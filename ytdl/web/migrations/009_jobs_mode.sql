@@ -1,0 +1,24 @@
+-- v9: jobs.mode -- which SEARCH MODE this job was run in, 'visuals' (b-roll to
+-- cut UNDER something else) or 'news' (a montage made OF the reporting, where
+-- the clip's own audio is what gets used). It picks the framing of BOTH AI
+-- calls: the queries that are generated, and the rubric the candidates are
+-- judged on (ytdlweb.claude_cli.MODES).
+--
+-- Stored per job for the same reason shot_types and max_candidates are: a job
+-- that sat queued over a container restart is re-run from `queued`, and it must
+-- be re-run under the rubric the editor submitted it with rather than under
+-- whatever the default has become since.
+--
+-- The DEFAULT is 'visuals', which is what every pre-existing row actually ran:
+-- the modes did not exist before 2026-08-18 and the only prompt this app had is
+-- the one `visuals` composes byte for byte (tests/golden/ pins that). So there
+-- is no backfill, and no row's history is rewritten by this column arriving.
+--
+-- NOT the same column as `download_mode` / `mode_lock` (migration 007), which
+-- are about WHICH MACHINE fetches the clips. This one is about what the search
+-- was for.
+--
+-- The literal is duplicated from claude_cli.DEFAULT_MODE because SQL cannot
+-- import Python (schema.sql carries the same one), and tests/test_db.py pins
+-- the three together so they cannot drift.
+ALTER TABLE jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'visuals';

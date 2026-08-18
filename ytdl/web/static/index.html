@@ -36,8 +36,23 @@
          box rather than below it since 2026-08-11: they are what the topic is
          read WITH, so they are chosen before it is typed, not after. -->
     <div class="ctrl-row shotrow">
+      <!-- WHAT THE SEARCH IS FOR, left of the boxes because it is chosen
+           before them: it decides which rubric the two AI passes run under,
+           and choosing it applies that mode's preset to the boxes (the editor
+           can still adjust them afterwards). Filled in by app.js from its
+           SEARCH_MODES table, which mirrors claude_cli.MODES. 2026-08-18,
+           the owner: "if you're downloading for montages, you ideally just
+           want news clips with lots of relevant audio". -->
+      <div id="modes" class="modes" role="group" aria-label="what this search is for"></div>
       <div id="shots" class="shots" title="What the two Claude passes look for: the search phrasings they generate, and what the relevance filter keeps or drops"></div>
       <span id="shotnote" class="shotnote muted"></span>
+    </div>
+    <!-- One line, static, under the boxes: on 2026-08-18 the two groups read
+         as "one of these is mandatory" rather than as two halves of a
+         selection, so the page says what they are instead of leaving it to be
+         worked out from nine labels. -->
+    <div class="ctrl-row">
+      <span class="shotcaption muted">SHOTS OF IT = footage of the subject; ALSO KEEP = people talking about it</span>
     </div>
 
     <div class="ctrl-row">

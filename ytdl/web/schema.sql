@@ -56,6 +56,19 @@ CREATE TABLE IF NOT EXISTS jobs (
     -- which means an unbiased search. Meaningless for kind='urls': nothing is
     -- searched for, so nothing is biased.
     shot_types       TEXT NOT NULL DEFAULT 'aerial,establishing,walkthrough,timelapse,event,raw',
+    -- WHAT THE SEARCH IS FOR: 'visuals' (b-roll to cut UNDER something
+    -- else, so the pictures are what gets used) or 'news' (a montage made OF
+    -- the reporting, so the clip's own AUDIO is what gets used). It chooses
+    -- the framing of BOTH AI calls -- the queries generated and the rubric
+    -- the candidates are judged on -- and the rubrics, and why they differ,
+    -- live in ytdlweb.claude_cli.MODES. The default here is that module's
+    -- DEFAULT_MODE and test_db.py pins the pair; an old row (and one written
+    -- by migrations/009) reads as 'visuals', which is the only search this
+    -- app ran before 2026-08-18. Meaningless for kind='urls': nothing is
+    -- searched for, so nothing is framed.
+    -- NOT `download_mode` / `mode_lock` below, which are about which MACHINE
+    -- fetches the clips.
+    mode             TEXT NOT NULL DEFAULT 'visuals',
     -- queued > generating_terms > searching > enriching > filtering >
     -- ready_for_review > downloading > done | failed | cancelled
     -- (kind='urls' skips the middle: queued > downloading > done)

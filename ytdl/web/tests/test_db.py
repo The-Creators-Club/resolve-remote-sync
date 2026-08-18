@@ -6,7 +6,7 @@ import threading
 import pytest
 
 from tests.conftest import PROJECTS, USER, OTHER_USER
-from ytdlweb import config, db
+from ytdlweb import claude_cli, config, db
 
 
 def test_schema_is_idempotent(con):
@@ -434,6 +434,149 @@ def test_an_unknown_key_in_the_column_costs_a_fragment_not_a_search(con, job):
                 (job['id'],))
     con.commit()
     assert db.shot_types_of(db.get_job(con, job['id'])) == ('aerial',)
+
+
+# --------------------------------------------------- the search mode (009)
+# 'visuals' (b-roll to cut under something else) or 'news' (a montage made of
+# the reporting). It chooses the framing of both AI calls, so it is stored on
+# the job for exactly the reason shot_types is: a job re-run from `queued`
+# after a restart must be re-run under the rubric the editor chose.
+
+
+def _at_v8(tmp_path, name='v8.db'):
+    """A database in the shape the fleet's ytdl.db is in BEFORE 009.
+
+    Built by migrating a v5 one rather than by pasting a fourth copy of the
+    DDL: 006/007/008 are the app's own files, so this cannot drift away from
+    what a real v8 database contains.
+    """
+    con = db.connect(tmp_path / name)
+    con.executescript(_V5_DDL)
+    for version in (6, 7, 8):
+        db._apply_migration(con, db._MIGRATIONS[version][0])
+    con.execute('PRAGMA user_version = 8')
+    con.commit()
+    return con
+
+
+def test_a_v8_database_gains_mode_and_its_old_rows_read_as_visuals(tmp_path):
+    """009. Like 005 and unlike 006, the default IS what those rows ran with:
+    the modes did not exist before 2026-08-18 and `visuals` composes the two
+    prompts this app has always sent, byte for byte (tests/golden/). Reading an
+    old row as a news montage would rewrite the history of every search the
+    fleet has run."""
+    con = _at_v8(tmp_path)
+    con.execute("INSERT INTO jobs(created_by,term,term_dir,project_slug,"
+                "project_label,phase,created_at,updated_at) "
+                "VALUES(?,'reef','reef','s','2026/FF5/Energy','done','x','x')",
+                (USER,))
+    con.commit()
+    assert 'mode' not in db._columns(con, 'jobs')
+
+    db.ensure_schema(con)
+
+    assert con.execute('PRAGMA user_version').fetchone()[0] == db.CURRENT_SCHEMA_VERSION
+    assert 'mode' in db._columns(con, 'jobs')
+    old = con.execute('SELECT * FROM jobs').fetchone()
+    assert old['mode'] == claude_cli.MODE_VISUALS
+    assert db.mode_of(old) == claude_cli.MODE_VISUALS
+    assert db.job_dict(old)['mode'] == claude_cli.MODE_VISUALS
+    # ...and nothing the earlier migrations wrote is disturbed by this one
+    assert db.shot_types_of(old) == db.DEFAULT_SHOT_TYPES
+    assert db.max_candidates_of(old) == db.DEFAULT_MAX_CANDIDATES
+    con.close()
+
+
+def test_the_migrations_mode_default_is_the_pythons_default(tmp_path):
+    """SQL cannot import Python, so the word is written three times -- the
+    module, the migration, schema.sql. A drift would migrate the fleet's
+    history to a rubric this build does not agree with."""
+    sql = (config.MIGRATIONS_DIR / '009_jobs_mode.sql').read_text(encoding='utf-8')
+    assert f"DEFAULT '{db.DEFAULT_MODE}'" in sql
+    schema = config.SCHEMA_PATH.read_text(encoding='utf-8')
+    assert f"mode             TEXT NOT NULL DEFAULT '{db.DEFAULT_MODE}'" in schema
+    assert db.DEFAULT_MODE in db.MODES
+    assert db._MIGRATIONS[9][0] == '009_jobs_mode.sql'
+    assert max(db._MIGRATIONS) == db.CURRENT_SCHEMA_VERSION
+
+
+def test_the_mode_survives_the_round_trip(con):
+    """Stored on the job, because BOTH AI calls read it off the row -- including
+    after a container restart re-runs the job from `queued`."""
+    slug, label, _ = PROJECTS[0]
+    job_id = db.create_job(con, USER, 'reef', 'reef', slug, label, mode='news')
+    row = db.get_job(con, job_id)
+    assert row['mode'] == 'news'
+    assert db.mode_of(row) == 'news'
+    assert db.job_dict(row)['mode'] == 'news'
+
+
+def test_no_mode_asked_for_is_visuals(con):
+    """None is "nobody said" -- an old client, an internal caller -- and it must
+    mean the search this app has always run, not the newer one."""
+    slug, label, _ = PROJECTS[0]
+    job_id = db.create_job(con, USER, 'reef', 'reef', slug, label)
+    assert db.mode_of(db.get_job(con, job_id)) == claude_cli.MODE_VISUALS
+
+
+def test_a_news_job_with_no_selection_takes_the_news_preset(con):
+    """The mode's preset is what "nobody sent any boxes" means, per mode: a
+    news montage nobody ticked anything for is the coverage types, not the six
+    footage ones. An EXPLICIT selection is still honoured whatever the mode --
+    the boxes are the editor's."""
+    slug, label, _ = PROJECTS[0]
+    job_id = db.create_job(con, USER, 'reef', 'reef', slug, label, mode='news')
+    assert db.shot_types_of(db.get_job(con, job_id)) == claude_cli.COVERAGE_KEYS
+
+    db.set_phase(con, job_id, 'done')
+    other = db.create_job(con, USER, 'wind', 'wind', slug, label, mode='news',
+                          shot_types=['aerial'])
+    assert db.shot_types_of(db.get_job(con, other)) == ('aerial',)
+
+
+def test_the_mode_cannot_be_updated_after_the_fact(con, job):
+    """Like `kind` and the selection: it is an input to the search that already
+    ran, and a later UPDATE would make the row describe a job nobody asked
+    for -- a manifest filtered on one rubric, labelled with the other."""
+    with pytest.raises(ValueError):
+        db.set_job(con, job['id'], mode='news')
+
+
+def test_a_row_with_no_mode_column_at_all_reads_as_visuals(con, job):
+    """The NOT NULL column cannot be null, so the only way to have no answer is
+    a row that predates it: a partial SELECT, or a database the migration has
+    not reached. Both are searches that ran under the only rubric there was."""
+    partial = con.execute('SELECT id, term FROM jobs WHERE id=?',
+                          (job['id'],)).fetchone()
+    assert db.mode_of(partial) == claude_cli.MODE_VISUALS
+    assert db.mode_of(None) == claude_cli.MODE_VISUALS
+    # a job_dict, whose mode is already a string, reads back as itself
+    assert db.mode_of(db.job_dict(db.get_job(con, job['id']))) == \
+        claude_cli.MODE_VISUALS
+
+
+def test_an_unknown_mode_in_the_column_costs_the_framing_not_a_search(con, job):
+    """A row written by another build must never break a job: the API refuses
+    an unknown mode, this layer merely falls back to the default one."""
+    con.execute("UPDATE jobs SET mode='montage-2000' WHERE id=?", (job['id'],))
+    con.commit()
+    assert db.mode_of(db.get_job(con, job['id'])) == claude_cli.MODE_VISUALS
+
+
+def test_a_url_job_carries_no_meaningful_mode(con):
+    """A paste is never searched, so there is no rubric to run it under: the
+    row takes the column default and the SPA shows none."""
+    slug, label, _ = PROJECTS[0]
+    job_id = db.create_url_job(con, OTHER_USER, '', '', slug, label,
+                               _url_videos('vid00000002'))
+    assert db.mode_of(db.get_job(con, job_id)) == claude_cli.MODE_VISUALS
+
+
+def test_the_manifest_on_disk_names_the_mode(con, job):
+    """The folder beside the clips outlives the database, and "why is this
+    folder full of press conferences" has to be answerable from it."""
+    manifest = db.manifest_json(con, db.get_job(con, job['id']))
+    assert manifest['mode'] == claude_cli.MODE_VISUALS
 
 
 def test_con_is_per_thread(con):

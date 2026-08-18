@@ -92,6 +92,30 @@ const SHOT_TYPES = [
 // bias was replaced to avoid.
 const SHOTS_KEY = 'ytdl.shot_types';
 
+// WHAT THE SEARCH IS FOR (2026-08-18, the owner: "if you're downloading for
+// montages, you ideally just want news clips with lots of relevant audio.
+// Maybe we should have a mode for 'visuals' and 'news montages'"). Mirrors
+// ytdlweb.claude_cli.MODES -- key, label and the preset ticks -- and
+// tests/test_static_app.py compares the two tables key for key, because the
+// SERVER owns both rubrics and this file owns only the words on the toggle.
+//
+// `preset` is what CHOOSING a mode ticks. It is a starting point, not a rule:
+// the editor adjusts the boxes afterwards and what they leave ticked is what
+// gets posted, in either mode.
+const SEARCH_MODES = [
+  {key: 'visuals', label: 'VISUALS', short: 'visuals',
+   preset: ['aerial', 'establishing', 'walkthrough', 'timelapse', 'event', 'raw'],
+   hint: 'B-roll to cut UNDER something else: footage of the subject, and the '
+         + 'clip audio is usually thrown away'},
+  {key: 'news', label: 'NEWS MONTAGE', short: 'news montage',
+   preset: ['interview', 'news', 'commentary'],
+   hint: 'A montage made OF the reporting: clips whose own audio carries the '
+         + 'story, so speech about the subject is what counts'},
+];
+const DEFAULT_MODE = 'visuals';
+// Remembered per browser like the ticks and the candidate cap are.
+const MODE_KEY = 'ytdl.search_mode';
+
 // How many candidates one search may collect. Mirrors
 // ytdlweb.config.CANDIDATE_CAPS -- the server validates against its own list
 // and tests/test_static_app.py compares the two -- because each candidate is a
@@ -149,6 +173,8 @@ const state = {
   termFilter: null,    // job_terms.id, or null for "everything"
   showFiltered: false,
   shots: new Set(),    // ticked shot-type keys; init() fills it
+  searchMode: DEFAULT_MODE,  // 'visuals' | 'news' -- which rubric the two AI
+                       // passes run under; init() fills it from localStorage
   collapsed: new Set(),// folded-away panel ids; initPanels() fills it
   phase: null,         // the last phase this page SAW for the attached job:
                        // "newly reached ready_for_review" is a transition, not
@@ -416,26 +442,102 @@ async function loadProjects() {
 // them on the job row and composes the prompts, so this file knows the names
 // and nothing about what they mean.
 
-const defaultShots = () => SHOT_TYPES.filter(s => s.on).map(s => s.key);
+const searchModeOf = key =>
+  SEARCH_MODES.find(m => m.key === key) || SEARCH_MODES[0];
+
+// The ticks a mode starts from, and what an unvisited mode is ticked to. The
+// visuals preset and the `on` flags in the table above are the same six keys:
+// both mirror the server (its MODES presets and its SHOT_TYPES defaults), and
+// test_static_app.py compares each of them against it rather than against
+// each other.
+const presetShots = mode => searchModeOf(mode).preset.slice();
+
+// The ticks are remembered PER MODE: the boxes mean different things in a
+// b-roll search and a news montage, so an editor who tunes one must not come
+// back to find the other re-tuned. `visuals` deliberately keeps the original
+// key, so the ticks every editor already has survive this build.
+const shotsKeyFor = mode => (mode === DEFAULT_MODE ? SHOTS_KEY
+                                                   : `${SHOTS_KEY}.${mode}`);
 
 // In TABLE order, always -- so two editors who ticked the same boxes post the
 // same list and an old localStorage value cannot smuggle in a key this build
 // dropped (the server would refuse the whole job over it).
 const shotKeys = () => SHOT_TYPES.filter(s => state.shots.has(s.key)).map(s => s.key);
 
-function loadShots() {
+function loadShots(mode) {
   // localStorage throws outright in some privacy modes, so a page that cannot
   // remember the ticks still has to be able to search.
   let saved = null;
-  try { saved = JSON.parse(localStorage.getItem(SHOTS_KEY)); }
-  catch { /* unreadable or absent: fall back to the defaults */ }
-  if (!Array.isArray(saved)) return defaultShots();
+  try { saved = JSON.parse(localStorage.getItem(shotsKeyFor(mode))); }
+  catch { /* unreadable or absent: fall back to this mode's preset */ }
+  if (!Array.isArray(saved)) return presetShots(mode);
   return SHOT_TYPES.filter(s => saved.includes(s.key)).map(s => s.key);
 }
 
 function saveShots() {
-  try { localStorage.setItem(SHOTS_KEY, JSON.stringify(shotKeys())); }
-  catch { /* the choice still applies to this search, just not the next visit */ }
+  try {
+    localStorage.setItem(shotsKeyFor(state.searchMode),
+                         JSON.stringify(shotKeys()));
+  } catch { /* the choice still applies to this search, just not the next visit */ }
+}
+
+// ------------------------------------------------------------ search mode
+// The toggle left of the boxes. It picks which rubric the SERVER composes for
+// both AI passes; this file knows the two names, the two presets and nothing
+// about what they mean.
+
+function loadSearchMode() {
+  let saved = null;
+  try { saved = localStorage.getItem(MODE_KEY); }
+  catch { /* unreadable or absent: the default */ }
+  // Validated against THIS build's list, never trusted: the server refuses a
+  // mode it does not know, so a stale value would 400 every search.
+  return SEARCH_MODES.some(m => m.key === saved) ? saved : DEFAULT_MODE;
+}
+
+function saveSearchMode() {
+  try { localStorage.setItem(MODE_KEY, state.searchMode); }
+  catch { /* it still applies to this search, just not the next visit */ }
+}
+
+// Choosing a mode applies ITS preset to the boxes -- but only the first time,
+// because the ticks are then remembered per mode: coming back to a mode
+// restores what the editor left it on, not the preset. Re-choosing the mode
+// you are already in does nothing at all, so a second click can never throw a
+// selection away.
+function setSearchMode(key) {
+  const mode = searchModeOf(key).key;
+  if (mode === state.searchMode) return;
+  state.searchMode = mode;
+  saveSearchMode();
+  state.shots = new Set(loadShots(mode));
+  renderSearchModes();
+  renderShots();
+}
+
+function renderSearchModes() {
+  const box = $('#modes');
+  box.textContent = '';
+  SEARCH_MODES.forEach(m => {
+    const on = state.searchMode === m.key;
+    // A real <button> with aria-pressed, like the panel headers are real
+    // buttons: this is a control, and it is the first thing on the row.
+    const b = el('button', 'modebtn' + (on ? ' on' : ''), `[ ${m.label} ]`);
+    b.type = 'button';
+    b.title = m.hint;
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    b.onclick = () => setSearchMode(m.key);
+    box.appendChild(b);
+  });
+}
+
+// What a job WAS run under, for the job header, the review header and Recent
+// searches. An absent or unknown value is a row from before the column existed
+// (or a server that predates it): say nothing rather than claim a rubric it
+// never ran under.
+function searchModeSummary(mode) {
+  const m = SEARCH_MODES.find(x => x.key === mode);
+  return m ? m.short : '';
 }
 
 // All ticked and none ticked are the same instruction to the server -- no bias
@@ -774,6 +876,11 @@ function renderProgress(job, r) {
   $('#phase').textContent = PHASE_LABEL[job.phase] || job.phase;
 
   const bits = [];
+  // FIRST, and before any counter: which rubric this search is running under
+  // is the thing that explains everything the phases below are doing. A url
+  // job is never searched, so it has none to name.
+  const mode = job.kind === 'urls' ? '' : searchModeSummary(job.mode);
+  if (mode) bits.push('mode: ' + mode);
   const en = (r.terms || []).filter(t => t.lang === 'en').length;
   const zh = (r.terms || []).filter(t => t.lang === 'zh').length;
   if (job.terms_total) bits.push(`${job.terms_total} terms (${en} en / ${zh} zh)`);
@@ -898,10 +1005,12 @@ async function loadManifest(jobId = state.jobId) {
 function renderTerms() {
   // The ticks and the ceiling this search actually ran with -- not the ones in
   // the header, which are whatever the editor has since changed them to.
+  const mode = searchModeSummary(state.manifest.job.mode);
   const shots = shotSummary(state.manifest.job.shot_types, true);
   const cap = capSummary(state.manifest.job.max_candidates);
   $('#jobshots').textContent =
-    [shots ? 'shot types: ' + shots : '', cap].filter(Boolean).join(' · ');
+    [mode ? 'mode: ' + mode : '', shots ? 'shot types: ' + shots : '', cap]
+      .filter(Boolean).join(' · ');
 
   const box = $('#termchips');
   box.innerHTML = '';
@@ -1100,6 +1209,10 @@ async function runSearch() {
       term, project_slug: slug,
       quality: $('#quality').value,
       period: $('#period').value || null,
+      // Which rubric both AI passes run under. Always sent; the server
+      // refuses a mode it does not know rather than reading it as the
+      // default, so this must never send anything but a key from the table.
+      mode: state.searchMode,
       // Always sent, even when it is every box or none: the server tells an
       // omitted field (an old client, which gets the defaults) apart from an
       // empty one (this editor asked for no bias).
@@ -1384,8 +1497,11 @@ async function loadRecent() {
     row.appendChild(el('span', 'name', j.kind === 'urls'
       ? `links → ${j.project_label}\\Youtube`
       : `${j.term} → ${j.project_label}`));
-    // A paste is never searched or filtered, so it has neither shot types nor
-    // a candidate ceiling to show -- its videos are the links that were pasted.
+    // A paste is never searched or filtered, so it has neither a mode, shot
+    // types nor a candidate ceiling to show -- its videos are the links that
+    // were pasted.
+    const mode = j.kind === 'urls' ? '' : searchModeSummary(j.mode);
+    if (mode) row.appendChild(el('span', 'modesum', mode));
     const shots = j.kind === 'urls' ? '' : shotSummary(j.shot_types);
     if (shots) row.appendChild(el('span', 'shotsum', shots));
     const cap = j.kind === 'urls' ? '' : capSummary(j.max_candidates);
@@ -1618,7 +1734,9 @@ async function init() {
   loadDashboardTopbar();
   // Before anything is awaited: the boxes are part of the SEARCH form and must
   // be on screen (and ticked as this editor left them) from the first paint.
-  state.shots = new Set(loadShots());
+  state.searchMode = loadSearchMode();
+  state.shots = new Set(loadShots(state.searchMode));
+  renderSearchModes();
   renderShots();
   renderCaps();
   // Also before anything is awaited: a panel this editor folded away must not

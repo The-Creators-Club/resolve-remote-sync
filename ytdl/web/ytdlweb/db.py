@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 
 # Highest schema version this codebase knows how to run against. Bump it, add
 # the file to _MIGRATIONS, and give it a predicate.
-CURRENT_SCHEMA_VERSION = 8
+CURRENT_SCHEMA_VERSION = 9
 
 # "the version this migration produces" -> (filename, already-applied predicate).
 # The predicate must answer "is this migration's effect already in the database?"
@@ -64,6 +64,10 @@ _MIGRATIONS = {
     # item 2). A whole new table, so the predicate is simply "is it there".
     8: ('008_attestations.sql',
         lambda con: _table_exists(con, 'attestations')),
+    # The search mode (visuals | news montage, 2026-08-18). One column, so the
+    # predicate is the same shape 005's and 006's are.
+    9: ('009_jobs_mode.sql',
+        lambda con: 'mode' in _columns(con, 'jobs')),
 }
 
 # What made a job. 'search' is a topic Claude expands and the editor reviews;
@@ -88,10 +92,48 @@ KINDS = (KIND_SEARCH, KIND_URLS)
 SHOT_TYPES = claude_cli.SHOT_TYPES
 DEFAULT_SHOT_TYPES = claude_cli.DEFAULT_SHOT_TYPES
 
+# WHAT THE SEARCH IS FOR (2026-08-18): 'visuals' is b-roll to cut under
+# something else, 'news' is a montage made OF the reporting, where the clip's
+# own audio is what gets used. It chooses the framing of both AI calls; the
+# rubrics and the reason they differ are in claude_cli.MODES.
+#
+# Stored per job like shot_types is, and read back the same tolerant way: an old
+# row (or a row from a database this migration has not reached) is 'visuals',
+# which is the only search this app ran before the modes existed.
+#
+# Nothing to do with `download_mode` / `mode_lock`, which are about which
+# machine fetches the clips.
+MODES = claude_cli.MODES
+DEFAULT_MODE = claude_cli.DEFAULT_MODE
 
-def encode_shot_types(shot_types):
-    """A selection -> the column value. None means the defaults."""
-    return ','.join(claude_cli.normalise_shot_types(shot_types))
+
+def encode_shot_types(shot_types, mode=None):
+    """A selection -> the column value. None means the MODE's preset.
+
+    `mode` matters only for None (a caller with no opinion, or a client that
+    predates the boxes): a news job nobody sent a selection for is stored with
+    the coverage preset, not the footage one.
+    """
+    return ','.join(claude_cli.normalise_shot_types(shot_types, mode))
+
+
+def mode_of(row_or_value):
+    """A jobs row (or the raw column, or a string) -> 'visuals' | 'news'.
+
+    Takes the ROW for the same reason shot_types_of does: a row read from a
+    database the migration has not reached, or by a SELECT that did not ask for
+    the column, has no such key at all -- and that reads as 'visuals', which is
+    the search those rows actually ran.
+    """
+    value = row_or_value
+    if value is not None and not isinstance(value, (str, bytes)):
+        try:
+            value = row_or_value['mode']
+        except (IndexError, KeyError, TypeError):
+            value = None
+    if isinstance(value, bytes):
+        value = value.decode('utf-8', 'replace')
+    return claude_cli.normalise_mode(value)
 
 
 def shot_types_of(row_or_value):
@@ -179,11 +221,11 @@ RESUMABLE = ('generating_terms', 'searching', 'enriching', 'filtering')
 
 # Columns the worker and the API are allowed to write through _update(). A
 # whitelist because the column name is interpolated into the SQL string --
-# values are always parameters, names never can be. `kind`, `shot_types` and
-# `max_candidates` are absent on purpose: all three are inputs to the search
-# that already ran, and a later UPDATE of one would make the job row describe a
-# job nobody asked for -- including, for the cap, one whose manifest is bigger
-# than the number it says it was searched under.
+# values are always parameters, names never can be. `kind`, `mode`,
+# `shot_types` and `max_candidates` are absent on purpose: all four are inputs
+# to the search that already ran, and a later UPDATE of one would make the job
+# row describe a job nobody asked for -- including, for the cap, one whose
+# manifest is bigger than the number it says it was searched under.
 _JOB_COLS = frozenset({
     'phase', 'error', 'terms_total', 'terms_done', 'candidates',
     'enrich_total', 'enrich_done', 'dl_total', 'dl_done', 'dl_failed',
@@ -337,26 +379,28 @@ def _update(c, table, where_sql, where_args, allowed, cols):
 
 def create_job(c, created_by, term, term_dir, project_slug, project_label,
                quality='1080p', period=None, max_per_term=15, shot_types=None,
-               max_candidates=None):
-    """A kind='search' job. `shot_types=None` is the default selection, and
-    `max_candidates=None` the default candidate ceiling.
+               max_candidates=None, mode=None):
+    """A kind='search' job. `shot_types=None` is the mode's preset selection,
+    `max_candidates=None` the default candidate ceiling, and `mode=None` the
+    default search mode ('visuals').
 
-    Both are written HERE and never again: the two Claude calls read the
-    selection off the row and the search phase reads the ceiling off it, so a
-    job that survives a container restart is re-run with the boxes the editor
-    actually ticked and the number they submitted -- not with whatever the
-    defaults have become since.
+    All three are written HERE and never again: the two Claude calls read the
+    mode and the selection off the row and the search phase reads the ceiling
+    off it, so a job that survives a container restart is re-run with the rubric
+    the editor chose, the boxes they actually ticked and the number they
+    submitted -- not with whatever the defaults have become since.
     """
     ts = now()
     try:
         cur = c.execute(
             'INSERT INTO jobs(created_by,term,term_dir,project_slug,project_label,'
-            'quality,period,max_per_term,max_candidates,shot_types,phase,'
+            'quality,period,max_per_term,max_candidates,mode,shot_types,phase,'
             'created_at,updated_at) '
-            "VALUES(?,?,?,?,?,?,?,?,?,?,'queued',?,?)",
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)",
             (created_by, term, term_dir, project_slug, project_label, quality,
              period, max_per_term, max_candidates_of(max_candidates),
-             encode_shot_types(shot_types), ts, ts))
+             claude_cli.normalise_mode(mode),
+             encode_shot_types(shot_types, mode), ts, ts))
     except sqlite3.IntegrityError:
         # The one-active-job index refused it (YTDL-25) -- and a failed INSERT
         # leaves this connection's implicit transaction OPEN, holding a write
@@ -1207,6 +1251,11 @@ def job_dict(row):
     # carries whatever the column default is and the SPA ignores it -- nothing
     # was searched for, so no selection was ever applied.
     d['shot_types'] = list(shot_types_of(row))
+    # 'visuals' | 'news'. Always one of the two, even for a row that came back
+    # without the column -- the SPA labels the running job, the review header
+    # and every Recent searches row with it, and "which rubric was this searched
+    # under" has to be answerable a week later.
+    d['mode'] = mode_of(row)
     # Always a number the SPA can render, even for a row that came back without
     # the column (a database the migration has not reached, a partial SELECT) --
     # the same rule shot_types is read under.
@@ -1284,6 +1333,10 @@ def manifest_json(c, job):
         # filed the links under rather than something that was searched for,
         # and this is what says so to anyone reading the folder later.
         'kind': job['kind'],
+        # 'visuals' | 'news' -- which rubric the two AI calls ran under. In the
+        # folder beside the clips because it is half the answer to "why is this
+        # folder full of press conferences", and this file outlives the database.
+        'mode': mode_of(job),
         'created': now(),
         'created_by': job['created_by'],
         'project': job['project_label'],

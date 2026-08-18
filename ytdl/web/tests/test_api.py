@@ -266,6 +266,79 @@ def test_a_url_job_ignores_a_shot_type_selection_cleanly(client, con):
         'shot_types': ['helicopter']}).status_code == 200
 
 
+# ------------------------------------------------------------ search mode
+# 2026-08-18: 'visuals' (b-roll to cut under something else) or 'news' (a
+# montage made of the reporting). Validated here and stored on the job row,
+# because both AI calls read the rubric back off that row -- including after a
+# container restart re-runs the job from `queued`.
+
+
+def test_the_search_mode_is_stored_on_the_job(client, con):
+    r, job = _job_shots(client, con, mode='news')
+    assert r.status_code == 200, r.text
+    assert job['mode'] == 'news'
+    assert db.mode_of(job) == 'news'
+
+
+def test_omitting_the_mode_is_visuals(client, con):
+    """A client that predates the toggle keeps exactly the search it has always
+    run: `visuals` composes the old prompts byte for byte."""
+    r, job = _job_shots(client, con)
+    assert r.status_code == 200
+    assert db.mode_of(job) == 'visuals'
+
+
+def test_an_unknown_mode_is_refused_rather_than_defaulted(client, con):
+    """Same rule as an unknown shot type: silently reading it as `visuals`
+    would run the search under a rubric the editor did not choose and could not
+    afterwards explain."""
+    r = client.post('/api/jobs', json={'term': 'reef',
+                                       'project_slug': PROJECTS[0][0],
+                                       'mode': 'montage'})
+    assert r.status_code == 400
+    assert 'montage' in r.json()['detail']
+    assert 'visuals' in r.json()['detail'] and 'news' in r.json()['detail']
+    assert db.active_job(con, USER) is None, 'the refused job was created anyway'
+
+
+def test_a_news_job_with_no_boxes_takes_the_news_preset(client, con):
+    """The preset is what "this client sent no selection" means, per mode. An
+    explicit selection still wins in either mode."""
+    from ytdlweb import claude_cli
+
+    r, job = _job_shots(client, con, mode='news')
+    assert db.shot_types_of(job) == claude_cli.COVERAGE_KEYS
+
+    client.post(f'/api/jobs/{job["id"]}/cancel')
+    r, job = _job_shots(client, con, mode='news', shot_types=['aerial'])
+    assert r.status_code == 200, r.text
+    assert db.shot_types_of(job) == ('aerial',)
+
+
+def test_the_poll_and_recent_views_report_the_mode(client, con):
+    """The SPA labels the running job, the review header and every Recent
+    searches row with it, so "why did that search find nothing but talking
+    heads" is answerable a week later."""
+    r, job = _job_shots(client, con, mode='news')
+    assert client.get(f'/api/jobs/{job["id"]}').json()['job']['mode'] == 'news'
+    assert client.get(f'/api/jobs/{job["id"]}/manifest').json()['job']['mode'] \
+        == 'news'
+    assert client.get('/api/jobs').json()['jobs'][0]['mode'] == 'news'
+
+
+def test_a_url_job_ignores_a_mode_cleanly(client, con):
+    """A paste is never searched, so there is no rubric to run it under -- and
+    the SPA posts one form for both boxes, so the field must be ignored rather
+    than turned into a 400 the editor cannot act on."""
+    r = client.post('/api/jobs/urls', json={
+        'urls': 'https://youtu.be/' + VID, 'project_slug': PROJECTS[0][0],
+        'mode': 'news'})
+    assert r.status_code == 200, r.text
+    job = db.get_job(con, r.json()['job_id'])
+    assert job['kind'] == 'urls'
+    assert db.mode_of(job) == 'visuals'
+
+
 # --------------------------------------------------------- the candidate cap
 # 2026-08-11: one search expanded to 24 terms -> 336 candidates, and YouTube
 # began refusing the NAS's IP outright at 112 metadata calls -- which blocked

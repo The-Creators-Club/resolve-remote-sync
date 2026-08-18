@@ -312,11 +312,12 @@ def _phase_generate_terms(c, job):
     db.add_term(c, job_id, job['term'],
                 'zh' if _looks_chinese(job['term']) else 'en', 'user')
 
-    # The shot types come off the JOB ROW, not from a default here: a job that
-    # sat queued over a restart must be expanded with the boxes the editor
-    # ticked when they submitted it.
+    # The mode and the shot types come off the JOB ROW, not from a default
+    # here: a job that sat queued over a restart must be expanded under the
+    # rubric the editor chose and with the boxes they ticked when they
+    # submitted it.
     generated = claude_cli.generate_terms(
-        job['term'], shot_types=db.shot_types_of(job))
+        job['term'], shot_types=db.shot_types_of(job), mode=db.mode_of(job))
     for item in generated:
         if len(db.terms(c, job_id)) >= config.MAX_TERMS:
             # A ceiling, not a target. 24 terms x 15 results is already a
@@ -536,11 +537,14 @@ def _phase_filter(c, job):
                     'channel': v['channel'], 'duration': v['duration']}
                    for v in candidates]
         try:
-            # The same selection the terms were generated from -- a manifest
-            # filtered for footage after a search that asked for interviews
-            # would drop most of what it just found.
+            # The same mode and selection the terms were generated from --
+            # a manifest filtered for footage after a search that asked for
+            # interviews would drop most of what it just found, and one
+            # filtered on the visuals rubric after a news-montage search would
+            # throw away the reporting it went looking for.
             verdicts = claude_cli.filter_relevance(
-                job['term'], payload, shot_types=db.shot_types_of(job))
+                job['term'], payload, shot_types=db.shot_types_of(job),
+                mode=db.mode_of(job))
         except claude_cli.ClaudeError as exc:
             claude_cli.note_failure(exc)
             log.warning('job %s: relevance filter unavailable (%s)', job_id, exc)

@@ -750,6 +750,17 @@ its policy.
 | `/ytdl/*` | the downloader SPA, **only when the feature is on** |
 | `/static/*`, `/favicon.ico` | assets |
 
+`/ytdl`'s own SPA API is session-gated, same-origin and deliberately not part
+of `/api/v1`; it is documented with the feature (`ytdl/web/DEPLOY.md`). The job
+row a browser polls carries, besides the phase and the counters: `kind`
+(`search` | `urls`), `mode` (`visuals` | `news` -- which rubric the two AI calls
+ran under, 2026-08-18), `shot_types` (the ticked boxes, as a list) and
+`max_candidates`. All four are inputs to the search that already ran and none of
+them is updatable afterwards; `mode` and `shot_types` are validated on create
+(400 on an unknown value, never silently defaulted) and a row written before a
+column existed reads as what it actually ran with. The **fleet** job routes the
+companion calls are §1's gate plus `docs/YTDL_LOCAL_DOWNLOAD.md` §4.
+
 The mounted SPAs are currently exempt from the CSRF check
 (`app._CSRF_EXEMPT_PREFIXES`) because their `fetch()` calls do not send the
 token yet; `SameSite=Lax` holds that line meanwhile. The token is already

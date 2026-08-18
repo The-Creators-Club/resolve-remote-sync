@@ -191,7 +191,8 @@ async function boot(handler, seed, hash) {
     + '"toggle","bulk","loadHealth","loadProjects","loadManifest","loadRecent",'
     + '"renderProgress","renderTerms","renderGrid","toast","setBanner",'
     + '"visibleVideos","SHOT_TYPES","shotKeys","shotSummary","renderShots",'
-    + '"startDownload","dispatchLocal","lockToServer","renderMode"]'
+    + '"startDownload","dispatchLocal","lockToServer","renderMode",'
+    + '"SEARCH_MODES","setSearchMode","searchModeSummary"]'
     + '.forEach(k => { try { globalThis.__[k] = eval(k); } catch (e) {} });', h.ctx);
   await flush();
   h.app = h.ctx.__;
@@ -867,6 +868,134 @@ scenarios['the_selection_shows_on_the_job_and_recent_views'] = async () => {
   return {jobshots: h.get('jobshots').textContent,
           rows: h.get('recentlist').byClass('recentrow')
                  .map(r => r.byClass('shotsum').map(s => s.textContent).join(''))};
+};
+
+// ---- the search mode -----------------------------------------------------
+// 2026-08-18: [ VISUALS ] [ NEWS MONTAGE ], left of the boxes. Choosing one
+// presets the boxes and is posted with the search; the ticks are then
+// remembered PER MODE, because the boxes mean different things in a b-roll
+// search and a montage made of the reporting.
+
+const modeButtons = h => h.get('modes').children;
+const clickMode = (h, label) => {
+  const b = modeButtons(h).find(x => x.textContent.includes(label));
+  b.onclick();
+};
+const ticked = h => shotBoxes(h).filter(b => b.checked).map(b => b.value);
+
+scenarios['the_mode_presets_the_boxes_and_is_posted'] = async () => {
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (method === 'POST' && url === 'api/jobs') return {json: {job_id: 61}};
+    if (url === 'api/jobs/61') return {json: POLLRES(JOB({id: 61, phase: 'queued'}))};
+    return {json: {}};
+  });
+  const buttons = modeButtons(h).map(b => [b.textContent, b.className,
+                                           b.getAttribute('aria-pressed')]);
+  const visuals_ticks = ticked(h);
+  clickMode(h, 'NEWS MONTAGE');
+  const news_ticks = ticked(h);
+  const news_buttons = modeButtons(h).map(b => b.className);
+  // ...and the editor can still adjust the boxes afterwards
+  clickShot(h, 'aerial', true);
+  h.get('q').value = 'reef';
+  h.get('project').value = 's';
+  await h.app.runSearch();
+  await flush();
+  const post = h.calls.filter(c => c.method === 'POST' && c.url === 'api/jobs')[0];
+  // read the store BEFORE switching back, or the last click is what it says
+  const stored = {mode: h.store['ytdl.search_mode'],
+                  news: h.store['ytdl.shot_types.news'],
+                  visuals: h.store['ytdl.shot_types']};
+  // back to visuals: the ticks that mode was left on, not the news ones
+  clickMode(h, 'VISUALS');
+  return {buttons, visuals_ticks, news_ticks, news_buttons,
+          body: post && post.body,
+          stored_mode: stored.mode,
+          stored_news: stored.news,
+          stored_visuals: stored.visuals,
+          back: ticked(h)};
+};
+
+scenarios['the_mode_and_its_ticks_come_back_from_localstorage'] = async () => {
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (method === 'POST' && url === 'api/jobs') return {json: {job_id: 62}};
+    if (url === 'api/jobs/62') return {json: POLLRES(JOB({id: 62}))};
+    return {json: {}};
+  }, {'ytdl.search_mode': 'news',
+      'ytdl.shot_types.news': JSON.stringify(['aerial', 'news'])});
+  const start = ticked(h);
+  h.get('q').value = 'reef';
+  h.get('project').value = 's';
+  await h.app.runSearch();
+  await flush();
+  const post = h.calls.filter(c => c.method === 'POST' && c.url === 'api/jobs')[0];
+  return {start, posted: post && post.body,
+          lit: modeButtons(h).map(b => b.className)};
+};
+
+// The server refuses a mode it does not know, so a value this build no longer
+// offers would 400 every search from this browser until localStorage was
+// cleared by hand -- the same rule the candidate cap runs under.
+scenarios['a_stale_mode_falls_back_to_the_default'] = async () => {
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (method === 'POST' && url === 'api/jobs') return {json: {job_id: 63}};
+    if (url === 'api/jobs/63') return {json: POLLRES(JOB({id: 63}))};
+    return {json: {}};
+  }, {'ytdl.search_mode': 'montage-2000'});
+  h.get('q').value = 'reef';
+  h.get('project').value = 's';
+  await h.app.runSearch();
+  await flush();
+  const post = h.calls.filter(c => c.method === 'POST' && c.url === 'api/jobs')[0];
+  return {posted: post && post.body.mode, ticks: ticked(h)};
+};
+
+// A manifest can sit at review for a week: "why is this full of press
+// conferences" has to be answerable from the page, not from memory.
+scenarios['the_mode_shows_on_the_running_job_and_the_recent_views'] = async () => {
+  const recent = [
+    {id: 44, kind: 'search', term: 'reef', project_label: '2026/FF5/Energy',
+     phase: 'done', created_at: '2026-08-18T09:00:00', mode: 'news',
+     shot_types: ['interview', 'news', 'commentary']},
+    {id: 45, kind: 'search', term: 'wind', project_label: '2026/FF5/Energy',
+     phase: 'done', created_at: '2026-08-18T09:10:00', mode: 'visuals',
+     shot_types: ['aerial']},
+    {id: 46, kind: 'urls', term: '', project_label: '2026/FF5/Energy',
+     phase: 'done', created_at: '2026-08-18T09:20:00', mode: 'visuals'},
+    // a row from before the column existed claims nothing at all
+    {id: 47, kind: 'search', term: 'lng', project_label: '2026/FF5/Energy',
+     phase: 'done', created_at: '2026-08-18T09:30:00', shot_types: ['aerial']},
+  ];
+  const running = JOB({id: 44, phase: 'searching', mode: 'news',
+                       terms_total: 4, terms_done: 2});
+  const manifest = MANIFEST({
+    job: JOB({id: 44, phase: 'ready_for_review', mode: 'news',
+              shot_types: ['interview', 'news'], max_candidates: 100}),
+    videos: [VIDEO('LLLLLLLLLLL')],
+    terms: [{id: 1, term: 'reef', lang: 'en', english_gloss: null,
+             source: 'user', hits: 1, videos: 1}],
+    counts: {relevant: 1, duplicates: 0, irrelevant: 0},
+  });
+  const h = await boot(async (method, url) => {
+    if (url.startsWith('api/jobs?')) return {json: {jobs: recent}};
+    const b = baseline(method, url); if (b) return b;
+    if (url.startsWith('api/jobs/44/manifest')) return {json: manifest};
+    if (url === 'api/jobs/44') return {json: POLLRES(running)};
+    return {json: {}};
+  });
+  await h.app.attach(44);
+  await flush();
+  const ticker = h.get('ticker').textContent;
+  // the review header is the manifest's own, not the poll's: it says what the
+  // job on screen was RUN with, whatever the search bar is set to now
+  await h.app.loadManifest(44);
+  await flush();
+  return {ticker, jobshots: h.get('jobshots').textContent,
+          rows: h.get('recentlist').byClass('recentrow')
+                 .map(r => r.byClass('modesum').map(m => m.textContent).join(''))};
 };
 
 // ---- the candidate-limit dropdown ---------------------------------------
@@ -1967,6 +2096,66 @@ def test_a_finished_search_still_says_what_it_was_run_with(spa):
     assert r['rows'] == ['aerial+raw', '', 'no shot-type filter'], r['rows']
 
 
+# ---------------------------------------------------------- the search mode
+def test_the_toggle_offers_two_modes_and_presets_the_boxes(spa):
+    """The owner's ask, 2026-08-18: a montage made OF the reporting wants clips
+    whose AUDIO carries the story, which is the opposite selection from b-roll
+    to cut under a narrator. Choosing the mode does the ticking; the editor
+    still adjusts it afterwards."""
+    r = spa['the_mode_presets_the_boxes_and_is_posted']
+    assert [b[0] for b in r['buttons']] == ['[ VISUALS ]', '[ NEWS MONTAGE ]'], r
+    assert r['buttons'][0][1] == 'modebtn on' and r['buttons'][1][1] == 'modebtn'
+    assert [b[2] for b in r['buttons']] == ['true', 'false'], 'announced state'
+    assert r['visuals_ticks'] == ['aerial', 'establishing', 'walkthrough',
+                                  'timelapse', 'event', 'raw'], r
+    assert r['news_ticks'] == ['interview', 'news', 'commentary'], r
+    assert r['news_buttons'] == ['modebtn', 'modebtn on'], r
+    # ...and the whole thing is ONE submit: mode and the adjusted boxes
+    assert r['body']['mode'] == 'news', r['body']
+    assert r['body']['shot_types'] == ['aerial', 'interview', 'news',
+                                       'commentary'], r['body']
+
+
+def test_the_ticks_are_remembered_per_mode(spa):
+    """The boxes mean different things in the two modes, so tuning one must not
+    re-tune the other -- and `visuals` keeps the ORIGINAL localStorage key, so
+    the ticks every editor already has survive this build."""
+    r = spa['the_mode_presets_the_boxes_and_is_posted']
+    assert r['stored_mode'] == 'news', r
+    assert json.loads(r['stored_news']) == ['aerial', 'interview', 'news',
+                                            'commentary'], r
+    # absent, not empty: nothing wrote the visuals key at all (an undefined
+    # value does not survive the harness's JSON hop, which is the assertion)
+    assert r.get('stored_visuals') is None, 'the visuals ticks were touched'
+    # switching back restores what visuals was left on, not the news selection
+    assert r['back'] == ['aerial', 'establishing', 'walkthrough', 'timelapse',
+                         'event', 'raw'], r
+
+    back = spa['the_mode_and_its_ticks_come_back_from_localstorage']
+    assert back['start'] == ['aerial', 'news'], back
+    assert back['posted']['mode'] == 'news', back
+    assert back['posted']['shot_types'] == ['aerial', 'news'], back
+    assert back['lit'] == ['modebtn', 'modebtn on'], back
+
+
+def test_a_stale_mode_is_never_posted(spa):
+    """The server refuses a mode it does not know rather than reading it as the
+    default, so a value this build no longer offers would 400 every search from
+    this browser."""
+    r = spa['a_stale_mode_falls_back_to_the_default']
+    assert r['posted'] == 'visuals', r
+    assert r['ticks'][0] == 'aerial' and 'interview' not in r['ticks'], r
+
+
+def test_every_view_of_a_job_says_which_mode_it_ran_under(spa):
+    r = spa['the_mode_shows_on_the_running_job_and_the_recent_views']
+    assert r['ticker'].startswith('mode: news montage'), r['ticker']
+    assert r['jobshots'].startswith('mode: news montage · shot types: '), r
+    # a search says its mode, a paste has none (never searched), and a row from
+    # before the column claims nothing
+    assert r['rows'] == ['news montage', 'visuals', '', ''], r['rows']
+
+
 # --------------------------------------------- the candidate-limit dropdown
 def test_the_limit_dropdown_offers_the_menu_and_defaults_to_100(spa):
     """100 because 112 rapid metadata calls is the only measured point at which
@@ -2657,6 +2846,51 @@ def test_the_limit_is_validated_against_this_builds_list_on_the_way_in_and_out()
     assert body.count('try {') >= 2 and body.count('catch') >= 2, body
 
 
+_MODE_ROW = re.compile(
+    r"\{key: '([a-z]+)', label: '([^']+)', short: '([^']+)',\s*\n"
+    r"\s*preset: \[([^\]]*)\]")
+
+
+def test_the_search_mode_table_matches_the_servers():
+    """The third duplication this feature carries (claude_cli.MODES -> the
+    toggle): the server refuses a mode that is not on ITS list, so a drift here
+    is a 400 on every search -- and a preset that drifts silently ticks the
+    wrong boxes for the montage the editor picked."""
+    from ytdlweb import claude_cli
+
+    rows = _MODE_ROW.findall(_js())
+    assert len(rows) == len(claude_cli.MODES), rows
+    assert [r[0] for r in rows] == list(claude_cli.MODES), 'order differs'
+    for key, label, short, preset in rows:
+        keys = [k.strip().strip("'") for k in preset.split(',') if k.strip()]
+        assert tuple(keys) == claude_cli.MODES[key]['preset'], key
+        assert label.strip() and short.strip(), key
+    assert f"const DEFAULT_MODE = '{claude_cli.DEFAULT_MODE}';" in _js()
+
+
+def test_the_search_posts_the_mode_and_the_paste_posts_none():
+    """A url job is never searched, so a rubric for the search would be a field
+    that changes nothing -- and the mode posted is always a key from the table,
+    because the server refuses one it does not know."""
+    js = _js()
+    body = js[js.index('async function runSearch()'):js.index('async function runUrls()')]
+    assert 'mode: state.searchMode' in body, body
+    paste = js[js.index('async function runUrls()'):js.index('async function startDownload()')]
+    assert 'mode:' not in paste, paste
+
+
+def test_the_two_groups_of_boxes_are_captioned_on_the_page():
+    """2026-08-18: nine labels in two unexplained groups read as "one of these
+    is mandatory". The page says what they are, in the markup, so it is there
+    before a single fetch lands."""
+    html = _html()
+    assert 'SHOTS OF IT = footage of the subject' in html
+    assert 'ALSO KEEP = people talking about it' in html
+    assert 'id="modes"' in html
+    # the toggle is FIRST on the row: it presets the boxes beside it
+    assert html.index('id="modes"') < html.index('id="shots"')
+
+
 def test_the_search_posts_the_ticked_shot_types_in_source():
     js = _js()
     body = js[js.index('async function runSearch()'):js.index('async function runUrls()')]
@@ -2809,9 +3043,12 @@ def test_localstorage_is_never_allowed_to_break_the_page():
     """It throws outright in some privacy modes, and a page that cannot
     remember the ticks must still be able to search."""
     js = _js()
-    body = js[js.index('function loadShots()'):js.index('function renderShotNote()')]
-    assert body.count('try {') >= 2 and body.count('catch') >= 2, body
+    body = js[js.index('function loadShots(mode)'):js.index('function renderShotNote()')]
+    # loadShots/saveShots and loadSearchMode/saveSearchMode: four accesses, four
+    # guards. The mode is remembered exactly like the ticks it presets.
+    assert body.count('try {') >= 4 and body.count('catch') >= 4, body
     assert "const SHOTS_KEY = 'ytdl.shot_types'" in js
+    assert "const MODE_KEY = 'ytdl.search_mode'" in js
 
 
 def test_the_destination_project_is_remembered_like_every_other_choice():
@@ -2823,7 +3060,7 @@ def test_the_destination_project_is_remembered_like_every_other_choice():
     assert "const PROJECT_KEY = 'ytdl.project'" in js
     guard = js[js.index('function loadProject()'):js.index('async function loadProjects()')]
     assert guard.count('try {') >= 2 and guard.count('catch') >= 2, guard
-    body = js[js.index('async function loadProjects()'):js.index('const defaultShots')]
+    body = js[js.index('async function loadProjects()'):js.index('const searchModeOf')]
     assert body.index('loadProject()') > body.index('sel.appendChild(o)'), \
         'the restore runs before the options exist'
     # only a slug the server still offers, and the change is what saves it

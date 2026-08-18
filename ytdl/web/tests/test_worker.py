@@ -245,6 +245,39 @@ def test_an_old_job_row_is_re_run_with_the_defaults(
         db.DEFAULT_SHOT_TYPES, db.DEFAULT_SHOT_TYPES]
 
 
+# -------------------------------------------------------- the search mode
+# The rubric is on the job row for the same reason the ticks are: a job re-run
+# from `queued` after a container restart must be expanded AND filtered under
+# the mode the editor chose, not under whatever the default has become.
+
+
+def test_the_jobs_mode_reaches_both_ai_calls(con, job, fake_claude, fake_youtube):
+    slug, label, _ = PROJECTS[1]
+    db.set_phase(con, job['id'], 'cancelled')
+    mine = db.create_job(con, USER, 'algal reef controversy', 'algal reef',
+                         slug, label, mode='news')
+    _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa']})
+    worker.run_job(con, mine)
+
+    assert fake_claude.modes == [('terms', 'news'), ('relevance', 'news')]
+    # ...with the mode's own preset, since no boxes were sent with it
+    assert [s for _stage, s in fake_claude.shot_types] == [
+        claude_cli.COVERAGE_KEYS, claude_cli.COVERAGE_KEYS]
+
+
+def test_an_old_job_row_is_re_run_as_a_visuals_search(
+        con, job, fake_claude, fake_youtube):
+    """A job queued before the modes existed ran the only search there was.
+    Migration 009 leaves it holding 'visuals', and boot recovery must re-run it
+    as that -- a manifest filtered on the news rubric would throw away the
+    footage it went looking for."""
+    assert db.get_job(con, job['id'])['mode'] == claude_cli.MODE_VISUALS
+    _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa']})
+    worker.run_job(con, job['id'])
+
+    assert [m for _stage, m in fake_claude.modes] == ['visuals', 'visuals']
+
+
 # --------------------------------------------------- the candidate ceiling
 # 2026-08-11: 24 terms -> 336 candidates -> one metadata call each, and YouTube
 # refused the NAS's IP at 112 of them. The ceiling is enforced where candidates

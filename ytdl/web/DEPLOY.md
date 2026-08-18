@@ -222,6 +222,40 @@ failure — never per request, because a live call costs a second or two and thi
 endpoint is hit by every page load. The SPA shows the banner from it *before*
 anyone submits a job. Verify by hand with any tiny request against the key.
 
+### Search modes: what the two calls are asked for (2026-08-18)
+
+The search bar carries a two-way toggle, `[ VISUALS ] [ NEWS MONTAGE ]`, left
+of the shot-type boxes. It picks which of the two rubrics in
+`ytdlweb/claude_cli.py` (`MODES`) both AI calls run under, and it is stored on
+the job row (`jobs.mode`, migration 009) so a job re-run from `queued` after a
+container restart is re-run under the rubric the editor chose.
+
+| | `visuals` (the default) | `news` |
+|---|---|---|
+| what it is for | b-roll to cut UNDER something else: a narrator, an interview, a music bed | a montage made OF the reporting, where the clip's own audio is what gets cut |
+| the terms call asks for | footage OF the subject: locations, aerials, walk-throughs, ceremonies and press events as they happened | reporting ON the subject: news packages and bulletins, field reports, press conferences, briefings, statements, substantive interviews, in both languages (`新聞`, `報導`, `記者會`, `專訪`, ...) |
+| the keep call scores | is this FOOTAGE OF the subject that can be cut into a timeline; prefers the longer, steadier, less-edited take; narration the editor cannot understand does not matter | does the clip's own AUDIO carry the story; prefers clear speech and the fuller version of a statement over a summary; drops music-only, ambient, silent and narration-free b-roll, and off-topic talking |
+| the boxes it starts with | the six footage types | the three coverage types (interviews, news reports, commentary) |
+
+Two things that are easy to get wrong when editing this:
+
+- **The mode and the shot-type boxes are different dials, and both still
+  apply.** The mode says what the search is for; the boxes bias which material
+  is looked for within it. A mode's preset is only what the toggle ticks when
+  you choose it (and what a caller who sends no selection at all gets) -- every
+  box is available in either mode, and the editor's adjustment is what gets
+  posted. The ticks are remembered per browser AND per mode.
+- **`visuals` must stay byte for byte what this app sent before the modes
+  existed.** `ytdl/web/tests/golden/` holds the four prompts composed by the
+  build that had no modes in it, and `test_claude_cli.py` compares them; if
+  that pin fails, an editor who never touched the toggle has had their search
+  changed under them.
+
+The mode is reported in every job payload (`GET api/jobs`, `GET api/jobs/{id}`,
+the manifest) and written into the `.json` manifest beside the downloaded
+clips, so "why is this folder full of press conferences" is answerable from the
+folder as well as from the page.
+
 ### Prompt injection
 
 The relevance call judges YouTube titles and channel names, which anyone can

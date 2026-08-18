@@ -473,6 +473,51 @@ a.brand:hover { color: var(--red-hot); }
 
 .shotnote { font-size: 10px; flex: 0 1 auto; }
 
+/* The search-mode toggle, first on the shot row (2026-08-18). Terminal idiom
+   -- [ VISUALS ] [ NEWS MONTAGE ] -- and the chosen one is lit the way a
+   ticked shot box is, because they are one control surface: the mode presets
+   the boxes and the boxes tune the mode. */
+.modes {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.modebtn {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  padding: 1px 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.modebtn:hover { color: var(--text); border-color: var(--red-dim); }
+.modebtn.on {
+  background: var(--field);
+  border-color: var(--red-dim);
+  color: var(--text);
+}
+
+/* The one line that says what the two groups of boxes mean. */
+.shotcaption {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+/* Which rubric a past search ran under, on its Recent searches row. Its own
+   class, like .capsum, so it is never what the ellipsis eats: two words, and
+   they are the difference between "this found nothing but talking heads" and
+   "this is broken". */
+.recentrow .modesum {
+  color: var(--muted);
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 /* The same selection, one line long, on a Recent searches row. Deliberately
    NOT .shots: that is the header's flex container. */
 .recentrow .shotsum {

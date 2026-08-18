@@ -55,3 +55,16 @@ This database was created at v1. Since then (2026-08-11 bug hunt):
   about both: a predicate that only checked `jobs` would call a database with
   no `job_videos.download_host` migrated and every clip status post would then
   die on "no such column".
+- `008_attestations.sql` — v8 (2026-08-17), the rights/ToS attestation table
+  (`attestation.py`, `docs/COMMERCIAL_READINESS.md` item 2). A whole new table,
+  so the predicate is simply "is it there"; a database where it is missing or
+  unreadable answers "nobody has accepted", which refuses downloads rather than
+  allowing them.
+- `009_jobs_mode.sql` — v9 (2026-08-18), `jobs.mode`: the SEARCH MODE, `visuals`
+  (b-roll to cut under something else) or `news` (a montage made of the
+  reporting, where the clip's own audio is what gets used). It picks the framing
+  of both AI calls. Like 005 and unlike 006, the default IS what the old rows
+  ran: `visuals` composes the previous prompts byte for byte
+  (`tests/golden/`), so there is no backfill and no row's history is rewritten.
+  It is not `download_mode` (007), which is about which machine fetches the
+  clips.

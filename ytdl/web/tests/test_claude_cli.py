@@ -19,6 +19,7 @@ because most assertions here are about wording rather than placement; the tests
 that are about the split read `_system()` and `_user()`.
 """
 import json
+import pathlib
 
 import pytest
 
@@ -674,6 +675,207 @@ def test_the_bias_is_one_fragment_table_and_nothing_else(run):
     for prompt in (term_prompt, rel_prompt):
         assert '{bias}' in prompt
         for leaked in ('drone', '空拍', 'timelapse', '專訪', 'studio'):
+            assert leaked not in prompt, leaked
+
+
+# ---------------------------------------------------------- the search mode
+# 2026-08-18, the owner: "If you're downloading for montages, you ideally just
+# want news clips with lots of relevant audio. Maybe we should have a mode for
+# 'visuals' and 'news montages'."
+#
+# The two rubrics score two different products (claude_cli.MODES says why at
+# length), so what this block pins is that they REALLY differ -- and, first,
+# that `visuals` is what this app has always sent, to the byte. The modes were
+# added to give an editor a second thing to ask for, not to re-tune the search
+# every editor already has.
+
+GOLDEN = pathlib.Path(__file__).resolve().parent / 'golden'
+
+
+def _golden(name):
+    """A recorded prompt, newline-normalised.
+
+    `.gitattributes` leaves these under `* text=auto`, so a Windows checkout
+    holds them CRLF while the composed string is always LF. Comparing bytes
+    with the line endings included would fail on the developer's machine and
+    pass in CI, which is the least useful shape a pin can have.
+    """
+    return (GOLDEN / name).read_text(encoding='utf-8').replace('\r\n', '\n')
+
+
+def _term_system(shot_types=None, mode=None):
+    m = claude_cli.MODES[claude_cli.normalise_mode(mode)]
+    return claude_cli._TERM_SYSTEM.format(
+        role=m['role'], mission=m['mission'],
+        bias=claude_cli.term_bias(shot_types, mode))
+
+
+def _relevance_system(shot_types=None, mode=None):
+    m = claude_cli.MODES[claude_cli.normalise_mode(mode)]
+    return claude_cli._RELEVANCE_SYSTEM.format(
+        role=m['judge_role'], judge=m['judge'],
+        bias=claude_cli.filter_bias(shot_types, mode))
+
+
+@pytest.mark.parametrize('selection,term_file,rel_file', [
+    (None, 'visuals_term_system.txt', 'visuals_relevance_system.txt'),
+    (['aerial', 'interview'], 'visuals_term_system_aerial_interview.txt',
+     'visuals_relevance_system_aerial_interview.txt'),
+])
+def test_the_visuals_prompts_are_byte_for_byte_what_they_were(
+        selection, term_file, rel_file):
+    """THE additive-change pin. The files in tests/golden/ were composed by the
+    build that had no modes in it at all; if this fails, an editor who never
+    touched the toggle has had their search changed under them."""
+    assert _term_system(selection) == _golden(term_file)
+    assert _relevance_system(selection) == _golden(rel_file)
+
+
+def test_the_default_mode_is_the_search_this_app_has_always_run():
+    assert claude_cli.DEFAULT_MODE == claude_cli.MODE_VISUALS
+    assert list(claude_cli.MODES) == ['visuals', 'news']
+    # an absent, blank or unrecognised mode is the default, never an error:
+    # this is fed from a job row another build may have written
+    for junk in (None, '', '  ', 'montage-2000', 42):
+        assert claude_cli.normalise_mode(junk) == claude_cli.MODE_VISUALS
+    assert claude_cli.normalise_mode(' NEWS ') == claude_cli.MODE_NEWS
+
+
+def test_each_mode_starts_the_boxes_where_that_montage_starts():
+    """visuals = footage of the subject, news = people talking about it. The
+    preset is only what NO SELECTION means: an explicit one is honoured in
+    either mode, because "news montage, but I want the aerials too" is real."""
+    assert claude_cli.preset_shot_types('visuals') == claude_cli.FOOTAGE_KEYS
+    assert claude_cli.preset_shot_types('news') == claude_cli.COVERAGE_KEYS
+    assert claude_cli.preset_shot_types() == claude_cli.DEFAULT_SHOT_TYPES
+
+    assert claude_cli.normalise_shot_types(None, 'news') == claude_cli.COVERAGE_KEYS
+    assert claude_cli.normalise_shot_types(None) == claude_cli.DEFAULT_SHOT_TYPES
+    assert claude_cli.normalise_shot_types(['aerial'], 'news') == ('aerial',)
+    # ...and [] still means "the editor deliberately ticked nothing", in both
+    assert claude_cli.normalise_shot_types([], 'news') == ()
+
+
+def test_the_news_term_prompt_goes_looking_for_reporting(run):
+    """The queries have to find journalism, in both languages: 新聞 is where a
+    Taiwanese bulletin is filed and 記者會 is where the press conference is --
+    an English word list would find neither."""
+    run.outcome = _terms_reply()
+    claude_cli.generate_terms('algal reef controversy', mode='news')
+    p = _prompt(run)
+    assert 'NEWS REPORTING' in p and 'PRIORITISE REPORTING' in p
+    assert 'PRIORITISE VISUALS' not in p
+    for phrasing in ('news report', 'news package', 'press conference',
+                     'briefing', 'statement', 'interview'):
+        assert phrasing in p, phrasing
+    for idiom in ('新聞', '報導', '新聞報導', '記者會', '專訪', '訪問'):
+        assert idiom in p, idiom
+    # ...and the output contract is untouched by the framing
+    assert '8 to 12 queries in English' in p
+    assert '{bias}' not in p and '{mission}' not in p and '{role}' not in p
+
+
+def test_the_news_keep_rubric_scores_the_audio_before_the_pictures(run):
+    """What an editor actually notices: a silent drone shot is worthless to a
+    montage made of the reporting, however beautiful, and a clip whose talking
+    is about something else is worse than useless."""
+    run.outcome = FakeMessage('{"keep": [0], "drop": []}')
+    claude_cli.filter_relevance('algal reef controversy', _videos(1), mode='news')
+    p = _system(run)
+    assert 'SCORE THE AUDIO FIRST' in p
+    assert 'AUDIO carries this story' in p
+    assert 'PRIORITISE VISUALS' not in p and 'FOOTAGE OF the subject' not in p
+    drop_block = p[p.index('DROP:'):p.index('KEEP')]
+    assert 'silent' in drop_block and 'narration-free' in drop_block
+    assert 'talking is about something else' in drop_block
+    keep_block = p[p.index('KEEP'):]
+    assert 'clear, well-recorded speech' in keep_block
+    assert 'fuller version of a statement' in keep_block
+    # one language per clip, said out loud: a montage cut across two is two
+    # subtitle passes
+    assert 'stays in one language' in keep_block
+    # ...and NOT the visuals line, which says the language does not matter
+    assert 'narration the editor cannot use' not in keep_block
+    # the indices-in, indices-out contract is the same in either mode
+    assert '{"keep": [0, 3, 4]' in p
+
+
+def test_the_visuals_rubric_still_says_the_opposite():
+    """The two halves of the same sentence, so a future edit cannot quietly
+    make one mode into the other."""
+    visuals = claude_cli.filter_bias(None, 'visuals')
+    news = claude_cli.filter_bias(None, 'news')
+    assert 'PRIORITISE' not in visuals or 'REPORTING' not in visuals
+    assert 'narration the editor cannot use does not matter' in visuals
+    assert 'no audio\n  here to cut' in news
+    assert visuals != news
+    assert claude_cli.term_bias(None, 'visuals') != claude_cli.term_bias(None, 'news')
+
+
+def test_the_boxes_still_bias_a_news_search(run):
+    """The mode and the ticks are different dials. Ticking `aerial` in a news
+    montage must still ask for aerials, and leaving `commentary` unticked must
+    still push panel shows away."""
+    seek = claude_cli.term_bias(['aerial', 'news'], 'news')
+    assert '空拍' in seek and 'drone footage' in seek
+    assert 'PRIORITISE REPORTING' in seek, 'the mode framing survives the ticks'
+    avoid_block = seek[seek.index('AVOID'):]
+    assert '政論' in avoid_block and 'reaction' in avoid_block
+
+    keep = claude_cli.filter_bias(['aerial', 'news'], 'news')
+    drop_block = keep[keep.index('DROP:'):keep.index('KEEP')]
+    assert 'interviews and talk/panel shows' in drop_block
+    keep_block = keep[keep.index('KEEP'):]
+    assert 'aerials, drone shots and flyovers' in keep_block
+    assert 'news reports and packages' in keep_block
+
+
+def test_a_news_search_with_no_boxes_at_all_still_asks_for_reporting():
+    """Both degenerate selections mean "no shot-type preference" -- they do NOT
+    mean "forget the montage this is for"."""
+    for selection in ([], list(claude_cli.SHOT_TYPES)):
+        terms = claude_cli.term_bias(selection, 'news')
+        filt = claude_cli.filter_bias(selection, 'news')
+        assert 'NO SHOT-TYPE PREFERENCE' in terms and 'PRIORITISE REPORTING' in terms
+        assert 'NO SHOT-TYPE PREFERENCE' in filt and 'SCORE THE AUDIO FIRST' in filt
+        assert 'AVOID' not in terms
+        assert 'silent' in filt and 'KEEP it' in filt
+
+
+def test_the_mode_reaches_both_calls_and_changes_nothing_else(run):
+    """Same JSON contract, same retry, same batching -- only the framing moves."""
+    run.outcome = _terms_reply()
+    out = claude_cli.generate_terms('x', mode='news')
+    assert [t['q'] for t in out] == ['presidential office building taipei aerial',
+                                     '總統府 空拍']
+    run.calls.clear()
+    run.outcome = FakeMessage('{"keep": [0, 1], "drop": []}')
+    verdicts = claude_cli.filter_relevance('x', _videos(3), mode='news', batch=2)
+    assert len(run.calls) == 2, 'still one call per batch'
+    assert claude_cli.filter_bias(None, 'news') in _system(run)
+    assert set(verdicts) == {'vid00000000', 'vid00000001', 'vid00000002'}
+
+
+def test_an_unknown_mode_costs_the_framing_not_a_search(run):
+    """Fed from a job row another build may have written: the API refuses an
+    unknown mode, this module falls back to the default one."""
+    run.outcome = _terms_reply()
+    claude_cli.generate_terms('x', mode='montage-2000')
+    assert _system(run) == _term_system()
+
+
+def test_the_mode_framing_is_one_table_and_nothing_else(run):
+    """Same rule the shot-type fragments live under: retuning a rubric must be
+    an edit to MODES, not a hunt through the two prompts."""
+    src = (claude_cli.__file__).replace('.pyc', '.py')
+    with open(src, encoding='utf-8') as fh:
+        body = fh.read()
+    term_prompt = body[body.index('_TERM_SYSTEM = '):body.index('def generate_terms')]
+    rel_prompt = body[body.index('_RELEVANCE_SYSTEM = '):body.index('RELEVANCE_BATCH')]
+    assert '{role}' in term_prompt and '{mission}' in term_prompt
+    assert '{role}' in rel_prompt and '{judge}' in rel_prompt
+    for prompt in (term_prompt, rel_prompt):
+        for leaked in ('b-roll', 'REPORTING', 'AUDIO', '新聞', 'montage'):
             assert leaked not in prompt, leaked
 
 

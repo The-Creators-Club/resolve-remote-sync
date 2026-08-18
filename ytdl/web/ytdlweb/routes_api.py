@@ -179,6 +179,11 @@ class NewJob(BaseModel):
     quality: str = '1080p'
     period: str | None = None
     max_per_term: int = 15
+    # WHAT THIS SEARCH IS FOR: 'visuals' or 'news' (claude_cli.MODES,
+    # 2026-08-18). OMITTED is 'visuals' -- the only search this app ran before
+    # the modes existed -- so a client that predates the toggle keeps exactly
+    # the behaviour it has always had.
+    mode: str | None = None
     # The ticked shot-type boxes. OMITTED is not the same as EMPTY: absent
     # means "this client does not know about shot types" and gets the
     # defaults, [] means the editor deliberately ticked nothing and gets an
@@ -204,6 +209,25 @@ MAX_TERM_CHARS = 400
 # is not a place to do unbounded work, and the 400 that names the cap is more
 # use than a 400 listing four thousand unknown keys (YTDL-7's shape).
 MAX_SHOT_TYPES = len(claude_cli.SHOT_TYPES)
+
+
+def _validated_mode(raw):
+    """The request's search mode -> what db.create_job wants, or a 400.
+
+    None (the field was not sent) passes through as None, which is the default
+    everywhere downstream. An unrecognised value is REFUSED rather than quietly
+    read as the default: the mode decides which rubric both AI calls run under,
+    and a typo that silently searched for the other thing would be invisible to
+    the editor and unexplainable afterwards -- the same reason an unknown shot
+    type is a 400.
+    """
+    if raw is None:
+        return None
+    if str(raw) not in claude_cli.MODES:
+        raise HTTPException(
+            400, f'unknown search mode {raw!r}. Known: '
+                 f'{", ".join(claude_cli.MODES)}')
+    return str(raw)
 
 
 def _validated_shot_types(raw):
@@ -277,6 +301,7 @@ def create_job(req: NewJob, request: Request):
         raise HTTPException(400, f'unknown period {req.period!r}')
     if req.quality not in ('best', '2160p', '1440p', '1080p', '720p', '480p'):
         raise HTTPException(400, f'unknown quality {req.quality!r}')
+    mode = _validated_mode(req.mode)
     shot_types = _validated_shot_types(req.shot_types)
     max_candidates = _validated_max_candidates(req.max_candidates)
 
@@ -293,7 +318,8 @@ def create_job(req: NewJob, request: Request):
             c, user, term, config.safe_term_dirname(term), project['slug'],
             project['label'], quality=req.quality, period=req.period or None,
             max_per_term=max(1, min(50, int(req.max_per_term))),
-            shot_types=shot_types, max_candidates=max_candidates)
+            shot_types=shot_types, max_candidates=max_candidates,
+            mode=mode)
     except sqlite3.IntegrityError:
         # The read above and this INSERT are not one transaction, and a
         # double-clicked SEARCH lands squarely between them; the partial unique
@@ -428,9 +454,10 @@ class NewUrlJob(BaseModel):
     # that no longer changes anything; pydantic would drop it silently anyway,
     # and this is the note saying that is deliberate.
     folder: str = ''
-    # Deliberately NO shot_types and NO max_candidates: a url job does no
-    # searching at all, so there is nothing for a bias to bias and nothing to
-    # accumulate a ceiling against -- its videos are exactly the links pasted,
+    # Deliberately NO mode, NO shot_types and NO max_candidates: a url job
+    # does no searching at all, so there is nothing to frame, nothing for a
+    # bias to bias and nothing to accumulate a ceiling against -- its videos
+    # are exactly the links pasted,
     # already capped by MAX_URLS. The SPA posts the same form for both boxes,
     # so one arriving here is ignored (pydantic drops unknown fields) rather
     # than refused -- a 400 over a field that changes nothing would be a paste

@@ -541,6 +541,12 @@ def expire_stale_leases(conn: sqlite3.Connection, now: datetime | None = None) -
     because this app has no timer: the dashboard runs uvicorn with workers=1
     and a background thread here would be a thread the fleet status page waits
     behind.
+
+    The comparison is a STRING one, which is only sound because every
+    `lease_expires_at` in this table is written by this module as a UTC
+    `datetime.isoformat()` -- same offset, same field widths, so lexical order
+    is chronological order. Nothing else writes that column; if anything ever
+    does, it writes it that way or this stops working silently.
     """
     cutoff = (now or datetime.now(timezone.utc)).isoformat()
     with conn:

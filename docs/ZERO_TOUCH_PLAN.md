@@ -458,8 +458,13 @@ per-project SFTP isolation ships in WP C. **S4** — see WP A's CI job.
   upgrade verification) — untouched; the companion already trusts only
   baked keys and its own origin, which is exactly the property the feed
   relies on.
-- The GPU indexers stay a vendor/pro-services thing on a GPU box (item 14);
-  the appliance only *hosts* the indexes it is given.
+- The GPU indexers are **local by default** now (2026-08-18: b-roll's
+  `describe` stage runs Qwen3-VL through a vendored llama.cpp on the
+  indexing machine's own GPU — `broll/docs/indexing-local.md` — with the
+  Anthropic API as an optional per-site backend needing no GPU at all,
+  `broll/docs/indexing-api.md`; music's CLAP embedding still needs a GPU with
+  no alternative). Indexing itself still runs on a GPU box outside the
+  appliance (item 14); the appliance only *hosts* the indexes it is given.
 - The legal layer (item 5), certificates (item 4) and YouTube posture
   (item 2) — orthogonal; the wizard's EULA step and feature switches are the
   places they plug in.

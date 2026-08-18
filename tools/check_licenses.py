@@ -24,6 +24,14 @@ Only two artefacts reach a customer as our own product:
 Everything else -- bench, the two indexers, the test extras -- runs on OUR
 machines and is not conveyed. It is in the notices inventory and not in this
 gate, deliberately: a gate that fails on a developer tool gets switched off.
+That includes the b-roll indexer's local-VLM backend (2026-08-18,
+broll_index/local_runtime.py): the llama.cpp runtime and Qwen3-VL GGUF
+weights it downloads on first use are sha256-pinned in
+broll_index/local_models.py, but they are neither a pip package nor part of
+`companion`/`dashboard` -- pip never sees them, so this script never sees
+them either. They are inventoried by hand in
+docs/legal/THIRD_PARTY_NOTICES.md instead, same as the faster-whisper
+environment the b-roll indexer has always shelled out to.
 
 WHERE THE PACKAGE LIST COMES FROM
 

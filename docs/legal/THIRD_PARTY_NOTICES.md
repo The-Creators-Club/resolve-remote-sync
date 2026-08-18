@@ -392,6 +392,8 @@ counsel should look at.
 | CLAP text tower (ONNX export) | derived from `laion/larger_clap_music_and_speech`, exported 2026-08-10 | Apache-2.0 | model id, dim 512 and 125,302,016 text params VERIFIED from `music/web/data/text_encoder/manifest.json`; licence *stated from knowledge — confirm* | Hugging Face, exported on the base rig by `music/indexer/export_text_encoder.py` | **A** |
 | MiniLM (b-roll embeddings) | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` via fastembed | Apache-2.0 | model id VERIFIED in `broll/web/app/semantic.py:51-53`; licence *stated from knowledge — confirm* | Hugging Face / the fastembed CDN, on the base rig only | not shipped — see below |
 | Whisper (transcription) | an external `faster-whisper` environment the operator already has | faster-whisper MIT, model weights MIT | path VERIFIED in `broll/indexer/broll_index/config.py:115-116`; licences *stated from knowledge — confirm* | operator-supplied, outside this repo (`%USERPROFILE%\tools\whisper` by default) | C |
+| **llama.cpp** (b-roll local indexing runtime, 2026-08-18) | release `b10470`, `llama-server` — one asset per platform (Windows CUDA 12.4, macOS arm64 Metal, Linux Vulkan) | **MIT** | asset names + sha256 pinned and VERIFIED against `api.github.com/repos/ggml-org/llama.cpp/releases/tags/b10470`'s own digests, `broll/indexer/broll_index/local_models.py:RUNTIMES`; licence *stated from knowledge — confirm* | `github.com/ggml-org/llama.cpp` releases, sha256-pinned per asset (`broll_index/local_runtime.py`) | B |
+| **Qwen3-VL-4B/8B-Instruct-GGUF** (b-roll local indexing model, 2026-08-18) | `Qwen/Qwen3-VL-4B-Instruct-GGUF`@`1cd86af…`, `Qwen/Qwen3-VL-8B-Instruct-GGUF`@`f982a07…`, `Q4_K_M` quant + F16 mmproj each | **Apache-2.0** | repo/revision/filename/sha256 pinned in `broll_index/local_models.py:TIERS`; 4B sha256 VERIFIED by local download+hash 2026-08-18, 8B sha256 is Hugging Face's own API-reported `lfs.oid` (not independently re-downloaded); licence *stated from knowledge — confirm against the model card* | Hugging Face, sha256-pinned per file (`broll_index/local_runtime.py`) | B |
 | htmx | `1.9.12` | 0BSD | version VERIFIED (`version:"1.9.12"` in `dashboard/static/htmx.min.js`); licence *stated from knowledge — confirm* | vendored into `dashboard/static/` | **A** |
 | Tcl/Tk | 8.6 (`tcl86t.dll`, `tk86t.dll`) | BSD-style (Tcl/Tk licence) | presence VERIFIED by byte-scanning `companion/dist/ccsync-companion.exe` (0.7.11, built 2026-08-17); licence *stated from knowledge — confirm* | the CPython 3.12.10 install on the build machine, collected by PyInstaller | **A** |
 | CPython (`python312.dll`) | 3.12.10 | PSF-2.0 | presence VERIFIED by the same byte scan; build-machine interpreter VERIFIED as 3.12.10 | the CPython install on the build machine | **A** |
@@ -488,7 +490,7 @@ Until then, the LGPLv3 §4/§6 obligations for that build stand: it is a
 single-file binary with an LGPL library statically inside it and no relinking
 mechanism offered.
 
-### CLAP, MiniLM, Whisper — what actually ships
+### CLAP, MiniLM, Whisper, Qwen3-VL/llama.cpp — what actually ships
 
 - **CLAP text tower — SHIPPED (mode A).** `music/web/data/text_encoder/` is an
   ONNX export of the 125M-parameter text half of
@@ -508,6 +510,17 @@ mechanism offered.
   operator-supplied `faster-whisper` environment
   (`broll/indexer/broll_index/transcribe.py:1-17`). Only the resulting
   transcript text reaches a customer, inside `broll.db`.
+- **Qwen3-VL / llama.cpp (b-roll local indexing, 2026-08-18) — NOT SHIPPED.**
+  Same posture as Whisper: `broll_index/local_runtime.py` has the INDEXING
+  machine's own `llama-server` process download the runtime binary from
+  GitHub and the GGUF weights from Hugging Face, sha256-verified against the
+  pins in `broll_index/local_models.py` before either is trusted. Only the
+  resulting shot descriptions (text) reach a customer, inside `broll.db` —
+  the model weights themselves never leave the indexing machine and are never
+  bundled into `companion` or the `dashboard` container, which is why
+  `tools/check_licenses.py`'s gate (scoped to those two shipped artefacts —
+  see its own docstring) does not see this row; it is inventoried here by
+  hand instead, same as Whisper above.
 
 TODO(legal): model weights are frequently licensed by terms that are *not* the
 repository's stated software licence (RAIL/OpenRAIL riders, "no commercial use"

@@ -1,6 +1,9 @@
 # The GPU indexers: what runs where, and what a customer without a GPU gets
 
-*Written 2026-08-17 for `docs/COMMERCIAL_READINESS.md` item 14.*
+*Written 2026-08-17 for `docs/COMMERCIAL_READINESS.md` item 14. Updated
+2026-08-18: the b-roll `claude` stage is now `describe` — local by default
+(Qwen3-VL via llama.cpp, `broll/docs/indexing-local.md`), Anthropic optional
+per site (`broll/docs/indexing-api.md`).*
 
 Two of this product's four web surfaces are search over a precomputed index:
 `/broll` searches a b-roll archive described by a vision model plus speech
@@ -24,7 +27,8 @@ fitting on the NAS.
 | Job | Where it runs | Needs | Writes |
 |---|---|---|---|
 | b-roll: scan / probe / proxy / frames | GPU host (ffmpeg-bound; a GPU makes it faster, not possible) | ffmpeg | `data_root`, `broll.db` |
-| b-roll: `claude` (contact-sheet indexing) | GPU host, but network-bound | an Anthropic API key | `broll.db` |
+| b-roll: `describe` (shot indexing, `indexer.backend: local`, the default) | GPU host, GPU-bound | an 8 GB+ NVIDIA GPU (or Apple Silicon), `broll-index models pull` | `broll.db` |
+| b-roll: `describe` (`indexer.backend: anthropic`, optional per site) | GPU host, but network-bound | an Anthropic API key | `broll.db` |
 | b-roll: `transcribe` (faster-whisper) | GPU host | CUDA + cuDNN, the sidecar venv | `data_root/transcripts`, `broll.db` |
 | b-roll: `embed` (fastembed, ONNX) | GPU host | — (CPU is fine) | `broll.db` |
 | music: CLAP embed / tag / peaks / debias | **GPU host only** — an RTX-class card; ~9 min for a full 376-track rebuild | torch + CUDA, ffmpeg, the library on a local mount | `music.db` |
@@ -49,7 +53,10 @@ mounts its config read-only, so "edit the file" is not always available.
 | `whisper.script` | `CCSYNC_WHISPER_SCRIPT` | `broll/indexer/tools/whisper_transcribe.py` |
 | `whisper.model_dir` | `CCSYNC_WHISPER_MODEL_DIR` | model cache; ~1.6 GB for `large-v3-turbo` |
 | `embedding.cache_dir` | `BROLL_MODEL_CACHE` | fastembed's ONNX weights |
-| — | `ANTHROPIC_API_KEY` (named by `anthropic.api_key_env`) | **never** in config.yaml |
+| `indexer.local_cache_dir` | `BROLL_LOCAL_CACHE_DIR` | the local backend's llama.cpp runtime + GGUF weights; `""` = per-OS default, see `broll/docs/indexing-local.md` |
+| `indexer.llama_server_path` | `BROLL_LLAMA_SERVER_PATH` | use an already-installed `llama-server` instead of the vendored download |
+| `indexer.dashboard_url` | `BROLL_DASHBOARD_URL` | where to ask `GET /api/v1/site` for `indexer.model_tier` when config.yaml doesn't say; `""` = derived from `db.url` |
+| — | `ANTHROPIC_API_KEY` (named by `anthropic.api_key_env`) | **never** in config.yaml; needed only when `indexer.backend: anthropic` (or for `taxonomy propose`, always) |
 
 ### music (`music/indexer/music_index/config.py`)
 
@@ -137,11 +144,30 @@ aggregate. Same caveat as the dashboard's pinned static ffmpeg
 The image is **not built by `tools/ship.cmd`** and is not part of any deploy: it
 is multi-GB and belongs to whoever runs the indexing.
 
+## Hardware guidance for the b-roll `describe` stage (local backend)
+
+Full detail, tiers table and troubleshooting: `broll/docs/indexing-local.md`.
+The short version, `broll-index doctor`'s own logic
+(`broll_index/local_runtime.recommend_tier`):
+
+| This machine's GPU | Tier | Config |
+|---|---|---|
+| 12 GB+ NVIDIA VRAM (or 24 GB+ Apple Silicon unified memory) | **Best** (Qwen3-VL-8B) | `indexer.model_tier: best` |
+| 8–11 GB NVIDIA VRAM (or 16–23 GB Apple Silicon) | **Good** (Qwen3-VL-4B, the default) | `indexer.model_tier: good`, or leave it unset |
+| < 8 GB VRAM, or no discrete GPU | none — `indexer.backend: anthropic`, or search-only from a vendor-built index (below) | |
+| Resolve is open on this machine | treat the GPU as unavailable — the eval measured Resolve alone holding 9.3 of 10 GB on an RTX 3080; run indexing off-hours or on a second machine | |
+
 ## Customers without a GPU
 
-This is the v1 scope-out, and it is a real product, not a degraded one.
+This is the v1 scope-out, and it is a real product, not a degraded one. It
+still applies in full to **music** (CLAP embedding has no non-GPU path). For
+**b-roll**, `indexer.backend: anthropic` is now a second way for a no-GPU
+customer to index their own new footage without a card at all — an Anthropic
+API key instead of a GPU, `broll/docs/indexing-api.md`. Everything below still
+holds for a customer who wants neither: a vendor-built index they only search.
 
-A customer with no NVIDIA card gets **search-only, over a vendor-built index**:
+A customer with no NVIDIA card and no Anthropic key gets **search-only, over a
+vendor-built index**:
 
 1. The vendor (or the customer's own GPU host) runs the indexers over the
    customer's library and produces `broll.db` / `music.db`, plus the b-roll
@@ -198,6 +224,10 @@ properties are in `music/web/musicweb/drain.py`.
 
 ## See also
 
+- `broll/docs/indexing-local.md` — the local (Qwen3-VL/llama.cpp) backend:
+  tiers, fetching, the compact format, the segment-merge post-process,
+  troubleshooting.
+- `broll/docs/indexing-api.md` — the Anthropic backend, now optional per site.
 - `broll/SPEC.md`, `broll/docs/indexing-findings.md` — what the b-roll stages
   cost, per clip, in money and hours.
 - `music/SPEC.md` — the CLAP model, the vocabulary, the debias axes.

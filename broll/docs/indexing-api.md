@@ -1,13 +1,23 @@
 # Indexing against the Anthropic API — keys, cost, and knobs
 
-*Written 2026-08-17 for COMMERCIAL_READINESS.md item 1.*
+*Written 2026-08-17 for COMMERCIAL_READINESS.md item 1. Updated 2026-08-18:
+this is now the **optional** `indexer.backend: anthropic` path — a new
+install defaults to `indexer.backend: local` (Qwen3-VL via a vendored
+llama.cpp, zero marginal cost, needs a GPU — see `broll/docs/indexing-local.md`
+and `broll/docs/local-indexing-options-2026-08-17.md`). Choose `anthropic`
+per site for a studio that wants the better first impression this document
+describes, or has no GPU to spare for indexing. An existing config.yaml that
+already has an `anthropic:` section keeps using it unchanged either way.*
 
-The `claude` stage is the only part of the indexer that costs money. Until
-2026-08-17 it shelled out to the `claude -p` CLI signed in to one person's Claude
-Code subscription. That could not ship to a customer: it needs a claude.ai login
-on the indexing machine, its session limits are per-person rather than per-org,
-and the Consumer Terms do not cover reselling it. The stage now calls the
-Messages API through the official `anthropic` SDK with the customer's own key.
+The `describe` stage (dispatched by `pipeline.stage_describe`; this document
+covers only the `anthropic` branch of it — `indexing-local.md` covers `local`)
+is the only part of the indexer that costs money, and only on this backend.
+Until 2026-08-17 it shelled out to the `claude -p` CLI signed in to one
+person's Claude Code subscription. That could not ship to a customer: it needs
+a claude.ai login on the indexing machine, its session limits are per-person
+rather than per-org, and the Consumer Terms do not cover reselling it. The
+stage now calls the Messages API through the official `anthropic` SDK with
+the customer's own key.
 
 Nothing else about the stage changed: same prompt, same JSON contract, same
 per-window merge, same `usage.jsonl`, same "an account-wide failure stops the run
@@ -55,7 +65,7 @@ drop to `haiku` for a bulk backfill.
 
 ## How many calls a clip costs
 
-The arithmetic, all of it visible in `broll_index/pipeline.py`'s `stage_claude`:
+The arithmetic, all of it visible in `broll_index/pipeline.py`'s `stage_describe` (the anthropic branch):
 
 ```
 frames        = scene cuts, plus filler so no gap exceeds sampling.max_gap_s

@@ -57,6 +57,10 @@ KEYS: dict[str, str] = {
     "org_name": "str",
     "org_short": "str",
     "product_name": "str",
+    # The tray/window mark every editor in this fleet wears -- a bare asset
+    # name the companion build ships, or an absolute path on the editor's
+    # machine. Blank = the product's own mark (2026-08-18).
+    "brand_logo": "str",
     "tree_name": "str",
     "canonical_prefix": "str",
     "remote_root": "str",
@@ -248,6 +252,7 @@ def seed_from_env_once(conn: sqlite3.Connection, settings: Any) -> bool:
         "org_name": settings.site_org_name,
         "org_short": settings.site_org_short,
         "product_name": settings.site_product_name,
+        "brand_logo": settings.site_brand_logo,
         "tree_name": settings.site_tree_name,
         "canonical_prefix": settings.site_canonical_prefix,
         "remote_root": settings.site_remote_root,
@@ -334,6 +339,7 @@ def resolved_manifest(conn: sqlite3.Connection, settings: Any) -> dict[str, Any]
         "org_name": pick("org_name"),
         "org_short": pick("org_short"),
         "product_name": pick("product_name") or "CC Sync",
+        "brand_logo": pick("brand_logo"),
         "tree_name": pick("tree_name"),
         "canonical_prefix": pick("canonical_prefix") or "P:\\",
         "remote_root": pick("remote_root"),
@@ -376,6 +382,7 @@ def _settings_fallback(key: str, settings: Any) -> str:
         "org_name": settings.site_org_name,
         "org_short": settings.site_org_short,
         "product_name": settings.site_product_name,
+        "brand_logo": settings.site_brand_logo,
         "tree_name": settings.site_tree_name,
         "canonical_prefix": settings.site_canonical_prefix,
         "remote_root": settings.site_remote_root,
@@ -414,7 +421,8 @@ _SECTIONS: list[tuple[str, list[str]]] = [
     ("net", ["dashboard_url", "sftp_host", "sftp_port", "sftp_chunk_size",
              "sftp_concurrency", "sftp_shell_type", "rclone_remote"]),
     ("syncthing", ["nas_syncthing_id"]),
-    ("site", ["org_name", "org_short", "product_name", "canonical_prefix"]),
+    ("site", ["org_name", "org_short", "product_name", "brand_logo",
+              "canonical_prefix"]),
     ("features", ["features.youtube_download", "features.youtube_unblock"]),
     ("indexer", ["indexer_model_tier"]),
 ]
@@ -464,6 +472,7 @@ def export_toml(conn: sqlite3.Connection, settings: Any) -> str:
         "org_name": manifest["org_name"],
         "org_short": manifest["org_short"],
         "product_name": manifest["product_name"],
+        "brand_logo": manifest["brand_logo"],
         "canonical_prefix": manifest["canonical_prefix"],
         "features.youtube_download": manifest["features"]["youtube_download"],
         "features.youtube_unblock": manifest["features"]["youtube_unblock"],

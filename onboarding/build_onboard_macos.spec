@@ -225,7 +225,7 @@ app = BUNDLE(
     # wizard asks for (Full Disk Access is NOT one of them).
     bundle_identifier="com.ccsync.onboard",
     info_plist={
-        "CFBundleShortVersionString": "1.0.30",  # INSTALLER_VERSION -- bump together
+        "CFBundleShortVersionString": "1.0.31",  # INSTALLER_VERSION -- bump together
         "NSHighResolutionCapable": True,
         # The wizard is a foreground app with a real window; no LSUIElement.
     },

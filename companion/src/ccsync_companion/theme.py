@@ -84,6 +84,12 @@ def icon_path():
 # fleet is the thing that sets machine environment. It must be
 # WHITE-ON-TRANSPARENT: everything below tints the alpha channel, so a
 # pre-coloured logo comes out as a solid red blob.
+#
+# As of 2026-08-18 the env var is the per-MACHINE override and the site
+# manifest's `brand_logo` is the per-FLEET default (brand_logo_site below):
+# item 10 shipped a build that wore the vendor mark until somebody set an env
+# var on every editor's machine, which meant a fleet that had its own logo
+# lost it on upgrade and could only get it back through a reinstall.
 BRAND_LOGO_ENV = "CCSYNC_BRAND_LOGO"
 PRODUCT_MARK_ASSET = "ccsync_mark.png"
 WINDOW_ICON_ASSET = PRODUCT_MARK_ASSET
@@ -95,23 +101,63 @@ WINDOW_ICON_ASSET = PRODUCT_MARK_ASSET
 WINDOW_ICON_SIZE = 128
 
 
-def brand_logo_override():
-    """$CCSYNC_BRAND_LOGO resolved to a real file, or None.
+def _resolve_logo(raw):
+    """A brand-logo selector -> a real file, or None.
 
     A bare name is looked up in assets/ (so a site can select the mark this
-    build already ships); anything with a separator is taken as a path. An
-    override that names a file that is not there is IGNORED rather than fatal
+    build already ships); anything with a separator is taken as a path. A
+    selector that names a file that is not there is IGNORED rather than fatal
     -- a wrong logo path must not stop an editor's tray coming up."""
-    import os
     from pathlib import Path
 
-    raw = str(os.environ.get(BRAND_LOGO_ENV, "") or "").strip().strip('"')
+    raw = str(raw or "").strip().strip('"')
     if not raw:
         return None
     if "/" not in raw and "\\" not in raw:
         return asset_path(raw)
     candidate = Path(raw).expanduser()
     return candidate if candidate.is_file() else None
+
+
+def brand_logo_env():
+    """$CCSYNC_BRAND_LOGO resolved to a real file, or None."""
+    import os
+
+    return _resolve_logo(os.environ.get(BRAND_LOGO_ENV, ""))
+
+
+def brand_logo_site():
+    """The cached site manifest's `brand_logo` resolved to a real file, or
+    None -- how a fleet wears its own mark WITHOUT a reinstall (2026-08-18).
+
+    The env var came first and is still the per-machine override, but it made
+    rebranding a fleet an installer job: every editor had to be re-bootstrapped
+    (or hand-edited) before their tray stopped wearing the vendor mark. The
+    manifest already carries org_name/org_short/product_name, so the mark
+    belongs beside them -- publish it once on the dashboard and every editor
+    picks it up on their next fetch.
+
+    Read through site.py's memoised brand cache, not a fresh parse: the tray
+    asks for this on every status repaint (tray._mark_asset_path). Import is
+    local and the whole thing fails to None -- theme is imported by the popups
+    and the tray alike, and neither may fail to draw because a manifest is
+    unreadable."""
+    try:
+        from . import site as site_mod
+
+        return _resolve_logo(site_mod.brand_logo())
+    except Exception:
+        return None
+
+
+def brand_logo_override():
+    """This machine's brand mark, or None for the product's own.
+
+    $CCSYNC_BRAND_LOGO wins over the manifest on purpose: it is the escape
+    hatch for a machine that must NOT follow its fleet (a vendor's own rig
+    testing a customer build, an editor mid-migration between two sites),
+    and an escape hatch that a server can overrule is not one."""
+    return brand_logo_env() or brand_logo_site()
 
 
 def window_mark_path():

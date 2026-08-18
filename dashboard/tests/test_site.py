@@ -26,6 +26,10 @@ EXPECTED_KEYS = {
     # Brand + the read-only extension list (2026-08-17,
     # COMMERCIAL_READINESS.md items 10/11).
     "org_short", "product_name", "video_extensions",
+    # The fleet's own tray/window mark (2026-08-18) -- the half of item 10's
+    # de-branding that a site needs to be able to undo without reinstalling
+    # every editor machine.
+    "brand_logo",
     # The optional-feature switches (items 2/3), already served by api_site.
     "features",
     # Which local vision model the b-roll indexer should load (2026-08-18).

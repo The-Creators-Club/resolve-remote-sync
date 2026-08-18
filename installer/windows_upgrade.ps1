@@ -19,6 +19,11 @@
       5. Relaunch the companion -- and confirm it is STILL RUNNING three
          seconds later. A build that dies on startup is a failed upgrade,
          not a completed one (SHIP-2); this script exits 1 for it.
+      6. Launch the setup wizard IF the licence agreement has not been
+         accepted on this machine, or the build brings a newer one. Since
+         0.8.0 the companion refuses to start its sync lanes without a
+         current acceptance, and nothing else on the upgrade path asks for
+         one -- see the note above step 6 below.
 
     Syncthing, rclone, Tailscale, and the drive mapping are untouched. Safe to
     re-run; -DryRun changes nothing.
@@ -54,6 +59,11 @@ param(
     # neither this flag, $env:CCSYNC_DASHBOARD_URL, nor a URL already in the
     # file, the key is left absent and said out loud rather than invented.
     [string]$DashboardUrl = "",
+    # Do not launch the setup wizard even when the licence agreement is
+    # unaccepted (step 6). For an unattended re-run where a human is not
+    # sitting in front of the machine to read it -- the machine stays
+    # NOT SYNCING until somebody does, which the summary says out loud.
+    [switch]$SkipWizard,
     [switch]$DryRun
 )
 
@@ -83,6 +93,13 @@ if (-not (Test-Path -LiteralPath $CompanionExe)) {
 }
 $srcInfo = Get-Item -LiteralPath $CompanionExe
 Write-Step "new build: $CompanionExe ($([int]($srcInfo.Length/1KB)) KB, $($srcInfo.LastWriteTime))"
+
+# The rest of the package travels with that exe, not with this script: -DryRun
+# aside, ship.ps1 and check_deploy_drift.ps1 both pass -CompanionExe pointing
+# into a staged package while running the copy of this script in the repo.
+# onboard.exe and EULA.md are read from beside the BUILD (step 6).
+$PackageDir = Split-Path -Parent (Resolve-Path -LiteralPath $CompanionExe)
+$OnboardExe = Join-Path $PackageDir "onboard.exe"
 
 # --- which version IS this? -----------------------------------------------
 # The exe has no --version flag (it is a windowed PyInstaller build), so an
@@ -400,6 +417,132 @@ else {
     }
 }
 
+# --- 6. the licence agreement, and the wizard that takes it ----------------
+# A COMPLETED UPGRADE THAT DOES NOT SYNC (2026-08-18). Companion 0.8.0 gates
+# the sync lanes on ~/.ccsync/eula_accepted.json (CR-5, eula.acceptance_problem):
+# with no current acceptance the sequencer never starts, and the tray renders
+# that as the generic "this machine isn't set up yet" on all three lanes. The
+# wizard is the only thing that writes the record -- and nothing on the upgrade
+# path ran it, so every editor upgrading to 0.8.0 would have landed on a
+# silently stopped companion. Seen live on the base rig the morning after the
+# 0.8.0 build. So: ask here, where a human is already watching an upgrade.
+#
+# Deliberately AFTER the relaunch, not before: the companion coming back is the
+# upgrade, and it must not wait on somebody reading a licence. It comes up
+# not-syncing for as long as that takes, which is the honest state.
+$wizardNeeded = $false
+$wizardReason = ""
+$acceptancePath = "$env:USERPROFILE\.ccsync\eula_accepted.json"
+$packagedEula = Join-Path $PackageDir "EULA.md"
+
+function Get-EulaVersion {
+    param([string]$Path)
+    # The `<!-- EULA-VERSION: x.y -->` marker, matching companion/eula.py's
+    # _VERSION_MARKER_RE. "" when the file or the marker is absent.
+    if (-not (Test-Path -LiteralPath $Path)) { return "" }
+    try { $text = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 } catch { return "" }
+    $m = [regex]::Match($text, '<!--\s*EULA-VERSION:\s*([0-9][0-9A-Za-z.\-]*)\s*-->')
+    if ($m.Success) { return $m.Groups[1].Value } else { return "" }
+}
+
+function Test-VersionAtLeast {
+    param([string]$Have, [string]$Want)
+    # Component-wise NUMERIC compare, zero-padded to the longer of the two --
+    # eula.version_at_least's contract. As strings "1.10" sorts below "1.9",
+    # which would make a tenth revision of the document read as older than its
+    # predecessor and silently stop asking anyone to re-accept.
+    $toParts = {
+        param($v)
+        @(("$v".Trim() -split '\.') | ForEach-Object {
+            $digits = ($_ -replace '^(\d*).*$', '$1')
+            if ($digits) { [int]$digits } else { 0 }
+        })
+    }
+    $a = & $toParts $Have
+    $b = & $toParts $Want
+    $width = [Math]::Max($a.Count, $b.Count)
+    for ($i = 0; $i -lt $width; $i++) {
+        $x = if ($i -lt $a.Count) { $a[$i] } else { 0 }
+        $y = if ($i -lt $b.Count) { $b[$i] } else { 0 }
+        if ($x -ne $y) { return ($x -gt $y) }
+    }
+    return $true
+}
+
+if (-not (Test-Path -LiteralPath $acceptancePath)) {
+    $wizardNeeded = $true
+    $wizardReason = "the licence agreement has not been accepted on this machine"
+}
+else {
+    $acceptedVersion = ""
+    try {
+        # -Encoding UTF8 for the same reason the config read above uses it, and
+        # a BOM-tolerant trim: eula.read_acceptance reads this file as
+        # utf-8-sig precisely because a PowerShell writer can leave one.
+        $raw = (Get-Content -LiteralPath $acceptancePath -Raw -Encoding UTF8).TrimStart([char]0xFEFF)
+        $acceptedVersion = ("" + (ConvertFrom-Json $raw).version).Trim()
+    }
+    catch { $acceptedVersion = "" }
+
+    $bundledVersion = Get-EulaVersion $packagedEula
+    if (-not $acceptedVersion) {
+        $wizardNeeded = $true
+        $wizardReason = "the licence acceptance record on this machine is unreadable"
+    }
+    elseif ($bundledVersion -and -not (Test-VersionAtLeast $acceptedVersion $bundledVersion)) {
+        # Only when the PACKAGE says so. A package built before EULA.md was
+        # shipped alongside it gives "" here, and an unknown version must not
+        # be read as a newer one -- that would re-ask every editor on every
+        # upgrade forever.
+        $wizardNeeded = $true
+        $wizardReason = ("the licence agreement has been updated (v$bundledVersion; " +
+                         "this machine accepted v$acceptedVersion)")
+    }
+}
+
+# The base rig is the one machine where re-running the wizard is worse than
+# the problem: its config.toml is hand-tuned (mode = "base", a pinned
+# active_project, no local sync) and tools\ship.cmd runs this script on it at
+# the end of every release. Say what to do instead rather than walking the
+# operator's own rig through an editor setup.
+$isBaseRig = $false
+if (Test-Path -LiteralPath $ConfigPath) {
+    $isBaseRig = (Get-Content -LiteralPath $ConfigPath -Encoding UTF8 |
+                  Where-Object { $_ -match '^\s*mode\s*=\s*"base"' }).Count -gt 0
+}
+
+$wizardLaunched = $false
+if (-not $wizardNeeded) {
+    Write-Skip "licence agreement already accepted on this machine"
+}
+elseif ($SkipWizard) {
+    Write-Warn2 "$wizardReason -- the sync lanes will NOT start (all three tray lines read `"this machine isn't set up yet`"). -SkipWizard was passed; run onboard.exe when someone is at the machine."
+}
+elseif ($isBaseRig) {
+    Write-Warn2 "$wizardReason -- the sync lanes will NOT start. This machine is mode = `"base`", so the wizard is NOT being launched over its hand-built config: accept from the tray (`"Accept the licence agreement to start syncing`"), or run onboard.exe deliberately."
+}
+elseif ($DryRun) {
+    Write-Step "[dry-run] would launch $OnboardExe ($wizardReason)"
+    $wizardLaunched = $true
+}
+elseif (-not (Test-Path -LiteralPath $OnboardExe)) {
+    Write-Warn2 "$wizardReason -- the sync lanes will NOT start, and there is no onboard.exe beside this script to fix it. Get the current installer from the dashboard's [ INSTALLER ] link and run it."
+}
+else {
+    Write-Step "$wizardReason -- launching the setup wizard..."
+    try {
+        # NOT -Wait: the wizard is a GUI the editor works through at their own
+        # pace, and this script's caller (tools\ship.ps1, or an editor's own
+        # console) must not block on it. The companion is already running and
+        # will pick the acceptance up on its next start.
+        Start-Process -FilePath $OnboardExe -WorkingDirectory $PackageDir | Out-Null
+        $wizardLaunched = $true
+    }
+    catch {
+        Write-Warn2 "could not launch the setup wizard ($($_.Exception.Message)) -- run `"$OnboardExe`" by hand, or the sync lanes will not start."
+    }
+}
+
 Write-Host ""
 Write-Host "=================================================================="
 if (-not $copySucceeded) {
@@ -419,6 +562,12 @@ else {
     Write-Step "Upgrade complete$(if ($DryRun) { ' (dry run -- nothing changed)' })$verSuffix."
 }
 Write-Step "Syncthing identity, rclone key, drive mapping, and settings were preserved."
+if ($wizardLaunched) {
+    Write-Step "The setup wizard is open: work through it to accept the licence agreement. UNTIL YOU DO, THIS MACHINE IS NOT SYNCING."
+}
+elseif ($wizardNeeded) {
+    Write-Warn2 "THIS MACHINE IS NOT SYNCING: $wizardReason, and the companion will not start its sync lanes without one (all three tray lines read `"this machine isn't set up yet`")."
+}
 if (-not $DashboardToken -and (Test-Path -LiteralPath $ConfigPath)) {
     # -Encoding UTF8 for the same reason as the migration read above (INST-3).
     $hasToken = (Get-Content -LiteralPath $ConfigPath -Encoding UTF8 | Where-Object { $_ -match '^\s*dashboard_token\s*=\s*"\S' }).Count -gt 0

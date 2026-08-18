@@ -336,6 +336,16 @@ $Files = @(
     @{ Src = "installer\macos_bootstrap.sh";      Dst = "macos_bootstrap.sh" },
     @{ Src = "installer\macos_uninstall.sh";      Dst = "macos_uninstall.sh" },
     @{ Src = "docs\EDITOR_SETUP.md";              Dst = "EDITOR_SETUP.md" },
+    # The licence the wizard makes an editor accept, shipped in the clear
+    # beside it (2026-08-18). Two jobs: an editor can read the agreement
+    # before running anything, and windows_upgrade.ps1 parses its
+    # `<!-- EULA-VERSION: -->` marker to decide whether this machine's
+    # acceptance is current -- the frozen exes carry their own copy, but a
+    # PowerShell script cannot read inside a PyInstaller bundle.
+    # companion\...\assets\EULA.md rather than docs\legal\EULA.md: the two are
+    # pinned byte-identical (companion tests/test_eula.py) and THIS is the one
+    # the shipped build actually bundles.
+    @{ Src = "companion\src\ccsync_companion\assets\EULA.md"; Dst = "EULA.md" },
     @{ Src = "companion\config.example.toml";     Dst = "config.example.toml" },
     @{ Src = "companion\dist\ccsync-companion.exe"; Dst = "ccsync-companion.exe" },
     # The one-click onboarding installer (bundles the companion exe + bootstrap

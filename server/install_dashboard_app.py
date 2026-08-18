@@ -593,6 +593,12 @@ def site_env(port: int = 8480, tree_root: str = "", nas_host: str = "",
         # a non-blank default, because every deployment runs the same
         # software. Set only by a reseller.
         "DASH_SITE_PRODUCT_NAME": site_value("site", "product_name"),
+        # THE CUSTOMER'S LOGO, for the companion's tray and window title
+        # (2026-08-18). Blank = the product's own mark, so a site that never
+        # says wears the vendor's rather than inheriting another tenant's.
+        # This is a seed, not the last word: Settings writes site_settings and
+        # a DB row beats every DASH_SITE_* value here.
+        "DASH_SITE_BRAND_LOGO": site_value("site", "brand_logo"),
         "DASH_SITE_TREE_NAME": site_value("tree", "tree_name"),
         # The project template and the fleet-wide asset libraries, comma-joined
         # (dashboard/src/ccsync_dashboard/provision._site_list splits on

@@ -148,7 +148,15 @@ foreach ($s in $Suites) {
 Write-Host "`n=== installer (Pester-less table tests) ===" -ForegroundColor Cyan
 $global:LASTEXITCODE = 9999
 powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\installer\tests\Test-DriveMapParser.ps1"
-$results += @{ Name = "installer"; Outcome = $(if ($LASTEXITCODE -eq 0) { "PASS" } else { "FAIL (exit $LASTEXITCODE)" }) }
+$driveMapExit = $LASTEXITCODE
+# windows_upgrade.ps1's licence-version compare (CR-22). Its own file rather
+# than more cases in the drive-map one: they slice out of different scripts,
+# and both are named in the summary as one "installer" row so a failure in
+# either still fails the suite.
+$global:LASTEXITCODE = 9999
+powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\installer\tests\Test-LicenceGate.ps1"
+$installerExit = $(if ($driveMapExit -ne 0) { $driveMapExit } else { $LASTEXITCODE })
+$results += @{ Name = "installer"; Outcome = $(if ($installerExit -eq 0) { "PASS" } else { "FAIL (exit $installerExit)" }) }
 
 # The macOS half of the same two checks -- the site-manifest reader, the
 # canonical_prefix -> drive-letter rule and the pinned-download verifier

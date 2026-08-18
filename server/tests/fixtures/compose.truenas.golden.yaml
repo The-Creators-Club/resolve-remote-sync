@@ -39,6 +39,10 @@
 #               carried the key and the dict did not, and the TrueNAS deploy
 #               posts the DICT, so the flag would never have reached the
 #               container it was written for.
+#   2026-08-18  +DASH_SITE_BRAND_LOGO -- the customer's tray/window mark,
+#               which item 10 could only restore via a per-machine env var.
+#               BLANK for this site here (the fixture site.toml names no
+#               logo), so the deployment is again unchanged by the addition.
 #   2026-08-17  +DASH_SITE_ORG_SHORT / DASH_SITE_PRODUCT_NAME /
 #               DASH_SITE_TEMPLATE_FOLDERS / DASH_SITE_SHARED_ASSETS and
 #               BROLL_DEFAULT_COLLECTION(_LABEL) (items 10 + 11) -- the brand
@@ -343,6 +347,13 @@ services:
       # it as a blank (2026-08-17, COMMERCIAL_READINESS.md item 10).
       DASH_SITE_ORG_SHORT: ""
       DASH_SITE_PRODUCT_NAME: ""
+      # The CUSTOMER'S LOGO for the companion's tray and window title
+      # (2026-08-18). Item 10 de-branded the tray to a neutral product mark
+      # and left $CCSYNC_BRAND_LOGO -- a per-MACHINE env var -- as the only
+      # way back, so an existing fleet lost its logo on upgrade and could not
+      # get it back without touching every editor. Blank still means "wear the
+      # product mark", so a site that says nothing is unchanged.
+      DASH_SITE_BRAND_LOGO: ""
       DASH_SITE_TREE_NAME: "Creators_Club"
       # The project template and the fleet-wide asset libraries, comma-joined
       # (item 11). The container has no site.toml, so this pair is how the

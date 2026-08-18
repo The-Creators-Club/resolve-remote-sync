@@ -910,6 +910,12 @@ def api_site(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> 
         # the product rather than another tenant's studio.
         "org_short": site["org_short"] or site["org_name"],
         "product_name": site["product_name"] or "CC Sync",
+        # The fleet's own tray/window mark (2026-08-18). Additive to schema 1
+        # like `features`: a companion too old to read it wears the product
+        # mark, which is the same thing a blank here means, so an old client
+        # and a silent server agree. Blank is the VENDOR default on purpose --
+        # a site that has never said must not inherit another tenant's logo.
+        "brand_logo": site["brand_logo"],
         "tree_name": site["tree_name"],
         "canonical_prefix": site["canonical_prefix"],
         "remote_root": site["remote_root"],

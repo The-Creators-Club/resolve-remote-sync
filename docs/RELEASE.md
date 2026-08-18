@@ -196,6 +196,19 @@ relaunches. It now prints **which version** it installed — previously it
 reported only a path and a timestamp, which is precisely how the 0.4.3
 situation stayed invisible.
 
+Since 1.0.31 it also has a **step 6**: if this machine has no current licence
+acceptance (`~/.ccsync/eula_accepted.json`, compared against the
+`<!-- EULA-VERSION -->` marker in the `EULA.md` the package now ships), it
+launches `onboard.exe` from the package folder — because a companion without
+one comes up and refuses to sync, and says so only as "this machine isn't set
+up yet" (KNOWN_BUGS CR-22). `-SkipWizard` suppresses it for an unattended
+re-run; the summary then says the machine is not syncing. **It never fires on
+`mode = "base"`** — `ship.cmd` runs this script on the base rig at the end of
+every release, and the rig's `config.toml` is hand-built. Accept there from
+the tray instead ("► Accept the licence agreement to start syncing…"), which
+is also how every self-upgrading editor accepts: the tray dialog shows the
+same bundled document and starts the lanes on ACCEPT, with no restart.
+
 By hand, if you must: stop the process, copy the exe over
 `%LOCALAPPDATA%\ccsync\bin\ccsync-companion.exe`, start it again. Copying
 without stopping fails — the running image is locked.

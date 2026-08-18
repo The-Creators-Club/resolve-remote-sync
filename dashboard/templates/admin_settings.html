@@ -12,11 +12,19 @@
     <div id="settings-error" class="banner" style="display:none"></div>
     <div id="settings-saved" class="muted"></div>
 
+    {# Hover help for the fields whose value is not self-evident from the
+       label. A dict rather than per-field markup because the inputs below are
+       one generic loop, and a second hand-written block would drift. #}
+    {% set FIELD_HINTS = {
+      "brand_logo": "Your studio's mark in every editor's tray and window title. Blank wears the product's own. A bare name (cc_mark_white.png) selects a mark the companion build already ships; anything with a slash is a path on the EDITOR's machine. It must be WHITE on transparent -- the tray tints it to carry sync status, so a pre-coloured logo comes out a solid blob.",
+    } %}
+
     <form id="settings-form" style="margin-top:0.8rem">
       {% for key, label in [
         ("org_name", "ORG NAME"),
         ("org_short", "SHORT NAME"),
         ("product_name", "PRODUCT NAME"),
+        ("brand_logo", "TRAY LOGO"),
         ("tree_name", "TREE NAME"),
         ("canonical_prefix", "DRIVE LETTER"),
         ("remote_root", "REMOTE ROOT"),
@@ -32,8 +40,10 @@
         ("nas_kind", "NAS KIND"),
       ] %}
         {% set is_auto = key in auto_derived and manifest[key] %}
-        <label>{{ label }}{% if is_auto %} <span class="muted">(auto-derived)</span>{% endif %}<br>
+        {% set hint = FIELD_HINTS.get(key, "") %}
+        <label{% if hint %} title="{{ hint }}"{% endif %}>{{ label }}{% if is_auto %} <span class="muted">(auto-derived)</span>{% endif %}<br>
           <input type="text" name="{{ key }}" value="{{ manifest[key] }}"
+                 {% if hint %}title="{{ hint }}"{% endif %}
                  {{ "readonly" if is_auto }}>
         </label>
       {% endfor %}

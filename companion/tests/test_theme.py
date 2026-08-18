@@ -326,3 +326,66 @@ def test_the_frozen_build_ships_both_the_mark_and_the_fallback():
 
     assert f"src/ccsync_companion/assets/{theme.WINDOW_ICON_ASSET}" in spec
     assert "src/ccsync_companion/assets/icon.png" in spec
+
+
+# -- which mark: env, then the site manifest, then the product's own ----------
+# 2026-08-18. Item 10 shipped the indirection with ONE selector, $CCSYNC_BRAND_
+# LOGO, which is machine environment -- so a fleet that had its own logo lost it
+# the moment its editors upgraded, and getting it back meant touching every
+# machine. The manifest already carries org_name/org_short/product_name; the
+# mark now travels with them.
+
+def test_no_selector_wears_the_products_own_mark(monkeypatch):
+    monkeypatch.delenv("CCSYNC_BRAND_LOGO", raising=False)
+    monkeypatch.setattr(theme, "brand_logo_site", lambda: None)
+    assert theme.brand_logo_override() is None
+    assert theme.window_mark_path() == theme.asset_path("ccsync_mark.png")
+
+
+def test_the_site_manifest_selects_a_mark_the_build_ships(monkeypatch):
+    """A bare name means "the asset in this build" -- which is the whole
+    reason build.spec still ships cc_mark_white.png beside the neutral one."""
+    monkeypatch.delenv("CCSYNC_BRAND_LOGO", raising=False)
+    monkeypatch.setattr(theme, "brand_logo_site",
+                        lambda: theme.asset_path("cc_mark_white.png"))
+    assert theme.window_mark_path() == theme.asset_path("cc_mark_white.png")
+
+
+def test_the_env_var_beats_the_manifest(monkeypatch):
+    """The escape hatch has to be one: a machine pinned to a mark by hand --
+    a vendor rig testing a customer build, an editor mid-migration -- must not
+    be overruled by whatever its dashboard publishes."""
+    monkeypatch.setenv("CCSYNC_BRAND_LOGO", "ccsync_mark.png")
+    monkeypatch.setattr(theme, "brand_logo_site",
+                        lambda: theme.asset_path("cc_mark_white.png"))
+    assert theme.window_mark_path() == theme.asset_path("ccsync_mark.png")
+
+
+def test_a_manifest_naming_a_missing_file_falls_back_rather_than_failing(monkeypatch, tmp_path):
+    """A wrong logo path must not stop an editor's tray coming up -- the same
+    rule the env var has always followed, now that a SERVER can set it."""
+    monkeypatch.delenv("CCSYNC_BRAND_LOGO", raising=False)
+    monkeypatch.setattr(theme, "brand_logo_site",
+                        lambda: theme._resolve_logo(str(tmp_path / "gone.png")))
+    assert theme.brand_logo_override() is None
+    assert theme.window_mark_path() == theme.asset_path("ccsync_mark.png")
+
+
+def test_brand_logo_site_reads_the_cached_manifest(monkeypatch):
+    from ccsync_companion import site as site_mod
+
+    monkeypatch.setattr(site_mod, "brand_logo", lambda: "cc_mark_white.png")
+    assert theme.brand_logo_site() == theme.asset_path("cc_mark_white.png")
+
+
+def test_brand_logo_site_never_raises(monkeypatch):
+    """theme is imported by the tray and by every popup; an unreadable
+    manifest may not be the reason one of them fails to draw."""
+    from ccsync_companion import site as site_mod
+
+    def boom():
+        raise RuntimeError("manifest on fire")
+
+    monkeypatch.setattr(site_mod, "brand_logo", boom)
+    assert theme.brand_logo_site() is None
+    assert theme.window_mark_path() == theme.asset_path("ccsync_mark.png")

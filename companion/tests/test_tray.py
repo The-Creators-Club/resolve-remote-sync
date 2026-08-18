@@ -2706,3 +2706,51 @@ def test_install_youtube_cookies_reports_a_bad_file(tmp_path, monkeypatch):
 
     assert notices and "signed-in" in notices[-1]
     assert not (tmp_path / "out.txt").exists()
+
+
+# -- CR-22: the licence gate needs a way out that is IN the menu -------------
+# 2026-08-18. The lane lines already say "NOT SYNCING (this machine isn't set
+# up yet)"; until this item existed, nothing in the menu could change that on
+# a machine that had self-upgraded, because the wizard that records consent is
+# a download away.
+
+
+class _FakeAppWithLicence(_FakeApp):
+    def __init__(self, config, problem=""):
+        super().__init__(config)
+        self._problem = problem
+        self.prompted: list[bool] = []
+
+    def eula_problem(self):
+        return self._problem or None
+
+    def prompt_licence_acceptance(self, force=False):
+        self.prompted.append(force)
+
+
+def test_menu_offers_the_licence_when_it_is_what_is_blocking():
+    from ccsync_companion.tray import _build_menu
+
+    app = _FakeAppWithLicence({"dashboard_url": ""},
+                              problem="The CC Sync licence agreement has not been accepted…")
+    labels = _menu_labels(_build_menu(app))
+    assert any("Accept the licence agreement" in label for label in labels)
+
+
+def test_menu_omits_the_licence_item_once_it_is_accepted():
+    from ccsync_companion.tray import _build_menu
+
+    labels = _menu_labels(_build_menu(_FakeAppWithLicence({"dashboard_url": ""})))
+    assert not any("licence" in label.lower() for label in labels)
+
+
+def test_accepting_the_licence_changes_the_menu_fingerprint():
+    """Same rule as the safety latches: without it the item survives the click
+    that cleared it, and the lane lines keep saying "isn't set up yet" until
+    something unrelated moves (UI-3's shape)."""
+    from ccsync_companion.tray import _menu_fingerprint, _tray_snapshot
+
+    blocked = _FakeAppWithLicence({"dashboard_url": ""}, problem="not accepted")
+    clear = _FakeAppWithLicence({"dashboard_url": ""})
+    assert (_menu_fingerprint(_tray_snapshot(blocked))
+            != _menu_fingerprint(_tray_snapshot(clear)))

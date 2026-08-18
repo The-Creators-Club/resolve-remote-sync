@@ -77,6 +77,23 @@ def _isolate_ccsync_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _unbranded_by_default(monkeypatch):
+    """Every test runs on a machine wearing the PRODUCT's mark.
+
+    $CCSYNC_BRAND_LOGO is machine environment (theme.brand_logo_env), so on a
+    developer's own branded rig -- the base rig sets it, 2026-08-18 -- it is
+    set for the pytest process too, and every assertion about which mark the
+    tray draws would be measuring that machine's logo instead of the build's.
+    The manifest half needs no fixture: _isolate_ccsync_home repoints
+    CONFIG_DIR, so there is no site.json for theme.brand_logo_site to find.
+
+    Tests of the override itself set the variable explicitly (test_theme.py).
+    """
+    monkeypatch.delenv("CCSYNC_BRAND_LOGO", raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _eula_already_accepted(_isolate_ccsync_home):
     """Every test runs on a machine whose editor accepted the licence.
 

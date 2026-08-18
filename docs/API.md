@@ -105,6 +105,7 @@ companion).
 {
   "schema": 1,
   "org_name": "", "org_short": "", "product_name": "CC Sync",
+  "brand_logo": "",
   "tree_name": "", "canonical_prefix": "P:\\",
   "remote_root": "", "smb_unc": "",
   "sftp_host": "", "sftp_port": 22,
@@ -127,6 +128,12 @@ Rules a client can rely on:
 - **Blank means "not configured"**, never another site's value.
 - `org_short` falls back to `org_name`, and both blank falls back to
   `product_name`.
+- `brand_logo` names the mark this fleet's companions wear in the tray and in
+  window title bars (2026-08-18) — a bare filename means "the asset in your
+  build", anything with a separator is a path on the editor's own machine.
+  Blank is the vendor default: wear the product's mark, never the last
+  tenant's. A client resolves it env-first (`$CCSYNC_BRAND_LOGO`), and treats
+  a name it cannot find as blank rather than as an error.
 - `nas_syncthing_id` prefers the **live** value read from Syncthing over the
   configured fallback, cached for the life of the process (a re-created
   Syncthing config regenerates the ID, and a stale one points every new editor

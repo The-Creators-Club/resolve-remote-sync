@@ -683,6 +683,12 @@ class CompanionApp:
         # and the guard is free to re-fire (absent -> misplaced) within one.
         self._root_absent_announced = False
         self._root_misplaced_announced = False
+        # The licence dialog is offered ONCE per run, on the same reasoning:
+        # an unaccepted licence is a state the tray already shows, and a modal
+        # that keeps coming back is how an editor learns to dismiss it without
+        # reading. Declining leaves the tray item (Accept the licence
+        # agreement…) as the way back.
+        self._licence_prompted = False
         # macOS took the tree away from us, rather than the editor unplugging
         # it: the ad-hoc-signed companion loses its Full Disk Access grant on
         # every self-upgrade (item 16). Checked once after an upgrade, read by
@@ -3249,6 +3255,103 @@ class CompanionApp:
             log.exception("EULA acceptance check failed -- treating it as accepted")
             return None
 
+    # -- the licence, and the one click that clears it ---------------------
+    #
+    # 2026-08-18. Item 3 put consent in the WIZARD and nowhere else, which was
+    # right for a clean install and wrong for an upgrade: editors get builds
+    # through the companion's own upgrade channel (upgrade.py), which never
+    # runs the wizard, so 0.8.0 reached a machine, refused to start its lanes,
+    # and rendered that as "this machine isn't set up yet" on all three tray
+    # lines. Getting a wizard back onto that machine means downloading the
+    # whole installer again -- ten minutes of drive mapping and account checks
+    # to produce a three-line JSON file.
+    #
+    # So the companion asks, showing the SAME document it would have shown:
+    # eula.BUNDLED_TEXT is assets/EULA.md, the copy tests/test_eula.py pins
+    # byte-identical to docs/legal/EULA.md. The wizard still asks on a fresh
+    # install; this is the upgrade path it never covered.
+
+    def prompt_licence_acceptance(self, force: bool = False) -> None:
+        """Offer the licence agreement, on its own thread. No-op when there is
+        nothing to accept.
+
+        `force` is the tray item: an editor who declined (or closed the window)
+        asking to see it again, which must work however many times they ask.
+        """
+        if not self.eula_problem():
+            return
+        if not force:
+            if self._licence_prompted:
+                return
+            self._licence_prompted = True
+        threading.Thread(
+            target=self._show_licence_dialog, name="ccsync-licence", daemon=True,
+        ).start()
+
+    def _show_licence_dialog(self) -> None:
+        """The dialog, under the popup lock like every other Tk root here."""
+        document = eula_mod.bundled_text()
+        if not document:
+            # eula.acceptance_problem() fails OPEN on a missing document, so
+            # reaching here with none means the gate is live and the text is
+            # not -- a packaging fault we must not paper over by recording an
+            # acceptance of nothing.
+            log.error("licence dialog: this build bundles no assets/EULA.md -- "
+                      "cannot ask anyone to accept it")
+            self._notify_tray(
+                "NOT SYNCING: this build is missing its licence document. "
+                "Tray → Copy diagnostics for your admin.", "ccsync-companion")
+            return
+        if not self._popup_active_lock.acquire(blocking=False):
+            log.info("licence dialog: another CCSync window is open -- not "
+                     "stacking a second modal on it")
+            self._licence_prompted = False   # ...so the next start still asks
+            return
+        try:
+            accepted = popup.licence_dialog(
+                "CCSYNC.EXE: licence agreement",
+                (f"This machine is NOT SYNCING until someone here accepts the "
+                 f"{site_mod.product_name()} licence agreement (version "
+                 f"{eula_mod.EULA_VERSION}).\n\n"
+                 f"Read it below. Accepting records your agreement on this "
+                 f"machine only, and syncing starts straight away."),
+                document,
+            )
+        except Exception:
+            log.exception("could not show the licence dialog")
+            return
+        finally:
+            self._popup_active_lock.release()
+
+        if not accepted:
+            log.warning("licence agreement DECLINED (or dismissed) -- this "
+                        "machine stays not-syncing")
+            self._notify_tray(
+                "NOT SYNCING: the licence agreement was not accepted. "
+                "Tray → Accept the licence agreement…", "ccsync-companion")
+            return
+        try:
+            eula_mod.record_acceptance()
+        except OSError:
+            # record_acceptance raises OSError precisely so this is not
+            # swallowed: an "accepted" that did not persist would show the
+            # same dialog forever with no explanation.
+            log.exception("licence accepted but the record could not be written")
+            self._notify_tray(
+                "Couldn't save your acceptance — check disk space and try again.",
+                "ccsync-companion")
+            return
+        log.info("licence agreement v%s accepted on this machine", eula_mod.EULA_VERSION)
+        # STRAIGHT BACK INTO SYNC, no restart. _start_lanes() is the one door
+        # every start path goes through and re-checks every other gate (pause,
+        # halt, config, drive), so calling it here cannot start lanes that some
+        # OTHER refusal is holding down.
+        try:
+            self._start_lanes()
+        except Exception:
+            log.exception("could not start the sync lanes after the licence was accepted")
+        self._notify_tray("Licence accepted — syncing is starting.", "ccsync-companion")
+
     def _start_lanes(self) -> None:
         """Actually start the sync lanes/sequencer, per sync_enabled/managed
         mode. Extracted from start() so on_signed_in() can (re)run it once a
@@ -5008,6 +5111,16 @@ class CompanionApp:
                 eula_problem = self.eula_problem()
                 if eula_problem:
                     self._notify_tray(f"NOT SYNCING: {eula_problem}", "ccsync-companion")
+                    # ...and ASK, rather than leaving a toast the editor has to
+                    # decode into an action (2026-08-18). A toast said the same
+                    # thing on the machines that upgraded to 0.8.0 and every one
+                    # of them sat there not syncing. Deferred a few seconds for
+                    # the same reason the update toast below is: the tray icon
+                    # thread has only just started, and this dialog's failure
+                    # path wants somewhere to put a notification.
+                    timer = threading.Timer(3.0, self.prompt_licence_acceptance)
+                    timer.daemon = True
+                    timer.start()
 
             if just_upgraded:
                 log.info("self-upgrade to v%s completed", config_mod.VERSION)

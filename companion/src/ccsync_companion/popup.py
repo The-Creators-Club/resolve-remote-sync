@@ -1514,3 +1514,90 @@ def show_popup(
             perform_ignore_all(rows, ignore_tracker)
         except Exception:
             log.exception("fallback: could not record the skipped clips")
+
+
+def licence_dialog(title: str, intro: str, document: str,
+                   accept_label: str = "ACCEPT") -> bool:
+    """The licence agreement, scrollable, with ACCEPT / DECLINE. True only if
+    the person clicked ACCEPT; close and DECLINE are both False.
+
+    Same shape as confirm_dialog -- one Tk root through ui_dispatch, ANY
+    failure defaulting to False -- but the body is a real scrolling Text
+    widget rather than a Label: this is the one dialog in the companion whose
+    body is a nine-thousand-character document, and a Label would render it
+    as one unreadable column taller than the screen.
+
+    THE DOCUMENT IS SHOWN, NOT SUMMARISED. An "accept" recorded against text
+    the person could not read is not consent -- so the widget holds the
+    verbatim assets/EULA.md this build bundles (eula.BUNDLED_TEXT), and the
+    caller passes it rather than this module inventing one.
+
+    ACCEPT is deliberately NOT the default-focused button and there is no
+    Return binding: every other dialog here is a yes/no about the editor's own
+    files, and this is the only one where a stray keypress would record a
+    legal agreement.
+    """
+    try:
+        import tkinter as tk
+
+        from . import theme
+    except Exception as exc:
+        log.warning("licence dialog unavailable (%s) -- defaulting to decline", exc)
+        return False
+
+    result = {"ok": False}
+
+    def _build_and_show() -> None:
+        root = tk.Tk()
+        root.title(title)
+        theme.apply_window_icon(tk, root)
+        root.attributes("-topmost", True)
+        root.configure(bg=theme.BG, padx=18, pady=14)
+
+        tk.Label(root, text=f"► {title}", bg=theme.BG, fg=theme.RED,
+                 font=theme.mono(12, bold=True), justify="left", anchor="w").pack(anchor="w")
+        tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
+        tk.Label(root, text=intro, bg=theme.BG, fg=theme.TEXT, font=theme.mono(10),
+                 justify="left", anchor="w").pack(anchor="w", pady=(6, 10))
+
+        body = tk.Frame(root, bg=theme.BG)
+        body.pack(fill="both", expand=True)
+        scroll = tk.Scrollbar(body, orient="vertical")
+        scroll.pack(side="right", fill="y")
+        text = tk.Text(
+            body, width=84, height=24, wrap="word",
+            bg=theme.PANEL, fg=theme.TEXT, font=theme.mono(9),
+            insertbackground=theme.TEXT, relief="flat",
+            highlightthickness=1, highlightbackground=theme.RED_DIM,
+            padx=10, pady=8, yscrollcommand=scroll.set,
+        )
+        text.pack(side="left", fill="both", expand=True)
+        scroll.config(command=text.yview)
+        text.insert("1.0", document)
+        # DISABLED, not readonly-by-convention: an editable licence would let
+        # someone alter the text above the button that records they agreed to
+        # it. Insert first -- a disabled Text refuses writes from us too.
+        text.configure(state="disabled")
+
+        btn_bar = tk.Frame(root, bg=theme.BG)
+        btn_bar.pack(anchor="e", pady=(12, 0))
+
+        def _ok():
+            result["ok"] = True
+            root.destroy()
+
+        def _cancel():
+            root.destroy()
+
+        theme.neon_button(tk, btn_bar, "DECLINE", _cancel, primary=False).pack(
+            side="left", padx=(0, 18))
+        theme.neon_button(tk, btn_bar, accept_label, _ok, primary=True).pack(side="left")
+        root.protocol("WM_DELETE_WINDOW", _cancel)
+        ui_dispatch.run_dialog(root)
+
+    try:
+        ui_dispatch.dispatch(_build_and_show)
+    except Exception as exc:
+        log.warning("licence dialog failed (%s) -- defaulting to decline", exc)
+        return False
+    return result["ok"]

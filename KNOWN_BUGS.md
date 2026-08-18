@@ -450,6 +450,56 @@ surfaced as one intermittent test failure during the 13-suite integration
 run. Now temp-file + `os.replace`, like `identity.save_identity`; two tests
 pin it.
 
+### CR-22 — 0.8.0 upgraded a machine into "this machine isn't set up yet" and left no way out — FIXED in repo 2026-08-18, unshipped
+Seen live on the base rig the morning after the 0.8.0 build. CR-5's licence
+gate is correct — `_start_lanes()` refuses without a current
+`~/.ccsync/eula_accepted.json` — but the ONLY thing that wrote that record was
+the onboarding wizard, and **the wizard does not run on the path editors
+upgrade by**: `upgrade.py` swaps the exe in place and restarts. So the new
+build came up, refused to sync, and `tray._format_lane_line_from` rendered
+that refusal as the generic *"NOT SYNCING (this machine isn't set up yet)"* on
+all three lanes — a sentence that points at the admin, for a state only the
+person at the keyboard can clear. A toast said the real reason; nothing in the
+menu could act on it. Every editor taking the 0.8.0 offer would have landed
+here, silently, one machine at a time.
+
+Now the companion asks, showing the document it already bundles:
+`popup.licence_dialog` (scrolling, verbatim `assets/EULA.md`, ACCEPT /
+DECLINE — no Return binding, since this is the one dialog where a stray
+keypress records a legal agreement), `app.prompt_licence_acceptance` once per
+run three seconds after the tray starts, and a **tray item** *"► Accept the
+licence agreement to start syncing…"* that is present exactly while the gate
+is (in the menu fingerprint, or it would survive the click that cleared it —
+UI-3's shape). ACCEPT calls `_start_lanes()` in the same breath, so syncing
+resumes with no restart. A build with no bundled document refuses to record
+anything rather than accept nothing (the gate itself still fails OPEN there,
+per CR-5). The wizard remains the fresh-install path, and
+`installer/windows_upgrade.ps1` now launches it (step 6) when a package
+upgrade finds no current acceptance — skipped on `mode = "base"`, where
+`tools\ship.cmd` runs that script at the end of every release and the rig's
+config is hand-built. The package ships `EULA.md` beside `onboard.exe` so the
+script can read the `<!-- EULA-VERSION -->` marker a frozen exe hides.
+
+### CR-23 — item 10's de-branding took a fleet's logo and could only be given back machine by machine — FIXED in repo 2026-08-18, unshipped
+The tray/window mark became `theme.PRODUCT_MARK_ASSET` with one escape hatch,
+`$CCSYNC_BRAND_LOGO` — **machine environment**. Right for the vendor default
+and wrong for the fleet already wearing its own logo: on upgrade every editor
+silently swapped to the neutral mark, and getting the studio's back meant
+setting an env var on every machine (in practice, a reinstall). The customer
+noticed the same morning as CR-22, on the same build.
+
+The mark now travels with the brand strings it belongs to: `brand_logo` in
+`[site]`, published by `GET /api/v1/site` (additive to schema 1, blank = the
+product's own), editable on the dashboard's Settings page with no container
+`--recreate`, seeded at deploy by `DASH_SITE_BRAND_LOGO`. `theme.
+brand_logo_override()` is now env → manifest → product mark; **the env var
+still wins**, because an escape hatch a server can overrule is not one. A bare
+name still selects a mark the build ships — `build.spec` keeps
+`cc_mark_white.png` beside `ccsync_mark.png` for exactly this — and a manifest
+naming a missing file falls back rather than failing, since a server can now
+set it. `companion/tests/conftest.py` clears the env var for every test: a
+developer's own branded rig was otherwise deciding what the suite measured.
+
 ---
 
 ## Open — residuals from the 2026-08-14 fix pass

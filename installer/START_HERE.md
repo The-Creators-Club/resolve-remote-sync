@@ -16,6 +16,13 @@ shared folder instead, **copy `onboard.exe` to your Desktop first, then run
 it from there** — never run it straight off the share (it locks the file
 for everyone, and the installer refuses to run that way).
 
+The licence agreement is in this folder as `EULA.md` if you would rather read
+it before running anything — the wizard shows you the same document and will
+not finish without your acceptance. Your companion will not sync until it has
+one, so if your tray says every lane is "NOT SYNCING (this machine isn't set
+up yet)", that is usually all it means: click **► Accept the licence agreement
+to start syncing…** in the tray menu.
+
 Follow the wizard: pick **REMOTE EDITOR** on the role page (BASE is only
 for the studio base rig). It cleans out any older CCSync install first,
 remounts your P: drive fresh, installs everything, signs you in with your

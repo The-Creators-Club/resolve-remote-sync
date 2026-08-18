@@ -134,6 +134,30 @@ def test_a_fresh_appliance_with_no_env_serves_built_in_defaults(conn):
     assert manifest["template_folders"] == provision.TEMPLATE_FOLDERS
 
 
+def test_brand_logo_is_blank_until_a_site_says(conn):
+    """The VENDOR default. A fresh install must wear the product's own mark
+    rather than inherit whichever tenant's logo the build happened to ship
+    (2026-08-18) -- and a blank is also how a fleet turns its own logo back
+    off, so it has to survive the round trip as a blank."""
+    settings = Settings()
+    assert site_store.resolved_manifest(conn, settings)["brand_logo"] == ""
+
+
+def test_brand_logo_db_row_wins_over_env(conn):
+    """The Settings page rebrands a fleet with no container --recreate: the
+    env var is only the deploy-time seed (server/install_dashboard_app.py)."""
+    settings = Settings.from_env({"DASH_SITE_BRAND_LOGO": "cc_mark_white.png"})
+    assert settings.site_brand_logo == "cc_mark_white.png"
+    manifest = site_store.resolved_manifest(conn, settings)
+    assert manifest["brand_logo"] == "cc_mark_white.png"    # env, no DB row yet
+
+    site_store.set_many(conn, {"brand_logo": "acme_mark.png"}, updated_by="admin")
+    conn.commit()
+    manifest = site_store.resolved_manifest(conn, settings)
+    assert manifest["brand_logo"] == "acme_mark.png"
+    assert "brand_logo" in manifest["_from_db"]
+
+
 def test_indexer_model_tier_defaults_to_good(conn):
     settings = Settings()
     manifest = site_store.resolved_manifest(conn, settings)
@@ -242,12 +266,14 @@ def test_export_toml_round_trips_through_import(conn):
         "org_name": "Studio", "tree_name": "Studio_Tree",
         "sftp_port": "2222", "features.youtube_download": "1",
         "template_folders": "AE,B-roll", "indexer_model_tier": "best",
+        "brand_logo": "cc_mark_white.png",
     }, updated_by="admin")
     conn.commit()
 
     text = site_store.export_toml(conn, settings)
     assert "[site]" in text
     assert 'org_name = "Studio"' in text
+    assert 'brand_logo = "cc_mark_white.png"' in text
     assert "[features]" in text
     assert "youtube_download = true" in text
     assert "[indexer]" in text
@@ -259,6 +285,7 @@ def test_export_toml_round_trips_through_import(conn):
     assert parsed["features.youtube_download"] == "1"
     assert parsed["template_folders"] == "AE,B-roll"
     assert parsed["indexer_model_tier"] == "best"
+    assert parsed["brand_logo"] == "cc_mark_white.png"
 
 
 def test_import_ignores_unrecognised_sections():

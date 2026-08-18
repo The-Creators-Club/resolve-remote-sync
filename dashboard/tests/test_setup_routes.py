@@ -293,3 +293,16 @@ def test_admin_settings_page_renders_for_an_admin(env):
     resp = client.get("/admin/settings")
     assert resp.status_code == 200
     assert "SITE SETTINGS" in resp.text
+
+
+def test_admin_settings_page_offers_the_tray_logo_field(env):
+    """Rebranding a fleet is a Settings edit, not a reinstall (CR-23) -- so
+    the field has to be ON the page, with the hover help that says what may
+    go in it (a bare asset name, or a path on the editor's own machine)."""
+    client, conn, settings = env
+    as_user(client, "owen")
+    resp = client.get("/admin/settings")
+    assert resp.status_code == 200
+    assert 'name="brand_logo"' in resp.text
+    assert "TRAY LOGO" in resp.text
+    assert "cc_mark_white.png" in resp.text

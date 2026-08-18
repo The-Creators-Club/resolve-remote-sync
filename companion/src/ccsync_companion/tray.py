@@ -1763,6 +1763,13 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     # editor -- one small file read, the same cost as every other line here.
     _get("ytdl_attested",
          lambda: _ytdl_attested(app), False)
+    # Is the LICENCE the thing stopping this machine syncing? One file read,
+    # same as the line above. Non-empty puts the accept item in the menu --
+    # the way back for an editor who declined or closed the dialog, and the
+    # only route at all on a machine that upgraded before this build existed
+    # (2026-08-18).
+    _get("eula_problem",
+         lambda: getattr(app, "eula_problem", lambda: None)() or "", "")
     # Is the editor's YouTube sign-in still working? Two small file reads
     # (ytdl_cookies.health): the status the executor recorded from yt-dlp's
     # own verdict, and the login cookies' expiry. "stale"/"expired" puts a
@@ -1935,6 +1942,12 @@ def _menu_fingerprint(snap: dict) -> tuple:
         # move the fingerprint or the menu keeps offering the wrong one until
         # something unrelated changes -- the same bug UI-3 was (item 9).
         _guard_fingerprint(snap.get("sync_guard")),
+        # Same rule as the two latches above: accepting the licence is the
+        # only thing that changes on a machine parked behind that gate, so
+        # without it here the accept item would still be in the menu after
+        # the click that cleared it -- and the lane lines would still say
+        # "isn't set up yet" (UI-3's shape again, 2026-08-18).
+        bool(snap.get("eula_problem")),
     )
 
 
@@ -2256,6 +2269,12 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
     def on_update_now(icon, item):
         _spawn(app, "Update now", lambda: _show_update_dialog(app))
 
+    def on_accept_licence(icon, item):
+        # force=True: this IS the editor asking again after declining or
+        # closing the dialog, and the once-per-run gate must not eat it.
+        _spawn(app, "Accept the licence agreement",
+               lambda: app.prompt_licence_acceptance(force=True))
+
     def on_setup_project(icon, item):
         _spawn(app, "Set up project",
                lambda: getattr(app, "setup_current_project", lambda: None)())
@@ -2322,6 +2341,19 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
             upgrade_mod.offer_label(upgrade_info["version"]), on_update_now,
         ), tray_backend.Menu.SEPARATOR]
         if upgrade_info else []
+    )
+    # THE ONE THING BLOCKING EVERYTHING, so it sits above even the breaker
+    # (2026-08-18). Present only while the licence gate is live: the lane
+    # lines already read "NOT SYNCING (this machine isn't set up yet)", and
+    # until this existed there was nothing in the menu an editor could click
+    # to change that -- the wizard, on a machine that self-upgraded, is a
+    # download away. Vanishes the moment it is accepted, same conditional-item
+    # pattern as the upgrade offer.
+    licence_items = (
+        [tray_backend.MenuItem("► Accept the licence agreement to start syncing…",
+                               on_accept_licence),
+         tray_backend.Menu.SEPARATOR]
+        if snap.get("eula_problem") else []
     )
     # Present only while this machine holds LUTs the shared library doesn't.
     # Same conditional-item pattern as the upgrade offer above: it appears
@@ -2470,6 +2502,7 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
         *state_items,
         *lane_items,
         tray_backend.Menu.SEPARATOR,
+        *licence_items,
         *breaker_items,
         *halt_release_items,
         tray_backend.MenuItem("Sync now", on_sync_now),

@@ -80,7 +80,7 @@ log = logging.getLogger("ccsync.config")
 # come from the site manifest (CR-16); crash reports are written locally
 # (CR-19). Minor bump, not patch: the loopback contract and the signed
 # channel are visible interface changes for the dashboard and the SPAs.
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"

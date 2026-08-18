@@ -1392,6 +1392,130 @@ def test_a_raising_licence_check_does_not_stop_the_lanes(tmp_path, monkeypatch):
     assert "lane_a_video_up" in started
 
 
+# -- accepting it from the tray, without the wizard -------------------------
+# 2026-08-18. Item 3 recorded consent in the WIZARD alone, which never runs on
+# the path editors actually upgrade by (upgrade.py swaps the exe in place), so
+# 0.8.0 reached machines that then refused to sync with no clickable way out.
+# These pin the way out: the dialog shows the BUNDLED document, an ACCEPT
+# records it and starts the lanes in the same breath, and a DECLINE leaves the
+# machine honestly not-syncing rather than half-accepted.
+
+
+def _licence_app(tmp_path, monkeypatch, answer):
+    """A blocked app whose licence dialog answers `answer` without any Tk.
+
+    Returns (app, started, shown) -- `shown` collects the (intro, document)
+    each dialog was built with, so a test can assert what was put in front of
+    the person, not merely that something was.
+    """
+    from ccsync_companion import eula as eula_mod, popup as popup_mod
+
+    app, started = _syncing_app(tmp_path)
+    eula_mod.acceptance_path().unlink(missing_ok=True)
+    shown: list[tuple] = []
+
+    def _fake_dialog(title, intro, document, accept_label="ACCEPT"):
+        shown.append((intro, document))
+        return answer
+
+    monkeypatch.setattr(popup_mod, "licence_dialog", _fake_dialog)
+    return app, started, shown
+
+
+def test_accepting_from_the_tray_records_it_and_starts_syncing(tmp_path, monkeypatch):
+    from ccsync_companion import eula as eula_mod
+
+    app, started, shown = _licence_app(tmp_path, monkeypatch, answer=True)
+    assert app.eula_problem() is not None
+
+    app._show_licence_dialog()
+
+    assert eula_mod.acceptance_ok(), "ACCEPT must persist -- else the same dialog forever"
+    assert app.eula_problem() is None
+    # ...and syncing starts THERE, not at the next launch: an editor who just
+    # accepted has no reason to expect a restart is still owed.
+    assert "lane_a_video_up" in started
+    assert app._lanes_started is True
+
+
+def test_the_dialog_shows_the_document_this_build_bundles(tmp_path, monkeypatch):
+    """Not a summary and not a link. An acceptance recorded against text the
+    person could not read is not consent."""
+    from ccsync_companion import eula as eula_mod
+
+    app, _started, shown = _licence_app(tmp_path, monkeypatch, answer=True)
+    app._show_licence_dialog()
+
+    assert len(shown) == 1
+    intro, document = shown[0]
+    assert document == eula_mod.BUNDLED_TEXT
+    assert document.strip(), "the fixture build must actually bundle assets/EULA.md"
+    assert eula_mod.EULA_VERSION in intro
+
+
+def test_declining_leaves_the_machine_not_syncing(tmp_path, monkeypatch):
+    from ccsync_companion import eula as eula_mod
+
+    app, started, _shown = _licence_app(tmp_path, monkeypatch, answer=False)
+
+    app._show_licence_dialog()
+
+    assert not eula_mod.acceptance_ok()
+    assert started == []
+    assert app._lanes_started is False
+
+
+def test_a_build_with_no_document_refuses_to_record_an_acceptance(tmp_path, monkeypatch):
+    """The gate is live and the text is not -- a packaging fault. Recording an
+    acceptance of nothing would be worse than staying stopped."""
+    from ccsync_companion import eula as eula_mod
+
+    app, started, shown = _licence_app(tmp_path, monkeypatch, answer=True)
+    monkeypatch.setattr(eula_mod, "bundled_text", lambda: "")
+
+    app._show_licence_dialog()
+
+    assert shown == [], "nothing may be presented as a licence when there is none"
+    assert not eula_mod.acceptance_ok()
+    assert started == []
+
+
+def test_the_prompt_is_offered_once_per_run_but_the_tray_can_reopen_it(tmp_path, monkeypatch):
+    """A modal that keeps coming back teaches an editor to dismiss it without
+    reading; a modal with no way back strands the one who declined by mistake.
+    So: automatic once, on request always."""
+    calls: list[bool] = []
+
+    app, _started, _shown = _licence_app(tmp_path, monkeypatch, answer=False)
+    monkeypatch.setattr(app, "_show_licence_dialog", lambda: calls.append(True))
+
+    app.prompt_licence_acceptance()
+    app.prompt_licence_acceptance()
+    for thread in list(threading.enumerate()):
+        if thread.name == "ccsync-licence":
+            thread.join(timeout=5)
+    assert len(calls) == 1
+
+    app.prompt_licence_acceptance(force=True)
+    for thread in list(threading.enumerate()):
+        if thread.name == "ccsync-licence":
+            thread.join(timeout=5)
+    assert len(calls) == 2
+
+
+def test_nothing_is_offered_once_the_licence_is_accepted(tmp_path, monkeypatch):
+    calls: list[bool] = []
+
+    app, _started, _shown = _licence_app(tmp_path, monkeypatch, answer=True)
+    from ccsync_companion import eula as eula_mod
+    eula_mod.record_acceptance()
+    monkeypatch.setattr(app, "_show_licence_dialog", lambda: calls.append(True))
+
+    app.prompt_licence_acceptance()
+    app.prompt_licence_acceptance(force=True)
+    assert calls == []
+
+
 # -- CORE-H1: a blank local_root must not scatter media into the CWD --------
 
 

@@ -212,6 +212,14 @@ class Settings:
     # deployment is running the same product and a blank window title helps
     # nobody. A reseller who ships this under their own name sets it.
     site_product_name: str = "CC Sync"
+    # The fleet's own tray/window mark, published to the companion as
+    # `brand_logo` (2026-08-18). A bare name selects a mark the companion
+    # build already ships ("cc_mark_white.png"); anything with a separator is
+    # an absolute path on the EDITOR's machine. Blank -- the vendor default --
+    # means every tray wears the product mark, which is what a fresh install
+    # should look like and what an existing fleet must be able to undo without
+    # touching each machine's environment.
+    site_brand_logo: str = ""
     site_tree_name: str = ""
     # The drive letter the editor tree is mapped at on Windows. Hardcoded to
     # P: everywhere in the companion by an explicit decision (2026-07-26); the
@@ -533,6 +541,7 @@ class Settings:
             site_org_name=env.get("DASH_SITE_ORG_NAME", "").strip(),
             site_org_short=env.get("DASH_SITE_ORG_SHORT", "").strip(),
             site_product_name=env.get("DASH_SITE_PRODUCT_NAME", "").strip() or "CC Sync",
+            site_brand_logo=env.get("DASH_SITE_BRAND_LOGO", "").strip(),
             site_tree_name=env.get("DASH_SITE_TREE_NAME", "").strip(),
             site_canonical_prefix=env.get("DASH_SITE_CANONICAL_PREFIX", "").strip() or "P:\\",
             site_remote_root=env.get("DASH_SITE_REMOTE_ROOT", "").strip(),

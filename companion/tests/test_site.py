@@ -381,16 +381,31 @@ def test_a_site_can_rename_the_product_but_never_to_nothing():
     assert site_mod.product_name() == "CC Sync"
 
 
+def test_a_site_publishes_the_mark_its_editors_wear():
+    """The tray logo travels with the other brand strings (2026-08-18), so a
+    fleet is rebranded once on the dashboard rather than once per machine."""
+    site_mod.save_site(site_mod.normalise(dict(GOOD, brand_logo="cc_mark_white.png")))
+    _forget_brand()
+    assert site_mod.brand_logo() == "cc_mark_white.png"
+
+    site_mod.save_site(site_mod.normalise(dict(GOOD, brand_logo="   ")))
+    _forget_brand()
+    assert site_mod.brand_logo() == ""
+
+
 def test_a_dashboard_that_predates_the_brand_keys_is_not_a_failure():
     """Additive to schema 1: an older dashboard sends neither key, and every
     reader has to degrade rather than show a blank brand."""
-    older = {k: v for k, v in GOOD.items() if k not in ("org_short", "product_name")}
+    older = {k: v for k, v in GOOD.items()
+             if k not in ("org_short", "product_name", "brand_logo")}
     older["org_name"] = ""
     site_mod.save_site(site_mod.normalise(older))
     _forget_brand()
     assert site_mod.org_short() == ""
     assert site_mod.product_name() == "CC Sync"
     assert site_mod.drive_phrase() == "your studio drive"
+    # ...and an unnamed mark is the product's, never the last tenant's.
+    assert site_mod.brand_logo() == ""
 
 
 def test_the_tray_and_the_window_wear_the_same_mark_and_it_is_the_products():

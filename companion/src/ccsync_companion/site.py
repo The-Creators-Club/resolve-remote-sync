@@ -64,6 +64,13 @@ STRING_KEYS = (
     # organisation where only a few characters fit; `product_name` is the
     # VENDOR's product, which is why it is the last fallback and not blank.
     "org_short", "product_name",
+    # The fleet's own tray/window mark, as a bare asset name the build already
+    # ships ("cc_mark_white.png") or an absolute path to a white-on-transparent
+    # PNG deployed to the editors. Added 2026-08-18: without it, item 10's
+    # de-branding could only be undone by setting $CCSYNC_BRAND_LOGO on every
+    # machine, so an existing fleet silently lost its logo on upgrade and
+    # needed a reinstall to get it back. "" = wear the product's own mark.
+    "brand_logo",
     "tree_name", "canonical_prefix", "remote_root", "smb_unc",
     "sftp_host", "rclone_remote", "nas_syncthing_id", "dashboard_url",
     "nas_kind",
@@ -364,6 +371,17 @@ def product_name(site: Optional[dict[str, Any]] = None,
     if isinstance(site, dict):
         value = str(site.get("product_name") or "").strip()
     return value or DEFAULT_PRODUCT_NAME
+
+
+def brand_logo(site: Optional[dict[str, Any]] = None,
+               path: Optional[Path] = None) -> str:
+    """This fleet's mark as the manifest names it, or "" for the product's
+    own. Resolving it to a file is theme.brand_logo_site()'s job -- this
+    module must not care where a build keeps its assets."""
+    site = site if site is not None else _brand_site(path)
+    if not isinstance(site, dict):
+        return ""
+    return str(site.get("brand_logo") or "").strip()
 
 
 def drive_phrase(capitalised: bool = False,

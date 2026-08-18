@@ -136,11 +136,15 @@ def test_is_valid_honors_injected_clock():
 
 
 def test_save_and_load_identity_round_trip(tmp_path):
+    # Built once -- see the note in the sign-in test below: _token() defaults
+    # its expiry off the clock, so writing and asserting with two separate
+    # calls compares different strings across a second boundary.
+    token = _token()
     path = tmp_path / "sub" / "identity.json"
-    save_identity(path, "owen", _token())
+    save_identity(path, "owen", token)
     loaded = load_identity(path)
     assert loaded["username"] == "owen"
-    assert loaded["token"] == _token()
+    assert loaded["token"] == token
     assert "verified_at" in loaded
 
 
@@ -181,6 +185,8 @@ def test_save_identity_overwrites_existing_file(tmp_path):
 
 
 def test_verify_credentials_success():
+    token = _token()
+
     def fake_post(url, data, headers, timeout):
         assert url == "http://dash.example.com/api/v1/verify"
         assert data["username"] == "owen"
@@ -190,12 +196,12 @@ def test_verify_credentials_success():
         assert data["companion_version"] == identity_mod.config_mod.VERSION
         assert data["platform"] in {"windows", "macos", "linux"}
         assert "Authorization" not in headers
-        return {"ok": True, "username": "owen", "token": _token()}
+        return {"ok": True, "username": "owen", "token": token}
 
     result = verify_credentials("http://dash.example.com", "owen", "hunter2", http_post=fake_post)
     assert result["ok"] is True
     assert result["username"] == "owen"
-    assert result["token"] == _token()
+    assert result["token"] == token
 
 
 def test_verify_credentials_strips_trailing_slash_from_url():
@@ -377,8 +383,15 @@ def test_identity_manager_loads_existing_valid_identity(tmp_path, monkeypatch):
 
 
 def test_identity_manager_sign_in_success_persists_and_updates_state(tmp_path, monkeypatch):
+    # ONE token, built once. _token() defaults its expiry to int(time.time())
+    # + 3600, so calling it in the fake response AND again in the assertion
+    # compared two strings that differ whenever the second ticks between them
+    # -- a ~1-in-N flake that failed a release gate on 2026-08-18 with a diff
+    # of exactly one in the epoch field.
+    token = _token(username="owen")
+
     def fake_post(url, data, headers, timeout):
-        return {"ok": True, "username": "owen", "token": _token(username="owen")}
+        return {"ok": True, "username": "owen", "token": token}
 
     mgr = _mgr(tmp_path, monkeypatch, http_post=fake_post)
     ok, error = mgr.sign_in("owen", "hunter2")
@@ -386,7 +399,7 @@ def test_identity_manager_sign_in_success_persists_and_updates_state(tmp_path, m
     assert error is None
     assert mgr.valid() is True
     assert mgr.username == "owen"
-    assert mgr.token == _token(username="owen")
+    assert mgr.token == token
 
     # persisted to disk too.
     loaded = load_identity(tmp_path / "identity.json")

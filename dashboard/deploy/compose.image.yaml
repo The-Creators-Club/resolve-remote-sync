@@ -147,6 +147,13 @@ services:
       DASH_SITE_ORG_NAME: "{{SITE_ORG_NAME}}"
       DASH_SITE_ORG_SHORT: "{{SITE_ORG_SHORT}}"
       DASH_SITE_PRODUCT_NAME: "{{SITE_PRODUCT_NAME}}"
+      # The CUSTOMER'S LOGO for the companion's tray and window title
+      # (2026-08-18). Item 10 de-branded the tray to a neutral product mark
+      # and left $CCSYNC_BRAND_LOGO -- a per-MACHINE env var -- as the only
+      # way back, so an existing fleet lost its logo on upgrade and could not
+      # get it back without touching every editor. Blank still means "wear the
+      # product mark", so a site that says nothing is unchanged.
+      DASH_SITE_BRAND_LOGO: "{{SITE_BRAND_LOGO}}"
       DASH_SITE_TREE_NAME: "{{SITE_TREE_NAME}}"
       DASH_SITE_TEMPLATE_FOLDERS: "{{SITE_TEMPLATE_FOLDERS}}"
       DASH_SITE_SHARED_ASSETS: "{{SITE_SHARED_ASSETS}}"

@@ -176,6 +176,20 @@ org_name = "Your Studio"
 # default, because every deployment runs the same software. Set it only if you
 # are reselling this under your own name.
 # product_name = "CC Sync"
+# YOUR LOGO in every editor's tray and window title bar (2026-08-18). Unset --
+# the vendor default -- means every tray wears the product's own mark, which is
+# what a fresh install should look like.
+#
+# A bare name selects a mark the companion build already ships; anything with a
+# separator is an absolute path on the EDITOR's machine, so the file has to be
+# somewhere every editor has it (the tree works: P:\Assets\Brand\mark.png).
+# WHITE ON TRANSPARENT, no exceptions: the tray tints the alpha channel red /
+# amber / green to carry sync status, so a pre-coloured logo renders as a solid
+# blob of the status colour.
+#
+# Per-machine, $CCSYNC_BRAND_LOGO overrides this (companion/theme.py) -- the
+# hatch for a rig that must not follow its fleet.
+# brand_logo = "cc_mark_white.png"
 # The drive letter editors map the tree as. Hardcoded to P: by decision
 # (2026-07-26); it is served so no client has to assume it.
 # canonical_prefix = "P:\\"

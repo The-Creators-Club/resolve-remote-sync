@@ -60,8 +60,36 @@ def test_media_routes_answer_under_the_prefix(mounted_client, conn, data_root):
 
 
 def test_static_assets_are_served_under_the_prefix(mounted_client):
-    for path in ("/broll/static/app.js", "/broll/static/style.css"):
+    for path in ("/broll/static/app.js", "/broll/static/style.css",
+                 "/broll/static/ingest.js"):
         assert mounted_client.get(path).status_code == 200, path
+
+
+def test_the_ingest_panels_session_routes_answer_under_the_prefix(mounted_client):
+    """Every `api/ingest-batches…` URL ingest.js builds, mounted.
+
+    The panel is the one part of the SPA that WRITES, and it writes with
+    document-relative URLs like `api/ingest-batches/precheck` -- under /broll
+    those resolve to the routes below, and at the origin root they resolve to
+    the same app. A leading slash on any of them would post the drop at the
+    dashboard (docs/BROLL_INGEST_PLAN.md 4.3).
+    """
+    headers = {"X-CCSync-User": "alex"}
+    listed = mounted_client.get("/broll/api/ingest-batches?scope=mine", headers=headers)
+    assert listed.status_code == 200, listed.text
+    pre = mounted_client.post(
+        "/broll/api/ingest-batches/precheck", headers=headers,
+        json={"share": "2026-08-18 ingest", "keep_subfolders": True,
+              "items": [{"local_id": "a", "name": "A001.MP4"}]})
+    assert pre.status_code == 200, pre.text
+    assert pre.json()["items"][0]["final_name"] == "A001.MP4"
+
+
+def test_the_ingest_panel_is_in_the_shipped_page(mounted_client):
+    """The drawer and its script ship with index.html, not from a build step."""
+    body = mounted_client.get("/broll/").text
+    assert 'id="ingest-panel"' in body
+    assert 'src="static/ingest.js"' in body
 
 
 def test_the_app_still_works_unmounted(client, conn):
@@ -84,7 +112,7 @@ def test_no_shipped_asset_uses_a_root_relative_app_url():
     absolute and must stay that way — it is a different process, not this app.
     """
     offenders = []
-    for name in ("app.js", "index.html", "style.css"):
+    for name in ("app.js", "index.html", "style.css", "ingest.js"):
         text = (STATIC / name).read_text(encoding="utf-8")
         for m in re.finditer(r"""["'`(]/(?:api|media|static)/""", text):
             line = text.count("\n", 0, m.start()) + 1
@@ -99,3 +127,26 @@ def test_the_companion_url_is_still_absolute():
     point it at the web server instead of the editor's local helper."""
     text = (STATIC / "app.js").read_text(encoding="utf-8")
     assert "http://127.0.0.1:8899" in text
+
+
+def test_no_shipped_asset_names_another_absolute_origin():
+    """The loopback is the ONLY absolute origin any of these files may name.
+
+    Both halves matter. A second host would be a page that phones somewhere off
+    the box (there is no CDN here and there must not be one), and a loopback on
+    any port but 8899 would be a second listener -- which is exactly what the
+    retired BRoll Companion was, and why it had to go (CLAUDE.md).
+
+    `www.w3.org` is exempt: it is the SVG namespace of the inline check-mark
+    data URI in style.css, a string identifier that is never fetched.
+    """
+    allowed = ("http://127.0.0.1:8899", "http://www.w3.org")
+    offenders = []
+    for name in ("app.js", "index.html", "style.css", "ingest.js"):
+        text = (STATIC / name).read_text(encoding="utf-8")
+        for m in re.finditer(r"https?://[\w.:@-]+", text):
+            url = m.group(0)
+            if url == "http://" or any(url.startswith(a) for a in allowed):
+                continue
+            offenders.append(f"{name}:{text.count(chr(10), 0, m.start()) + 1} {url}")
+    assert not offenders, "unexpected absolute origin: " + "; ".join(offenders)

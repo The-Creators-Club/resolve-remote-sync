@@ -166,6 +166,16 @@ Three rules hold for all three, and they are load-bearing:
    putting its tree on `PYTHONPATH` and importing it as top-level `app`; a
    second package of that name would collide in `sys.modules`.
 
+The fleet grid's per-machine **chips** are the one place a state that is
+invisible in every other signal becomes visible: a tripped lane B breaker, a
+halted machine, a relayed Syncthing peer — and, since 2026-08-18,
+`[ INDEXING B-ROLL: 12/40 ]` while a machine is crunching a local b-roll batch,
+`[ VRAM ]` when one was refused because the GPU cannot fit the chosen model
+(shown even with nothing running), and `[ N NEED PROXIES ]`. All of them are
+flat `machine_state` columns fed by sections of the companion's report
+(`BROLL_INGEST_PLAN.md` §3.2), not a JSON blob: the grid sorts and alarms on
+them.
+
 An in-process **collector thread** polls Syncthing's REST API on staggered
 cadences (connections 15s, completion 60s, config 120s, provisioning 300s,
 inventory 900s) and reconciles folder shares against the tick table. Two of
@@ -459,9 +469,15 @@ sequenceDiagram
     C->>N: lane C -- Syncthing carries the project file itself
     E->>E: open the project in Resolve Studio
     C->>C: watch the timeline; repoint stale proxy paths; offer to fix out-of-tree media
-    C->>D: POST /api/v1/report (lanes, presence, alarms)
-    D-->>C: {"upgrade": ...}, {"commands": {"halt": ...}}, "this project has no root mapping"
+    C->>D: POST /api/v1/report (lanes, presence, alarms, proxy + b-roll ingest progress)
+    D-->>C: {"upgrade": ...}, {"commands": {"halt": ..., "broll_ingest": {"cancel": [...]}}}, "this project has no root mapping"
 ```
+
+The report is also how an admin sees **which machines are indexing b-roll and
+how far along they are**: the companion's `broll_ingest` section lands in
+`machine_state` and becomes a fleet-grid chip (§4). The reply is the only
+channel back to a tray, so a cancelled batch rides it too — best-effort, since
+the companion's own ingest heartbeat is what authoritatively stops it.
 
 ---
 

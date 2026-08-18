@@ -519,13 +519,15 @@ def test_the_vendored_vlm_set_has_no_unchecked_members():
         "BROLL_VLM_MODULES here AND to $VendorPairs in tools/release.ps1")
 
 
-def test_the_release_gate_pins_every_vendored_pair():
-    """The suites and the release gate must agree on WHAT is checked. A pair
-    added here but not there ships on the next release; a pair added there but
-    not here is only checked on Windows at release time."""
-    release = (REPO_ROOT / "tools" / "release.ps1").read_text(encoding="utf-8")
+@pytest.mark.parametrize("gate", ["release.ps1", "release_macos.sh"])
+def test_both_release_gates_pin_every_vendored_pair(gate):
+    """The suites and BOTH release gates must agree on what is checked. A pair
+    added here but not there ships on the next release; a pair in the Windows
+    gate only would let a Mac build carry a drifted copy (SHIP-3 is exactly
+    that hole, found once already)."""
+    text = (REPO_ROOT / "tools" / gate).read_text(encoding="utf-8")
     for name in (*BROLL_VLM_MODULES, BROLL_VLM_PROMPT.name, "ytdl_common.py"):
-        assert name in release, f"tools/release.ps1 does not pin the vendored {name}"
+        assert name in text, f"tools/{gate} does not pin the vendored {name}"
 
 
 # A deliberately hostile info dict: the byte comparison above proves the FILES

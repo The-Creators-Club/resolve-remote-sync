@@ -213,10 +213,24 @@ capture() {
 # FAIL SAFE, exactly like the Windows copy: a missing, unreadable or
 # marker-less file is a problem, never a skip -- "I could not check" must not
 # read as "fine".
+#
+# A fourth argument of "exact" compares the WHOLE file instead of the part
+# below the marker -- for a vendored copy that cannot carry a header at all
+# (the local-VLM prompt: its bytes are what the model is sent). Same rule as
+# release.ps1's -Mode.
 vendor_parity_problem() {
-    local source_path="$1" vendored_path="$2" marker="$3" count marker_line
+    local source_path="$1" vendored_path="$2" marker="$3" mode="${4:-marker}" count marker_line
     [ -f "$source_path" ] || { printf '%s' "cannot read $source_path (missing) -- refusing rather than skipping the check"; return 0; }
     [ -f "$vendored_path" ] || { printf '%s' "cannot read $vendored_path (missing) -- refusing rather than skipping the check"; return 0; }
+
+    if [ "$mode" = "exact" ]; then
+        if cmp -s "$vendored_path" "$source_path"; then
+            printf '%s' ""
+        else
+            printf '%s' "the vendored copy has DRIFTED from its source (this pair carries no header -- the whole file must match)"
+        fi
+        return 0
+    fi
 
     count="$(grep -c -x -F "$marker" "$vendored_path" 2>/dev/null || true)"
     [ -n "$count" ] || count=0
@@ -250,6 +264,19 @@ PYPROJECT="$COMPANION_DIR/pyproject.toml"
 YTDL_COMMON_SRC="$REPO_ROOT/ytdl/web/ytdlweb/ytdl_common.py"
 YTDL_COMMON_VENDORED="$COMPANION_DIR/src/ccsync_companion/ytdl_common.py"
 VENDOR_MARKER="# --- vendored content below, byte-identical ---"
+# Every pair, as "source|vendored|mode" -- the bash twin of release.ps1's
+# $VendorPairs. The broll_vlm set joined 2026-08-18 (docs/BROLL_INGEST_PLAN.md
+# section 3.3): the companion indexes b-roll with the INDEXER's local backend,
+# so a drifted copy describes clips differently into the one search database.
+VENDOR_PAIRS="
+$YTDL_COMMON_SRC|$YTDL_COMMON_VENDORED|marker
+$REPO_ROOT/broll/indexer/broll_index/local_models.py|$COMPANION_DIR/src/ccsync_companion/broll_vlm/local_models.py|marker
+$REPO_ROOT/broll/indexer/broll_index/local_runtime.py|$COMPANION_DIR/src/ccsync_companion/broll_vlm/local_runtime.py|marker
+$REPO_ROOT/broll/indexer/broll_index/local_vlm.py|$COMPANION_DIR/src/ccsync_companion/broll_vlm/local_vlm.py|marker
+$REPO_ROOT/broll/indexer/broll_index/compact_format.py|$COMPANION_DIR/src/ccsync_companion/broll_vlm/compact_format.py|marker
+$REPO_ROOT/broll/indexer/broll_index/contract.py|$COMPANION_DIR/src/ccsync_companion/broll_vlm/contract.py|marker
+$REPO_ROOT/broll/indexer/broll_index/prompts/index_clip_v7_compact.md|$COMPANION_DIR/src/ccsync_companion/broll_vlm/prompts/index_clip_v7_compact.md|exact
+"
 DIST_DIR="$COMPANION_DIR/dist"
 ARTIFACT="$DIST_DIR/ccsync-companion"
 MANIFEST="$DIST_DIR/ccsync-release.json"
@@ -338,22 +365,32 @@ step "version parity OK"
 # server/tests/test_cross_component.py, which only ship.cmd runs and which
 # cannot run on a Mac. Hence a hard refusal here, exactly as tools/release.ps1
 # does on Windows (SHIP-3, 2026-08-14).
-VENDOR_PROBLEM="$(vendor_parity_problem "$YTDL_COMMON_SRC" "$YTDL_COMMON_VENDORED" "$VENDOR_MARKER")"
-if [ -n "$VENDOR_PROBLEM" ]; then
-    echo ""
-    fail "vendored-file parity check failed:
+VENDOR_PAIR_COUNT=0
+# A here-string, NOT a pipeline: `... | while read` runs the loop in a subshell,
+# where `fail`'s exit could not stop this script -- the gate would print and
+# then build anyway. Reading with IFS='|' also survives a repo path with a
+# space in it, which `for pair in $VENDOR_PAIRS` would not.
+while IFS='|' read -r pair_src pair_vendored pair_mode; do
+    [ -n "$pair_src" ] || continue
+    VENDOR_PROBLEM="$(vendor_parity_problem "$pair_src" "$pair_vendored" "$VENDOR_MARKER" "$pair_mode")"
+    if [ -n "$VENDOR_PROBLEM" ]; then
+        echo ""
+        fail "vendored-file parity check failed:
          $VENDOR_PROBLEM
-         source   (edit THIS one): $YTDL_COMMON_SRC
-         vendored (do not edit)  : $YTDL_COMMON_VENDORED
-         Fix: make the change in ytdl/web/ytdlweb/ytdl_common.py -- it is the source of
-         truth -- then re-copy that whole file into the companion BELOW the marker line
-         \"$VENDOR_MARKER\", leaving the companion header above it untouched.
-         (docs/YTDL_LOCAL_DOWNLOAD.md section 5: the two executors must write
-         byte-identical artifacts into one canonical tree; bump TEMPLATE_VERSION/
-         SIDECAR_VERSION in the source if the shape changed, so old companions decline
-         the claim instead.)"
-fi
-step "vendored parity OK (ytdl_common.py: companion copy == ytdl/web below the marker)"
+         source   (edit THIS one): $pair_src
+         vendored (do not edit)  : $pair_vendored
+         Fix: make the change in the SOURCE file -- it is the source of truth -- then
+         re-copy that whole file into the companion BELOW the marker line
+         \"$VENDOR_MARKER\", leaving the companion header above it untouched
+         (the local-VLM prompt has no header: copy it whole).
+         (docs/YTDL_LOCAL_DOWNLOAD.md section 5 and docs/BROLL_INGEST_PLAN.md
+         section 3.3: two trees that cannot import each other must not drift --
+         one grows a second filename for the same YouTube clip, the other
+         describes clips differently into the one search database.)"
+    fi
+    VENDOR_PAIR_COUNT=$((VENDOR_PAIR_COUNT + 1))
+done <<< "$VENDOR_PAIRS"
+step "vendored parity OK ($VENDOR_PAIR_COUNT pairs: ytdl_common.py + the broll_vlm set)"
 
 # The installer number is a separate thing from the companion version and this
 # script publishes none of the three files that carry it -- so drift here is

@@ -79,9 +79,23 @@
   function renderAiProviders(data) {
     showAiError("");
     var host = document.getElementById("ai-providers");
+    // An open setup wizard lives INSIDE its provider's row. Rebuilding the
+    // rows used to destroy it: every install-status tick, every sign-in
+    // poll and every Test refreshed this list, and the admin watched the
+    // stepper vanish and reopened it four times per setup (owner,
+    // 2026-08-18). The panel node is lifted out first and re-attached to the
+    // rebuilt row for the same provider, so its polling state (which holds
+    // this very node) carries on unbroken.
+    var openPanels = {};
+    Array.prototype.forEach.call(host.querySelectorAll(".ai-wizard"), function (panel) {
+      if (panel.dataset.provider) openPanels[panel.dataset.provider] = panel;
+    });
     host.textContent = "";
     (data.providers || []).forEach(function (p) {
-      host.appendChild(providerRow(p, data));
+      var row = providerRow(p, data);
+      row.dataset.provider = p.name;
+      host.appendChild(row);
+      if (openPanels[p.name]) row.appendChild(openPanels[p.name]);
     });
 
     var resolved = document.getElementById("ai-resolved");
@@ -190,6 +204,7 @@
     var existing = host.querySelector(".ai-wizard");
     if (existing) { existing.parentNode.removeChild(existing); return; }
     var panel = el("div", "ai-wizard");
+    panel.dataset.provider = p.name;
     panel.style.border = "1px dotted #2a2a31";
     panel.style.padding = "0.6rem";
     panel.style.marginTop = "0.4rem";

@@ -334,9 +334,13 @@ async function loadHealth() {
   } else if (h.claude === 'timeout') {
     setBanner('health', HINTS[2][1]);              // amber: it may answer next time
   } else if (h.claude === 'error') {
-    setBanner('health', 'Claude Code failed on the server'
+    // Names the provider the failure came from: with five possible
+    // backends, "Claude Code failed" over an Anthropic-API "credit balance is
+    // too low" sent the owner looking at the wrong provider (2026-08-18).
+    setBanner('health', `${aiName} failed on the server`
               + (h.claude_detail ? `: ${h.claude_detail}` : '')
-              + '. Searches will fail until it works. See ytdl/web/DEPLOY.md.', true);
+              + '. Searches will fail until it works. An admin can change the '
+              + 'provider or its credential on the dashboard: Settings > AI providers.', true);
   } else if (h.yt_dlp !== 'ok') {
     setBanner('health', 'yt-dlp is not installed in this container, so searching '
               + 'and downloading will both fail. See ytdl/web/DEPLOY.md.', true);

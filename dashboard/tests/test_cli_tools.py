@@ -1032,3 +1032,60 @@ def test_a_disabled_site_still_touches_nothing(env, monkeypatch):
     assert rows["claude_code"]["status"] == "disabled_by_site"
     assert ran == []
     assert not cli_tools.tools_root(settings).exists()
+
+
+# ---------------------------------------------- the Test button sees the wizard
+
+def test_the_test_route_sees_the_wizard_install_and_does_not_poison_the_cache(env, monkeypatch):
+    """Owner, 2026-08-18, a minute after a successful sign-in: [ TEST ] said
+    "not installed: no `claude` on this container's PATH", the row flipped
+    to the same, and the downloader fell back to the next provider. The
+    Test route probed WITHOUT settings, so it could not see
+    <data>/tools/claude-code/current -- and a forced probe is cached, so its
+    blind answer became everyone's answer."""
+    from ccsync_dashboard import ai_providers, cli_tools
+
+    client, conn, settings = env
+    name = cli_tools.CLAUDE_CODE
+    ai_providers.reset_probe_cache()
+    version_dir = cli_tools.tool_root(settings, name) / "2.1.234"
+    version_dir.mkdir(parents=True)
+    (version_dir / "claude").write_text("#!/bin/true\n", encoding="utf-8")
+    cli_tools._finish_install(settings, name, version="2.1.234", rel="claude",
+                              sha="a" * 64, size=12, url="https://x/claude",
+                              checksum_source="publisher_manifest")
+    monkeypatch.setattr(ai_providers.shutil, "which", lambda *_a, **_k: None)
+
+    calls = []
+
+    class _Proc:
+        def __init__(self, out):
+            self.returncode = 0
+            self.stdout = out
+            self.stderr = ""
+
+    def fake_run(argv, stdin, timeout, env=None):
+        calls.append(list(argv))
+        return _Proc("2.1.234 (Claude Code)\n" if "--version" in argv else "ok")
+
+    monkeypatch.setattr(ai_providers, "_run", fake_run)
+    monkeypatch.setattr(ai_providers, "cli_enabled", lambda *_a, **_k: True)
+
+    result = ai_providers.test_provider(conn, settings, name)
+    assert result["ok"], result
+    assert calls and calls[0][0] == str(version_dir / "claude"), calls
+    # and the shared cache now holds the truth, not a blind "not installed"
+    cached = ai_providers.probe_cli(conn, name, settings=settings)
+    assert cached["installed"] and cached["path"] == str(version_dir / "claude")
+
+
+def test_a_settings_less_probe_never_writes_not_installed_into_the_cache(env, monkeypatch):
+    from ccsync_dashboard import ai_providers, cli_tools
+
+    client, conn, settings = env
+    name = cli_tools.CLAUDE_CODE
+    ai_providers.reset_probe_cache()
+    monkeypatch.setattr(ai_providers.shutil, "which", lambda *_a, **_k: None)
+    blind = ai_providers.probe_cli(conn, name, force=True)          # no settings
+    assert not blind["installed"]
+    assert ai_providers._cached_probe(name) is None, "a blind answer was cached"

@@ -510,6 +510,14 @@ def probe_cli(conn: sqlite3.Connection, name: str, *, force: bool = False,
             return cached
     provider = spec(name)
     path = cli_path(conn, name, settings)
+    if not path and settings is None:
+        # A settings-less caller cannot see the wizard's install, so its "not
+        # installed" is an answer about ITS view, not about the container.
+        # Never let that view into the shared cache, where the Settings page
+        # and the ytdl lookup (both of which do pass settings) would read it
+        # as the truth (2026-08-18).
+        return {"installed": False, "signed_in": False, "path": "", "version": "",
+                "detail": f"not installed: no `{provider.binary}` on this container's PATH."}
     env = _probe_env(settings, name)
     result = {"installed": False, "signed_in": False, "path": path,
               "version": "", "detail": ""}
@@ -968,7 +976,13 @@ def test_provider(conn: sqlite3.Connection, settings: Any, name: str) -> dict:
         if not cli_enabled(conn, settings):
             return {"ok": False, "detail": "CLI providers are off for this site "
                                            "([features] ai_cli_providers)"}
-        probed = probe_cli(conn, name, force=True)
+        # WITH settings: without them the probe cannot see the wizard's own
+        # install under <data>/tools, answers "not installed", and -- because
+        # a forced probe is cached -- flips the status row to the same wrong
+        # answer, sending the downloader back to the next provider in the
+        # chain. Owner hit exactly that a minute after a successful sign-in
+        # (2026-08-18).
+        probed = probe_cli(conn, name, force=True, settings=settings)
         if probed["signed_in"]:
             return {"ok": True, "detail": f"{provider.label} answered "
                                           f"({probed['version'] or probed['path']})"}

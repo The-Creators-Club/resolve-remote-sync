@@ -89,6 +89,15 @@ STRING_KEYS = (
     # spike 6, 2026-08-17). Read by both bootstrap scripts when they write
     # the stanza; "" = keep their built-in "unix".
     "sftp_shell_type",
+    # WHERE THIS FLEET'S VENDOR ARTEFACTS LIVE (2026-08-18,
+    # docs/MUSIC_INGEST_PLAN.md step 3): the dashboard's release-feed URL minus
+    # its `channel.json`, and the only thing that tells this machine where to
+    # fetch the CLAP audio model from. No vendor host is written down anywhere
+    # in this repo -- the same rule that keeps a CUSTOMER's name out of it --
+    # so a blank here (an older dashboard, or a fleet with no feed) means the
+    # model cannot be downloaded, which music_clap_sidecar says in words rather
+    # than guessing a host.
+    "release_feed_base",
 )
 LIST_KEYS = ("template_folders", "shared_asset_folders")
 

@@ -49,6 +49,17 @@ PLAN.md §4.1):
   GET  /broll/ingest/thumb
   POST /broll/ingest/run
   POST /broll/ingest/control
+and, since the same day, the MUSIC ingest group -- the same eight routes,
+parameterised by kind, because the pipeline behind them is the same object
+(docs/MUSIC_INGEST_PLAN.md §2):
+  GET  /music/ingest/capabilities
+  POST /music/ingest/pick
+  POST /music/ingest/prepare
+  PUT  /music/ingest/upload/{staging_id}/{local_id}
+  GET  /music/ingest/progress
+  GET  /music/ingest/thumb
+  POST /music/ingest/run
+  POST /music/ingest/control
 That group brings the first PUT and the first non-JSON body this listener has
 ever accepted, so it brings its own two rules with it (see do_PUT): the body
 cap is the DECLARED size of that one file rather than MAX_BODY_BYTES, and
@@ -98,6 +109,7 @@ from . import broll_fetch
 from . import broll_vlm_sidecar
 from . import config as ccsync_config
 from . import ffmpeg_tools
+from . import ingest_kinds
 from . import loopback_guard
 from . import music_server
 from . import music_worker
@@ -132,8 +144,17 @@ _READ_CHUNK_BYTES = 64 * 1024
 # The route group's own prefix, and the ONE route that takes a body which is
 # not JSON and not small.
 INGEST_PREFIX = "/broll/ingest/"
+MUSIC_INGEST_PREFIX = "/music/ingest/"
+# Every ingest prefix this listener answers, longest-first is not needed (they
+# do not nest) but ORDER IS: `_kind_for_path` returns the first match, and a
+# route group added here without a kind in `ingest_kinds.KINDS` would dispatch
+# to b-roll's orchestrator with a music page's body.
+INGEST_PREFIXES = {
+    INGEST_PREFIX: ingest_kinds.BROLL,
+    MUSIC_INGEST_PREFIX: ingest_kinds.MUSIC,
+}
 _UPLOAD_PATH_RE = re.compile(
-    r"^/broll/ingest/upload/([A-Za-z0-9_-]{1,64})/([A-Za-z0-9_.-]{1,80})$")
+    r"^/(broll|music)/ingest/upload/([A-Za-z0-9_-]{1,64})/([A-Za-z0-9_.-]{1,80})$")
 
 # The header that makes a dropped-file PUT possible at all. `application/
 # octet-stream` is not on the CORS-safelisted list, so a cross-origin PUT
@@ -171,6 +192,13 @@ INGEST_RUN_MODES = ("idle", "foreground")
 INGEST_VIDEO_EXTS = frozenset({
     ".mp4", ".mov", ".m4v", ".mxf", ".mts", ".m2ts", ".avi", ".mkv", ".webm",
 })
+
+# The music container's per-file ceiling (`musicweb.config.
+# MAX_INGEST_FILE_BYTES`, 512 MiB), enforced HERE as well as there because the
+# PUT that streams a dropped track never reaches the server: an editor who
+# drags a 2 GB session stem should be told by the machine that has the file,
+# not by a 413 from a NAS half a continent away after the upload.
+MUSIC_MAX_FILE_BYTES = 512 * 1024 * 1024
 
 # The staging directory, inside the b-roll archive so it is on the same volume
 # as everything it will produce (a rename, not a copy) and inside a tree the
@@ -799,9 +827,17 @@ def _ingest_floor_bytes(ccsync_cfg: Optional[dict[str, Any]]) -> int:
 
 def build_ingest_capabilities(ccsync_cfg: Optional[dict[str, Any]],
                               ingestor: Optional[Any] = None,
-                              deps: Optional[Any] = None) -> dict[str, Any]:
-    """What GET /broll/ingest/capabilities answers. 200 always; `ok` carries
+                              deps: Optional[Any] = None,
+                              kind: Optional[Any] = None) -> dict[str, Any]:
+    """What GET /<kind>/ingest/capabilities answers. 200 always; `ok` carries
     the verdict and `reasons` says what is missing, in editor words.
+
+    `kind` defaults to b-roll, so every existing caller (and every test that
+    pins the pre-2026-08-18 three-argument shape) gets exactly the answer it
+    always did. Music is a DIFFERENT answer, not a subset: it has no tiers and
+    no VRAM floor to report, and what its page needs instead is whether the
+    CLAP artefact is cached and how big a first run's download would be
+    (`build_music_ingest_capabilities`).
 
     ZERO I/O apart from one disk_usage, for ytdl's reason: the page asks this
     before it renders the drop zone, and a probe that spawned ffmpeg or
@@ -814,6 +850,8 @@ def build_ingest_capabilities(ccsync_cfg: Optional[dict[str, Any]],
     cannot index, and the page says so with the reason rather than offering a
     Run button that will 503.
     """
+    if kind is not None and getattr(kind, "name", "") == ingest_kinds.MUSIC:
+        return build_music_ingest_capabilities(ccsync_cfg, ingestor, deps)
     cfg = ccsync_cfg or {}
     reasons: list[str] = []
 
@@ -940,7 +978,121 @@ def build_ingest_capabilities(ccsync_cfg: Optional[dict[str, Any]],
     }
 
 
-def pick_ingest_sources(kind: str) -> tuple[int, dict[str, Any]]:
+def build_music_ingest_capabilities(
+        ccsync_cfg: Optional[dict[str, Any]] = None,
+        ingestor: Optional[Any] = None,
+        deps: Optional[Any] = None) -> dict[str, Any]:
+    """What GET /music/ingest/capabilities answers (MUSIC_INGEST_PLAN.md §2).
+
+    b-roll's answer with `tiers`/`gpu`/`recommended_tier` replaced by one
+    `clap` block, because there is nothing to choose: the CLAP audio tower is
+    one 280 MB artefact that runs on the CPU. `{cached, download_bytes,
+    version}` is what the page's "this will download N MB first" confirmation
+    needs, and it is the ONLY thing an editor is asked to consent to here.
+
+    NO VRAM GATE and no `fits`, deliberately: a machine with no GPU is a
+    perfectly good music indexer (~90 ms per 10 s window), so the one refusal
+    this kind can raise is a build with no onnxruntime -- which is a broken
+    install, not a small graphics card.
+
+    Same ZERO I/O rule as b-roll's (one disk_usage): the page asks this before
+    it renders the drop zone.
+    """
+    from . import music_clap_sidecar
+
+    cfg = ccsync_cfg or {}
+    reasons: list[str] = []
+
+    try:
+        clap = music_clap_sidecar.capabilities(cfg)
+    except Exception:  # noqa: BLE001 - a capability probe is never fatal
+        log.debug("music ingest: the CLAP snapshot failed", exc_info=True)
+        clap = {"cached": False, "download_bytes": 0, "version": "",
+                "runtime": None, "providers": [], "feed": False, "dim": 0}
+    try:
+        refusal = music_clap_sidecar.refusal(cfg)
+    except Exception:  # noqa: BLE001
+        refusal = ""
+    if refusal:
+        reasons.append(refusal)
+
+    ffmpeg_path = str(cfg.get("ffmpeg_path", "ffmpeg") or "ffmpeg").strip() or "ffmpeg"
+    try:
+        ffmpeg = ffmpeg_tools._resolve_binary(ffmpeg_path)
+    except Exception:  # noqa: BLE001
+        ffmpeg = None
+    if not ffmpeg:
+        reasons.append("ffmpeg is not installed on this machine yet: it is "
+                       "fetched the first time a batch runs")
+
+    rclone_path = str(cfg.get("rclone_path", "rclone") or "rclone").strip() or "rclone"
+    rclone = bool(shutil.which(rclone_path) or os.path.isfile(rclone_path))
+    if not rclone:
+        reasons.append("rclone is not installed on this machine, so indexed "
+                       "tracks could not be uploaded to the library")
+
+    kind = ingest_kinds.MUSIC_KIND
+    staging_dir = kind.staging_root(cfg)
+    floor = _ingest_floor_bytes(cfg)
+    free = _free_bytes_at(staging_dir) if staging_dir is not None else None
+    if staging_dir is None:
+        reasons.append("this machine has no synced tree, so there is nowhere "
+                       "to stage the tracks")
+    elif free is not None and free < floor:
+        reasons.append(
+            f"only {free / 1_000_000_000:.1f} GB free where the tracks would "
+            f"be staged (the floor is {floor / 1_000_000_000:.0f} GB)")
+
+    busy = {"batch_uid": None, "state": ""}
+    if ingestor is not None:
+        try:
+            busy = dict(ingestor.busy())
+        except Exception:  # noqa: BLE001
+            log.debug("music ingest: busy() failed", exc_info=True)
+    if busy.get("batch_uid"):
+        reasons.append("this machine is already indexing a music batch")
+
+    editor = ""
+    if deps is not None:
+        try:
+            editor = str(deps.editor() or "")
+        except Exception:  # noqa: BLE001
+            editor = ""
+    if not editor:
+        reasons.append("nobody is signed in on this machine")
+
+    if ingestor is None:
+        reasons.append("music indexing is switched off on this machine")
+
+    return {
+        "ok": not reasons,
+        "reasons": reasons,
+        "version": ccsync_config.VERSION,
+        "kind": ingest_kinds.MUSIC,
+        "ffmpeg": bool(ffmpeg),
+        "rclone": rclone,
+        "clap": clap,
+        "audio_exts": sorted(kind.exts),
+        "transcode_exts": sorted(ingest_kinds.MUSIC_TRANSCODE_EXTS),
+        # The container's own per-file ceiling (musicweb.config.
+        # MAX_INGEST_FILE_BYTES). Published so the page refuses a 2 GB stem
+        # before it streams it, and so THIS listener and the server cannot
+        # disagree about what "too big" is.
+        "max_file_bytes": MUSIC_MAX_FILE_BYTES,
+        "max_items": kind.max_prepare_items,
+        "staging": {
+            "dir": str(staging_dir) if staging_dir is not None else "",
+            "free_bytes": free,
+            "floor_bytes": floor,
+        },
+        "busy": busy,
+        "signed_in": bool(editor),
+        "run_modes": list(INGEST_RUN_MODES),
+    }
+
+
+def pick_ingest_sources(kind: str,
+                        exts: Optional[Any] = None) -> tuple[int, dict[str, Any]]:
     """Run the native file/folder picker and answer with real paths.
 
     THE ONLY route that learns a local path from this machine rather than
@@ -956,7 +1108,15 @@ def pick_ingest_sources(kind: str) -> tuple[int, dict[str, Any]]:
     if kind not in ("files", "folder"):
         return 400, {"ok": False, "message": "kind must be 'files' or 'folder'"}
     try:
-        files = popup.pick_media_sources(kind, timeout=PICK_TIMEOUT_SECONDS)
+        # `exts` is passed ONLY when a caller named one: the b-roll route does
+        # not, so this stays the same call it always was down to its keyword
+        # arguments (which the tests' picker doubles pin), and
+        # pick_media_sources falls back to the b-roll list itself. The music
+        # route names its own -- without it, a folder walk would offer an
+        # editor every .mov sitting in their album folder.
+        extra = {"exts": exts} if exts is not None else {}
+        files = popup.pick_media_sources(kind, timeout=PICK_TIMEOUT_SECONDS,
+                                         **extra)
     except Exception as exc:  # noqa: BLE001 - a picker is never fatal
         log.warning("broll ingest: the file picker failed (%s)", exc, exc_info=True)
         return 200, {"ok": False, "message": "the file picker could not be opened "
@@ -1237,26 +1397,44 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
 
         self._guarded(_dispatch)
 
-    def _ingest_deps(self) -> Any:
-        """What app.py handed this listener about b-roll ingest, or None.
+    def _kind_for_path(self, path: str) -> Any:
+        """Which ingest kind a path belongs to. b-roll unless it says music.
+
+        The two route groups are the same eight routes with the same bodies
+        (MUSIC_INGEST_PLAN.md §2), so the prefix is the ONLY thing that
+        decides which orchestrator, which staging root and which fleet prefix
+        a request reaches.
+        """
+        for prefix, name in INGEST_PREFIXES.items():
+            if path.startswith(prefix):
+                return ingest_kinds.kind_for(name)
+        return ingest_kinds.BROLL_KIND
+
+    def _ingest_deps(self, kind: Optional[Any] = None) -> Any:
+        """What app.py handed this listener about ingest of `kind`, or None.
 
         None is a complete answer -- a companion whose orchestrator failed to
         construct, or one built by an older caller -- and every ingest route
         answers it the same way: this machine cannot index, in the body, with
-        the page free to fall back to "ask another machine".
+        the page free to fall back to "ask another machine". The music
+        attribute is separate rather than a dict keyed by kind so that a
+        server built by an older caller (b-roll only) is exactly what it was.
         """
+        if kind is not None and getattr(kind, "name", "") == ingest_kinds.MUSIC:
+            return getattr(self.server, "music_ingest_deps", None)
         return getattr(self.server, "ingest_deps", None)
 
-    def _ingestor(self) -> Any:
-        deps = self._ingest_deps()
+    def _ingestor(self, kind: Optional[Any] = None) -> Any:
+        deps = self._ingest_deps(kind)
         if deps is None:
             return None
         return getattr(deps, "ingestor", None)
 
-    def _no_ingestor(self) -> None:
+    def _no_ingestor(self, kind: Optional[Any] = None) -> None:
+        label = getattr(kind, "label", "") or "b-roll"
         self._send_json(503, {
             "ok": False,
-            "message": "b-roll indexing is not running on this machine",
+            "message": f"{label} indexing is not running on this machine",
         })
 
     def _ingest_content_type_ok(self) -> bool:
@@ -1387,18 +1565,20 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
             self._body_consumed += len(chunk)
 
     def _dispatch_put(self) -> None:
-        match = _UPLOAD_PATH_RE.match(urlparse(self.path).path)
+        path = urlparse(self.path).path
+        match = _UPLOAD_PATH_RE.match(path)
         if match is None:
             self._send_json(404, {"ok": False, "message": f"not found: {self.path}"})
             return
-        ingestor = self._ingestor()
+        kind = self._kind_for_path(path)
+        ingestor = self._ingestor(kind)
         if ingestor is None:
             self._drain_small_body()
-            self._no_ingestor()
+            self._no_ingestor(kind)
             return
         if not self._ingest_content_type_ok():
             return
-        staging_id, local_id = match.group(1), unquote(match.group(2))
+        staging_id, local_id = match.group(2), unquote(match.group(3))
 
         status, slot = ingestor.upload_slot(staging_id, local_id)
         if status != 200:
@@ -1419,6 +1599,17 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
             return
 
         declared = int(slot.get("size") or 0)
+        # The music container refuses a file over its own ceiling, so a track
+        # that big is bytes an editor would upload twice and lose both times.
+        # Refused HERE, before the first one moves.
+        if (kind.name == ingest_kinds.MUSIC and declared
+                and declared > MUSIC_MAX_FILE_BYTES):
+            self._drain_small_body()
+            self._send_json(413, {"ok": False, "message": (
+                f"that track is {declared / 1_000_000:.0f} MB and the library "
+                f"takes at most {MUSIC_MAX_FILE_BYTES / 1_000_000:.0f} MB per "
+                "file")})
+            return
         floor = _ingest_floor_bytes(getattr(self.server, "ccsync_cfg", None))
         free = _free_bytes_at(dest.parent)
         if free is not None and declared and (free - declared) < floor:
@@ -1441,28 +1632,30 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
         self._send_json(status, result)
 
     def _dispatch_ingest_get(self, path: str, query: dict) -> bool:
-        """The two ingest GETs. True when this request was answered here."""
-        if path == "/broll/ingest/capabilities":
+        """The three ingest GETs, for either kind. True when answered here."""
+        kind = self._kind_for_path(path)
+        suffix = path[len(kind.loopback_prefix):]
+        if suffix == "/capabilities":
             # 200 ALWAYS with the verdict in the body, for /ytdl/capabilities'
             # reason: a non-200 reads to the page as "no companion here", which
             # is a different (and less useful) message than "this GPU is too
             # small".
             self._send_json(200, build_ingest_capabilities(
                 getattr(self.server, "ccsync_cfg", None),
-                self._ingestor(), self._ingest_deps()))
+                self._ingestor(kind), self._ingest_deps(kind), kind=kind))
             return True
-        if path == "/broll/ingest/progress":
-            ingestor = self._ingestor()
+        if suffix == "/progress":
+            ingestor = self._ingestor(kind)
             if ingestor is None:
-                self._no_ingestor()
+                self._no_ingestor(kind)
                 return True
             staging_id = (query.get("staging_id") or [""])[0]
             self._send_json(200, ingestor.progress(staging_id or None))
             return True
-        if path == "/broll/ingest/thumb":
-            ingestor = self._ingestor()
+        if suffix == "/thumb":
+            ingestor = self._ingestor(kind)
             if ingestor is None:
-                self._no_ingestor()
+                self._no_ingestor(kind)
                 return True
             staging_id = (query.get("staging_id") or [""])[0]
             local_id = (query.get("local_id") or [""])[0]
@@ -1475,23 +1668,34 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
         return False
 
     def _dispatch_ingest_post(self, path: str) -> bool:
-        """The four ingest POSTs. True when this request was answered here."""
-        if not path.startswith(INGEST_PREFIX):
+        """The four ingest POSTs, for either kind. True when answered here."""
+        if not any(path.startswith(prefix) for prefix in INGEST_PREFIXES):
             return False
-        if path == "/broll/ingest/pick":
+        kind = self._kind_for_path(path)
+        suffix = path[len(kind.loopback_prefix):]
+        if suffix == "/pick":
             body = self._read_json_body("message")
             if body is _REFUSED:
                 return True
             if not isinstance(body, dict):
                 self._send_json(400, {"ok": False, "message": "invalid JSON body"})
                 return True
-            status, result = pick_ingest_sources(str(body.get("kind") or "files"))
+            # `kind` in THIS body is "files" or "folder" -- which picker to
+            # open -- and has nothing to do with the ingest kind the path
+            # carries. Same word, two meanings, and the path is the one that
+            # decides where the answer goes.
+            # b-roll passes NO extension list: `popup.pick_media_sources`
+            # already defaults to exactly `INGEST_VIDEO_EXTS`, so naming it
+            # here would be a second copy of the same set. Music must name
+            # its own or the folder walk offers every .mov in the album.
+            wanted = None if kind.name == ingest_kinds.BROLL else kind.exts
+            status, result = pick_ingest_sources(str(body.get("kind") or "files"),
+                                                 exts=wanted)
             self._send_json(status, result)
             return True
 
-        ingestor = self._ingestor()
-        if path in ("/broll/ingest/prepare", "/broll/ingest/run",
-                    "/broll/ingest/control"):
+        ingestor = self._ingestor(kind)
+        if suffix in ("/prepare", "/run", "/control"):
             body = self._read_json_body("message")
             if body is _REFUSED:
                 return True
@@ -1499,11 +1703,11 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"ok": False, "message": "invalid JSON body"})
                 return True
             if ingestor is None:
-                self._no_ingestor()
+                self._no_ingestor(kind)
                 return True
-            if path == "/broll/ingest/prepare":
+            if suffix == "/prepare":
                 status, result = ingestor.prepare(body)
-            elif path == "/broll/ingest/run":
+            elif suffix == "/run":
                 # `batch_uid`, `staging_id` and `run_mode` and NOTHING ELSE
                 # (plan §4.1). The tier, the archive names, the taxonomy and
                 # the settings all come back from the server's claim under the
@@ -1679,7 +1883,8 @@ class BrollCompanionServer(ThreadingHTTPServer):
     def __init__(self, server_address, handler_cls, companion_config: dict,
                  ccsync_cfg: Optional[dict] = None,
                  ytdl_deps: Optional[Any] = None,
-                 ingest_deps: Optional[Any] = None):
+                 ingest_deps: Optional[Any] = None,
+                 music_ingest_deps: Optional[Any] = None):
         super().__init__(server_address, handler_cls)
         self.companion_config = companion_config
         # The companion's own config.toml dict, for the on-demand archive
@@ -1696,6 +1901,12 @@ class BrollCompanionServer(ThreadingHTTPServer):
         # terms -- a companion whose orchestrator failed to construct serves
         # every other route unchanged and answers "cannot index here".
         self.ingest_deps = ingest_deps
+        # The same thing for the /music/ingest/* group. A SECOND attribute
+        # rather than a dict keyed by kind, so a server constructed by a caller
+        # that predates music ingest (every test pinning the old signature) is
+        # byte-for-byte the object it was, and its music routes answer "not
+        # running on this machine" rather than reaching b-roll's orchestrator.
+        self.music_ingest_deps = music_ingest_deps
 
         # Who may drive this listener (loopback_guard.py, 2026-08-17).
         # Computed ONCE, here, rather than per request: it reads the cached
@@ -1729,10 +1940,12 @@ def make_server(
     ccsync_cfg: Optional[dict] = None,
     ytdl_deps: Optional[Any] = None,
     ingest_deps: Optional[Any] = None,
+    music_ingest_deps: Optional[Any] = None,
 ) -> BrollCompanionServer:
     """Bind a loopback-only server. Raises OSError if the port is taken."""
     return BrollCompanionServer((host, port), BrollRequestHandler, cfg,
-                                ccsync_cfg, ytdl_deps, ingest_deps)
+                                ccsync_cfg, ytdl_deps, ingest_deps,
+                                music_ingest_deps)
 
 
 # -- startup ----------------------------------------------------------------
@@ -1764,7 +1977,8 @@ def configured_port(ccsync_cfg: dict[str, Any]) -> int:
 
 def start(ccsync_cfg: dict[str, Any],
           ytdl_deps: Optional[Any] = None,
-          ingest_deps: Optional[Any] = None) -> Optional[BrollCompanionServer]:
+          ingest_deps: Optional[Any] = None,
+          music_ingest_deps: Optional[Any] = None) -> Optional[BrollCompanionServer]:
     """Start the /broll insert server on a daemon thread. Never raises.
 
     Returns the server (call .shutdown() then .server_close()) or None when
@@ -1791,7 +2005,8 @@ def start(ccsync_cfg: dict[str, Any],
 
     try:
         server = make_server(broll_cfg, HOST, port, ccsync_cfg=ccsync_cfg,
-                             ytdl_deps=ytdl_deps, ingest_deps=ingest_deps)
+                             ytdl_deps=ytdl_deps, ingest_deps=ingest_deps,
+                             music_ingest_deps=music_ingest_deps)
     except OSError as exc:
         log.warning(
             "broll: could not listen on %s:%d (%s) -- \"Send to Resolve\" in the "
@@ -1854,13 +2069,16 @@ def stop(server: Optional[BrollCompanionServer]) -> None:
     # the server (or this machine on restart) picks it up from the last
     # checkpoint. Uploads first, then the crunch: killing the queue while the
     # orchestrator is still enqueueing would leave jobs behind it.
-    deps = getattr(server, "ingest_deps", None) if server is not None else None
-    ingestor = getattr(deps, "ingestor", None) if deps is not None else None
-    if ingestor is not None:
+    for attr in ("ingest_deps", "music_ingest_deps"):
+        deps = getattr(server, attr, None) if server is not None else None
+        ingestor = getattr(deps, "ingestor", None) if deps is not None else None
+        if ingestor is None:
+            continue
         try:
             ingestor.stop()
         except Exception:
-            log.debug("broll: stopping the ingest orchestrator failed", exc_info=True)
+            log.debug("broll: stopping the %s orchestrator failed", attr,
+                      exc_info=True)
     if server is None:
         return
     try:

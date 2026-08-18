@@ -392,6 +392,34 @@ ALTER TABLE machine_state ADD COLUMN proxy_state TEXT;
 ALTER TABLE machine_state ADD COLUMN proxy_left INTEGER;
 """
 
+# v21: music ingest, flattened onto machine_state exactly as v20 did for
+# b-roll (docs/MUSIC_INGEST_PLAN.md step 3, 2026-08-18). A SECOND set of
+# columns rather than a `kind` discriminator on v20's, because the two run at
+# the same time: music needs no GPU, so a machine can be embedding an album
+# while it indexes a camera card, and one row per machine has to be able to
+# say both.
+#
+# `music_ingest_active` follows v20's rule and its reason: written on EVERY
+# report, never COALESCEd, back to 0 when the section is absent -- the
+# reporter omits an empty section, so "the batch finished" is spelled by
+# silence and a latched 1 would leave a machine indexing forever on the grid.
+#
+# No `tier` column, deliberately: music has one model and nothing to choose,
+# so the column would be empty on every row that ever existed.
+SCHEMA_V21 = """
+ALTER TABLE machine_state ADD COLUMN music_ingest_active INTEGER;
+ALTER TABLE machine_state ADD COLUMN music_ingest_batch TEXT;
+ALTER TABLE machine_state ADD COLUMN music_ingest_state TEXT;
+ALTER TABLE machine_state ADD COLUMN music_ingest_gate TEXT;
+ALTER TABLE machine_state ADD COLUMN music_ingest_done INTEGER;
+ALTER TABLE machine_state ADD COLUMN music_ingest_total INTEGER;
+ALTER TABLE machine_state ADD COLUMN music_ingest_failed INTEGER;
+ALTER TABLE machine_state ADD COLUMN music_ingest_track TEXT;
+ALTER TABLE machine_state ADD COLUMN music_ingest_percent INTEGER;
+ALTER TABLE machine_state ADD COLUMN music_ingest_warning TEXT;
+ALTER TABLE machine_state ADD COLUMN music_ingest_at TEXT;
+"""
+
 # v14: the signed upgrade channel (COMMERCIAL_READINESS.md item 4,
 # 2026-08-17). Every published package now carries an offline Ed25519
 # signature over its whole record; the dashboard stores it and serves it
@@ -616,6 +644,7 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (18, SCHEMA_V18),
     (19, SCHEMA_V19),
     (20, SCHEMA_V20),
+    (21, SCHEMA_V21),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -1482,6 +1511,7 @@ def upsert_machine_state(
     guard: Mapping[str, Any] | None = None,
     ingest: Mapping[str, Any] | None = None,
     proxy: Mapping[str, Any] | None = None,
+    music: Mapping[str, Any] | None = None,
 ) -> None:
     """`transport` is summarize_transport_health()'s flattened dict, or None.
 
@@ -1508,6 +1538,9 @@ def upsert_machine_state(
     g = dict(guard or {})
     i = dict(ingest or {})
     p = dict(proxy or {})
+    # flatten_music_ingest()'s dict (v21). Same None-leaves-it-alone rule as
+    # `ingest`, and the same exception for its `active` flag.
+    m = dict(music or {})
     conn.execute(
         """INSERT INTO machine_state
              (editor_username, machine, detected_project_root, reported_at,
@@ -1521,11 +1554,16 @@ def upsert_machine_state(
               ingest_active, ingest_batch, ingest_state, ingest_gate,
               ingest_done, ingest_total, ingest_failed, ingest_clip,
               ingest_percent, ingest_tier, ingest_warning, ingest_at,
-              proxy_missing, proxy_state, proxy_left)
+              proxy_missing, proxy_state, proxy_left,
+              music_ingest_active, music_ingest_batch, music_ingest_state,
+              music_ingest_gate, music_ingest_done, music_ingest_total,
+              music_ingest_failed, music_ingest_track, music_ingest_percent,
+              music_ingest_warning, music_ingest_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                   ?, ?, ?)
+                   ?, ?, ?,
+                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(editor_username, machine) DO UPDATE SET
              detected_project_root=excluded.detected_project_root,
              reported_at=excluded.reported_at,
@@ -1616,7 +1654,41 @@ def upsert_machine_state(
              proxy_missing=COALESCE(excluded.proxy_missing,
                                     machine_state.proxy_missing),
              proxy_state=COALESCE(excluded.proxy_state, machine_state.proxy_state),
-             proxy_left=COALESCE(excluded.proxy_left, machine_state.proxy_left)""",
+             proxy_left=COALESCE(excluded.proxy_left, machine_state.proxy_left),
+             -- v21, and every CASE below is v20's rule for the same reason:
+             -- the flag is written on every report so a finished batch can
+             -- clear it, and everything else is held unless this report
+             -- carried a music section at all (music_ingest_at is the marker).
+             music_ingest_active=excluded.music_ingest_active,
+             music_ingest_batch=CASE WHEN excluded.music_ingest_at IS NULL
+                                     THEN machine_state.music_ingest_batch
+                                     ELSE excluded.music_ingest_batch END,
+             music_ingest_state=CASE WHEN excluded.music_ingest_at IS NULL
+                                     THEN machine_state.music_ingest_state
+                                     ELSE excluded.music_ingest_state END,
+             music_ingest_gate=CASE WHEN excluded.music_ingest_at IS NULL
+                                    THEN machine_state.music_ingest_gate
+                                    ELSE excluded.music_ingest_gate END,
+             music_ingest_done=CASE WHEN excluded.music_ingest_at IS NULL
+                                    THEN machine_state.music_ingest_done
+                                    ELSE excluded.music_ingest_done END,
+             music_ingest_total=CASE WHEN excluded.music_ingest_at IS NULL
+                                     THEN machine_state.music_ingest_total
+                                     ELSE excluded.music_ingest_total END,
+             music_ingest_failed=CASE WHEN excluded.music_ingest_at IS NULL
+                                      THEN machine_state.music_ingest_failed
+                                      ELSE excluded.music_ingest_failed END,
+             music_ingest_track=CASE WHEN excluded.music_ingest_at IS NULL
+                                     THEN machine_state.music_ingest_track
+                                     ELSE excluded.music_ingest_track END,
+             music_ingest_percent=CASE WHEN excluded.music_ingest_at IS NULL
+                                       THEN machine_state.music_ingest_percent
+                                       ELSE excluded.music_ingest_percent END,
+             music_ingest_warning=CASE WHEN excluded.music_ingest_at IS NULL
+                                       THEN machine_state.music_ingest_warning
+                                       ELSE excluded.music_ingest_warning END,
+             music_ingest_at=COALESCE(excluded.music_ingest_at,
+                                      machine_state.music_ingest_at)""",
         (editor, machine, detected_project_root, now, resolve_project, int(verified),
          platform, companion_version,
          t.get("relayed"), t.get("direct"), t.get("orphan_partials"),
@@ -1629,7 +1701,10 @@ def upsert_machine_state(
          int(bool(i.get("active"))), i.get("batch"), i.get("state"), i.get("gate"),
          i.get("done"), i.get("total"), i.get("failed"), i.get("clip"),
          i.get("percent"), i.get("tier"), i.get("warning"), i.get("at"),
-         p.get("missing"), p.get("state"), p.get("left")),
+         p.get("missing"), p.get("state"), p.get("left"),
+         int(bool(m.get("active"))), m.get("batch"), m.get("state"),
+         m.get("gate"), m.get("done"), m.get("total"), m.get("failed"),
+         m.get("track"), m.get("percent"), m.get("warning"), m.get("at")),
     )
     evict_extra_machines(conn, editor)
 
@@ -1689,6 +1764,38 @@ def fetch_broll_ingest_map(conn: sqlite3.Connection) -> dict[tuple[str, str], di
                       ingest_state, ingest_gate, ingest_done, ingest_total,
                       ingest_failed, ingest_clip, ingest_percent, ingest_tier,
                       ingest_warning, ingest_at
+               FROM machine_state"""
+        )
+    }
+
+
+def fetch_music_ingest_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
+    """(editor, machine) -> the music ingest state for the fleet grid (v21).
+
+    fetch_broll_ingest_map's twin, over its own columns, so the grid can show
+    both chips at once -- which is the state a machine embedding an album while
+    it indexes a card is actually in.
+    """
+    return {
+        (r["editor_username"], r["machine"]): {
+            "active": bool(r["music_ingest_active"]),
+            "batch": r["music_ingest_batch"],
+            "state": r["music_ingest_state"],
+            "gate": r["music_ingest_gate"],
+            "done": r["music_ingest_done"] or 0,
+            "total": r["music_ingest_total"] or 0,
+            "failed": r["music_ingest_failed"] or 0,
+            "track": r["music_ingest_track"],
+            "percent": r["music_ingest_percent"],
+            "warning": r["music_ingest_warning"] or "",
+            "at": r["music_ingest_at"],
+        }
+        for r in conn.execute(
+            """SELECT editor_username, machine, music_ingest_active,
+                      music_ingest_batch, music_ingest_state, music_ingest_gate,
+                      music_ingest_done, music_ingest_total, music_ingest_failed,
+                      music_ingest_track, music_ingest_percent,
+                      music_ingest_warning, music_ingest_at
                FROM machine_state"""
         )
     }

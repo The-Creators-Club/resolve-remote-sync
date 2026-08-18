@@ -626,6 +626,7 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
     # (BROLL_INGEST_PLAN.md §0) -- plus the missing-proxy count, which the
     # companion has always sent and this dashboard has never stored (v20).
     ingest = db.fetch_broll_ingest_map(conn)
+    music_ingest = db.fetch_music_ingest_map(conn)
     proxies = db.fetch_proxy_coverage_map(conn)
     result = []
     for entry in machines.values():
@@ -635,6 +636,7 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
         entry["transport"] = transport.get(key) or {}
         entry["guard"] = guards.get(key) or {}
         entry["ingest"] = ingest.get(key) or {}
+        entry["music_ingest"] = music_ingest.get(key) or {}
         entry["proxy"] = proxies.get(key) or {}
         entry["companion_version"] = (
             (machine_versions.get(key) or {}).get("companion_version")
@@ -956,6 +958,21 @@ def api_site(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> 
         # canonical copy; publishing it lets a future client read it instead
         # of growing a fourth (2026-08-17, COMMERCIAL_READINESS.md item 11).
         "video_extensions": list(provision.VIDEO_EXTENSIONS),
+        # Where this fleet's vendor artefacts live, as a DIRECTORY prefix: the
+        # configured `DASH_RELEASE_FEED_URL` minus its `channel.json`
+        # (docs/RELEASE_FEED.md). Published because the companion needs it to
+        # fetch the CLAP audio model for music ingest, and because no vendor
+        # host may be written down in this repo -- the same rule that keeps a
+        # CUSTOMER's name out of it (docs/MUSIC_INGEST_PLAN.md step 3;
+        # music_clap_sidecar.feed_base reads exactly this key).
+        #
+        # NOT A SECRET and not a credential: the feed is world-readable static
+        # files whose every byte is signature- and sha256-verified after the
+        # fact, and a client that fetched from the wrong host would simply
+        # fail those checks. Empty when no feed is configured, which every
+        # client reads as "this fleet cannot fetch models" -- a refusal with a
+        # fix, not an error.
+        "release_feed_base": _release_feed_base(settings),
         "nas_kind": site["nas_kind"],
         # Optional features this site has turned on. Additive to schema 1 on
         # purpose (companion/site.py reads unknown-to-it keys as absent), and
@@ -985,6 +1002,22 @@ def api_site(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> 
             "model_tier": site["indexer"]["model_tier"],
         },
     }
+
+
+def _release_feed_base(settings: Any) -> str:
+    """`DASH_RELEASE_FEED_URL` minus the filename, or "".
+
+    Derived rather than configured separately, so there is exactly one URL an
+    operator sets and no way for the two to disagree about which feed this
+    fleet trusts. Anything that is not an https URL ending in a filename comes
+    back "" -- release_feed.py already refuses a non-https feed at boot, and a
+    client with no base simply does not download.
+    """
+    raw = str(getattr(settings, "release_feed_url", "") or "").strip()
+    if not raw.lower().startswith("https://"):
+        return ""
+    base = raw.rsplit("/", 1)[0] if "/" in raw.split("://", 1)[1] else ""
+    return base.rstrip("/")
 
 
 @router.get("/projects")
@@ -3393,6 +3426,21 @@ class BrollIngestIn(_ReportSectionIn):
     at: str = Field(default="", max_length=64)
 
 
+class MusicIngestIn(BrollIngestIn):
+    """The companion's `music_ingest` section (MUSIC_INGEST_PLAN.md step 3,
+    2026-08-18) -- one local music indexing batch, as the tray sees it.
+
+    b-roll's fields exactly, plus `kind`, and a SEPARATE section rather than a
+    reuse of the b-roll one because the two run AT THE SAME TIME: music needs
+    no GPU, so a machine can be embedding an album while it indexes a camera
+    card, and one section could only ever describe one of them.
+
+    `tier` is inherited and is always "" here -- music has one model and
+    nothing to choose -- so the grid's chip has nothing to say about it.
+    """
+    kind: str = Field(default="music", max_length=16)
+
+
 def flatten_broll_ingest(ingest: "BrollIngestIn | None", now: str) -> dict[str, Any] | None:
     """BrollIngestIn -> the flat machine_state columns (schema v20).
 
@@ -3418,6 +3466,35 @@ def flatten_broll_ingest(ingest: "BrollIngestIn | None", now: str) -> dict[str, 
         "clip": ingest.clip or None,
         "percent": ingest.percent,
         "tier": ingest.tier or None,
+        "warning": ingest.warning or None,
+    }
+
+
+def flatten_music_ingest(ingest: "MusicIngestIn | None", now: str) -> dict[str, Any] | None:
+    """MusicIngestIn -> the flat machine_state columns (schema v21).
+
+    flatten_broll_ingest's dict, into its own set of columns. None when the
+    companion sent no section at all, which upsert_machine_state reads as
+    "leave every stored music value alone EXCEPT music_ingest_active, which
+    goes to 0" -- the reporter omits an empty section, so silence is how a
+    finished batch is spelled.
+
+    `tier` is not carried: music has one model, so the column would be empty
+    on every row that ever existed.
+    """
+    if ingest is None:
+        return None
+    return {
+        "at": now,
+        "active": int(bool(ingest.active)),
+        "batch": ingest.batch_uid or None,
+        "state": ingest.state or None,
+        "gate": ingest.gate or None,
+        "done": ingest.done,
+        "total": ingest.total,
+        "failed": ingest.failed,
+        "track": ingest.clip or None,
+        "percent": ingest.percent,
         "warning": ingest.warning or None,
     }
 
@@ -3452,6 +3529,7 @@ _TOLERANT_SECTIONS: dict[str, type[BaseModel]] = {
     "proxy_coverage": ProxyCoverageIn,
     "youtube_import": YoutubeImportIn,
     "broll_ingest": BrollIngestIn,
+    "music_ingest": MusicIngestIn,
 }
 
 
@@ -3511,6 +3589,60 @@ def broll_cancel_requested(settings: Any, editor: str, machine: str) -> list[str
                 pass
 
 
+def music_cancel_requested(settings: Any, editor: str, machine: str) -> list[str]:
+    """Batch uids an admin/owner has asked this machine to stop indexing.
+
+    `broll_cancel_requested`'s twin, and BEST-EFFORT IN EVERY DIRECTION for
+    the same reason: the report reply is the fleet's status channel and must
+    not acquire a dependency on the music checkout being present, importable,
+    migrated or even readable. Every failure here answers "nothing to cancel"
+    and the companion learns about the cancel from its next heartbeat's 410
+    instead -- which is the authoritative path anyway.
+
+    The sub-app is reached exactly as music.py reaches it (`musicweb`, on the
+    PYTHONPATH the container sets), and its database is opened READ-ONLY: the
+    mounted app holds that file open read-write in WAL mode.
+
+    There is NO settings flag to check first, unlike b-roll's: the music mount
+    has never had one (`mount_music` is attempted on every boot and reports
+    MOUNTED/ABSENT/DEGRADED), so the import below is the only honest test of
+    whether this deployment has music at all. `settings` is accepted anyway,
+    so the two functions are called identically and a future flag has
+    somewhere to go.
+    """
+    try:
+        from musicweb.config import DB_PATH  # type: ignore[import-not-found]
+        from musicweb.ingest_batches import (  # type: ignore[import-not-found]
+            cancel_requested_for,
+        )
+    except ImportError:
+        # No music checkout, or one predating the ingest work. Not an error:
+        # the feature is optional and the dashboard is not.
+        return []
+    except Exception as e:  # noqa: BLE001
+        log.debug("music cancel lookup skipped (%s: %s)", type(e).__name__, e)
+        return []
+    conn = None
+    try:
+        path = Path(str(DB_PATH))
+        if not path.is_file():
+            return []
+        conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        uids = cancel_requested_for(conn, editor, machine) or []
+        return [str(u) for u in uids][:MAX_INGEST_CANCELS]
+    except Exception as e:  # noqa: BLE001 - see the docstring
+        log.warning("music cancel lookup failed for %s/%s (%s: %s); the report was "
+                    "answered without it", editor, machine, type(e).__name__, e)
+        return []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 class ReportIn(BaseModel):
     editor_name: str = Field(min_length=1, max_length=64)
     machine: str = Field(min_length=1, max_length=128)
@@ -3553,6 +3685,9 @@ class ReportIn(BaseModel):
     proxy_coverage: ProxyCoverageIn | None = None
     youtube_import: YoutubeImportIn | None = None
     broll_ingest: BrollIngestIn | None = None
+    # The music half of the same feature (MUSIC_INGEST_PLAN.md step 3). Its
+    # own field for the reason MusicIngestIn gives: both can be true at once.
+    music_ingest: MusicIngestIn | None = None
     # Set by _truncate_report_sections, never by the client: {section:
     # entries dropped}. Echoed in the reply and logged, so a truncated report
     # is loud rather than silent (B6).
@@ -3595,7 +3730,8 @@ class ReportIn(BaseModel):
         lane_report_current row for a bogus name (SEC-4)."""
         return [lane for lane in lanes if lane.name in LANE_LABELS]
 
-    @field_validator("proxy_coverage", "youtube_import", "broll_ingest", mode="before")
+    @field_validator("proxy_coverage", "youtube_import", "broll_ingest",
+                     "music_ingest", mode="before")
     @classmethod
     def _a_bad_section_never_422s(cls, value, info):
         """A diagnostic section that will not parse is DROPPED, not fatal.
@@ -3788,6 +3924,7 @@ def api_report(
         transport=flatten_transport_health(payload.transport_health, received_at),
         guard=flatten_sync_guard(payload.sync_guard, received_at),
         ingest=flatten_broll_ingest(payload.broll_ingest, received_at),
+        music=flatten_music_ingest(payload.music_ingest, received_at),
         proxy=flatten_proxy_coverage(payload.proxy_coverage, received_at),
     )
     # An overridden "Remove from this machine" destroyed a local copy the
@@ -3895,6 +4032,13 @@ def api_report(
     cancels = broll_cancel_requested(settings, editor, machine)
     if cancels:
         result["commands"]["broll_ingest"] = {"cancel": cancels}
+    # ...and the same for music, on the same terms and with the same
+    # best-effort rules (MUSIC_INGEST_PLAN.md step 3). Present only when there
+    # is something to cancel: an empty list is not an instruction and this
+    # rides every tick of every machine.
+    music_cancels = music_cancel_requested(settings, editor, machine)
+    if music_cancels:
+        result["commands"]["music_ingest"] = {"cancel": music_cancels}
     return result
 
 

@@ -59,7 +59,12 @@ KIND_POSTER = "poster"
 KIND_SPRITE = "sprite"
 KIND_PROXY = "proxy"
 KIND_ORIGINAL = "original"
-UPLOAD_ORDER = {KIND_POSTER: 0, KIND_SPRITE: 1, KIND_PROXY: 2, KIND_ORIGINAL: 3}
+# Music's one artefact per item (music_ingest.KIND_AUDIO). It has no ordering
+# problem to solve -- a music item owns exactly one file -- so it sits at the
+# end and the b-roll order above is untouched.
+KIND_AUDIO = "audio"
+UPLOAD_ORDER = {KIND_POSTER: 0, KIND_SPRITE: 1, KIND_PROXY: 2, KIND_ORIGINAL: 3,
+                KIND_AUDIO: 4}
 
 # rclone's closing "fatal error received" notice repeats the fact of failure
 # without the cause -- broll_fetch skips it for the same reason.
@@ -245,7 +250,8 @@ class UploadQueue:
     """
 
     def __init__(self, cfg_fn: Callable[[], dict[str, Any]],
-                 runner: Optional[Callable[["UploadQueue", UploadJob, list[str]], None]] = None):
+                 runner: Optional[Callable[["UploadQueue", UploadJob, list[str]], None]] = None,
+                 archive_rel: str = ARCHIVE_REMOTE_REL):
         """`cfg_fn` is read per job, not once: an operator can repoint the
         remote (or fix a blank remote_root) without restarting the tray, and
         a batch can outlive several config reloads.
@@ -254,8 +260,16 @@ class UploadQueue:
         job's outcome -- it must call `queue._finish(job, ok, error)`. That is
         the tests' seam and the one place they are allowed to reach past the
         public surface; nothing in the app passes one.
+
+        `archive_rel` is what this queue's remote paths hang off, under the
+        rclone remote's root: the b-roll archive by default, `Assets/Music`
+        for a music batch (docs/MUSIC_INGEST_PLAN.md 2). It is the ONLY thing
+        that had to change for one queue to serve both kinds -- the ordering,
+        the pause, the one-at-a-time rule and the lsjson verification are the
+        same problem either way.
         """
         self._cfg_fn = cfg_fn
+        self._archive_rel = str(archive_rel or ARCHIVE_REMOTE_REL)
         self._runner = runner
         self._lock = threading.RLock()
         self._queue: list[UploadJob] = []
@@ -411,13 +425,14 @@ class UploadQueue:
                 self._wake.wait(timeout=5.0)
                 self._wake.clear()
                 continue
-            cmd = build_upload_command(cfg, job.local_path, job.remote_rel)
+            cmd = build_upload_command(cfg, job.local_path, job.remote_rel,
+                                       self._archive_rel)
             if self._runner is not None:
                 self._runner(self, job, cmd)
                 continue
             ok, error = run_upload(job, cmd)
             if ok:
-                ok, error = verify_upload(cfg, job)
+                ok, error = verify_upload(cfg, job, archive_rel=self._archive_rel)
             self._finish(job, ok, error)
 
 
@@ -499,7 +514,8 @@ def run_upload(job: UploadJob, cmd: list[str]) -> tuple[bool, str]:
 
 
 def verify_upload(ccsync_cfg: dict[str, Any], job: UploadJob,
-                  runner: Optional[Callable[..., Any]] = None) -> tuple[bool, str]:
+                  runner: Optional[Callable[..., Any]] = None,
+                  archive_rel: str = ARCHIVE_REMOTE_REL) -> tuple[bool, str]:
     """Confirm the far side has the file, at the size we sent -> (ok, error).
 
     A size we cannot READ is not a failure (parse_verify_size's rule): the
@@ -517,7 +533,7 @@ def verify_upload(ccsync_cfg: dict[str, Any], job: UploadJob,
         local_size = None
 
     try:
-        proc = run(build_verify_command(ccsync_cfg, job.remote_rel))
+        proc = run(build_verify_command(ccsync_cfg, job.remote_rel, archive_rel))
     except Exception as exc:  # noqa: BLE001 - see the docstring
         log.debug("broll upload: lsjson verification failed (%s)", exc, exc_info=True)
         return True, ""

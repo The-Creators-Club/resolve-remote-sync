@@ -34,6 +34,10 @@ EXPECTED_KEYS = {
     "features",
     # Which local vision model the b-roll indexer should load (2026-08-18).
     "indexer",
+    # Where this fleet's vendor artefacts live (2026-08-18,
+    # docs/MUSIC_INGEST_PLAN.md step 3): the companion fetches the CLAP audio
+    # model from here, and no vendor host may be hardcoded in the repo.
+    "release_feed_base",
 }
 
 SITE_ENV = {
@@ -157,6 +161,40 @@ def test_site_carries_no_credential_and_no_fleet_inventory(tmp_path):
     for secret in ("super-secret-token", "nas-password", "ingest-secret"):
         assert secret not in resp.text
     assert set(resp.json()) == EXPECTED_KEYS
+
+
+def test_the_release_feed_base_is_the_feed_url_without_its_filename(tmp_path):
+    """What `music_clap_sidecar.feed_base` hangs a model download off. Derived
+    from the ONE URL an operator sets, so the two can never disagree about
+    which feed this fleet trusts."""
+    settings = replace(
+        Settings.from_env(SITE_ENV), db_path=str(tmp_path / "s.db"),
+        session_secret="secret",
+        release_feed_url="https://feed.example.test/download/v1/channel.json")
+    with TestClient(create_app(settings)) as client:
+        body = client.get("/api/v1/site").json()
+
+    assert body["release_feed_base"] == "https://feed.example.test/download/v1"
+
+
+def test_no_feed_configured_is_a_blank_base_not_a_guess(tmp_path):
+    """A fleet with no feed cannot fetch a model, and saying so is the whole
+    answer: a client that invented a host would be downloading an unverified
+    file from somewhere nobody chose."""
+    settings = replace(Settings.from_env(SITE_ENV), db_path=str(tmp_path / "s.db"),
+                       session_secret="secret", release_feed_url="")
+    with TestClient(create_app(settings)) as client:
+        assert client.get("/api/v1/site").json()["release_feed_base"] == ""
+
+
+def test_a_non_https_feed_url_publishes_no_base(tmp_path):
+    """release_feed.py refuses a non-https feed outright; this must not hand a
+    companion a plain-http host to download 280 MB from either."""
+    settings = replace(Settings.from_env(SITE_ENV), db_path=str(tmp_path / "s.db"),
+                       session_secret="secret",
+                       release_feed_url="http://feed.example.test/v1/channel.json")
+    with TestClient(create_app(settings)) as client:
+        assert client.get("/api/v1/site").json()["release_feed_base"] == ""
 
 
 def test_smb_host_falls_back_to_the_nas_host_for_pre_manifest_containers():

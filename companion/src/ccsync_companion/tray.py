@@ -1809,6 +1809,11 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     # and {} is the honest answer on a companion with no orchestrator.
     _get("broll_ingest",
          lambda: (getattr(app, "broll_ingest_view", None) or (lambda: {}))() or {}, {})
+    # ...and the music batch beside it (docs/MUSIC_INGEST_PLAN.md 2). Two
+    # separate sections, because the two run at the same time: music needs no
+    # GPU, so it never waits for b-roll and b-roll never waits for it.
+    _get("music_ingest",
+         lambda: (getattr(app, "music_ingest_view", None) or (lambda: {}))() or {}, {})
     _get("p_swap_available", lambda: (getattr(app, "p_swap_available", None) or (lambda: False))(), False)
     # The CACHED classification, never a probe: p_mapping_mode() spawns
     # `net use P:` (plus a `subst` on a subst-mapped rig), and reading it here
@@ -1949,6 +1954,7 @@ def _menu_fingerprint(snap: dict) -> tuple:
         # is dropped on it -- so without this the whole group would be
         # unreachable until something unrelated changed (UI-3's shape).
         _ingest_fingerprint(snap.get("broll_ingest")),
+        _ingest_fingerprint(snap.get("music_ingest")),
         # The safety latches decide whether two ACTIONS exist at all
         # ("Resume proxy download", "Start syncing again"), so they have to
         # move the fingerprint or the menu keeps offering the wrong one until
@@ -2032,8 +2038,14 @@ def _proxy_eta_line(gap: Optional[dict]) -> str:
     return f"About {proxy_history.human_duration(eta)} to go at this rate"
 
 
-def _ingest_lines(ingest: Optional[dict]) -> list[str]:
-    """The b-roll indexing lines, in the plan's words (§3.3).
+def _ingest_lines(ingest: Optional[dict], label: str = "b-roll",
+                  unit: str = "clip") -> list[str]:
+    """The indexing lines for one kind, in the plan's words (BROLL 3.3).
+
+    `label`/`unit` default to b-roll's words, so the b-roll call is the call
+    it always was; music passes its own ("music", "track"). One function for
+    both because the sentences ARE the same sentences -- what is happening,
+    when it stops -- and two copies would drift the moment one was reworded.
 
     Advisory, like the proxy lines above and for the same reason: an editor
     whose machine is indexing has nothing to fix, and the sentence has to say
@@ -2054,24 +2066,26 @@ def _ingest_lines(ingest: Optional[dict]) -> list[str]:
     percent = ingest.get("model_download_percent")
 
     if percent is not None:
-        lines.append(f"Downloading the b-roll indexing model… {int(percent)} %")
+        lines.append(f"Downloading the {label} indexing model… {int(percent)} %")
     elif gate == "running":
         tail = (" (stops when you're back)"
                 if ingest.get("run_mode") != "foreground" else "")
-        lines.append(f"Indexing b-roll… {done} of {total}{tail}")
+        lines.append(f"Indexing {label}… {done} of {total}{tail}")
     elif gate in ("user-active", "resolve-open") and total:
         left = max(total - done - failed, 0)
-        lines.append(f"B-roll indexing waits until you're away: {left} clips queued")
+        lines.append(f"{label.capitalize()} indexing waits until you're away: "
+                     f"{left} {unit}s queued")
     elif gate == "paused" and total:
-        lines.append(f"B-roll indexing paused: {max(total - done - failed, 0)} clips left")
+        lines.append(f"{label.capitalize()} indexing paused: "
+                     f"{max(total - done - failed, 0)} {unit}s left")
 
     upload_left = int(ingest.get("upload_left") or 0)
     if ingest.get("upload_paused") and upload_left:
-        lines.append(f"Uploading indexed b-roll is paused: {upload_left} left")
+        lines.append(f"Uploading indexed {label} is paused: {upload_left} left")
     elif upload_left:
-        lines.append(f"Uploading indexed b-roll… {upload_left} clip(s) left")
+        lines.append(f"Uploading indexed {label}… {upload_left} {unit}(s) left")
     if failed and total:
-        lines.append(f"{failed} b-roll clip(s) could not be indexed. See the log")
+        lines.append(f"{failed} {label} {unit}(s) could not be indexed. See the log")
     return lines
 
 
@@ -2112,19 +2126,24 @@ def _with_ingest_suffix(text: str, snap: dict) -> str:
     rebuild per clip -- see _ingest_fingerprint), so this is the one place an
     editor watches the number move.
     """
-    ingest = snap.get("broll_ingest")
-    if not isinstance(ingest, dict) or not ingest:
-        return text
-    percent = ingest.get("model_download_percent")
-    if percent is not None:
-        suffix = f" · fetching the b-roll model {int(percent)}%"
-    elif ingest.get("gate") == "running":
-        suffix = (f" · indexing b-roll {int(ingest.get('done') or 0)}/"
-                  f"{int(ingest.get('total') or 0)}")
-    else:
-        return text
-    combined = text + suffix
-    return combined if len(combined) <= TOOLTIP_LIMIT else text
+    for key, label in (("broll_ingest", "b-roll"), ("music_ingest", "music")):
+        ingest = snap.get(key)
+        if not isinstance(ingest, dict) or not ingest:
+            continue
+        percent = ingest.get("model_download_percent")
+        if percent is not None:
+            suffix = f" · fetching the {label} model {int(percent)}%"
+        elif ingest.get("gate") == "running":
+            suffix = (f" · indexing {label} {int(ingest.get('done') or 0)}/"
+                      f"{int(ingest.get('total') or 0)}")
+        else:
+            continue
+        # ONE suffix, whichever kind is working: the tooltip is 63 characters
+        # on win32 and two of these would push the sync state -- the thing the
+        # tooltip is for -- off the end.
+        combined = text + suffix
+        return combined if len(combined) <= TOOLTIP_LIMIT else text
+    return text
 
 
 def _proxy_fingerprint(gap: Optional[dict]) -> tuple:
@@ -2343,6 +2362,28 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
     def on_show_ingest_progress(icon, item):
         _spawn(app, "Show indexing progress",
                getattr(app, "show_ingest_progress", None) or (lambda: None))
+
+    def on_index_music_now(icon, item):
+        _spawn(app, "Index music now",
+               getattr(app, "index_music_now", None) or (lambda: None))
+
+    def on_pause_music_ingest(icon, item):
+        _spawn(app, "Pause music indexing",
+               getattr(app, "pause_music_ingest", None) or (lambda: None))
+
+    def on_resume_music_ingest(icon, item):
+        _spawn(app, "Resume music indexing",
+               getattr(app, "resume_music_ingest", None) or (lambda: None))
+
+    def on_cancel_music_ingest(icon, item):
+        # CONFIRMED in the app (it opens a dialog), which is why it goes
+        # through _spawn like every other action.
+        _spawn(app, "Cancel the music batch",
+               getattr(app, "cancel_music_ingest", None) or (lambda: None))
+
+    def on_show_music_ingest_progress(icon, item):
+        _spawn(app, "Show music indexing progress",
+               getattr(app, "show_music_ingest_progress", None) or (lambda: None))
 
     def on_proxy_history(icon, item):
         # Rendering the report reads the ledger off disk, so it goes through
@@ -2602,6 +2643,29 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
             "Show indexing progress…", on_show_ingest_progress))
         ingest_actions.append(tray_backend.MenuItem(
             "Cancel the b-roll batch…", on_cancel_broll_ingest))
+
+    # Music indexing (music_ingest.py, 2026-08-18). The same shape, its own
+    # batch: an editor can be indexing an album and a camera card at once, and
+    # a menu that showed one set of controls for both would pause the wrong
+    # thing.
+    music = snap.get("music_ingest") or {}
+    ingest_items += [tray_backend.MenuItem(line, None, enabled=False)
+                     for line in _ingest_lines(music, "music", "track")]
+    if music.get("batch_uid"):
+        if music.get("paused"):
+            ingest_actions.append(tray_backend.MenuItem(
+                "Resume indexing the music batch", on_resume_music_ingest))
+        else:
+            if music.get("gate") in ("user-active", "resolve-open"):
+                ingest_actions.append(tray_backend.MenuItem(
+                    "Index the music batch now (don't wait until I'm away)",
+                    on_index_music_now))
+            ingest_actions.append(tray_backend.MenuItem(
+                "Pause music indexing", on_pause_music_ingest))
+        ingest_actions.append(tray_backend.MenuItem(
+            "Show music indexing progress…", on_show_music_ingest_progress))
+        ingest_actions.append(tray_backend.MenuItem(
+            "Cancel the music batch…", on_cancel_music_ingest))
 
         # "nothing syncs until you do" is only TRUE when login is required. With
     # require_login=false the lanes are already running under editor_name, and

@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import broll_ingest as broll_ingest_mod
+from . import music_ingest as music_ingest_mod
 from . import broll_server as broll_server_mod
 from . import canon
 from . import config as config_mod
@@ -944,6 +945,33 @@ class CompanionApp:
             log.exception("failed to build the b-roll ingest orchestrator")
             self.broll_ingestor = None
 
+        # Music ingest (music_ingest.py, 2026-08-18): the same object with the
+        # music kind and the CLAP sidecar. Its own try for the same reason as
+        # the b-roll one above, and its own state file, its own batch and its
+        # own progress window -- the two run side by side, because music needs
+        # no GPU and therefore never has to wait for b-roll.
+        self.music_ingestor: Any = None
+        self._music_ingest_deps: Any = None
+        try:
+            self._music_ingest_deps = self._ingest_deps(
+                kind=music_ingest_mod.ingest_kinds.MUSIC_KIND)
+            if self._music_ingest_deps is not None:
+                self.music_ingestor = music_ingest_mod.MusicIngestor(
+                    cfg,
+                    self._state_dir,
+                    deps=self._music_ingest_deps,
+                    root_present_fn=self.root_is_present,
+                    paused_fn=self.is_paused,
+                    blocked_fn=lambda: bool(self.config_problems),
+                    idle_probe=idle_mod.make_idle_probe(True),
+                    resolve_running_fn=resolve_prefs_mod.resolve_is_running,
+                    notify=self._notify_tray,
+                    show_window=self.show_music_ingest_progress,
+                )
+        except Exception:
+            log.exception("failed to build the music ingest orchestrator")
+            self.music_ingestor = None
+
         # YouTube auto-import (youtube_import.py): files the clips the
         # dashboard's YouTube page downloaded into <project>\Youtube\<term>\
         # into the open Resolve project's Master/Youtube/<term> bins. Its own
@@ -1050,6 +1078,7 @@ class CompanionApp:
             # the admin watching the fleet grid are both looking for exactly
             # this and neither should wait for a heavy cycle.
             get_broll_ingest=self.broll_ingest_status,
+            get_music_ingest=self.music_ingest_status,
             # The safety latches (item 9). Every tick, not just the heavy
             # ones: a tripped breaker and a halted machine are the two states
             # an admin must not learn about a report interval late.
@@ -1090,6 +1119,11 @@ class CompanionApp:
         # A b-roll ingest cancel rides it too (BROLL_INGEST_PLAN.md §4.2):
         # the heartbeat's 410 is still the authoritative stop, this just makes
         # it arrive within one report interval instead of one heartbeat.
+        if self.music_ingestor is not None:
+            try:
+                self.music_ingestor.note_report_response(resp)
+            except Exception:
+                log.exception("music_ingest.note_report_response failed")
         if self.broll_ingestor is not None:
             try:
                 self.broll_ingestor.note_report_response(resp)
@@ -4387,6 +4421,10 @@ class CompanionApp:
             # gate, and nothing to do on a machine nobody drops clips on.
             if self.broll_ingestor is not None:
                 self.broll_ingestor.start()
+            # ...and the music one beside it: separate thread, separate gate,
+            # and nothing to do on a machine nobody drops music on.
+            if self.music_ingestor is not None:
+                self.music_ingestor.start()
         except Exception:
             log.exception("failed to start the proxy generator")
         # Next to it, and behind its own try for the same reason: it needs no
@@ -4449,7 +4487,11 @@ class CompanionApp:
                 # carries `.ingestor`, which is how the /broll/ingest/* routes
                 # reach the live batch. A second one would answer every route
                 # "this machine cannot index".
-                ingest_deps=self._broll_ingest_deps)
+                ingest_deps=self._broll_ingest_deps,
+                # The SAME deps object the music orchestrator was built with,
+                # for the same reason: it carries `.ingestor`, which is how
+                # the /music/ingest/* routes reach the live batch.
+                music_ingest_deps=self._music_ingest_deps)
         except Exception:
             log.exception("failed to start the b-roll Send-to-Resolve server")
             self._broll_server = None
@@ -4637,6 +4679,26 @@ class CompanionApp:
             "Closing this window does not stop it.",
             self.broll_ingestor.progress_model, self._ingest_window_action)
 
+    def show_music_ingest_progress(self) -> None:
+        """Tray action / automatic on a batch start: the music window."""
+        if self.music_ingestor is None:
+            return
+        self._open_work_window(
+            "music_ingest", "INDEXING MUSIC",
+            "Your tracks are analysed on this machine and uploaded to the "
+            "library. Closing this window does not stop it.",
+            self.music_ingestor.progress_model, self._music_ingest_window_action)
+
+    def _music_ingest_window_action(self, name: str) -> None:
+        if self.music_ingestor is None:
+            return
+        {
+            "pause": self.pause_music_ingest,
+            "resume": self.resume_music_ingest,
+            "start_now": self.index_music_now,
+            "cancel": self.cancel_music_ingest,
+        }.get(name, lambda: None)()
+
     def _ingest_window_action(self, name: str) -> None:
         """The window's buttons are the tray's actions -- one object, two
         surfaces, so a pause from either means the same thing."""
@@ -4723,9 +4785,9 @@ class CompanionApp:
     # NULL-SAFE like the proxy accessors above and for the same reason: the
     # orchestrator's constructor is allowed to fail without taking the
     # companion with it, and the tray reads these on its refresh thread.
-    def _ingest_deps(self) -> Any:
-        """What the b-roll ingest orchestrator (and the 8899 routes) are
-        allowed to know about this machine.
+    def _ingest_deps(self, kind: Any = None) -> Any:
+        """What an ingest orchestrator (and the 8899 routes) are allowed to
+        know about this machine.
 
         The three live seams are the app's answers rather than config keys,
         exactly as _ytdl_deps' are: `editor_identity` because a lease needs
@@ -4742,9 +4804,10 @@ class CompanionApp:
                 editor_fn=self.editor_identity,
                 identity_token_fn=lambda: self.identity.token,
                 machine_name=platform.node(),
+                kind=kind,
             )
         except Exception:
-            log.exception("failed to build the b-roll ingest dependencies")
+            log.exception("failed to build the ingest dependencies")
             return None
 
     def broll_ingest_status(self) -> dict[str, Any]:
@@ -4768,6 +4831,78 @@ class CompanionApp:
         except Exception:
             log.debug("broll ingest: status() failed", exc_info=True)
             return {}
+
+    def music_ingest_status(self) -> dict[str, Any]:
+        """The reporter's `music_ingest` section -- the dashboard's
+        MusicIngestIn fields only. Empty when nothing is happening, which is
+        how an absent section clears the fleet grid's chip."""
+        if self.music_ingestor is None:
+            return {}
+        try:
+            return self.music_ingestor.report()
+        except Exception:
+            log.debug("music ingest: report() failed", exc_info=True)
+            return {}
+
+    def music_ingest_view(self) -> dict[str, Any]:
+        """The TRAY's fuller view of the same snapshot (zero I/O)."""
+        if self.music_ingestor is None:
+            return {}
+        try:
+            return self.music_ingestor.status()
+        except Exception:
+            log.debug("music ingest: status() failed", exc_info=True)
+            return {}
+
+    def index_music_now(self) -> None:
+        """Tray action: "don't wait until I'm away" for the current batch."""
+        if self.music_ingestor is None:
+            self._notify_tray("Music indexing is not set up on this machine.")
+            return
+        self.music_ingestor.request_run()
+        self._notify_tray(
+            "Analysing the music batch now. It keeps going while you work.",
+            "ccsync-companion: music")
+
+    def pause_music_ingest(self) -> None:
+        if self.music_ingestor is None:
+            return
+        self.music_ingestor.pause()
+        self._notify_tray("Music indexing paused. Nothing already indexed is lost.",
+                          "ccsync-companion: music")
+
+    def resume_music_ingest(self) -> None:
+        if self.music_ingestor is None:
+            return
+        self.music_ingestor.resume()
+        self._notify_tray("Music indexing will carry on from where it stopped.",
+                          "ccsync-companion: music")
+
+    def cancel_music_ingest(self) -> None:
+        """Tray action, CONFIRMED: the tracks already in the library stay, the
+        rest are dropped."""
+        if self.music_ingestor is None:
+            return
+        snap = self.music_ingest_view()
+        if not snap.get("batch_uid"):
+            return
+        if not self._popup_active_lock.acquire(blocking=False):
+            log.info("music ingest: not asking about the cancel -- a dialog is open")
+            return
+        try:
+            confirmed = popup.confirm_dialog(
+                "STOP INDEXING THIS MUSIC BATCH",
+                f"{snap.get('done', 0)} of {snap.get('total', 0)} tracks are "
+                "already in the library and they stay there.\n\nThe rest will "
+                "not be indexed. The files themselves are not deleted.",
+                ok_label="STOP INDEXING",
+            )
+        finally:
+            self._popup_active_lock.release()
+        if not confirmed:
+            return
+        self.music_ingestor.cancel("cancelled from the tray")
+        self._notify_tray("Music indexing stopped.", "ccsync-companion: music")
 
     def index_broll_now(self) -> None:
         """Tray action: "don't wait until I'm away" for the current batch."""

@@ -55,16 +55,50 @@ from . import broll_server
 from . import broll_upload
 from . import broll_vlm_sidecar as sidecar_mod
 from . import config as config_mod
+from . import ingest_kinds
 from . import popup
 from . import root_guard
 from . import upgrade as upgrade_mod
 
 log = logging.getLogger("ccsync.brollingest")
 
+
+class _KindLog:
+    """`log`, with the kind stamped on every line.
+
+    Every line in this module used to begin `broll ingest:` as a literal.
+    Music runs the SAME methods (docs/MUSIC_INGEST_PLAN.md §2), so a literal
+    would have an operator reading "broll ingest: track 4 failed" while
+    debugging a music batch. Prefixing here rather than at 65 call sites keeps
+    the diff against the b-roll implementation to the word `self`, which is
+    what makes "the b-roll behaviour is exactly preserved" checkable.
+    """
+
+    def __init__(self, logger: logging.Logger, tag: str) -> None:
+        self._log = logger
+        self._tag = f"{tag} ingest: "
+
+    def debug(self, message, *args, **kwargs):
+        self._log.debug(self._tag + message, *args, **kwargs)
+
+    def info(self, message, *args, **kwargs):
+        self._log.info(self._tag + message, *args, **kwargs)
+
+    def warning(self, message, *args, **kwargs):
+        self._log.warning(self._tag + message, *args, **kwargs)
+
+    def error(self, message, *args, **kwargs):
+        self._log.error(self._tag + message, *args, **kwargs)
+
+    def exception(self, message, *args, **kwargs):
+        self._log.exception(self._tag + message, *args, **kwargs)
+
 # Where the fleet routes live under the dashboard (docs/API.md §6a). The
 # dashboard's login_gate carves exactly this prefix out for a companion token,
-# so it is not a string to tidy.
-API_PREFIX = "/broll/api/fleet/ingest"
+# so it is not a string to tidy. The music kind's own prefix (§6b) is carved
+# out by a SEPARATE regex, which is why the value travels on the kind
+# (`ingest_kinds.py`) rather than being derived from it here.
+API_PREFIX = ingest_kinds.BROLL_KIND.api_prefix
 
 TICK_SECONDS = 15.0
 HEARTBEAT_SECONDS = 30.0
@@ -74,7 +108,7 @@ HTTP_TIMEOUT_SECONDS = 20.0
 # vanished drive does not hold the worker thread for ever.
 MEDIA_TIMEOUT_SECONDS = media_mod.RUN_TIMEOUT_SECONDS
 
-STATE_FILENAME = "broll_ingest.json"
+STATE_FILENAME = ingest_kinds.BROLL_KIND.state_filename
 
 # How many times one clip may fail before it is left alone. Two, not three:
 # the second attempt is already the CPU fallback for a proxy NVENC refused,
@@ -130,7 +164,7 @@ STAGED_WAITING = "waiting"
 STAGED_READY = "ready"
 STAGED_FAILED = "failed"
 
-MAX_PREPARE_ITEMS = 2000
+MAX_PREPARE_ITEMS = ingest_kinds.BROLL_KIND.max_prepare_items
 
 
 class LeaseLost(Exception):
@@ -210,8 +244,14 @@ class IngestDeps:
                  sidecar: Any = None,
                  uploader: Any = None,
                  machine_name: str = "",
-                 ingestor: Any = None) -> None:
+                 ingestor: Any = None,
+                 kind: Any = None) -> None:
         self.cfg = cfg or {}
+        # Which ingest this dependency bundle is for. b-roll by default, so
+        # every existing caller (app.py, the loopback, the tests) is unchanged;
+        # `broll_server` reads it to answer the right capability route.
+        self.kind = kind or ingest_kinds.BROLL_KIND
+        self.log = _KindLog(log, self.kind.name)
         self._editor_fn = editor_fn
         self._identity_token_fn = identity_token_fn
         self.request = request_fn or default_request
@@ -244,7 +284,7 @@ class IngestDeps:
             try:
                 return str(self._editor_fn() or "").strip()
             except Exception:
-                log.debug("broll ingest: editor_fn failed", exc_info=True)
+                self.log.debug("editor_fn failed", exc_info=True)
                 return ""
         return str(self.cfg.get("editor_name", "") or "").strip()
 
@@ -253,7 +293,7 @@ class IngestDeps:
             try:
                 return str(self._identity_token_fn() or "").strip()
             except Exception:
-                log.debug("broll ingest: identity_token_fn failed", exc_info=True)
+                self.log.debug("identity_token_fn failed", exc_info=True)
                 return ""
         return ""
 
@@ -268,12 +308,19 @@ class FleetClient:
     read it behaves exactly as before.
     """
 
-    def __init__(self, deps: IngestDeps, timeout: float = HTTP_TIMEOUT_SECONDS) -> None:
+    def __init__(self, deps: IngestDeps, timeout: float = HTTP_TIMEOUT_SECONDS,
+                 prefix: str = "") -> None:
         self.deps = deps
         self.timeout = timeout
+        # The kind's prefix, defaulting to the deps' own kind and then to
+        # b-roll's: a client built by an older caller reaches exactly the
+        # routes it always did.
+        self.prefix = prefix or getattr(
+            getattr(deps, "kind", None), "api_prefix", "") or API_PREFIX
+        self.log = getattr(deps, "log", None) or _KindLog(log, ingest_kinds.BROLL)
 
     def _url(self, suffix: str) -> str:
-        return f"{self.deps.dashboard_url}{API_PREFIX}{suffix}"
+        return f"{self.deps.dashboard_url}{self.prefix}{suffix}"
 
     def _headers(self) -> dict:
         return {
@@ -314,7 +361,7 @@ class FleetClient:
         status, parsed = self._call(
             "POST", f"/batches/{batch_uid}/items/{item_uid}/status", body)
         if status != 200:
-            log.warning("broll ingest: the server refused item %s -> %s (HTTP %s: %s)",
+            self.log.warning("the server refused item %s -> %s (HTTP %s: %s)",
                         item_uid, state, status, _detail_of(parsed) or "no detail")
         return parsed if isinstance(parsed, dict) else {}
 
@@ -327,6 +374,20 @@ class FleetClient:
             "POST", f"/batches/{batch_uid}/items/{item_uid}/uploaded",
             {"files": files, "original_uploaded": bool(original_uploaded)})
 
+    def item_uploaded_size(self, batch_uid: str, item_uid: str,
+                           size: Optional[int]) -> tuple[int, Any]:
+        """The MUSIC kind's `uploaded` body (docs/API.md §6b): one size and no
+        paths at all.
+
+        A music item owns exactly one file and the SERVER allocated its name at
+        `result`, so there is nothing about where to look coming off the wire
+        -- which is why this is a different call rather than the same one with
+        an empty list.
+        """
+        return self._call(
+            "POST", f"/batches/{batch_uid}/items/{item_uid}/uploaded",
+            {"size": int(size) if size is not None else None})
+
     def release(self, batch_uid: str, state: str, summary: Any = None) -> None:
         """Finish the batch. A LOST LEASE here is not an error: the cancel path
         expires the lease before this call is made, and the server accepts a
@@ -335,10 +396,10 @@ class FleetClient:
             self._call("POST", f"/batches/{batch_uid}/release",
                        {"state": state, "summary": summary})
         except LeaseLost:
-            log.info("broll ingest: the server had already taken batch %s back",
+            self.log.info("the server had already taken batch %s back",
                      batch_uid)
         except Exception as exc:  # noqa: BLE001
-            log.warning("broll ingest: could not release batch %s (%s)", batch_uid, exc)
+            self.log.warning("could not release batch %s (%s)", batch_uid, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -453,10 +514,24 @@ class BrollIngestor:
         run_media_fn: Optional[Callable[..., tuple]] = None,
         hash_fn: Optional[Callable[[Any], str]] = None,
         clock: Callable[[], float] = time.monotonic,
+        kind: Any = None,
     ) -> None:
         self.cfg = cfg or {}
-        self.state_path = Path(state_dir) / STATE_FILENAME
-        self.deps = deps if deps is not None else IngestDeps(self.cfg)
+        # WHICH ingest this is (docs/MUSIC_INGEST_PLAN.md §2). b-roll by
+        # default and in every existing call site, so this class behaves
+        # exactly as it did; `MusicIngestor` passes the music kind and
+        # overrides the per-item pipeline, which is the only part that is
+        # genuinely a different job.
+        self.kind = kind or ingest_kinds.BROLL_KIND
+        # What "nothing left to do with this item" means. b-roll's four, plus
+        # whatever the kind adds: music has `queued_for_base_rig`, the fallback
+        # for a companion that could not embed (MUSIC_INGEST_PLAN.md 1), and an
+        # item in it is finished HERE while the work goes on elsewhere.
+        self.item_finished = frozenset(
+            getattr(self.kind, "finished_states", None) or ITEM_FINISHED)
+        self.log = _KindLog(log, self.kind.name)
+        self.state_path = Path(state_dir) / self.kind.state_filename
+        self.deps = deps if deps is not None else IngestDeps(self.cfg, kind=self.kind)
         self.deps.ingestor = self
 
         self._root_present_fn = root_present_fn
@@ -492,18 +567,18 @@ class BrollIngestor:
         # constructed inside CompanionApp.__init__, where a hand-edited
         # `broll_ingest_idle_seconds = "5m"` would take the windowed exe down
         # with no tray and no log line (proxy_gen's note, same trap).
-        self.enabled = bool(self.cfg.get("broll_ingest_enabled", True))
+        self.enabled = bool(self.cfg.get(self.kind.cfg_key("enabled"), True))
         self.ffmpeg_path = str(self.cfg.get("ffmpeg_path", "ffmpeg")
                                or "ffmpeg").strip() or "ffmpeg"
         self.idle_seconds = config_mod.coerce_numeric(
-            self.cfg, "broll_ingest_idle_seconds",
+            self.cfg, self.kind.cfg_key("idle_seconds"),
             config_mod.coerce_numeric(self.cfg, "proxy_gen_idle_seconds", 300))
         self.skip_while_resolve = bool(
-            self.cfg.get("broll_ingest_skip_while_resolve", True))
+            self.cfg.get(self.kind.cfg_key("skip_while_resolve"), True))
         self.free_space_floor_gb = config_mod.coerce_numeric(
-            self.cfg, "broll_ingest_free_space_floor_gb", 20)
+            self.cfg, self.kind.cfg_key("free_space_floor_gb"), 20)
         self.max_concurrent_ffmpeg = int(config_mod.coerce_numeric(
-            self.cfg, "broll_ingest_max_concurrent_ffmpeg", 2))
+            self.cfg, self.kind.cfg_key("max_concurrent_ffmpeg"), 2))
 
         # -- state, ALL of it guarded by _lock: status() is called from the
         # tray's refresh thread and the reporter's tick while this thread
@@ -535,11 +610,11 @@ class BrollIngestor:
         try:
             self._resume()
         except Exception:
-            log.exception("broll ingest: could not resume the saved batch")
+            self.log.exception("could not resume the saved batch")
 
     # -- staging paths -----------------------------------------------------
     def staging_root(self) -> Optional[Path]:
-        return broll_server.ingest_staging_root(self.cfg)
+        return self.kind.staging_root(self.cfg)
 
     def staging_dir(self, staging_id: str) -> Optional[Path]:
         root = self.staging_root()
@@ -589,7 +664,7 @@ class BrollIngestor:
                 tmp.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
                 os.replace(str(tmp), str(self.state_path))
         except Exception:
-            log.warning("broll ingest: could not write %s", self.state_path,
+            self.log.warning("could not write %s", self.state_path,
                         exc_info=True)
             _unlink(tmp)
 
@@ -602,7 +677,7 @@ class BrollIngestor:
         try:
             saved = json.loads(self.state_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            log.warning("broll ingest: %s is unreadable -- starting clean",
+            self.log.warning("%s is unreadable -- starting clean",
                         self.state_path)
             return
         if not isinstance(saved, dict):
@@ -617,7 +692,7 @@ class BrollIngestor:
             return
         for item in batch.get("items") or []:
             local = item.get("local_path")
-            if item.get("stage") in ITEM_FINISHED:
+            if item.get("stage") in self.item_finished:
                 continue
             if local and not os.path.isfile(local):
                 item["stage"] = ITEM_FAILED
@@ -627,7 +702,7 @@ class BrollIngestor:
         # restart, and the first tick re-issues the (idempotent) claim.
         batch["needs_claim"] = True
         self._batch = batch
-        log.info("broll ingest: resuming batch %s (%d clip(s), %d already live)",
+        self.log.info("resuming batch %s (%d clip(s), %d already live)",
                  batch.get("uid"), len(batch.get("items") or []),
                  sum(1 for i in batch.get("items") or [] if i.get("stage") == ITEM_LIVE))
 
@@ -641,7 +716,7 @@ class BrollIngestor:
         except Exception:
             # "Can't tell" is present, matching proxy_gen: an unanswerable
             # probe must not switch a feature off.
-            log.debug("broll ingest: could not check local_root", exc_info=True)
+            self.log.debug("could not check local_root", exc_info=True)
             return True
 
     def _is_paused(self) -> bool:
@@ -650,14 +725,14 @@ class BrollIngestor:
         try:
             return bool(self._paused_fn()) if self._paused_fn is not None else False
         except Exception:
-            log.debug("broll ingest: paused_fn failed", exc_info=True)
+            self.log.debug("paused_fn failed", exc_info=True)
             return False
 
     def _is_blocked(self) -> bool:
         try:
             return bool(self._blocked_fn()) if self._blocked_fn is not None else False
         except Exception:
-            log.debug("broll ingest: blocked_fn failed", exc_info=True)
+            self.log.debug("blocked_fn failed", exc_info=True)
             return False
 
     def _resolve_running(self) -> bool:
@@ -669,7 +744,7 @@ class BrollIngestor:
         try:
             return bool(self._resolve_running_fn())
         except Exception:
-            log.debug("broll ingest: resolve_running_fn failed", exc_info=True)
+            self.log.debug("resolve_running_fn failed", exc_info=True)
             return True
 
     def _user_is_away(self) -> bool:
@@ -679,7 +754,7 @@ class BrollIngestor:
         try:
             value = self._idle_probe.seconds_idle()
         except Exception:
-            log.debug("broll ingest: idle probe failed", exc_info=True)
+            self.log.debug("idle probe failed", exc_info=True)
             return False
         return value is not None and float(value) >= self.idle_seconds
 
@@ -692,7 +767,7 @@ class BrollIngestor:
             ok, _message = probe(self.ffmpeg_path)
             return bool(ok)
         except Exception:
-            log.debug("broll ingest: ffmpeg probe failed", exc_info=True)
+            self.log.debug("ffmpeg probe failed", exc_info=True)
             return False
 
     def _nvenc(self) -> bool:
@@ -703,7 +778,7 @@ class BrollIngestor:
                 probe = ffmpeg_tools.detect_encoders
             return "h264_nvenc" in probe(self.ffmpeg_path)
         except Exception:
-            log.debug("broll ingest: encoder detection failed", exc_info=True)
+            self.log.debug("encoder detection failed", exc_info=True)
             return False
 
     def _probe(self, path: Any) -> dict:
@@ -731,7 +806,7 @@ class BrollIngestor:
             batch = self._batch
         if not batch:
             return False
-        return any(item.get("stage") not in ITEM_FINISHED
+        return any(item.get("stage") not in self.item_finished
                    and not (item.get("stage") == ITEM_FAILED
                             and int(item.get("attempts") or 0) >= MAX_ITEM_ATTEMPTS)
                    for item in batch.get("items") or [])
@@ -778,7 +853,7 @@ class BrollIngestor:
         try:
             return self.sidecar.fits(tier)
         except Exception:
-            log.debug("broll ingest: the tier fit check failed", exc_info=True)
+            self.log.debug("the tier fit check failed", exc_info=True)
             return False, "this machine could not be checked for the indexing model"
 
     def _model_ready(self, tier: str) -> bool:
@@ -787,7 +862,7 @@ class BrollIngestor:
             return bool((snapshot.get("model_ready") or {}).get(tier)
                         and snapshot.get("runtime_ready"))
         except Exception:
-            log.debug("broll ingest: the sidecar snapshot failed", exc_info=True)
+            self.log.debug("the sidecar snapshot failed", exc_info=True)
             return False
 
     def _publish_state(self, state: str) -> None:
@@ -808,12 +883,12 @@ class BrollIngestor:
             self._warning = message
         if same:
             return
-        log.warning("broll ingest: %s", message)
+        self.log.warning("%s", message)
         if self._notify is not None:
             try:
-                self._notify(message, "ccsync-companion: b-roll")
+                self._notify(message, f"ccsync-companion: {self.kind.label}")
             except Exception:
-                log.debug("broll ingest: the tray notification failed", exc_info=True)
+                self.log.debug("the tray notification failed", exc_info=True)
 
     def _clear_warning(self) -> None:
         with self._lock:
@@ -884,6 +959,10 @@ class BrollIngestor:
         snap = self.status()
         if not snap["batch_uid"] and not snap["warning"]:
             return {}
+        # NOTE the absence of a `kind` field: this is b-roll's section, and the
+        # dashboard's BrollIngestIn declares exactly these keys. The music
+        # subclass adds its own (`music_ingest.MusicIngestor.report`) -- the
+        # two sections ride the same report and land in different columns.
         return {
             "active": bool(snap["active"]),
             "batch_uid": snap["batch_uid"],
@@ -924,7 +1003,7 @@ class BrollIngestor:
         """The sentence the PROXY generator shows while it stands aside."""
         if not self.is_working():
             return None
-        return "indexing b-roll first"
+        return self.kind.blocking_sentence()
 
     def block_reason(self) -> Optional[str]:
         """Shutdown-screen text while a batch is in flight, else None.
@@ -938,8 +1017,9 @@ class BrollIngestor:
             return None
         left = max(snap["total"] - snap["done"] - snap["failed"], 0)
         if snap["gate"] == STATE_NO_MODEL:
-            return "still downloading the b-roll indexing model"
-        return f"still indexing b-roll ({left} clip(s) left)"
+            return f"still downloading the {self.kind.label} indexing model"
+        return (f"still indexing {self.kind.label} "
+                f"({left} {self.kind.unit}(s) left)")
 
     def progress_model(self) -> popup.ProgressModel:
         """This batch as the shared work window draws it (popup.py).
@@ -958,7 +1038,7 @@ class BrollIngestor:
             actions.append("start_now")
         note = snap["warning"] or _gate_note(snap["gate"])
         return popup.ProgressModel(
-            title="INDEXING B-ROLL",
+            title=self.kind.window_title,
             phase=snap["gate"],
             headline=(f"Downloading {snap['model_download_name']}"
                       if snap["model_download_percent"] is not None else ""),
@@ -969,6 +1049,7 @@ class BrollIngestor:
             done=snap["done"], total=snap["total"], failed=snap["failed"],
             eta_seconds=snap["eta_seconds"],
             note=note,
+            unit=self.kind.unit,
             actions=tuple(actions),
             finished=bool(snap["total"]) and snap["done"] + snap["failed"] >= snap["total"],
         )
@@ -982,7 +1063,7 @@ class BrollIngestor:
         self._cancel.clear()
         self._save()
         self._wake.set()
-        log.info("broll ingest: a foreground run was requested from the tray")
+        self.log.info("a foreground run was requested from the tray")
 
     def pause(self) -> None:
         with self._lock:
@@ -1005,7 +1086,7 @@ class BrollIngestor:
             try:
                 uploader.pause() if paused else uploader.resume()
             except Exception:
-                log.debug("broll ingest: could not pause the upload queue",
+                self.log.debug("could not pause the upload queue",
                           exc_info=True)
         self._save()
 
@@ -1021,7 +1102,7 @@ class BrollIngestor:
         uid = batch.get("uid")
         if uid:
             self._client().release(uid, "cancelled", {"reason": reason})
-            log.info("broll ingest: batch %s cancelled (%s)", uid, reason)
+            self.log.info("batch %s cancelled (%s)", uid, reason)
         with self._lock:
             self._batch = None
             self._current = {}
@@ -1048,25 +1129,30 @@ class BrollIngestor:
                      "batch": self.status()["batch_uid"]}
 
     def note_report_response(self, resp: Any) -> None:
-        """`commands.broll_ingest.cancel` from the report reply.
+        """`commands.<kind>_ingest.cancel` from the report reply.
 
         The heartbeat's 410 remains the authoritative stop; this only makes a
         cancel arrive within one report interval instead of one heartbeat.
         Best effort, and never raises into the reporter's loop.
+
+        The block is looked up by the KIND's section name, so a music
+        orchestrator cannot be stopped by a b-roll cancel and vice versa --
+        one editor can be running one of each at the same time.
         """
         try:
             commands = (resp or {}).get("commands") if isinstance(resp, dict) else None
-            block = (commands or {}).get("broll_ingest") if isinstance(commands, dict) else None
+            block = ((commands or {}).get(self.kind.report_section)
+                     if isinstance(commands, dict) else None)
             uids = (block or {}).get("cancel") if isinstance(block, dict) else None
             if not uids:
                 return
             with self._lock:
                 uid = (self._batch or {}).get("uid")
             if uid and uid in list(uids):
-                log.info("broll ingest: the dashboard asked for batch %s to stop", uid)
+                self.log.info("the dashboard asked for batch %s to stop", uid)
                 self.cancel("cancelled from the dashboard")
         except Exception:
-            log.debug("broll ingest: could not read the report response",
+            self.log.debug("could not read the report response",
                       exc_info=True)
 
     # -- staging (the loopback's prepare/upload/progress/thumb) ------------
@@ -1081,15 +1167,15 @@ class BrollIngestor:
         raw_items = body.get("items")
         if not isinstance(raw_items, list) or not raw_items:
             return 400, {"ok": False, "message": "no clips were offered"}
-        if len(raw_items) > MAX_PREPARE_ITEMS:
+        if len(raw_items) > self.kind.max_prepare_items:
             return 413, {"ok": False, "message": (
-                f"that is {len(raw_items)} clips; {MAX_PREPARE_ITEMS} is the most "
-                "one batch can hold")}
+                f"that is {len(raw_items)} {self.kind.unit}s; "
+                f"{self.kind.max_prepare_items} is the most one batch can hold")}
         root = self.staging_root()
         if root is None:
             return 503, {"ok": False, "message": (
                 "this machine has no synced tree, so there is nowhere to stage "
-                "the clips")}
+                f"the {self.kind.unit}s")}
         refusal = self._space_refusal(root)
         if refusal:
             return 507, {"ok": False, "message": refusal}
@@ -1100,7 +1186,7 @@ class BrollIngestor:
             directory.mkdir(parents=True, exist_ok=True)
             (directory / "out").mkdir(exist_ok=True)
         except OSError as exc:
-            log.warning("broll ingest: could not create %s (%s)", directory, exc)
+            self.log.warning("could not create %s (%s)", directory, exc)
             return 507, {"ok": False, "message": (
                 "the companion could not create its staging folder -- "
                 f"{exc.strerror or exc}")}
@@ -1121,10 +1207,10 @@ class BrollIngestor:
                 "state": STAGED_WAITING, "hash": None, "probe": None, "error": "",
                 "path": "", "thumb": "",
             }
-            if ext not in broll_server.INGEST_VIDEO_EXTS:
+            if ext not in self.kind.exts:
                 entry.update(state=STAGED_FAILED,
-                             error=f"{ext or 'that file'} is not a video this "
-                                   "machine can index")
+                             error=f"{ext or 'that file'} is not "
+                                   f"{self.kind.media_word}")
                 answers.append({"local_id": local_id, "accepted": False,
                                 "reason": entry["error"]})
                 items[local_id] = entry
@@ -1144,7 +1230,7 @@ class BrollIngestor:
                 entry["path"] = str(directory / f"{local_id}{ext}")
                 answers.append({
                     "local_id": local_id, "accepted": True,
-                    "upload_url": f"/broll/ingest/upload/{staging_id}/{local_id}",
+                    "upload_url": self.kind.upload_url(staging_id, local_id),
                 })
             items[local_id] = entry
 
@@ -1153,7 +1239,8 @@ class BrollIngestor:
                                          "items": items, "at": _iso_now()}
         self._save()
         self._start_prepare_worker(staging_id)
-        log.info("broll ingest: staged %d clip(s) as %s", len(items), staging_id)
+        self.log.info("staged %d %s(s) as %s", len(items), self.kind.unit,
+                      staging_id)
         return 202, {"ok": True, "staging_id": staging_id, "items": answers}
 
     def upload_slot(self, staging_id: str, local_id: str) -> tuple[int, dict]:
@@ -1243,7 +1330,7 @@ class BrollIngestor:
             return 404, {"ok": False, "message": "no preview for that clip yet"}
         from . import loopback_guard
         if not loopback_guard.is_within(thumb, directory):
-            log.warning("broll ingest: refusing a thumb outside staging: %s", thumb)
+            self.log.warning("refusing a thumb outside staging: %s", thumb)
             return 403, {"ok": False, "message": "refused"}
         try:
             return 200, thumb.read_bytes()
@@ -1268,7 +1355,7 @@ class BrollIngestor:
                 "this machine is already indexing another batch")}
         if not self.enabled:
             return 503, {"ok": False, "message": (
-                "b-roll indexing is switched off on this machine")}
+                f"{self.kind.label} indexing is switched off on this machine")}
         if not self.deps.dashboard_url or not self.deps.token:
             return 503, {"ok": False, "message": (
                 "this machine has no dashboard URL or token configured")}
@@ -1281,19 +1368,20 @@ class BrollIngestor:
                 staging = self._staging.get(staging_id)
             if staging is None:
                 return 409, {"ok": False, "message": (
-                    "those clips are no longer staged on this machine -- drop "
-                    "them again")}
+                    f"those {self.kind.unit}s are no longer staged on this "
+                    "machine - drop them again")}
 
-        capabilities = broll_server.build_ingest_capabilities(self.cfg, self, self.deps)
+        capabilities = broll_server.build_ingest_capabilities(
+            self.cfg, self, self.deps, kind=self.kind)
         try:
             status, parsed = self._client().claim(batch_uid, self._tier(), capabilities)
         except Exception as exc:  # noqa: BLE001 - an unreachable dashboard is an answer
-            log.warning("broll ingest: could not claim batch %s (%s)", batch_uid, exc)
+            self.log.warning("could not claim batch %s (%s)", batch_uid, exc)
             return 503, {"ok": False, "message": (
                 "this machine could not reach the dashboard to claim the batch")}
         if status != 200 or not isinstance(parsed, dict):
             message = _detail_of(parsed) or "the dashboard would not hand over this batch"
-            log.warning("broll ingest: claim of %s refused (HTTP %s: %s)",
+            self.log.warning("claim of %s refused (HTTP %s: %s)",
                         batch_uid, status, message)
             return (status if status in (403, 409, 410) else 503), {
                 "ok": False, "message": message}
@@ -1304,7 +1392,7 @@ class BrollIngestor:
             # editor made it in the same form, seconds ago, and the stored copy
             # is what another machine would resume under.
             settings["run_mode"] = run_mode
-        tier = str(settings.get("tier") or "good")
+        tier = str(settings.get("tier") or "good") if self.kind.uses_tier else ""
 
         fits, why = self._fits(tier)
         if not fits:
@@ -1312,7 +1400,7 @@ class BrollIngestor:
             # editor's machines can take the batch. Releasing it `failed` here
             # would make them re-create it instead (plan §6).
             self._warn(why)
-            log.warning("broll ingest: refusing batch %s -- %s", batch_uid, why)
+            self.log.warning("refusing batch %s -- %s", batch_uid, why)
             return 503, {"ok": False, "message": why, "reason": "tier_unfit"}
         self._clear_warning()
 
@@ -1323,8 +1411,7 @@ class BrollIngestor:
             "settings": settings,
             "state": "claimed",
             "share": (parsed.get("batch") or {}).get("share") or "",
-            "archive_remote_rel": parsed.get("archive_remote_rel")
-            or broll_upload.ARCHIVE_REMOTE_REL,
+            "archive_remote_rel": self._remote_rel(parsed),
             "taxonomy": parsed.get("taxonomy") or [],
             "heartbeat_seconds": parsed.get("heartbeat_seconds") or HEARTBEAT_SECONDS,
             "items": [self._item_from_manifest(entry, staging)
@@ -1344,10 +1431,23 @@ class BrollIngestor:
         self._wake.set()
 
         state = "claimed" if self._model_ready(tier) else "waiting-for-model"
-        log.info("broll ingest: claimed batch %s -- %d clip(s), tier %s, %s",
-                 batch_uid, len(batch["items"]), tier, settings.get("run_mode"))
+        self.log.info("claimed batch %s - %d %s(s), tier %s, %s",
+                      batch_uid, len(batch["items"]), self.kind.unit,
+                      tier or "n/a", settings.get("run_mode"))
         return 202, {"ok": True, "batch_uid": batch_uid, "state": state,
                      "run_mode": settings.get("run_mode"), "tier": tier}
+
+    def _remote_rel(self, parsed: dict) -> str:
+        """Where this kind's uploads hang off the remote root.
+
+        The SERVER says (`archive_remote_rel` for b-roll, `library_remote_rel`
+        for music); the constant is only the fallback for a dashboard too old
+        to have said, and it is never a local path -- only this machine knows
+        what the remote root is mounted at (the /music/send principle, applied
+        to a work order).
+        """
+        return (parsed.get("archive_remote_rel")
+                or broll_upload.ARCHIVE_REMOTE_REL)
 
     def _item_from_manifest(self, entry: dict, staging: Optional[dict]) -> dict:
         """One manifest row plus whatever this machine knows about the file."""
@@ -1386,7 +1486,7 @@ class BrollIngestor:
         if self._thread is not None:
             return
         if not self.enabled:
-            log.info("broll ingest: disabled by config")
+            self.log.info("disabled by config")
             return
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._loop, name="ccsync-broll-ingest",
@@ -1409,10 +1509,10 @@ class BrollIngestor:
         try:
             thread.join(timeout=timeout)
             if thread.is_alive():
-                log.warning("broll ingest: the worker did not stop within %.0fs",
+                self.log.warning("the worker did not stop within %.0fs",
                             timeout)
         except Exception:
-            log.exception("broll ingest: failed to join the worker thread")
+            self.log.exception("failed to join the worker thread")
 
     def _loop(self) -> None:
         while not self._stop_event.is_set():
@@ -1421,7 +1521,7 @@ class BrollIngestor:
             except Exception:
                 # One bad tick must not end the thread: a batch that stops
                 # silently is the failure this feature cannot afford.
-                log.exception("broll ingest: tick failed")
+                self.log.exception("tick failed")
             self._wake.wait(TICK_SECONDS)
             self._wake.clear()
 
@@ -1466,7 +1566,7 @@ class BrollIngestor:
         try:
             show()
         except Exception:
-            log.debug("broll ingest: could not open the progress window",
+            self.log.debug("could not open the progress window",
                       exc_info=True)
 
     # -- the model ---------------------------------------------------------
@@ -1484,10 +1584,10 @@ class BrollIngestor:
         with self._lock:
             self._model_note = "" if ok else message
         if ok:
-            log.info("broll ingest: %s", message)
+            self.log.info("%s", message)
             self._clear_warning()
         else:
-            log.warning("broll ingest: the model is not ready -- %s", message)
+            self.log.warning("the model is not ready -- %s", message)
 
     def _download_snapshot(self) -> dict[str, Any]:
         try:
@@ -1500,7 +1600,7 @@ class BrollIngestor:
         try:
             self.sidecar.stop_server()
         except Exception:
-            log.debug("broll ingest: could not stop the model server", exc_info=True)
+            self.log.debug("could not stop the model server", exc_info=True)
 
     # -- the drain ---------------------------------------------------------
     def _should_stop(self) -> bool:
@@ -1524,7 +1624,7 @@ class BrollIngestor:
                 self._lease_lost(str(exc))
                 return STATE_NOTHING_TO_DO
             except Exception as exc:  # noqa: BLE001 - one clip, not the batch
-                log.exception("broll ingest: %s failed", item.get("name"))
+                self.log.exception("%s failed", item.get("name"))
                 self._fail_item(item, f"this clip could not be indexed: {exc}")
             else:
                 if item.get("stage") in (ITEM_UPLOADING, ITEM_LIVE):
@@ -1544,7 +1644,7 @@ class BrollIngestor:
                 return None
             for item in batch.get("items") or []:
                 stage = item.get("stage")
-                if stage in ITEM_FINISHED or stage == ITEM_UPLOADING:
+                if stage in self.item_finished or stage == ITEM_UPLOADING:
                     continue
                 if stage == ITEM_FAILED and int(item.get("attempts") or 0) >= MAX_ITEM_ATTEMPTS:
                     continue
@@ -1659,7 +1759,7 @@ class BrollIngestor:
                         self._fail_item(item, f"the proxy could not be published: {exc}")
                         return None
                     return str(dest)
-                log.warning("broll ingest: %s produced a short proxy on %s",
+                self.log.warning("%s produced a short proxy on %s",
                             item.get("name"), "NVENC" if nvenc else "the CPU")
             _unlink(partial)
             if self._should_stop():
@@ -1674,7 +1774,7 @@ class BrollIngestor:
         try:
             made = float(self._probe(path).get("duration_s") or 0)
         except Exception:
-            log.debug("broll ingest: could not verify %s", path, exc_info=True)
+            self.log.debug("could not verify %s", path, exc_info=True)
             return True
         return made >= expected * VERIFY_DURATION_RATIO
 
@@ -1802,7 +1902,7 @@ class BrollIngestor:
             describe(cfg_shim, storage, {"id": item.get("video_id") or item.get("uid")},
                      server_url=getattr(handle, "url", None))
         except Exception as exc:  # noqa: BLE001
-            log.warning("broll ingest: the local model failed on %s (%s)",
+            self.log.warning("the local model failed on %s (%s)",
                         item.get("name"), exc)
             self._fail_item(item, (
                 f"the local model could not describe this clip ({exc}) -- see "
@@ -1842,7 +1942,7 @@ class BrollIngestor:
         }
         status, parsed = self._client().item_result(uid, item["uid"], body)
         if status != 200:
-            log.warning("broll ingest: the server refused the result for %s "
+            self.log.warning("the server refused the result for %s "
                         "(HTTP %s: %s)", item.get("name"), status,
                         _detail_of(parsed) or "no detail")
         item["stage"] = ITEM_INDEXED
@@ -1897,7 +1997,7 @@ class BrollIngestor:
                 queue.enqueue(local, rel, kind, item_uid=item["uid"],
                               size_bytes=os.path.getsize(local))
             except Exception:
-                log.exception("broll ingest: could not queue %s", rel)
+                self.log.exception("could not queue %s", rel)
         item["stage"] = ITEM_UPLOADING
         self._stage(item, ITEM_UPLOADING, 90)
 
@@ -1909,7 +2009,7 @@ class BrollIngestor:
         try:
             return queue.progress()
         except Exception:
-            log.debug("broll ingest: the upload snapshot failed", exc_info=True)
+            self.log.debug("the upload snapshot failed", exc_info=True)
             return {"queued": 0, "active": None}
 
     def _pump_uploads(self) -> None:
@@ -1929,7 +2029,7 @@ class BrollIngestor:
             landed = {entry["rel"]: entry for entry in queue.uploaded()}
             failures = {entry["rel"]: entry for entry in queue.failures()}
         except Exception:
-            log.debug("broll ingest: could not read the upload queue", exc_info=True)
+            self.log.debug("could not read the upload queue", exc_info=True)
             return
         for item in list(batch.get("items") or []):
             if item.get("stage") != ITEM_UPLOADING:
@@ -1947,21 +2047,21 @@ class BrollIngestor:
             original_uploaded = any(
                 kind == broll_upload.KIND_ORIGINAL for kind in rels.values())
             try:
-                status, parsed = self._client().item_uploaded(
-                    batch["uid"], item["uid"], files, original_uploaded)
+                status, parsed = self._post_uploaded(
+                    batch["uid"], item, files, original_uploaded)
             except LeaseLost as exc:
                 self._lease_lost(str(exc))
                 return
             except Exception as exc:  # noqa: BLE001
-                log.warning("broll ingest: could not report %s as uploaded (%s)",
+                self.log.warning("could not report %s as uploaded (%s)",
                             item.get("name"), exc)
                 continue
             if status == 200:
-                item["stage"] = ITEM_LIVE
-                item["error"] = ""
+                item["stage"] = self._final_state(item)
+                item["error"] = "" if item["stage"] == ITEM_LIVE else item.get("error", "")
                 item["original_uploaded"] = original_uploaded
                 self._mirror_locally(item)
-                log.info("broll ingest: %s is live in the archive", item.get("name"))
+                self.log.info("%s finished as %s", item.get("name"), item["stage"])
             elif status == 409:
                 # The server could not see some of the files. Re-queue exactly
                 # those -- the item STAYS in `uploading`, which is the whole
@@ -1972,7 +2072,7 @@ class BrollIngestor:
                 gone = list((detail or {}).get("missing") or [])
                 tries = int(item.get("upload_attempts") or 0) + 1
                 item["upload_attempts"] = tries
-                log.warning("broll ingest: the NAS is missing %d file(s) for %s "
+                self.log.warning("the NAS is missing %d file(s) for %s "
                             "-- retry %d of %d", len(gone), item.get("name"),
                             tries, MAX_UPLOAD_ATTEMPTS)
                 if tries >= MAX_UPLOAD_ATTEMPTS:
@@ -1982,9 +2082,29 @@ class BrollIngestor:
                     continue
                 self._enqueue_uploads(item)
             else:
-                log.warning("broll ingest: the server would not mark %s live "
+                self.log.warning("the server would not mark %s live "
                             "(HTTP %s)", item.get("name"), status)
         self._save()
+
+    def _final_state(self, item: dict) -> str:
+        """What an item becomes once its files are on the NAS.
+
+        `live` for b-roll, always: an uploaded clip with an index row IS live.
+        Music has one other ending (`queued_for_base_rig`, the fallback for a
+        machine that could not embed), so it overrides this rather than having
+        the shared pump hardcode a happy ending it cannot always deliver.
+        """
+        return ITEM_LIVE
+
+    def _post_uploaded(self, batch_uid: str, item: dict, files: list,
+                       original_uploaded: bool) -> tuple[int, Any]:
+        """Tell the server the files landed. The ONE call whose BODY differs
+        between the kinds (docs/API.md 6a vs 6b): b-roll declares a list of
+        archive-relative files, music declares one size, because the server
+        allocated the only name involved and nothing about it came off the
+        wire."""
+        return self._client().item_uploaded(batch_uid, item["uid"], files,
+                                            original_uploaded)
 
     def _mirror_locally(self, item: dict) -> None:
         """Put this machine's own copy of the preview where the archive keeps
@@ -2004,7 +2124,7 @@ class BrollIngestor:
             shutil.move(outputs["proxy"], str(dest))
             outputs["proxy"] = str(dest)
         except Exception:
-            log.debug("broll ingest: could not mirror %s locally", rel, exc_info=True)
+            self.log.debug("could not mirror %s locally", rel, exc_info=True)
 
     def _stop_uploads(self) -> None:
         queue = self._uploader
@@ -2013,7 +2133,7 @@ class BrollIngestor:
         try:
             queue.stop_all()
         except Exception:
-            log.debug("broll ingest: could not stop the upload queue", exc_info=True)
+            self.log.debug("could not stop the upload queue", exc_info=True)
 
     # -- finishing ---------------------------------------------------------
     def _maybe_finish(self) -> None:
@@ -2025,7 +2145,7 @@ class BrollIngestor:
         if not items:
             return
         outstanding = [i for i in items
-                       if i.get("stage") not in ITEM_FINISHED
+                       if i.get("stage") not in self.item_finished
                        and not (i.get("stage") == ITEM_FAILED
                                 and int(i.get("attempts") or 0) >= MAX_ITEM_ATTEMPTS)]
         if outstanding:
@@ -2035,7 +2155,7 @@ class BrollIngestor:
                    "failed": failed, "total": len(items)}
         self._client().release(batch["uid"], "failed" if failed == len(items) else "done",
                                summary)
-        log.info("broll ingest: batch %s finished -- %s", batch["uid"], summary)
+        self.log.info("batch %s finished -- %s", batch["uid"], summary)
         with self._lock:
             self._batch = None
             self._current = {}
@@ -2052,7 +2172,7 @@ class BrollIngestor:
             uid = (self._batch or {}).get("uid")
             self._batch = None
             self._current = {}
-        log.info("broll ingest: batch %s is no longer ours (%s)", uid, why)
+        self.log.info("batch %s is no longer ours (%s)", uid, why)
         self._kill_child()
         self._stop_uploads()
         self._stop_model_server()
@@ -2087,7 +2207,7 @@ class BrollIngestor:
                 self._lease_lost(str(exc))
                 return
             except Exception as exc:  # noqa: BLE001 - a NAS blip is not a stop
-                log.debug("broll ingest: heartbeat failed (%s)", exc)
+                self.log.debug("heartbeat failed (%s)", exc)
             else:
                 if reply.get("cancel_requested"):
                     self.cancel("cancelled from the dashboard")
@@ -2099,14 +2219,14 @@ class BrollIngestor:
 
     # -- small helpers -----------------------------------------------------
     def _client(self) -> FleetClient:
-        return FleetClient(self.deps)
+        return FleetClient(self.deps, prefix=self.kind.api_prefix)
 
     def _run_media(self, cmd: list) -> tuple:
         runner = self._run_media_fn or self.media.run_ffmpeg
         try:
             return runner(cmd)
         except self.media.UnreadableMediaError as exc:
-            log.warning("broll ingest: ffmpeg refused (%s)", exc)
+            self.log.warning("ffmpeg refused (%s)", exc)
             return 1, str(exc)
 
     def _kill_child(self) -> None:
@@ -2117,7 +2237,7 @@ class BrollIngestor:
         try:
             child.kill()
         except Exception:
-            log.debug("broll ingest: could not kill the media child", exc_info=True)
+            self.log.debug("could not kill the media child", exc_info=True)
 
     def _set_current(self, name: str, stage: str, percent: int) -> None:
         with self._lock:
@@ -2141,19 +2261,30 @@ class BrollIngestor:
         try:
             self._client().item_status(
                 batch["uid"], item["uid"], stage, stage_percent=percent,
-                attempts=item.get("attempts"), hash=item.get("hash"),
-                probe=item.get("probe"))
+                **self._status_fields(item))
         except LeaseLost:
             raise
         except Exception as exc:  # noqa: BLE001
-            log.debug("broll ingest: checkpoint %s for %s did not reach the "
+            self.log.debug("checkpoint %s for %s did not reach the "
                       "dashboard (%s)", stage, item.get("name"), exc)
         self._save()
+
+    def _status_fields(self, item: dict) -> dict[str, Any]:
+        """What a checkpoint carries besides the stage and its percentage.
+
+        A hook rather than a literal because the two kinds' status models
+        declare different fields (docs/API.md 6a vs 6b) and pydantic silently
+        DROPS one it does not declare -- so a music checkpoint sending b-roll's
+        `hash` would post a content hash the server never records, and nothing
+        would say so.
+        """
+        return {"attempts": item.get("attempts"), "hash": item.get("hash"),
+                "probe": item.get("probe")}
 
     def _fail_item(self, item: dict, why: str) -> None:
         item["stage"] = ITEM_FAILED
         item["error"] = why
-        log.warning("broll ingest: %s -- %s", item.get("name"), why)
+        self.log.warning("%s -- %s", item.get("name"), why)
         with self._lock:
             batch = self._batch
         if batch:
@@ -2164,7 +2295,7 @@ class BrollIngestor:
             except LeaseLost:
                 raise
             except Exception:
-                log.debug("broll ingest: could not report the failure", exc_info=True)
+                self.log.debug("could not report the failure", exc_info=True)
         self._save()
 
     def _space_refusal(self, directory: Path) -> Optional[str]:
@@ -2175,7 +2306,7 @@ class BrollIngestor:
         free = broll_server._free_bytes_at(directory)
         if free is None or free >= floor:
             return None
-        return (f"Not enough space where the clips would be staged "
+        return (f"Not enough space where the {self.kind.unit}s would be staged "
                 f"({directory}): {free / 1_000_000_000:.1f} GB free, and "
                 f"{floor / 1_000_000_000:.0f} GB is the floor. Free some space "
                 "and it will continue")
@@ -2189,8 +2320,8 @@ class BrollIngestor:
                 return "that file is not on this machine"
         except OSError:
             return "that file could not be read"
-        if os.path.splitext(path)[1].lower() not in broll_server.INGEST_VIDEO_EXTS:
-            return "that is not a video this machine can index"
+        if os.path.splitext(path)[1].lower() not in self.kind.exts:
+            return f"that is not {self.kind.media_word}"
         return ""
 
     def _probe_and_hash(self, entry: dict) -> dict:
@@ -2209,7 +2340,7 @@ class BrollIngestor:
         try:
             entry["hash"] = self._hash_fn(path)
         except Exception as exc:  # noqa: BLE001
-            log.debug("broll ingest: could not hash %s (%s)", path, exc)
+            self.log.debug("could not hash %s (%s)", path, exc)
         entry["state"] = STAGED_READY
         entry.setdefault("size", None)
         if not entry.get("size"):
@@ -2312,4 +2443,4 @@ def _unlink(path: Path) -> None:
     try:
         path.unlink(missing_ok=True)
     except OSError as exc:
-        log.debug("broll ingest: could not remove %s (%s)", path, exc)
+        log.debug("ingest: could not remove %s (%s)", path, exc)

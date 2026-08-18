@@ -168,6 +168,18 @@ $VendorPairs = @(
     @{ Source = Join-Path $RepoRoot "ytdl\web\ytdlweb\identity.py"
        Vendored = Join-Path $RepoRoot "broll\web\app\identity.py"
        Mode = "marker"; Fix = "edit ytdl/web/ytdlweb/identity.py (two verifiers that disagree about a token shape are two answers to 'which editor is this'), then re-copy it in" }
+    # Music ingest step 3 (docs/MUSIC_INGEST_PLAN.md): the companion embeds
+    # dropped music with the CLAP audio tower, and two of the three pieces
+    # that takes are the indexer's. A drifted parser throws; a drifted MEL
+    # produces a plausible 512-dimensional vector for audio that does not
+    # sound like that, in the one space every cosine in the music library is
+    # measured against -- and nothing downstream can detect it.
+    @{ Source = Join-Path $RepoRoot "music\indexer\music_models.py"
+       Vendored = Join-Path $CompanionDir "src\ccsync_companion\music_clap\music_models.py"
+       Mode = "marker"; Fix = "edit music/indexer/music_models.py -- it is what the exporter writes and what the sidecar downloads -- then re-copy it in" }
+    @{ Source = Join-Path $RepoRoot "music\indexer\mel_numpy.py"
+       Vendored = Join-Path $CompanionDir "src\ccsync_companion\music_clap\mel_numpy.py"
+       Mode = "marker"; Fix = "edit music/indexer/mel_numpy.py -- its bit-parity test against ClapFeatureExtractor is the gate that matters -- then re-copy it in" }
     # Music ingest (docs/MUSIC_INGEST_PLAN.md step 2): the THIRD copy of the
     # identity verifier, for the third fleet-token surface. musicweb can import
     # neither of the other two -- ytdl is feature-gated per site, and broll/web

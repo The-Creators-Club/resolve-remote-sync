@@ -283,6 +283,8 @@ $REPO_ROOT/broll/indexer/broll_index/compact_format.py|$COMPANION_DIR/src/ccsync
 $REPO_ROOT/broll/indexer/broll_index/contract.py|$COMPANION_DIR/src/ccsync_companion/broll_vlm/contract.py|marker
 $REPO_ROOT/broll/indexer/broll_index/prompts/index_clip_v7_compact.md|$COMPANION_DIR/src/ccsync_companion/broll_vlm/prompts/index_clip_v7_compact.md|exact
 $YTDL_COMMON_SRC_IDENTITY|$REPO_ROOT/music/web/musicweb/identity.py|marker
+$REPO_ROOT/music/indexer/music_models.py|$COMPANION_DIR/src/ccsync_companion/music_clap/music_models.py|marker
+$REPO_ROOT/music/indexer/mel_numpy.py|$COMPANION_DIR/src/ccsync_companion/music_clap/mel_numpy.py|marker
 "
 DIST_DIR="$COMPANION_DIR/dist"
 ARTIFACT="$DIST_DIR/ccsync-companion"

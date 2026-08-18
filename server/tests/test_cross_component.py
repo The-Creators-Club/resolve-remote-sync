@@ -508,6 +508,45 @@ def test_the_vendored_vlm_prompt_is_an_exact_copy():
         f"{vendored} has drifted from {source} -- copy the indexer's file over it whole.")
 
 
+# -- the vendored CLAP audio front end (2026-08-18, MUSIC_INGEST_PLAN.md) ----
+#
+# Third instance of the same problem, and the sharpest one. The companion
+# embeds dropped music with the CLAP audio tower now, and two of the three
+# pieces that takes are the indexer's: the artefact catalogue (which ONNX,
+# which sha256) and the log-mel front end. A drifted parser throws; a drifted
+# MEL does not -- it produces a perfectly plausible 512-dimensional vector for
+# audio that does not sound like that, in the one space every cosine in the
+# music library is measured against.
+MUSIC_INDEXER_SRC = REPO_ROOT / "music" / "indexer"
+MUSIC_CLAP_VENDORED = (REPO_ROOT / "companion" / "src" / "ccsync_companion"
+                       / "music_clap")
+MUSIC_CLAP_MODULES = ("music_models.py", "mel_numpy.py")
+
+
+@pytest.mark.parametrize("name", MUSIC_CLAP_MODULES)
+def test_the_vendored_music_clap_modules_are_byte_identical(name):
+    source = MUSIC_INDEXER_SRC / name
+    vendored = MUSIC_CLAP_VENDORED / name
+    assert source.exists(), f"missing source of truth: {source}"
+    assert vendored.exists(), f"missing vendored copy: {vendored}"
+    body = _vendored_body(vendored)
+    assert body == source.read_bytes(), (
+        f"{vendored} has drifted from {source}: {len(body)} bytes below the marker "
+        f"vs {len(source.read_bytes())} in the source. Edit the INDEXER's copy, then "
+        f"re-copy the whole file in below the marker line.")
+
+
+def test_the_vendored_music_clap_set_has_no_unchecked_members():
+    """A third module dropped into music_clap/ without a line in
+    MUSIC_CLAP_MODULES (and in tools/release.ps1's $VendorPairs and
+    tools/release_macos.sh's VENDOR_PAIRS) would be unpinned forever."""
+    present = sorted(p.name for p in MUSIC_CLAP_VENDORED.glob("*.py")
+                     if p.name != "__init__.py")
+    assert present == sorted(MUSIC_CLAP_MODULES), (
+        "companion/src/ccsync_companion/music_clap/ gained or lost a module: add it "
+        "to MUSIC_CLAP_MODULES here AND to both release gates")
+
+
 def test_the_vendored_vlm_set_has_no_unchecked_members():
     """A sixth module dropped into broll_vlm/ without a line in
     BROLL_VLM_MODULES (and in tools/release.ps1's $VendorPairs) would be

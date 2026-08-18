@@ -57,9 +57,18 @@ def test_is_pinned_is_false_when_a_digest_is_a_placeholder(monkeypatch):
 def test_urls_hang_off_the_feed_base_and_never_a_hardcoded_host():
     got = music_models.urls('https://feed.example.test/v1/')
     onnx, params = music_models.filenames()
-    assert got[onnx] == f'https://feed.example.test/v1/models/{onnx}'
-    assert got[params] == f'https://feed.example.test/v1/models/{params}'
+    assert got[onnx] == f'https://feed.example.test/v1/{onnx}'
+    assert got[params] == f'https://feed.example.test/v1/{params}'
     assert 'http' not in music_models.FEED_URL_TEMPLATE
+
+
+def test_the_artefact_is_a_flat_sibling_of_channel_json():
+    """GitHub Releases has one flat asset namespace per tag and no
+    directories, so a `models/` (or any other) path segment is a URL that
+    404s on the host this feed is actually served from
+    (docs/RELEASE_FEED.md 3.1)."""
+    for url in music_models.urls('https://feed.example.test/v1').values():
+        assert url.count('/') == 'https://feed.example.test/v1/x'.count('/')
 
 
 def test_no_feed_base_is_a_refusal_not_a_default():

@@ -51,6 +51,38 @@ if sys.platform == "darwin":
     # in through pystray before; now it is ours to name.
     hidden_imports += ["AppKit", "Foundation", "objc"]
 
+# numpy and onnxruntime: the CLAP audio tower runs in this binary now
+# (docs/MUSIC_INGEST_PLAN.md step 3). Neither is optional at runtime -- both
+# are hard dependencies in pyproject.toml -- but both need naming here anyway:
+#
+#   * `music_clap_sidecar` imports them INSIDE its functions (so a tray that
+#     never ingests music never pays for the import), and PyInstaller's static
+#     analysis does not follow a deferred import into a module-level graph;
+#   * onnxruntime is a C extension whose Python half loads its own
+#     `onnxruntime_pybind11_state` and ships a capi/ directory of shared
+#     libraries and version metadata that no import statement mentions.
+#     collect_all is the only thing that brings those along, and without them
+#     the frozen build imports and then raises on the first InferenceSession
+#     -- the same shape of failure the vendored prompt's `datas` line exists
+#     to prevent.
+#
+# Guarded like the Pillow block above so a build environment that is missing
+# one of them fails at pip time (where the message is about a dependency)
+# rather than inside PyInstaller's analysis.
+onnx_datas = []
+onnx_binaries = []
+try:
+    from PyInstaller.utils.hooks import collect_all
+
+    hidden_imports.append("numpy")
+    _ort_datas, _ort_binaries, _ort_hidden = collect_all("onnxruntime")
+    onnx_datas += _ort_datas
+    onnx_binaries += _ort_binaries
+    hidden_imports += _ort_hidden
+    hidden_imports.append("onnxruntime.capi.onnxruntime_pybind11_state")
+except Exception:  # noqa: BLE001 - a build without it fails louder at import
+    hidden_imports.append("onnxruntime")
+
 entry_point = "launcher.py"  # absolute-import shim; running the package __main__.py directly breaks relative imports
 
 # Windows wants a .ico and we ship one. macOS wants an .icns, which this repo
@@ -92,7 +124,7 @@ if sys.platform == "win32":
 a = Analysis(
     [entry_point],
     pathex=["src"],
-    binaries=extra_binaries,
+    binaries=extra_binaries + onnx_binaries,
     # The marks: theme.asset_path() reads these back out of sys._MEIPASS at
     # this exact relative path -- icon.png for every popup window, and the
     # white-on-transparent mark for the tray icon's tinted/pulsing one
@@ -127,7 +159,7 @@ a = Analysis(
         # EULA.md line above exists to prevent, one feature later.
         ("src/ccsync_companion/broll_vlm/prompts/index_clip_v7_compact.md",
          "ccsync_companion/broll_vlm/prompts"),
-    ],
+    ] + onnx_datas,
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},

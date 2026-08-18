@@ -71,3 +71,8 @@ ytdl/web/ytdlweb/identity.py text eol=lf
 broll/web/app/normalize.py text eol=lf
 broll/web/app/identity.py text eol=lf
 music/web/musicweb/identity.py text eol=lf
+# ...and the CLAP audio front end the companion vendors from the music indexer
+# (2026-08-18, docs/MUSIC_INGEST_PLAN.md step 3).
+music/indexer/music_models.py text eol=lf
+music/indexer/mel_numpy.py text eol=lf
+companion/src/ccsync_companion/music_clap/** text eol=lf

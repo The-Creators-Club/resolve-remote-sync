@@ -18,6 +18,26 @@ dependencies = [
     # digest 12,000 existing rows carry. BSD-2-Clause, one small C extension
     # (tools/check_licenses.py).
     "xxhash>=3.4",
+    # The CLAP AUDIO tower runs HERE now (docs/MUSIC_INGEST_PLAN.md §1): an
+    # editor drops an album on the dashboard's music page and this machine
+    # embeds it, because the container has no torch and uploading the audio to
+    # wait for the base rig's GPU is the loop that feature exists to replace.
+    #
+    # numpy is the mel front end (`music_clap/mel_numpy.py`, vendored from the
+    # indexer) and the waveform overview; onnxruntime executes the exported
+    # tower. BSD-3-Clause and MIT respectively -- both clear
+    # tools/check_licenses.py -- and neither pulls torch in: the pip
+    # `onnxruntime` wheel is the CPU build, ~16 MB, and a machine that happens
+    # to have the CUDA/DirectML package installed is used if it does
+    # (music_clap_sidecar._providers_for_session) and never required.
+    #
+    # They are unconditional dependencies rather than an extra because the
+    # frozen build is one binary for the whole fleet: an extra would mean a
+    # second artefact, which is the thing CLAUDE.md's "never a second binary"
+    # rules out. Cost is ~35 MB frozen (measured on the wheels: numpy ~19 MB
+    # installed, onnxruntime ~16 MB) against a 40-odd MB exe.
+    "numpy>=1.26",
+    "onnxruntime>=1.20",
 ]
 
 [project.optional-dependencies]

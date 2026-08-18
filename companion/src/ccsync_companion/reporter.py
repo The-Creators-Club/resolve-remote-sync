@@ -81,6 +81,13 @@ GetYoutubeImportFn = Callable[[], dict[str, Any]]
 # exactly this, and the fleet grid's chip is how an admin sees which machines
 # are indexing (BROLL_INGEST_PLAN.md §1 step 8, 2026-08-18).
 GetBrollIngestFn = Callable[[], dict[str, Any]]
+# Music ingest state (app.CompanionApp.music_ingest_status ->
+# music_ingest.py): the same shape with `kind: "music"`, and a SECOND section
+# rather than a reuse of the one above, because the two run at the same time
+# -- music needs no GPU, so a machine can be embedding an album while it
+# indexes a camera card, and one section could only ever describe one of them
+# (docs/MUSIC_INGEST_PLAN.md 2, 2026-08-18).
+GetMusicIngestFn = Callable[[], dict[str, Any]]
 # Upgrade-channel addition: called with the PARSED report response after
 # every successful post (the dashboard piggybacks its `upgrade`
 # advertisement on the report reply -- see upgrade.py). Exceptions are
@@ -208,6 +215,7 @@ class DashboardReporter:
         get_youtube_import: Optional[GetYoutubeImportFn] = None,
         get_sync_guard: Optional[Callable[[], dict[str, Any]]] = None,
         get_broll_ingest: Optional[GetBrollIngestFn] = None,
+        get_music_ingest: Optional[GetMusicIngestFn] = None,
     ) -> None:
         self._get_statuses = get_statuses
         self.cfg = cfg
@@ -261,6 +269,10 @@ class DashboardReporter:
         # dashboard reads an absent section as "not indexing" and clears the
         # chip (api.flatten_broll_ingest).
         self._get_broll_ingest = get_broll_ingest
+        # Optional on exactly the same terms, and omitted-when-empty for the
+        # same load-bearing reason: an absent section is how a FINISHED music
+        # batch is spelled (api.flatten_music_ingest).
+        self._get_music_ingest = get_music_ingest
 
         self.dashboard_url = str(cfg.get("dashboard_url", "")).strip()
         self.dashboard_token = str(cfg.get("dashboard_token", "")).strip()
@@ -425,6 +437,14 @@ class DashboardReporter:
             # the dashboard the batch is over.
             if ingest:
                 payload["broll_ingest"] = ingest
+        if self._get_music_ingest is not None:
+            try:
+                music = self._get_music_ingest()
+            except Exception:
+                log.exception("get_music_ingest() failed")
+                music = None
+            if music:
+                payload["music_ingest"] = music
         if not light:
             if self._get_local_manifest is not None:
                 try:

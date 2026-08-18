@@ -1,3 +1,28 @@
+# VENDORED VERBATIM from music/indexer/music_models.py -- DO NOT EDIT HERE.
+# Edit the indexer's copy and re-copy it in BELOW THE MARKER LINE at the end of
+# this header; everything under that line is byte-identical to the source on
+# purpose, so the two trees can be compared mechanically -- and they are:
+# tools/release.ps1 (and tools/release_macos.sh) strip this header, byte-compare
+# the rest against the source and REFUSE to build on a mismatch, and
+# server/tests/test_cross_component.py pins the same comparison in the suites.
+# Same mechanism as ccsync_companion/broll_vlm/ (2026-08-18) and
+# ccsync_companion/ytdl_common.py (2026-08-14).
+#
+# Why a copy and not an import (docs/MUSIC_INGEST_PLAN.md step 3): the
+# companion is a frozen, windowed PyInstaller build and `music_index` reaches
+# torch, librosa and transformers -- gigabytes -- for two modules that between
+# them need nothing but the stdlib and numpy. The MODULE NAMES are unchanged so
+# nothing inside them has to be rewritten.
+#
+# What drift here would cost is not a crash: a mel that differs in its last
+# bits produces a plausible embedding of the wrong audio, in the wrong place in
+# a 512-dimensional space that every cosine in the library is measured against.
+# Nothing downstream can detect it.
+#
+# The marker is the LAST line of this header and appears exactly once (both the
+# gate and the test refuse an absent or ambiguous marker rather than skipping).
+# Nothing but the source file's own bytes may follow it.
+# --- vendored content below, byte-identical ---
 """The music sidecar model catalogue: which artefact, which sha256, how big.
 
 One place, so `export_audio_encoder.py` (which produces the artefact), the

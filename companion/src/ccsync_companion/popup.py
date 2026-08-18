@@ -1493,7 +1493,8 @@ class ProgressModel:
                  headline_percent: Optional[int] = None, item_label: str = "",
                  item_percent: Optional[int] = None, done: int = 0, total: int = 0,
                  failed: int = 0, eta_seconds: Optional[float] = None,
-                 note: str = "", actions: Any = (), finished: bool = False) -> None:
+                 note: str = "", actions: Any = (), finished: bool = False,
+                 unit: str = "clip") -> None:
         self.title = title
         self.phase = phase
         self.headline = headline
@@ -1507,12 +1508,18 @@ class ProgressModel:
         self.note = note
         self.actions = tuple(actions or ())
         self.finished = bool(finished)
+        # The noun the overall line counts in. "clip" by default because that
+        # is what this window has always said and what the proxy generator
+        # still means; music ingest passes "track" (MUSIC_INGEST_PLAN.md §2),
+        # since "12 of 40 clips" over an album is the kind of wrong that makes
+        # an editor doubt the rest of the window.
+        self.unit = str(unit or "clip")
 
     def overall_line(self) -> str:
         """"12 of 40 clips · 1 failed"."""
         if not self.total:
             return "" if not self.done else f"{self.done} done"
-        word = "clip" if self.total == 1 else "clips"
+        word = self.unit if self.total == 1 else f"{self.unit}s"
         line = f"{min(self.done, self.total)} of {self.total} {word}"
         if self.failed:
             line += f" · {self.failed} failed"

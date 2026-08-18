@@ -360,6 +360,29 @@ are a protocol between the server and the companion, not a per-site choice:
 numbers — ten missed heartbeats is a comfortable margin over a laptop lid
 closing), and `MAX_BATCH_ITEMS = 500`.
 
+**The companion half (step 3, 2026-08-18) needs one thing set, and it is not
+its own.** `DASH_RELEASE_FEED_URL` (§2.3a) is where the CLAP audio model is
+fetched from: `GET /api/v1/site` publishes it as `release_feed_base` (the URL
+minus its filename), the companion downloads the two files from there and
+verifies them against the sha256 baked into its own build. **A fleet with no
+feed configured cannot ingest music on an editor's machine at all** — the tray
+says "this fleet has no release feed configured", the fleet grid shows a
+`[ MUSIC MODEL ]` chip, and every drop falls back to the browser upload that
+queues the file for the base rig. Nothing is lost; nothing is local either.
+
+Per-machine overrides in an editor's `~/.ccsync/config.toml`, all optional and
+all mirroring the b-roll ingest keys they are named after (`music_ingest_*`
+for `broll_ingest_*`):
+
+| Key | Default | Notes |
+|---|---|---|
+| `music_ingest_enabled` | `true` | `false` switches the orchestrator off; the loopback routes then answer "music indexing is not running on this machine" and the page falls back |
+| `music_ingest_idle_seconds` | `proxy_gen_idle_seconds`, else `300` | How long away from the keyboard counts as idle, for a batch running in `idle` mode |
+| `music_ingest_skip_while_resolve` | `true` | Stand down while Resolve is open. Kept for symmetry with b-roll and with the proxy generator; music uses one CPU core, so a site that wants it running anyway can say so |
+| `music_ingest_free_space_floor_gb` | `20` | Refuse to stage a drop below this much free space |
+| `music_ingest_staging_dir` | `<local_root>/Assets/Music/.ingest` | The base rig overrides it: its `local_root` IS the NAS share, and staging there would push every file over SMB twice |
+| `music_clap_feed_base` | *(the site manifest's)* | A dev loop or a base rig pointing at a local copy of the feed. Overrides `release_feed_base` |
+
 ### 2.6 Mounts and cadences
 
 | Var | Default | Notes |

@@ -457,3 +457,133 @@ def test_republishing_the_same_feed_is_idempotent(key, artifact, tmp_path):
     assert _build(feed_dir, artifact, upload=True, runner=second) == pf.EXIT_OK
     assert first.upload_argv()[3:] == second.upload_argv()[3:]
     assert "--clobber" in second.upload_argv()
+
+
+# --- non-package artefacts (2026-08-18, docs/MUSIC_INGEST_PLAN.md step 3) ----
+#
+# The CLAP audio tower is not a package: nothing installs it, it has no
+# platform, and the party that verifies it is a COMPANION checking the sha256
+# baked into the build it is already running. What the feed owes it is a URL
+# and a size, inside the signed document.
+
+@pytest.fixture
+def clap_files(tmp_path):
+    onnx = tmp_path / "music-clap-audio-1.onnx"
+    onnx.write_bytes(b"ONNX" + b"w" * 4096)
+    params = tmp_path / "music-clap-audio-1.params.json"
+    params.write_text(json.dumps({"params_version": 1}), encoding="utf-8")
+    return onnx, params
+
+
+def test_an_asset_is_published_beside_the_packages(key, clap_files, tmp_path):
+    onnx, params = clap_files
+    feed_dir = tmp_path / "feed"
+    rc = pf.main([
+        "--asset", str(onnx), "--asset", str(params),
+        "--asset-kind", "music-clap-audio", "--asset-version", "1",
+        "--feed-dir", str(feed_dir), "--base-url", BASE_URL,
+    ])
+    assert rc == pf.EXIT_OK
+    channel = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
+    assert channel["packages"] == [], "an artefact is not a package"
+    got = {a["filename"]: a for a in channel["artefacts"]}
+    assert set(got) == {onnx.name, params.name}
+    assert got[onnx.name]["kind"] == "music-clap-audio"
+    assert got[onnx.name]["version"] == "1"
+    assert got[onnx.name]["size_bytes"] == onnx.stat().st_size
+    # FLAT beside channel.json, which is the only shape GitHub Releases serves
+    # and the one music_models.FEED_URL_TEMPLATE builds.
+    assert got[onnx.name]["url"] == f"{BASE_URL}/{onnx.name}"
+    assert (feed_dir / onnx.name).read_bytes() == onnx.read_bytes()
+
+
+def test_the_artefact_rides_the_channel_signature(key, clap_files, tmp_path):
+    """There is no per-record signature for an artefact (sign_release signs
+    PACKAGES), so the channel's own signature is what makes it unforgeable --
+    which means tampering with it has to fail verification."""
+    onnx, _params = clap_files
+    feed_dir = tmp_path / "feed"
+    pf.main(["--asset", str(onnx), "--asset-version", "1",
+             "--feed-dir", str(feed_dir), "--base-url", BASE_URL])
+    ok, _report = pf.verify_feed_dir(feed_dir, pubkeys=_pubkeys_for(key))
+    assert ok
+
+    channel = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
+    channel["artefacts"][0]["url"] = "https://evil.test/model.onnx"
+    (feed_dir / pf.CHANNEL_FILENAME).write_text(json.dumps(channel, indent=2, sort_keys=True))
+    ok, report = pf.verify_feed_dir(feed_dir, pubkeys=_pubkeys_for(key))
+    assert not ok and any("channel signature: FAILED" in line for line in report)
+
+
+def test_a_file_that_does_not_match_its_recorded_sha_fails_verification(key, clap_files, tmp_path):
+    onnx, _params = clap_files
+    feed_dir = tmp_path / "feed"
+    pf.main(["--asset", str(onnx), "--asset-version", "1",
+             "--feed-dir", str(feed_dir), "--base-url", BASE_URL])
+    (feed_dir / onnx.name).write_bytes(b"different bytes entirely")
+    ok, report = pf.verify_feed_dir(feed_dir, pubkeys=_pubkeys_for(key))
+    assert not ok
+    assert any("does NOT match sha256" in line for line in report)
+
+
+def test_republishing_the_same_filename_replaces_it(key, clap_files, tmp_path):
+    onnx, _params = clap_files
+    feed_dir = tmp_path / "feed"
+    pf.main(["--asset", str(onnx), "--asset-version", "1",
+             "--feed-dir", str(feed_dir), "--base-url", BASE_URL])
+    onnx.write_bytes(b"ONNX" + b"z" * 8192)      # a re-export, same version
+    pf.main(["--asset", str(onnx), "--asset-version", "1",
+             "--feed-dir", str(feed_dir), "--base-url", BASE_URL])
+    channel = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
+    assert len(channel["artefacts"]) == 1
+    assert channel["artefacts"][0]["size_bytes"] == onnx.stat().st_size
+
+
+def test_two_versions_coexist_on_the_feed(key, clap_files, tmp_path):
+    """The version is in the FILENAME precisely so a fleet mid-upgrade has
+    both: an editor still running the old companion must keep finding the file
+    its baked sha256 belongs to."""
+    onnx, _params = clap_files
+    feed_dir = tmp_path / "feed"
+    pf.main(["--asset", str(onnx), "--asset-version", "1",
+             "--feed-dir", str(feed_dir), "--base-url", BASE_URL])
+    two = onnx.parent / "music-clap-audio-2.onnx"
+    two.write_bytes(b"ONNX2" + b"q" * 4096)
+    pf.main(["--asset", str(two), "--asset-version", "2",
+             "--feed-dir", str(feed_dir), "--base-url", BASE_URL])
+    channel = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
+    assert sorted(a["filename"] for a in channel["artefacts"]) == [
+        "music-clap-audio-1.onnx", "music-clap-audio-2.onnx"]
+
+
+def test_an_asset_without_a_version_is_refused(key, clap_files, tmp_path):
+    onnx, _params = clap_files
+    rc = pf.main(["--asset", str(onnx), "--feed-dir", str(tmp_path / "feed"),
+                  "--base-url", BASE_URL])
+    assert rc == pf.EXIT_USAGE
+
+
+def test_an_asset_is_uploaded_with_the_channel(key, clap_files, tmp_path):
+    onnx, params = clap_files
+    feed_dir = tmp_path / "feed"
+    pf.main(["--asset", str(onnx), "--asset", str(params), "--asset-version", "1",
+             "--feed-dir", str(feed_dir),
+             "--base-url", pf.github_base_url("o/r", pf.DEFAULT_GITHUB_TAG)])
+    channel = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
+    plan = pf.github_asset_plan(
+        feed_dir, channel, base_url=pf.github_base_url("o/r", pf.DEFAULT_GITHUB_TAG))
+    names = [p.name for p in plan]
+    assert pf.CHANNEL_FILENAME in names and pf.SIG_FILENAME in names
+    assert onnx.name in names and params.name in names
+
+
+def test_an_asset_whose_url_does_not_match_the_upload_target_is_refused(key, clap_files, tmp_path):
+    """The url is inside the SIGNED document: getting it wrong is not a
+    re-upload away from correct, it is a re-sign away."""
+    onnx, _params = clap_files
+    feed_dir = tmp_path / "feed"
+    pf.main(["--asset", str(onnx), "--asset-version", "1",
+             "--feed-dir", str(feed_dir), "--base-url", "https://elsewhere.test/v1"])
+    channel = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
+    with pytest.raises(pf.PublishFeedError):
+        pf.github_asset_plan(feed_dir, channel, base_url=BASE_URL)

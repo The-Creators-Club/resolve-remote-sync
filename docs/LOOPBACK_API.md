@@ -122,6 +122,24 @@ On top of those:
   path — a native dialog on the UI thread, ≤ 300 s, after which it answers
   "cancelled" rather than parking a request thread (and, on macOS, the UI
   dispatcher's main thread) for the life of the process.
+- **`/music/ingest/*` is the same eight routes, parameterised by kind**
+  (2026-08-18, `docs/MUSIC_INGEST_PLAN.md` step 3): `capabilities`, `pick`,
+  `prepare`, `upload/{staging_id}/{local_id}` (the PUT), `progress`, `thumb`,
+  `run`, `control`. Same envelope, same PUT rules, same "the browser hands over
+  a batch uid and nothing else" principle; only the prefix decides which
+  orchestrator, which staging root and which fleet routes a request reaches
+  (`broll_server._kind_for_path`). What differs in the bodies:
+  `capabilities` reports `{clap: {cached, download_bytes, version}}` instead of
+  `tiers`/`gpu` — music has one model, it runs on the CPU, and there is no VRAM
+  refusal to make; the PUT filter is the audio extension list and the per-file
+  cap is the container's own `MAX_INGEST_FILE_BYTES` (512 MiB), refused *here*
+  so an editor is told by the machine holding the file rather than by a 413
+  from the NAS after the upload; `thumb` exists and always 404s (audio has no
+  poster) rather than being a route the page has to know is absent. Staging is
+  `<local_root>/Assets/Music/.ingest` (`music_ingest_staging_dir` overrides).
+  A companion built before this answers **404 on every `/music/ingest/*`
+  route**, which the page reads as "your companion is too old" and falls back
+  to the browser upload.
 - **Refusals are generic.** "This request was refused — see the log." The
   reason, the offending Origin and the allow-list are log lines. A caller this
   server has just declined to talk to is not owed a description of the check it

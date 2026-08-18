@@ -191,8 +191,15 @@ umask 077
 # `ytdlweb` (ytdl). They are deliberately NOT all called `app`: two top-level
 # packages of the same name on one PYTHONPATH collide in sys.modules and one
 # wins silently.
-IMAGE_PYTHONPATH=/app/src:/broll-app:/music-app:/ytdl-app
-export PYTHONPATH=$IMAGE_PYTHONPATH
+export PYTHONPATH=/app/src:/broll-app:/music-app:/ytdl-app
+# The image's own four roots, remembered for the restart loop at the bottom of
+# this file: in image mode the path is re-decided on every boot by
+# select_code_root.py, and this is what it falls back to (and what a
+# bind-mount deployment keeps unconditionally). Assigned FROM the line above
+# rather than repeated, so the list exists exactly once
+# (server/tests/test_music_deploy.py reads that line and checks every entry is
+# a real mount).
+IMAGE_PYTHONPATH="$PYTHONPATH"
 
 # Static ffmpeg/ffprobe, mounted read-only from the host at /opt/ffmpeg by
 # compose and put there by server/install_dashboard_app.py. This image is a

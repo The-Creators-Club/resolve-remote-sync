@@ -61,6 +61,61 @@ the "Status 2026-08-17" paragraphs in `docs/COMMERCIAL_READINESS.md`.**
 
 ---
 
+## Open — dashboard self-update over the air (WP K, 2026-08-18)
+
+### WPK-1 — image mode never carried `templates/` or `static/` — FIXED in repo 2026-08-18, no image rebuilt yet
+`dashboard/deploy/Dockerfile` copied `dashboard/src` and `dashboard/deploy`
+and nothing else, while `ui.py`/`app.py` resolve `TEMPLATES_DIR`/`STATIC_DIR`
+as `parents[2]` of the package — `/app/templates` and `/app/static`. That path
+exists in bind-mount mode (the whole `dashboard/` tree is mounted at `/app`)
+and did not exist in the image, so an image-mode container answered
+`/api/v1/health` perfectly, passed its healthcheck, and returned a 500 for
+every page and a 404 for every stylesheet. Never noticed because no
+deployment runs image mode yet. Two `COPY` lines added; **every image built
+before 2026-08-18, including anything `.github/workflows/image.yml` has
+already pushed to GHCR, is unusable for the UI and must be rebuilt.**
+
+### WPK-2 — nothing works until an image is rebuilt with `/venv/.runtime-id`
+The whole two-tier rule keys off that file, and only an image built from the
+updated Dockerfile has it. Until then `image_mode()` is false everywhere:
+every apply is refused ("this deployment updates from the base rig"), the
+Packages page's Dashboard section says so, and `select_code_root.py` boots the
+image's own code no matter what is in `/data/code`. That is the correct
+behaviour for **every live site today**, all of which are bind-mount mode —
+this is a note about the order of operations for the first image site, not a
+defect.
+
+### WPK-3 — the code path is untested against a real container
+Everything here was built and tested on Windows against temp directories: 63
+tests, including the real bundle, the real stage-verify subprocess and the
+real `select_code_root.py`, but **no `docker build`, no `docker run`, and no
+NAS**. Specifically unexercised: `/venv/.runtime-id` actually being written by
+the Dockerfile's `RUN` (the recipe is unit-tested, the `RUN` line is not); the
+exit-75 loop under a real container runtime's signal handling and restart
+policy; a real update over a real feed. First image site should do one apply
+and one rollback deliberately before relying on it.
+
+### WPK-4 — `min_version` is signed but unused for `dashboard` records
+Every record signs `min_version`; for this kind nothing reads it. The only
+ordering rule is "newer than the image's own version"
+(`select_code_root.check_tree`), plus the operator's own choice of what to
+publish. A downgrade floor for dashboard code would need a monotonic
+high-water mark on the data volume, the way the companion keeps one in
+`~/.ccsync/upgrade_floor.json`. Deliberately not built: a dashboard rollback
+is one click by an admin who is standing in front of the thing, not an
+unattended fleet-wide event.
+
+### WPK-5 — the pre-update NAS snapshot needs a dataset name it cannot derive
+`dashboard_update.snapshot_before` is best-effort like
+`server/common.snapshot_before`, but a container sees `/data`, not the pool
+path behind it — so it needs `DASH_UPDATE_SNAPSHOT_DATASET` in the
+environment, and without it reports "skipped, and why" rather than guessing.
+Also TrueNAS-only (`/zfs/snapshot`); a DSM site gets the same skip. The
+database backups under `/data/backups/<ts>/` are taken either way and are the
+recovery path that actually matters here.
+
+---
+
 ## Open — the 2026-08-17 commercial-readiness pass (CR-n)
 
 ### CR-1 — the b-roll indexer billed a personal Claude Code subscription — FIXED in repo 2026-08-17, unshipped

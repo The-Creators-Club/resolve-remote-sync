@@ -274,6 +274,16 @@ class Settings:
     site_feature_youtube_download: bool = False
     site_feature_youtube_unblock: bool = False
 
+    # Whether this site may point the YouTube downloader's two AI calls at a
+    # Claude Code / Codex CLI **the customer installed on this host
+    # themselves** (2026-08-18, ai_providers.py). OFF in the vendor build, and
+    # off is what keeps COMMERCIAL_READINESS.md item 1 answered: nothing is
+    # bundled or fetched by us either way, but a personal subscription driving
+    # a service is the customer's decision to make explicitly, not something
+    # that happens because a binary was on PATH. API keys are the default
+    # path and need no flag at all.
+    site_feature_ai_cli_providers: bool = False
+
     # Published companion builds (the upgrade channel). Empty = default to a
     # "packages" dir next to the SQLite file, which in production lands under
     # /data -- the only volume that survives a redeploy -- with no compose
@@ -561,6 +571,7 @@ class Settings:
             # off state is the one that is safe to be wrong about here.
             site_feature_youtube_download=env.get("DASH_SITE_YOUTUBE_DOWNLOAD", "") == "1",
             site_feature_youtube_unblock=env.get("DASH_SITE_YOUTUBE_UNBLOCK", "") == "1",
+            site_feature_ai_cli_providers=env.get("DASH_SITE_AI_CLI_PROVIDERS", "") == "1",
             broll_enabled=env.get("DASH_BROLL_ENABLED", "") == "1",
             broll_ingest_token=env.get("BROLL_INGEST_TOKEN", "").strip(),
             packages_dir=env.get("DASH_PACKAGES_DIR", ""),

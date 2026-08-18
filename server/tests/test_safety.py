@@ -1872,6 +1872,38 @@ def test_the_pot_provider_is_off_unless_the_site_asked_for_it():
     assert not any("/opt/deno" in v for v in default["services"]["dashboard"]["volumes"])
     assert env["DASH_SITE_YOUTUBE_DOWNLOAD"] == "0"
     assert env["DASH_SITE_YOUTUBE_UNBLOCK"] == "0"
+    # ...and the AI CLI providers (2026-08-18). Nothing is installed for this
+    # one at any setting -- the customer installs their own claude/codex --
+    # so all this pins is that the vendor build says "no".
+    assert env["DASH_SITE_AI_CLI_PROVIDERS"] == "0"
+
+
+def test_no_ai_cli_binary_is_ever_pushed_to_the_nas():
+    """COMMERCIAL_READINESS.md item 1, held down where it was broken.
+
+    The pre-2026-08-17 deploy copied the 304 MB proprietary Claude Code CLI
+    onto customer hardware and mounted a `claude-home` volume holding one
+    human's OAuth credential. The 2026-08-18 CLI *providers* are adapters for
+    a binary the CUSTOMER installed on the dashboard host; this deploy script
+    must still never fetch, copy, mount or reference one.
+    """
+    body = install_dashboard_app.compose_config(
+        8480, "/mnt/tank/apps/ccsync-dashboard", "http://x:8384", "k", "t",
+        ai_cli_providers="1", youtube_download="1",
+    )
+    service = body["services"]["dashboard"]
+    assert not any("claude" in v for v in service["volumes"]), service["volumes"]
+    env = service["environment"]
+    assert "YTDL_CLAUDE_HOME" not in env and "YTDL_CLAUDE_BIN" not in env
+    # String LITERALS, not mentions: the file's comments talk about
+    # claude-bin/claude-home at length (that history is why they are banned),
+    # and a test that could not tell the two apart would forbid explaining
+    # itself.
+    source = Path(install_dashboard_app.__file__).read_text(encoding="utf-8")
+    for banned in ("claude-bin", "claude-home", "@anthropic-ai/claude-code",
+                   "@openai/codex"):
+        for literal in (f'"{banned}', f"'{banned}"):
+            assert literal not in source, f"{banned!r} is back in the deploy script"
 
 
 def test_the_pot_provider_is_reachable_only_from_inside_the_compose_network():

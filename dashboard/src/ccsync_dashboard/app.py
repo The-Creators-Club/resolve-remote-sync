@@ -18,9 +18,9 @@ from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 
 from . import (
-    api, assignments, auth, broll, crash_report, db, internal_sftp, local_users, music,
-    oidc, release_feed, secrets_boot, sessions, setup_api, setup_routes, site_store,
-    ui, ytdl,
+    ai_providers, api, assignments, auth, broll, crash_report, db, internal_sftp,
+    local_users, music, oidc, release_feed, secrets_boot, sessions, setup_api,
+    setup_routes, site_store, ui, ytdl,
 )
 from .collector import Collector
 from .settings import Settings
@@ -689,6 +689,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # the site-manifest admin routes. Its own module, its own router, one
     # line here -- CLAUDE.md's "new logic in NEW modules" for shared files.
     app.include_router(setup_routes.router)
+    # Settings -> AI providers (2026-08-18): the key store, the CLI probes and
+    # the chain the /ytdl app resolves through. Its own module and router for
+    # the same reason setup_routes has one -- and because everything in it
+    # touches a credential, which is easier to audit in one file.
+    app.include_router(ai_providers.router)
     app.include_router(release_feed.router)
     app.include_router(ui.router)
     # The admin project<->editor assignment matrix (2026-08-17): one page,

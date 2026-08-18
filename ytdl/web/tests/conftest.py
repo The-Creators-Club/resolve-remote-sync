@@ -56,6 +56,14 @@ os.environ['YTDL_SEARCH_PAUSE'] = '0'
 # and no subprocess to point it for. The key is blank on purpose: the
 # suite fakes ytdlweb.claude_cli._client and must never build a real one.
 os.environ['ANTHROPIC_API_KEY'] = ''
+# ...and the two providers the chain added 2026-08-18 (ai_backend.py). Blanked
+# here for the same reason DASH_REPORT_TOKEN is: a developer's own shell may
+# well export OPENAI_API_KEY, and a suite that picked it up would resolve a
+# real provider and put a real HTTPS request on the wire from a test that
+# thinks it is faking one. The tests that exercise these set
+# ytdlweb.config.OPENAI_API_KEY / DEEPSEEK_API_KEY themselves.
+os.environ['OPENAI_API_KEY'] = ''
+os.environ['DEEPSEEK_API_KEY'] = ''
 
 # The fleet token the companion authenticates its claim/heartbeat/manifest/
 # status calls with (docs/YTDL_LOCAL_DOWNLOAD.md §4). Explicitly EMPTY, and set

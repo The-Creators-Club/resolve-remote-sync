@@ -87,6 +87,40 @@
       <div style="margin-top:0.6rem"><button class="btn" type="submit">[ SAVE ]</button></div>
     </form>
 
+    {# AI providers (2026-08-18). Rendered by static/site_settings.js from
+       GET /api/v1/admin/ai-providers rather than server-side, for one
+       concrete reason: a CLI provider's status costs two subprocesses on the
+       dashboard host, and a Settings page that blocked on those would take
+       seconds to paint (and would run them for an admin who only came here to
+       rename their studio). The static half below is what is true whatever
+       that call answers. #}
+    <div class="side-head" style="margin-top:1.4rem">[ AI PROVIDERS ]
+      <span class="muted">Which AI answers the YouTube downloader's two calls
+        (search terms, then relevance). The first AVAILABLE provider in this
+        order is used, unless you pin one.</span></div>
+
+    <div id="ai-resolved" class="muted" style="margin-top:0.4rem">loading…</div>
+    <div id="ai-error" class="banner" style="display:none"></div>
+    <div id="ai-providers"></div>
+
+    <div style="margin-top:0.8rem">
+      <label>USE
+        <select id="ai-preference">
+          <option value="auto">auto — first available in the order above</option>
+        </select>
+      </label>
+      <span class="muted">A pinned provider that is not available is a
+        refusal, not a fallback: nothing else is used in its place.</span>
+    </div>
+
+    <fieldset class="model-tier-fieldset" style="margin-top:0.8rem">
+      <label class="radio-option">
+        <input type="checkbox" id="ai-cli-enabled">
+        Allow CLI providers (Claude Code, Codex)
+      </label>
+      <div class="muted" id="ai-cli-tos" style="margin-top:0.4rem"></div>
+    </fieldset>
+
     <div class="side-head" style="margin-top:1.4rem">[ EXPORT / IMPORT ]
       <span class="muted">site.toml-shaped text -- for a NAS migration or a backup.</span></div>
     <div style="margin-top:0.4rem">

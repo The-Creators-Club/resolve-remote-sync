@@ -84,11 +84,22 @@ run alongside the tray app — it would hold port 8899.
   `youtube_download` gates the whole `/ytdl` stack; `youtube_unblock`
   additionally gates the anti-anti-automation components. The code stays in
   the tree, dormant — never a second binary.
-- The b-roll indexer and the ytdl service call the **Anthropic API** through
-  the `anthropic` SDK, never a Claude Code subscription or the `claude`
-  binary (2026-08-17): both need `ANTHROPIC_API_KEY` in the environment
-  (the indexer refuses to start without one; the container gets it from
-  compose). Cost/knobs: `broll/docs/indexing-api.md`.
+- The b-roll indexer and the ytdl service call an **AI provider over HTTP**,
+  never a bundled CLI (2026-08-17, COMMERCIAL_READINESS item 1 — we shipped
+  the 304 MB `claude` binary to customer hardware and ran every deployment on
+  one consumer account). The indexer is the `anthropic` SDK with
+  `ANTHROPIC_API_KEY`; cost/knobs in `broll/docs/indexing-api.md`.
+  **The ytdl service since 2026-08-18 resolves a provider per call**
+  (`ytdlweb/ai_backend.py` ← `ccsync_dashboard/ai_providers.py`): the first
+  available of `claude_code > anthropic_api > codex > openai_api >
+  deepseek_api`, with keys entered on **Settings → AI providers** (files
+  under `<data>/secrets/ai/`, 0600; the environment always wins) and an
+  admin pin. The two **CLI** entries are adapters for a binary the CUSTOMER
+  installed on the dashboard host — we still download, bundle and install
+  nothing — and they are dark unless `site.toml [features]
+  ai_cli_providers` is on (off in the vendor build), with the "a personal
+  subscription may breach its terms, your call" note on the page. No key is
+  ever in `/api/v1/site`, a log, or an API response (masked `sk-…abcd`).
 - The 8899 loopback is origin-allow-listed (`loopback_guard.py`,
   2026-08-17): only the configured dashboard origin gets CORS headers, and a
   POST needs that origin or the `~/.ccsync/loopback-token` header. If

@@ -508,6 +508,30 @@ Values are always strings on the wire (`"1"`/`"0"` for the two boolean
 decides a value is acceptable, so the API and the Settings page form can
 never disagree about what is valid.
 
+### AI providers
+
+`ai_providers.py`, 2026-08-18 — which AI answers `/ytdl`'s two calls, and
+where its credentials live ([`CONFIG.md`](CONFIG.md) §2.5a). Admin-only, CSRF
+like every other cookie-authenticated write.
+
+| Route | What |
+|---|---|
+| `GET /admin/ai-providers` | every provider in **chain order** (`claude_code`, `anthropic_api`, `codex`, `openai_api`, `deepseek_api`) with `rank`, `status`, `available`, a **masked** key and its source; plus `preference`, `cli_enabled`, `cli_tos_note` and `resolved` (`{name, label, reason, pinned}`) |
+| `PUT /admin/ai-providers/{name}/key` | `{"key": "sk-…"}` → the same snapshot. `400` for a CLI provider (it has no key), `409` when the environment sets that key (it always wins), `422` for a blank/spaced/control-character value, `404` for an unknown provider |
+| `DELETE /admin/ai-providers/{name}/key` | forget a stored key → the snapshot |
+| `PUT /admin/ai-providers/{name}/path` | `{"path": "/usr/local/bin/claude"}` — **CLI providers only** (`400` otherwise); blank clears it back to a `PATH` search. The only writable thing about a CLI provider: there is no install action, because nothing here ships or fetches either binary |
+| `POST /admin/ai-providers/{name}/test` | one tiny live call → `{"ok": bool, "detail": "…"}`. A model-list request for the API providers, the login probe for a CLI. Never 500s, never echoes the key |
+| `PUT /admin/ai-providers/preference` | `{"preference": "auto"｜"<name>"}` → the snapshot. A pin that is not available is a **refusal** (`resolved.name` is `""`), never a fall-through to the next provider |
+
+**No key is ever in a response, a query string, a log line or
+`GET /api/v1/site`.** The stored value goes exactly one place: the mounted
+ytdl app, in-process, through a callback it invokes per AI call.
+
+`status` is one of `available`, `not_configured`, `not_installed`,
+`not_signed_in`, `disabled_by_site`, `unknown`. The last two are CLI-only:
+`disabled_by_site` means `[features] ai_cli_providers` is off, in which case
+the CLI is **not probed at all** — no subprocess runs.
+
 ### Setup wizard
 
 Behind `/setup`. Unlike every other route in this section, these are reachable

@@ -17,6 +17,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 # app.csrf_gate); a deployment that sets it gets a WARNING on every boot.
 os.environ["DASH_DEV_INSECURE"] = "1"
 
+# The AI providers' keys (ai_providers.py, 2026-08-18). Removed at import
+# time, for the same reason ytdl/web's conftest blanks DASH_REPORT_TOKEN: the
+# base rig genuinely exports ANTHROPIC_API_KEY, "the environment always wins"
+# is a real rule of this module, and a suite that resolved a live provider on
+# one machine and nothing on CI would hide the property that matters most --
+# a dashboard with no key configured must report NO provider, not somebody's
+# shell's. Tests that are about the env path set it themselves (monkeypatch).
+for _ai_key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"):
+    os.environ.pop(_ai_key, None)
+
 from ccsync_dashboard import db as dbmod  # noqa: E402
 
 

@@ -96,6 +96,7 @@ it stops and names it; that is the enforcement.
 |---|---|---|
 | `youtube_download` | `false` | **F**. The `/ytdl` page. Off means the mount does not exist, the fleet routes 404, and companions hide their YouTube items. A legal decision, not a technical one — [`legal/YOUTUBE_FEATURE_NOTICE.md`](legal/YOUTUBE_FEATURE_NOTICE.md) |
 | `youtube_unblock` | `false` | **F**. The PO-token provider, the deno n-challenge solver, the cookie sign-in. **The vendor build ships none of them installed.** Requires `youtube_download`; alone it does nothing and the manifest will not report it true |
+| `ai_cli_providers` | `false` | **F**. Lets the downloader's two AI calls use a **Claude Code / Codex CLI the customer installed on the dashboard host themselves** (§2.5a). Nothing is bundled, downloaded or installed by us either way; what this switches on is our willingness to *run* one. Using a personal subscription to power a service may breach its terms — the customer's decision, stated on the Settings page. **Not published in `GET /api/v1/site`**: no client needs it |
 
 ### `[releases]`
 
@@ -284,10 +285,54 @@ Feature flags, both `"1"`-and-nothing-else (an unset, empty, misspelt or
 `"true"`-shaped value all mean **off**, because off is the state it is safe to
 be wrong about): `DASH_SITE_YOUTUBE_DOWNLOAD`, `DASH_SITE_YOUTUBE_UNBLOCK`.
 
+`DASH_SITE_AI_CLI_PROVIDERS` — same `"1"`-only rule, and off in the vendor
+build (§2.5a).
+
 `DASH_SITE_INDEXER_MODEL_TIER` — `good` (default) or `best` (2026-08-18, see
 `[indexer]` above). Case-insensitive; anything else falls back to `good` with
 a boot warning, the same "never coerce upward" rule as
 `DASH_RELEASE_FEED_POLICY`.
+
+### 2.5a AI providers for the YouTube downloader (2026-08-18)
+
+Which AI answers `/ytdl`'s two calls (search-term expansion, relevance
+filtering). Set on **Settings → AI providers**, or in the environment; the
+chain is resolved on **every call**, so a key typed on the page works on the
+next job with no container restart.
+
+**Order, first available wins:** `claude_code` → `anthropic_api` → `codex` →
+`openai_api` → `deepseek_api`. An admin can pin one (`ai_provider_preference`,
+a `site_settings` row); **a pin that is not available is a refusal, not a
+fallback** — nothing else is spent in its place.
+
+| Var | | Notes |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | **S** | Provider 2, and the vendor default. Also read by the ytdl app directly |
+| `ANTHROPIC_BASE_URL` | | A proxy or gateway. Blank = `api.anthropic.com` |
+| `OPENAI_API_KEY` / `OPENAI_BASE_URL` | **S** | Provider 4. Plain `urllib` against `/chat/completions` — **no new dependency** was taken for two HTTP calls |
+| `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` | **S** | Provider 5, OpenAI-compatible, same implementation |
+| `DASH_SITE_AI_CLI_PROVIDERS` | **F** | `"1"` turns providers 1 and 3 on for this site. Off in the vendor build |
+| `YTDL_CLAUDE_CODE_ARGS` / `YTDL_CODEX_ARGS` | | How the **customer's own** CLI is invoked non-interactively (prompt on stdin). One string each, so a customer on a different CLI build can correct a flag without a release |
+
+**Where keys typed on Settings live:** `<DASH_DB_PATH's parent>/secrets/ai/`,
+one 0600 file per provider (`anthropic_api_key`, `openai_api_key`,
+`deepseek_api_key`), written through the same helper as the five boot secrets
+(§1.1). **The environment always wins** where it is set: the page shows the
+value as "set by the deployment" and refuses to overwrite it. A key is never
+in `GET /api/v1/site`, never in a log line, and never in an API response — the
+admin routes publish a mask (`sk-…abcd`) and a source
+([`API.md`](API.md) §5 "AI providers").
+
+**The two CLI providers are adapters, not a bundle.** Nothing in this product
+downloads, installs, updates or version-pins `claude` or `codex`; they are
+found on `PATH` (or at `ai_claude_code_path` / `ai_codex_path`, typed by the
+admin) and signed in **on the host** by the customer — an interactive OAuth
+cannot be completed from a web page, so the Settings page prints the command
+instead of pretending. That is what keeps
+[`COMMERCIAL_READINESS.md`](COMMERCIAL_READINESS.md) item 1 answered: the
+redistribution problem was ours and stays fixed; the "is a personal
+subscription allowed to power a service" question is the customer's, asked
+explicitly, off by default.
 
 ### 2.6 Mounts and cadences
 

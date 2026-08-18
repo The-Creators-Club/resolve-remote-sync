@@ -231,6 +231,14 @@ services:
       # file carries none of them. See docs/legal/YOUTUBE_FEATURE_NOTICE.md.
       DASH_SITE_YOUTUBE_DOWNLOAD: "0"
       DASH_SITE_YOUTUBE_UNBLOCK: "0"
+      # Whether the downloader's two AI calls may run a Claude Code / Codex
+      # CLI THE CUSTOMER installed on this host (2026-08-18, Settings -> AI
+      # providers). "0" is the vendor build. NOTHING IS EVER INSTALLED FOR
+      # THIS AT ANY SETTING -- there is no binary in the image, no volume and
+      # no download, which is the half of COMMERCIAL_READINESS.md item 1 that
+      # was ours; the flag only decides whether we will run one already
+      # there, on the customer's own subscription and their own say-so.
+      DASH_SITE_AI_CLI_PROVIDERS: "0"
       # Published companion builds (upgrade channel). Optional: defaults to
       # a "packages" dir next to DASH_DB_PATH, i.e. /data/packages -- which
       # is already persistent. Only set this to move them elsewhere.

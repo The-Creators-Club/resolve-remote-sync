@@ -1764,7 +1764,9 @@ def test_health_timeout_warns_and_does_not_erase_the_projects_warning(spa):
 # ----------------------------------------------------------------- YTDL-12
 def test_a_failed_jobs_banner_does_not_survive_into_the_next_job(spa):
     r = spa['job_error_banner_is_cleared_by_the_next_job']
-    assert 'Claude did not answer in time' in r['after_failure'], r
+    # "The AI provider did not answer in time" since 2026-08-18: there are
+    # five possible backends now, so the hint text stopped naming one.
+    assert 'did not answer in time' in r['after_failure'], r
     assert r['after_retry'] == '', r['after_retry']
 
 

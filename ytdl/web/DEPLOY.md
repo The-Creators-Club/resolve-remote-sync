@@ -125,6 +125,62 @@ the API's allow-list and migration 006's SQL default all have to agree.
 Every one is `YTDL_`-prefixed because this app shares one environment with the
 dashboard, with b-roll (`BROLL_*`) and with music (`MUSIC_*`).
 
+## Which AI answers the two calls (2026-08-18)
+
+There are five possible backends now, chosen by the dashboard's **Settings →
+AI providers** page (`ccsync_dashboard/ai_providers.py`) and resolved by
+`ytdlweb/ai_backend.py` on **every call** — so a key an admin pastes works on
+the next job, with no container restart, and a key they clear stops working
+just as fast.
+
+**The chain, first available wins:**
+
+| # | provider | available when | credential |
+|---|---|---|---|
+| 1 | `claude_code` | the CLI is installed **on this host by the customer** and signed in | their own Claude subscription |
+| 2 | `anthropic_api` | a key is set | `ANTHROPIC_API_KEY` or Settings |
+| 3 | `codex` | the CLI is installed **by the customer** and signed in | their own ChatGPT subscription |
+| 4 | `openai_api` | a key is set | `OPENAI_API_KEY` or Settings |
+| 5 | `deepseek_api` | a key is set | `DEEPSEEK_API_KEY` or Settings |
+
+An admin can **pin** one instead of `auto`. A pin that is not available is a
+refusal, not a fallback: nothing else is spent in its place.
+
+**The two CLI rows are behind `site.toml [features] ai_cli_providers`, which
+ships OFF.** Nothing in this repo downloads, bundles or installs either CLI —
+the customer installs it on the dashboard host themselves and signs it in
+themselves, on the host, because an interactive OAuth cannot be completed from
+a web page. Using a personal subscription to power a service may breach that
+subscription's terms; the Settings page says so, and it is the customer's
+decision. **API keys are the supported path** and the only one a deployment
+gets without asking. See `docs/legal/YOUTUBE_FEATURE_NOTICE.md`.
+
+Keys typed on Settings are files under `<data>/secrets/ai/`, 0600, written the
+same way the five boot secrets are. **The environment always wins** where it is
+set — the page says "set by the deployment" and refuses to overwrite it (409).
+
+Standalone (`uvicorn ytdlweb.main:app`, no dashboard in reach) there is no
+Settings page and no feature flag, so the app falls back to
+`ANTHROPIC_API_KEY` → `OPENAI_API_KEY` → `DEEPSEEK_API_KEY` from its own
+environment and **never** to a CLI.
+
+| env var | container value | what it is |
+|---|---|---|
+| `OPENAI_API_KEY` / `OPENAI_BASE_URL` | *(unset)* | provider 4. Plain `urllib` against `/chat/completions` — **no `openai` SDK dependency** was added for two HTTP calls |
+| `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` | *(unset)* | provider 5. OpenAI-compatible, same implementation |
+| `YTDL_OPENAI_MODEL` | `gpt-4o-mini` | conservative default; an unknown model id is an HTTP 400 on every job |
+| `YTDL_DEEPSEEK_MODEL` | `deepseek-chat` | as above |
+| `YTDL_CLAUDE_CODE_ARGS` | `-p --output-format text --disallowed-tools *` | how the customer's `claude` is invoked, non-interactive, prompt on **stdin**. One string so a customer on a different CLI build can correct a flag without waiting for a release |
+| `YTDL_CODEX_ARGS` | `exec --sandbox read-only -` | the same for `codex` |
+| `YTDL_AI_CLI_TIMEOUT` | `300` | a CLI is slower to start than an HTTPS call, so it has its own ceiling |
+| `DASH_SITE_AI_CLI_PROVIDERS` | `0` | the feature flag's env spelling (a `site_settings` row from Settings beats it) |
+
+The CLI subprocess is given an environment with `ANTHROPIC_API_KEY` /
+`OPENAI_API_KEY` / `DEEPSEEK_API_KEY` **removed**: an admin who picked a CLI
+provider wants the subscription used, and Claude Code prefers an API key when
+it finds one — which would silently bill the wrong account, invisibly until
+the invoice.
+
 ## The Anthropic API key (the customer's)
 
 **2026-08-17, docs/COMMERCIAL_READINESS.md item 1.** The two AI calls —
@@ -135,8 +191,10 @@ authenticated by a one-time `/login` whose OAuth credentials lived in a
 account, could not be rotated or metered, and put an agent binary with
 filesystem tools inside a container that mounts the whole Projects tree rw.
 
-It is now `ytdlweb/claude_cli.py` → the `anthropic` SDK, with a key **the
-customer supplies** in the container's environment:
+It is now `ytdlweb/ai_backend.py` (the transport; `claude_cli.py` kept the
+prompts and the health cache) → the `anthropic` SDK, with a key **the customer
+supplies**, either on Settings → AI providers or in the container's
+environment:
 
 ```
 ANTHROPIC_API_KEY=sk-ant-...
@@ -153,7 +211,8 @@ No tools are ever sent with these requests: not a policy the model is asked to
 follow, a capability it is not given.
 
 `/ytdl/api/health` reports the state (`ok` / `unauthenticated` / `missing` /
-`timeout`) from a **cached** probe refreshed by the worker at start and on every
+`timeout`) **and which provider it is about** (`ai_provider`, 2026-08-18) from
+a **cached** probe refreshed by the worker at start and on every
 failure — never per request, because a live call costs a second or two and this
 endpoint is hit by every page load. The SPA shows the banner from it *before*
 anyone submits a job. Verify by hand with any tiny request against the key.

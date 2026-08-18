@@ -137,6 +137,9 @@ services:
       # GET /api/v1/site. Both OFF -- the same default compose.yaml carries.
       DASH_SITE_YOUTUBE_DOWNLOAD: "0"
       DASH_SITE_YOUTUBE_UNBLOCK: "0"
+      # See compose.yaml: the CLI AI providers flag (2026-08-18). "0" in the
+      # vendor build, and no binary is installed for it at any setting.
+      DASH_SITE_AI_CLI_PROVIDERS: "0"
       TRUENAS_HOST: "{{NAS_HOST}}"
       TRUENAS_USER: "{{NAS_USER}}"
       TRUENAS_PW: "REPLACE_ME"

@@ -250,8 +250,21 @@ org_name = "Your Studio"
 #   --enable-youtube-unblock to server/install_dashboard_app.py), which is
 #   that customer asserting they have the right to do so.
 #   Requires youtube_download; on its own it does nothing.
+#
+# ai_cli_providers -- lets the downloader's two AI calls run through a Claude
+#   Code or Codex CLI **the customer installed on the dashboard host
+#   themselves**, driven by their own personal subscription, instead of a
+#   metered API key (2026-08-18, dashboard Settings -> AI providers).
+#   NOTHING IS BUNDLED OR DOWNLOADED BY US EITHER WAY: this switch only
+#   decides whether we are willing to RUN a binary already on that host, and
+#   while it is off the two rows are not even probed. Using a personal
+#   subscription to power a service may breach that subscription's terms --
+#   the customer's decision, which is why it is a key here and not a default.
+#   API keys (Anthropic / OpenAI / DeepSeek, entered on the same page) are the
+#   supported path and need no flag. docs/CONFIG.md 2.5a.
 youtube_download = false
 youtube_unblock = false
+ai_cli_providers = false
 
 [stack]
 # The uid:gid the dashboard container runs as: the service account that owns

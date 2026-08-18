@@ -59,6 +59,10 @@
       <span class="flag-toggles-label">hide flagged:</span>
     </div>
 
+    <!-- Opens the ingest drawer. A drop anywhere on the page opens it too
+         (ingest.js), so this button is for the editor who wants the native
+         picker rather than a drag. -->
+    <button id="ingest-btn" class="icon-btn" title="Add clips to the archive (or drag clips/folders anywhere on this page)">&#43;</button>
     <button id="settings-btn" class="icon-btn" title="Settings">&#9881;</button>
   </div>
 </header>
@@ -138,6 +142,127 @@
   </div>
 </section>
 
+<!-- Full-window drag veil: the drop target is the WINDOW (ingest.js uses a
+     depth counter on dragenter/dragleave, the music app's pattern), so the
+     editor must not have to aim at a small box. -->
+<div id="ingest-veil" class="ingest-veil" aria-hidden="true">
+  <div class="ingest-veil-inner">Drop clips or folders to add them to the archive</div>
+</div>
+
+<section id="ingest-panel" class="hidden" aria-label="Add clips to the archive">
+  <div class="ingest-inner">
+    <button id="ingest-close" class="text-btn">&times; close</button>
+    <h2>Add b-roll</h2>
+
+    <div class="companion-status">
+      <span id="ingest-dot" class="status-dot status-unknown"></span>
+      <span id="ingest-companion-text">checking&hellip;</span>
+      <button id="ingest-recheck" class="text-btn">recheck</button>
+    </div>
+    <p class="muted small">
+      Your own machine does the work: the CC Sync companion transcodes, indexes with
+      the local model and uploads the finished clips to the archive. Nothing is
+      uploaded to the dashboard.
+    </p>
+
+    <!-- Persistent, not a toast: a VRAM refusal (503 from the companion's
+         /broll/ingest/run) has to still be on screen when the editor comes
+         back to change the model tier. Cleared only by dismissing it or by a
+         run that is accepted. -->
+    <div id="ingest-notice" class="ingest-notice hidden" role="alert">
+      <span id="ingest-notice-text"></span>
+      <button id="ingest-notice-dismiss" class="text-btn">dismiss</button>
+    </div>
+
+    <div id="ingest-drop" class="ingest-drop">
+      <div class="ingest-drop-head">Drag clips or folders here</div>
+      <div class="muted small">or choose from this computer&hellip;</div>
+      <div class="ingest-pick-row">
+        <button type="button" id="ingest-pick-files" class="primary-btn">Choose files&hellip;</button>
+        <button type="button" id="ingest-pick-folder" class="primary-btn">Choose a folder&hellip;</button>
+      </div>
+      <div class="muted small">
+        Files chosen this way are indexed where they are &mdash; they are not copied
+        into the browser first.
+      </div>
+    </div>
+
+    <div id="ingest-stage" class="hidden">
+      <h3>Clips</h3>
+      <div id="ingest-preview-head" class="ingest-preview-head"></div>
+      <div id="ingest-preview" class="ingest-preview"></div>
+
+      <h3>Settings</h3>
+      <form id="ingest-form" class="ingest-form" autocomplete="off">
+        <label class="ingest-field" for="ingest-share">
+          <span class="ingest-field-label">Shoot name</span>
+          <input id="ingest-share" type="text" maxlength="90" spellcheck="false">
+        </label>
+        <div id="ingest-share-note" class="muted small"></div>
+
+        <fieldset class="ingest-fieldset">
+          <legend>Model</legend>
+          <div id="ingest-tiers"></div>
+        </fieldset>
+
+        <fieldset class="ingest-fieldset">
+          <legend>When to run</legend>
+          <label class="radio-option">
+            <input type="radio" name="ingest-run-mode" value="idle" checked>
+            <span>Only when idle
+              <span class="muted small">Starts when you step away, pauses the moment you come back &mdash; the way proxy generation already works.</span>
+            </span>
+          </label>
+          <label class="radio-option">
+            <input type="radio" name="ingest-run-mode" value="foreground">
+            <span>Foreground
+              <span class="muted small">Starts now and keeps going while you work. Your GPU will be busy.</span>
+            </span>
+          </label>
+        </fieldset>
+
+        <label class="ingest-check">
+          <input id="ingest-keep-subfolders" type="checkbox" checked>
+          <span>Keep sub-folders</span>
+        </label>
+        <label class="ingest-check">
+          <input id="ingest-upload-originals" type="checkbox" checked>
+          <span>Upload the originals too <span class="muted small">(previews and the index go up either way)</span></span>
+        </label>
+        <label class="ingest-check">
+          <input id="ingest-transcribe" type="checkbox" disabled>
+          <span>Transcribe speech <span class="muted small">&mdash; phase 2, not available yet</span></span>
+        </label>
+      </form>
+
+      <div id="ingest-summary" class="ingest-summary"></div>
+      <div class="ingest-actions">
+        <button type="button" id="ingest-run" class="primary-btn">Run</button>
+        <button type="button" id="ingest-clear" class="text-btn">clear</button>
+      </div>
+    </div>
+
+    <div id="ingest-live" class="hidden">
+      <h3>Running</h3>
+      <div id="ingest-live-body"></div>
+      <div class="ingest-actions">
+        <button type="button" id="ingest-pause" class="primary-btn">Pause</button>
+        <button type="button" id="ingest-resume" class="primary-btn">Resume</button>
+        <button type="button" id="ingest-start-now" class="primary-btn">Start now</button>
+        <button type="button" id="ingest-pause-upload" class="primary-btn">Pause uploads</button>
+        <button type="button" id="ingest-cancel" class="text-btn">cancel batch&hellip;</button>
+      </div>
+    </div>
+
+    <h3>Batches</h3>
+    <div id="ingest-scope-tabs" class="mode-toggles">
+      <button type="button" class="mode-btn" data-scope="mine">Mine</button>
+      <button type="button" class="mode-btn hidden" data-scope="all">All machines</button>
+    </div>
+    <div id="ingest-batch-list" class="ingest-batch-list"></div>
+  </div>
+</section>
+
 <div id="settings-panel" class="hidden">
   <div class="settings-inner">
     <button id="settings-close" class="text-btn">&times; close</button>
@@ -171,5 +296,10 @@
 <div id="toast-container"></div>
 
 <script src="static/app.js"></script>
+<!-- A second classic script, not a module: it shares app.js's helpers
+     ($, el, toast, fetchJson) through the global scope, and its URLs
+     follow the same document-relative rule (tests/test_mounted_prefix.py).
+     tests/test_ingest_ui.py pins that the two files declare no name twice. -->
+<script src="static/ingest.js"></script>
 </body>
 </html>

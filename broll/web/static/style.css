@@ -812,3 +812,281 @@ a.brand:hover { color: var(--red-hot); }
 }
 .tree-caret { flex: 0 0 9px; color: var(--red-dim); font-size: 9px; }
 .tree-children.hidden { display: none; }
+
+/* ---------- form controls: checkboxes and radios ----------
+   COPIED, not imported, from dashboard/static/style.css (2026-08-17 for the
+   checkbox block, 2026-08-18 for the radios): this app ships its own
+   stylesheet and there is no build step to share one, but mounted at /broll
+   the two UIs sit behind one login and one origin, so a checkbox must not be
+   a UA-chrome box here and a themed one there.
+
+   The element stays a real `<input type="checkbox">`/`"radio"` -- `appearance:
+   none` only removes the UA paint, so markup and `.checked` assertions still
+   hold. It is deliberately GLOBAL, exactly as it is on the dashboard: the
+   header's `fuzzy`/`hide flagged` toggles (which only had `accent-color`
+   before, inert once appearance is none) get the same paint as the ingest
+   panel's, which is the point.
+
+   The check mark is an inline SVG data URI, never a static asset: nothing in
+   these pages may reach off-box. */
+input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 1em;
+  height: 1em;
+  min-width: 1em;
+  border: 1px solid var(--red-dim);
+  background: var(--field);
+  cursor: pointer;
+  position: relative;
+  vertical-align: middle;
+  flex-shrink: 0;
+  transition: border-color 0.15s ease, background 0.15s ease, opacity 0.15s ease;
+}
+input[type="checkbox"]:hover:not(:disabled) { border-color: var(--red-hot); }
+input[type="checkbox"]:checked {
+  border-color: var(--red);
+  background: var(--red-dim);
+  box-shadow: 0 0 6px rgba(255, 33, 64, 0.55);
+}
+input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  inset: 2px;
+  background: var(--text);
+  -webkit-mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M2 8.5l3.8 3.8L14 4" fill="none" stroke="black" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>') center / contain no-repeat;
+  mask: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path d="M2 8.5l3.8 3.8L14 4" fill="none" stroke="black" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>') center / contain no-repeat;
+}
+input[type="checkbox"]:focus-visible,
+input[type="radio"]:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
+}
+input[type="checkbox"]:disabled,
+input[type="radio"]:disabled {
+  opacity: 0.4;
+  cursor: default;
+  border-color: #3a3a42;
+}
+
+/* The radio is the only round thing in a square theme -- deliberately, because
+   "one of these" must not read as "any of these" (the dashboard's model-tier
+   chooser, same rule). */
+input[type="radio"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 1em;
+  height: 1em;
+  min-width: 1em;
+  border: 1px solid var(--red-dim);
+  border-radius: 50%;
+  background: var(--field);
+  cursor: pointer;
+  position: relative;
+  vertical-align: middle;
+  flex-shrink: 0;
+  transition: border-color 0.15s ease, background 0.15s ease, opacity 0.15s ease;
+}
+input[type="radio"]:hover:not(:disabled) { border-color: var(--red-hot); }
+input[type="radio"]:checked {
+  border-color: var(--red);
+  background: var(--red-dim);
+  box-shadow: 0 0 6px rgba(255, 33, 64, 0.55);
+}
+input[type="radio"]:checked::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--text);
+}
+
+.radio-option {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+  cursor: pointer;
+}
+.radio-option:first-child { margin-top: 0; }
+.radio-option .muted { display: block; font-weight: normal; }
+
+/* ---------- ingest panel (docs/BROLL_INGEST_PLAN.md section 5) ---------- */
+
+/* The drop target is the WINDOW, so the feedback has to be the window too:
+   aiming at a 200px box while dragging 40 GB of camera card is not a thing
+   anybody does twice. */
+.ingest-veil {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 10, 13, 0.82);
+  border: 2px dashed var(--red);
+  pointer-events: none;   /* never swallow the drop it is advertising */
+}
+.ingest-veil.on { display: flex; }
+.ingest-veil-inner {
+  color: var(--red);
+  letter-spacing: 0.08em;
+  font-size: 15px;
+  text-shadow: 0 0 12px rgba(255, 33, 64, 0.55);
+}
+
+#ingest-panel {
+  position: fixed;
+  top: 0; right: 0; bottom: 0;
+  width: 520px;
+  max-width: 100vw;
+  background: var(--panel);
+  border-left: 1px solid var(--red-dim);
+  padding: 16px;
+  z-index: 50;
+  overflow-y: auto;
+}
+#ingest-panel h2 {
+  font-size: 14px;
+  margin: 6px 0 14px;
+  color: var(--red);
+  letter-spacing: 0.08em;
+  text-shadow: 0 0 12px rgba(255, 33, 64, 0.55);
+}
+#ingest-panel h3 {
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.1em;
+  margin: 18px 0 8px;
+  text-transform: uppercase;
+  border-bottom: 1px dotted var(--border);
+  padding-bottom: 3px;
+}
+
+/* Persistent by design (a VRAM refusal must survive the editor looking away),
+   so it is loud: a full red border, not the toast's left stripe. */
+.ingest-notice {
+  border: 1px solid var(--danger);
+  background: rgba(255, 33, 64, 0.08);
+  color: var(--text);
+  padding: 8px 10px;
+  margin: 10px 0;
+  font-size: 12px;
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.ingest-drop {
+  border: 1px dashed var(--red-dim);
+  background: var(--field);
+  padding: 14px;
+  margin: 12px 0;
+  text-align: center;
+}
+.ingest-drop.on { border-color: var(--red); border-style: solid; }
+.ingest-drop-head { color: var(--red); letter-spacing: 0.06em; margin-bottom: 6px; }
+.ingest-pick-row { display: flex; gap: 8px; justify-content: center; margin: 8px 0; }
+
+.ingest-preview-head { color: var(--muted); font-size: 11px; margin-bottom: 6px; }
+.ingest-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  padding: 6px;
+}
+.ingest-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 3px 2px;
+  border-bottom: 1px dotted var(--border);
+}
+.ingest-row:last-child { border-bottom: none; }
+.ingest-thumb {
+  flex: 0 0 80px;
+  height: 45px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.ingest-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.ingest-row-body { flex: 1 1 auto; min-width: 0; }
+.ingest-row-name {
+  display: block;
+  font-size: 12px;
+  word-break: break-all;
+  cursor: pointer;
+}
+.ingest-row-meta { font-size: 11px; color: var(--muted); word-break: break-word; }
+.ingest-row-meta.bad { color: var(--danger); }
+.ingest-row-meta.warn { color: var(--amber); }
+
+.ingest-bar { height: 3px; background: var(--border); margin-top: 3px; }
+.ingest-bar-fill { height: 100%; background: var(--red); width: 0; }
+
+.ingest-form { display: flex; flex-direction: column; gap: 10px; }
+.ingest-field { display: flex; flex-direction: column; gap: 3px; }
+.ingest-field-label { color: var(--muted); font-size: 11px; letter-spacing: 0.06em; }
+.ingest-field input[type="text"] {
+  background: var(--field);
+  border: 1px solid var(--red-dim);
+  color: var(--text);
+  padding: 4px 6px;
+}
+.ingest-field input[type="text"]:focus { outline: 1px solid var(--red); }
+.ingest-fieldset {
+  border: 1px solid var(--red-dim);
+  padding: 8px 10px 10px;
+  margin: 0;
+}
+.ingest-fieldset legend {
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0 4px;
+}
+.ingest-check { display: flex; align-items: baseline; gap: 0.5rem; cursor: pointer; }
+.ingest-check .muted { font-weight: normal; }
+
+.ingest-summary { margin: 12px 0 8px; color: var(--text); font-size: 12px; }
+.ingest-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ingest-actions button:disabled { opacity: 0.4; cursor: default; }
+
+.ingest-live-head { color: var(--red); letter-spacing: 0.04em; }
+.ingest-gate { color: var(--amber); font-size: 11.5px; margin: 4px 0; }
+.ingest-item-states {
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  margin: 6px 0;
+  padding: 4px 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.ingest-item-state { white-space: pre-wrap; word-break: break-word; }
+.ingest-item-state.state-live { color: var(--green); }
+.ingest-item-state.state-failed { color: var(--danger); }
+.ingest-item-state.state-duplicate { color: var(--amber); }
+
+.ingest-batch-list { display: flex; flex-direction: column; gap: 8px; }
+.ingest-batch {
+  background: var(--field);
+  border: 1px solid var(--red-dim);
+  padding: 7px 9px;
+}
+.ingest-batch-head { display: flex; justify-content: space-between; gap: 8px; }
+.ingest-batch-share { color: var(--text); word-break: break-all; }
+.ingest-batch-state { color: var(--red); font-size: 11px; letter-spacing: 0.06em; }
+.ingest-batch.state-done .ingest-batch-state { color: var(--green); }
+.ingest-batch.state-failed .ingest-batch-state,
+.ingest-batch.state-done_with_errors .ingest-batch-state { color: var(--danger); }
+.ingest-batch-actions { display: flex; gap: 12px; }

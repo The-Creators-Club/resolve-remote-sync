@@ -18,6 +18,14 @@ learned the hard way there:
     under the token. The page never learns a path and never dictates one; that
     is /music/send's principle applied to a work order.
 
+**`X-CCSync-Machine` on every call after the claim.** The plan's bodies for
+heartbeat/status/result/uploaded/release carry no machine name, so it rides a
+header instead of being bolted onto five request models: it is what proves the
+caller is still THIS editor's leaseholding machine rather than another of their
+companions waking up with a stale state file. Absent, that one check is skipped
+and the editor/lease/cancel checks still run -- an older companion degrades to
+the pre-2026-08-18 guarantee rather than being locked out.
+
 410, NOT 403, for every way a claim can end. The lease expired and the server
 reclaimed the batch, the editor cancelled it, another of their machines took
 it, the batch finished -- the companion's answer to all of them is the same

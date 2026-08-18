@@ -317,6 +317,23 @@ def test_the_machine_that_no_longer_holds_it_gets_410(client, conn):
     assert r.json()["detail"]["reason"] == "other_machine"
 
 
+def test_a_caller_that_declares_no_machine_still_gets_every_other_check(client, conn):
+    """X-CCSync-Machine rides a header because the plan's bodies carry no
+    machine name. An older companion that does not send it must degrade to the
+    pre-2026-08-18 guarantee -- editor, lease and cancel are all still
+    checked -- rather than be locked out mid-batch."""
+    uid = _queue(client)
+    _claim(client, uid, machine="EDIT-01")
+    headers = fleet_headers()
+    headers.pop("X-CCSync-Machine")
+    assert client.post(f"{BASE}/{uid}/heartbeat", json={},
+                       headers=headers).status_code == 200
+
+    ingest_batches.cancel(conn, uid, "root")
+    assert client.post(f"{BASE}/{uid}/heartbeat", json={},
+                       headers=headers).status_code == 410
+
+
 # --- per-item status -----------------------------------------------------------
 
 def _first_item(client, uid):

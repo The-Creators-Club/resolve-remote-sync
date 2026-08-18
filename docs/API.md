@@ -610,6 +610,12 @@ Both uids are 32 lowercase hex characters (`lower(hex(randomblob(16)))`), and
 the shape is load-bearing: an integer id would be one an editor could
 enumerate, and `app.py`'s carve-out regex pins it.
 
+**Every call after `claim` should also send `X-CCSync-Machine`** — the same
+string that claim's body carried. It is what proves the caller is still *this*
+editor's leaseholding machine rather than another of their companions, and
+without it that one check is skipped (the editor, lease and cancel checks all
+still run). A machine that does not match gets 410 `reason: other_machine`.
+
 **`claim` is one transaction** and is idempotent for the machine that already
 holds the batch (a companion restarting mid-batch re-issues it): it mints the
 `videos` rows at `status='ingesting'`, allocates each archive name against what

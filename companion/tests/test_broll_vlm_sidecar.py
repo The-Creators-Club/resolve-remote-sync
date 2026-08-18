@@ -111,7 +111,7 @@ def test_best_on_an_8gb_card_is_the_plans_exact_sentence():
     ok, message = sc.fits("best", _gpu(vram=8.0))
     assert ok is False
     assert message == ("Can't index b-roll: Best needs 12 GB VRAM, this GPU has 8 GB "
-                       "— choose Good")
+                       "- choose Good")
 
 
 def test_good_on_a_small_card_does_not_offer_good_as_the_alternative():
@@ -127,7 +127,7 @@ def test_apple_silicon_is_told_about_unified_memory_not_vram():
                                        name="Apple Silicon (unified memory)"))
     assert ok is False
     assert message == ("Can't index b-roll: Best needs 24 GB unified memory, this Mac "
-                       "has 16 GB — choose Good")
+                       "has 16 GB - choose Good")
 
 
 def test_a_big_enough_gpu_fits_with_no_message():

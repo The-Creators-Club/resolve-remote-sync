@@ -356,7 +356,7 @@ def load_frame_list(sheets_dir: Path) -> list[dict[str, Any]]:
     """
     meta_path = Path(sheets_dir) / "frames.json"
     if not meta_path.is_file():
-        raise RuntimeError(f"no frames metadata found at {meta_path} — run the 'frames' stage first")
+        raise RuntimeError(f"no frames metadata found at {meta_path} - run the 'frames' stage first")
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     frames_dir = Path(sheets_dir) / "frames"
     out = []
@@ -471,7 +471,7 @@ def describe_video(
     sheets_dir = Path(cfg.data_root) / "sheets" / str(video["id"])
     frames = load_frame_list(sheets_dir)
     if not frames:
-        raise RuntimeError("no usable frames found — run the 'frames' stage first")
+        raise RuntimeError("no usable frames found - run the 'frames' stage first")
 
     tier = local_models.tier(cfg.indexer.model_tier)
     model_label = f"local:{tier.model_label}"

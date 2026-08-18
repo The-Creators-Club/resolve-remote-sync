@@ -501,8 +501,8 @@ def run(
         return Outcome(False, ytdl_cookies.OFF_MESSAGE)
     browser = browser or find_browser()
     if browser is None:
-        return Outcome(False, "no Chromium browser found (Microsoft Edge, Google Chrome or Brave) "
-                              "— install one, or use the cookies.txt file instead")
+        return Outcome(False, "no Chromium browser found (Microsoft Edge, Google Chrome or Brave). "
+                              "Install one, or use the cookies.txt file instead")
     profile = profile or profile_dir()
     try:
         profile.mkdir(parents=True, exist_ok=True)
@@ -522,22 +522,22 @@ def run(
         return Outcome(False, f"couldn't start {browser.name} ({exc})")
     log.info("ytdl sign-in: launched %s with a private profile, devtools on 127.0.0.1:%d", browser.name, port)
     if progress:
-        progress(f"{browser.name} is opening — sign in to YouTube in that window")
+        progress(f"{browser.name} is opening. Sign in to YouTube in that window")
 
     session: Optional[CdpSession] = None
     try:
         if not wait_devtools(port, alive=lambda: _alive(proc), sleep=sleep, clock=clock):
-            return Outcome(False, f"{browser.name} started but its sign-in window never became reachable "
-                                  "— close any leftover windows and try again")
+            return Outcome(False, f"{browser.name} started but its sign-in window never became reachable. "
+                                  "Close any leftover windows and try again")
         session = session_factory(port)
         if session is None:
-            return Outcome(False, "the sign-in window opened but could not be inspected — try again")
+            return Outcome(False, "the sign-in window opened but could not be inspected - try again")
 
         end = clock() + login_timeout
         cookies: list[dict] = []
         while clock() < end:
             if not _alive(proc):
-                return Outcome(False, "the browser was closed before the sign-in finished — nothing saved")
+                return Outcome(False, "the browser was closed before the sign-in finished - nothing saved")
             try:
                 cookies = list((session.call("Network.getAllCookies", timeout=10) or {}).get("cookies") or [])
             except (ConnectionError, TimeoutError, RuntimeError, OSError) as exc:
@@ -558,7 +558,7 @@ def run(
                 break
             sleep(POLL_SECONDS)
         else:
-            return Outcome(False, "the sign-in did not finish in time — nothing saved; try again")
+            return Outcome(False, "the sign-in did not finish in time - nothing saved; try again")
 
         text = netscape_text(relevant(cookies))
         ok, message = install_text(text)

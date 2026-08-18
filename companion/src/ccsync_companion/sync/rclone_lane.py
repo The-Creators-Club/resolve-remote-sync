@@ -3336,7 +3336,7 @@ class RcloneLane(LaneAdapter):
         self._watch_blocked_announced = False
         log.info("%s: the sync drive is answering again -- the file watcher is back",
                  self.name)
-        self._announce_watch_state("The sync drive is responding again — CCSync is watching it for "
+        self._announce_watch_state("The sync drive is responding again. CCSync is watching it for "
                   "new files.")
 
     def _announce_watch_state(self, message: str) -> None:

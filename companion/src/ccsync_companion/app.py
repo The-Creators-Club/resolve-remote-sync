@@ -1289,7 +1289,7 @@ class CompanionApp:
                     self.config.get("local_root"), state,
                 )
                 self._notify_tray(
-                    f"Sync paused — {site_mod.drive_phrase()} is disconnected.",
+                    f"Sync paused: {site_mod.drive_phrase()} is disconnected.",
                     "ccsync-companion",
                 )
             self._root_pause_lanes()
@@ -1330,7 +1330,7 @@ class CompanionApp:
             log.info("local_root %s is back -- resuming sync",
                      self.config.get("local_root"))
             self._root_resume_lanes()
-            self._notify_tray("Drive reconnected — sync resumed.", "ccsync-companion")
+            self._notify_tray("Drive reconnected, sync resumed.", "ccsync-companion")
         except Exception:
             log.exception("root guard: could not resume after the drive came back")
 
@@ -1392,7 +1392,7 @@ class CompanionApp:
         )
         self._notify_tray(
             f"{site_mod.drive_phrase(capitalised=True)} is mounted at the wrong "
-            f"path. Sync is paused until it is fixed — see the CCSync window.",
+            f"path. Sync is paused until it is fixed. See the CCSync window.",
             "ccsync-companion")
         body = (
             f"{site_mod.drive_phrase(capitalised=True)} is plugged in, but macOS "
@@ -1814,7 +1814,7 @@ class CompanionApp:
         name = item.get("clip_name") or os.path.basename(path) or "a clip"
         log.warning("clip stored under another machine's path (unfixable here): %s", path)
         self._notify_tray(
-            f"\u201c{name}\u201d points at {path[:60]}\u2026 \u2014 a path that only exists on "
+            f"\u201c{name}\u201d points at {path[:60]}\u2026 - a path that only exists on "
             "another editor's machine, so it can never sync or come online here. "
             "Whoever imported it should re-import it through the P: drive (their "
             "companion will offer the fix).",
@@ -3411,7 +3411,7 @@ class CompanionApp:
             # same dialog forever with no explanation.
             log.exception("licence accepted but the record could not be written")
             self._notify_tray(
-                "Couldn't save your acceptance — check disk space and try again.",
+                "Couldn't save your acceptance. Check disk space and try again.",
                 "ccsync-companion")
             return
         log.info("licence agreement v%s accepted on this machine", eula_mod.EULA_VERSION)
@@ -3423,7 +3423,7 @@ class CompanionApp:
             self._start_lanes()
         except Exception:
             log.exception("could not start the sync lanes after the licence was accepted")
-        self._notify_tray("Licence accepted — syncing is starting.", "ccsync-companion")
+        self._notify_tray("Licence accepted, syncing is starting.", "ccsync-companion")
 
     def _start_lanes(self) -> None:
         """Actually start the sync lanes/sequencer, per sync_enabled/managed
@@ -4835,7 +4835,7 @@ class CompanionApp:
         # must not put a window in front of whatever they left open.
         self.show_proxy_progress()
         self._notify_tray(
-            "Making the missing proxies now — it stops on its own when they're done.",
+            "Making the missing proxies now. It stops on its own when they're done.",
             "ccsync-companion",
         )
 

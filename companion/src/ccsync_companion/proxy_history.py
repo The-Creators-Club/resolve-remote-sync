@@ -431,7 +431,7 @@ class ProxyHistory:
         snap = self.snapshot()
         today, lifetime = snap["today"], snap["lifetime"]
         lines = [
-            "CCSync — proxies made on this machine",
+            "CCSync: proxies made on this machine",
             "=" * 46,
             "",
             f"Ledger:  {self.ledger_path}",

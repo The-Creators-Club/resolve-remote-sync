@@ -548,7 +548,7 @@ def test_perform_insert_no_timeline_open(monkeypatch):
     resolve, _media_pool, _root = _make_stack(timeline_present=False)
     monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
     result = resolve_bridge.perform_insert("Y:/broll/clip.mov", 0, 10)
-    assert result == {"ok": False, "message": "no timeline open — create one first"}
+    assert result == {"ok": False, "message": "no timeline open - create one first"}
 
 
 def test_perform_insert_creates_the_archive_sub_bin_when_missing(monkeypatch):
@@ -2305,7 +2305,7 @@ def test_run_answers_the_orchestrators_refusal_verbatim(ingest_server):
     balloons -- the page must be able to show the same sentence."""
     srv, client, ingestor, staging = ingest_server
     ingestor.run_result = (503, {"ok": False, "message": (
-        "Can't index b-roll: Best needs 12 GB VRAM, this GPU has 8 GB — choose Good")})
+        "Can't index b-roll: Best needs 12 GB VRAM, this GPU has 8 GB - choose Good")})
 
     status, _headers, body = client.post_json(
         "/broll/ingest/run", {"batch_uid": "b" * 32, "staging_id": "s1"})

@@ -82,7 +82,7 @@ TIERS: dict[str, ModelTier] = {
         label="Good",
         description="Qwen3-VL 4B",
         vram_note=(
-            "Qwen3-VL 4B — needs an NVIDIA GPU with 8 GB VRAM (or Apple "
+            "Qwen3-VL 4B: needs an NVIDIA GPU with 8 GB VRAM (or Apple "
             "Silicon with 16 GB); ~20 s per clip on an RTX 3080"
         ),
         vram_gb=8,
@@ -108,7 +108,7 @@ TIERS: dict[str, ModelTier] = {
         label="Best",
         description="Qwen3-VL 8B",
         vram_note=(
-            "Qwen3-VL 8B — needs 12 GB VRAM (or Apple Silicon with 24 GB); "
+            "Qwen3-VL 8B: needs 12 GB VRAM (or Apple Silicon with 24 GB); "
             "a little sharper on on-screen text and vocabulary, ~2× slower"
         ),
         vram_gb=12,
@@ -136,7 +136,7 @@ def tier(key: str) -> ModelTier:
     key = (key or DEFAULT_TIER).strip().lower()
     if key not in TIERS:
         raise ValueError(
-            f"unknown model tier {key!r} — expected one of {', '.join(VALID_TIERS)}"
+            f"unknown model tier {key!r} - expected one of {', '.join(VALID_TIERS)}"
         )
     return TIERS[key]
 
@@ -210,7 +210,7 @@ RUNTIMES: dict[str, RuntimeBuild] = {
     # `doctor` should say so rather than imply parity with the Windows numbers.
     "linux": RuntimeBuild(
         platform="linux",
-        label=f"llama.cpp {LLAMA_CPP_TAG} (Vulkan, Linux x64 — not benchmarked, no CUDA build in this release)",
+        label=f"llama.cpp {LLAMA_CPP_TAG} (Vulkan, Linux x64: not benchmarked, no CUDA build in this release)",
         backend="vulkan",
         server_binary="llama-server",
         archive=RuntimeAsset(
@@ -227,6 +227,6 @@ def runtime_for_platform(platform_key: str) -> RuntimeBuild:
     if build is None:
         raise ValueError(
             f"no llama.cpp {LLAMA_CPP_TAG} build pinned for platform {platform_key!r} "
-            f"— expected one of {', '.join(RUNTIMES)}"
+            f"- expected one of {', '.join(RUNTIMES)}"
         )
     return build

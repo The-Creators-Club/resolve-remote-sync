@@ -290,21 +290,21 @@ def build_reveal_response(
         # for word ytdl_server's line: two route groups on one listener, one
         # language.
         target, select = str(folder), False
-        message = f"{path.name} is not there — opened {folder} instead"
+        message = f"{path.name} is not there - opened {folder} instead"
     else:
         # Nothing to point a file manager at. Spawning "explorer <missing>"
         # here opens the editor's Documents folder and looks like a bug.
         return 200, {
             "ok": False,
-            "error": f"{path} is not on this machine — is the share mounted?",
+            "error": f"{path} is not on this machine - is the share mounted?",
         }
 
     argv = ytdl_server.reveal_command(target, select, platform)
     if argv is None:
         return 200, {
             "ok": False,
-            "error": f"opening a folder is only supported on Windows and macOS "
-                     f"— the file is at {target}",
+            "error": f"opening a folder is only supported on Windows and macOS. "
+                     f"The file is at {target}",
         }
 
     run = spawner if spawner is not None else ytdl_server.spawn
@@ -392,7 +392,7 @@ def build_send_response(
         if not fetchable_from_nas(share, mounts, ccsync_cfg):
             return 200, {
                 "ok": False,
-                "error": f"file not found at {local_path_str} — is the share mounted?",
+                "error": f"file not found at {local_path_str} - is the share mounted?",
             }
         # Deferred for the reason local_path_for's is; the vetted components
         # re-joined with forward slashes, never the raw client string.
@@ -415,7 +415,7 @@ def build_send_response(
             progress = fetch.get("progress") or {}
             percent = progress.get("percent")
             message = (
-                f"syncing the track to this machine — {percent}%"
+                f"syncing the track to this machine: {percent}%"
                 if isinstance(percent, int)
                 else "syncing the track to this machine…"
             )
@@ -432,7 +432,7 @@ def build_send_response(
             # reaching here means the file vanished in between.
             return 200, {
                 "ok": False,
-                "error": f"file not found at {local_path_str} — is the share mounted?",
+                "error": f"file not found at {local_path_str} - is the share mounted?",
             }
 
     kw: dict[str, Any] = {"path": local_path_str}

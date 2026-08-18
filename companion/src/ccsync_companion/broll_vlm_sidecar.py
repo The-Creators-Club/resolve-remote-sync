@@ -229,7 +229,7 @@ def fits(tier_key: str, gpu_info: Optional[dict[str, Any]] = None) -> tuple[bool
     if not info.get("present"):
         return False, (
             "Can't index b-roll: no usable GPU on this machine "
-            f"({info.get('detail') or 'no GPU detected'}) — indexing needs an "
+            f"({info.get('detail') or 'no GPU detected'}). Indexing needs an "
             "NVIDIA GPU or Apple Silicon")
 
     apple = bool(info.get("apple_silicon"))
@@ -245,9 +245,9 @@ def fits(tier_key: str, gpu_info: Optional[dict[str, Any]] = None) -> tuple[bool
     # is how a support call starts.
     smaller = models.TIERS["good"] if tier_key == "best" else None
     tail = (f"choose {smaller.label}" if smaller is not None
-            else "indexing needs a bigger GPU — this batch can run on another machine")
+            else "indexing needs a bigger GPU: this batch can run on another machine")
     return False, (f"Can't index b-roll: {tier.label} needs {floor} GB {kind}, "
-                   f"{whose} {_gb(have)} GB — {tail}")
+                   f"{whose} {_gb(have)} GB - {tail}")
 
 
 def recommended_tier(gpu_info: Optional[dict[str, Any]] = None) -> Optional[str]:
@@ -440,7 +440,7 @@ def free_space_refusal(tier_key: str, directory: Optional[Path] = None) -> Optio
         return None
     return (f"Not enough disk space for the {_models().tier(tier_key).label} model: "
             f"needs about {needed / 1_000_000_000:.1f} GB free at {directory}, "
-            f"has {free / 1_000_000_000:.1f} GB — free some space and try again")
+            f"has {free / 1_000_000_000:.1f} GB - free some space and try again")
 
 
 def ensure(
@@ -511,12 +511,12 @@ def ensure(
     except _Stopped:
         _clear_download("")
         log.info("broll vlm: model download stopped; the partial file is kept for resume")
-        return False, "the download was stopped — it will resume where it left off"
+        return False, "the download was stopped - it will resume where it left off"
     except runtime.LocalRuntimeError as exc:
         message = str(exc)
         if "sha256 mismatch" in message.lower():
             _delete_tier_files(tier_key)
-            message = ("the model download's checksum did not match — the file was "
+            message = ("the model download's checksum did not match. The file was "
                        "deleted and will be fetched again")
         log.warning("broll vlm: %s", message)
         _clear_download(message)

@@ -872,7 +872,7 @@ def test_the_fingerprint_moves_when_the_stray_lut_count_does():
 
 
 def test_lane_lines_say_the_drive_is_disconnected():
-    """An editor whose SSD is unplugged must read "PAUSED — drive
+    """An editor whose SSD is unplugged must read "PAUSED (drive
     disconnected", not "this machine isn't set up yet" -- the first names a
     five-second fix, the second sends them to their admin."""
     from ccsync_companion.tray import _format_lane_line_from
@@ -2179,7 +2179,7 @@ def test_the_menu_says_who_cannot_see_the_footage():
 
     app = _proxy_app(missing=12)
     labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-    assert "12 clips have no proxy — other editors can't see them" in labels
+    assert "12 clips have no proxy: other editors can't see them" in labels
 
 
 def test_the_one_clip_wording_is_singular():
@@ -2187,7 +2187,7 @@ def test_the_one_clip_wording_is_singular():
 
     app = _proxy_app(missing=1)
     labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-    assert "1 clip has no proxy — other editors can't see it" in labels
+    assert "1 clip has no proxy: other editors can't see it" in labels
 
 
 def test_the_menu_says_when_it_is_making_them_and_that_it_stops():
@@ -2432,7 +2432,7 @@ def test_an_older_generator_with_no_history_block_renders_normally():
     app.proxy_gap = lambda: {"missing": 12, "braw": 0, "left": 0,
                              "encoding": False, "can_generate": True}
     labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-    assert "12 clips have no proxy — other editors can't see them" in labels
+    assert "12 clips have no proxy: other editors can't see them" in labels
     assert not any("Made" in label and "today" in label for label in labels)
 
 
@@ -2496,7 +2496,7 @@ def test_the_tooltip_suffix_yields_to_everything_louder():
 
     app = _proxy_app(missing=12)
     app._root_absent = True
-    assert _tooltip_text(_tray_snapshot(app)) == "CCSync: PAUSED — your drive is disconnected"
+    assert _tooltip_text(_tray_snapshot(app)) == "CCSync: PAUSED (your drive is disconnected)"
 
     app = _proxy_app(missing=12)
     app.paused = True
@@ -2824,7 +2824,7 @@ def test_the_vram_refusal_is_the_first_line_and_survives_an_idle_gate():
     from ccsync_companion.tray import _build_menu, _tray_snapshot
 
     warning = ("Can't index b-roll: Best needs 12 GB VRAM, this GPU has 8 GB "
-               "— choose Good")
+               "- choose Good")
     app = _ingest_app(gate="tier-unfit", warning=warning, batch_uid="", total=0)
     labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
 

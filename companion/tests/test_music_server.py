@@ -671,7 +671,7 @@ def test_reveal_falls_back_to_the_folder_when_the_track_has_not_synced(tmp_path)
     assert status == 200 and body["ok"] is True
     assert spawned == [["explorer", str(tmp_path / "Ambient")]]
     assert body["message"] == \
-        f"cue.wav is not there — opened {tmp_path / 'Ambient'} instead"
+        f"cue.wav is not there - opened {tmp_path / 'Ambient'} instead"
 
 
 def test_reveal_with_nothing_there_says_so_and_launches_nothing(tmp_path):

@@ -38,6 +38,18 @@ class _FakeResponse:
         return False
 
 
+def _zip_bytes(members: dict) -> bytes:
+    """A real (tiny) zip -- ensure_runtime extracts what it downloads."""
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, data in members.items():
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
 def _fake_opener(payload: bytes, status: int = 200):
     calls = []
 
@@ -273,3 +285,105 @@ def test_platform_key_unsupported_raises(monkeypatch):
     monkeypatch.setattr(local_runtime.platform, "system", lambda: "Plan9")
     with pytest.raises(local_runtime.LocalRuntimeError, match="unsupported platform"):
         local_runtime.platform_key()
+
+
+# ---------------------------------------------------------------------------
+# the host-application progress seam (2026-08-18, plan §3.4)
+# ---------------------------------------------------------------------------
+#
+# The companion fetches the same runtime + weights from a WINDOWED PyInstaller
+# build, where `sys.stderr` is None. Every print in this module would raise on
+# the first chunk of a 2.5 GB download, so `progress=` both reports the bytes
+# and switches stderr off entirely. Both halves are asserted: a callback that
+# fires while stderr is still being written to would work here and crash on an
+# editor's machine.
+
+
+def _fake_tier(weights_payload: bytes, mmproj_payload: bytes):
+    from broll_index import local_models
+
+    return local_models.ModelTier(
+        key="good", label="Good", description="d", vram_note="n", vram_gb=8,
+        apple_unified_gb=16,
+        weights=ModelFile(repo="r", revision="rev", filename="w.gguf",
+                          sha256=_sha256(weights_payload), size_bytes=len(weights_payload)),
+        mmproj=ModelFile(repo="r", revision="rev", filename="m.gguf",
+                         sha256=_sha256(mmproj_payload), size_bytes=len(mmproj_payload)),
+        model_label="fake",
+    )
+
+
+def _patch_downloads(monkeypatch, responses: dict):
+    """Route download_verified through a fake opener, KEEPING its progress
+    argument -- which is the thing under test here."""
+    def opener(req):
+        return _FakeResponse(responses[req.full_url.rsplit("/", 1)[-1]])
+
+    real = local_runtime.download_verified
+    monkeypatch.setattr(
+        local_runtime, "download_verified",
+        lambda url, dest, **kw: real(
+            url, dest, sha256=kw["sha256"], size_bytes=kw.get("size_bytes"),
+            progress=kw.get("progress"), opener=opener))
+
+
+def test_ensure_model_reports_bytes_to_the_progress_callback(tmp_path, monkeypatch):
+    from broll_index import local_models
+
+    weights_payload = b"w" * 4096
+    mmproj_payload = b"m" * 2048
+    monkeypatch.setattr(local_models, "TIERS",
+                        {"good": _fake_tier(weights_payload, mmproj_payload)})
+    _patch_downloads(monkeypatch, {"w.gguf": weights_payload, "m.gguf": mmproj_payload})
+
+    seen = []
+    local_runtime.ensure_model(tmp_path, "good", progress=lambda *a: seen.append(a))
+
+    assert [name for name, _w, _t in seen] == ["w.gguf", "m.gguf"]
+    assert seen[0] == ("w.gguf", len(weights_payload), len(weights_payload))
+    assert seen[1] == ("m.gguf", len(mmproj_payload), len(mmproj_payload))
+
+
+def test_ensure_model_writes_nothing_to_stderr_when_a_callback_is_given(
+        tmp_path, monkeypatch):
+    """`sys.stderr = None` IS the windowed exe. If anything in the download
+    path still prints, this raises AttributeError instead of passing."""
+    from broll_index import local_models
+
+    payload = b"x" * 1024
+    monkeypatch.setattr(local_models, "TIERS", {"good": _fake_tier(payload, payload)})
+    _patch_downloads(monkeypatch, {"w.gguf": payload, "m.gguf": payload})
+
+    monkeypatch.setattr(local_runtime.sys, "stderr", None)
+    calls = []
+    local_runtime.ensure_model(tmp_path, "good", progress=lambda *a: calls.append(a))
+    assert calls
+
+
+def test_ensure_runtime_reports_bytes_and_leaves_stderr_alone(tmp_path, monkeypatch):
+    from broll_index import local_models
+
+    archive = _zip_bytes({"llama-server.exe": b"binary"})
+    build = local_models.RuntimeBuild(
+        platform="windows", label="fake", backend="cuda", server_binary="llama-server.exe",
+        archive=local_models.RuntimeAsset(name="llama.zip", sha256=_sha256(archive),
+                                          size_bytes=len(archive)),
+    )
+    _patch_downloads(monkeypatch, {"llama.zip": archive})
+    monkeypatch.setattr(local_runtime.sys, "stderr", None)
+
+    seen = []
+    exe = local_runtime.ensure_runtime(tmp_path, build=build,
+                                       progress=lambda *a: seen.append(a))
+    assert exe.is_file()
+    assert seen[-1] == ("llama.zip", len(archive), len(archive))
+
+
+def test_quiet_still_means_quiet_without_a_callback(tmp_path, monkeypatch, capsys):
+    from broll_index import local_models
+
+    payload = b"q" * 512
+    monkeypatch.setattr(local_models, "TIERS", {"good": _fake_tier(payload, payload)})
+    _patch_downloads(monkeypatch, {"w.gguf": payload, "m.gguf": payload})
+    local_runtime.ensure_model(tmp_path, "good", quiet=True)
+    assert capsys.readouterr().err == ""

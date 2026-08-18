@@ -242,6 +242,7 @@ def test_own_proxy_stringifies_path_objects():
 BROLL_NVENC_TAIL = [
     "-vf", "scale=-2:'trunc(min(540,ih)/2)*2'",
     "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "34",
+    "-pix_fmt", "yuv420p",
     "-c:a", "aac", "-b:a", "96k",
     "-movflags", "+faststart",
     "-f", "mp4",
@@ -249,6 +250,7 @@ BROLL_NVENC_TAIL = [
 BROLL_CPU_TAIL = [
     "-vf", "scale=-2:'trunc(min(540,ih)/2)*2'",
     "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
+    "-pix_fmt", "yuv420p",
     "-c:a", "aac", "-b:a", "96k",
     "-movflags", "+faststart",
     "-f", "mp4",
@@ -284,12 +286,42 @@ def test_preview_proxy_constants_are_the_measured_ones():
     assert ft.PROXY_AUDIO_BITRATE == "96k"
 
 
-def test_preview_proxy_carries_no_timecode_or_metadata_flags():
+def test_preview_proxy_carries_no_metadata_flags_and_no_timecode_by_default():
+    """The YouTube tier passes no timecode (a download has none) and must not
+    invent one -- a proxy claiming 00:00:00:00 against a source that claims
+    nothing is a mismatch of its own."""
     cmd = ft.preview_proxy_cmd("ffmpeg", "in.mp4", "out.mp4", nvenc=True)
 
     assert "-timecode" not in cmd
     assert "-map_metadata" not in cmd
     assert "-tag:v" not in cmd
+
+
+def test_preview_proxy_carries_the_timecode_when_the_ingest_path_passes_one():
+    """b-roll INGEST encodes camera originals, which DO carry a start
+    timecode, and Resolve's LinkProxyMedia refuses a proxy that lost it (R10).
+    Same flag, same place, as the indexer's build_proxy puts it: after
+    -pix_fmt, before the audio codec."""
+    cmd = ft.preview_proxy_cmd("ffmpeg", "in.mov", "out.mp4", nvenc=False,
+                               timecode="03:40:27;12")
+
+    assert _sub(cmd, ["-timecode", "03:40:27;12"])
+    assert cmd.index("-pix_fmt") < cmd.index("-timecode") < cmd.index("-c:a")
+
+
+@pytest.mark.parametrize("nvenc", [True, False])
+def test_preview_proxy_pins_8bit_420_like_the_indexer_does(nvenc):
+    """Without it libx264 inherits the source's pixel format, and our own
+    shoots are 10-bit (FX3/FX30 XAVC): every preview from a 10-bit source came
+    back a black rectangle in the editors' browsers (indexer, 2026-08-11).
+    The companion's copy of this argv shipped without the flag until
+    2026-08-18, so the two pipelines produced different files for the same
+    10-bit input."""
+    cmd = ft.preview_proxy_cmd("ffmpeg", "in.mp4", "out.mp4", nvenc=nvenc)
+
+    assert _sub(cmd, ["-pix_fmt", "yuv420p"])
+    # An OUTPUT option: after the encoder is chosen, before the audio codec.
+    assert cmd.index("-c:v") < cmd.index("-pix_fmt") < cmd.index("-c:a")
 
 
 def test_preview_proxy_quality_overrides_reach_the_argv():

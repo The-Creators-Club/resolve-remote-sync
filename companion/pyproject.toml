@@ -9,6 +9,15 @@ description = "Editor-side companion app for the CC Sync Resolve remote-sync sys
 requires-python = ">=3.12"
 dependencies = [
     "watchdog>=4",
+    # `videos.hash` is xxh64(first 8 MiB + last 8 MiB + size) -- broll/schema.sql
+    # and broll_index/hashing.py. The companion computes it now, because b-roll
+    # ingest dedupes an editor's dropped clips against the live archive BEFORE
+    # anything is uploaded (docs/BROLL_INGEST_PLAN.md §3.3), and a different
+    # digest would mean re-ingesting an archive that is already there. Not a
+    # hashlib algorithm and not reimplementable in a few lines: xxh64 is the
+    # digest 12,000 existing rows carry. BSD-2-Clause, one small C extension
+    # (tools/check_licenses.py).
+    "xxhash>=3.4",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +46,14 @@ ccsync-companion = "ccsync_companion.app:run"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# The vendored local-VLM prompt (2026-08-18, docs/BROLL_INGEST_PLAN.md §3.3).
+# `broll_vlm/compact_format.py` reads it off disk beside itself, so a pip
+# install of this package without it imports fine and fails on the first clip.
+# The frozen build has its own declaration in build.spec's `datas` -- neither
+# covers the other.
+[tool.setuptools.package-data]
+"ccsync_companion.broll_vlm" = ["prompts/*.md"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

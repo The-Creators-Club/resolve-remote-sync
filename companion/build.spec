@@ -117,6 +117,15 @@ a = Analysis(
         # (a packaging fault must never stop a fleet syncing), which means the
         # gate would silently do nothing in every shipped build.
         ("src/ccsync_companion/assets/EULA.md", "ccsync_companion/assets"),
+        # The local-VLM prompt (2026-08-18, docs/BROLL_INGEST_PLAN.md §3.3).
+        # broll_vlm/compact_format.py is a VERBATIM copy of the indexer's and
+        # reads this file off disk beside itself (PROMPT_PATH); PyInstaller
+        # collects .py files into the archive but never a .md, so without this
+        # line a frozen build imports fine and then dies with FileNotFoundError
+        # on the first clip an editor tries to index -- the same failure the
+        # EULA.md line above exists to prevent, one feature later.
+        ("src/ccsync_companion/broll_vlm/prompts/index_clip_v7_compact.md",
+         "ccsync_companion/broll_vlm/prompts"),
     ],
     hiddenimports=hidden_imports,
     hookspath=[],

@@ -1,3 +1,28 @@
+# VENDORED VERBATIM from broll/indexer/broll_index/local_vlm.py -- DO NOT EDIT HERE.
+# Edit the indexer's copy and re-copy it in BELOW THE MARKER LINE at the end of
+# this header; everything under that line is byte-identical to the source on
+# purpose, so the two trees can be compared mechanically -- and they are:
+# tools/release.ps1 strips this header, byte-compares the rest against the
+# source and REFUSES to build on a mismatch, and
+# server/tests/test_cross_component.py pins the same comparison in the suites.
+# Same mechanism as ccsync_companion/ytdl_common.py (2026-08-14).
+#
+# Why a copy and not an import (docs/BROLL_INGEST_PLAN.md section 3.3): the
+# companion is a frozen, windowed PyInstaller build, and importing
+# `broll_index` would drag anthropic, xxhash, pyyaml, requests and jieba into
+# every editor's tray app -- ~50 MB and a licence surface -- for five modules
+# that between them need nothing but the stdlib and Pillow. The MODULE NAMES
+# are deliberately unchanged so the relative imports inside them keep
+# resolving inside this sub-package.
+#
+# What the indexer must therefore never do to these five: import
+# claude_client (that is what contract.py exists to avoid), or add a
+# third-party import. broll/indexer/tests/test_contract.py fails on either.
+#
+# The marker is the LAST line of this header and appears exactly once (both
+# the gate and the test refuse an absent or ambiguous marker rather than
+# skipping). Nothing but the source file's own bytes may follow it.
+# --- vendored content below, byte-identical ---
 """The local backend: llama-server lifecycle, one HTTP call per window of
 frames, and the segment-merge post-process the eval flagged as the remaining
 gap (`broll/docs/local-indexing-options-2026-08-17.md` §3,

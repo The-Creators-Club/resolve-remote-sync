@@ -397,3 +397,109 @@ def test_an_explicit_but_missing_ffmpeg_path_is_not_papered_over(monkeypatch, tm
                        github_open=_boom)
     assert status["action"] == fm.ACTION_NONE
     assert not fm.managed_path("ffmpeg").exists()
+
+
+# ---------------------------------------------------------------------------
+# ensure_ffmpeg_pair -- the ungated half (2026-08-18, BROLL_INGEST_PLAN §3.3)
+# ---------------------------------------------------------------------------
+#
+# ffmpeg was installed only where the site turned `youtube_download` on,
+# because that was the only feature that needed one. B-roll ingest needs it on
+# every editor machine that indexes a clip -- proxy, sprite, poster, scene
+# detection and frame extraction are all ffmpeg -- and the proxy generator has
+# always wanted one. A codec is not an entitlement. deno still is.
+
+
+def test_the_ffmpeg_pair_installs_with_the_youtube_feature_off(monkeypatch):
+    _no_own_ffmpeg(monkeypatch)
+    opener = _pin(monkeypatch, _both(), kinds=ZIP)
+
+    status = fm.ensure_ffmpeg_pair({"ytdl_local_downloads": False}, github_open=opener)
+
+    assert status["ok"] is True and status["action"] == fm.ACTION_INSTALLED
+    assert fm.managed_path("ffmpeg").read_bytes() == b"I am ffmpeg"
+    assert fm.managed_path("ffprobe").read_bytes() == b"I am ffprobe"
+
+
+def test_the_ffmpeg_pair_never_installs_deno(monkeypatch):
+    """deno is the n-challenge solver, not a codec: it stays behind BOTH
+    YouTube flags, and this function must never be the way it arrives."""
+    _no_own_ffmpeg(monkeypatch)
+    opener = _pin(monkeypatch, _both(), kinds=ZIP)
+
+    fm.ensure_ffmpeg_pair({}, github_open=opener)
+
+    assert [u.rsplit("/", 1)[-1] for u in opener.calls] == ["ffmpeg-fake.gz", "ffprobe-fake.gz"]
+    assert not fm.managed_path("deno").exists()
+    assert fm.managed_deno() is None
+
+
+def test_the_ffmpeg_pair_leaves_an_editors_own_ffmpeg_alone(monkeypatch, tmp_path):
+    own = tmp_path / "own" / ("ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")
+    own.parent.mkdir()
+    own.write_bytes(b"theirs")
+    monkeypatch.setattr(fm.shutil, "which", lambda *_a, **_k: None)
+    monkeypatch.setattr(ffmpeg_tools.shutil, "which",
+                        lambda name, *a, **k: str(own) if name == "ffmpeg" else None)
+
+    def _boom(*a, **k):
+        pytest.fail("downloaded over the editor's own ffmpeg")
+
+    status = fm.ensure_ffmpeg_pair({}, github_open=_boom)
+
+    assert status["action"] == fm.ACTION_NONE and status["own_ffmpeg"] is True
+    assert not fm.managed_path("ffmpeg").exists()
+
+
+def test_the_ffmpeg_pair_reports_unsupported_and_downloads_nothing(monkeypatch):
+    _no_own_ffmpeg(monkeypatch)
+    monkeypatch.setattr(fm, "pinned_assets", lambda *a, **k: None)
+
+    def _boom(*a, **k):
+        pytest.fail("downloaded on an unsupported platform")
+
+    status = fm.ensure_ffmpeg_pair({}, github_open=_boom)
+    assert status["ok"] is False and status["action"] == fm.ACTION_UNSUPPORTED
+
+
+def test_a_second_ffmpeg_pair_call_touches_nothing(monkeypatch):
+    _no_own_ffmpeg(monkeypatch)
+    opener = _pin(monkeypatch, _both(), kinds=ZIP)
+    fm.ensure_ffmpeg_pair({}, github_open=opener)
+    before = len(opener.calls)
+
+    status = fm.ensure_ffmpeg_pair({}, github_open=opener)
+
+    assert status["action"] == fm.ACTION_NONE and len(opener.calls) == before
+
+
+def test_the_ffmpeg_pair_refuses_when_there_is_no_room(monkeypatch):
+    _no_own_ffmpeg(monkeypatch)
+    opener = _pin(monkeypatch, _both(), kinds=ZIP)
+    monkeypatch.setattr(fm, "_free_space_ok", lambda d: False)
+
+    status = fm.ensure_ffmpeg_pair({}, github_open=opener)
+
+    assert status["ok"] is False and status["action"] == fm.ACTION_FAILED
+    assert opener.calls == []
+
+
+def test_ensure_still_gates_on_youtube_and_delegates_the_pair(monkeypatch):
+    """The gated wrapper: with the downloader off it downloads NOTHING (not
+    even the pair, which its own caller fetches directly); with it on, it
+    installs through ensure_ffmpeg_pair and adds deno on top."""
+    calls = []
+    monkeypatch.setattr(fm, "ensure_ffmpeg_pair",
+                        lambda *a, **kw: calls.append("pair") or {
+                            "ok": True, "action": fm.ACTION_NONE, "own_ffmpeg": False,
+                            "installed": [], "failed": [], "message": "x"})
+
+    status = fm.ensure({"ytdl_local_downloads": False})
+    assert status["action"] == fm.ACTION_DISABLED
+    assert calls == []
+
+    _no_own_ffmpeg(monkeypatch)
+    monkeypatch.setattr(fm, "_unblock_enabled", lambda: False)
+    status = fm.ensure({"ytdl_local_downloads": True})
+    assert calls == ["pair"]
+    assert status["action"] == fm.ACTION_NONE

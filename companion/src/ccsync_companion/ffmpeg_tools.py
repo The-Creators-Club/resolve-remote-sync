@@ -471,6 +471,15 @@ def probe_video(ffmpeg_path: str, path: str | Path) -> dict:
         video_stream.get("r_frame_rate", "") or ""
     )
 
+    # `creation_time` is an ISO timestamp ("2026-08-14T09:12:33.000000Z");
+    # the first 10 characters are the date the camera recorded, which is what
+    # `videos.shot_date` stores. Re-added 2026-08-18 for b-roll INGEST: the
+    # rehoming comment above says it was dropped because "only the search
+    # index cares about it", and the search index is now something this
+    # machine fills (docs/BROLL_INGEST_PLAN.md §3.3). Same derivation as
+    # broll_index/ffmpeg_tools.probe_video, so an ingested clip's shot_date
+    # matches a base-rig-indexed one's.
+    creation_time = _tags(fmt).get("creation_time") or _tags(video_stream).get("creation_time")
     return {
         "duration_s": duration_s,
         "fps": fps,
@@ -479,6 +488,7 @@ def probe_video(ffmpeg_path: str, path: str | Path) -> dict:
         "codec": video_stream.get("codec_name"),
         "has_audio": audio_stream is not None,
         "audio_channels": (audio_stream or {}).get("channels"),
+        "shot_date": str(creation_time)[:10] if creation_time else None,
         # Normalized HERE rather than in the argv builder: the tag is only
         # wrong relative to the source's frame rate, and this is the one place
         # that holds both (COMP-MEDIA-1, 2026-08-14).
@@ -656,19 +666,22 @@ def preview_proxy_cmd(
     height: int = PROXY_HEIGHT,
     cq: int = PROXY_CQ,
     crf: int = PROXY_CRF,
+    timecode: Optional[str] = None,
 ) -> list[str]:
     """argv for a 540p browsing proxy -- byte-for-byte the b-roll spec.
 
-    No `-timecode`/`-map_metadata` here, unlike own_proxy_cmd: this tier exists
-    for downloaded footage, which has no timecode to preserve, and the output
-    is meant to be interchangeable with one the b-roll indexer produced. Any
-    extra flag here would make the two pipelines produce different files for
-    the same input, which is the whole thing this tier is trying to avoid.
+    `timecode` is None for the YouTube tier (a download has none to preserve)
+    and carries the source's for b-roll INGEST (2026-08-18): the indexer's own
+    build_proxy reads it off the source and passes it, because Resolve's
+    LinkProxyMedia refuses a proxy whose timecode does not match the original
+    (R10). Omitted entirely when there is none -- writing a zero timecode onto
+    a source that claims none is a mismatch of its own. Pass the DROP-FRAME
+    NORMALIZED value probe_video already returns.
     """
     video_codec = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", str(cq)] if nvenc else [
         "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
     ]
-    return [
+    cmd = [
         ffmpeg_path, "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(src),
         # Never upscale: a 360p source should stay 360p rather than being
@@ -681,6 +694,21 @@ def preview_proxy_cmd(
         # indexer's version does not encode at all.
         "-vf", f"scale=-2:'trunc(min({height},ih)/2)*2'",
         *video_codec,
+        # 8-bit 4:2:0, ALWAYS. Copied from the indexer's build_proxy
+        # (:261-267), where it was added after every Creators_Club preview
+        # from a 10-bit source came back as a black rectangle in the editors'
+        # browsers: without the pin libx264 inherits the source's pixel format,
+        # and our own shoots are 10-bit (FX3/FX30 XAVC) -> H.264 High 10 /
+        # yuv420p10le, which posters fine and plays nowhere. This companion
+        # copy shipped WITHOUT the flag for a week (COMP-MEDIA drift, found
+        # 2026-08-18 writing the ingest plan §0): the two pipelines produced
+        # different files for the same 10-bit input, which is the one thing
+        # this tier exists to prevent.
+        "-pix_fmt", "yuv420p",
+    ]
+    if timecode:
+        cmd += ["-timecode", str(timecode)]
+    cmd += [
         "-c:a", "aac", "-b:a", PROXY_AUDIO_BITRATE,
         "-movflags", "+faststart",
         # The one deliberate divergence from the b-roll indexer's argv, and it
@@ -690,6 +718,7 @@ def preview_proxy_cmd(
         "-f", "mp4",
         str(dest),
     ]
+    return cmd
 
 
 # -- verification ---------------------------------------------------------

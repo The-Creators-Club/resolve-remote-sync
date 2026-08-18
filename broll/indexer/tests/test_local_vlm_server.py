@@ -281,3 +281,61 @@ def test_describe_video_raises_when_frames_stage_never_ran(fake_server, local_cf
             local_cfg, storage, {"id": 999},
             server_url=f"http://127.0.0.1:{fake_server.server_port}",
         )
+
+
+# ---------------------------------------------------------------------------
+# start_server's Windows creation flags (2026-08-18, plan §3.4)
+# ---------------------------------------------------------------------------
+
+class _FakeProc:
+    """A llama-server that is alive and never exits."""
+
+    returncode = None
+
+    def poll(self):
+        return None
+
+    def terminate(self):
+        pass
+
+
+def test_start_server_spawns_with_create_no_window_on_windows(tmp_path, monkeypatch):
+    """This module is VENDORED INTO THE COMPANION (docs/BROLL_INGEST_PLAN.md
+    §3.3), a windowed PyInstaller build: without CREATE_NO_WINDOW (0x08000000)
+    starting the model server flashes a black console on the editor's desktop
+    and leaves it there for the life of the batch. CREATE_NEW_PROCESS_GROUP
+    (0x00000200) stays, so a Ctrl-C in the indexer's own console still does not
+    reach llama-server."""
+    seen = {}
+
+    def fake_popen(cmd, **kwargs):
+        seen["cmd"] = cmd
+        seen["kwargs"] = kwargs
+        return _FakeProc()
+
+    monkeypatch.setattr(local_vlm.os, "name", "nt")
+    monkeypatch.setattr(local_vlm.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(local_vlm, "_health", lambda url, *a, **kw: True)
+
+    local_vlm.start_server(tmp_path / "llama-server.exe", tmp_path / "w.gguf",
+                           tmp_path / "m.gguf", port=1234)
+
+    flags = seen["kwargs"]["creationflags"]
+    assert flags & 0x08000000, "CREATE_NO_WINDOW missing"
+    assert flags & 0x00000200, "CREATE_NEW_PROCESS_GROUP missing"
+
+
+def test_start_server_passes_no_creation_flags_off_windows(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_popen(cmd, **kwargs):
+        seen["kwargs"] = kwargs
+        return _FakeProc()
+
+    monkeypatch.setattr(local_vlm.os, "name", "posix")
+    monkeypatch.setattr(local_vlm.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(local_vlm, "_health", lambda url, *a, **kw: True)
+
+    local_vlm.start_server(tmp_path / "llama-server", tmp_path / "w.gguf",
+                           tmp_path / "m.gguf", port=1234)
+    assert "creationflags" not in seen["kwargs"]

@@ -120,6 +120,39 @@ shortens the warning; `-DryRun` prints every step and changes nothing.
 `tools/release.ps1` never runs a git write command — it only reads
 `rev-parse` / `describe` / `status --porcelain` for provenance.
 
+#### The vendored-file pairs the build refuses to ship past
+
+Step 1 also **byte-compares every vendored copy against its source of truth**
+and exits 1 on drift, because the exe about to be built bakes in whatever is
+in `companion/src`. The pairs are declared in one place — `$VendorPairs` in
+`tools/release.ps1` — and `server/tests/test_cross_component.py` pins the same
+comparison in the suites (and asserts the two lists agree):
+
+| Source of truth (edit THIS one) | Vendored into the companion |
+|---|---|
+| `ytdl/web/ytdlweb/ytdl_common.py` | `ccsync_companion/ytdl_common.py` |
+| `broll/indexer/broll_index/local_models.py` | `ccsync_companion/broll_vlm/local_models.py` |
+| `broll/indexer/broll_index/local_runtime.py` | `ccsync_companion/broll_vlm/local_runtime.py` |
+| `broll/indexer/broll_index/local_vlm.py` | `ccsync_companion/broll_vlm/local_vlm.py` |
+| `broll/indexer/broll_index/compact_format.py` | `ccsync_companion/broll_vlm/compact_format.py` |
+| `broll/indexer/broll_index/contract.py` | `ccsync_companion/broll_vlm/contract.py` |
+| `broll/indexer/broll_index/prompts/index_clip_v7_compact.md` | `ccsync_companion/broll_vlm/prompts/index_clip_v7_compact.md` |
+
+Fixing a drift is always the same move: **edit the source, then re-copy the
+whole file into the companion below its
+`# --- vendored content below, byte-identical ---` line**, leaving the header
+above it alone. The prompt is the one exception — it carries no header, because
+its bytes are what the model is sent, so it is copied whole and compared whole.
+
+Why copies at all: the frozen exe has neither `ytdlweb` nor `broll_index` in
+it and never will (`broll_index` alone would bring anthropic, xxhash, pyyaml,
+requests and jieba — ~50 MB and a licence surface onto every editor machine),
+and the container has no `ccsync_companion`. `docs/YTDL_LOCAL_DOWNLOAD.md` §5
+and `docs/BROLL_INGEST_PLAN.md` §3.3 are the two designs that chose this.
+A drifted copy never throws: it downloads the same YouTube clip under a second
+filename, or describes clips with a different prompt into the one search
+database, and is found months later if at all.
+
 ### 3. Publish to the dashboard upgrade channel
 
 ```powershell

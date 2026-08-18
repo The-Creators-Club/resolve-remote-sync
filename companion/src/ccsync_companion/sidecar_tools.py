@@ -150,7 +150,11 @@ ACTION_INSTALLED = ytdlp_manager.ACTION_INSTALLED
 ACTION_FAILED = ytdlp_manager.ACTION_FAILED
 ACTION_UNSUPPORTED = "unsupported"   # no pinned asset for this platform/arch
 
-_work_lock = threading.Lock()
+# RLock, not Lock (2026-08-18): `ensure()` holds it and calls
+# `ensure_ffmpeg_pair()`, which takes it too. Same thread, one install at a
+# time -- a plain Lock would deadlock the yt-dlp manager's daily thread on the
+# first pass and take the tray's tools maintenance with it.
+_work_lock = threading.RLock()
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +346,76 @@ def install_tool(tool: str, url: str, expected_sha256: str, kind: str, directory
     return True
 
 
+def ensure_ffmpeg_pair(cfg: Optional[dict[str, Any]] = None,
+                       github_open: Optional[HttpOpenFn] = None,
+                       available_fn: Optional[Callable[[str], bool]] = None) -> dict[str, Any]:
+    """Make the managed ffmpeg + ffprobe present, if they should be. Never
+    raises. **No YouTube gate.**
+
+    Factored out of ensure() 2026-08-18 (docs/BROLL_INGEST_PLAN.md §3.3): the
+    ffmpeg pair was installed only where the site's manifest turned
+    `youtube_download` on, because until now that was the only feature that
+    needed one. B-roll ingest needs ffmpeg on the editor's machine regardless
+    -- proxy, sprite, poster, scene detection and frame extraction are ALL
+    ffmpeg -- and the proxy generator has always wanted one too (it degrades to
+    notifier-only without). A codec is not an entitlement; deno still is, and
+    `ensure()` above keeps both of its gates for it.
+
+        no pinned asset for this platform/arch -> nothing, action=unsupported
+        editor's own ffmpeg_path resolves       -> nothing, action=none (theirs)
+        both already installed                  -> nothing, action=none
+        either missing                          -> install what is missing
+
+    `available_fn` answers "does the configured ffmpeg_path already resolve to
+    something OUTSIDE the tools dir?" -- ffmpeg_tools._resolve_binary by
+    default. An editor with `winget install Gyan.FFmpeg` on PATH, or an
+    explicit ffmpeg_path, keeps theirs and we download nothing.
+    """
+    with _work_lock:
+        table = pinned_assets()
+        if table is None:
+            return {"ok": False, "action": ACTION_UNSUPPORTED,
+                    "message": f"no pinned ffmpeg for {sys.platform}/{platform.machine()} "
+                               f"-- this machine cannot make proxies or index b-roll"}
+
+        try:
+            own_ffmpeg = _editor_has_own_ffmpeg(cfg, available_fn)
+        except Exception:
+            log.debug("sidecar: own-ffmpeg check failed; continuing", exc_info=True)
+            own_ffmpeg = False
+        if own_ffmpeg:
+            return {"ok": True, "action": ACTION_NONE, "own_ffmpeg": True,
+                    "installed": [], "failed": [],
+                    "message": "using the ffmpeg already on this machine"}
+
+        missing = [tool for tool in ("ffmpeg", "ffprobe") if not is_installed(tool)]
+        if not missing:
+            return {"ok": True, "action": ACTION_NONE, "own_ffmpeg": False,
+                    "installed": [], "failed": [],
+                    "message": f"ffmpeg {FFMPEG_RELEASE_TAG} is installed"}
+
+        directory = ytdlp_manager.ensure_tools_dir()
+        if directory is None or not _free_space_ok(directory):
+            return {"ok": False, "action": ACTION_FAILED, "own_ffmpeg": False,
+                    "installed": [], "failed": list(missing), "no_room": True,
+                    "message": "ffmpeg could not be installed (tools dir or free space)"}
+
+        installed, failed = [], []
+        for tool in missing:
+            url, sha, kind = table[tool]
+            if install_tool(tool, url, sha, kind, directory, github_open):
+                installed.append(tool)
+            else:
+                failed.append(tool)
+        if failed:
+            return {"ok": False, "action": ACTION_FAILED, "own_ffmpeg": False,
+                    "installed": installed, "failed": failed,
+                    "message": f"could not install {', '.join(failed)}"}
+        return {"ok": True, "action": ACTION_INSTALLED, "own_ffmpeg": False,
+                "installed": installed, "failed": [],
+                "message": f"installed {', '.join(installed)} into {directory}"}
+
+
 def ensure(cfg: Optional[dict[str, Any]] = None,
            github_open: Optional[HttpOpenFn] = None,
            available_fn: Optional[Callable[[str], bool]] = None) -> dict[str, Any]:
@@ -367,65 +441,79 @@ def ensure(cfg: Optional[dict[str, Any]] = None,
         # Either the site never turned the downloader on (2026-08-17 --
         # COMMERCIAL_READINESS.md item 2, the default) or this editor opted
         # their machine out. Same answer: nothing is downloaded onto the disk.
+        #
+        # NB since 2026-08-18 this gate covers DENO ONLY in practice: the
+        # ffmpeg pair is installed by ensure_ffmpeg_pair(), which b-roll
+        # ingest and the proxy generator call whether or not YouTube is on
+        # (docs/BROLL_INGEST_PLAN.md §3.3). What this branch still guarantees
+        # is what it always meant here: with the downloader off, THIS function
+        # downloads nothing at all.
         return {"ok": False, "action": ACTION_DISABLED,
                 "message": "the YouTube downloader is off for this site or "
                            "switched off in config"}
 
+    # The ffmpeg half, with no gate of its own -- the yt-dlp merge needs it,
+    # and so do proxies and b-roll ingest.
+    pair = ensure_ffmpeg_pair(cfg, github_open, available_fn)
+    if pair["action"] == ACTION_UNSUPPORTED:
+        return {"ok": False, "action": ACTION_UNSUPPORTED,
+                "message": f"no pinned ffmpeg/deno for {sys.platform}/{platform.machine()} "
+                           f"-- YouTube downloads stay on the server"}
+    own_ffmpeg = bool(pair.get("own_ffmpeg"))
+    installed = list(pair.get("installed") or [])
+    failed = list(pair.get("failed") or [])
+    no_room = bool(pair.get("no_room"))
+
     with _work_lock:
         table = pinned_assets()
-        if table is None:
+        if table is None:  # pragma: no cover - ensure_ffmpeg_pair already said so
             return {"ok": False, "action": ACTION_UNSUPPORTED,
                     "message": f"no pinned ffmpeg/deno for {sys.platform}/{platform.machine()} "
                                f"-- YouTube downloads stay on the server"}
 
-        wanted: list[str] = []
-        try:
-            own_ffmpeg = _editor_has_own_ffmpeg(cfg, available_fn)
-        except Exception:
-            log.debug("sidecar: own-ffmpeg check failed; continuing", exc_info=True)
-            own_ffmpeg = False
-        if not own_ffmpeg:
-            wanted += ["ffmpeg", "ffprobe"]
         # deno IS the n-challenge solver: its only job here is to answer the
         # JavaScript challenge YouTube serves signed-in clients, which is an
         # anti-anti-automation component and therefore not part of the vendor
         # build's default install (COMMERCIAL_READINESS.md item 3,
         # docs/legal/YOUTUBE_FEATURE_NOTICE.md). It is downloaded only where
-        # the customer's site manifest says `youtube_unblock`. The code above
-        # and below stays exactly as it was -- dormant, not deleted -- so
-        # turning the flag on is a config change and never a different binary.
-        if _unblock_enabled() and not _editor_has_own_deno():
-            wanted.append("deno")
+        # the customer's site manifest says `youtube_unblock`. The code stays
+        # exactly as it was -- dormant, not deleted -- so turning the flag on
+        # is a config change and never a different binary.
+        wants_deno = _unblock_enabled() and not _editor_has_own_deno()
+        if wants_deno and not is_installed("deno"):
+            directory = ytdlp_manager.ensure_tools_dir()
+            if directory is None or not _free_space_ok(directory):
+                failed.append("deno")
+                no_room = True
+            else:
+                url, sha, kind = table["deno"]
+                if install_tool("deno", url, sha, kind, directory, github_open):
+                    installed.append("deno")
+                else:
+                    failed.append("deno")
 
-        missing = [tool for tool in wanted if not is_installed(tool)]
-        if not missing:
-            parts = ["using the ffmpeg already on this machine" if own_ffmpeg
-                     else f"ffmpeg {FFMPEG_RELEASE_TAG} is installed"]
-            parts.append(f"deno {DENO_RELEASE_TAG} is installed"
-                         if "deno" in wanted or is_installed("deno")
-                         else "no JS runtime (this site has not enabled "
-                              "youtube_unblock)")
-            return {"ok": True, "action": ACTION_NONE, "message": "; ".join(parts)}
-
-        directory = ytdlp_manager.ensure_tools_dir()
-        if directory is None or not _free_space_ok(directory):
+        if no_room:
             return {"ok": False, "action": ACTION_FAILED,
                     "message": "sidecar tools could not be installed (tools dir or free space) "
                                "-- YouTube downloads stay on the server"}
-
-        failed = []
-        for tool in missing:
-            url, sha, kind = table[tool]
-            if not install_tool(tool, url, sha, kind, directory, github_open):
-                failed.append(tool)
         if failed:
             return {"ok": False, "action": ACTION_FAILED,
                     "message": f"could not install {', '.join(failed)} -- "
                                + ("YouTube downloads stay on the server"
                                   if "ffmpeg" in failed else
                                   "signed-in YouTube downloads stay off on this machine")}
-        return {"ok": True, "action": ACTION_INSTALLED,
-                "message": f"installed {', '.join(missing)} into {directory}"}
+        if installed:
+            return {"ok": True, "action": ACTION_INSTALLED,
+                    "message": f"installed {', '.join(installed)} into "
+                               f"{ytdlp_manager.tools_dir()}"}
+
+        parts = ["using the ffmpeg already on this machine" if own_ffmpeg
+                 else f"ffmpeg {FFMPEG_RELEASE_TAG} is installed"]
+        parts.append(f"deno {DENO_RELEASE_TAG} is installed"
+                     if wants_deno or is_installed("deno")
+                     else "no JS runtime (this site has not enabled "
+                          "youtube_unblock)")
+        return {"ok": True, "action": ACTION_NONE, "message": "; ".join(parts)}
 
 
 def _editor_has_own_ffmpeg(cfg: Optional[dict[str, Any]],

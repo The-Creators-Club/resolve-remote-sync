@@ -1118,7 +1118,11 @@ async function runSearch() {
     if (e.status === 409 && e.info && e.info.job_id) {
       // The job the server refused to duplicate is exactly the one the editor
       // has lost sight of -- including a forgotten manifest from last week.
-      toast(`${e.message}, showing it below`, false, 12000);
+      // Loud, red and specific: a quiet amber "showing it below" over a
+      // four-day-old review read as "SEARCH does nothing" (owner, 2026-08-18).
+      toast(`A previous search is still open below (job #${e.info.job_id}). ` +
+            `Finish its review or press CANCEL on it, then search again. ` +
+            `(${e.message})`, true, 15000);
       $('#progress').classList.remove('hidden');
       await attach(e.info.job_id);
     } else {

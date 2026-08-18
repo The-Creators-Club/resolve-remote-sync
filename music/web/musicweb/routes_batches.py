@@ -181,6 +181,17 @@ def cancel(uid: str, x_ccsync_user: str = Header(default=None),
         # Idempotent, not an error: two clicks, or a click on a batch that
         # finished while the page was stale, must not raise at an editor.
         return {'ok': True, 'state': batch['state'], 'already_finished': True}
+    # A batch NO machine holds -- queued and never claimed, or handed back
+    # when its lease expired -- has nobody to deliver the request to, so the
+    # flag alone would leave it "cancelling" forever and the panel wedged on
+    # it (owner, 2026-08-18: a batch orphaned by a companion crash). Finalise
+    # it here; a HELD batch keeps the request-not-kill semantics below.
+    if batch['state'] == 'queued' or not batch['lease_expires_at']:
+        ingest_batches.cancel(conn, uid, user)
+        fresh = ingest_batches.get_batch(conn, uid)
+        result = ingest_batches.release(conn, fresh, state='cancelled')
+        return {'ok': True, 'state': result.get('state', 'cancelled'), 'cancel_requested': True,
+                'finalised': True}
     ingest_batches.cancel(conn, uid, user)
     return {'ok': True, 'state': batch['state'], 'cancel_requested': True}
 

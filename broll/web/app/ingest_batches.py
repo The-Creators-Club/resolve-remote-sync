@@ -585,7 +585,8 @@ def claim(conn: sqlite3.Connection, *, batch_uid: str, editor: str, machine: str
         raise HTTPException(403, {
             "detail": "this batch belongs to another editor",
             "reason": "identity"})
-    if batch["cancel_requested"] and batch["state"] not in BATCH_TERMINAL:
+    if batch["cancel_requested"] and (batch["state"] not in BATCH_TERMINAL
+                                      or batch["state"] == "cancelled"):
         raise HTTPException(410, {"detail": "this batch has been cancelled",
                                   "reason": "cancelled"})
     if batch["state"] in BATCH_TERMINAL:

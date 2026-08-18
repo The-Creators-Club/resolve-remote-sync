@@ -910,7 +910,13 @@ def capabilities(cfg: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     for the b-roll capability route's reason -- the page asks this before it
     renders the drop zone.
     """
-    snapshot = status()
+    # refresh(), not status(): the snapshot starts empty at boot and only a
+    # download filled it, so a machine that already HAD the model answered
+    # "cached: False" for a whole session -- the panel asked to download
+    # 280 MB again, and the ingest tick sat at "no-model" (owner, 2026-08-18).
+    # refresh() is a few stat() calls behind a TTL, cheap enough for the
+    # capability route; status() stays the zero-I/O read for the tray.
+    snapshot = refresh()
     cached = bool(snapshot.get("ready"))
     try:
         pending = 0 if cached else int(

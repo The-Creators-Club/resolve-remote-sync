@@ -109,7 +109,9 @@ class MusicIngestor(broll_ingest.BrollIngestor):
 
     def _model_ready(self, tier: str) -> bool:
         try:
-            snapshot = self.sidecar.status()
+            # refresh() rather than status(): see music_clap_sidecar.capabilities.
+            snapshot = (self.sidecar.refresh() if hasattr(self.sidecar, "refresh")
+                        else self.sidecar.status())
         except Exception:  # noqa: BLE001
             self.log.debug("the sidecar snapshot failed", exc_info=True)
             return False

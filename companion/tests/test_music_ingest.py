@@ -194,6 +194,18 @@ class FakeIdle:
         return self.seconds
 
 
+@pytest.fixture(autouse=True)
+def _plenty_of_disk(monkeypatch):
+    """prepare() measures the REAL free space of the staging root, which is
+    pytest's tmp dir on the host's system drive: the day that drive dropped
+    under the 20 GB floor, test_only_audio_may_be_staged 507'd for reasons
+    that had nothing to do with audio (2026-08-18). Same fix test_proxy_gen
+    took: the disk is faked, the floor stays real."""
+    from ccsync_companion import broll_server as _bs
+
+    monkeypatch.setattr(_bs, "_free_bytes_at", lambda _d: 10 ** 12)
+
+
 def make_ingestor(tmp_path, *, server=None, sidecar=None, queue=None, idle=None,
                   cfg_extra=None, **kwargs):
     cfg = {

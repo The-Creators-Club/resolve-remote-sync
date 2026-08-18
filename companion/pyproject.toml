@@ -38,6 +38,14 @@ ccsync-companion = "ccsync_companion.app:run"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The vendored local-VLM prompt (2026-08-18, docs/BROLL_INGEST_PLAN.md §3.3).
+# `broll_vlm/compact_format.py` reads it off disk beside itself, so a pip
+# install of this package without it imports fine and fails on the first clip.
+# The frozen build has its own declaration in build.spec's `datas` -- neither
+# covers the other.
+[tool.setuptools.package-data]
+"ccsync_companion.broll_vlm" = ["prompts/*.md"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]

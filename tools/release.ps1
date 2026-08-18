@@ -118,13 +118,45 @@ $PyprojectToml = Join-Path $CompanionDir "pyproject.toml"
 $BootstrapPs1 = Join-Path $RepoRoot "installer\windows_bootstrap.ps1"
 $OnboardSteps = Join-Path $RepoRoot "onboarding\steps.py"
 $BootstrapSh = Join-Path $RepoRoot "installer\macos_bootstrap.sh"
-# The vendored-file parity pair (docs/YTDL_LOCAL_DOWNLOAD.md section 5, 2026-08-14).
-# ytdl/web's copy is the SOURCE OF TRUTH; the companion carries a header and
-# then the same bytes, because the frozen exe has no ytdlweb and the dashboard
-# container has no ccsync_companion.
-$YtdlCommonSrc = Join-Path $RepoRoot "ytdl\web\ytdlweb\ytdl_common.py"
-$YtdlCommonVendored = Join-Path $CompanionDir "src\ccsync_companion\ytdl_common.py"
+# The vendored-file parity pairs (docs/YTDL_LOCAL_DOWNLOAD.md section 5,
+# 2026-08-14; docs/BROLL_INGEST_PLAN.md section 3.3, 2026-08-18). The OTHER
+# tree's copy is the SOURCE OF TRUTH in every pair; the companion carries a
+# header and then the same bytes, because the frozen exe has neither ytdlweb
+# nor broll_index in it and never will.
 $VendorMarker = "# --- vendored content below, byte-identical ---"
+$VendorPairs = @(
+    # ytdl: the two download executors must produce byte-identical artifacts.
+    @{ Source = Join-Path $RepoRoot "ytdl\web\ytdlweb\ytdl_common.py"
+       Vendored = Join-Path $CompanionDir "src\ccsync_companion\ytdl_common.py"
+       Mode = "marker"
+       Fix = "make the change in ytdl/web/ytdlweb/ytdl_common.py -- it is the source of truth -- and bump TEMPLATE_VERSION/SIDECAR_VERSION there if the shape changed" }
+    # b-roll ingest: the companion indexes clips with the indexer's own local
+    # backend. A drifted copy here means the SAME clip is described by two
+    # different pipelines into one database -- silent index skew, discovered
+    # (if ever) as "the search results depend on which machine indexed it".
+    @{ Source = Join-Path $RepoRoot "broll\indexer\broll_index\local_models.py"
+       Vendored = Join-Path $CompanionDir "src\ccsync_companion\broll_vlm\local_models.py"
+       Mode = "marker"; Fix = "edit broll/indexer/broll_index/local_models.py, then re-copy it in" }
+    @{ Source = Join-Path $RepoRoot "broll\indexer\broll_index\local_runtime.py"
+       Vendored = Join-Path $CompanionDir "src\ccsync_companion\broll_vlm\local_runtime.py"
+       Mode = "marker"; Fix = "edit broll/indexer/broll_index/local_runtime.py, then re-copy it in" }
+    @{ Source = Join-Path $RepoRoot "broll\indexer\broll_index\local_vlm.py"
+       Vendored = Join-Path $CompanionDir "src\ccsync_companion\broll_vlm\local_vlm.py"
+       Mode = "marker"; Fix = "edit broll/indexer/broll_index/local_vlm.py, then re-copy it in" }
+    @{ Source = Join-Path $RepoRoot "broll\indexer\broll_index\compact_format.py"
+       Vendored = Join-Path $CompanionDir "src\ccsync_companion\broll_vlm\compact_format.py"
+       Mode = "marker"; Fix = "edit broll/indexer/broll_index/compact_format.py, then re-copy it in" }
+    @{ Source = Join-Path $RepoRoot "broll\indexer\broll_index\contract.py"
+       Vendored = Join-Path $CompanionDir "src\ccsync_companion\broll_vlm\contract.py"
+       Mode = "marker"; Fix = "edit broll/indexer/broll_index/contract.py, then re-copy it in" }
+    # The prompt carries NO header: its bytes are what the model is sent, so a
+    # header would be part of the prompt AND would differ between the two
+    # pipelines. Whole-file equality instead -- a stricter check, not a weaker
+    # one (companion/src/ccsync_companion/broll_vlm/__init__.py says the same).
+    @{ Source = Join-Path $RepoRoot "broll\indexer\broll_index\prompts\index_clip_v7_compact.md"
+       Vendored = Join-Path $CompanionDir "src\ccsync_companion\broll_vlm\prompts\index_clip_v7_compact.md"
+       Mode = "exact"; Fix = "copy broll/indexer/broll_index/prompts/index_clip_v7_compact.md over the companion's copy whole -- it has no header" }
+)
 $DistDir = Join-Path $CompanionDir "dist"
 $ExePath = Join-Path $DistDir "ccsync-companion.exe"
 $ManifestPath = Join-Path $DistDir "ccsync-release.json"
@@ -166,11 +198,21 @@ function Get-VendorParityProblem {
         later. So this refuses the build the way the installer version drift
         check above does.
 
+        The same reasoning covers the broll_vlm set (2026-08-18): the
+        companion describes clips with the INDEXER's local backend, so a
+        drifted copy has two pipelines writing differently-shaped index rows
+        into one database.
+
+        $Mode "exact" compares the WHOLE file instead of the part below the
+        marker -- for a vendored copy that cannot carry a header at all (the
+        VLM prompt: its bytes are what the model is sent).
+
         Returns "" when the two agree, or a one-line description of the
         problem. FAIL SAFE: a missing, unreadable or marker-less file is a
         problem, never a skip -- "I could not check" must not read as "fine".
     #>
-    param([string]$SourcePath, [string]$VendoredPath, [string]$Marker)
+    param([string]$SourcePath, [string]$VendoredPath, [string]$Marker,
+          [string]$Mode = "marker")
 
     foreach ($p in @($SourcePath, $VendoredPath)) {
         if (-not (Test-Path -LiteralPath $p)) {
@@ -183,6 +225,13 @@ function Get-VendorParityProblem {
     }
     catch {
         return "cannot read the parity pair: $($_.Exception.Message)"
+    }
+
+    if ($Mode -eq "exact") {
+        if ([string]::Equals($vend, $src, [StringComparison]::Ordinal)) { return "" }
+        return ("the vendored copy has DRIFTED from its source: $($vend.Length) byte(s) " +
+                "vs $($src.Length) in the source (this pair carries no header -- the whole " +
+                "file must match)")
     }
 
     $first = $vend.IndexOf($Marker, [StringComparison]::Ordinal)
@@ -368,34 +417,43 @@ if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
 }
 Write-Step "version parity OK"
 
-# --- vendored-file parity (docs/YTDL_LOCAL_DOWNLOAD.md section 5, 2026-08-14) ------
+# --- vendored-file parity (docs/YTDL_LOCAL_DOWNLOAD.md section 5, 2026-08-14;
+#     docs/BROLL_INGEST_PLAN.md section 3.3, 2026-08-18) --------------------
 #
 # Same class of failure as the installer version drift above, one layer down:
-# a constant duplicated across two trees that cannot import each other. The
+# code duplicated across two trees that cannot import each other. The
 # consequence is worse, though -- an installer that reports the wrong version
 # is embarrassing, a companion whose ytdl_common has drifted from the NAS
 # worker's downloads the same YouTube clip under a second filename into the one
-# canonical tree, and nobody finds out until an editor sees the same video
-# twice. The exe about to be built BAKES IN whatever is in companion/src, so
-# this is the last moment the two copies can be compared.
-$vendorProblem = Get-VendorParityProblem -SourcePath $YtdlCommonSrc `
-    -VendoredPath $YtdlCommonVendored -Marker $VendorMarker
-if ($vendorProblem) {
-    Write-Host ""
-    Write-Fail "vendored-file parity check failed:"
-    Write-Host "    - $vendorProblem" -ForegroundColor Red
-    Write-Host "      source   (edit THIS one): $YtdlCommonSrc" -ForegroundColor Red
-    Write-Host "      vendored (do not edit)  : $YtdlCommonVendored" -ForegroundColor Red
-    Write-Host ""
-    Write-Step "fix: make the change in ytdl/web/ytdlweb/ytdl_common.py -- it is the source of truth --"
-    Write-Step "     then re-copy that whole file into the companion BELOW the marker line"
-    Write-Step "     `"$VendorMarker`", leaving the companion header above it untouched."
-    Write-Step "     (docs/YTDL_LOCAL_DOWNLOAD.md section 5: the two executors must write byte-identical"
-    Write-Step "     artifacts into one canonical tree; bump TEMPLATE_VERSION/SIDECAR_VERSION in the"
-    Write-Step "     source if the shape changed, so old companions decline the claim instead.)"
-    exit 1
+# canonical tree, and a companion whose broll_vlm has drifted from the indexer
+# describes clips with a different prompt, parser or contract into the one
+# search database. Neither throws; both are found months later, if at all.
+# The exe about to be built BAKES IN whatever is in companion/src, so this is
+# the last moment the copies can be compared.
+$vendorFailed = $false
+foreach ($pair in $VendorPairs) {
+    $vendorProblem = Get-VendorParityProblem -SourcePath $pair.Source `
+        -VendoredPath $pair.Vendored -Marker $VendorMarker -Mode $pair.Mode
+    if ($vendorProblem) {
+        $vendorFailed = $true
+        Write-Host ""
+        Write-Fail "vendored-file parity check failed:"
+        Write-Host "    - $vendorProblem" -ForegroundColor Red
+        Write-Host "      source   (edit THIS one): $($pair.Source)" -ForegroundColor Red
+        Write-Host "      vendored (do not edit)  : $($pair.Vendored)" -ForegroundColor Red
+        Write-Host ""
+        Write-Step "fix: $($pair.Fix),"
+        if ($pair.Mode -eq "exact") {
+            Write-Step "     as a WHOLE-FILE copy (this pair carries no header)."
+        }
+        else {
+            Write-Step "     re-copying that whole file into the companion BELOW the marker line"
+            Write-Step "     `"$VendorMarker`", leaving the companion header above it untouched."
+        }
+    }
 }
-Write-Step "vendored parity OK (ytdl_common.py: companion copy == ytdl/web below the marker)"
+if ($vendorFailed) { exit 1 }
+Write-Step "vendored parity OK ($($VendorPairs.Count) pairs: ytdl_common.py + the broll_vlm set)"
 
 # --- release-key parity (COMMERCIAL_READINESS.md item 4, 2026-08-17) --------
 # A companion built with an EMPTY RELEASE_PUBKEYS trusts nobody and can never

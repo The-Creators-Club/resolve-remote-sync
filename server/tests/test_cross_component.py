@@ -20,6 +20,8 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "server"))
 sys.path.insert(0, str(REPO_ROOT / "dashboard" / "src"))
@@ -455,6 +457,75 @@ def test_the_contract_versions_agree():
     same constants."""
     assert companion_ytdl.TEMPLATE_VERSION == server_ytdl.TEMPLATE_VERSION
     assert companion_ytdl.SIDECAR_VERSION == server_ytdl.SIDECAR_VERSION
+
+
+# -- the vendored local-VLM set (2026-08-18, docs/BROLL_INGEST_PLAN.md §3.3) --
+#
+# Second instance of the ytdl_common problem, and the same answer. From
+# companion 0.8.x an editor's own machine indexes b-roll with the INDEXER's
+# local backend -- the same Qwen3-VL prompt, the same GBNF grammar, the same
+# tolerant parser, the same contract -- because both write into one search
+# database that the whole fleet queries. A drifted copy does not throw either:
+# it describes clips slightly differently forever, and the only symptom is
+# that search results depend on which machine happened to index a clip.
+#
+# The companion cannot import `broll_index` (anthropic, xxhash, pyyaml,
+# requests, jieba -- ~50 MB and a licence surface in a frozen exe), and the
+# indexer cannot import `ccsync_companion`, so five modules and one prompt are
+# copied. tools/release.ps1 refuses to build on drift; this is the suites'
+# half, and the strip logic is reimplemented here on purpose (same reason as
+# ytdl_common's above).
+BROLL_INDEX_SRC = REPO_ROOT / "broll" / "indexer" / "broll_index"
+BROLL_VLM_VENDORED = (REPO_ROOT / "companion" / "src" / "ccsync_companion" / "broll_vlm")
+BROLL_VLM_MODULES = ("local_models.py", "local_runtime.py", "local_vlm.py",
+                     "compact_format.py", "contract.py")
+BROLL_VLM_PROMPT = Path("prompts") / "index_clip_v7_compact.md"
+
+
+@pytest.mark.parametrize("name", BROLL_VLM_MODULES)
+def test_the_vendored_broll_vlm_modules_are_byte_identical(name):
+    source = BROLL_INDEX_SRC / name
+    vendored = BROLL_VLM_VENDORED / name
+    assert source.exists(), f"missing source of truth: {source}"
+    assert vendored.exists(), f"missing vendored copy: {vendored}"
+    body = _vendored_body(vendored)
+    assert body == source.read_bytes(), (
+        f"{vendored} has drifted from {source}: {len(body)} bytes below the marker "
+        f"vs {len(source.read_bytes())} in the source. Edit the INDEXER's copy, then "
+        f"re-copy the whole file in below the marker line.")
+
+
+def test_the_vendored_vlm_prompt_is_an_exact_copy():
+    """The ONE vendored file with no header: `build_compact_prompt` reads it
+    and sends its text to the model, so a vendoring header would (a) be part of
+    the prompt and (b) differ from what the indexer sends -- exactly the drift
+    the copy exists to prevent. Whole-file equality instead, which is stricter,
+    not looser."""
+    source = BROLL_INDEX_SRC / BROLL_VLM_PROMPT
+    vendored = BROLL_VLM_VENDORED / BROLL_VLM_PROMPT
+    assert source.exists() and vendored.exists()
+    assert vendored.read_bytes() == source.read_bytes(), (
+        f"{vendored} has drifted from {source} -- copy the indexer's file over it whole.")
+
+
+def test_the_vendored_vlm_set_has_no_unchecked_members():
+    """A sixth module dropped into broll_vlm/ without a line in
+    BROLL_VLM_MODULES (and in tools/release.ps1's $VendorPairs) would be
+    unpinned forever, which is worse than not vendoring it at all."""
+    present = sorted(p.name for p in BROLL_VLM_VENDORED.glob("*.py")
+                     if p.name != "__init__.py")
+    assert present == sorted(BROLL_VLM_MODULES), (
+        "companion/src/ccsync_companion/broll_vlm/ gained or lost a module: add it to "
+        "BROLL_VLM_MODULES here AND to $VendorPairs in tools/release.ps1")
+
+
+def test_the_release_gate_pins_every_vendored_pair():
+    """The suites and the release gate must agree on WHAT is checked. A pair
+    added here but not there ships on the next release; a pair added there but
+    not here is only checked on Windows at release time."""
+    release = (REPO_ROOT / "tools" / "release.ps1").read_text(encoding="utf-8")
+    for name in (*BROLL_VLM_MODULES, BROLL_VLM_PROMPT.name, "ytdl_common.py"):
+        assert name in release, f"tools/release.ps1 does not pin the vendored {name}"
 
 
 # A deliberately hostile info dict: the byte comparison above proves the FILES

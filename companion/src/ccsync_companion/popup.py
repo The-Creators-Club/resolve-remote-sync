@@ -1545,6 +1545,12 @@ class ProgressModel:
             return ""
         if self.headline_percent is None:
             return self.headline
+        # A headline that already states a percentage keeps it and only it:
+        # since 2026-08-18 a model download says "Downloading X: 61% at 38 MB/s,
+        # about 1 min left" in one sentence, and appending " - 61%" to that
+        # reads as two different numbers about the same bar.
+        if "%" in self.headline:
+            return self.headline
         return f"{self.headline} - {max(0, min(100, int(self.headline_percent)))}%"
 
 

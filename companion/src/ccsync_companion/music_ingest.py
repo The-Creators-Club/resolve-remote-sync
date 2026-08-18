@@ -158,7 +158,9 @@ class MusicIngestor(broll_ingest.BrollIngestor):
         if not downloading:
             return {}
         return {"percent": downloading.get("percent"),
-                "name": "the music indexing model"}
+                "name": "the music indexing model",
+                "rate_bytes_per_s": downloading.get("rate_bytes_per_s"),
+                "eta_seconds": downloading.get("eta_seconds")}
 
     # -- the work order ----------------------------------------------------
     def _remote_rel(self, parsed: dict) -> str:

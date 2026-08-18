@@ -1104,7 +1104,46 @@ def test_the_model_download_is_the_top_line_while_it_runs(tmp_path):
 
     model = ing.progress_model()
 
-    assert model.headline_line() == "Downloading Qwen3-VL 4B - 43%"
+    assert model.headline_line() == "Downloading Qwen3-VL 4B: 43%"
+
+
+def test_the_model_download_headline_quotes_the_speed_and_the_time_left(tmp_path):
+    """A multi-GB fetch with only a percentage on it is indistinguishable from
+    a hang (2026-08-18, BROLL-ING-4): the parallel fetcher measures a rate,
+    and this is where an editor reads it."""
+    sidecar = FakeSidecar(ready=False)
+    sidecar.downloading = {"name": "Qwen3-VL 4B (Good)", "written": 61, "total": 100,
+                           "percent": 61, "rate_bytes_per_s": 38e6,
+                           "eta_seconds": 95}
+    ing = make_ingestor(tmp_path, server=FakeServer(), sidecar=sidecar)
+    staging = stage_one_clip(ing, tmp_path)
+    ing.run("b" * 32, staging, "foreground")
+
+    model = ing.progress_model()
+
+    assert model.headline_line() == (
+        "Downloading Qwen3-VL 4B (Good): 61% at 36.2 MB/s, about 1 min left")
+    # The bar still gets its number; the line just does not say it twice.
+    assert model.headline_percent == 61
+    snap = ing.status()
+    assert snap["model_download_rate"] == 38e6
+    assert snap["model_download_eta"] == 95
+    assert ing.progress(staging)["batch"]["model"]["rate_bytes_per_s"] == 38e6
+    assert ing.progress(staging)["batch"]["model"]["eta_seconds"] == 95
+
+
+def test_a_model_download_with_no_rate_yet_is_still_a_headline(tmp_path):
+    """The first seconds have no rate to quote. The line must not say "at
+    0 MB/s" or vanish -- it is the reason nothing else is moving."""
+    sidecar = FakeSidecar(ready=False)
+    sidecar.downloading = {"name": "Qwen3-VL 4B", "written": 0, "total": 100,
+                           "percent": 0, "rate_bytes_per_s": None,
+                           "eta_seconds": None}
+    ing = make_ingestor(tmp_path, server=FakeServer(), sidecar=sidecar)
+    staging = stage_one_clip(ing, tmp_path)
+    ing.run("b" * 32, staging, "foreground")
+
+    assert ing.progress_model().headline_line() == "Downloading Qwen3-VL 4B: 0%"
 
 
 def test_the_window_is_offered_once_per_batch_and_only_when_working(tmp_path):

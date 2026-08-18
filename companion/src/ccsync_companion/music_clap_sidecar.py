@@ -376,13 +376,36 @@ def reset_caches() -> None:
         _extractor = None
 
 
+def _download_rate_and_eta(written: int, total: Optional[int]
+                           ) -> tuple[Optional[float], Optional[float]]:
+    """The fetcher's aggregate rate and the seconds left at it -- the same
+    reading broll_vlm_sidecar takes, because this module fetches through the
+    same vendored `download_verified` (which, since 2026-08-18, uses several
+    connections; BROLL-ING-4). Never raises."""
+    try:
+        from .broll_vlm import local_runtime
+
+        rate = float(local_runtime.download_verified.last_rate_bytes_per_s or 0.0)
+    except Exception:  # noqa: BLE001 - a speed reading may not fail a download
+        return None, None
+    if rate <= 0:
+        return None, None
+    eta = None
+    if total and total > written:
+        eta = (total - written) / rate
+    return rate, eta
+
+
 def _note_download(name: str, written: int, total: Optional[int]) -> None:
     percent = None
     if total:
         percent = max(0, min(100, int(written * 100 / total)))
+    rate, eta = _download_rate_and_eta(written, total)
     with _lock:
         _status_cache["downloading"] = {"name": name, "written": written,
-                                        "total": total, "percent": percent}
+                                        "total": total, "percent": percent,
+                                        "rate_bytes_per_s": rate,
+                                        "eta_seconds": eta}
 
 
 def _clear_download(error: str = "") -> None:

@@ -161,6 +161,13 @@ The short version, `broll-index doctor`'s own logic
 | < 8 GB VRAM, or no discrete GPU | none — `indexer.backend: anthropic`, or search-only from a vendor-built index (below) | |
 | Resolve is open on this machine | treat the GPU as unavailable — the eval measured Resolve alone holding 9.3 of 10 GB on an RTX 3080; run indexing off-hours or on a second machine | |
 
+**Fetching the weights: `CCSYNC_DOWNLOAD_STREAMS`** (default 6, clamped 1..16;
+set it to 1 for one connection). `download_verified` splits a ranged download
+across that many connections, because a single long-lived one to Hugging Face
+was measured decaying to ~2 MB/s while six ran at ~38 MB/s (KNOWN_BUGS
+BROLL-ING-4). The same variable governs the companion's model fetch and the
+music CLAP artefact, which go through the same function.
+
 ## Customers without a GPU
 
 This is the v1 scope-out, and it is a real product, not a degraded one. Two

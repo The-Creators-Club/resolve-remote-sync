@@ -175,6 +175,60 @@ migration. What it costs today: "40 clips, 38 indexed" with no explanation of
 the other two, and no way to ask later what a batch chose not to ingest. Worth
 doing the next time the panel is opened for other reasons.
 
+### BROLL-ING-4 - the model download crawled at 2 MB/s on one stuck connection - FIXED in repo 2026-08-18, unshipped
+Measured on the base rig while the tray fetched the Good tier: **~2 MB/s for
+thirty minutes** on one long-lived HTTPS connection to Hugging Face, while
+fresh connections from the same machine at the same moment got **13 MB/s**
+single-stream and **~45 MB/s** over four parallel range requests. py-spy had
+our thread parked in `ssl.read`, so the slow party was the CDN edge we had
+been assigned, not the disk, not the GIL and not the hash. At that rate the
+Good tier's 3.3 GB is over four hours, and an editor watching a bar that has
+not moved in a minute concludes the feature is broken and closes the tray.
+
+`download_verified` (in `broll/indexer/broll_index/local_runtime.py`, vendored
+verbatim into the companion) now does two things instead of one:
+
+- **Parallel ranged fetch.** When the first GET answers 206 with a total size,
+  the file is split into up to `CCSYNC_DOWNLOAD_STREAMS` (default 6, clamped
+  1..16) contiguous slices, each on its own connection, writing into a
+  preallocated `.part` at its own offset. That first connection becomes slice
+  0's rather than being closed, so N streams cost exactly N connections. A
+  `.part.json` sidecar records the slice boundaries and the bytes done per
+  slice, so a killed download resumes **each slice where it stopped**; it is
+  deleted when the file completes and hashes. A `.part` with no sidecar is a
+  partial from an older build (or from N=1) and resumes single-stream exactly
+  as before, and a server with no Range support gets today's single stream
+  unchanged.
+- **Stall detection.** A stream that moves less than 256 KiB in 20 s is closed
+  and its remaining range reopened on a new connection, which lands on a
+  different edge, and that is the measured cure. Five stalls in a row, or
+  three failed attempts, fail that slice and therefore the download, which
+  KEEPS the partial and the sidecar so the next run resumes rather than
+  restarts. Every retry after the first goes back to the ORIGINAL URL, because
+  a signed CDN URL can expire under a multi-GB download.
+
+Measured after the fix, same machine, same file (the Good tier's 836 MB
+mmproj), 15 s each: **N=1 → 7.8 and 8.6 MB/s** (its rolling window down to
+1.5-1.9 MB/s by the end, i.e. the bug reproducing), **N=6 → 37.1 and
+39.8 MB/s**. About 4.6x.
+
+The aggregate rate is published as
+`download_verified.last_rate_bytes_per_s` (the progress callback's signature
+belongs to the indexer and could not carry it) and both sidecars read it, so
+`status()["downloading"]` gains `rate_bytes_per_s`/`eta_seconds`, the progress
+window's headline reads "Downloading Qwen3-VL 4B (Good): 61% at 38 MB/s, about
+1 min left", and the loopback `progress` payload's `model` object carries both
+for the ingest SPA. The music CLAP artefact fetch benefits without a line
+changed: `music_clap_sidecar` has always called this same function, and a test
+now pins that it does.
+
+Tests: `broll/indexer/tests/test_download_parallel.py` and
+`companion/tests/test_vendored_downloader.py` run a threaded stdlib
+`http.server` (Range and no-Range variants, a slice that goes quiet, a slice
+that always 500s) over a 12 MiB random payload. What is NOT covered by a test:
+the real CDN. The numbers above are the only evidence that the edge behaves
+this way, and they came from a hand-run measurement against the live URL.
+
 ## Open — music ingest (MUSIC-ING-n, 2026-08-18)
 
 Deferred deliberately while building `docs/MUSIC_INGEST_PLAN.md` steps 3-5.

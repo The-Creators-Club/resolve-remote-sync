@@ -938,6 +938,8 @@ class BrollIngestor:
             "upload_paused": bool(upload_paused),
             "model_download_percent": download.get("percent"),
             "model_download_name": download.get("name") or "",
+            "model_download_rate": download.get("rate_bytes_per_s"),
+            "model_download_eta": download.get("eta_seconds"),
             "model_note": model_note,
             "warning": warning,
             "paused": bool(paused),
@@ -1040,8 +1042,9 @@ class BrollIngestor:
         return popup.ProgressModel(
             title=self.kind.window_title,
             phase=snap["gate"],
-            headline=(f"Downloading {snap['model_download_name']}"
-                      if snap["model_download_percent"] is not None else ""),
+            headline=_download_headline(
+                snap["model_download_name"], snap["model_download_percent"],
+                snap["model_download_rate"], snap["model_download_eta"]),
             headline_percent=snap["model_download_percent"],
             item_label=(f"{snap['clip']} - {snap['stage']}" if snap["clip"]
                         else ""),
@@ -1306,9 +1309,14 @@ class BrollIngestor:
                 "current": {"name": snap["clip"], "stage": snap["stage"],
                             "percent": snap["percent"]},
                 "upload": self._upload_snapshot(),
+                # rate_bytes_per_s/eta_seconds (2026-08-18): the SPA draws
+                # "38 MB/s, about 1 min left" beside the percent, because a bar
+                # that moves slowly with no number beside it reads as a hang.
                 "model": {"tier": snap["tier"],
                           "ready": self._model_ready(snap["tier"] or self._tier()),
                           "percent": snap["model_download_percent"],
+                          "rate_bytes_per_s": snap["model_download_rate"],
+                          "eta_seconds": snap["model_download_eta"],
                           "note": snap["model_note"]},
             },
         }
@@ -1627,7 +1635,11 @@ class BrollIngestor:
             downloading = self.sidecar.status().get("downloading") or {}
         except Exception:
             return {}
-        return {"percent": downloading.get("percent"), "name": downloading.get("name")}
+        # rate/eta are absent on an older sidecar (and while the first bytes
+        # are still being measured): every reader treats them as optional.
+        return {"percent": downloading.get("percent"), "name": downloading.get("name"),
+                "rate_bytes_per_s": downloading.get("rate_bytes_per_s"),
+                "eta_seconds": downloading.get("eta_seconds")}
 
     def _stop_model_server(self) -> None:
         try:
@@ -2439,6 +2451,46 @@ def _gate_note(gate: str) -> str:
         STATE_RUNNING: "",
         STATE_NOTHING_TO_DO: "",
     }.get(gate, gate)
+
+
+def _time_left_phrase(seconds: Optional[float]) -> str:
+    """"about 1 min left". Deliberately vaguer than popup.human_eta's "~12 min
+    left": a model download's remaining time swings with the CDN, and a number
+    that looks precise and then doubles is worse than one that never claimed
+    to be."""
+    try:
+        secs = int(float(seconds))
+    except (TypeError, ValueError):
+        return ""
+    if secs <= 0:
+        return "almost done"
+    if secs < 60:
+        return f"about {secs} sec left"
+    if secs < 3600:
+        return f"about {secs // 60} min left"
+    return f"about {secs // 3600}h {(secs % 3600) // 60}m left"
+
+
+def _download_headline(name: str, percent: Optional[int],
+                       rate: Optional[float], eta: Optional[float]) -> str:
+    """The progress window's top line while a model is being fetched.
+
+    "Downloading Qwen3-VL 4B (Good): 61% at 38 MB/s, about 1 min left"
+    (2026-08-18) -- the speed and the time left are the whole point of the
+    line, because a multi-GB fetch with only a percentage on it is
+    indistinguishable from a hang. Both are optional: the first seconds of a
+    download have no rate to quote yet, and then the line is just the name.
+    """
+    if percent is None:
+        return ""
+    headline = f"Downloading {name}" if name else "Downloading the indexing model"
+    detail = f"{max(0, min(100, int(percent)))}%"
+    if rate and rate > 0:
+        detail += f" at {popup.human_bytes(rate)}/s"
+    left = _time_left_phrase(eta) if eta else ""
+    if left:
+        detail += f", {left}"
+    return f"{headline}: {detail}"
 
 
 def _safe_id(value: Any) -> bool:

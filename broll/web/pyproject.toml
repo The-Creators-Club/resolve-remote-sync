@@ -8,6 +8,15 @@ dependencies = [
     "uvicorn[standard]>=0.29",
     "numpy>=1.26",
     "rapidfuzz>=3.0",
+    # The CJK search_norm blob, computed SERVER-SIDE since 2026-08-18
+    # (docs/BROLL_INGEST_PLAN.md §3.1, PR-D). app/normalize.py treats both as
+    # optional and degrades to raw text, which is honest for a dev checkout --
+    # but a deployment without them silently loses every two-character CJK
+    # term, so they are hard dependencies here and in
+    # dashboard/deploy/requirements.txt. jieba is MIT,
+    # opencc-python-reimplemented is Apache-2.0 (tools/check_licenses.py).
+    "jieba>=0.42",
+    "opencc-python-reimplemented>=0.1.7",
 ]
 
 [project.optional-dependencies]

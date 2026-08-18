@@ -34,6 +34,15 @@ dependencies = [
 broll = [
     "numpy>=1.26",
     "rapidfuzz>=3.0",
+    # `segments.search_norm`, the word-segmented + script-normalised CJK blob.
+    # Computed by the SERVER since 2026-08-18 (docs/BROLL_INGEST_PLAN.md §3.1):
+    # dashboard b-roll ingest has no base rig behind it to run an embed pass
+    # afterwards. Optional upstream and therefore silent when missing, which is
+    # why they are pinned here -- a two-character CJK term is below trigram's
+    # floor and unicode61 makes an unbroken CJK run one token, so a container
+    # without them serves an archive nobody can search in Chinese.
+    "jieba>=0.42",
+    "opencc-python-reimplemented>=0.1.7",
 ]
 
 # Runtime deps of the music web app (music/web), mounted in-process at /music

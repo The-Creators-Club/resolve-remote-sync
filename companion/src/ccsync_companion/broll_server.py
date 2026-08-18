@@ -38,6 +38,25 @@ requester's own machine fetching its own YouTube clips instead of the NAS:
   GET  /ytdl/capabilities
   POST /ytdl/download
   GET  /ytdl/progress
+and since 2026-08-18 the b-roll INGEST route group -- drag clips onto the
+dashboard's b-roll page and this machine crunches them (docs/BROLL_INGEST_
+PLAN.md §4.1):
+  GET  /broll/ingest/capabilities
+  POST /broll/ingest/pick
+  POST /broll/ingest/prepare
+  PUT  /broll/ingest/upload/{staging_id}/{local_id}
+  GET  /broll/ingest/progress
+  GET  /broll/ingest/thumb
+  POST /broll/ingest/run
+  POST /broll/ingest/control
+That group brings the first PUT and the first non-JSON body this listener has
+ever accepted, so it brings its own two rules with it (see do_PUT): the body
+cap is the DECLARED size of that one file rather than MAX_BODY_BYTES, and
+`application/octet-stream` is accepted on that route ALONE, and only with the
+`X-CCSync-Ingest` header (or the loopback token) -- a custom header forces a
+preflight, which is what keeps a hostile page from streaming bytes into
+staging with a plain form POST.
+
 They are here, on this listener, rather than on one of their own precisely
 because this process already owns 8899 and a second server holding it breaks
 the tray app (CLAUDE.md). Those halves' logic lives in music_server.py,
@@ -67,15 +86,18 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from . import broll_fetch
+from . import broll_vlm_sidecar
 from . import config as ccsync_config
+from . import ffmpeg_tools
 from . import loopback_guard
 from . import music_server
 from . import music_worker
@@ -104,6 +126,56 @@ STATUS_TIMEOUT = 20
 # (MED-10, 2026-08-11).
 MAX_BODY_BYTES = 256 * 1024
 _READ_CHUNK_BYTES = 64 * 1024
+
+# -- b-roll ingest (docs/BROLL_INGEST_PLAN.md §4.1, 2026-08-18) --------------
+
+# The route group's own prefix, and the ONE route that takes a body which is
+# not JSON and not small.
+INGEST_PREFIX = "/broll/ingest/"
+_UPLOAD_PATH_RE = re.compile(
+    r"^/broll/ingest/upload/([A-Za-z0-9_-]{1,64})/([A-Za-z0-9_.-]{1,80})$")
+
+# The header that makes a dropped-file PUT possible at all. `application/
+# octet-stream` is not on the CORS-safelisted list, so a cross-origin PUT
+# already needs a preflight -- but a body-carrying request is exactly the
+# shape browsers have historically let through in one form or another, and
+# this listener has never accepted one. Requiring a custom header is a second,
+# independent reason for the browser to ask permission first, and it is
+# checked here as well as by the browser so a non-browser caller cannot skip
+# it either (the loopback token is the alternative, for curl and the tray).
+INGEST_HEADER = "X-CCSync-Ingest"
+
+# How much more than the declared size a streamed upload may be before it is
+# refused: browsers send exactly what they said they would, so this is slack
+# for nothing in particular and a cap on a lying client. 1 % of a 40 GB
+# original is 400 MB, hence the absolute floor beside it.
+INGEST_UPLOAD_SLACK_PCT = 0.01
+INGEST_UPLOAD_SLACK_FLOOR = 64 * 1024
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+# The native picker runs on the UI thread and an editor may take a while to
+# find their card's folder. Long, but not unbounded: a dialog nobody ever
+# answers must not hold a request thread for the life of the process.
+PICK_TIMEOUT_SECONDS = 300
+
+# What `run` is allowed to be asked for. Published in the capability answer so
+# the page can render the choice without knowing this build's vocabulary.
+INGEST_RUN_MODES = ("idle", "foreground")
+
+# What may be dropped or picked. Shared by the picker's folder walk, the
+# prepare route's per-item refusal and (as a filter) the page: three places
+# that must agree, or a folder drop shows 400 clips and stages 380.
+# BRAW/R3D/CRM are deliberately absent -- ffmpeg cannot decode them, so this
+# machine could make neither a proxy nor a frame (proxy_scan.NEEDS_RESOLVE_EXTS
+# says the same thing about the same formats).
+INGEST_VIDEO_EXTS = frozenset({
+    ".mp4", ".mov", ".m4v", ".mxf", ".mts", ".m2ts", ".avi", ".mkv", ".webm",
+})
+
+# The staging directory, inside the b-roll archive so it is on the same volume
+# as everything it will produce (a rename, not a copy) and inside a tree the
+# root guard already understands.
+INGEST_DIR_NAME = ".ingest"
 
 # Config file for the SHARE->MOUNT map, unchanged from the standalone
 # companion: editors already have this file, the b-roll settings panel names
@@ -487,6 +559,20 @@ def _json_bytes(obj: dict) -> bytes:
 _REFUSED = object()
 
 
+class _UploadTooLarge(Exception):
+    """A streamed body outgrew the cap the route was given. Internal to
+    _stream_body_to, which turns it into the 413 and deletes the partial."""
+
+
+def _discard(path: Path) -> None:
+    """Delete a half-written staging file. Never raises -- it runs on every
+    upload failure path, including the ones already sending a 5xx."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("broll ingest: could not remove %s (%s)", path, exc)
+
+
 def build_status_response(mounts: dict, caller: Optional[Callable[..., dict]] = None) -> dict:
     """GET /status body, per SPEC.md: {ok, resolve_connected, mounts, version}.
 
@@ -657,6 +743,214 @@ def build_insert_response(
     return 200, result
 
 
+# ---------------------------------------------------------------------------
+# b-roll ingest (docs/BROLL_INGEST_PLAN.md §4.1)
+# ---------------------------------------------------------------------------
+
+
+def ingest_staging_root(ccsync_cfg: Optional[dict[str, Any]]) -> Optional[Path]:
+    """Where dropped clips and their intermediate files live on this machine.
+
+    `<local_root>/Assets/B-roll Archive/.ingest`, i.e. INSIDE the tree, for two
+    reasons that are not convenience: everything staging produces is renamed
+    (never copied) into the archive mirror beside it, and the root guard
+    already refuses to write there when the drive is absent or misplaced.
+
+    `broll_ingest_staging_dir` overrides it for the base rig, whose local_root
+    IS the NAS share -- staging a 40 GB original there would push it over SMB
+    twice (plan §9.2). None when this machine has no tree configured at all,
+    which every caller reads as "no ingest capability here".
+    """
+    cfg = ccsync_cfg or {}
+    override = str(cfg.get("broll_ingest_staging_dir") or "").strip()
+    if override:
+        return Path(override)
+    mount = default_broll_mount(cfg)
+    if not mount:
+        return None
+    return Path(mount) / INGEST_DIR_NAME
+
+
+def _free_bytes_at(path: Any) -> Optional[int]:
+    """Free bytes on the volume holding `path`, walking up to the first
+    directory that exists. None when it cannot be answered -- staging is
+    created lazily, so the directory itself usually does not exist yet."""
+    try:
+        current = Path(path).resolve()
+    except Exception:
+        return None
+    for candidate in [current, *current.parents]:
+        try:
+            if candidate.exists():
+                return int(shutil.disk_usage(str(candidate)).free)
+        except OSError:
+            return None
+    return None
+
+
+def _ingest_floor_bytes(ccsync_cfg: Optional[dict[str, Any]]) -> int:
+    floor_gb = ccsync_config.coerce_numeric(
+        ccsync_cfg or {}, "broll_ingest_free_space_floor_gb", 20)
+    try:
+        return int(max(0.0, float(floor_gb)) * 1_000_000_000)
+    except (TypeError, ValueError):
+        return 20_000_000_000
+
+
+def build_ingest_capabilities(ccsync_cfg: Optional[dict[str, Any]],
+                              ingestor: Optional[Any] = None,
+                              deps: Optional[Any] = None) -> dict[str, Any]:
+    """What GET /broll/ingest/capabilities answers. 200 always; `ok` carries
+    the verdict and `reasons` says what is missing, in editor words.
+
+    ZERO I/O apart from one disk_usage, for ytdl's reason: the page asks this
+    before it renders the drop zone, and a probe that spawned ffmpeg or
+    nvidia-smi would make the panel appear a second late on every load. The
+    GPU and the model cache come from broll_vlm_sidecar's cached snapshot
+    (refreshed on the ingest tick), the encoder list from ffmpeg_tools' cache,
+    and "is rclone there" from a which() -- never a `--version` spawn.
+
+    `ok: false` is a complete answer, not an error: it means this machine
+    cannot index, and the page says so with the reason rather than offering a
+    Run button that will 503.
+    """
+    cfg = ccsync_cfg or {}
+    reasons: list[str] = []
+
+    snapshot = {}
+    gpu_info: dict[str, Any] = {}
+    try:
+        snapshot = broll_vlm_sidecar.status()
+        gpu_info = dict(snapshot.get("gpu") or {})
+    except Exception:  # noqa: BLE001 - a capability probe is never fatal
+        log.debug("broll ingest: the sidecar snapshot failed", exc_info=True)
+
+    tiers: dict[str, Any] = {}
+    ready = dict(snapshot.get("model_ready") or {})
+    for key in ("good", "best"):
+        try:
+            fits, why = broll_vlm_sidecar.fits(key, gpu_info or None)
+        except Exception:  # noqa: BLE001
+            fits, why = False, "this build cannot describe that model tier"
+        tiers[key] = {"fits": bool(fits), "reason": why,
+                      "cached": bool(ready.get(key))}
+    try:
+        recommended = broll_vlm_sidecar.recommended_tier(gpu_info or None)
+    except Exception:  # noqa: BLE001
+        recommended = None
+    if not any(t["fits"] for t in tiers.values()):
+        reasons.append(tiers["good"]["reason"] or
+                       "this machine's GPU cannot run the b-roll indexing model")
+
+    ffmpeg_path = str(cfg.get("ffmpeg_path", "ffmpeg") or "ffmpeg").strip() or "ffmpeg"
+    try:
+        ffmpeg = ffmpeg_tools._resolve_binary(ffmpeg_path)
+    except Exception:  # noqa: BLE001
+        ffmpeg = None
+    if not ffmpeg:
+        reasons.append("ffmpeg is not installed on this machine yet — it is "
+                       "fetched the first time a batch runs")
+    # None, not False, when nothing has probed the encoders yet: "we have not
+    # asked" and "this build has no NVENC" send an editor to different places.
+    nvenc: Optional[bool] = None
+    try:
+        encoders = ffmpeg_tools.encoders_if_known(ffmpeg_path)
+        if encoders is not None:
+            nvenc = "h264_nvenc" in encoders
+    except Exception:  # noqa: BLE001
+        nvenc = None
+
+    rclone_path = str(cfg.get("rclone_path", "rclone") or "rclone").strip() or "rclone"
+    rclone = bool(shutil.which(rclone_path) or os.path.isfile(rclone_path))
+    if not rclone:
+        reasons.append("rclone is not installed on this machine, so indexed "
+                       "clips could not be uploaded to the NAS")
+
+    staging_dir = ingest_staging_root(cfg)
+    floor = _ingest_floor_bytes(cfg)
+    free = _free_bytes_at(staging_dir) if staging_dir is not None else None
+    if staging_dir is None:
+        reasons.append("this machine has no synced tree, so there is nowhere "
+                       "to stage the clips")
+    elif free is not None and free < floor:
+        reasons.append(
+            f"only {free / 1_000_000_000:.1f} GB free where the clips would be "
+            f"staged — {floor / 1_000_000_000:.0f} GB is the floor")
+
+    busy = {"batch_uid": None, "state": ""}
+    if ingestor is not None:
+        try:
+            busy = dict(ingestor.busy())
+        except Exception:  # noqa: BLE001
+            log.debug("broll ingest: busy() failed", exc_info=True)
+    if busy.get("batch_uid"):
+        reasons.append("this machine is already indexing a b-roll batch")
+
+    editor = ""
+    if deps is not None:
+        try:
+            editor = str(deps.editor() or "")
+        except Exception:  # noqa: BLE001
+            editor = ""
+    if not editor:
+        reasons.append("nobody is signed in on this machine")
+
+    if ingestor is None:
+        reasons.append("b-roll indexing is switched off on this machine")
+
+    return {
+        "ok": not reasons,
+        "reasons": reasons,
+        "version": ccsync_config.VERSION,
+        "ffmpeg": bool(ffmpeg),
+        "nvenc": nvenc,
+        "rclone": rclone,
+        "gpu": {
+            "present": bool(gpu_info.get("present")),
+            "vram_gb": gpu_info.get("vram_gb"),
+            "detail": gpu_info.get("detail") or "",
+            "apple_silicon": bool(gpu_info.get("apple_silicon")),
+        },
+        "tiers": tiers,
+        "recommended_tier": recommended,
+        "runtime_cached": bool(snapshot.get("runtime_ready")),
+        "staging": {
+            "dir": str(staging_dir) if staging_dir is not None else "",
+            "free_bytes": free,
+            "floor_bytes": floor,
+        },
+        "busy": busy,
+        "signed_in": bool(editor),
+        "run_modes": list(INGEST_RUN_MODES),
+    }
+
+
+def pick_ingest_sources(kind: str) -> tuple[int, dict[str, Any]]:
+    """Run the native file/folder picker and answer with real paths.
+
+    THE ONLY route that learns a local path from this machine rather than
+    being told one, and that is the point: a browser cannot hand over a path
+    (it never sees one), so an editor who wants their 400-clip card indexed IN
+    PLACE -- no copy into staging at all -- has to pick it here. The dialog
+    runs on the UI thread through ui_dispatch, like every other window in this
+    package; a request thread that opened its own Tk root would be the second
+    one in the process (CORE-M3).
+    """
+    from . import popup  # deferred: importing Tk plumbing costs a server that never picks
+
+    if kind not in ("files", "folder"):
+        return 400, {"ok": False, "message": "kind must be 'files' or 'folder'"}
+    try:
+        files = popup.pick_media_sources(kind, timeout=PICK_TIMEOUT_SECONDS)
+    except Exception as exc:  # noqa: BLE001 - a picker is never fatal
+        log.warning("broll ingest: the file picker failed (%s)", exc, exc_info=True)
+        return 200, {"ok": False, "message": "the file picker could not be opened "
+                                             "on this machine"}
+    if not files:
+        return 200, {"ok": False, "message": "cancelled"}
+    return 200, {"ok": True, "files": files}
+
+
 class BrollRequestHandler(BaseHTTPRequestHandler):
     server_version = f"CCSyncCompanion/{ccsync_config.VERSION}"
 
@@ -763,9 +1057,14 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", self._cors_origin)
         self.send_header(
             "Access-Control-Allow-Headers",
-            f"Content-Type, {loopback_guard.TOKEN_HEADER}",
+            f"Content-Type, {loopback_guard.TOKEN_HEADER}, {INGEST_HEADER}",
         )
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        # PUT since 2026-08-18, for the one ingest upload route. A method a
+        # preflight is not told about is a method the browser refuses before
+        # the request is made, so this is what makes drag-and-drop possible at
+        # all -- and it costs nothing elsewhere: do_PUT answers 404 on every
+        # other path.
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS")
         # Private Network Access, for ALLOWED origins only (it was
         # unconditional until 2026-08-17). The b-roll UI is served from the
         # cc_sync dashboard, so the page comes from a tailnet address and
@@ -781,6 +1080,21 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
         self._set_cors_headers()
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _send_bytes(self, status: int, content_type: str, payload: bytes) -> None:
+        """The one non-JSON answer this listener gives: a staging thumbnail.
+
+        no-store rather than a cache header: a `local_id` is reused within a
+        staging directory as soon as an item is retried, and a browser holding
+        the first attempt's frame would show the wrong clip.
+        """
+        self.send_response(status)
+        self._set_cors_headers()
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(payload)
 
@@ -878,6 +1192,274 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
             and self._content_type_ok() and self._dispatch_post()
         )
 
+    def do_PUT(self) -> None:
+        """The upload route, and nothing else.
+
+        Same envelope as a POST -- Host, Origin, then "an allowed Origin or the
+        token" -- but NOT _content_type_ok: this body is bytes, and the
+        content-type rule that applies here is do_PUT's own (see
+        _ingest_upload).
+        """
+        self._guarded(
+            lambda: self._vet_request() and self._post_authorised()
+            and self._dispatch_put()
+        )
+
+    def _ingest_deps(self) -> Any:
+        """What app.py handed this listener about b-roll ingest, or None.
+
+        None is a complete answer -- a companion whose orchestrator failed to
+        construct, or one built by an older caller -- and every ingest route
+        answers it the same way: this machine cannot index, in the body, with
+        the page free to fall back to "ask another machine".
+        """
+        return getattr(self.server, "ingest_deps", None)
+
+    def _ingestor(self) -> Any:
+        deps = self._ingest_deps()
+        if deps is None:
+            return None
+        return getattr(deps, "ingestor", None)
+
+    def _no_ingestor(self) -> None:
+        self._send_json(503, {
+            "ok": False,
+            "message": "b-roll indexing is not running on this machine",
+        })
+
+    def _ingest_content_type_ok(self) -> bool:
+        """The upload route's own rule, replacing _content_type_ok's.
+
+        `application/octet-stream` is accepted ONLY alongside `X-CCSync-Ingest`
+        (or the loopback token). Without one of those a page could stream bytes
+        into staging with no preflight at all, which is the one thing this
+        route must never allow -- and JSON is refused outright here, because a
+        JSON body on an upload route is a caller that has misread the contract.
+        """
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/octet-stream":
+            log.warning("broll ingest: refusing PUT %s -- Content-Type %r is not "
+                        "application/octet-stream", self.path, ctype or None)
+            self._refuse(415)
+            return False
+        if str(self.headers.get(INGEST_HEADER) or "").strip():
+            return True
+        if loopback_guard.verify_token(
+            self.headers.get(loopback_guard.TOKEN_HEADER)
+        ):
+            return True
+        log.warning(
+            "broll ingest: refusing PUT %s -- an octet-stream body needs the %s "
+            "header (which forces a preflight) or the loopback token",
+            self.path, INGEST_HEADER,
+        )
+        self._refuse(403)
+        return False
+
+    def _stream_body_to(self, dest: Path, limit: int) -> Optional[int]:
+        """Stream this request's body to `dest`, at most `limit` bytes.
+
+        Returns the byte count, or None when a 4xx/5xx is already on the wire.
+        Written to `<dest>.partial` and renamed only on a complete body, for
+        broll_fetch's reason: a half-written file that looks finished is worse
+        than no file, and the next attempt must be able to tell them apart.
+
+        The limit is enforced on the BYTES READ, not on Content-Length alone: a
+        client that declares 4 KB and sends 40 GB would otherwise fill the
+        editor's drive, and Content-Length is the client's claim about itself.
+        """
+        raw_length = self.headers.get("Content-Length")
+        try:
+            declared = int(raw_length) if raw_length else -1
+        except (TypeError, ValueError):
+            self._send_json(400, {"ok": False, "message": "invalid Content-Length"})
+            return None
+        if declared < 0:
+            self._send_json(411, {"ok": False,
+                                  "message": "this upload needs a Content-Length"})
+            return None
+        if declared > limit:
+            self._send_json(413, {"ok": False, "message": (
+                f"this file is bigger than the {limit} bytes the companion was "
+                "told to expect")})
+            return None
+
+        partial = dest.with_name(dest.name + ".partial")
+        written = 0
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with open(partial, "wb") as handle:
+                remaining = declared
+                while remaining > 0:
+                    chunk = self.rfile.read(min(remaining, _UPLOAD_CHUNK_BYTES))
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > limit:
+                        raise _UploadTooLarge()
+                    handle.write(chunk)
+                    remaining -= len(chunk)
+        except _UploadTooLarge:
+            _discard(partial)
+            self._send_json(413, {"ok": False, "message": (
+                "this upload sent more than it declared -- nothing was kept")})
+            return None
+        except OSError as exc:
+            _discard(partial)
+            log.warning("broll ingest: could not write %s (%s)", partial, exc)
+            self._send_json(507, {"ok": False, "message": (
+                "the companion could not write the clip to its staging folder "
+                f"-- {exc.strerror or exc}")})
+            return None
+        if written < declared:
+            # The client hung up mid-body. The partial is dropped rather than
+            # renamed: a short file that reached the hashing stage would be
+            # indexed and uploaded as if it were the whole clip.
+            _discard(partial)
+            self._send_json(400, {"ok": False, "message": (
+                "the upload stopped before the whole file arrived")})
+            return None
+        try:
+            os.replace(str(partial), str(dest))
+        except OSError as exc:
+            _discard(partial)
+            log.warning("broll ingest: could not publish %s (%s)", dest, exc)
+            self._send_json(507, {"ok": False, "message": (
+                "the companion could not finish writing the clip into staging")})
+            return None
+        return written
+
+    def _dispatch_put(self) -> None:
+        match = _UPLOAD_PATH_RE.match(urlparse(self.path).path)
+        if match is None:
+            self._send_json(404, {"ok": False, "message": f"not found: {self.path}"})
+            return
+        ingestor = self._ingestor()
+        if ingestor is None:
+            self._no_ingestor()
+            return
+        if not self._ingest_content_type_ok():
+            return
+        staging_id, local_id = match.group(1), unquote(match.group(2))
+
+        status, slot = ingestor.upload_slot(staging_id, local_id)
+        if status != 200:
+            self._send_json(status, slot)
+            return
+        dest = Path(str(slot.get("path") or ""))
+        root = slot.get("staging_root")
+        # Belt and braces over the orchestrator's own containment check: this
+        # is the only route on this listener that WRITES a caller-named file,
+        # and the id came off the wire. `.parent`, because dest does not exist
+        # yet and realpath cannot follow a symlink that is not there.
+        if not root or not loopback_guard.is_within(dest.parent, root):
+            log.warning("broll ingest: refusing an upload to %s -- outside %s",
+                        dest, root)
+            self._refuse(403)
+            return
+
+        declared = int(slot.get("size") or 0)
+        floor = _ingest_floor_bytes(getattr(self.server, "ccsync_cfg", None))
+        free = _free_bytes_at(dest.parent)
+        if free is not None and declared and (free - declared) < floor:
+            self._send_json(507, {"ok": False, "message": (
+                f"not enough space to stage this clip: it needs "
+                f"{declared / 1_000_000_000:.1f} GB and only "
+                f"{free / 1_000_000_000:.1f} GB is free "
+                f"(the floor is {floor / 1_000_000_000:.0f} GB) -- free some "
+                "space and drop it again")})
+            return
+
+        limit = (declared + max(int(declared * INGEST_UPLOAD_SLACK_PCT),
+                                INGEST_UPLOAD_SLACK_FLOOR)
+                 if declared else MAX_BODY_BYTES)
+        written = self._stream_body_to(dest, limit)
+        if written is None:
+            return
+        status, result = ingestor.note_upload(staging_id, local_id, written)
+        self._send_json(status, result)
+
+    def _dispatch_ingest_get(self, path: str, query: dict) -> bool:
+        """The two ingest GETs. True when this request was answered here."""
+        if path == "/broll/ingest/capabilities":
+            # 200 ALWAYS with the verdict in the body, for /ytdl/capabilities'
+            # reason: a non-200 reads to the page as "no companion here", which
+            # is a different (and less useful) message than "this GPU is too
+            # small".
+            self._send_json(200, build_ingest_capabilities(
+                getattr(self.server, "ccsync_cfg", None),
+                self._ingestor(), self._ingest_deps()))
+            return True
+        if path == "/broll/ingest/progress":
+            ingestor = self._ingestor()
+            if ingestor is None:
+                self._no_ingestor()
+                return True
+            staging_id = (query.get("staging_id") or [""])[0]
+            self._send_json(200, ingestor.progress(staging_id or None))
+            return True
+        if path == "/broll/ingest/thumb":
+            ingestor = self._ingestor()
+            if ingestor is None:
+                self._no_ingestor()
+                return True
+            staging_id = (query.get("staging_id") or [""])[0]
+            local_id = (query.get("local_id") or [""])[0]
+            status, result = ingestor.thumb(staging_id, local_id)
+            if status != 200:
+                self._send_json(status, result)
+                return True
+            self._send_bytes(200, "image/jpeg", result)
+            return True
+        return False
+
+    def _dispatch_ingest_post(self, path: str) -> bool:
+        """The four ingest POSTs. True when this request was answered here."""
+        if not path.startswith(INGEST_PREFIX):
+            return False
+        if path == "/broll/ingest/pick":
+            body = self._read_json_body("message")
+            if body is _REFUSED:
+                return True
+            if not isinstance(body, dict):
+                self._send_json(400, {"ok": False, "message": "invalid JSON body"})
+                return True
+            status, result = pick_ingest_sources(str(body.get("kind") or "files"))
+            self._send_json(status, result)
+            return True
+
+        ingestor = self._ingestor()
+        if path in ("/broll/ingest/prepare", "/broll/ingest/run",
+                    "/broll/ingest/control"):
+            body = self._read_json_body("message")
+            if body is _REFUSED:
+                return True
+            if not isinstance(body, dict):
+                self._send_json(400, {"ok": False, "message": "invalid JSON body"})
+                return True
+            if ingestor is None:
+                self._no_ingestor()
+                return True
+            if path == "/broll/ingest/prepare":
+                status, result = ingestor.prepare(body)
+            elif path == "/broll/ingest/run":
+                # `batch_uid`, `staging_id` and `run_mode` and NOTHING ELSE
+                # (plan §4.1). The tier, the archive names, the taxonomy and
+                # the settings all come back from the server's claim under the
+                # fleet token: the browser is the only party that can see both
+                # the dashboard and this loopback, which is why it dispatches
+                # -- not a reason to trust it with the work order.
+                status, result = ingestor.run(
+                    str(body.get("batch_uid") or ""),
+                    str(body.get("staging_id") or ""),
+                    str(body.get("run_mode") or ""),
+                )
+            else:
+                status, result = ingestor.control(str(body.get("action") or ""))
+            self._send_json(status, result)
+            return True
+        return False
+
     def _ytdl_deps(self) -> Any:
         """The executor's view of this companion.
 
@@ -897,6 +1479,11 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
     def _dispatch_get(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
+        if path.startswith(INGEST_PREFIX):
+            if self._dispatch_ingest_get(path, parse_qs(parsed.query)):
+                return
+            self._send_json(404, {"ok": False, "message": f"not found: {path}"})
+            return
         if path == "/status":
             mounts = self.server.companion_config.get("mounts", {})
             self._send_json(200, build_status_response(mounts))
@@ -925,6 +1512,8 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
 
     def _dispatch_post(self) -> None:
         path = urlparse(self.path).path
+        if self._dispatch_ingest_post(path):
+            return
         if path == "/music/send":
             body = self._read_json_body("error")
             if body is _REFUSED:
@@ -1019,7 +1608,8 @@ class BrollCompanionServer(ThreadingHTTPServer):
 
     def __init__(self, server_address, handler_cls, companion_config: dict,
                  ccsync_cfg: Optional[dict] = None,
-                 ytdl_deps: Optional[Any] = None):
+                 ytdl_deps: Optional[Any] = None,
+                 ingest_deps: Optional[Any] = None):
         super().__init__(server_address, handler_cls)
         self.companion_config = companion_config
         # The companion's own config.toml dict, for the on-demand archive
@@ -1030,6 +1620,12 @@ class BrollCompanionServer(ThreadingHTTPServer):
         # editor identity and this machine's project selection, for the /ytdl
         # download executor. None = no capability (see _ytdl_deps).
         self.ytdl_deps = ytdl_deps
+        # broll_ingest.IngestDeps: the orchestrator, the sidecar and the
+        # verified editor identity, for the /broll/ingest/* group. Held on the
+        # server object exactly like ytdl_deps above, and None on the same
+        # terms -- a companion whose orchestrator failed to construct serves
+        # every other route unchanged and answers "cannot index here".
+        self.ingest_deps = ingest_deps
 
         # Who may drive this listener (loopback_guard.py, 2026-08-17).
         # Computed ONCE, here, rather than per request: it reads the cached
@@ -1062,10 +1658,11 @@ def make_server(
     cfg: dict, host: str = HOST, port: int = PORT,
     ccsync_cfg: Optional[dict] = None,
     ytdl_deps: Optional[Any] = None,
+    ingest_deps: Optional[Any] = None,
 ) -> BrollCompanionServer:
     """Bind a loopback-only server. Raises OSError if the port is taken."""
     return BrollCompanionServer((host, port), BrollRequestHandler, cfg,
-                                ccsync_cfg, ytdl_deps)
+                                ccsync_cfg, ytdl_deps, ingest_deps)
 
 
 # -- startup ----------------------------------------------------------------
@@ -1096,7 +1693,8 @@ def configured_port(ccsync_cfg: dict[str, Any]) -> int:
 
 
 def start(ccsync_cfg: dict[str, Any],
-          ytdl_deps: Optional[Any] = None) -> Optional[BrollCompanionServer]:
+          ytdl_deps: Optional[Any] = None,
+          ingest_deps: Optional[Any] = None) -> Optional[BrollCompanionServer]:
     """Start the /broll insert server on a daemon thread. Never raises.
 
     Returns the server (call .shutdown() then .server_close()) or None when
@@ -1123,7 +1721,7 @@ def start(ccsync_cfg: dict[str, Any],
 
     try:
         server = make_server(broll_cfg, HOST, port, ccsync_cfg=ccsync_cfg,
-                             ytdl_deps=ytdl_deps)
+                             ytdl_deps=ytdl_deps, ingest_deps=ingest_deps)
     except OSError as exc:
         log.warning(
             "broll: could not listen on %s:%d (%s) -- \"Send to Resolve\" in the "
@@ -1180,6 +1778,19 @@ def stop(server: Optional[BrollCompanionServer]) -> None:
         ytdl_executor.stop_all()
     except Exception:
         log.debug("broll: stopping the ytdl executor failed", exc_info=True)
+    # ...and the b-roll ingest orchestrator, for the third time the same
+    # reason: an ffmpeg or an rclone still writing into staging after the tray
+    # exits is an orphan nothing supervises, and its batch's lease expires so
+    # the server (or this machine on restart) picks it up from the last
+    # checkpoint. Uploads first, then the crunch: killing the queue while the
+    # orchestrator is still enqueueing would leave jobs behind it.
+    deps = getattr(server, "ingest_deps", None) if server is not None else None
+    ingestor = getattr(deps, "ingestor", None) if deps is not None else None
+    if ingestor is not None:
+        try:
+            ingestor.stop()
+        except Exception:
+            log.debug("broll: stopping the ingest orchestrator failed", exc_info=True)
     if server is None:
         return
     try:

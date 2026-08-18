@@ -1601,3 +1601,126 @@ def licence_dialog(title: str, intro: str, document: str,
         log.warning("licence dialog failed (%s) -- defaulting to decline", exc)
         return False
     return result["ok"]
+
+
+# ---------------------------------------------------------------------------
+# the native "choose from this computer..." picker (b-roll ingest, 2026-08-18)
+# ---------------------------------------------------------------------------
+
+# The same ceiling the page and the prepare route hold: a card with 6,000
+# clips on it is a batch nobody meant to start.
+PICK_MAX_FILES = 2000
+
+
+def _walk_folder_for_media(folder: Any, exts) -> list[dict[str, Any]]:
+    """Every video under `folder`, with the sub-folder path the archive keeps.
+    Sorted, so a picked card is offered in the order it was shot."""
+    root = os.path.abspath(str(folder))
+    top = os.path.basename(root.rstrip(os.sep)) or root
+    out: list[dict[str, Any]] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for name in sorted(filenames):
+            if os.path.splitext(name)[1].lower() not in exts:
+                continue
+            full = os.path.join(dirpath, name)
+            rel_dir = os.path.relpath(dirpath, root)
+            rel_dir = "" if rel_dir == "." else rel_dir.replace(os.sep, "/")
+            try:
+                size = os.path.getsize(full)
+            except OSError:
+                continue
+            out.append({"path": full, "name": name, "size": size,
+                        "rel_dir": rel_dir, "top": top})
+            if len(out) >= PICK_MAX_FILES:
+                log.warning("ingest picker: %s holds more than %d clips -- "
+                            "offering the first %d", root, PICK_MAX_FILES,
+                            PICK_MAX_FILES)
+                return out
+    return out
+
+
+def _tk_pick(kind: str) -> Any:
+    """The real dialog, on the UI thread (ui_dispatch) like every other window
+    in this package: a request thread that opened its own Tk root would be the
+    second one in the process, which is CORE-M3's wedged interpreter."""
+    import tkinter as tk
+    from tkinter import filedialog
+
+    from . import theme
+
+    def _ask() -> Any:
+        root = tk.Tk()
+        try:
+            root.withdraw()
+            theme.apply_window_icon(tk, root)
+            root.attributes("-topmost", True)
+            if kind == "folder":
+                return filedialog.askdirectory(
+                    parent=root, title="Choose a folder of clips to index",
+                    mustexist=True)
+            return filedialog.askopenfilenames(
+                parent=root, title="Choose clips to index")
+        finally:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+
+    return ui_dispatch.dispatch(_ask)
+
+
+def pick_media_sources(kind: str, timeout: float = 300.0,
+                       dialog_fn: Optional[Callable[[str], Any]] = None,
+                       exts: Optional[Any] = None) -> list[dict[str, Any]]:
+    """"Choose from this computer…" -> [{path, name, size, rel_dir, top}].
+
+    The ONE place this companion learns a local path from a person rather than
+    from a server, and the reason the feature can index a 400-clip card in
+    place instead of copying it into staging first (plan §1 step 1).
+
+    Runs the dialog on a helper thread and waits `timeout` for it. An editor
+    who opens the picker and wanders off must not park the request thread --
+    or, on macOS, the UI dispatcher's main thread -- for the life of the
+    process; after the timeout this answers "nothing was picked" and the
+    dialog's eventual result is dropped. `dialog_fn` is the tests' seam.
+    """
+    from .broll_server import INGEST_VIDEO_EXTS
+
+    wanted = exts if exts is not None else INGEST_VIDEO_EXTS
+    ask = dialog_fn or _tk_pick
+    box: dict[str, Any] = {}
+    done = threading.Event()
+
+    def _run() -> None:
+        try:
+            box["value"] = ask(kind)
+        except Exception as exc:  # noqa: BLE001 - a picker is never fatal
+            log.warning("ingest picker: the dialog failed (%s)", exc, exc_info=True)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=_run, name="ccsync-ingest-picker", daemon=True)
+    thread.start()
+    if not done.wait(timeout):
+        log.warning("ingest picker: nothing chosen within %.0fs -- treating it "
+                    "as cancelled", timeout)
+        return []
+    chosen = box.get("value")
+    if not chosen:
+        return []
+
+    if kind == "folder":
+        return _walk_folder_for_media(chosen, wanted)
+    out: list[dict[str, Any]] = []
+    for path in list(chosen)[:PICK_MAX_FILES]:
+        name = os.path.basename(str(path))
+        if os.path.splitext(name)[1].lower() not in wanted:
+            continue
+        try:
+            size = os.path.getsize(str(path))
+        except OSError:
+            continue
+        out.append({"path": os.path.abspath(str(path)), "name": name,
+                    "size": size, "rel_dir": "", "top": ""})
+    return out

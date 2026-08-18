@@ -575,6 +575,11 @@ def _lane_root_absent_detail() -> str:
             f"back in and syncing resumes on its own")
 
 
+def _leaf_name(path: str) -> str:
+    """The last path component whichever separator the string uses."""
+    return path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+
+
 def _proxy_state_note(state: str) -> str:
     """proxy_gen's gate, in the sentence the progress window shows.
 
@@ -4738,7 +4743,12 @@ class CompanionApp:
         return popup.ProgressModel(
             title="MAKING PROXIES",
             phase=str(gap.get("state") or ""),
-            item_label=(os.path.basename(str(first.get("path") or "")) if first
+            # Not os.path.basename: the path in encoding_detail is whatever
+            # the generator recorded, and a Windows path shown by a Mac
+            # companion (or a Windows-recorded state file read on macOS, or
+            # simply the suite running on the macOS release runner) has
+            # backslashes posix basename() does not split on (2026-08-18).
+            item_label=(_leaf_name(str(first.get("path") or "")) if first
                         else ""),
             item_percent=first.get("percent"),
             done=made, total=made + left,

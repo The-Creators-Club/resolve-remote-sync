@@ -96,7 +96,7 @@ it stops and names it; that is the enforcement.
 |---|---|---|
 | `youtube_download` | `false` | **F**. The `/ytdl` page. Off means the mount does not exist, the fleet routes 404, and companions hide their YouTube items. A legal decision, not a technical one — [`legal/YOUTUBE_FEATURE_NOTICE.md`](legal/YOUTUBE_FEATURE_NOTICE.md) |
 | `youtube_unblock` | `false` | **F**. The PO-token provider, the deno n-challenge solver, the cookie sign-in. **The vendor build ships none of them installed.** Requires `youtube_download`; alone it does nothing and the manifest will not report it true |
-| `ai_cli_providers` | `false` | **F**. Lets the downloader's two AI calls use a **Claude Code / Codex CLI the customer installed on the dashboard host themselves** (§2.5a). Nothing is bundled, downloaded or installed by us either way; what this switches on is our willingness to *run* one. Using a personal subscription to power a service may breach its terms — the customer's decision, stated on the Settings page. **Not published in `GET /api/v1/site`**: no client needs it |
+| `ai_cli_providers` | `false` | **F**. Lets the downloader's two AI calls use a **Claude Code / Codex CLI on the dashboard host** (§2.5a): one the customer installed themselves, or one the **SET UP wizard** fetched from the publisher at their click. Nothing is bundled either way. Using a personal subscription to power a service may breach its terms — the customer's decision, taken on the wizard's first step. Accepting that notice is what turns this flag on. **Not published in `GET /api/v1/site`**: no client needs it |
 
 ### `[releases]`
 
@@ -332,15 +332,62 @@ admin routes publish a mask (`sk-…abcd`) and a source
 ([`API.md`](API.md) §5 "AI providers").
 
 **The two CLI providers are adapters, not a bundle.** Nothing in this product
-downloads, installs, updates or version-pins `claude` or `codex`; they are
-found on `PATH` (or at `ai_claude_code_path` / `ai_codex_path`, typed by the
-admin) and signed in **on the host** by the customer — an interactive OAuth
-cannot be completed from a web page, so the Settings page prints the command
-instead of pretending. That is what keeps
-[`COMMERCIAL_READINESS.md`](COMMERCIAL_READINESS.md) item 1 answered: the
-redistribution problem was ours and stays fixed; the "is a personal
-subscription allowed to power a service" question is the customer's, asked
-explicitly, off by default.
+*bundles* `claude` or `codex`: not in the image, not in a package record, not
+in a release artefact. Where a CLI comes from is one of three places, in this
+order of precedence: the path an admin typed (`ai_claude_code_path` /
+`ai_codex_path`), what the **SET UP wizard** installed, and `PATH`.
+
+#### The SET UP wizard (2026-08-18)
+
+The owner's verdict on "install it on the dashboard host, or set its full path
+below" was *"this is too complex for most users"*, and an appliance customer
+has no shell to do it in. `dashboard/src/ccsync_dashboard/cli_tools.py` runs
+the four steps from the page: **notice → install → sign in → test**.
+
+| What | Where |
+|---|---|
+| The binary | `<DASH_DB_PATH's parent>/tools/claude-code/<version>/claude` (Codex keeps the publisher's package layout: `…/codex/<version>/bin/codex`), dir `0700`, file `0755` |
+| Which one is live | `…/tools/<tool>/current` — a **pointer file** holding a relative path, deliberately not a symlink (a DSM volume may refuse one, and a dangling symlink reads as "never installed") |
+| The record | `…/tools/<tool>/state.json`: `installed_version`, `sha256`, `installed_at`, `source_url`, `checksum_source` |
+| `$HOME` for every run of it | `…/tools/<tool>/home`, `0700`. Never the container's own HOME, which is inside the image on some deployments: a sign-in there would evaporate at the next `compose up` |
+| The `setup-token` fallback's token | `<data>/secrets/ai/claude_code_oauth_token`, `0600`, passed back as `CLAUDE_CODE_OAUTH_TOKEN` |
+
+Where the bytes come from, and what is checked: **Claude Code** from
+`downloads.claude.ai/claude-code-releases/<version>/<platform>/claude`, against
+the `checksum` and `size` in the publisher's own `manifest.json`. **Codex**
+from the `openai/codex` GitHub release, asset
+`codex-package-<arch>-unknown-linux-musl.tar.gz` (what the publisher's own
+`install.sh` picks on every Linux), against the release's
+`codex-package_SHA256SUMS`. Everything is https-only through the same bounded,
+credential-free redirect follow the release feed uses; the sha256 is checked
+**before the pointer moves**, so a failed download installs nothing and leaves
+the previous version exactly as it was. If a publisher ever stops publishing a
+checksum for an asset, the wizard says so on the page instead of pretending it
+verified something. Linux x86_64/arm64 glibc only: a musl container, another
+OS or an unknown architecture is a refusal that names what it saw.
+
+Sign-in is a **pty**, because `claude auth login` prints an authorisation URL
+and waits for a code on its terminal: the dashboard reads the URL out of the
+CLI's output, the admin opens it and pastes the code back into the page, and
+the code is written to the pty. URL out, code back — the same shape as the
+companion's YouTube sign-in. The code and the token are never logged. One
+sign-in and one install at a time, process-wide; five-minute timeout. Where
+`claude auth login` will not take a pty, the wizard falls back to `claude
+setup-token` on its own.
+
+**The manual path still works and is still documented**: install the CLI in
+the container yourself and type its path, which wins over anything the wizard
+installed. The page prints the login command beside the wizard for the same
+reason.
+
+That is what keeps [`COMMERCIAL_READINESS.md`](COMMERCIAL_READINESS.md) item 1
+answered. The problem it named was the vendor REDISTRIBUTING a proprietary
+304 MB binary inside its own artefacts; that stays fixed. Fetching the
+publisher's build, from the publisher, at the customer's click, into the
+customer's volume, is the customer installing it — with one button instead of
+a shell. The "is a personal subscription allowed to power a service" question
+is still the customer's, asked explicitly on the wizard's first step, off by
+default.
 
 ### 2.5b Music ingest (`MUSIC_INGEST_PLAN.md` step 2, 2026-08-18)
 

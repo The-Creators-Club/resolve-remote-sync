@@ -18,9 +18,9 @@ from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 
 from . import (
-    ai_providers, api, assignments, auth, broll, crash_report, dashboard_update, db,
-    internal_sftp, local_users, music, oidc, release_feed, secrets_boot, sessions,
-    setup_api, setup_routes, site_store, ui, ytdl,
+    ai_providers, api, assignments, auth, broll, cli_tools, crash_report,
+    dashboard_update, db, internal_sftp, local_users, music, oidc, release_feed,
+    secrets_boot, sessions, setup_api, setup_routes, site_store, ui, ytdl,
 )
 from .collector import Collector
 from .settings import Settings
@@ -731,6 +731,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # the same reason setup_routes has one -- and because everything in it
     # touches a credential, which is easier to audit in one file.
     app.include_router(ai_providers.router)
+    # The AI CLI setup wizard (2026-08-18): install the publisher's binary and
+    # sign it in, from the page, because "no `claude` on this container's PATH,
+    # install it on the dashboard host" is a sentence with a shell in it and
+    # the customers this is packaged for do not have one. Its own module and
+    # router beside the provider routes it extends -- everything in it either
+    # writes an executable or touches a credential, which is easier to audit
+    # in one file (cli_tools.py).
+    app.include_router(cli_tools.router)
     app.include_router(release_feed.router)
     # The dashboard's own code updates (ZERO_TOUCH_PLAN.md WP K): its own
     # module and its own router, beside the feed's, because it consumes the

@@ -762,6 +762,52 @@ mechanism CR-23 built is unchanged — only the default flipped). Not touched:
 theirs; the *mark* is ours), the dashboard favicon (already CC), `icon.ico`
 (already CC).
 
+### CR-26 — the AI CLI setup wizard: two halves that could only be verified from Windows — BUILT in repo 2026-08-18, UNVERIFIED on a container
+The owner read the Settings row *"Claude Code: not installed. no `claude` on
+this container's PATH. Install it on the dashboard host, or set its full path
+below"* and said: *"we should make this process a click-through wizard, this is
+too complex for most users."* Built as
+`dashboard/src/ccsync_dashboard/cli_tools.py` (notice, install, sign in, test).
+What was verified, and how, on 2026-08-18 from the base rig:
+
+* **The Claude Code distribution.** `GET
+  downloads.claude.ai/claude-code-releases/latest` answers `2.1.234`;
+  `/2.1.234/manifest.json` carries `platforms["linux-x64"].checksum` (sha256)
+  and `.size` (328,358,192 bytes = **313 MiB**, so the 300 MiB cap this was
+  first specified with would have refused the real binary on day one; the cap
+  is 512 MiB and the manifest's exact size is enforced instead).
+* **The Claude Code command surface**, against the locally installed 2.1.234:
+  `claude auth login [--claudeai|--console]`, `claude auth logout`, `claude
+  auth status --json` (`{loggedIn, authMethod, apiProvider, apiKeySource,
+  email, orgId, orgName, subscriptionType}`) and `claude setup-token` all exist
+  with those spellings.
+* **The Codex distribution.** The asset names in the task
+  (`codex-x86_64-unknown-linux-gnu.tar.gz`) **do not exist**: the publisher's
+  own `install.sh` picks `codex-package-<arch>-unknown-linux-musl.tar.gz` on
+  every Linux (the Linux builds are static musl) and verifies it against the
+  `codex-package_SHA256SUMS` asset in the same release. That is what is
+  implemented, checked against `rust-v0.147.0`'s 200 assets.
+
+**What could NOT be verified from Windows, and is what to check first on the
+container:**
+
+1. **The pty sign-in itself.** `claude auth login` was never run: this machine
+   has no pty (`pty.openpty` is Linux-only) and no WSL, and running the real
+   login would have re-authenticated the owner's own account. So it is not
+   known whether `auth login` accepts a pty as a terminal inside the container,
+   nor exactly how it prompts for the code. BOTH strategies are implemented,
+   login first, with an automatic fall back to `setup-token` when the CLI says
+   something in `_NO_TTY_MARKERS` before printing a URL. The URL parser is
+   pinned by tests against synthesised output, NOT against a real transcript.
+2. **`codex login --device-auth`.** Detected at runtime from the downloaded
+   binary's own `codex login --help` rather than assumed, but neither branch
+   has been run.
+3. **A real 313 MB download onto the NAS**, and the pointer flip under a
+   container uid.
+
+Until 1 is verified, the manual path stays documented and the page still
+prints the login command beside the wizard.
+
 ---
 
 ## Open — residuals from the 2026-08-14 fix pass

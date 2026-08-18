@@ -210,7 +210,7 @@ def fake_cli(monkeypatch, *, on_path="/usr/bin/claude", version=FakeProc(0, "2.1
     monkeypatch.setattr(ai_providers.shutil, "which",
                         lambda binary: on_path)
 
-    def run(argv, stdin, timeout):
+    def run(argv, stdin, timeout, env=None):
         return version if argv[1:] == ["--version"] else probe
 
     monkeypatch.setattr(ai_providers, "_run", run)
@@ -276,7 +276,7 @@ def test_the_probe_is_cached_between_calls(env, monkeypatch):
     calls = []
     monkeypatch.setattr(ai_providers.shutil, "which", lambda b: "/usr/bin/claude")
 
-    def run(argv, stdin, timeout):
+    def run(argv, stdin, timeout, env=None):
         calls.append(argv)
         return FakeProc(0, "ok")
 
@@ -581,7 +581,11 @@ def test_the_tos_note_says_whose_decision_it_is():
     assert "your decision" in note
     # And that we ship neither CLI -- the half of COMMERCIAL_READINESS item 1
     # that is ours to keep answered.
-    assert "Neither CLI is shipped, installed or updated by CC Sync" in note
+    assert "Neither CLI is shipped, bundled or updated by CC Sync" in note
+    # And that the SET UP button, added 2026-08-18, is described for what it
+    # is: a fetch from the publisher at the customer's click, checksum-checked
+    # -- not us putting a copy of somebody's proprietary binary in an artefact.
+    assert "publisher's own build" in note and "checksum" in note
 
 
 def test_the_key_is_never_in_a_query_string(env):

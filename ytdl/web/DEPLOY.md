@@ -137,9 +137,9 @@ just as fast.
 
 | # | provider | available when | credential |
 |---|---|---|---|
-| 1 | `claude_code` | the CLI is installed **on this host by the customer** and signed in | their own Claude subscription |
+| 1 | `claude_code` | the CLI is on this host (the customer installed it, or the Settings wizard fetched it from the publisher at their click) and signed in | their own Claude subscription |
 | 2 | `anthropic_api` | a key is set | `ANTHROPIC_API_KEY` or Settings |
-| 3 | `codex` | the CLI is installed **by the customer** and signed in | their own ChatGPT subscription |
+| 3 | `codex` | the same, for Codex | their own ChatGPT subscription |
 | 4 | `openai_api` | a key is set | `OPENAI_API_KEY` or Settings |
 | 5 | `deepseek_api` | a key is set | `DEEPSEEK_API_KEY` or Settings |
 
@@ -147,16 +147,21 @@ An admin can **pin** one instead of `auto`. A pin that is not available is a
 refusal, not a fallback: nothing else is spent in its place.
 
 **The two CLI rows are behind `site.toml [features] ai_cli_providers`, which
-ships OFF.** Nothing in this repo downloads, bundles or installs either CLI —
-the customer installs it on the dashboard host themselves and signs it in
-themselves, on the host, because an interactive OAuth cannot be completed from
-a web page. Using a personal subscription to power a service may breach that
-subscription's terms; the Settings page says so, and it is the customer's
-decision. **API keys are the supported path** and the only one a deployment
-gets without asking. See `docs/legal/YOUTUBE_FEATURE_NOTICE.md`.
+ships OFF.** Nothing in this repo BUNDLES either CLI. Since 2026-08-18 the
+Settings page's **SET UP** wizard can fetch one at an admin's click, from the
+publisher's own distribution and checked against the publisher's own checksum,
+into `<data>/tools/<tool>/` -- and drive the browser sign-in through a pty
+(URL out, code back). A CLI the customer installed themselves still works
+exactly as before and a typed path still wins. Using a personal subscription
+to power a service may breach that subscription's terms; the wizard's first
+step says so and is what turns the flag on, and it is the customer's decision.
+**API keys are the supported path** and the only one a deployment gets without
+asking. `docs/CONFIG.md` 2.5a, `docs/legal/YOUTUBE_FEATURE_NOTICE.md`.
 
 Keys typed on Settings are files under `<data>/secrets/ai/`, 0600, written the
-same way the five boot secrets are. **The environment always wins** where it is
+same way the five boot secrets are; a CLI signed in by the wizard keeps its
+credential in `<data>/tools/<tool>/home`, which is the `$HOME` the probe, the
+Test button and this app all run it with. **The environment always wins** where it is
 set — the page says "set by the deployment" and refuses to overwrite it (409).
 
 Standalone (`uvicorn ytdlweb.main:app`, no dashboard in reach) there is no

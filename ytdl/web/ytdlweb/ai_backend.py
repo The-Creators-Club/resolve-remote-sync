@@ -14,15 +14,19 @@ the dashboard which of them to use *on every call*.
 **The readiness decision that made item 1 a stop-ship still holds.** The three
 ToS problems it named were (a) service use of a CONSUMER plan, (b) seat
 sharing, and (c) REDISTRIBUTING the 304 MB proprietary CLI onto customer
-hardware. Nothing here reintroduces (c): there is no download, no bundled
-binary, no installer step and no `claude-bin` volume anywhere in this
-codebase. A CLI provider is an ADAPTER that runs an executable already on the
-container's PATH (or at a path the admin typed), it is behind a site feature
-flag that ships OFF, and the Settings page states in plain words that using a
-personal subscription for a service may breach its terms and that this is the
-customer's decision to make. (a) and (b) are therefore the customer's own,
-knowingly, on their own hardware, with their own account -- not something the
-vendor arranges for them or profits from silently.
+hardware. Nothing here reintroduces (c): this app contains no binary, no
+bundled copy, no installer step and no `claude-bin` volume, and it runs
+whatever path the dashboard hands it. Since 2026-08-18 that path may be one
+the dashboard's setup wizard fetched FROM THE PUBLISHER at the admin's click
+(`ccsync_dashboard/cli_tools.py`) -- the customer installing the publisher's
+own build on their own host, checksum-verified, rather than the vendor
+shipping a copy inside an artefact. A CLI provider is still an ADAPTER, it is
+still behind a site feature flag that ships OFF, and the Settings page still
+states in plain words that using a personal subscription for a service may
+breach its terms and that this is the customer's decision to make. (a) and (b)
+are therefore the customer's own, knowingly, on their own hardware, with their
+own account -- not something the vendor arranges for them or profits from
+silently.
 
 Per call, not per boot: `current_provider()` reads the dashboard's answer
 every time, so a key an admin pastes into Settings works on the next job with
@@ -131,16 +135,22 @@ class Provider:
     """
 
     __slots__ = ('name', 'api_key', 'base_url', 'model', 'cli_path',
-                 'cli_enabled', 'detail')
+                 'cli_enabled', 'cli_env', 'detail')
 
     def __init__(self, name, api_key='', base_url='', model='', cli_path='',
-                 cli_enabled=False, detail=''):
+                 cli_enabled=False, detail='', cli_env=None):
         self.name = name
         self.api_key = api_key or ''
         self.base_url = (base_url or '').rstrip('/')
         self.model = model or ''
         self.cli_path = cli_path or ''
         self.cli_enabled = bool(cli_enabled)
+        # Environment OVERRIDES for the CLI child, from the dashboard's
+        # cli_tools.cli_env_overlay (2026-08-18): $HOME for the CLI's own
+        # credential store, and the OAuth token when the dashboard holds one.
+        # It can carry a credential, so it is treated exactly like api_key --
+        # never in __repr__, never logged.
+        self.cli_env = dict(cli_env or {})
         self.detail = detail or ''
 
     @property
@@ -149,7 +159,8 @@ class Provider:
 
     def __repr__(self):                     # never the key. See the docstring.
         return (f'<Provider {self.name or "none"} key={"set" if self.api_key else "unset"} '
-                f'cli={"set" if self.cli_path else "unset"}>')
+                f'cli={"set" if self.cli_path else "unset"} '
+                f'env={len(self.cli_env)}>')
 
 
 # ------------------------------------------------------- who decides, and how
@@ -231,6 +242,7 @@ def current_provider():
         model=str(raw.get('model') or ''),
         cli_path=str(raw.get('cli_path') or ''),
         cli_enabled=bool(raw.get('cli_enabled')),
+        cli_env=raw.get('cli_env') or {},
         detail=str(raw.get('detail') or ''),
     )
 
@@ -636,11 +648,12 @@ def _default_model(name):
 
 
 # ------------------------------------------------ claude code / codex (CLIs)
-# THE CUSTOMER INSTALLED THESE. Nothing in this repo downloads, bundles,
-# vendors or version-checks either binary; `cli_path` arrives from the
-# dashboard, which found it on PATH or was told where it is by an admin. If it
-# is not there, that is a state the Settings page reports and this refuses --
-# never something the code fixes by fetching an installer.
+# THE CUSTOMER'S BINARY, AT THE CUSTOMER'S CLICK. Nothing in THIS app
+# downloads, bundles or version-checks either CLI; `cli_path` arrives from the
+# dashboard, which found it on PATH, was told where it is by an admin, or
+# installed it from the publisher when the admin pressed SET UP. If it is not
+# there, that is a state the Settings page reports and this refuses -- never
+# something a worker thread fixes mid-job by fetching an installer.
 
 def _cli_argv(provider):
     path = provider.cli_path
@@ -696,7 +709,7 @@ def _complete_cli(system, user, provider, timeout):
             # to read or write relative to its working directory must not land
             # in a customer's footage.
             cwd=str(config.ensure_data_root()),
-            env=_cli_env(),
+            env=_cli_env(provider),
         )
     except FileNotFoundError:
         raise ClaudeError(ERR_MISSING,
@@ -742,7 +755,7 @@ def looks_like_cli_auth_failure(text):
     return any(marker in low for marker in _AUTH_MARKERS)
 
 
-def _cli_env():
+def _cli_env(provider=None):
     """The environment the CLI subprocess gets.
 
     The container's own AI keys are REMOVED: a CLI provider is selected
@@ -750,9 +763,20 @@ def _cli_env():
     ANTHROPIC_API_KEY in the environment would silently bill their API key
     instead (Claude Code prefers it when present) -- the opposite of what the
     admin picked, and invisible until the invoice.
+
+    The dashboard's overlay is then applied (2026-08-18): `HOME` pointing at
+    `<data>/tools/<tool>/home`, where the setup wizard signed the CLI in, and
+    `CLAUDE_CODE_OAUTH_TOKEN` when that is the credential it holds. The SAME
+    overlay the dashboard's own probe and Test button use
+    (`ccsync_dashboard.cli_tools.cli_env`) -- if this ran against a different
+    $HOME, the Settings page would report "signed in" about an account no job
+    could reach.
     """
     env = dict(os.environ)
     for name in ('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'DEEPSEEK_API_KEY',
                  'ANTHROPIC_AUTH_TOKEN'):
         env.pop(name, None)
+    overlay = getattr(provider, 'cli_env', None) or {}
+    for key, value in overlay.items():
+        env[str(key)] = str(value)
     return env

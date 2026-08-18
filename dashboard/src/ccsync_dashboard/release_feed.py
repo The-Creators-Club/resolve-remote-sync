@@ -235,6 +235,21 @@ def _open_following_https_redirects(url: str, *, timeout: float):
     raise FeedError(f"{url} redirected more than {_MAX_REDIRECTS} times -- refused")
 
 
+def open_https_stream(url: str, *, timeout: float):
+    """The public name for the follow above (2026-08-18).
+
+    `cli_tools.py` fetches the AI CLIs from their publishers' own
+    distributions, and GitHub 302s a release asset to
+    release-assets.githubusercontent.com exactly as this module's feed does.
+    ONE implementation of "which redirects may be followed, and on what
+    terms" -- a second one written next door is how the https-only, no-hop-
+    limit, no-credential rule ends up being true of one caller and not the
+    other. Everything it returns is sha256-verified by the caller, which is
+    the condition that makes the follow safe at all (docs/GOTCHAS.md 12).
+    """
+    return _open_following_https_redirects(url, timeout=timeout)
+
+
 def _fetch_bytes(url: str, *, cap: int, timeout: float = FEED_FETCH_TIMEOUT) -> bytes:
     """GET url, https only, at most _MAX_REDIRECTS https redirects followed,
     capped at `cap` bytes. Raises FeedError on anything short of a clean 2xx

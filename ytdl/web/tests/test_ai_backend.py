@@ -12,6 +12,7 @@ through `ai_backend._opener`, which is replaced; the CLI providers through
 either -- the `Provider.__repr__` test is the one that pins that.
 """
 import json
+import os
 
 import pytest
 
@@ -335,6 +336,43 @@ def test_the_cli_subprocess_never_inherits_the_containers_api_keys(run_cli, monk
     calls = run_cli(FakeProc(stdout='ok'))
     ai_backend.complete('s', 'u', provider=cli())
     assert 'ANTHROPIC_API_KEY' not in calls[0][1]['env']
+
+
+def test_the_dashboards_env_overlay_reaches_the_subprocess(run_cli, monkeypatch):
+    """`$HOME` is the whole point (2026-08-18). The dashboard's setup wizard
+    signs the CLI in under `<data>/tools/<tool>/home`, and a job that ran with
+    the container's own HOME would be told to log in by a CLI that IS logged
+    in -- with the Settings page cheerfully reporting "signed in" about the
+    other one."""
+    monkeypatch.setenv('ANTHROPIC_API_KEY', 'sk-should-not-be-inherited')
+    calls = run_cli(FakeProc(stdout='ok'))
+    ai_backend.complete('s', 'u', provider=cli(cli_env={
+        'HOME': '/data/tools/claude-code/home',
+        'CLAUDE_CODE_OAUTH_TOKEN': 'sk-ant-oat01-TOKEN',
+    }))
+    env = calls[0][1]['env']
+    assert env['HOME'] == '/data/tools/claude-code/home'
+    # The token the dashboard holds is a CREDENTIAL and is passed through; the
+    # container's API keys are still stripped, in the same call.
+    assert env['CLAUDE_CODE_OAUTH_TOKEN'] == 'sk-ant-oat01-TOKEN'
+    assert 'ANTHROPIC_API_KEY' not in env
+
+
+def test_a_provider_never_prints_its_env_overlay(run_cli):
+    """`repr` of a Provider ends up in log lines, tracebacks and pytest diffs,
+    and the overlay can carry an OAuth token."""
+    text = repr(cli(cli_env={'CLAUDE_CODE_OAUTH_TOKEN': 'sk-ant-oat01-TOKEN'}))
+    assert 'sk-ant' not in text
+    assert 'env=1' in text
+
+
+def test_no_overlay_is_the_old_behaviour(run_cli):
+    """A deployment whose admin installed the CLI on the host themselves gets
+    exactly the environment it always got: keys stripped, nothing added."""
+    calls = run_cli(FakeProc(stdout='ok'))
+    ai_backend.complete('s', 'u', provider=cli())
+    env = calls[0][1]['env']
+    assert env.get('HOME') == os.environ.get('HOME')
 
 
 def test_codex_uses_its_own_non_interactive_form(run_cli):

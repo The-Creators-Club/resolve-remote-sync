@@ -607,7 +607,7 @@ like every other cookie-authenticated write.
 | `GET /admin/ai-providers` | every provider in **chain order** (`claude_code`, `anthropic_api`, `codex`, `openai_api`, `deepseek_api`) with `rank`, `status`, `available`, a **masked** key and its source; plus `preference`, `cli_enabled`, `cli_tos_note` and `resolved` (`{name, label, reason, pinned}`) |
 | `PUT /admin/ai-providers/{name}/key` | `{"key": "sk-…"}` → the same snapshot. `400` for a CLI provider (it has no key), `409` when the environment sets that key (it always wins), `422` for a blank/spaced/control-character value, `404` for an unknown provider |
 | `DELETE /admin/ai-providers/{name}/key` | forget a stored key → the snapshot |
-| `PUT /admin/ai-providers/{name}/path` | `{"path": "/usr/local/bin/claude"}` — **CLI providers only** (`400` otherwise); blank clears it back to a `PATH` search. The only writable thing about a CLI provider: there is no install action, because nothing here ships or fetches either binary |
+| `PUT /admin/ai-providers/{name}/path` | `{"path": "/usr/local/bin/claude"}` — **CLI providers only** (`400` otherwise); blank clears it back to the wizard's install, then a `PATH` search. A typed path **wins** over anything the wizard installed |
 | `POST /admin/ai-providers/{name}/test` | one tiny live call → `{"ok": bool, "detail": "…"}`. A model-list request for the API providers, the login probe for a CLI. Never 500s, never echoes the key |
 | `PUT /admin/ai-providers/preference` | `{"preference": "auto"｜"<name>"}` → the snapshot. A pin that is not available is a **refusal** (`resolved.name` is `""`), never a fall-through to the next provider |
 
@@ -619,6 +619,32 @@ ytdl app, in-process, through a callback it invokes per AI call.
 `not_signed_in`, `disabled_by_site`, `unknown`. The last two are CLI-only:
 `disabled_by_site` means `[features] ai_cli_providers` is off, in which case
 the CLI is **not probed at all** — no subprocess runs.
+
+### AI CLI setup wizard
+
+`cli_tools.py`, 2026-08-18 — install the publisher's build and sign it in from
+the page, because "install it on the dashboard host" assumes a shell an
+appliance customer does not have ([`CONFIG.md`](CONFIG.md) §2.5a). Admin-only
+and CSRF-gated like everything above; `{name}` is `claude_code` or `codex` and
+anything else is a `404`.
+
+| Route | What |
+|---|---|
+| `GET /admin/ai-providers/{name}/setup` | everything the stepper needs in one poll, and **no subprocess**: `{tool, label, publisher, supported, unsupported_detail, cli_enabled, notice{title,text,checkbox}, install{…}, signin{…}, signed_in, home, modes[]}` |
+| `POST /admin/ai-providers/{name}/install` | install (or update to) the publisher's latest build, on a background thread → the first status. `409` while another install runs or while `ai_cli_providers` is off, `400` on a host the wizard cannot install for (not Linux, musl, unknown arch, unwritable data volume) |
+| `GET /admin/ai-providers/{name}/install-status` | `{state: idle｜running｜done｜error, step, version, bytes, total, percent, error, checksum_source, installed, installed_version, installed_at, installed_sha256, unverified}` |
+| `DELETE /admin/ai-providers/{name}/install` | delete the tree **and the sign-in with it** (the credential lives in the `$HOME` inside it) and the stored OAuth token |
+| `POST /admin/ai-providers/{name}/signin` | `{"mode": "subscription"｜"console"}` → starts the pty login and answers as soon as the CLI prints its URL: `{state, url, user_code, strategy, detail, account, expires_in}`. `400` when nothing is installed, when the dashboard is not on Linux, `409` when a sign-in is already open |
+| `GET /admin/ai-providers/{name}/signin` | the same object. `state` walks `starting → awaiting_url → awaiting_code｜awaiting_browser → verifying → signed_in｜failed｜cancelled` |
+| `POST /admin/ai-providers/{name}/signin/code` | `{"code": "…"}` → written to the CLI's pty. **In the body, never a query string, and never logged** |
+| `POST /admin/ai-providers/{name}/signin/cancel` | kill the child, free the slot |
+| `DELETE /admin/ai-providers/{name}/signin` | sign out: the CLI's own logout, plus the stored token, best-effort in that order so the credential goes even if the binary is gone |
+
+One install and one sign-in at a time, process-wide: these are 100-330 MB
+downloads onto a NAS that is also serving footage, and two pty children would
+be two writers in one `$HOME`. The sign-in times out after 5 minutes and the
+child is killed. Nothing in any of these answers carries the code, the OAuth
+token or an unmasked email (`a…x@example.com`).
 
 ### Setup wizard
 

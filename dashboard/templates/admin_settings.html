@@ -99,6 +99,16 @@
         (search terms, then relevance). The first AVAILABLE provider in this
         order is used, unless you pin one.</span></div>
 
+    {# The wizard (2026-08-18) is drawn by the same JS, inline under its row:
+       [ SET UP ] walks an admin through the notice, the install, the browser
+       sign-in and a test call. The static line below is what is true before
+       any of that loads. #}
+    <div class="muted" style="margin-top:0.3rem">Claude Code and Codex are
+      command-line tools published by Anthropic and OpenAI. [ SET UP ] installs
+      the publisher's own build on this server, at your click, and signs it in
+      with your own subscription. API keys are the supported path and need no
+      install.</div>
+
     <div id="ai-resolved" class="muted" style="margin-top:0.4rem">loading…</div>
     <div id="ai-error" class="banner" style="display:none"></div>
     <div id="ai-providers"></div>

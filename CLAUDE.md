@@ -94,12 +94,19 @@ run alongside the tray app — it would hold port 8899.
   available of `claude_code > anthropic_api > codex > openai_api >
   deepseek_api`, with keys entered on **Settings → AI providers** (files
   under `<data>/secrets/ai/`, 0600; the environment always wins) and an
-  admin pin. The two **CLI** entries are adapters for a binary the CUSTOMER
-  installed on the dashboard host — we still download, bundle and install
-  nothing — and they are dark unless `site.toml [features]
-  ai_cli_providers` is on (off in the vendor build), with the "a personal
-  subscription may breach its terms, your call" note on the page. No key is
-  ever in `/api/v1/site`, a log, or an API response (masked `sk-…abcd`).
+  admin pin. The two **CLI** entries are adapters for a binary on the
+  dashboard host, dark unless `site.toml [features] ai_cli_providers` is on
+  (off in the vendor build). **We BUNDLE nothing and never will** (item 1:
+  no image layer, no package record, no release artefact) — but since
+  2026-08-18 `cli_tools.py`'s **SET UP wizard** can fetch one at the admin's
+  click, from the publisher's own distribution, checksum-verified, into
+  `<data>/tools/<tool>/`, and drive the browser sign-in through a pty (URL
+  out, code back, five-minute timeout). Its `$HOME` is
+  `<data>/tools/<tool>/home` for the probe, the Test button AND the real
+  ytdl call — one helper, `cli_tools.cli_env`; never the container's HOME,
+  which an image update takes with it. Accepting the wizard's notice is what
+  turns the feature flag on. No key, code or token is ever in
+  `/api/v1/site`, a log, or an API response (masked `sk-…abcd`).
 - The 8899 loopback is origin-allow-listed (`loopback_guard.py`,
   2026-08-17): only the configured dashboard origin gets CORS headers, and a
   POST needs that origin or the `~/.ccsync/loopback-token` header. If

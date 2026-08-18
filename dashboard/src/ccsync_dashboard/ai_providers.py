@@ -18,16 +18,20 @@ DeepSeek did not consent to their Anthropic key being spent instead.
 `COMMERCIAL_READINESS.md` item 1.** That finding named three ToS problems:
 service use of a CONSUMER plan, seat sharing, and REDISTRIBUTING the Claude
 Code binary to customer hardware. The third one is ours and stays fixed:
-nothing in this repo downloads, bundles, installs or version-pins either CLI,
-and there is no `claude-bin` volume, no installer step and no image layer for
-one. A CLI provider is an ADAPTER for an executable the CUSTOMER installed on
-the dashboard host themselves -- found on PATH, or at a path they typed. The
-first two are the customer's own decision, made knowingly: the whole CLI half
-is behind the site feature flag `[features] ai_cli_providers`, which ships
-OFF in the vendor build, and the Settings page says in plain words that using
-a personal Claude/ChatGPT subscription for a service may breach its terms and
-that this is their call. API keys stay the vendor default and the documented
-path.
+nothing in this repo BUNDLES either CLI -- not in the image
+(`docs/DOCKER.md`), not in a package record, not in a release artefact, and
+there is no `claude-bin` volume or installer step for one. Since 2026-08-18
+`cli_tools.py` can FETCH one at the admin's click, from the publisher's own
+distribution and checked against the publisher's own checksum, into the
+customer's own data volume: that is the customer installing the publisher's
+build on their own host with one button instead of a shell, which is what the
+owner asked for when he read "no `claude` on this container's PATH. Install it
+on the dashboard host" and said it was too complex for most users. A CLI
+provider is still an ADAPTER, and the first two ToS problems are still the
+customer's own decision, made knowingly: the whole CLI half is behind the site
+feature flag `[features] ai_cli_providers`, which ships OFF in the vendor
+build, the wizard opens on a notice saying whose subscription is about to be
+spent, and API keys stay the vendor default and the documented path.
 
 **No secret ever leaves this module in a readable form except to the ytdl
 app.** Keys are files under `<data>/secrets/ai/<name>`, 0600, written through
@@ -60,7 +64,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from . import auth, secrets_boot
+from . import auth, cli_tools, secrets_boot
 from .api import get_conn
 
 log = logging.getLogger("ccsync.dashboard.ai_providers")
@@ -156,9 +160,10 @@ AUTO = "auto"
 CLI_TOS_NOTE = (
     "Claude Code and Codex are signed in with a personal Claude or ChatGPT "
     "subscription. Using a personal subscription to power a service may "
-    "breach its terms -- that is your decision, not ours. Neither CLI is "
-    "shipped, installed or updated by CC Sync: you install it on this host "
-    "yourself, and you sign it in yourself. The API keys above are the "
+    "breach its terms: that is your decision, not ours. Neither CLI is "
+    "shipped, bundled or updated by CC Sync. SET UP downloads the publisher's "
+    "own build, from the publisher's own servers, at your click, and checks it "
+    "against the publisher's own checksum. The API keys above are the "
     "supported path."
 )
 
@@ -386,14 +391,28 @@ def cli_enabled(conn: sqlite3.Connection, settings: Any) -> bool:
     return bool(getattr(settings, "site_feature_ai_cli_providers", False))
 
 
-def cli_path(conn: sqlite3.Connection, name: str) -> str:
-    """The executable for a CLI provider: the admin's configured path, else
-    whatever is on PATH. NEVER a path this code downloaded something to --
-    there is no such path (see the module docstring)."""
+def cli_path(conn: sqlite3.Connection, name: str, settings: Any = None) -> str:
+    """The executable for a CLI provider, in the order the page implies.
+
+    1. The path an admin TYPED. It is the override, so it wins even when the
+       wizard has installed something: an admin who points at a binary is
+       telling us about their host, and being second-guessed by a download is
+       exactly the surprise this whole page exists to avoid.
+    2. The one the SET UP wizard installed under `<data>/tools`, at the
+       customer's click, from the publisher (2026-08-18, `cli_tools.py`).
+    3. Whatever is on PATH, which is how a customer who installed it in the
+       container themselves has always been found.
+
+    `settings` is optional so a caller that only has a connection (an older
+    test, a probe with nothing to install into) still gets 1 and 3.
+    """
     provider = spec(name)
     configured = get_setting(conn, provider.path_setting, "").strip()
     if configured:
         return configured if Path(configured).is_file() else ""
+    installed = cli_tools.cli_binary(settings, name) if settings is not None else ""
+    if installed:
+        return installed
     return shutil.which(provider.binary) or ""
 
 
@@ -447,31 +466,33 @@ def _cli_argv(name: str, path: str) -> list[str]:
     return [path] + shlex.split(raw)
 
 
-def _probe_env() -> dict:
-    """The environment a probe runs in: this container's, MINUS the API keys.
+def _probe_env(settings: Any = None, name: str = "") -> dict:
+    """The environment a probe runs in: this container's, MINUS the API keys,
+    PLUS the wizard's `$HOME` and token when there is one.
 
     A CLI provider is chosen because the customer wants their SUBSCRIPTION
     used. Claude Code prefers `ANTHROPIC_API_KEY` when it finds one, so a
     probe that inherited it would answer "signed in" about a key rather than
-    about the login -- and would bill the wrong account to say so. The same
-    strip happens on the real call (`ytdlweb.ai_backend._cli_env`).
+    about the login -- and would bill the wrong account to say so.
+
+    ONE helper since 2026-08-18 (`cli_tools.cli_env`): the probe, the Test
+    button and the real ytdl call must agree about which `$HOME` the CLI reads
+    its credentials from, or the chip on this page is about a different
+    account than the one a job spends.
     """
-    env = dict(os.environ)
-    for name in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY",
-                 "ANTHROPIC_AUTH_TOKEN"):
-        env.pop(name, None)
-    return env
+    return cli_tools.cli_env(settings, name)
 
 
-def _run(argv: list[str], stdin: str | None, timeout: float):
+def _run(argv: list[str], stdin: str | None, timeout: float, env: dict | None = None):
     """One subprocess. argv, never a shell; the customer's binary, never ours."""
     return subprocess.run(                                  # noqa: S603
         argv, input=stdin, capture_output=True, text=True, timeout=timeout,
-        env=_probe_env(),
+        env=_probe_env() if env is None else env,
     )
 
 
-def probe_cli(conn: sqlite3.Connection, name: str, *, force: bool = False) -> dict:
+def probe_cli(conn: sqlite3.Connection, name: str, *, force: bool = False,
+              settings: Any = None) -> dict:
     """{installed, signed_in, path, version, detail} for one CLI provider.
 
     Blocking (two subprocesses at worst) -- call it off the event loop.
@@ -484,17 +505,24 @@ def probe_cli(conn: sqlite3.Connection, name: str, *, force: bool = False) -> di
         if cached is not None:
             return cached
     provider = spec(name)
-    path = cli_path(conn, name)
+    path = cli_path(conn, name, settings)
+    env = _probe_env(settings, name)
     result = {"installed": False, "signed_in": False, "path": path,
               "version": "", "detail": ""}
     if not path:
+        # The old text told an admin to open a shell on the dashboard host.
+        # The owner's answer to that, 2026-08-18, was "this is too complex for
+        # most users" -- so it names the button that does it for them, and
+        # keeps the manual path as the second sentence for the deployments
+        # that already work that way.
         result["detail"] = (
-            f"no `{provider.binary}` on this container's PATH. Install it on the "
-            f"dashboard host, or set its full path below.")
+            f"not installed: no `{provider.binary}` on this container's PATH. "
+            f"Click SET UP to install it from the publisher, or set the full "
+            f"path of a copy you installed yourself.")
         _store_probe(name, result)
         return result
     try:
-        proc = _run([path, "--version"], None, VERSION_TIMEOUT)
+        proc = _run([path, "--version"], None, VERSION_TIMEOUT, env)
     except (OSError, subprocess.SubprocessError) as exc:
         result["detail"] = f"could not run {path}: {type(exc).__name__}"
         _store_probe(name, result)
@@ -508,7 +536,7 @@ def probe_cli(conn: sqlite3.Connection, name: str, *, force: bool = False) -> di
     result["version"] = first_line[:120]
 
     try:
-        probe = _run(_cli_argv(name, path), PROBE_PROMPT, LOGIN_PROBE_TIMEOUT)
+        probe = _run(_cli_argv(name, path), PROBE_PROMPT, LOGIN_PROBE_TIMEOUT, env)
     except subprocess.TimeoutExpired:
         result["detail"] = (f"{provider.label} did not answer a one-token probe "
                             f"within {LOGIN_PROBE_TIMEOUT:.0f}s")
@@ -523,9 +551,11 @@ def probe_cli(conn: sqlite3.Connection, name: str, *, force: bool = False) -> di
     else:
         detail = (probe.stderr or probe.stdout or "").strip()[:200]
         result["detail"] = detail or "the CLI answered nothing"
-        # THE LOGIN IS NOT SCRIPTED. It is an interactive OAuth in a browser;
-        # this page cannot complete one on the admin's behalf and must not
-        # pretend to -- it prints the command they run on the host instead.
+        # The login is an interactive OAuth in a browser. Until 2026-08-18
+        # this page could only print the command for an admin to run on the
+        # host; the wizard (`cli_tools.py`) now drives it through a pty and
+        # relays the URL and the code, so the command stays here as the manual
+        # fallback rather than as the only answer.
         result["login_command"] = provider.login_command
     _store_probe(name, result)
     return result
@@ -632,7 +662,28 @@ def provider_states(
                 "version": "",
                 "login_command": provider.login_command,
                 "configured_path": get_setting(conn, provider.path_setting, ""),
+                "installable": False,
+                "install_detail": "",
+                "installed_by_wizard": False,
+                "installed_version": "",
+                "signin_state": "idle",
+                "signed_in_account": "",
             })
+            if allow_cli:
+                # The wizard's view of this tool, and it costs no subprocess:
+                # two small file reads and an in-memory session. The page needs
+                # it on the ROW (not only inside the stepper) to draw the chip
+                # and to choose between [ SET UP ] and the buttons that replace
+                # it. Only for an ENABLED site, so an off one touches nothing.
+                wizard = cli_tools.setup_snapshot(conn, settings, name)
+                row.update({
+                    "installable": wizard["supported"],
+                    "install_detail": wizard["unsupported_detail"],
+                    "installed_by_wizard": wizard["install"]["installed"],
+                    "installed_version": wizard["install"]["installed_version"],
+                    "signin_state": wizard["signin"]["state"],
+                    "signed_in_account": wizard["signin"].get("account", ""),
+                })
             if not allow_cli:
                 # NOT PROBED, not just hidden: an off site must not run
                 # somebody's agent binary to find out whether it would have
@@ -647,7 +698,7 @@ def provider_states(
             elif not probe:
                 row["status"] = ST_UNKNOWN
             else:
-                probed = probe_cli(conn, name, force=force)
+                probed = probe_cli(conn, name, force=force, settings=settings)
                 row["path"] = probed["path"]
                 row["version"] = probed["version"]
                 row["detail"] = probed["detail"]
@@ -691,7 +742,14 @@ def lookup_payload(conn: sqlite3.Connection, settings: Any) -> dict:
     if provider.kind == "api":
         payload["api_key"] = read_key(settings, choice.name)[0]
     else:
-        payload["cli_path"] = cli_path(conn, choice.name)
+        payload["cli_path"] = cli_path(conn, choice.name, settings)
+        # The OVERLAY, not the whole environment: the ytdl app runs in this
+        # same process and builds its base from the same os.environ, so this
+        # carries only what this module knows and it does not (the wizard's
+        # $HOME, and the OAuth token when the setup-token strategy is what
+        # signed the CLI in). Without it the job would run against a different
+        # $HOME than the probe on the Settings page and be told to log in.
+        payload["cli_env"] = cli_tools.cli_env_overlay(settings, choice.name)
     return payload
 
 
@@ -840,11 +898,13 @@ async def api_set_ai_cli_path(
 ) -> dict:
     """Where the CUSTOMER installed their CLI, when it is not on PATH.
 
-    Blank clears it (back to `shutil.which`). This is the only writable thing
-    about a CLI provider: there is no install button and never will be -- we
-    do not ship, fetch or update either binary (COMMERCIAL_READINESS.md item
-    1). An admin who types a path to something that is not there gets
-    "not installed", not a download.
+    Blank clears it (back to the wizard's install, else `shutil.which`). A
+    TYPED PATH STILL WINS over anything the wizard installed (`cli_path`): an
+    admin who points at a binary is telling us about their host, and being
+    silently overridden by a download is the surprise this page exists to
+    avoid. An admin who types a path to something that is not there gets
+    "not installed", never a download -- fetching happens only at the SET UP
+    button, from the publisher, with a checksum (`cli_tools.py`).
     """
     admin = _require_admin(request)
     provider = _known(name)
@@ -912,9 +972,9 @@ def test_provider(conn: sqlite3.Connection, settings: Any, name: str) -> dict:
             return {"ok": False, "detail": probed["detail"] or
                     f"no `{provider.binary}` on this host"}
         return {"ok": False,
-                "detail": (f"installed but not signed in. Run `{provider.login_command}` "
-                           f"ON THIS HOST -- an interactive login cannot be done "
-                           f"from this page. [{probed['detail']}]")}
+                "detail": (f"installed but not signed in. Click SET UP and finish "
+                           f"the sign-in step, or run `{provider.login_command}` on "
+                           f"this host. [{probed['detail']}]")}
 
     key, source = read_key(settings, name)
     if not key:

@@ -127,7 +127,13 @@ Fill in the five `REPLACE_ME` values (`SYNCTHING_API_KEY`, `DASH_REPORT_TOKEN`,
   is GPLv3 and putting it inside a vendor image is *conveying* it, with all the
   source-offer obligations that implies (item 3, `docs/legal/THIRD_PARTY_NOTICES.md`).
 - **The Claude Code CLI** at `/opt/claude` stays a mount because it must not be
-  redistributed at all (item 1).
+  redistributed at all (item 1). Since 2026-08-18 there is a second, better
+  place it can come from and it is still not the image: the Settings page's
+  SET UP wizard downloads the publisher's own build into the **data volume**
+  (`<data>/tools/claude-code/…`, `docs/CONFIG.md` §2.5a) at an admin's click.
+  That deliberately survives an image update and is never baked into one: an
+  image layer containing somebody's proprietary 313 MB binary is the thing
+  item 1 forbids, whoever pressed the button.
 - **deno** at `/opt/deno` rides along with those two.
 - **The YouTube "unblock" plugin (`bgutil-ytdlp-pot-provider`, GPLv3)** is
   NOT in the image layer either, for the exact same reason as ffmpeg above —

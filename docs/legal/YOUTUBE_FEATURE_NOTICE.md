@@ -31,7 +31,7 @@ anti-automation measures.
 | PO-token provider sidecar (`bgutil-ytdlp-pot-provider`) | **No** — the compose service does not exist | `[features] youtube_unblock = true` |
 | deno, the "n-challenge" JavaScript solver | **No** — not provisioned on the NAS, not installed by the companion | `[features] youtube_unblock = true` |
 | Signing in to YouTube with browser cookies | **No** — the tray item is hidden, the endpoint refuses, cookie files on disk are ignored | `[features] youtube_unblock = true` |
-| The Claude Code / Codex CLIs | **No, and not at any setting** — nothing here downloads, bundles, installs or updates either one. The customer installs and signs in their own | `[features] ai_cli_providers = true` only permits *using* one already on the host |
+| The Claude Code / Codex CLIs | **No, and not at any setting** — no copy of either one is contained in, or distributed with, any build of this software | `[features] ai_cli_providers = true` permits *using* one on the host: either one the customer installed themselves, or one the customer's admin fetched **from the publisher, at their own click**, through the SET UP wizard (below) |
 | The rights/ToS attestation | Always. It cannot be switched off | — |
 
 The three rows in the middle are what this document calls the **unblock
@@ -136,21 +136,64 @@ Since 2026-08-18 the same Settings page can also point the two AI calls at
 publish, driven by a personal Claude or ChatGPT subscription instead of a
 metered API key.
 
-**Neither tool is part of this product.** CC Sync does not ship, bundle,
-download, install, update or version-pin either one. What it contains is an
-*adapter*: if an executable called `claude` (or `codex`) is present on the
-dashboard host — because the customer installed it there — and the customer has
-signed it in there, the downloader can invoke it in its non-interactive mode.
-CC Sync cannot sign it in: that is an interactive browser login, so the page
-prints the command for the customer to run on the host and does nothing else.
+**Neither tool is part of this product.** No copy of either one is contained
+in, or distributed with, any build of CC Sync: not in the container image, not
+in an installer, not in a release artefact, not in an update package. What CC
+Sync contains is an *adapter*: if an executable called `claude` (or `codex`) is
+present on the dashboard host, and it has been signed in there, the downloader
+can invoke it in its non-interactive mode.
+
+**Installed at the customer's click, from the publisher's own distribution,
+not shipped by us.** Since 2026-08-18 the Settings page can also *fetch* one,
+because requiring a shell on the server put the feature out of reach of the
+customers it was meant for. When an administrator presses SET UP and accepts
+the notice, the customer's own server downloads the tool **directly from the
+publisher** — `downloads.claude.ai` for Claude Code, the `openai/codex` GitHub
+releases for Codex — verifies it against the publisher's own published
+checksum, and stores it in the customer's own data volume. The vendor is not
+in that path: no copy is hosted, mirrored, cached, modified or redistributed by
+CC Sync, no vendor credential is used to obtain it, and nothing is fetched
+until an administrator asks for it. It is the same act as that administrator
+running the publisher's install command on their own machine, with a button in
+place of a terminal. Each tool remains governed by its own publisher's licence
+and terms, between the customer and that publisher.
+
+**The sign-in is the customer's, in the customer's browser.** CC Sync cannot
+authenticate on anyone's behalf: the wizard runs the tool's own login command,
+shows the administrator the authorisation URL it prints, and passes back the
+one-time code they paste in. The credential the tool then writes is stored on
+the customer's own server, under a directory only that server reads. The
+vendor never sees it.
 
 **It is off unless the customer turns it on.** `site.toml` `[features]
 ai_cli_providers` (default `false`) is what makes the two rows appear at all;
-while it is off they are not even probed — no process is executed. The Settings
-page carries this sentence above the switch:
+while it is off they are not even probed — no process is executed, and nothing
+can be downloaded. The Settings page carries this sentence above the switch:
 
 > Using a personal Claude/ChatGPT subscription for a service may breach its
 > terms — that is your decision.
+
+and the wizard's first step, which an administrator must read and tick before
+anything is fetched, says it at length:
+
+> Claude Code and Codex are signed in with a personal Claude or ChatGPT
+> subscription. Every YouTube search this dashboard runs, for every editor,
+> will be spent on the account you are about to sign in. Using a personal
+> subscription to power a service may breach its terms: that is your decision,
+> not ours.
+>
+> CC Sync does not ship, bundle or update either tool. When you click INSTALL,
+> this container downloads the publisher's own build, from the publisher's own
+> servers, and checks it against the publisher's own checksum before it is
+> used. Nothing is installed until you click.
+>
+> The supported alternative is an API key (Claude API, OpenAI, DeepSeek)
+> entered on this page, billed to your own account, with no subscription terms
+> in question.
+
+Accepting that notice **is** what sets `ai_cli_providers`: the switch and the
+statement of whose subscription is about to be spent are one decision, made in
+one place, by a named administrator.
 
 Which is the whole of the vendor's position. **Whether a personal subscription
 may be used to power a service, and whether more than one person may benefit
@@ -164,7 +207,19 @@ an earlier version of this feature shipped the 304 MB Claude Code binary onto
 customer hardware and ran every deployment under one human's consumer account.
 The redistribution was the vendor's to fix and is fixed — nothing is
 distributed. What remains is a switch the customer may set for their own host,
-their own binary and their own account.
+their own binary and their own account, and a button that fetches that binary
+from its publisher on their instruction.
+
+**A note for counsel on that distinction.** The engineering position is that
+"the vendor distributes a copy" and "the vendor's software fetches the
+publisher's copy when a customer asks it to" are different acts, and that the
+second is what a package manager, an IDE extension installer and the
+publisher's own `install.sh` all do. It is drawn in code: no artefact of ours
+contains either tool, no vendor-controlled host serves it, no vendor
+credential obtains it, the request is unauthenticated and https-only, the
+bytes are checked against the publisher's own checksum, and nothing happens
+without an administrator's click. Whether that distinction holds under each
+publisher's terms is a question for review (open item 5 below).
 
 ## Vendored code
 
@@ -186,3 +241,11 @@ in `ytdl/web/ytdlweb/vendor/PROVENANCE.md`.
    download ledger (who downloaded what, when, from which machine). Neither is
    currently pruned.
 4. Resolve the vendored-code grant in `PROVENANCE.md`.
+5. **The SET UP wizard (2026-08-18).** Confirm that fetching Claude Code from
+   `downloads.claude.ai`, and Codex from the `openai/codex` GitHub releases, at
+   an administrator's click and into their own server, is not "distribution" by
+   the vendor under either publisher's terms, and that the notice quoted above
+   is sufficient disclosure of the subscription question at the moment it is
+   asked. If either answer is no, the fix is small and known: remove the two
+   install routes and go back to the customer typing the publisher's install
+   command themselves. The adapter, the flag and the notice are unaffected.

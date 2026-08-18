@@ -241,6 +241,15 @@ class Settings:
     # editor at a device that no longer exists.
     site_nas_syncthing_id: str = ""
     site_dashboard_url: str = ""
+    # Which LOCAL vision model the b-roll indexer loads, chosen on Settings
+    # (WP D, this key added 2026-08-18) by how much VRAM the indexing machine
+    # has: "good" (Qwen3-VL 4B, 8 GB) or "best" (Qwen3-VL 8B, 12 GB) -- see
+    # broll/indexer's `local_models.TIERS`, which shares these two labels and
+    # their description strings verbatim with the Settings page. An
+    # unrecognised value falls back to "good" with a boot warning (same
+    # pattern as release_feed_policy below), never upward to the heavier
+    # model a typo did not actually ask for.
+    site_indexer_model_tier: str = "good"
 
     # OPTIONAL FEATURES this site has turned on, published in the manifest as
     # `features` (COMMERCIAL_READINESS.md items 2 + 3, 2026-08-17). BOTH
@@ -427,6 +436,15 @@ class Settings:
                 "using manual", self.release_feed_policy,
             )
             object.__setattr__(self, "release_feed_policy", "manual")
+        # Same idea for the indexer's model tier: an unrecognised
+        # DASH_SITE_INDEXER_MODEL_TIER must not silently hand every indexing
+        # machine the heavier "best" model it never asked for.
+        if self.site_indexer_model_tier not in ("good", "best"):
+            log.warning(
+                "DASH_SITE_INDEXER_MODEL_TIER=%r is not 'good' or 'best' -- using 'good'",
+                self.site_indexer_model_tier,
+            )
+            object.__setattr__(self, "site_indexer_model_tier", "good")
 
     def packages_path(self) -> Path:
         return Path(self.packages_dir) if self.packages_dir else Path(self.db_path).parent / "packages"
@@ -527,6 +545,8 @@ class Settings:
             site_rclone_remote=env.get("DASH_SITE_RCLONE_REMOTE", "").strip(),
             site_nas_syncthing_id=env.get("DASH_SITE_NAS_SYNCTHING_ID", "").strip(),
             site_dashboard_url=env.get("DASH_SITE_DASHBOARD_URL", "").strip().rstrip("/"),
+            site_indexer_model_tier=(
+                env.get("DASH_SITE_INDEXER_MODEL_TIER", "").strip().lower() or "good"),
             # "1" and nothing else, matching DASH_BROLL_ENABLED: an unset,
             # empty, misspelt or "true"-shaped value all mean OFF, because the
             # off state is the one that is safe to be wrong about here.

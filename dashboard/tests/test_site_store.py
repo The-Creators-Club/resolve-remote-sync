@@ -52,6 +52,17 @@ def test_bool_fields_are_one_or_zero_only():
             site_store.validate("features.youtube_download", bad)
 
 
+def test_indexer_model_tier_accepts_good_and_best():
+    assert site_store.validate("indexer_model_tier", "good") == "good"
+    assert site_store.validate("indexer_model_tier", "BEST") == "best"
+
+
+def test_indexer_model_tier_rejects_anything_else():
+    for bad in ("", "medium", "qwen3-vl-8b", "1"):
+        with pytest.raises(site_store.SiteValidationError):
+            site_store.validate("indexer_model_tier", bad)
+
+
 def test_unknown_key_is_refused():
     with pytest.raises(site_store.SiteValidationError):
         site_store.validate("not_a_real_key", "x")
@@ -121,6 +132,32 @@ def test_a_fresh_appliance_with_no_env_serves_built_in_defaults(conn):
     assert manifest["product_name"] == "CC Sync"
     assert manifest["canonical_prefix"] == "P:\\"
     assert manifest["template_folders"] == provision.TEMPLATE_FOLDERS
+
+
+def test_indexer_model_tier_defaults_to_good(conn):
+    settings = Settings()
+    manifest = site_store.resolved_manifest(conn, settings)
+    assert manifest["indexer"] == {"model_tier": "good"}
+
+
+def test_indexer_model_tier_db_row_wins_over_env(conn):
+    settings = Settings.from_env({"DASH_SITE_INDEXER_MODEL_TIER": "best"})
+    assert settings.site_indexer_model_tier == "best"
+    manifest = site_store.resolved_manifest(conn, settings)
+    assert manifest["indexer"]["model_tier"] == "best"      # env, no DB row yet
+
+    site_store.set_many(conn, {"indexer_model_tier": "good"}, updated_by="admin")
+    conn.commit()
+    manifest = site_store.resolved_manifest(conn, settings)
+    assert manifest["indexer"]["model_tier"] == "good"      # DB now wins
+    assert "indexer_model_tier" in manifest["_from_db"]
+
+
+def test_settings_falls_back_to_good_for_an_unrecognised_env_tier():
+    """Mirrors DASH_RELEASE_FEED_POLICY's own rule: a typo must not silently
+    hand every indexing machine the heavier model it never asked for."""
+    settings = Settings.from_env({"DASH_SITE_INDEXER_MODEL_TIER": "ultra"})
+    assert settings.site_indexer_model_tier == "good"
 
 
 def test_template_folders_override_from_db(conn):
@@ -204,7 +241,7 @@ def test_export_toml_round_trips_through_import(conn):
     site_store.set_many(conn, {
         "org_name": "Studio", "tree_name": "Studio_Tree",
         "sftp_port": "2222", "features.youtube_download": "1",
-        "template_folders": "AE,B-roll",
+        "template_folders": "AE,B-roll", "indexer_model_tier": "best",
     }, updated_by="admin")
     conn.commit()
 
@@ -213,12 +250,15 @@ def test_export_toml_round_trips_through_import(conn):
     assert 'org_name = "Studio"' in text
     assert "[features]" in text
     assert "youtube_download = true" in text
+    assert "[indexer]" in text
+    assert 'model_tier = "best"' in text
 
     parsed = site_store.import_toml(text)
     assert parsed["org_name"] == "Studio"
     assert parsed["sftp_port"] == "2222"
     assert parsed["features.youtube_download"] == "1"
     assert parsed["template_folders"] == "AE,B-roll"
+    assert parsed["indexer_model_tier"] == "best"
 
 
 def test_import_ignores_unrecognised_sections():

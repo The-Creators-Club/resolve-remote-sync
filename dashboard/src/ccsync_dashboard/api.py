@@ -958,6 +958,19 @@ def api_site(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> 
             "youtube_unblock": bool(site["features"]["youtube_download"]
                                     and site["features"]["youtube_unblock"]),
         },
+        # Which LOCAL vision model the b-roll indexer should load: "good"
+        # (Qwen3-VL 4B, needs 8 GB VRAM) or "best" (Qwen3-VL 8B, needs 12 GB),
+        # chosen on Settings by how much VRAM the indexing machine has
+        # (2026-08-18). A NEW top-level object rather than a third `features`
+        # entry -- it is a choice between two shipped models, not an
+        # on/off switch, and the indexer already has its own per-machine
+        # override in config.toml if this ever disagrees with the box it is
+        # actually running on. Additive to `schema: 1`, same as `features`
+        # was: an indexer too old to read this key defaults to "good" itself
+        # (see broll/indexer's local_models.TIERS).
+        "indexer": {
+            "model_tier": site["indexer"]["model_tier"],
+        },
     }
 
 

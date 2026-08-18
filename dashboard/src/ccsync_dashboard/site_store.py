@@ -74,7 +74,19 @@ KEYS: dict[str, str] = {
     "nas_kind": "str",
     "features.youtube_download": "bool",
     "features.youtube_unblock": "bool",
+    # Which LOCAL vision model the b-roll indexer loads -- "good" (Qwen3-VL
+    # 4B) or "best" (Qwen3-VL 8B), chosen by how much VRAM the indexing
+    # machine has (2026-08-18). Validated against MODEL_TIERS in validate()
+    # below, the same way canonical_prefix gets its own special-cased
+    # validator rather than the generic "str" one.
+    "indexer_model_tier": "str",
 }
+
+# The two model tiers the b-roll indexer ships, and the only values
+# `indexer_model_tier` accepts. Mirrors broll/indexer's `local_models.TIERS`
+# labels ("good"/"best") -- the indexer reads this exact spelling out of the
+# manifest, so it must never drift from what that module expects.
+MODEL_TIERS = ("good", "best")
 
 # Which keys are DERIVED once the Tailscale sidecar (WP B) and the SFTP
 # sidecar (WP C) exist -- read-only in the Settings UI whenever a live value
@@ -142,6 +154,16 @@ def _validate_str(key: str, raw: str) -> str:
     return raw
 
 
+def _validate_model_tier(raw: str) -> str:
+    value = str(raw or "").strip().lower()
+    if value not in MODEL_TIERS:
+        raise SiteValidationError(
+            "indexer_model_tier",
+            f"must be one of {', '.join(MODEL_TIERS)} (got {raw!r})",
+        )
+    return value
+
+
 def _validate_csv(key: str, raw: str) -> str:
     items = [p.strip() for p in str(raw or "").split(",")]
     items = [p for p in items if p]
@@ -160,6 +182,8 @@ def validate(key: str, raw: str) -> str:
         raise SiteValidationError(key, "not a recognised site setting")
     if key == "canonical_prefix":
         return _validate_canonical_prefix(raw)
+    if key == "indexer_model_tier":
+        return _validate_model_tier(raw)
     if kind == "int":
         return _validate_int(key, raw)
     if kind == "bool":
@@ -239,6 +263,7 @@ def seed_from_env_once(conn: sqlite3.Connection, settings: Any) -> bool:
         "nas_kind": settings.nas_kind,
         "features.youtube_download": "1" if settings.site_feature_youtube_download else "0",
         "features.youtube_unblock": "1" if settings.site_feature_youtube_unblock else "0",
+        "indexer_model_tier": settings.site_indexer_model_tier,
     }
     # template_folders / shared_asset_folders come from provision.py (its own
     # DASH_SITE_TEMPLATE_FOLDERS / DASH_SITE_SHARED_ASSETS env reader, applied
@@ -328,6 +353,18 @@ def resolved_manifest(conn: sqlite3.Connection, settings: Any) -> dict[str, Any]
             "youtube_download": as_bool("features.youtube_download"),
             "youtube_unblock": as_bool("features.youtube_unblock"),
         },
+        # A NEW top-level object (2026-08-18), not another flat key -- same
+        # shape convention as "features" above, and room for more indexer
+        # knobs later without another manifest field. `pick` above already
+        # falls through DB -> Settings (itself validated to good/best in
+        # Settings.__post_init__); the `in MODEL_TIERS` check is only a last
+        # defensive line, not the enforcement -- set_many() is.
+        "indexer": {
+            "model_tier": (
+                pick("indexer_model_tier")
+                if pick("indexer_model_tier") in MODEL_TIERS else "good"
+            ),
+        },
         # For the Settings page: which fields the DB actually overrides,
         # vs. which are still falling through to Settings/defaults.
         "_from_db": sorted(k for k in KEYS if k in db_values),
@@ -354,6 +391,7 @@ def _settings_fallback(key: str, settings: Any) -> str:
         "nas_kind": settings.nas_kind,
         "features.youtube_download": "1" if settings.site_feature_youtube_download else "0",
         "features.youtube_unblock": "1" if settings.site_feature_youtube_unblock else "0",
+        "indexer_model_tier": settings.site_indexer_model_tier,
         "template_folders": "",
         "shared_asset_folders": "",
     }
@@ -378,6 +416,7 @@ _SECTIONS: list[tuple[str, list[str]]] = [
     ("syncthing", ["nas_syncthing_id"]),
     ("site", ["org_name", "org_short", "product_name", "canonical_prefix"]),
     ("features", ["features.youtube_download", "features.youtube_unblock"]),
+    ("indexer", ["indexer_model_tier"]),
 ]
 
 # toml key name (section-local) for each manifest key, where it differs from
@@ -389,6 +428,7 @@ _TOML_KEY_NAMES = {
     "shared_asset_folders": "shared_assets",
     "features.youtube_download": "youtube_download",
     "features.youtube_unblock": "youtube_unblock",
+    "indexer_model_tier": "model_tier",
 }
 
 
@@ -427,6 +467,7 @@ def export_toml(conn: sqlite3.Connection, settings: Any) -> str:
         "canonical_prefix": manifest["canonical_prefix"],
         "features.youtube_download": manifest["features"]["youtube_download"],
         "features.youtube_unblock": manifest["features"]["youtube_unblock"],
+        "indexer_model_tier": manifest["indexer"]["model_tier"],
     }
     for section, keys in _SECTIONS:
         lines.append(f"[{section}]")

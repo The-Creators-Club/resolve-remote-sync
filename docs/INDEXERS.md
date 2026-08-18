@@ -204,3 +204,8 @@ properties are in `music/web/musicweb/drain.py`.
 - `music/web/DEPLOY.md` — shipping a music index to the NAS.
 - `docs/BACKUP_RESTORE.md` and `server/publish_db.py` — the database publish
   procedure (**see there**; do not hand-copy a WAL-mode database).
+
+The b-roll indexer's local vision model (Qwen3-VL 4B "good" vs 8B "best") is
+chosen on the dashboard's Settings page and published in the site manifest as
+`indexer.model_tier` (`docs/CONFIG.md` `[indexer]`, `docs/API.md`); it can be
+overridden per machine in the indexer's own config.

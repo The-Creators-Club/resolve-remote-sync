@@ -114,7 +114,8 @@ companion).
   "shared_asset_folders": [{"id": "assets-luts", "rel": "Assets/Luts", "label": "…"}],
   "video_extensions": ["…"],
   "nas_kind": "truenas",
-  "features": { "youtube_download": false, "youtube_unblock": false }
+  "features": { "youtube_download": false, "youtube_unblock": false },
+  "indexer": { "model_tier": "good" }
 }
 ```
 
@@ -132,6 +133,11 @@ Rules a client can rely on:
   at a device that no longer exists).
 - `features.youtube_unblock` is never true on its own — it implies
   `youtube_download`.
+- `indexer.model_tier` (2026-08-18) is `good` or `best` — which LOCAL vision
+  model the b-roll indexer loads, chosen on Settings by the indexing
+  machine's VRAM. A NEW top-level object, same convention as `features`; an
+  indexer too old to read it defaults to `good` itself. See `CONFIG.md`
+  `[indexer]`.
 - `schema` is a monotonic integer, not the dashboard version. Unknown keys are
   additive; a client that cannot read `features` must behave as if the feature
   is **off**.

@@ -47,6 +47,11 @@
           if (el.readOnly) return;   // auto-derived fields are display-only
           if (el.type === "checkbox") {
             values[el.name] = el.checked ? "1" : "0";
+          } else if (el.type === "radio") {
+            // Every radio in a group shares one `name`; only the checked one
+            // contributes a value (an unchecked one must not overwrite it --
+            // form.elements iterates the whole group in DOM order).
+            if (el.checked) values[el.name] = el.value;
           } else {
             values[el.name] = el.value;
           }

@@ -365,6 +365,67 @@ input[type="checkbox"].is-saving {
   50% { opacity: 0.4; }
 }
 
+/* ---------------- radio buttons (2026-08-18) --------------------------
+   Same `appearance: none` treatment as the checkbox block above, for the
+   Settings page's "B-roll indexing model" chooser (Good/Best) -- a real
+   `<input type="radio">` so existing form-collection code (site_settings.js)
+   and `.checked` assertions in tests keep working; only the paint changes.
+   ----------------------------------------------------------------------- */
+input[type="radio"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 1em;
+  height: 1em;
+  min-width: 1em;
+  border: 1px solid var(--red-dim);
+  border-radius: 50%;
+  background: var(--field);
+  cursor: pointer;
+  position: relative;
+  vertical-align: middle;
+  flex-shrink: 0;
+  transition: border-color 0.15s ease, background 0.15s ease, opacity 0.15s ease;
+}
+input[type="radio"]:hover:not(:disabled) { border-color: var(--red-hot); }
+input[type="radio"]:checked {
+  border-color: var(--red);
+  background: var(--red-dim);
+  box-shadow: 0 0 6px rgba(255, 33, 64, 0.55);
+}
+input[type="radio"]:checked::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--text);
+}
+input[type="radio"]:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
+}
+input[type="radio"]:disabled {
+  opacity: 0.4;
+  cursor: default;
+  border-color: #3a3a42;
+}
+
+.model-tier-fieldset {
+  border: 1px solid var(--red-dim);
+  border-radius: 2px;
+  padding: 0.6rem 1rem 0.8rem;
+  margin: 0.4rem 0 0;
+}
+.radio-option {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-top: 0.4rem;
+  cursor: pointer;
+}
+.radio-option:first-child { margin-top: 0; }
+.radio-option input[type="radio"] { margin-top: 0.15rem; }
+.radio-option .muted { display: block; font-weight: normal; }
+
 /* ---------------- sidebar checkbox ---------------- */
 .project-link { display: flex; align-items: baseline; gap: 0.4rem; }
 .proj-check {

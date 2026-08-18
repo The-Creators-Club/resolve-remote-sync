@@ -96,6 +96,12 @@ it stops and names it; that is the enforcement.
 | `youtube_download` | `false` | **F**. The `/ytdl` page. Off means the mount does not exist, the fleet routes 404, and companions hide their YouTube items. A legal decision, not a technical one — [`legal/YOUTUBE_FEATURE_NOTICE.md`](legal/YOUTUBE_FEATURE_NOTICE.md) |
 | `youtube_unblock` | `false` | **F**. The PO-token provider, the deno n-challenge solver, the cookie sign-in. **The vendor build ships none of them installed.** Requires `youtube_download`; alone it does nothing and the manifest will not report it true |
 
+### `[indexer]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `model_tier` | `good` | **F**-shaped (validated, not feature-gated). Which LOCAL vision model the b-roll indexer loads: `good` (Qwen3-VL 4B — needs an NVIDIA GPU with 8 GB VRAM, or Apple Silicon with 16 GB; ~20 s/clip on an RTX 3080) or `best` (Qwen3-VL 8B — needs 12 GB VRAM, or Apple Silicon with 24 GB; sharper on-screen text and vocabulary, ~2× slower). Chosen on **Settings** by how much VRAM the indexing machine has, published at `GET /api/v1/site` as `indexer.model_tier`; the indexer's own `config.toml` can override it per machine. An unrecognised value is refused on write (`site_store.SiteValidationError`), and falls back to `good` if it somehow reaches the manifest anyway |
+
 ### `[stack]`
 
 | Key | Default | Notes |
@@ -259,6 +265,11 @@ value.
 Feature flags, both `"1"`-and-nothing-else (an unset, empty, misspelt or
 `"true"`-shaped value all mean **off**, because off is the state it is safe to
 be wrong about): `DASH_SITE_YOUTUBE_DOWNLOAD`, `DASH_SITE_YOUTUBE_UNBLOCK`.
+
+`DASH_SITE_INDEXER_MODEL_TIER` — `good` (default) or `best` (2026-08-18, see
+`[indexer]` above). Case-insensitive; anything else falls back to `good` with
+a boot warning, the same "never coerce upward" rule as
+`DASH_RELEASE_FEED_POLICY`.
 
 ### 2.6 Mounts and cadences
 

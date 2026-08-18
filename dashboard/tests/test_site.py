@@ -28,6 +28,8 @@ EXPECTED_KEYS = {
     "org_short", "product_name", "video_extensions",
     # The optional-feature switches (items 2/3), already served by api_site.
     "features",
+    # Which local vision model the b-roll indexer should load (2026-08-18).
+    "indexer",
 }
 
 SITE_ENV = {
@@ -63,6 +65,15 @@ def test_site_is_readable_without_logging_in(tmp_path):
     assert body["dashboard_url"] == "https://nas.example.ts.net"      # no trailing slash
     assert body["nas_kind"] == "truenas"
     assert body["canonical_prefix"] == "P:\\"
+    assert body["indexer"] == {"model_tier": "good"}
+
+
+def test_indexer_model_tier_is_settable_via_env(tmp_path):
+    settings = replace(Settings.from_env({"DASH_SITE_INDEXER_MODEL_TIER": "best"}),
+                       db_path=str(tmp_path / "s.db"))
+    with TestClient(create_app(settings)) as client:
+        body = client.get("/api/v1/site").json()
+    assert body["indexer"] == {"model_tier": "best"}
 
 
 def test_unset_values_are_empty_strings_not_another_tenants(tmp_path):

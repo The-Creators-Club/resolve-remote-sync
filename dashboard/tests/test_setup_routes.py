@@ -168,6 +168,18 @@ def test_admin_site_put_happy_path_and_validation_refusal(env):
     assert bad.status_code == 422
 
 
+def test_admin_site_put_accepts_and_refuses_the_indexer_model_tier(env):
+    client, conn, settings = env
+    as_user(client, "owen")
+
+    ok = client.put("/api/v1/admin/site", json={"values": {"indexer_model_tier": "best"}})
+    assert ok.status_code == 200
+    assert ok.json()["indexer"]["model_tier"] == "best"
+
+    bad = client.put("/api/v1/admin/site", json={"values": {"indexer_model_tier": "medium"}})
+    assert bad.status_code == 422
+
+
 def test_admin_site_put_refuses_a_non_admin(env):
     client, conn, settings = env
     as_user(client, "editor1")
@@ -210,6 +222,33 @@ def test_admin_site_import_requires_admin(env):
     client, conn, settings = env
     resp = client.post("/api/v1/admin/site/import", json={"text": "[site]\n"})
     assert resp.status_code == 401
+
+
+def test_settings_page_renders_both_indexer_model_tier_options(env):
+    client, conn, settings = env
+    as_user(client, "owen")
+    resp = client.get("/admin/settings")
+    assert resp.status_code == 200
+    body = resp.text
+    assert 'name="indexer_model_tier" value="good"' in body
+    assert 'name="indexer_model_tier" value="best"' in body
+    assert "aria-describedby=\"indexer-model-tier-good-help\"" in body
+    assert "aria-describedby=\"indexer-model-tier-best-help\"" in body
+    assert ">\n          Good\n" in body
+    assert ">\n          Best\n" in body
+    assert ("Qwen3-VL 4B" in body and "8 GB VRAM" in body and "16 GB" in body
+            and "~20 s per clip on an RTX 3080" in body)
+    assert ("Qwen3-VL 8B" in body and "12 GB VRAM" in body and "24 GB" in body
+            and "sharper on on-screen text and vocabulary" in body)
+    assert "reads this choice from the dashboard" in body
+    # The default option ("good") is pre-checked for a fresh manifest, the
+    # unselected one is not.
+    good_start = body.index('name="indexer_model_tier" value="good"')
+    good_end = body.index(">", good_start)
+    assert "checked" in body[good_start:good_end]
+    best_start = body.index('name="indexer_model_tier" value="best"')
+    best_end = body.index(">", best_start)
+    assert "checked" not in body[best_start:best_end]
 
 
 # ----------------------------------------------------------------- /setup page

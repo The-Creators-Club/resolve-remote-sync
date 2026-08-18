@@ -162,13 +162,11 @@ $VendorPairs = @(
     # b-roll ingest (docs/BROLL_INGEST_PLAN.md section 3.1): two more pairs that
     # never involve the companion -- they cross from one deployed tree to
     # another inside the container, a gap no import can close.
-    @{ Source = Join-Path $RepoRoot "broll\indexerroll_index
-ormalize.py"
-       Vendored = Join-Path $RepoRoot "broll\webpp
-ormalize.py"
+    @{ Source = Join-Path $RepoRoot "broll\indexer\broll_index\normalize.py"
+       Vendored = Join-Path $RepoRoot "broll\web\app\normalize.py"
        Mode = "marker"; Fix = "edit broll/indexer/broll_index/normalize.py (a search_norm built by a different tokenisation than the query path matches NOTHING), then re-copy it in" }
     @{ Source = Join-Path $RepoRoot "ytdl\web\ytdlweb\identity.py"
-       Vendored = Join-Path $RepoRoot "broll\webpp\identity.py"
+       Vendored = Join-Path $RepoRoot "broll\web\app\identity.py"
        Mode = "marker"; Fix = "edit ytdl/web/ytdlweb/identity.py (two verifiers that disagree about a token shape are two answers to 'which editor is this'), then re-copy it in" }
 )
 $DistDir = Join-Path $CompanionDir "dist"

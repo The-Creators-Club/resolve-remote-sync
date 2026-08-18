@@ -69,3 +69,4 @@ ytdl/web/ytdlweb/ytdl_common.py text eol=lf
 ytdl/web/ytdlweb/identity.py text eol=lf
 broll/web/app/normalize.py text eol=lf
 broll/web/app/identity.py text eol=lf
+music/web/musicweb/identity.py text eol=lf

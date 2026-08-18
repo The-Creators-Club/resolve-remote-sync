@@ -29,7 +29,7 @@ import types
 from pathlib import Path
 
 import pytest
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, Header
 from fastapi.responses import HTMLResponse
 from fastapi.testclient import TestClient
 
@@ -118,6 +118,38 @@ def _build_fake_musicweb() -> dict[str, types.ModuleType]:
     @music_app.get("/", response_class=HTMLResponse)
     def home() -> str:
         return "<html><body>MUSIC SEARCH</body></html>"
+
+    # The ingest PANEL (docs/MUSIC_INGEST_PLAN.md step 2): session-authorised
+    # on a header the real musicweb reads and MusicGate mints. Echoed rather
+    # than implemented -- what these tests are about is WHICH name (and whether
+    # "admin") reaches the sub-app, which is the gate's job, not the panel's.
+    @music_app.get("/api/ingest-batches")
+    def list_batches(x_ccsync_user: str | None = Header(default=None),
+                     x_ccsync_admin: str | None = Header(default=None)) -> dict:
+        return {"user": x_ccsync_user, "admin": x_ccsync_admin}
+
+    @music_app.post("/api/ingest-batches")
+    def create_batch(x_ccsync_user: str | None = Header(default=None)) -> dict:
+        return {"created_by": x_ccsync_user}
+
+    @music_app.post("/api/ingest-batches/{uid}/cancel")
+    def cancel_batch(uid: str, x_ccsync_user: str | None = Header(default=None),
+                     x_ccsync_admin: str | None = Header(default=None)) -> dict:
+        return {"uid": uid, "user": x_ccsync_user, "admin": x_ccsync_admin}
+
+    # The companion's half: fleet-token authed, no session anywhere. Only the
+    # carve-out in app.py decides whether these are reachable at all.
+    @music_app.post("/api/fleet/ingest/batches/{uid}/claim")
+    def fleet_claim(uid: str) -> dict:
+        return {"claimed": uid}
+
+    @music_app.post("/api/fleet/ingest/batches/{uid}/items/{iuid}/result")
+    def fleet_result(uid: str, iuid: str) -> dict:
+        return {"batch": uid, "item": iuid}
+
+    @music_app.post("/api/fleet/ingest/batches/{uid}/items/{iuid}/uploaded")
+    def fleet_uploaded(uid: str, iuid: str) -> dict:
+        return {"batch": uid, "item": iuid}
 
     main.app = music_app
     pkg.config, pkg.db, pkg.main = config, db, main
@@ -438,3 +470,182 @@ def test_a_real_checkout_still_satisfies_the_contract_the_fake_models(tmp_path, 
         as_user(c)
         assert c.get("/music/").status_code == 200
         assert c.get("/music/docs").status_code == 404
+
+
+# --- identity: the ingest panel's headers are minted here, never accepted -----
+#
+# docs/MUSIC_INGEST_PLAN.md step 2, 2026-08-18. `/music/api/ingest-batches`
+# makes per-user decisions with real consequences -- whose batches these are,
+# and who may stop another machine's work -- and musicweb has no session code
+# of its own. MusicGate is where the ccsync_session cookie becomes a name, on
+# exactly the contract BrollGate and YtdlGate already run.
+
+def test_the_sub_app_is_told_who_the_session_belongs_to(tmp_path, music_env):
+    app = _app(tmp_path)
+    with TestClient(app) as c:
+        as_user(c, "kchen")
+        assert c.get("/music/api/ingest-batches").json()["user"] == "kchen"
+        assert c.post("/music/api/ingest-batches").json() == {"created_by": "kchen"}
+        as_user(c, "jsmith")
+        assert c.get("/music/api/ingest-batches").json()["user"] == "jsmith"
+
+
+def test_a_forged_identity_header_never_reaches_the_sub_app(tmp_path, music_env):
+    """SPOOF-PROOFING, and the reason the gate strips before it appends. A
+    logged-in editor sails past login_gate with a valid session of their own;
+    if their `fetch(url, {headers: {'X-CCSync-User': 'admin'}})` survived the
+    trip, that header would be the whole authorisation story for "whose batch
+    may I cancel"."""
+    app = _app(tmp_path)
+    with TestClient(app) as c:
+        as_user(c, "jsmith")
+        forged = {"X-CCSync-User": "kchen", "X-CCSync-Admin": "1"}
+        body = c.get("/music/api/ingest-batches", headers=forged).json()
+        assert body["user"] == "jsmith"
+        assert body["admin"] is None, "a forged admin claim reached the sub-app"
+        assert c.post("/music/api/ingest-batches/abc/cancel",
+                      headers=forged).json()["user"] == "jsmith"
+
+
+def test_a_real_admin_is_stamped_as_one(tmp_path, music_env):
+    """`scope=all` (every machine's batches) and cancelling somebody else's
+    work are gated on this header inside the sub-app, so it has to arrive for
+    the people who really are admins -- and only them."""
+    app = _app(tmp_path, admin_users="root, kchen")
+    with TestClient(app) as c:
+        as_user(c, "kchen")
+        assert c.get("/music/api/ingest-batches").json()["admin"] == "1"
+        as_user(c, "jsmith")
+        assert c.get("/music/api/ingest-batches").json()["admin"] is None
+
+
+def test_a_forged_header_survives_nothing_even_with_no_session(tmp_path, music_env):
+    """login_gate answers this 401 long before the sub-app sees it, so this is
+    the belt to that brace: even reached directly, the gate hands the sub-app
+    NO identity rather than the caller's own claim."""
+    import asyncio
+
+    seen: dict = {}
+
+    async def spy(scope, receive, send):
+        seen["headers"] = [(k.decode(), v.decode()) for k, v in scope["headers"]]
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(_message):
+        return None
+
+    gate = music.MusicGate(spy, Settings(db_path=":memory:", session_secret=SECRET))
+    scope = {"type": "http", "method": "GET", "path": "/music/api/ingest-batches",
+             "root_path": "/music",
+             "headers": [(b"x-ccsync-user", b"admin"), (b"x-ccsync-admin", b"1"),
+                         (b"cookie", b"ccsync_session=nonsense; other=1")]}
+    asyncio.run(gate(scope, receive, send))
+
+    assert not [k for k, _v in seen["headers"]
+                if k in ("x-ccsync-user", "x-ccsync-admin")], (
+        "a forged identity header reached the sub-app with no session at all")
+    # ...and the gate did not mutate the caller's own scope on the way past:
+    # it belongs to the server, and a mounted app is not the only reader.
+    assert (b"x-ccsync-user", b"admin") in scope["headers"]
+
+
+def test_the_identity_header_round_trips_a_latin1_name_and_withholds_a_cjk_one(
+        tmp_path, music_env):
+    """LATIN-1, because Starlette decodes headers latin-1: UTF-8 turned `josé`
+    into `josÃ©` on arrival and that editor's own rows matched nothing
+    (YTDL-29, 2026-08-11). A name beyond U+00FF has no lossless encoding and a
+    lossy one could collide two editors, so the header is withheld entirely and
+    the sub-app 401s -- broken loudly for one person, never quietly wrong."""
+    app = _app(tmp_path)
+    with TestClient(app) as c:
+        as_user(c, "josé")
+        assert c.get("/music/api/ingest-batches").json()["user"] == "josé"
+        as_user(c, "小明")
+        assert c.get("/music/api/ingest-batches").json()["user"] is None
+
+
+def test_a_mount_with_no_settings_serves_search_but_stamps_nothing(tmp_path, music_env):
+    """The music mount fails ABSENT, never fatal. A caller that has not been
+    updated must get a working search UI with the ingest panel 401ing, not a
+    dashboard that will not boot."""
+    host = FastAPI()
+    assert music.mount_music(host) == music.MOUNTED
+    with TestClient(host) as c:
+        c.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "jsmith"))
+        assert c.get("/music/api/ingest-batches").json()["user"] is None
+
+
+# --- the fleet carve-out (docs/MUSIC_INGEST_PLAN.md step 2) -------------------
+
+FLEET_UID = "0123456789abcdef0123456789abcdef"
+ITEM_UID = "fedcba9876543210fedcba9876543210"
+
+
+def test_a_companion_reaches_the_fleet_routes_with_the_fleet_token(tmp_path, music_env):
+    """These calls happen with no browser open, so there is no session to gate
+    on. Without the carve-out every one of them gets a 303 to an HTML login
+    page that no companion can follow, and music ingest stops fleet-wide."""
+    token = "f" * 40
+    app = _app(tmp_path, report_token=token)
+    headers = {"X-CCSync-Token": token}
+    with TestClient(app) as c:
+        r = c.post(f"/music/api/fleet/ingest/batches/{FLEET_UID}/claim", json={},
+                   headers=headers, follow_redirects=False)
+        assert r.status_code == 200, r.text
+        r = c.post(
+            f"/music/api/fleet/ingest/batches/{FLEET_UID}/items/{ITEM_UID}/result",
+            json={}, headers=headers, follow_redirects=False)
+        assert r.status_code == 200, r.text
+
+
+def test_the_carve_out_is_per_suffix_not_per_prefix(tmp_path, music_env):
+    """A leaked fleet token must not read or stop a browser's batch: the SPA's
+    own panel stays fully session-gated."""
+    token = "f" * 40
+    app = _app(tmp_path, report_token=token)
+    with TestClient(app) as c:
+        r = c.get("/music/api/ingest-batches", headers={"X-CCSync-Token": token},
+                  follow_redirects=False)
+        assert r.status_code == 401
+
+
+def test_no_fleet_token_is_still_a_login_bounce(tmp_path, music_env):
+    token = "f" * 40
+    app = _app(tmp_path, report_token=token)
+    with TestClient(app) as c:
+        r = c.post(f"/music/api/fleet/ingest/batches/{FLEET_UID}/claim", json={},
+                   follow_redirects=False)
+        assert r.status_code == 401
+
+
+@pytest.mark.parametrize("path", [
+    # an id of the wrong shape -- the 32-hex uid is what the server mints
+    "/music/api/fleet/ingest/batches/1/claim",
+    f"/music/api/fleet/ingest/batches/{FLEET_UID}/items/1/result",
+    # a suffix nobody defined
+    f"/music/api/fleet/ingest/batches/{FLEET_UID}/delete",
+    # ... and the b-roll pattern must not cover music, nor the other way round
+    f"/music/api/fleet/ingest/batches/{FLEET_UID}/items/{ITEM_UID}/frames",
+])
+def test_only_the_six_fleet_shapes_skip_the_login_gate(tmp_path, music_env, path):
+    token = "f" * 40
+    app = _app(tmp_path, report_token=token)
+    with TestClient(app) as c:
+        r = c.post(path, json={}, headers={"X-CCSync-Token": token},
+                   follow_redirects=False)
+        assert r.status_code == 401, path
+
+
+def test_the_music_and_broll_carve_outs_are_separate_patterns():
+    """Two mounts, two prefixes. A widened pattern covering both would be one
+    nobody can read a carve-out out of -- and one that a rename of either mount
+    silently unguards."""
+    from ccsync_dashboard import app as app_module
+    source = Path(app_module.__file__).read_text(encoding="utf-8")
+    assert "_music_fleet_re" in source
+    assert r"^/music/api/fleet/ingest/batches/[0-9a-f]{32}/" in source
+    assert r"^/broll/api/fleet/ingest/batches/[0-9a-f]{32}/" in source

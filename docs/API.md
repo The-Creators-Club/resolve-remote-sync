@@ -682,6 +682,105 @@ itself allocated is required whether or not the companion mentioned it.
 
 ---
 
+## 6b. Music ingest — `/music/api/ingest-batches` and `/music/api/fleet/ingest`
+
+Added 2026-08-18 (`docs/MUSIC_INGEST_PLAN.md` step 2). The same three-party
+split as §6a and the same credentials, for a different pipeline: drop music on
+the `/music` page and the editor's **own machine** embeds it with the exported
+CLAP **audio** tower (`music/indexer/export_audio_encoder.py`, ONNX +
+onnxruntime, no GPU needed), uploads the audio to the library, and the
+**server** turns that embedding into a track with tags and axes using the CLAP
+**text** tower it already runs for every search query. Nothing on either end
+needs torch.
+
+The older browser-upload path (`POST /music/api/ingest`, `ingest_queue`, a
+base-rig `index_music.py --queue` drain) is untouched and is the documented
+fallback for a companion that cannot embed: its item ends `queued_for_base_rig`
+and a `pending` journal row waits for the drain.
+
+### The panel's routes (session)
+
+Authorised by `X-CCSync-User` / `X-CCSync-Admin`, which
+`ccsync_dashboard.music.MusicGate` mints from the session cookie and **strips
+inbound** — the same rule `/broll` and `/ytdl` run on. A request with no stamp
+is 401 in the sub-app even if something let it past `login_gate`.
+
+| Route | Body | Answer |
+|---|---|---|
+| `POST …/precheck` | `{items:[{local_id,name,size,duration,content_hash}]}` | `{items:[{local_id, duplicate_of, duplicate_name, final_name, unsupported}]}`. Reserves nothing |
+| `POST …/` | `{settings, items:[…]}` | `{uid, state:"queued", n_items}` |
+| `GET …/?scope=mine\|all` | — | `{scope, admin, batches:[…]}`. `scope=all` needs `X-CCSync-Admin: 1` |
+| `GET …/limits` | — | `{max_items, audio_exts, transcode_exts, run_modes}` — what the SPA must not exceed, said by the server that enforces it |
+| `GET …/{uid}` | — | `{batch, items:[…]}` |
+| `POST …/{uid}/cancel` | — | sets `cancel_requested` **and expires the lease**. Owner or admin |
+| `POST …/{uid}/upload-paused` | `{paused}` | holds the uploads; the embedding continues |
+
+`settings` = `{run_mode: idle\|foreground}`. No tier, unlike b-roll: music
+ingest never uses the GPU (~93 ms per 10 s window on CPU), so there is no model
+size to choose and nothing for it to block. A file whose extension is not audio
+is a **422 that names it**, not a silent drop.
+
+**Both duplicate defences run before anything is written**, the two
+`musicweb.db` already applies to a browser upload: normalised stem + duration
+within 2 s (`find_reencode` — the only one that can see a re-encode, since
+transcoding changes every byte) and the whole-file blake2b-16
+(`find_content_duplicate_by_digest`, which takes the digest the editor's
+machine computed and only opens library rows whose byte count already matches).
+
+Another editor's batch is **404, never 403** — a 403 hands out a uid.
+
+### The companion's routes (fleet)
+
+`X-CCSync-Token` (the shared `DASH_REPORT_TOKEN`) **plus** a signed
+`X-CCSync-Identity`, both fail-closed (§1, and H5 — the token proves *a* fleet
+machine and nothing about **which**). `login_gate` carves these six shapes out
+**per suffix** via `_music_fleet_re`, a separate pattern from b-roll's, so a
+leaked fleet token cannot read or stop a batch through the panel routes above.
+
+| Route | Body | Answer |
+|---|---|---|
+| `POST …/batches/{uid}/claim` | `{machine, companion_version, capabilities}` | `{batch, settings, lease_seconds, heartbeat_seconds, library_remote_rel:"Assets/Music", audio_exts, transcode_exts, items:[…]}` |
+| `POST …/batches/{uid}/heartbeat` | `{}` | `{ok, cancel_requested, upload_paused, lease_expires_at}` |
+| `POST …/batches/{uid}/items/{iuid}/status` | `{state, stage_percent?, error?, attempts?, content_hash?, transcoded?, probe?}` | the batch counters |
+| `POST …/batches/{uid}/items/{iuid}/result` | `{embedding, dim, model, name?, transcoded, content_hash, size_bytes, duration, bpm?, music_key?, key_conf?, lufs?, peak_db?, probe, peaks, windows:[{idx,t0,t1,vector}]}` | writes the `tracks` row, then re-scores the library: `{ok, track_id, rel_path, scores, …counters}` |
+| `POST …/batches/{uid}/items/{iuid}/uploaded` | `{size}` | `{ok, live:true, rel_path, bytes}` |
+| `POST …/batches/{uid}/release` | `{state: done\|failed\|cancelled, summary}` | finalises; `done` with failures becomes `done_with_errors` |
+
+`embedding`, `peaks` and each window `vector` are **base64 of raw
+little-endian float32** (uint8 for `peaks`) — the bytes `db.to_blob` stores,
+with a base64 in between. A JSON array of 512 numbers is ~9× the bytes and
+every one of them is parsed into a Python float and thrown away.
+
+Item states are music's own: `pending → transcoding → embedding → indexed →
+uploading → live`, plus `duplicate`, `failed` (the one terminal state a retry
+may leave), `cancelled`, `skipped` and `queued_for_base_rig`.
+
+**`claim` mints no `tracks` rows** — the one real difference from b-roll's.
+b-roll can mint a hidden `videos` row at claim because `status='ingesting'` is
+excluded from browse, tree and search; `tracks` has no status column and every
+facet, percentile and debias axis reads every row, so a placeholder would skew
+the library rather than hide from it. The row is written at `result`, with the
+embedding, under a name allocated against the library **and** against every
+other unlanded item (`theme.wav`, `theme (2).wav`).
+
+**`result` re-scores the whole library** (`musicweb/rescore.py`). Tags are a
+softmax over labels z-scored down the library's own column and every `pct` is a
+rank among the others, so there is no such thing as scoring one track alone.
+An embedding whose width disagrees with the library's is **409
+`model_mismatch`**: a vector from another CLAP version is not comparable with
+these, and mixing two would make every cosine in the index meaningless.
+
+**`uploaded` believes nothing.** The music share is mounted in this container
+(it is what `/api/audio` streams), so the file is `stat()`ed at the path the
+**server** allocated — nothing about it comes off the wire — and the size must
+agree. It also widens the mode to 0664, because the container's `umask 077`
+otherwise leaves a file that is in the index and invisible over SMB.
+
+Status codes are §6a's, with two music-specific 409 reasons: `model_mismatch`
+(above) and `size_mismatch` / `not_uploaded` on `uploaded`.
+
+---
+
 ## 7. The companion loopback API
 
 Separate service, separate trust model, separate document:

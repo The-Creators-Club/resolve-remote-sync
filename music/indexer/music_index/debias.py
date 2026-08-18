@@ -31,60 +31,15 @@ genuine brightness, which is musically meaningful).
 Note the grouping reads the SHAPE of a filename, never its words, and only at
 index time to cancel a bias -- names play no part in ranking.
 
-INDEX TIME ONLY. Finding the axes needs the whole library's embedding matrix
-and its filenames, so it happens here, on the base rig, on every retag; the
-result is stored in the `debias` table. Applying them to a vector is three
-lines of numpy and happens per query, in `musicweb/projection.py`. The
-computation is deliberately not duplicated into the web app.
+WHERE IT RUNS (updated 2026-08-18, docs/MUSIC_INGEST_PLAN.md step 2). Finding
+the axes needs the whole library's embedding matrix and its filenames, so it
+happens wherever a track is ADDED -- which used to mean the base rig alone and
+now also means the NAS container, because dashboard music ingest writes a track
+row there. The code therefore lives in `musicweb/rescore.py`, the tree both
+halves share, and this module is the indexer's name for it. Applying the axes
+to a vector is still three lines of numpy per query in `musicweb/projection.py`
+and is still not duplicated.
 """
-import os
-import re
-
-import numpy as np
-
-MIN_GROUP = 8
-
-
-def source_group(filename):
-    """Which catalogue a file appears to come from, by naming convention."""
-    stem = os.path.splitext(os.path.basename(filename))[0]
-    if stem.upper().startswith('ES_'):
-        return 'epidemic'
-    if re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-', stem, re.I):
-        return 'uuid'
-    if re.match(r'^[0-9A-Z]{20,}$', stem):
-        return 'ulid'
-    if re.match(r'^\d{3,}([_\-]\d+)*$', stem) or re.match(r'^\d{4,}_\d', stem):
-        return 'numeric-id'
-    return 'other'
-
-
-def compute_directions(mat, filenames, min_group=MIN_GROUP):
-    """One orthogonal one-vs-rest axis per source group. -> (k, D) float32."""
-    if mat is None or mat.size == 0:
-        return np.zeros((0, 0), dtype=np.float32)
-    groups = {}
-    for i, name in enumerate(filenames):
-        groups.setdefault(source_group(name), []).append(i)
-
-    dirs = []
-    for g in sorted(groups):
-        members = groups[g]
-        # A boolean mask, not `[i for i in range(n) if i not in set(members)]`
-        # (MUSIC-11, 2026-08-14): that rebuilt the set on every one of the n
-        # iterations, i.e. O(n * |members|) per group. Invisible at 376 tracks
-        # and ~50M redundant insertions at 10,000, inside every --retag, which
-        # is the cheap tuning path the whole workflow leans on.
-        mask = np.zeros(mat.shape[0], dtype=bool)
-        mask[members] = True
-        if len(members) < min_group or mask.all():
-            continue
-        v = mat[mask].mean(axis=0) - mat[~mask].mean(axis=0)
-        for u in dirs:                       # Gram-Schmidt
-            v = v - np.dot(v, u) * u
-        n = np.linalg.norm(v)
-        if n > 1e-6:
-            dirs.append(v / n)
-    if not dirs:
-        return np.zeros((0, mat.shape[1]), dtype=np.float32)
-    return np.stack(dirs).astype(np.float32)
+from musicweb.rescore import (  # noqa: F401
+    MIN_GROUP, compute_directions, source_group,
+)

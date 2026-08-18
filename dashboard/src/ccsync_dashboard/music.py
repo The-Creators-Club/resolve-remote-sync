@@ -38,14 +38,31 @@ session -- so they had to be allowed PAST login_gate, and once past it the only
 thing left between the tailnet and "repoint every clip's archive path" was a
 token that the upstream app treats as optional ("not configured = dev mode =
 open"). mount_broll therefore re-checks that token itself. musicweb has no such
-route: its write paths (/api/ingest drag-and-drop, /api/resolve* -- reveal
-moved to the companion's 8899 loopback, MUSIC-6 2026-08-14, it drove Explorer
-on the SERVER here) are all called by the SPA from a logged-in browser, and
-nothing about /music/* is
-exempted from login_gate, and there is no upstream dev-mode branch to reach. The
-session IS the credential. The day music grows a machine-to-machine ingest for
-the base rig, it gets the full broll treatment -- a mandatory token validated in
-create_app and re-checked in MusicGate -- and not before.
+route: /api/ingest (drag-and-drop) is called by the SPA from a logged-in
+browser and is fail-closed on its own account, and nothing about /music/* is
+exempted from login_gate for a browser. The session IS the credential there.
+
+THE DAY IT PREDICTED ARRIVED (2026-08-18, docs/MUSIC_INGEST_PLAN.md step 2),
+and it took the OTHER half of the b-roll treatment rather than a token here:
+
+  * `/music/api/fleet/ingest/...` is machine-to-machine -- an editor's
+    companion, embedding a dropped album with the CLAP audio tower while
+    nobody is at the browser -- so it is carved out of login_gate by
+    `_music_fleet_re` in app.py, per suffix, and authenticates itself with the
+    shared fleet token PLUS a signed identity (musicweb/fleet_auth.py). There
+    is nothing for this module to re-check: unlike broll's ingest token, the
+    music fleet routes have no "unconfigured = open" branch to reach -- they
+    fail closed on their own.
+  * `/music/api/ingest-batches*` is the SPA's half, and it makes per-user
+    decisions with real consequences (whose batches these are, who may cancel
+    another machine's work). So MusicGate now STAMPS the identity, exactly as
+    BrollGate and YtdlGate do: every inbound `X-CCSync-User`/`X-CCSync-Admin`
+    is stripped and the real pair -- decoded from the session cookie with the
+    dashboard's own secret -- is appended when, and only when, that cookie is
+    valid. Strip-then-append, never "append if absent": a logged-in editor
+    sails through login_gate, and without the strip their own
+    `fetch(url, {headers: {'X-CCSync-Admin': '1'}})` would be the whole
+    authorisation story for "may I cancel every other machine's ingest".
 """
 
 from __future__ import annotations
@@ -58,9 +75,24 @@ from typing import Any, Callable
 
 from fastapi import FastAPI
 
+from . import auth
+from .broll import _header_value, _session_cookie
+from .settings import Settings
+
 log = logging.getLogger(__name__)
 
 MOUNT_PATH = "/music"
+
+# The ingest PANEL's own routes (docs/MUSIC_INGEST_PLAN.md step 2). Note the
+# absence of a trailing slash: the collection routes are `/api/ingest-batches`
+# and `/api/ingest-batches/`, and a prefix with a slash on the end would miss
+# the first of them -- so the create and list calls would reach the sub-app
+# with no identity and be answered 401 for every editor.
+BATCHES_PREFIX = "/api/ingest-batches"
+# The two headers the sub-app trusts, lowercase bytes because that is how they
+# appear in an ASGI scope.
+IDENTITY_HEADER = b"x-ccsync-user"
+ADMIN_HEADER = b"x-ccsync-admin"
 
 # mount_music's tri-state. "absent" and "degraded" are both "do not advertise
 # it in the nav" (ui.py), but they are different operator problems: absent =
@@ -77,23 +109,74 @@ BLOCKED_PATHS = frozenset({"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi
 
 
 class MusicGate:
-    """ASGI wrapper around the music sub-app: 404 its interactive docs.
+    """ASGI wrapper around the music sub-app. Two jobs, both fail-closed.
+
+    1. The sub-app's default interactive docs are 404'd.
+    2. Every request is re-stamped with the session's identity: any inbound
+       `X-CCSync-User`/`X-CCSync-Admin` is REMOVED, and the real pair --
+       decoded from the ccsync_session cookie with the dashboard's own secret
+       -- is appended when, and only when, that cookie is valid (2026-08-18,
+       docs/MUSIC_INGEST_PLAN.md step 2). A request with no valid session
+       reaches the sub-app carrying NO identity at all, so `/api/ingest-batches`
+       answers its own 401 even in the impossible case that something let it
+       past login_gate.
+
+       The strip runs on EVERY request, not only the batch ones, for
+       BrollGate's reason: scoping it to the paths that read the headers today
+       would mean a route added upstream tomorrow inherits a forgeable
+       identity, and the cost is two list comprehensions over ~8 headers.
+
+    There is deliberately no token check here, unlike BrollGate: the music
+    FLEET routes fail closed on their own (musicweb/fleet_auth.py has no
+    "unconfigured = open" branch to reach), and the panel routes are
+    session-authorised.
 
     A plain ASGI wrapper rather than BaseHTTPMiddleware or add_middleware:
     nothing is re-wrapped or buffered on the way through, so /api/audio's
     Range/206 streaming responses are untouched, and no upstream global is
-    mutated by importing us. It is also the seam to hang a write-path check on
-    if musicweb ever grows one (see the module docstring).
+    mutated by importing us.
     """
 
-    def __init__(self, app: Any) -> None:
+    def __init__(self, app: Any, settings: Settings | None = None) -> None:
         self.app = app
+        # Optional so an older caller (or a merge that has not caught up) gets
+        # a mount with no identity stamping rather than a TypeError at boot --
+        # the music mount fails ABSENT, never fatal, and the ingest panel
+        # 401ing is a smaller failure than the dashboard not starting.
+        self._settings = settings
+        self._secret = getattr(settings, "session_secret", "") or ""
+
+    def _identified_scope(self, scope: dict) -> dict:
+        """A copy of `scope` whose headers carry our identity pair and no other.
+
+        The original is left alone: it belongs to the server, and a mounted app
+        is not the only thing that ever reads it.
+        """
+        headers = [(k, v) for k, v in scope.get("headers", ())
+                   if k.lower() not in (IDENTITY_HEADER, ADMIN_HEADER)]
+        username = (auth.read_session_cookie(self._secret, _session_cookie(headers))
+                    if self._secret else None)
+        if username:
+            encoded = _header_value(username)
+            if encoded is None:
+                # Fail closed: no header at all, so the sub-app answers its own
+                # 401 rather than authorising a name that is not this editor's.
+                log.warning("music identity header not minted for %r: the name "
+                            "cannot survive a latin-1 header round trip", username)
+            else:
+                headers.append((IDENTITY_HEADER, encoded))
+                if self._settings is not None and auth.is_admin(self._settings, username):
+                    headers.append((ADMIN_HEADER, b"1"))
+        new_scope = dict(scope)
+        new_scope["headers"] = headers
+        return new_scope
 
     async def __call__(self, scope, receive, send) -> None:
         if scope.get("type") == "http":
             if any(p in BLOCKED_PATHS for p in sub_paths(scope)):
                 await _json_response(send, 404, {"detail": "Not Found"})
                 return
+            scope = self._identified_scope(scope)
         await self.app(scope, receive, send)
 
 
@@ -148,7 +231,7 @@ def _add_in_repo_music_web() -> bool:
     return True
 
 
-def mount_music(app: FastAPI) -> str:
+def mount_music(app: FastAPI, settings: Settings | None = None) -> str:
     """Mount the music app at /music. Returns MOUNTED / ABSENT / DEGRADED.
 
     The import is guarded and the failure is logged rather than raised, so a
@@ -162,6 +245,11 @@ def mount_music(app: FastAPI) -> str:
     healthcheck and a feature that does not work).
 
     Takes no token, unlike mount_broll; see the module docstring for why.
+    `settings` IS taken, since 2026-08-18: MusicGate mints the ingest
+    panel's identity (X-CCSync-User/X-CCSync-Admin) from the session cookie
+    with settings.session_secret, the way BrollGate and YtdlGate do. It
+    stays optional so a caller that has not caught up gets a mount with no
+    stamping rather than a dashboard that will not boot.
     """
     try:
         try:
@@ -180,7 +268,7 @@ def mount_music(app: FastAPI) -> str:
 
     _declare_login_gated()
 
-    gated = MusicGate(music_app)
+    gated = MusicGate(music_app, settings)
 
     try:
         _init_music_storage()

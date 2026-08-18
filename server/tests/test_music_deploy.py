@@ -919,8 +919,13 @@ def test_the_dry_run_says_how_big_the_push_is(monkeypatch, capsys):
     """1.4 GB over paramiko's SFTP is a decision, not a detail. The operator
     sees the size before it starts."""
     src = ida.music_data_source()
-    if not src.is_dir():
-        pytest.skip(f"no music data under {src}")
+    # "is there a data/ directory" is not the question -- "is any of the THREE
+    # shippable components in it" is (2026-08-18). A checkout whose data/ holds
+    # only something the installer never ships (the exported CLAP AUDIO tower
+    # lands in data/audio_encoder/ and goes to the release feed, not the NAS)
+    # has nothing to size, and the dry run correctly says "nothing to ship".
+    if not ida.music_data_sizes(src):
+        pytest.skip(f"no shippable music data under {src}")
     cmds: list = []
     transcript = _dry_run(monkeypatch, capsys, cmds)
     assert "music data to ship" in transcript

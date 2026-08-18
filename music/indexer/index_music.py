@@ -47,8 +47,8 @@ import numpy as np
 
 # music_index must come first: importing it is what puts the shared web tree
 # (musicweb.db, web/schema.sql) on sys.path.
-from music_index import audio, config, features, tagging, vocab
-from musicweb import db, drain
+from music_index import audio, config, features, vocab
+from musicweb import db, drain, rescore
 
 
 def iter_files(root: Path):
@@ -149,28 +149,24 @@ def upsert(con, rel_path, path, fields, windows, model, share=config.SHARE):
 
 
 def retag(con, clap):
-    ids, mat = db.load_matrix(con)
-    if not ids:
+    """Re-score the whole library from the stored embeddings.
+
+    The work itself lives in `musicweb.rescore` since 2026-08-18
+    (MUSIC_INGEST_PLAN.md step 2) because the NAS container has to do exactly
+    this to a dashboard-ingested track and cannot import the indexer. `clap` is
+    passed straight through as the embedder: the container hands the ONNX text
+    tower to the same function, and the two agree on `embed_text` and nothing
+    else -- which is the whole reason one implementation serves both.
+    """
+    n = con.execute('SELECT COUNT(*) c FROM tracks '
+                    'WHERE embedding IS NOT NULL').fetchone()['c']
+    if not n:
         print('nothing to tag'); return
-
-    # recompute the source-bias axes: they depend on the library's composition,
-    # so they must be refreshed whenever it changes
-    from music_index import debias
-    names = [r['filename'] for r in con.execute(
-        'SELECT filename FROM tracks WHERE embedding IS NOT NULL ORDER BY id')]
-    dirs = debias.compute_directions(mat, names)
-    db.save_debias(con, dirs)
-    print(f'  source-bias axes: {dirs.shape[0]} of {mat.shape[1]} dims erased')
-
-    print(f'tagging {len(ids)} tracks against '
+    print(f'tagging {n} tracks against '
           f'{sum(len(v) for v in vocab.CATEGORIES.values())} labels '
           f'+ {len(vocab.AXES)} axes...')
-    cats, axes = tagging.build_label_space(clap)
-    tags, axvals = tagging.score_all(mat, cats, axes)
-    tagging.write_scores(con, ids, tags, axvals)
-    db.set_meta(con, 'vocab_hash', vocab.vocab_hash())
-    db.set_meta(con, 'tagged_at', datetime.now(timezone.utc).isoformat(timespec='seconds'))
-    con.commit()
+    summary = rescore.rescore_library(con, clap)
+    print(f'  source-bias axes: {summary["debias"]} dims erased')
     print('  tags written')
 
 

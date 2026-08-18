@@ -263,6 +263,12 @@ PYPROJECT="$COMPANION_DIR/pyproject.toml"
 # dashboard container has no ccsync_companion.
 YTDL_COMMON_SRC="$REPO_ROOT/ytdl/web/ytdlweb/ytdl_common.py"
 YTDL_COMMON_VENDORED="$COMPANION_DIR/src/ccsync_companion/ytdl_common.py"
+# The identity verifier, whose copies cross TREES rather than reaching the
+# companion: music/web's joined 2026-08-18 (docs/MUSIC_INGEST_PLAN.md step 2)
+# because music ingest grew fleet routes with the same token-is-not-an-identity
+# problem. Checked here as well as in release.ps1 for SHIP-3's reason -- a pair
+# pinned in the Windows gate only lets a Mac build ship a drifted copy.
+YTDL_COMMON_SRC_IDENTITY="$REPO_ROOT/ytdl/web/ytdlweb/identity.py"
 VENDOR_MARKER="# --- vendored content below, byte-identical ---"
 # Every pair, as "source|vendored|mode" -- the bash twin of release.ps1's
 # $VendorPairs. The broll_vlm set joined 2026-08-18 (docs/BROLL_INGEST_PLAN.md
@@ -276,6 +282,7 @@ $REPO_ROOT/broll/indexer/broll_index/local_vlm.py|$COMPANION_DIR/src/ccsync_comp
 $REPO_ROOT/broll/indexer/broll_index/compact_format.py|$COMPANION_DIR/src/ccsync_companion/broll_vlm/compact_format.py|marker
 $REPO_ROOT/broll/indexer/broll_index/contract.py|$COMPANION_DIR/src/ccsync_companion/broll_vlm/contract.py|marker
 $REPO_ROOT/broll/indexer/broll_index/prompts/index_clip_v7_compact.md|$COMPANION_DIR/src/ccsync_companion/broll_vlm/prompts/index_clip_v7_compact.md|exact
+$YTDL_COMMON_SRC_IDENTITY|$REPO_ROOT/music/web/musicweb/identity.py|marker
 "
 DIST_DIR="$COMPANION_DIR/dist"
 ARTIFACT="$DIST_DIR/ccsync-companion"

@@ -12,6 +12,8 @@ from fastapi.responses import HTMLResponse, Response
 
 from musicweb import config
 from musicweb.routes_api import router as api_router
+from musicweb.routes_batches import router as batches_router
+from musicweb.routes_fleet import router as fleet_router
 from musicweb.routes_ingest import router as ingest_router
 from musicweb.routes_media import router as media_router
 
@@ -20,6 +22,15 @@ app = FastAPI(title='Music Tagger')
 app.include_router(api_router)
 app.include_router(media_router)
 app.include_router(ingest_router)
+# Dashboard music ingest (docs/MUSIC_INGEST_PLAN.md step 2, 2026-08-18). Two
+# doors onto the same ledger and they authenticate completely differently:
+# `routes_batches` is the SPA's, identified by the X-CCSync-User the
+# dashboard's MusicGate stamps from the session; `routes_fleet` is the
+# companion's, with no session at all -- the shared fleet token plus a SIGNED
+# identity. The fleet prefix is carved out of the dashboard's login_gate by
+# `_music_fleet_re` in app.py, per suffix, never per prefix.
+app.include_router(batches_router)
+app.include_router(fleet_router)
 
 
 # The frontend asks for these DOCUMENT-relative ('app.js', 'style.css',

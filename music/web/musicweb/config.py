@@ -190,6 +190,58 @@ def ingest_token():
     return token or None
 
 
+# ------------------------------------------------------- fleet ingest (2026-08-18)
+# The OTHER ingest door (docs/MUSIC_INGEST_PLAN.md step 2): an editor's
+# companion embeds a dropped track with the exported CLAP audio tower and
+# reports the result under the fleet credentials the whole fleet already holds.
+# No browser is involved, so the session cannot be the credential and these are
+# read from the environment the dashboard container already sets.
+
+
+def fleet_token():
+    """DASH_REPORT_TOKEN, or None when it is unset.
+
+    The shared secret every companion in the fleet already holds. FAIL-CLOSED
+    (fleet_auth.require_fleet_token): None means every /api/fleet/ingest call
+    is refused, because the alternative -- an unauthenticated route that writes
+    `tracks` rows and re-scores the library -- is not a dev convenience, it is
+    the whole write path.
+
+    It is NOT an identity: every machine has the same one, so it proves "a
+    fleet machine" and nothing about WHICH (H5, COMMERCIAL_READINESS.md item
+    7). See fleet_auth.require_identity for the half that does.
+
+    Read live, not bound at import, so a container restart with a rotated
+    secret needs no code change.
+    """
+    token = (os.environ.get('DASH_REPORT_TOKEN') or '').strip()
+    return token or None
+
+
+def session_secret():
+    """DASH_SESSION_SECRET, or None when it is unset.
+
+    The key the dashboard signs its identity tokens with. Shared with the
+    dashboard by ENVIRONMENT rather than by import: this app is deployed as its
+    own tree and cannot see ccsync_dashboard.
+    """
+    secret = (os.environ.get('DASH_SESSION_SECRET') or '').strip()
+    return secret or None
+
+
+# How long a claim is good for, and how often the companion must say it is
+# still alive. The ytdl and b-roll fleet routes' 300/30, because the failure
+# they cover is identical: a machine switched off mid-batch has to release its
+# lease without anyone pressing anything, and 10 missed heartbeats is a
+# comfortable margin over a laptop lid closing for a minute.
+LEASE_SECONDS = 300
+HEARTBEAT_SECONDS = 30
+
+# A drop is a drag of files, not a library import. Well above the biggest
+# observed drop (an 18-track album) and far below anything that would keep the
+# single-worker container busy for minutes inside one request.
+MAX_BATCH_ITEMS = 500
+
 # Ceilings on one ingest request. The dashboard's body_size_gate only makes a
 # DECLARATION check on /music/api/ingest (the multipart body is spooled past it
 # on purpose -- buffering a dropped album is the memory problem that middleware

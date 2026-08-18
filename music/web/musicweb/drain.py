@@ -329,7 +329,15 @@ def apply_bundle(con, bundle_path, apply_rescore=True):
             report['applied'].append(row['uid'])
 
         if apply_rescore and meta.get('rescore') == '1':
-            report['rescored_tracks'] = _apply_rescore(con, b)
+            # Imported HERE, not at module scope, and that is load-bearing:
+            # this module's whole point is that it can be run by whatever
+            # python3 the NAS host happens to have (`music/web/DEPLOY.md`
+            # applies a bundle over SSH), and `musicweb.rescore` imports numpy
+            # for the half of it that COMPUTES scores -- which this path never
+            # reaches. A top-level import would turn a stdlib-only apply into
+            # one that needs numpy on the NAS host.
+            from musicweb import rescore
+            report['rescored_tracks'] = rescore.apply_bundle_rows(con, b)
         con.commit()
     except Exception:
         con.rollback()
@@ -375,50 +383,11 @@ def _apply_children(con, b, track_id, rel_path):
                     (track_id, peak['n'], peak['data']))
 
 
-def _apply_rescore(con, b):
-    """Library-wide tags/axes/debias. -> how many local tracks were re-scored.
-
-    Silently skips rel_paths this index does not have. That is not a failure: a
-    bundle is drained from a copy of this index, and anything the copy held that
-    is gone here was deleted deliberately (a prune, a rename) in the meantime.
-    """
-    ids = {r['rel_path']: r['id']
-           for r in con.execute('SELECT id,rel_path FROM tracks')}
-    touched = set()
-    tags = {}
-    for r in b.execute('SELECT rel_path,category,label,score,pct,rank FROM bundle_tags'):
-        tid = ids.get(r['rel_path'])
-        if tid is None:
-            continue
-        tags.setdefault(tid, []).append((tid, r['category'], r['label'],
-                                         r['score'], r['pct'], r['rank']))
-    axes = {}
-    for r in b.execute('SELECT rel_path,axis,raw,pct FROM bundle_axes'):
-        tid = ids.get(r['rel_path'])
-        if tid is None:
-            continue
-        axes.setdefault(tid, []).append((tid, r['axis'], r['raw'], r['pct']))
-
-    for tid, rows in tags.items():
-        con.execute('DELETE FROM tags WHERE track_id=?', (tid,))
-        con.executemany('INSERT INTO tags(track_id,category,label,score,pct,rank) '
-                        'VALUES(?,?,?,?,?,?)', rows)
-        touched.add(tid)
-    for tid, rows in axes.items():
-        con.execute('DELETE FROM axes WHERE track_id=?', (tid,))
-        con.executemany('INSERT INTO axes(track_id,axis,raw,pct) VALUES(?,?,?,?)',
-                        rows)
-        touched.add(tid)
-
-    debias = b.execute('SELECT idx,vec FROM bundle_debias ORDER BY idx').fetchall()
-    if debias:
-        # All or nothing: the directions are an orthogonal set projected out of
-        # every embedding together, so a half-replaced set is not a weaker
-        # projection, it is a wrong one.
-        con.execute('DELETE FROM debias')
-        con.executemany('INSERT INTO debias(idx,vec) VALUES(?,?)',
-                        [(r['idx'], r['vec']) for r in debias])
-    return len(touched)
+# The library-wide tags/axes/debias a bundle carries are applied by
+# `rescore.apply_bundle_rows` (moved there 2026-08-18, MUSIC_INGEST_PLAN.md
+# step 2, unchanged). It sits beside the code that COMPUTES the same rows now
+# that the container can: this file is about moving finished work between two
+# copies of the index, and that is the one thing both paths share.
 
 
 # ------------------------------------------------------------------------ cli

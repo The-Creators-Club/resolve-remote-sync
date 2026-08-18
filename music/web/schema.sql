@@ -133,3 +133,74 @@ CREATE INDEX IF NOT EXISTS idx_queue_hash  ON ingest_queue(content_hash);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_uid ON ingest_queue(uid);
 -- and it only hashes library files whose byte count already matches
 CREATE INDEX IF NOT EXISTS idx_tracks_bytes ON tracks(bytes);
+
+-- Dashboard music ingest: batches and their per-track items
+-- (migrations/004_ingest_batches.sql, 2026-08-18, docs/MUSIC_INGEST_PLAN.md).
+-- The definitions live in BOTH files for the reason at the top of this one: a
+-- brand-new database gets schema.sql in full and never runs a migration, while
+-- an existing one is migrated and then re-run through here. Migration 004's
+-- header carries the reasoning -- what each column is for and where it differs
+-- from b-roll's 011 -- and this copy stays a copy of it.
+CREATE TABLE IF NOT EXISTS ingest_batches (
+    uid               TEXT PRIMARY KEY,
+    editor            TEXT NOT NULL,      -- the VERIFIED dashboard identity
+    machine           TEXT,               -- which of their machines holds the lease
+    companion_version TEXT,
+    share             TEXT NOT NULL DEFAULT 'music',
+    settings_json     TEXT NOT NULL,      -- {run_mode}
+    state             TEXT NOT NULL DEFAULT 'queued'
+                      CHECK (state IN ('queued','claimed','running','done',
+                                       'done_with_errors','cancelled','failed')),
+    n_items           INTEGER NOT NULL DEFAULT 0,
+    n_done            INTEGER NOT NULL DEFAULT 0,
+    n_failed          INTEGER NOT NULL DEFAULT 0,
+    n_live            INTEGER NOT NULL DEFAULT 0,
+    n_duplicate       INTEGER NOT NULL DEFAULT 0,
+    current_item_uid  TEXT,
+    lease_expires_at  TEXT,               -- a claim dies of silence
+    last_heartbeat_at TEXT,
+    cancel_requested  INTEGER NOT NULL DEFAULT 0,   -- a request, never a kill
+    cancel_by         TEXT,
+    upload_paused     INTEGER NOT NULL DEFAULT 0,
+    error             TEXT,
+    created_at        TEXT NOT NULL,
+    claimed_at        TEXT,
+    started_at        TEXT,
+    finished_at       TEXT,
+    updated_at        TEXT
+);
+
+CREATE TABLE IF NOT EXISTS ingest_items (
+    uid          TEXT PRIMARY KEY,
+    batch_uid    TEXT NOT NULL REFERENCES ingest_batches(uid) ON DELETE CASCADE,
+    ord          INTEGER NOT NULL,
+    orig_name    TEXT NOT NULL,
+    size_bytes   INTEGER,
+    content_hash TEXT,                    -- blake2b-16 of the whole file
+    duration_s   REAL,
+    samplerate   INTEGER,
+    channels     INTEGER,
+    codec        TEXT,
+    transcoded   INTEGER NOT NULL DEFAULT 0,
+    source       TEXT NOT NULL DEFAULT 'upload' CHECK (source IN ('upload','path')),
+    -- NULL until `result`: `tracks` has no status column and every facet,
+    -- percentile and debias axis reads every row, so a placeholder would skew
+    -- the library rather than hide from it.
+    track_id     INTEGER REFERENCES tracks(id) ON DELETE SET NULL,
+    duplicate_of INTEGER REFERENCES tracks(id) ON DELETE SET NULL,
+    dest_name    TEXT,                    -- the flat name allocated under the share root
+    state        TEXT NOT NULL DEFAULT 'pending'
+                 CHECK (state IN ('pending','duplicate','transcoding','embedding',
+                                  'indexed','uploading','live','failed','cancelled',
+                                  'skipped','queued_for_base_rig')),
+    stage_percent INTEGER,
+    error         TEXT,
+    attempts      INTEGER NOT NULL DEFAULT 0,
+    updated_at    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_ingest_batches_editor ON ingest_batches(editor, created_at);
+CREATE INDEX IF NOT EXISTS idx_ingest_batches_state  ON ingest_batches(state);
+CREATE INDEX IF NOT EXISTS idx_ingest_items_batch    ON ingest_items(batch_uid, ord);
+CREATE INDEX IF NOT EXISTS idx_ingest_items_track    ON ingest_items(track_id);
+CREATE INDEX IF NOT EXISTS idx_ingest_items_hash     ON ingest_items(content_hash);

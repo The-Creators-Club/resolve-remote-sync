@@ -182,7 +182,7 @@ def test_a_409_on_upload_is_success(js):
 
 
 def test_duplicates_come_back_unticked_and_named(js):
-    assert "already in the archive — clip #" in js
+    assert "already in the archive: clip #" in js
     assert "if (item.duplicate_of && !wasDuplicate) item.include = false;" in js
 
 
@@ -236,7 +236,7 @@ def test_the_default_shoot_name_is_the_folder_or_a_dated_ingest(js):
 
 
 def test_the_summary_line_says_when_it_will_run(js):
-    """"N clips, X GB — will run when you're away" (plan §5). The mode has to be
+    """"N clips, X GB - will run when you're away" (plan §5). The mode has to be
     IN the sentence: an editor who chose Foreground and read "when you're away"
     would walk off, and one who chose idle and read "now" would sit and wait."""
     body = js[js.index("function ingestRenderSummary"):]

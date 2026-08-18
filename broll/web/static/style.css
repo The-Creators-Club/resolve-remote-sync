@@ -1,4 +1,4 @@
-/* Neon-red terminal theme — same palette and idioms as the fleet dashboard
+/* Neon-red terminal theme - same palette and idioms as the fleet dashboard
    (dashboard/static/style.css), which in turn lifts it from the companion's
    theme.py (WRITE.EXE-style). Mounted at /broll the two UIs sit behind one
    login and one origin, so they must not look like two different products.
@@ -38,7 +38,7 @@
   /* Kept only as an alias: there is no sans face in this theme any more. */
   --sans: var(--mono);
 
-  /* Sticky header height — the browse rail parks directly underneath it. */
+  /* Sticky header height - the browse rail parks directly underneath it. */
   --header-h: 88px;
 }
 
@@ -679,7 +679,7 @@ a.brand:hover { color: var(--red-hot); }
 .share-row .share-desc { color: var(--muted); }
 
 .companion-status { display: flex; align-items: center; gap: 8px; }
-/* Square, glowing pip — the dashboard's .dot idiom without a border-radius. */
+/* Square, glowing pip - the dashboard's .dot idiom without a border-radius. */
 .status-dot {
   width: 9px; height: 9px;
   display: inline-block;

@@ -1,14 +1,14 @@
 "use strict";
 
 /* ==========================================================================
-   Ingest panel — drag clips in, the editor's own machine indexes them.
+   Ingest panel: drag clips in, the editor's own machine indexes them.
    docs/BROLL_INGEST_PLAN.md §5 (browser mechanics), 2026-08-18.
 
    THREE PARTIES, and this file talks to two of them:
      - this app (document-relative `api/…` URLs, the session routes of
        app/routes_batches.py) mints the batch and owns the truth about it;
      - the editor's OWN companion (`http://127.0.0.1:8899`, absolute on
-       purpose — a different process, not this app) stages the bytes and does
+       purpose - a different process, not this app) stages the bytes and does
        the crunching.
    The browser never carries a work order: it hands the companion a batch uid
    and the companion fetches the manifest itself under the fleet token. Same
@@ -16,7 +16,7 @@
 
    A second classic script rather than a module or an addition to app.js: it
    shares app.js's helpers ($, el, toast, fetchJson, escapeHtml, debounce)
-   through the global scope, which means NO NAME MAY BE DECLARED TWICE — two
+   through the global scope, which means NO NAME MAY BE DECLARED TWICE - two
    classic scripts share one global lexical environment and a duplicate `const`
    is a SyntaxError that takes the whole page down, search included. Everything
    here is therefore `ingest`/`ING` prefixed, and tests/test_ingest_ui.py fails
@@ -40,7 +40,7 @@ const ING_MAX_ITEMS = 2000;
 
 // archive_names.safe_name, character for character: exactly what Windows
 // forbids and nothing else, so CJK shoot names survive. The server re-validates
-// and answers 422 with the name it wanted (routes_batches._validated_share) —
+// and answers 422 with the name it wanted (routes_batches._validated_share) -
 // this is a courtesy, never the check.
 const ING_UNSAFE = /[<>:"/\\|?*\x00-\x1f]/g;
 const ING_MAX_STEM = 90;
@@ -64,17 +64,17 @@ const ING_SERVER_POLL_MS = 5000;     // the truth after a reload
 const ING_BATCH_LIST_MS = 10000;
 
 const ING_TIER_LABELS = {
-  good: "Good — Qwen3-VL 4B, needs about 8 GB of VRAM",
-  best: "Best — Qwen3-VL 8B, needs about 12 GB of VRAM",
+  good: "Good: Qwen3-VL 4B, needs about 8 GB of VRAM",
+  best: "Best: Qwen3-VL 8B, needs about 12 GB of VRAM",
 };
 
 /* The one place this file says "the companion is not answering". Repeated
    verbatim from the /insert path's lesson (2026-08-12): a rejected fetch is
-   NOT proof the companion is down — Chrome's local-network permission blocks a
+   NOT proof the companion is down - Chrome's local-network permission blocks a
    plain-http dashboard origin from reaching 127.0.0.1 with the identical
    error. /status in a tab is never gated, so it disambiguates. */
 const ING_COMPANION_HINT =
-  "not reachable — companion not running, or the browser blocked local " +
+  "not reachable: companion not running, or the browser blocked local " +
   "connections (self-test: open http://127.0.0.1:8899/status in a tab; if " +
   "that shows ok:true it is the browser, not the companion)";
 
@@ -116,7 +116,7 @@ document.addEventListener("DOMContentLoaded", ingestInit);
 
 function ingestInit() {
   const btn = document.getElementById("ingest-btn");
-  if (!btn) return;   // markup absent (a stale index.html) — stay inert
+  if (!btn) return;   // markup absent (a stale index.html) - stay inert
   btn.addEventListener("click", ingestToggle);
   $("#ingest-close").addEventListener("click", ingestClose);
   $("#ingest-recheck").addEventListener("click", () => ingestCapabilities(true));
@@ -245,7 +245,7 @@ function ingestWireDropzone() {
 
 /* A DataTransfer is neutered the instant this handler yields, so every entry
    is taken SYNCHRONOUSLY first and only then walked. Reading dt.items after an
-   await returns an empty list in Chrome — which looked exactly like "the drop
+   await returns an empty list in Chrome - which looked exactly like "the drop
    contained no videos". */
 async function ingestCollect(dt) {
   const roots = [];
@@ -259,7 +259,7 @@ async function ingestCollect(dt) {
   if (roots.length) {
     // A single dropped folder IS the shoot, so its own name is stripped from
     // rel_dir and offered as the shoot name instead. Two folders dropped
-    // together are two shelves of one shoot, so their names stay in rel_dir —
+    // together are two shelves of one shoot, so their names stay in rel_dir -
     // stripping both would merge `Day1/A001` and `Day2/A001` into one folder.
     const onlyFolder = roots.length === 1 && roots[0].isDirectory ? roots[0].name : "";
     for (const entry of roots) await ingestWalkEntry(entry, onlyFolder, out);
@@ -275,7 +275,7 @@ async function ingestCollect(dt) {
 }
 
 /* readEntries is documented to return AT MOST 100 entries per call in Chrome
-   and to signal the end of the directory with an empty array — not with the
+   and to signal the end of the directory with an empty array - not with the
    first short read. Calling it once silently dropped every clip past the
    hundredth of a camera card. */
 async function ingestWalkEntry(entry, stripTop, out) {
@@ -321,7 +321,7 @@ function ingestMakeItem(name, size, relDir, source, path, file) {
     size: typeof size === "number" ? size : null,
     rel_dir: relDir || "",
     source: source,               // "upload" (bytes stream to staging) | "path"
-    path: path || null,           // native picker only — indexed in place
+    path: path || null,           // native picker only - indexed in place
     file: file || null,
     include: true,
     thumb: null,
@@ -346,7 +346,7 @@ function ingestMakeItem(name, size, relDir, source, path, file) {
 
 function ingestAddItems(items) {
   if (!items.length) {
-    toast("Nothing there this app can index — b-roll takes video files " +
+    toast("Nothing there this app can index: b-roll takes video files " +
           `(${ing.videoExts.slice(0, 6).join(", ")}, …).`, "warn");
     return;
   }
@@ -356,7 +356,7 @@ function ingestAddItems(items) {
     return;
   }
   if (items.length > room) {
-    toast(`Only the first ${room} clips were taken — a batch holds ` +
+    toast(`Only the first ${room} clips were taken: a batch holds ` +
           `${ING_MAX_ITEMS}.`, "warn");
     items = items.slice(0, room);
   }
@@ -408,8 +408,8 @@ function ingestSafeName(name) {
 /* ---------------------------------------------------------------------- */
 
 /* Dropped Files are decoded in the page (nothing has been uploaded yet, so
-   there is no server that could make a poster). Formats no browser decodes —
-   BRAW, R3D, most MXF — never produce one: the row says "no preview" until the
+   there is no server that could make a poster). Formats no browser decodes -
+   BRAW, R3D, most MXF - never produce one: the row says "no preview" until the
    companion's own thumb arrives from staging, which is ffmpeg's answer and
    understands all of them. */
 function ingestQueueThumb(item) {
@@ -518,10 +518,10 @@ async function ingestCapabilities(loud) {
   } catch (e) {
     ing.caps = null;
     // A companion published before this feature existed answers 404 on every
-    // /broll/ingest route — the same "editors need a republished companion"
+    // /broll/ingest route - the same "editors need a republished companion"
     // gap /music/* had. Worth its own sentence: nothing is wrong with it.
     ing.capsError = e.status === 404
-      ? "your companion app is too old for b-roll ingest — update it from the " +
+      ? "your companion app is too old for b-roll ingest: update it from the " +
         "tray icon (check for updates), then reload this page"
       : ING_COMPANION_HINT;
     dot.className = "status-dot status-bad";
@@ -558,7 +558,7 @@ function ingestDefaultTier() {
 /** capabilities publishes `tiers.{good,best}`. `fits` is the documented key
  *  (plan §4.1); `fit` is accepted too because the loopback half of this
  *  feature was written in parallel and one letter must not disable both
- *  models. Unknown (no capabilities yet) is NOT a refusal — the companion
+ *  models. Unknown (no capabilities yet) is NOT a refusal - the companion
  *  refuses the run itself, with the VRAM numbers in the message. */
 function ingestTierInfo(tier) {
   const tiers = (ing.caps && ing.caps.tiers) || {};
@@ -584,7 +584,7 @@ async function ingestLoadSite() {
       ing.videoExts = site.video_extensions.map((e) => String(e).toLowerCase());
     }
   } catch {
-    /* standalone dev loop, or an older dashboard — fallbacks stand */
+    /* standalone dev loop, or an older dashboard - fallbacks stand */
   }
   if (!ing.tier) ing.tier = ingestDefaultTier();
   ingestRenderTiers();
@@ -635,7 +635,7 @@ async function ingestPrepare() {
   if (!ing.caps) await ingestCapabilities(false);
   if (!ing.caps) {
     ingestSetNotice(`Your companion app is not answering, so these clips cannot ` +
-                    `be staged — ${ing.capsError || ING_COMPANION_HINT}`);
+                    `be staged: ${ing.capsError || ING_COMPANION_HINT}`);
     return;
   }
   const body = {
@@ -733,7 +733,7 @@ function ingestUploadItem(item) {
     item.uploadPercent = 100;
     done(true, "");
   };
-  xhr.onerror = () => done(false, "upload failed — is the companion still running?");
+  xhr.onerror = () => done(false, "upload failed. Is the companion still running?");
   xhr.send(item.file);
 }
 
@@ -792,13 +792,13 @@ async function ingestPollServer() {
     const answer = await fetchJson(`api/ingest-batches/${encodeURIComponent(ing.batchUid)}`);
     ing.batch = answer.batch;
     ing.batchItems = answer.items || [];
-    // The server is the truth after a reload — when it says the batch is over,
+    // The server is the truth after a reload - when it says the batch is over,
     // the live view stops claiming otherwise even if the companion is silent.
     if (["done", "done_with_errors", "cancelled", "failed"].includes(ing.batch.state)) {
       ing.running = false;
     }
   } catch {
-    /* transient — the batch list poll will catch up */
+    /* transient - the batch list poll will catch up */
   }
   ingestRenderLive();
 }
@@ -990,7 +990,7 @@ function ingestUpdateRow(item) {
     n.meta.classList.add("bad");
   } else if (item.duplicate_of) {
     n.meta.textContent =
-      `already in the archive — clip #${item.duplicate_of}` +
+      `already in the archive: clip #${item.duplicate_of}` +
       (item.duplicate_name ? ` (${item.duplicate_name})` : "") +
       (bits.length ? ` · ${bits.join(" · ")}` : "");
     n.meta.classList.add("warn");
@@ -1039,7 +1039,7 @@ function ingestRenderTiers() {
       text.appendChild(el("span", {
         className: "muted small",
         text: `not downloaded yet${info.download_bytes || info.bytes
-          ? ` — about ${ingestBytes(info.download_bytes || info.bytes)}` : ""}`,
+          ? `, about ${ingestBytes(info.download_bytes || info.bytes)}` : ""}`,
       }));
     }
     box.appendChild(label);
@@ -1052,7 +1052,7 @@ function ingestRenderSummary() {
   const when = ing.runMode === "foreground"
     ? "will run now" : "will run when you're away";
   const line = chosen.length
-    ? `${chosen.length} clip${chosen.length === 1 ? "" : "s"}, ${ingestBytes(bytes)} — ${when}`
+    ? `${chosen.length} clip${chosen.length === 1 ? "" : "s"}, ${ingestBytes(bytes)} - ${when}`
     : "nothing selected";
   $("#ingest-summary").textContent = line;
   const blocked = !chosen.length || ing.running || !ing.caps ||
@@ -1080,7 +1080,7 @@ async function ingestRun() {
   const info = ingestTierInfo(ing.tier);
   if (info && info.cached === false) {
     // Plan §9 decision 6: consent for the download, with the byte count, BEFORE
-    // anything starts — a 4 GB model on a hotel connection is the editor's
+    // anything starts - a 4 GB model on a hotel connection is the editor's
     // business, not ours.
     const size = info.download_bytes || info.bytes || info.size_bytes;
     const how = size ? `about ${ingestBytes(size)}` : "several gigabytes";
@@ -1139,10 +1139,10 @@ async function ingestRun() {
   } catch (e) {
     // 503 = the machine refused: the tier does not fit this GPU, or a
     // capability vanished between the probe and the click. PERSISTENT, not a
-    // toast — the editor has to come back and change the model (plan §6).
+    // toast - the editor has to come back and change the model (plan §6).
     ingestSetNotice(
       e.status === 503
-        ? `${e.message} The batch is queued on the server — change the model ` +
+        ? `${e.message} The batch is queued on the server: change the model ` +
           `and run it again, or another of your machines can pick it up.`
         : `The companion did not take the batch: ${e.message}`);
     ingestLoadBatches();
@@ -1155,7 +1155,7 @@ async function ingestRun() {
   $("#ingest-live").classList.remove("hidden");
   toast(ing.runMode === "foreground"
     ? "Indexing started on this machine."
-    : "Queued — it starts when you step away from this machine.", "success");
+    : "Queued: it starts when you step away from this machine.", "success");
   ingestStartPolling();
   ingestLoadBatches();
   ingestRenderSummary();
@@ -1179,7 +1179,7 @@ function ingestRenderLive() {
   const lb = (ing.loopback && ing.loopback.batch) || null;
   const head = el("div", { className: "ingest-live-head" });
   head.textContent = batch
-    ? `${batch.share} — ${batch.state}${batch.machine ? ` on ${batch.machine}` : ""}`
+    ? `${batch.share} - ${batch.state}${batch.machine ? ` on ${batch.machine}` : ""}`
     : "waiting for the server…";
   box.appendChild(head);
 
@@ -1206,7 +1206,7 @@ function ingestRenderLive() {
   } else if (ing.running) {
     box.appendChild(el("div", {
       className: "muted small",
-      text: "the companion isn't answering right now — the batch keeps its place " +
+      text: "the companion isn't answering right now - the batch keeps its place " +
             "on the server (" + ING_COMPANION_HINT + ")",
     }));
   }
@@ -1216,7 +1216,7 @@ function ingestRenderLive() {
     for (const item of ing.batchItems.slice(0, 200)) {
       const row = el("div", { className: `ingest-item-state state-${item.state}` });
       row.textContent = `${item.state.padEnd(10, " ")} ${item.rel_dir ? item.rel_dir + "/" : ""}${item.orig_name}` +
-                        (item.error ? ` — ${item.error}` : "");
+                        (item.error ? ` - ${item.error}` : "");
       list.appendChild(row);
     }
     box.appendChild(list);
@@ -1288,7 +1288,7 @@ async function ingestCancelUid(uid) {
     try { await ingestLoopback("POST", "/broll/ingest/control", { action: "cancel" }); }
     catch { /* it will hear it from the heartbeat */ }
   }
-  toast("Cancel requested — the machine stops within a heartbeat.", "");
+  toast("Cancel requested: the machine stops within a heartbeat.", "");
   ingestPollServer();
   ingestLoadBatches();
 }
@@ -1403,7 +1403,7 @@ function ingestRenderBatches() {
         list.appendChild(el("div", {
           className: `ingest-item-state state-${item.state}`,
           text: `${item.state} · ${item.rel_dir ? item.rel_dir + "/" : ""}${item.orig_name}` +
-                (item.error ? ` — ${item.error}` : ""),
+                (item.error ? ` - ${item.error}` : ""),
         }));
       }
       card.appendChild(list);

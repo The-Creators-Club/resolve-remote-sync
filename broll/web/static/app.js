@@ -168,12 +168,12 @@ async function fetchJson(url, opts) {
   if (!res.ok) {
     // Served from the cc_sync dashboard, the session can expire underneath a
     // long-open tab. The gate answers /broll/api with 401 JSON rather than a
-    // 303 to an HTML login page precisely so this is detectable — otherwise the
+    // 303 to an HTML login page precisely so this is detectable - otherwise the
     // SPA would try to parse the login page as JSON and report nonsense.
     // Standalone (no dashboard) nothing ever returns 401, so this never fires.
     if (res.status === 401 && window.location.pathname.startsWith("/broll")) {
       const back = encodeURIComponent(window.location.pathname);
-      toast("Session expired — signing in again…", "error");
+      toast("Session expired, signing in again…", "error");
       window.location.assign(`/login?next=${back}`);
     }
     const detail = body && (body.detail || body.message);
@@ -482,7 +482,7 @@ function renderFolderTree() {
  *
  * Creators_Club nests as deep as the shoot did (share :: event / day / camera),
  * so a fixed root>group>leaf renderer could only ever show the first two
- * levels — everything below was unreachable by clicking (2026-08-10). Downloads
+ * levels - everything below was unreachable by clicking (2026-08-10). Downloads
  * is the same shape, two levels deep, and its leaves may arrive with no
  * "children" key at all, hence the `|| []`. */
 function renderTreeNode(collection, node, depth) {
@@ -494,7 +494,7 @@ function renderTreeNode(collection, node, depth) {
     className: `tree-node ${depth === 0 ? "tree-node-group" : "tree-node-leaf"}`,
     type: "button",
   });
-  // A leaf-less node (Uncategorised, a camera folder) gets no caret — there is
+  // A leaf-less node (Uncategorised, a camera folder) gets no caret - there is
   // nothing to expand, and a caret that does nothing when clicked reads as
   // broken. The span stays either way so labels line up down the rail.
   const caret = children.length ? (open ? "▾" : "▸") : "";
@@ -525,7 +525,7 @@ function renderTreeNode(collection, node, depth) {
 /** Is `slug` the selection itself, or on the path down to it? (Which is what
  * decides whether a node shows its children.) A bare startsWith is not enough:
  * "Whisky" must not count as an ancestor of "Whisky Bar", so the remainder has
- * to begin at a real separator — "::" under a share, " / " between shoot path
+ * to begin at a real separator - "::" under a share, " / " between shoot path
  * components, "/" between subject slugs. */
 function isAncestorCategory(slug, category) {
   if (!slug || !category) return false;
@@ -536,7 +536,7 @@ function isAncestorCategory(slug, category) {
 }
 
 /** One level up from a folder slug, "" at the top of either root. Shoot slugs
- * are "share::Event / Day 1 / A-cam" — the share joins with "::" and the path
+ * are "share::Event / Day 1 / A-cam" - the share joins with "::" and the path
  * under it with " / "; subject slugs nest with plain "/". */
 function parentFolder(category) {
   if (!category) return "";
@@ -611,7 +611,7 @@ async function runSearch() {
   const token = ++searchToken;
   const params = new URLSearchParams();
   if (state.q) params.set("q", state.q);
-  // Creators_Club folders are shoot paths, not subject slugs — own footage is
+  // Creators_Club folders are shoot paths, not subject slugs - own footage is
   // not model-indexed, so there is no subject to filter on.
   if (isOwnedCollection(state.collection)) {
     if (state.category) params.set("shoot", state.category);
@@ -731,7 +731,7 @@ function buildCard(row) {
   // text carried survives elsewhere: the filename/category as a hover tooltip,
   // the best hit as the card's click target, and every hit as a yellow band on
   // the detail seekbar.
-  card.title = `${basename(video.rel_path)} — ${video.category || video.category_hint || "uncategorised"}`;
+  card.title = `${basename(video.rel_path)} - ${video.category || video.category_hint || "uncategorised"}`;
   card.appendChild(thumb);
   // Open at the moment that matched, not at 0:00. The whole point of a hit is
   // that the archive is long-form: the match is often minutes in, and landing
@@ -833,7 +833,7 @@ function wireSpriteScrub(thumb, overlay, video) {
 function wireDetailView() {
   $("#detail-back").addEventListener("click", () => {
     // The detail view is a history entry of its own, so the in-page button and
-    // the browser's Back button must do the same thing — otherwise leaving by
+    // the browser's Back button must do the same thing - otherwise leaving by
     // one of them leaves a stale entry the other then walks back into.
     if (history.state && history.state.broll) {
       history.back();
@@ -1166,7 +1166,7 @@ function renderVideoMeta(data) {
   pathLine.appendChild(el("span", { text: basename(video.rel_path) }));
   pathLine.appendChild(
     el("span", {
-      text: ` — ${formatDuration(video.duration_s)} @ ${video.fps || "?"}fps`,
+      text: ` - ${formatDuration(video.duration_s)} @ ${video.fps || "?"}fps`,
     })
   );
   meta.appendChild(pathLine);
@@ -1190,7 +1190,7 @@ function renderVideoMeta(data) {
       )
     );
   } else {
-    catLine.appendChild(el("span", { text: "—" }));
+    catLine.appendChild(el("span", { text: "none" }));
   }
   meta.appendChild(catLine);
 
@@ -1348,7 +1348,7 @@ function renderTranscriptList(data) {
  *
  * Duration comes from the loaded media FIRST. The probed duration_s is
  * sometimes short (VFR sources, truncated recordings) and dividing by it drove
- * markers off the right-hand end of the bar — the cause of the stray green
+ * markers off the right-hand end of the bar - the cause of the stray green
  * ticks past the edge. Reads state rather than taking the payload so the
  * loadedmetadata re-render has something to re-render from. */
 function renderSeekMarkers() {
@@ -1397,7 +1397,7 @@ function renderInOutRange() {
     ? $("#player").duration || state.detail.video.duration_s || 0
     : 0;
 
-  // Each flag drops the moment ITS key lands — the shaded range still needs
+  // Each flag drops the moment ITS key lands - the shaded range still needs
   // both ends, but "did my I register?" must be answerable immediately.
   const place = (el, seconds) => {
     if (seconds == null || !duration) {
@@ -1622,10 +1622,10 @@ async function sendToResolve(mode = "append") {
         // 2026-08-12 -- the companion was healthy the whole time). Opening
         // /status directly in a tab is never gated, so it disambiguates.
         toast(
-          "Couldn't reach the companion app. It may not be running — or your " +
+          "Couldn't reach the companion app. It may not be running, or your " +
           "browser blocked the connection (look for a “local network” " +
           "permission prompt, or allow it in site settings). Self-test: open " +
-          "http://127.0.0.1:8899/status — if that shows ok:true, it's the " +
+          "http://127.0.0.1:8899/status - if that shows ok:true, it's the " +
           "browser, not the companion. Downloads are in Settings.",
           "error"
         );
@@ -1642,7 +1642,7 @@ async function sendToResolve(mode = "append") {
       if (res.ok && body && body.state === "downloading") {
         if (!announcedSync) {
           announcedSync = true;
-          toast("Clip isn't on this machine yet — syncing it down, then inserting.", "");
+          toast("Clip isn't on this machine yet: syncing it down, then inserting.", "");
         }
         if (btn) btn.textContent = syncProgressLabel(body.progress);
         await new Promise((r) => setTimeout(r, 1500));
@@ -1657,7 +1657,7 @@ async function sendToResolve(mode = "append") {
         // "needs an update" text, so only the legacy string is rewritten.
         if (mode === "playhead" && /not implemented yet/.test(message)) {
           message =
-            "This companion build predates Place at Playhead — update the " +
+            "This companion build predates Place at Playhead. Update the " +
             "companion app (tray icon → check for updates), or use Append.";
         }
         toast(message, "error");
@@ -1713,7 +1713,7 @@ async function loadShares() {
   }
   for (const s of shares) {
     const row = el("div", { className: "share-row" });
-    row.innerHTML = `<span class="share-name mono">${escapeHtml(s.share)}</span> — <span class="share-desc">${escapeHtml(s.description)}</span>`;
+    row.innerHTML = `<span class="share-name mono">${escapeHtml(s.share)}</span> - <span class="share-desc">${escapeHtml(s.description)}</span>`;
     list.appendChild(row);
   }
 }
@@ -1735,7 +1735,7 @@ async function checkCompanionStatus() {
     // permission on an http:// dashboard origin) looks identical to a
     // stopped companion from here.
     text.textContent =
-      "not reachable — companion not running, or the browser blocked local " +
+      "not reachable: companion not running, or the browser blocked local " +
       "connections (self-test: open http://127.0.0.1:8899/status)";
   }
 }

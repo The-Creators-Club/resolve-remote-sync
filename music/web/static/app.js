@@ -49,7 +49,7 @@ const audio = () => $('#audio');
 
 // ---------------------------------------------------------------- helpers
 const fmtDur = s => {
-  if (!s && s !== 0) return '—';
+  if (!s && s !== 0) return '-';
   const m = Math.floor(s / 60), r = Math.floor(s % 60);
   return `${m}:${String(r).padStart(2, '0')}`;
 };
@@ -275,8 +275,8 @@ async function sendToResolve(t, action, btn, msg) {
         const pct = r.progress && Number.isInteger(r.progress.percent) ? r.progress.percent : null;
         msg.className = 'rmsg';
         msg.textContent = announced
-          ? (pct == null ? 'syncing the track to this machine…' : `syncing the track to this machine — ${pct}%`)
-          : 'track isn’t on this machine yet — syncing it down, then sending…';
+          ? (pct == null ? 'syncing the track to this machine…' : `syncing the track to this machine: ${pct}%`)
+          : 'track isn’t on this machine yet: syncing it down, then sending…';
         announced = true;
         await new Promise(res => setTimeout(res, 1500));
         continue;
@@ -294,8 +294,8 @@ async function sendToResolve(t, action, btn, msg) {
     // OR the browser blocked local connections (Chrome's local-network
     // permission on an http:// dashboard origin does exactly this).
     msg.textContent = e.message.startsWith('companion')
-      ? `the companion answered but refused the request (${e.message}) — see its log`
-      : 'couldn’t reach the ccsync companion — tray app not running, or the '
+      ? `the companion answered but refused the request (${e.message}), see its log`
+      : 'couldn’t reach the ccsync companion: tray app not running, or the '
         + 'browser blocked local connections (self-test: open '
         + 'http://127.0.0.1:8899/status)';
   } finally {
@@ -327,9 +327,9 @@ async function revealOnThisMachine(t, btn, msg) {
     // companion older than the build that added /music/reveal answers 404,
     // which arrives as "companion 404" rather than as silence.
     msg.textContent = e.message.startsWith('companion')
-      ? `the companion refused the request (${e.message}) — an older build has `
+      ? `the companion refused the request (${e.message}): an older build has `
         + 'no reveal; update the tray app'
-      : 'couldn’t reach the ccsync companion — tray app not running, or the '
+      : 'couldn’t reach the ccsync companion: tray app not running, or the '
         + 'browser blocked local connections (self-test: open '
         + 'http://127.0.0.1:8899/status)';
   } finally {
@@ -344,15 +344,15 @@ async function refreshResolveStatus() {
     if (r.ok) {
       s.className = 'rstatus on';
       s.textContent = `Resolve · ${r.timeline || r.project || 'connected'}`;
-      s.title = `project ${r.project || '—'} · timeline ${r.timeline || 'none open'}`;
+      s.title = `project ${r.project || 'none'} · timeline ${r.timeline || 'none open'}`;
     } else {
       s.className = 'rstatus off';
-      s.textContent = 'Resolve —';
+      s.textContent = 'Resolve · off';
       s.title = r.error || 'not connected';
     }
   } catch {
     s.className = 'rstatus off';
-    s.textContent = 'Resolve —';
+    s.textContent = 'Resolve · off';
   }
 }
 
@@ -515,7 +515,7 @@ function paintAxes(axes) {
     const wrap = el('div', 'axis');
     const lab = el('div', 'lab');
     const [lo, hi] = AXIS_HELP[axis] || ['low', 'high'];
-    lab.appendChild(el('span', null, `${axis} — ${lo} → ${hi}`));
+    lab.appendChild(el('span', null, `${axis}: ${lo} → ${hi}`));
     const val = el('span', 'val', 'off');
     lab.appendChild(val);
     wrap.appendChild(lab);
@@ -563,7 +563,7 @@ function wireDropzone() {
 // Two possible answers, and the toast must not conflate them. On the base rig
 // the file is decoded, embedded and tagged inside the request, so it really is
 // in the library by the time this returns. On a host with no GPU it has only
-// been landed in the share and queued — claiming a bpm and a key there, or
+// been landed in the share and queued - claiming a bpm and a key there, or
 // even "added", would be a lie that sends the editor searching for a cue that
 // is not indexed yet.
 async function ingest(files) {
@@ -571,7 +571,7 @@ async function ingest(files) {
   uploading.appendChild(el('div', 'row',
     `Uploading ${files.length} file${files.length === 1 ? '' : 's'}…`));
   uploading.appendChild(el('div', 'muted',
-    'checking for duplicates — this can take a few seconds each'));
+    'checking for duplicates: this can take a few seconds each'));
   toast(uploading, 0);
   const fd = new FormData();
   files.forEach(f => fd.append('files', f, f.name));
@@ -587,7 +587,7 @@ async function ingest(files) {
     out.appendChild(head);
     if (r.mode === 'queued' && r.queued) {
       out.appendChild(el('div', 'muted',
-        'nothing was analysed — this host has no GPU. They are in the library and '
+        'nothing was analysed: this host has no GPU. They are in the library and '
         + 'will not be searchable until the base rig indexes them'
         + (r.pending > r.queued ? ` (${r.pending} waiting in all)` : '') + '.'));
     }
@@ -595,14 +595,14 @@ async function ingest(files) {
       const tc = x.transcoded ? ' (transcoded to mp3)' : '';
       if (x.status === 'queued')
         out.appendChild(el('div', 'row',
-          `◷ ${x.name}${tc} — ${fmtDur(x.duration)}, queued for indexing`));
+          `◷ ${x.name}${tc} - ${fmtDur(x.duration)}, queued for indexing`));
       else if (x.ok)
-        out.appendChild(el('div', 'row good', `✓ ${x.name}${tc} — ${fmtDur(x.duration)}`
+        out.appendChild(el('div', 'row good', `✓ ${x.name}${tc} - ${fmtDur(x.duration)}`
           + (x.bpm ? ', ' + Math.round(x.bpm) + ' bpm' : '')));
       else
         // x.name and x.error carry indexer rel_paths and raw ffmpeg stderr,
         // neither of them filtered for HTML by safe_upload_name (MUSIC-15).
-        out.appendChild(el('div', 'row bad', `✕ ${x.name} — ${x.error}`));
+        out.appendChild(el('div', 'row bad', `✕ ${x.name} - ${x.error}`));
     });
     toast(out, 9000);
     if (r.added) {

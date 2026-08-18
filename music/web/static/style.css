@@ -1,4 +1,4 @@
-/* Neon-red terminal theme — same palette and idioms as the fleet dashboard
+/* Neon-red terminal theme - same palette and idioms as the fleet dashboard
    (dashboard/static/style.css) and the b-roll UI (broll/web/static/style.css),
    which lift it from the companion's theme.py (WRITE.EXE-style). Mounted at
    /music the three UIs sit behind one login and one origin, so they must not
@@ -27,7 +27,7 @@
 
   --mono: Consolas, Menlo, "DejaVu Sans Mono", monospace;
 
-  /* Sticky header height — the filter rail parks directly underneath it.
+  /* Sticky header height - the filter rail parks directly underneath it.
      Four rows: topbar, rule, controls, example prompts. */
   --header-h: 134px;
 }

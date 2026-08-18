@@ -23,7 +23,7 @@
    healthy on every other signal this page has -- so the fleet banner is the
    only thing that makes it visible without reading every row. #}
 {% if fleet.fleet_halt and fleet.fleet_halt.active %}
-<div class="banner alarm">⛔ FLEET SYNC IS HALTED — every companion has stopped syncing.
+<div class="banner alarm">⛔ FLEET SYNC IS HALTED: every companion has stopped syncing.
   {% if fleet.fleet_halt.reason %}{{ fleet.fleet_halt.reason }}{% endif %}
   <span class="mono-sm muted">set by {{ fleet.fleet_halt.set_by }} {{ fleet.fleet_halt.set_at | ago }}</span>
 </div>
@@ -74,7 +74,7 @@
         {% if e.transport.orphan_partials %}<span class="chip amber" title="{{ e.transport.orphan_partial_bytes | human_bytes }} of orphaned rclone .partial files left on the NAS by an interrupted lane A. Never deleted automatically; remove them by hand to reclaim the space.">[ ORPHANS: {{ e.transport.orphan_partials }} ]</span>{% endif %}
         {# The safety latches, first among the chips: they outrank every
            transport diagnostic beside them (item 9). #}
-        {% if e.guard.breaker_tripped %}<span class="chip red" title="{{ e.guard.breaker_reason }} — tripped {{ e.guard.breaker_at | ago }}. Lane A and lane C are still running; nothing was deleted.">[ PROXY DOWNLOAD STOPPED ]</span>{% endif %}
+        {% if e.guard.breaker_tripped %}<span class="chip red" title="{{ e.guard.breaker_reason }}, tripped {{ e.guard.breaker_at | ago }}. Lane A and lane C are still running; nothing was deleted.">[ PROXY DOWNLOAD STOPPED ]</span>{% endif %}
         {% if e.guard.halt_active %}<span class="chip red" title="{{ e.guard.halt_reason }}">[ SYNC HALTED{{ " (FLEET)" if e.guard.halt_scope == "fleet" }} ]</span>{% endif %}
         {% if e.guard.skipped_exists %}<span class="chip amber" title="{{ e.guard.skipped_exists }} file(s) exist on the NAS under the same name at a different size. Lane A is copy --ignore-existing, so this machine's newer versions will never upload.">[ WON'T UPLOAD: {{ e.guard.skipped_exists }} ]</span>{% endif %}
         {% if e.guard.trash_bytes and e.guard.trash_bytes > 5000000000 %}<span class="chip amber" title="{{ e.guard.trash_count }} recoverable file(s) in this machine's .ccsync-trash. Pruned automatically after 14 days.">[ TRASH: {{ e.guard.trash_bytes | human_bytes }} ]</span>{% endif %}
@@ -84,7 +84,7 @@
            an insufficient-VRAM refusal means the batch the editor asked for
            is not happening at all, and the grid is where an admin sees that
            without reading their tray. #}
-        {% if e.ingest.active %}<span class="chip {{ "amber" if e.ingest.warning else "green" }}" title="b-roll batch {{ e.ingest.batch[:8] if e.ingest.batch else "?" }}{% if e.ingest.clip %} — {{ e.ingest.clip }}{% endif %}{% if e.ingest.state %} ({{ e.ingest.state }}{% if e.ingest.gate %}: {{ e.ingest.gate }}{% endif %}){% endif %}{% if e.ingest.tier %} · {{ e.ingest.tier }} model{% endif %}{% if e.ingest.percent %} · {{ e.ingest.percent }}% of this clip{% endif %}{% if e.ingest.failed %} · {{ e.ingest.failed }} failed{% endif %} · reported {{ e.ingest.at | ago }}">[ INDEXING B-ROLL: {{ e.ingest.done }}/{{ e.ingest.total }} ]</span>{% endif %}
+        {% if e.ingest.active %}<span class="chip {{ "amber" if e.ingest.warning else "green" }}" title="b-roll batch {{ e.ingest.batch[:8] if e.ingest.batch else "?" }}{% if e.ingest.clip %} - {{ e.ingest.clip }}{% endif %}{% if e.ingest.state %} ({{ e.ingest.state }}{% if e.ingest.gate %}: {{ e.ingest.gate }}{% endif %}){% endif %}{% if e.ingest.tier %} · {{ e.ingest.tier }} model{% endif %}{% if e.ingest.percent %} · {{ e.ingest.percent }}% of this clip{% endif %}{% if e.ingest.failed %} · {{ e.ingest.failed }} failed{% endif %} · reported {{ e.ingest.at | ago }}">[ INDEXING B-ROLL: {{ e.ingest.done }}/{{ e.ingest.total }} ]</span>{% endif %}
         {% if e.ingest.warning %}<span class="chip amber" title="{{ e.ingest.warning }}">[ VRAM ]</span>{% endif %}
         {% if e.proxy.missing %}<span class="chip amber" title="{{ e.proxy.missing }} clip(s) on this machine have no proxy yet, so nobody else on the fleet can see that footage{% if e.proxy.state %} (proxy generator: {{ e.proxy.state }}){% endif %}{% if e.proxy.left %}; {{ e.proxy.left }} queued to encode{% endif %}.">[ {{ e.proxy.missing }} NEED PROXIES ]</span>{% endif %}
         {% if e.transport.express_last_error %}<span class="chip amber" title="last express-lane failure: {{ e.transport.express_last_error }}">[ EXPRESS FAILED ]</span>

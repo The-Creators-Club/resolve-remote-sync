@@ -53,7 +53,7 @@ const PHASE_LABEL = {
 // -- the prefixes themselves are still the four above because an editor's
 // cached bundle and the server have to agree on them.
 const HINTS = [
-  ['claude_auth:', 'This deployment has no working AI provider credential. An admin must add one on the dashboard: Settings → AI providers (or set ANTHROPIC_API_KEY on the container) — see ytdl/web/DEPLOY.md. Nothing else on this page is affected.'],
+  ['claude_auth:', 'This deployment has no working AI provider credential. An admin must add one on the dashboard: Settings → AI providers (or set ANTHROPIC_API_KEY on the container). See ytdl/web/DEPLOY.md. Nothing else on this page is affected.'],
   ['claude_missing:', 'The dashboard container cannot reach the configured AI provider (missing SDK or CLI, or no route out). See ytdl/web/DEPLOY.md.'],
   ['claude_timeout:', 'The AI provider did not answer in time. Try the search again; if it keeps happening the server is overloaded.'],
   ['claude_output:', 'The AI provider answered with something this app could not read. Trying again usually works.'],
@@ -194,7 +194,7 @@ const post = (path, body) => api(path, {
 });
 
 const fmtDur = s => {
-  if (!s && s !== 0) return '—';
+  if (!s && s !== 0) return '-';
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = Math.floor(s % 60);
   return h ? `${h}:${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}`
            : `${m}:${String(r).padStart(2, '0')}`;
@@ -288,7 +288,7 @@ function setBanner(key, text, bad) {
 // that finished hours ago (YTDL-10, 2026-08-11).
 function sessionExpired() {
   stopPolling();
-  setBanner('session', 'your dashboard session has expired — sign in to the '
+  setBanner('session', 'your dashboard session has expired. Sign in to the '
             + 'dashboard again and reload this page. The job itself keeps '
             + 'running on the server.', true);
 }
@@ -336,9 +336,9 @@ async function loadHealth() {
   } else if (h.claude === 'error') {
     setBanner('health', 'Claude Code failed on the server'
               + (h.claude_detail ? `: ${h.claude_detail}` : '')
-              + '. Searches will fail until it works — see ytdl/web/DEPLOY.md.', true);
+              + '. Searches will fail until it works. See ytdl/web/DEPLOY.md.', true);
   } else if (h.yt_dlp !== 'ok') {
-    setBanner('health', 'yt-dlp is not installed in this container — searching '
+    setBanner('health', 'yt-dlp is not installed in this container, so searching '
               + 'and downloading will both fail. See ytdl/web/DEPLOY.md.', true);
   } else {
     setBanner('health', null);
@@ -859,7 +859,7 @@ function renderDownloads(job, r) {
     } else if (p && p.status && v.dl_state === 'downloading') {
       st = p.status;                     // 'merging', 'converting to H.264...'
     } else if (v.dl_state === 'failed') {
-      st = 'failed — ' + (v.dl_error || 'see the server log');
+      st = 'failed: ' + (v.dl_error || 'see the server log');
     } else if (v.dl_state === 'skipped') {
       st = 'already downloaded';
     } else if (v.dl_state === 'done' && v.dl_error) {
@@ -867,7 +867,7 @@ function renderDownloads(job, r) {
       // (SAQBbd1Rxmo, 2026-08-13: YouTube served f137 truncated from two IPs
       // and only the 720p rung would come down). The clip is here; nothing
       // else in the UI would ever say it is not the rung that was asked for.
-      st = 'done — ' + v.dl_error;
+      st = 'done: ' + v.dl_error;
     } else {
       st = v.dl_state;                   // 'pending', 'done', 'downloading'
     }
@@ -918,7 +918,7 @@ function renderTerms() {
     c.appendChild(el('span', null, t.term));
     // REQ 5: a Chinese term is unreadable to most of the fleet without this.
     if (t.lang === 'zh' && t.english_gloss) {
-      c.appendChild(el('span', 'gloss', '— ' + t.english_gloss));
+      c.appendChild(el('span', 'gloss', '(' + t.english_gloss + ')'));
     }
     const shown = visibleVideos(t.id).length;
     c.appendChild(el('span', 'n', String(shown)));
@@ -960,7 +960,7 @@ function renderGrid() {
     const held = m.videos.filter(v => state.termFilter === null
       || (v.term_ids || []).includes(state.termFilter)).length;
     grid.appendChild(el('div', 'gridempty', held
-      ? `all ${held} filtered out — [ SHOW FILTERED OUT ] to see them`
+      ? `all ${held} filtered out: [ SHOW FILTERED OUT ] to see them`
       : 'nothing found for this term'));
   }
 
@@ -1114,7 +1114,7 @@ async function runSearch() {
     if (e.status === 409 && e.info && e.info.job_id) {
       // The job the server refused to duplicate is exactly the one the editor
       // has lost sight of -- including a forgotten manifest from last week.
-      toast(`${e.message} — showing it below`, false, 12000);
+      toast(`${e.message}, showing it below`, false, 12000);
       $('#progress').classList.remove('hidden');
       await attach(e.info.job_id);
     } else {
@@ -1158,7 +1158,7 @@ async function runUrls() {
     }
   } catch (e) {
     if (e.status === 409 && e.info && e.info.job_id) {
-      toast(`${e.message} — showing it below`, false, 12000);
+      toast(`${e.message}, showing it below`, false, 12000);
       $('#progress').classList.remove('hidden');
       await attach(e.info.job_id);
     } else {
@@ -1200,7 +1200,7 @@ async function cancelJob() {
   if (!state.jobId) return;
   try {
     await post(`api/jobs/${state.jobId}/cancel`);
-    toast('cancelling — it stops after the video in flight');
+    toast('cancelling: it stops after the video in flight');
   } catch (e) {
     toast(e.message, true);
   }
@@ -1323,7 +1323,7 @@ async function lockToServer() {
   btn.disabled = true;                        // same request, not a second one
   try {
     await post(`api/jobs/${state.jobId}/mode-lock`, {mode: 'server'});
-    toast('handing this job back to the server — it picks up whatever your '
+    toast('handing this job back to the server: it picks up whatever your '
           + 'machine has not finished');
   } catch (e) {
     // A deliberate human action, unlike the dispatch above: this one says so
@@ -1402,7 +1402,7 @@ async function loadHistory(more) {
   state.historyOffset = offset + items.length;
   $('#historymore').classList.toggle('hidden', !r.has_more);
   $('#historynote').textContent =
-    `showing ${state.historyOffset} of ${r.total} — click a clip to open its folder`;
+    `showing ${state.historyOffset} of ${r.total}. Click a clip to open its folder`;
 }
 
 function historyRow(d) {
@@ -1461,14 +1461,14 @@ async function reveal(d) {
     // A rejected fetch also happens when the browser blocks a plain-HTTP
     // dashboard origin from reaching 127.0.0.1 (Chrome's local-network
     // permission) with a perfectly healthy companion behind it (2026-08-12).
-    noCompanion(d, 'couldn’t reach the CC Sync companion — it may not be '
+    noCompanion(d, 'couldn’t reach the CC Sync companion: it may not be '
                 + 'running, or the browser blocked local connections (self-test: '
                 + 'open http://127.0.0.1:8899/status)');
     return;
   }
   if (res.status === 404) {
     // The tray app is there but predates this route: an upgrade, not a bug.
-    noCompanion(d, 'your companion is too old to open folders — it will be able '
+    noCompanion(d, 'your companion is too old to open folders; it will be able '
                 + 'to after the next upgrade');
     return;
   }
@@ -1490,7 +1490,7 @@ async function reveal(d) {
 // fallback anybody uses.
 function noCompanion(d, why) {
   const folder = 'Projects\\' + winParent(winPath(d.reveal_path));
-  toast(`${why} — the clip is in ${folder} on your sync drive (P: on Windows)`,
+  toast(`${why}. The clip is in ${folder} on your sync drive (P: on Windows)`,
         false, 15000,
         {label: '[ COPY PATH ]', run: () => copyText(folder)});
 }
@@ -1575,7 +1575,7 @@ async function acceptAttestation() {
   try {
     const info = await post('api/attestation', {version: state.attestVersion});
     setAttested(!!info.accepted);
-    toast('Recorded — thank you.');
+    toast('Recorded. Thank you.');
   } catch (e) {
     // A 409 means the wording changed while this page was open; reloading is
     // the only honest fix, because accepting text that is no longer current

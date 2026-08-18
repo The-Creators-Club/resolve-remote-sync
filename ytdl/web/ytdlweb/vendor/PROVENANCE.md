@@ -10,7 +10,7 @@ it is an engineering record, not legal advice.
 
 | File | Origin |
 |---|---|
-| `downloader.py` | Vendored from `yt-credit-downloader/downloader.py`, 2026-08-11, "as close to verbatim as the container allows" — the two container edits are marked `# [vendor]` at the code site. |
+| `downloader.py` | Vendored from `yt-credit-downloader/downloader.py`, 2026-08-11, "as close to verbatim as the container allows" — the container edits are marked `# [vendor]` at the code site (two of them, plus a third on 2026-08-18 that reworded two `on_status()` strings off an em dash for house style). |
 | `ytsearch.py` | Derived from the same project's `batch_dl.py`: its search half, with the argparse/print layer removed. |
 | `__init__.py` | Written for this repo; describes the two edits above. |
 

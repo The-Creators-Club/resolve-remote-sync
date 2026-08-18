@@ -45,7 +45,7 @@
         <input id="q" type="search" autocomplete="off"
                placeholder="one topic&hellip; algal reef controversy taiwan, offshore wind protest, drone show">
         <select id="project" title="Where the clips land: &lt;project&gt;\Youtube\&lt;term&gt;"></select>
-        <select id="quality" title="1080p is the highest YouTube serves as AVC — anything above re-encodes on the NAS">
+        <select id="quality" title="1080p is the highest YouTube serves as AVC; anything above re-encodes on the NAS">
           <option value="1080p">1080p</option>
           <option value="720p">720p</option>
           <option value="1440p">1440p</option>
@@ -65,7 +65,7 @@
              like #project is, and remembered in localStorage between visits.
              Raise it for a thin topic; 400 is a deliberate choice, and the
              reason there is a choice at all is 2026-08-11. -->
-        <select id="maxcand" title="How many candidate videos this search may collect before it stops looking — each one costs a metadata request at YouTube, and bulk requests from the NAS are what gets the IP bot-checked"></select>
+        <select id="maxcand" title="How many candidate videos this search may collect before it stops looking. Each one costs a metadata request at YouTube, and bulk requests from the NAS are what gets the IP bot-checked"></select>
       </div>
       <button id="go" class="primary-btn">SEARCH</button>
       <span id="health" class="rstatus" title="server-side Claude Code + yt-dlp"></span>
@@ -82,7 +82,7 @@
     <div class="ctrl-row">
       <div class="search-bar">
         <textarea id="urls" rows="1" spellcheck="false" autocomplete="off"
-                  placeholder="&hellip;or paste YouTube links — one per line — to download exactly those (ctrl+enter)"></textarea>
+                  placeholder="&hellip;or paste YouTube links (one per line) to download exactly those (ctrl+enter)"></textarea>
       </div>
       <button id="golinks" class="primary-btn"
               title="Downloads exactly these videos into &lt;project&gt;\Youtube, through the same pipeline as a search">GET LINKS</button>

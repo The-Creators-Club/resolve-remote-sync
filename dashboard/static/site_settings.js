@@ -89,7 +89,7 @@
       resolved.textContent = data.resolved && data.resolved.name
         ? "YouTube downloader will use: " + data.resolved.label
           + " (" + data.resolved.reason + ")"
-        : "YouTube downloader has NO usable AI provider — "
+        : "YouTube downloader has NO usable AI provider: "
           + (data.resolved ? data.resolved.reason : "nothing is configured");
     }
 
@@ -239,7 +239,7 @@
     btn.addEventListener("click", function () {
       out.textContent = " testing…";
       api("/api/v1/admin/ai-providers/" + p.name + "/test", {method: "POST"})
-        .then(function (r) { out.textContent = " " + (r.ok ? "OK — " : "FAILED — ") + r.detail; })
+        .then(function (r) { out.textContent = " " + (r.ok ? "OK: " : "FAILED: ") + r.detail; })
         .catch(function (err) { out.textContent = " failed: " + err.message; });
     });
     var wrap = el("span", "ai-test");

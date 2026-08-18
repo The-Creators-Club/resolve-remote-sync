@@ -64,21 +64,21 @@
           it can be overridden per machine in the indexer's config.</span></div>
       <fieldset class="model-tier-fieldset">
         <label class="radio-option"
-               title="Qwen3-VL 4B &mdash; needs an NVIDIA GPU with 8 GB VRAM (or Apple Silicon with 16 GB); ~20 s per clip on an RTX 3080">
+               title="Qwen3-VL 4B: needs an NVIDIA GPU with 8 GB VRAM (or Apple Silicon with 16 GB); ~20 s per clip on an RTX 3080">
           <input type="radio" name="indexer_model_tier" value="good"
                  aria-describedby="indexer-model-tier-good-help"
                  {{ "checked" if manifest.indexer.model_tier == "good" }}>
           Good
-          <span id="indexer-model-tier-good-help" class="muted">Qwen3-VL 4B — needs an NVIDIA GPU
+          <span id="indexer-model-tier-good-help" class="muted">Qwen3-VL 4B: needs an NVIDIA GPU
             with 8 GB VRAM (or Apple Silicon with 16 GB); ~20 s per clip on an RTX 3080</span>
         </label>
         <label class="radio-option"
-               title="Qwen3-VL 8B &mdash; needs 12 GB VRAM (or Apple Silicon with 24 GB); a little sharper on on-screen text and vocabulary, ~2&times; slower">
+               title="Qwen3-VL 8B: needs 12 GB VRAM (or Apple Silicon with 24 GB); a little sharper on on-screen text and vocabulary, ~2&times; slower">
           <input type="radio" name="indexer_model_tier" value="best"
                  aria-describedby="indexer-model-tier-best-help"
                  {{ "checked" if manifest.indexer.model_tier == "best" }}>
           Best
-          <span id="indexer-model-tier-best-help" class="muted">Qwen3-VL 8B — needs 12 GB VRAM (or
+          <span id="indexer-model-tier-best-help" class="muted">Qwen3-VL 8B: needs 12 GB VRAM (or
             Apple Silicon with 24 GB); a little sharper on on-screen text and vocabulary, ~2×
             slower</span>
         </label>
@@ -106,7 +106,7 @@
     <div style="margin-top:0.8rem">
       <label>USE
         <select id="ai-preference">
-          <option value="auto">auto — first available in the order above</option>
+          <option value="auto">auto - first available in the order above</option>
         </select>
       </label>
       <span class="muted">A pinned provider that is not available is a

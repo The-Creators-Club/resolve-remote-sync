@@ -329,8 +329,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # The PRODUCT's name, not a customer's: this is the ASGI app title, which
     # a second deployment must not inherit branded as the first one
     # (2026-08-17, COMMERCIAL_READINESS.md item 10). A site that says who it
-    # is gets "<org> — <product> Dashboard".
-    app_title = " — ".join(
+    # is gets "<org> - <product> Dashboard".
+    app_title = " - ".join(
         p for p in (settings.site_org_name,
                     f"{settings.site_product_name or 'CC Sync'} Dashboard") if p)
     app = FastAPI(title=app_title, lifespan=lifespan,

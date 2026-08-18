@@ -92,7 +92,7 @@
     <div class="muted">
       not configured. Set <span class="mono-sm">DASH_RELEASE_FEED_URL</span> to the vendor's
       channel (e.g. <span class="mono-sm">https://releases.ccsync.app/v1/channel.json</span>)
-      and redeploy to enable one-click updates from here — see docs/RELEASE_FEED.md.
+      and redeploy to enable one-click updates from here. See docs/RELEASE_FEED.md.
     </div>
   {% else %}
     <div class="muted">
@@ -110,9 +110,9 @@
       <form class="inline-form" hx-post="/partials/admin/feed/policy"
             hx-target="closest .admin-packages-box" hx-swap="outerHTML">
         <select name="policy" onchange="this.form.requestSubmit()">
-          <option value="manual" {% if feed.policy == "manual" %}selected{% endif %}>manual — Check now / Publish only</option>
-          <option value="stage" {% if feed.policy == "stage" %}selected{% endif %}>stage — auto-publish, not current</option>
-          <option value="current" {% if feed.policy == "current" %}selected{% endif %}>current — auto-publish + make current</option>
+          <option value="manual" {% if feed.policy == "manual" %}selected{% endif %}>manual - Check now / Publish only</option>
+          <option value="stage" {% if feed.policy == "stage" %}selected{% endif %}>stage - auto-publish, not current</option>
+          <option value="current" {% if feed.policy == "current" %}selected{% endif %}>current - auto-publish + make current</option>
         </select>
       </form>
     </div>
@@ -152,7 +152,7 @@
         </tbody>
       </table>
     {% else %}
-      <div class="muted">nothing new — the fleet's packages already cover everything the vendor feed offers</div>
+      <div class="muted">nothing new: the fleet's packages already cover everything the vendor feed offers</div>
     {% endif %}
 
     {% if feed.image.tag %}
@@ -166,7 +166,7 @@
       <div class="muted" style="margin-top:0.6rem">
         image <span class="mono-sm">{{ feed.image.tag }}</span> available
         (running <span class="mono-sm">{{ feed.image.current_running_version }}</span>)
-        — update in your NAS UI: <span class="mono-sm">{{ nas_hint }}</span>
+        - update in your NAS UI: <span class="mono-sm">{{ nas_hint }}</span>
       </div>
     {% endif %}
   {% endif %}

@@ -1,12 +1,14 @@
 """Core YouTube download logic.
 
 VENDORED VERBATIM from yt-credit-downloader/downloader.py (2026-08-11). The
-only edits are the ones the container forced, each marked `# [vendor]`:
-yt_dlp is imported lazily inside the functions that use it, and build_opts()
-takes a `cookies_file` alongside `cookies_browser` because there is no browser
-profile for uid 3000 to read cookies out of. Everything else -- especially the
-three redundant metadata channels and the .credits.json sidecar -- is
-unchanged, because the downstream DaVinci Resolve credits script reads them.
+only edits are the forced ones, each marked `# [vendor]`: yt_dlp is imported
+lazily inside the functions that use it, build_opts() takes a `cookies_file`
+alongside `cookies_browser` because there is no browser profile for uid 3000
+to read cookies out of, and the two on_status strings below were reworded off
+the upstream em dash (house style, 2026-08-18: no em dash in anything an
+editor reads). Everything else -- especially the three redundant metadata
+channels and the .credits.json sidecar -- is unchanged, because the downstream
+DaVinci Resolve credits script reads them.
 
 Downloads a video with yt-dlp and embeds the channel name and video URL into the
 file's metadata so a downstream DaVinci Resolve script can read them back and
@@ -398,12 +400,14 @@ def _swap_in(tmp: str, final: str, original: str, on_status=None) -> str:
         # Even the rename failed — keep the converted file under its own name
         # rather than throwing the work away.
         if on_status:
+            # [vendor] Reworded from the upstream em dash (house style, 2026-08-18).
             on_status(f"converted, but could not replace "
-                      f"{os.path.basename(original)} — saved as {os.path.basename(tmp)}")
+                      f"{os.path.basename(original)}: saved as {os.path.basename(tmp)}")
         return tmp
 
     if on_status:
-        on_status(f"original was in use — kept as {os.path.basename(aside)}")
+        # [vendor] Reworded from the upstream em dash (house style, 2026-08-18).
+        on_status(f"original was in use, kept as {os.path.basename(aside)}")
     return final
 
 

@@ -816,9 +816,19 @@ def _free_bytes_at(path: Any) -> Optional[int]:
     return None
 
 
-def _ingest_floor_bytes(ccsync_cfg: Optional[dict[str, Any]]) -> int:
-    floor_gb = ccsync_config.coerce_numeric(
-        ccsync_cfg or {}, "broll_ingest_free_space_floor_gb", 20)
+def _ingest_floor_bytes(ccsync_cfg: Optional[dict[str, Any]],
+                        kind: Optional[Any] = None) -> int:
+    """The staging free-space floor for `kind`, in bytes.
+
+    Kind-aware since 2026-08-18: the ORCHESTRATOR has always read
+    `<prefix>_free_space_floor_gb` through `IngestKind.cfg_key`, so a site that
+    set only `music_ingest_free_space_floor_gb` got its number in the batch and
+    b-roll's at the PUT that refuses before the first byte. Same key, one
+    reader. No `kind` still means b-roll's, for the callers that predate it.
+    """
+    key = (kind.cfg_key("free_space_floor_gb") if kind is not None
+           else "broll_ingest_free_space_floor_gb")
+    floor_gb = ccsync_config.coerce_numeric(ccsync_cfg or {}, key, 20)
     try:
         return int(max(0.0, float(floor_gb)) * 1_000_000_000)
     except (TypeError, ValueError):
@@ -1033,7 +1043,7 @@ def build_music_ingest_capabilities(
 
     kind = ingest_kinds.MUSIC_KIND
     staging_dir = kind.staging_root(cfg)
-    floor = _ingest_floor_bytes(cfg)
+    floor = _ingest_floor_bytes(cfg, kind)
     free = _free_bytes_at(staging_dir) if staging_dir is not None else None
     if staging_dir is None:
         reasons.append("this machine has no synced tree, so there is nowhere "
@@ -1610,7 +1620,7 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
                 f"takes at most {MUSIC_MAX_FILE_BYTES / 1_000_000:.0f} MB per "
                 "file")})
             return
-        floor = _ingest_floor_bytes(getattr(self.server, "ccsync_cfg", None))
+        floor = _ingest_floor_bytes(getattr(self.server, "ccsync_cfg", None), kind)
         free = _free_bytes_at(dest.parent)
         if free is not None and declared and (free - declared) < floor:
             self._drain_small_body()
@@ -1753,7 +1763,12 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
     def _dispatch_get(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
-        if path.startswith(INGEST_PREFIX):
+        # EVERY ingest prefix, not just b-roll's: this read `INGEST_PREFIX`
+        # until 2026-08-18, so `GET /music/ingest/capabilities` fell through to
+        # the plain 404 below and every music page decided the companion was
+        # too old and uploaded through the browser instead. The POST dispatcher
+        # always tested the whole set; this one is now the same shape.
+        if any(path.startswith(prefix) for prefix in INGEST_PREFIXES):
             if self._dispatch_ingest_get(path, parse_qs(parsed.query)):
                 return
             self._send_json(404, {"ok": False, "message": f"not found: {path}"})

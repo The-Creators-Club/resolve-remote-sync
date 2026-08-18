@@ -591,6 +591,45 @@ def test_a_music_path_resolves_to_the_music_kind():
     assert handler._kind_for_path("/status").name == "broll"
 
 
+def test_the_free_space_floor_reads_this_kind_s_key(tmp_path):
+    """The orchestrator reads `<prefix>_free_space_floor_gb` through cfg_key,
+    so the loopback must too: a site that set only the music key used to get
+    its number in the batch and b-roll's at the PUT that refuses first."""
+    cfg = {"music_ingest_free_space_floor_gb": 5,
+           "broll_ingest_free_space_floor_gb": 40,
+           "music_ingest_staging_dir": str(tmp_path)}
+
+    music = broll_server.build_ingest_capabilities(
+        cfg, None, None, kind=ingest_kinds.MUSIC_KIND)
+    broll = broll_server.build_ingest_capabilities(cfg, None, None)
+
+    assert music["staging"]["floor_bytes"] == 5_000_000_000
+    assert broll["staging"]["floor_bytes"] == 40_000_000_000
+
+
+def test_a_music_ingest_get_reaches_the_ingest_dispatcher():
+    """The GET dispatcher tested `INGEST_PREFIX` (b-roll's) rather than the
+    whole set until 2026-08-18, so `/music/ingest/capabilities` 404'd and every
+    music page read that as "this companion is too old" and uploaded through
+    the browser. The music feature was invisible on the machine holding it."""
+    handler = broll_server.BrollRequestHandler.__new__(
+        broll_server.BrollRequestHandler)
+    seen: list[str] = []
+    answered: list[int] = []
+    handler._dispatch_ingest_get = lambda path, query: (  # type: ignore[method-assign]
+        seen.append(path) or True)
+    handler._send_json = lambda status, body: answered.append(status)  # type: ignore[method-assign]
+
+    for path in ("/music/ingest/capabilities", "/music/ingest/progress",
+                 "/music/ingest/thumb", "/broll/ingest/capabilities"):
+        handler.path = path
+        handler._dispatch_get()
+
+    assert seen == ["/music/ingest/capabilities", "/music/ingest/progress",
+                    "/music/ingest/thumb", "/broll/ingest/capabilities"]
+    assert answered == []
+
+
 def test_the_upload_route_matches_both_prefixes():
     match = broll_server._UPLOAD_PATH_RE.match("/music/ingest/upload/s1/l1")
     assert match and match.group(1) == "music"

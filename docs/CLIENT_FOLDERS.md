@@ -151,8 +151,7 @@ published.
 
 ```sh
 TS=/var/packages/Tailscale/target/bin/tailscale
-sudo $TS serve  --bg --yes --https=8443 --set-path /broll/share http://127.0.0.1:8480/broll/share
-sudo $TS funnel --bg --yes --https=8443 on
+sudo $TS funnel --bg --yes --https=8443 --set-path /broll/share http://127.0.0.1:8480/broll/share
 sudo $TS serve status        # expect: https://<nas>.<tailnet>.ts.net:8443 (Funnel on) |-- /broll/share proxy http://127.0.0.1:8480/broll/share
 ```
 
@@ -161,12 +160,17 @@ dashboard binds the tailnet IP from `[net] bind_tailnet`, not loopback):**
 
 ```sh
 # over SSH on the NAS; the container is named `tailscale`
-sudo docker exec tailscale tailscale serve  --bg --yes --https=8443 --set-path /broll/share http://<tailnet-ip>:8480/broll/share
-sudo docker exec tailscale tailscale funnel --bg --yes --https=8443 on
+sudo docker exec tailscale tailscale funnel --bg --yes --https=8443 --set-path /broll/share http://<tailnet-ip>:8480/broll/share
 sudo docker exec tailscale tailscale serve status
 ```
 
-**`tailscale funnel … on` BLOCKS until the tailnet allows Funnel for this
+`tailscale funnel` takes the SAME arguments as `tailscale serve` and turns
+Funnel on for that mount in one go; there is no separate `funnel … on` step
+(that form fails on 1.98 with `non-localhost target "http://on" must include
+a scheme`). To go tailnet-only again: `tailscale funnel --https=8443 off`
+leaves the mount, `serve --https=8443 --set-path /broll/share off` removes it.
+
+**`tailscale funnel …` BLOCKS until the tailnet allows Funnel for this
 node.** With no `funnel` node attribute it prints
 
 ```
@@ -206,6 +210,10 @@ redeploy, and a customer's is theirs.
 
 **Turn it off** with `tailscale funnel --https=8443 off` (the serve mount can
 stay; it is tailnet-only without the funnel) and clear the public base.
+
+**Done for this fleet on 2026-08-19:** `truenas.tail26290e.ts.net:8443`, the
+`funnel` attribute granted by the owner through the console link, the folder
+JSON fetched from outside the tailnet (200) and `/login` on that port 404.
 
 ### 3.3 What Funnel costs
 

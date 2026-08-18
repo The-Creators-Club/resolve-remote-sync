@@ -206,6 +206,11 @@ Full runbook, including what each version number means and how to roll back:
 
 ## Conventions that matter here
 
+- **No em dashes in user-visible text** (owner's rule, 2026-08-18): tray
+  lines, popup/window copy, dashboard templates and SPA strings, wizard
+  steps, HTTP `detail` messages an editor reads. Use a hyphen with spaces, a
+  colon, or two sentences. Comments, docstrings, docs and log lines are not
+  covered. Each web/dashboard suite carries a scan test that fails on one.
 - **Comments explain constraints, history, and failure modes** — never what
   the next line does. Most non-obvious decisions cite a date or a bug id;
   keep doing that.

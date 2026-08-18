@@ -28,8 +28,15 @@ lazily. Browse, filters, similarity, streaming and the UI all work without it.
 ## Tests
 
 ```powershell
-cd music\web;  .venv\Scripts\python.exe -m pytest tests -q
+cd music\web;      .venv\Scripts\python.exe -m pytest tests -q
+cd music\indexer;  python -m pytest tests -q      # system python, torch-free half
 ```
+
+`indexer/tests` runs on the system interpreter on purpose. The CLAP half needs
+a GPU rig, so what is tested there is the surface that does not: the required
+paths, the model catalogue, and `mel_numpy` — whose bit-parity test against the
+real `ClapFeatureExtractor` skips (loudly) wherever transformers is not
+installed and runs wherever it is.
 
 ## Re-index after adding music (base rig only — it needs the RTX 3080)
 
@@ -60,6 +67,26 @@ python -m musicweb.drain apply drain.db --db <live music.db>
 and idempotent, and a row is closed only if the live journal still agrees about
 its `rel_path` and `content_hash`. `python -m musicweb.drain inspect drain.db`
 shows what a bundle holds. See `../docs/INDEXERS.md` and `web/DEPLOY.md`.
+
+### The two exported model halves
+
+Neither the NAS container nor the frozen companion may carry torch, so both
+halves of CLAP are exported once on the base rig and run with onnxruntime:
+
+```powershell
+cd music\indexer
+python export_text_encoder.py                              # -> data\text_encoder\  (ships to the NAS)
+python export_audio_encoder.py --db ..\web\data\music.db   # -> data\audio_encoder\ (ships to the release feed)
+```
+
+The **text** tower embeds every search query in the container. The **audio**
+tower (280 MB fp32, 512-d, cosine 0.9999999 vs torch on 20 library tracks) is
+what the companion will run to embed dropped music where it was dropped
+(`docs/MUSIC_INGEST_PLAN.md`); `mel_numpy.py` is the numpy front end that feeds
+it, bit-identical to the checkpoint's own feature extractor, and
+`music_models.py` pins both files by sha256 for the download. Neither exporter
+publishes anything that failed its own check. `../docs/INDEXERS.md` has the
+rules and the numbers.
 
 Indexing is resumable and skips unchanged files by size+mtime. A full rebuild of 376
 tracks takes ~9 min on the RTX 3080. `--retag` takes seconds because it re-scores from
@@ -185,6 +212,11 @@ indexer/
     debias.py               finds the source-bias axes (index time)
     ingest.py               drag-and-drop ingest + transcode + dedupe
   index_music.py            indexer CLI
+  export_text_encoder.py    CLAP text tower -> ONNX (the container runs it)
+  export_audio_encoder.py   CLAP audio tower -> ONNX (the companion runs it)
+  mel_numpy.py              the log-mel front end in numpy alone      <- vendored by the companion
+  music_models.py           the sidecar model catalogue: sha256, size, feed URL
+  tests/                    torch-free by design; system interpreter
 eval/
   eval.py                   quality measurement
   validate.py               tag spot-checks

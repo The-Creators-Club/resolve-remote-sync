@@ -127,6 +127,48 @@ Two things about that are load-bearing:
   `/static` mount. Relative URLs make the subdirectory pointless, and `tests/test_api.py`
   pins those two content types. This differs from b-roll; it is deliberate.
 
+## Dashboard ingest: the fleet routes and what they need (2026-08-18)
+
+`docs/MUSIC_INGEST_PLAN.md` step 2. There are now **two** ways music reaches the
+library, and only the older one goes through this app's `/api/ingest`:
+
+| | browser upload (2026-08-17) | dashboard ingest (2026-08-18) |
+|---|---|---|
+| who embeds | nobody here — the base rig drains `ingest_queue` later | the **editor's own machine**, with the exported CLAP audio tower (ONNX, no GPU) |
+| who tags | the base rig, and a drain bundle carries the rows back | **this container**, from the uploaded embedding, with the text tower it already loads for queries (`musicweb/rescore.py`) |
+| routes | `POST /music/api/ingest` | `/music/api/ingest-batches` (session) + `/music/api/fleet/ingest/…` (fleet) |
+| credential | the session, or `MUSIC_INGEST_TOKEN` standalone | `X-CCSync-Token` (`DASH_REPORT_TOKEN`) **plus** a signed `X-CCSync-Identity` |
+| still supported | **yes** — it is the documented fallback when a companion cannot embed (the item ends `queued_for_base_rig` and a `pending` journal row waits for the drain) | — |
+
+**Nothing new to configure.** The fleet routes read `DASH_REPORT_TOKEN` and
+`DASH_SESSION_SECRET`, which this container already has, and they fail closed
+without them: every `/music/api/fleet/ingest/*` call answers 403 and nothing
+else about `/music` changes. `docs/CONFIG.md` §2.5b is the table.
+
+Three deployment facts worth knowing before the first drop:
+
+- **The music share must be mounted `:rw`-readable to this container**, which it
+  already is for `/api/audio`. `uploaded` does not believe the companion: it
+  `stat()`s the file at the path the SERVER allocated and compares the size,
+  then widens the mode to 0664 — the container's `umask 077` otherwise leaves a
+  file that is in the index and invisible over SMB (the same fix
+  `routes_ingest._make_readable_to_the_fleet` applies to a browser upload).
+- **`music-data` must stay writable.** `result` writes a `tracks` row, its
+  windows and its waveform, and then re-scores every tag and axis in the
+  library — the percentiles are library-relative, so one new track changes
+  everybody's numbers.
+- **Migration 004** adds `ingest_batches`/`ingest_items` and is applied by
+  `ensure_schema` on the first connection after the deploy, like every
+  migration here. `ingest_queue` is untouched: it is the fallback, not
+  something 004 replaces.
+
+The artefact the COMPANION needs — `music-clap-audio-<ver>.onnx` plus its
+params JSON — is **not** shipped by this installer and is not in the table
+below. It goes to the vendor release feed (`docs/RELEASE_FEED.md`), pinned by
+sha256 in `music/indexer/music_models.py`; the container never embeds audio.
+It is exported into `data/audio_encoder/`, which is exactly why `data/` is
+shipped item by item rather than wholesale.
+
 ## What ships to the NAS
 
 The `web/` tree, and — separately — the three things in `data/` the app cannot work

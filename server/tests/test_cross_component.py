@@ -600,6 +600,76 @@ def test_the_vendored_identity_verifier_agrees_with_ytdls():
     assert ytdl_identity.read_identity_token("", token) is None
 
 
+# -- the music ingest vendored pair (2026-08-18, MUSIC_INGEST_PLAN.md step 2) --
+#
+#   music/web/musicweb/identity.py  <- ytdl/web/ytdlweb/identity.py
+#     The THIRD copy of the verifier that answers "which editor's companion is
+#     calling", for the third fleet-token surface (music ingest). Three
+#     verifiers that disagree about a token shape are three answers to one
+#     question and two of them are wrong.
+#
+#     musicweb can import neither of the other two: ytdl is feature-gated and a
+#     site may never have shipped it, and broll/web is deployed as a tree
+#     imported as the top-level package `app` -- the one name musicweb must
+#     never depend on (CLAUDE.md: two packages called `app` on one PYTHONPATH
+#     collide in sys.modules and one silently wins), and a music mount that
+#     stopped verifying identities because the b-roll checkout is stale would
+#     break the rule that each mount fails on its own.
+MUSIC_VENDOR_PAIRS = {
+    "music/web/musicweb/identity.py": (
+        REPO_ROOT / "music" / "web" / "musicweb" / "identity.py",
+        YTDL_WEB_PKG / "identity.py"),
+}
+
+
+def test_the_music_web_vendored_copies_are_byte_identical_to_their_sources():
+    """Fix a drift by editing the SOURCE and re-copying it in below the marker
+    -- never by editing musicweb's copy, which is what its header says and what
+    tools/release.ps1 prints."""
+    for label, (vendored, source) in sorted(MUSIC_VENDOR_PAIRS.items()):
+        assert source.exists(), f"missing source of truth for {label}: {source}"
+        assert vendored.exists(), f"missing vendored copy: {vendored}"
+        body = _vendored_body(vendored)
+        assert body == source.read_bytes(), (
+            f"{vendored} has drifted from {source}: {len(body)} bytes below the "
+            f"marker vs {len(source.read_bytes())} in the source. Edit the source, "
+            f"then re-copy it below the marker line.")
+
+
+def test_all_three_identity_verifiers_agree():
+    """The bytes are equal, so this proves the three MODULES load independently
+    and answer the same on the input that matters: a genuine token, and the
+    session-purpose token that must never be replayable as a machine identity
+    (the dashboard's SEC-1, copied into all three copies of this file)."""
+    modules = {
+        "ytdl": _load_by_path("ytdlweb_identity_three", YTDL_WEB_PKG / "identity.py"),
+        "broll": _load_by_path("broll_identity_three",
+                               REPO_ROOT / "broll" / "web" / "app" / "identity.py"),
+        "music": _load_by_path("music_identity_three",
+                               REPO_ROOT / "music" / "web" / "musicweb" / "identity.py"),
+    }
+    secret = "s" * 32
+    token = modules["ytdl"].make_identity_token(secret, "jsmith")
+    for name, mod in modules.items():
+        assert mod.read_identity_token(secret, token) == "jsmith", name
+        for bad in (None, "", "v1.jsmith.999.deadbeef",
+                    token.replace("identity", "session"),
+                    token[:-1] + ("0" if token[-1] != "0" else "1")):
+            assert mod.read_identity_token(secret, bad) is None, (name, bad)
+        # No secret configured is None everywhere -- fail-closed is the
+        # property, not an implementation detail of one of them.
+        assert mod.read_identity_token("", token) is None, name
+        assert mod.HEADER == modules["ytdl"].HEADER, name
+
+
+def test_the_music_release_gates_pin_the_music_pair():
+    """Both gates, for SHIP-3's reason: a pair pinned in the Windows gate only
+    would let a Mac build ship a drifted copy."""
+    for gate in ("release.ps1", "release_macos.sh"):
+        text = (REPO_ROOT / "tools" / gate).read_text(encoding="utf-8")
+        assert "music/web/musicweb/identity.py" in text.replace("\\", "/"), gate
+
+
 # A deliberately hostile info dict: the byte comparison above proves the FILES
 # match, this proves the two imported MODULES behave alike on the input most
 # likely to expose an encoding or fallback difference between a Linux container

@@ -45,7 +45,7 @@ from musicweb import config
 
 # Highest schema version this codebase knows how to run against. Bump it, add
 # the file to _MIGRATIONS, and give it a predicate.
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 # "the version this migration produces" -> (filename, already-applied predicate).
 # The predicate must answer "is this migration's effect already in the
@@ -54,6 +54,7 @@ _MIGRATIONS = {
     1: ('001_track_share.sql', lambda c: 'share' in _columns(c, 'tracks')),
     2: ('002_ingest_queue.sql', lambda c: _table_exists(c, 'ingest_queue')),
     3: ('003_ingest_journal.sql', lambda c: 'uid' in _columns(c, 'ingest_queue')),
+    4: ('004_ingest_batches.sql', lambda c: _table_exists(c, 'ingest_items')),
 }
 
 
@@ -481,8 +482,25 @@ def find_content_duplicate(con, path, digest=None):
     here, and caught by the sweep that indexes them.
     """
     path = Path(path)
-    size = path.stat().st_size
-    digest = digest or content_hash(path)
+    return find_content_duplicate_by_digest(
+        con, digest or content_hash(path), path.stat().st_size)
+
+
+def find_content_duplicate_by_digest(con, digest, size):
+    """The same defence, for a file this host does not have (2026-08-18).
+
+    Dashboard music ingest hashes on the EDITOR'S machine and sends the digest
+    ahead of the bytes -- the pre-check has to answer "already in the library?"
+    while the file is still on a laptop. The digest is the same blake2b-16
+    `content_hash` computes, and the candidate set is the same one:
+    rows whose byte count already matches, which the server can still open
+    because the share is mounted here for /api/audio.
+
+    Split out of find_content_duplicate rather than reimplemented, so the two
+    entry points cannot drift into two answers about the same file.
+    """
+    if not digest or not size:
+        return None
     for r in con.execute('SELECT share, rel_path FROM tracks WHERE bytes=?', (size,)):
         try:
             other = config.resolve_path(r['share'] or config.SHARE, r['rel_path'])

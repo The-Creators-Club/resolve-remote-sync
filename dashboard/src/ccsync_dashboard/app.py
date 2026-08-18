@@ -582,6 +582,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         r"(claim|heartbeat|release|items/[0-9a-f]{32}/(status|result|uploaded))$"
     )
 
+    # The MUSIC ingest fleet routes (docs/MUSIC_INGEST_PLAN.md step 2,
+    # 2026-08-18). Identical posture and identical shape to the b-roll block
+    # above -- an editor's companion embedding a dropped album with the CLAP
+    # audio tower while nobody is at the browser -- so it gets its own regex
+    # rather than a widened one: two mounts, two prefixes, and a pattern that
+    # tried to cover both would be a pattern nobody can read a carve-out out of.
+    #
+    # Per-suffix, never per-prefix. /music/api/ingest-batches -- the SPA's own
+    # panel, which decides whose batches you may cancel -- stays fully
+    # session-gated, so a leaked fleet token cannot read or stop one.
+    _music_fleet_re = re.compile(
+        r"^/music/api/fleet/ingest/batches/[0-9a-f]{32}/"
+        r"(claim|heartbeat|release|items/[0-9a-f]{32}/(status|result|uploaded))$"
+    )
+
     @app.middleware("http")
     async def login_gate(request, call_next):
         path = request.url.path
@@ -612,6 +627,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # the companion indexing a claimed b-roll ingest batch -- same
             # fleet-token posture again (docs/BROLL_INGEST_PLAN.md §4.2)
             or (_broll_fleet_re.match(path) is not None and _companion_token_ok(request))
+            # and the same for a claimed MUSIC ingest batch
+            # (docs/MUSIC_INGEST_PLAN.md step 2)
+            or (_music_fleet_re.match(path) is not None and _companion_token_ok(request))
             # the setup wizard's own API (ZERO_TOUCH_PLAN.md WP D). Open at
             # THIS layer only -- every route under it re-checks via
             # setup_routes.require_setup_access, which is the actual gate
@@ -722,12 +740,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.broll_mounted = app.state.broll_status == broll.MOUNTED
 
     # Same contract for the music platform, and mounted the same way: after the
-    # routers, best-effort, tri-state, only advertised when it fully took. No
-    # flag and no token, unlike b-roll -- musicweb has no route that bypasses
-    # login_gate, so there is no credential to validate and nothing to refuse to
-    # start over; whether the music tree is shipped to the host IS the switch,
-    # and a host without it simply reports ABSENT. See music.py.
-    app.state.music_status = music.mount_music(app)
+    # routers, best-effort, tri-state, only advertised when it fully took. Still
+    # no flag and no token, unlike b-roll -- the music FLEET routes fail closed
+    # on their own and there is no "unconfigured = open" branch to re-check;
+    # whether the music tree is shipped to the host IS the switch, and a host
+    # without it simply reports ABSENT. `settings` since 2026-08-18: MusicGate
+    # mints the ingest panel's identity from the session cookie the way
+    # BrollGate does. See music.py.
+    app.state.music_status = music.mount_music(app, settings)
     app.state.music_mounted = app.state.music_status == music.MOUNTED
 
     # And the YouTube downloader, on the same terms as music -- shipping the

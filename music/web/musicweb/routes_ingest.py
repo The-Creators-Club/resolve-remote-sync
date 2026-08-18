@@ -36,6 +36,7 @@ and total bytes, because the dashboard's body_size_gate deliberately only makes
 a DECLARATION check on this path. See config's "ingest credentials" block.
 """
 import hmac
+import importlib.util
 import json
 import logging
 import os
@@ -246,13 +247,25 @@ def _transcode_to_mp3(src: Path, dest_dir: Path):
 
 
 def _load_indexer():
-    """-> (music_index.ingest, index_music), or None if this host has neither.
+    """-> (music_index.ingest, index_music), or None if this host cannot analyse.
 
     None is not an error here, it is the container: `add_indexer_to_path()`
-    finds nothing, or it finds the tree and the import dies on torch/librosa.
+    finds nothing, or it finds the tree and cannot run the CLAP AUDIO tower.
     Either way the answer is to queue, not to 503.
+
+    The torch check is EXPLICIT, and it has to be (2026-08-18). Until the
+    tagging code moved to `musicweb.rescore`, `import index_music` reached
+    `music_index.tagging` -> `clap_model` -> torch, so a torch-less host was
+    sorted into the queued path by an import that failed on the way past. That
+    accident disappeared the moment index_music stopped importing tagging, and
+    a checkout-carrying container went straight down the INLINE path and 500'd
+    on `index().clap` -- the one thing this function exists to prevent. What
+    inline ingest actually needs is the audio tower; the audio tower needs
+    torch; so that is what is asked.
     """
     if not config.add_indexer_to_path():
+        return None
+    if importlib.util.find_spec('torch') is None:
         return None
     try:
         from music_index import ingest as _ingest

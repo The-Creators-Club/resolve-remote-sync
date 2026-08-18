@@ -168,6 +168,14 @@ $VendorPairs = @(
     @{ Source = Join-Path $RepoRoot "ytdl\web\ytdlweb\identity.py"
        Vendored = Join-Path $RepoRoot "broll\web\app\identity.py"
        Mode = "marker"; Fix = "edit ytdl/web/ytdlweb/identity.py (two verifiers that disagree about a token shape are two answers to 'which editor is this'), then re-copy it in" }
+    # Music ingest (docs/MUSIC_INGEST_PLAN.md step 2): the THIRD copy of the
+    # identity verifier, for the third fleet-token surface. musicweb can import
+    # neither of the other two -- ytdl is feature-gated per site, and broll/web
+    # is the tree deployed as top-level `app`, the one name musicweb must never
+    # depend on.
+    @{ Source = Join-Path $RepoRoot "ytdl\web\ytdlweb\identity.py"
+       Vendored = Join-Path $RepoRoot "music\web\musicweb\identity.py"
+       Mode = "marker"; Fix = "edit ytdl/web/ytdlweb/identity.py (three verifiers that disagree about a token shape are three answers to 'which editor is this'), then re-copy it in" }
 )
 $DistDir = Join-Path $CompanionDir "dist"
 $ExePath = Join-Path $DistDir "ccsync-companion.exe"

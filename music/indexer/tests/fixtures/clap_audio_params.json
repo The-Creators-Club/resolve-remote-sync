@@ -1,0 +1,56 @@
+{
+  "params_version": 1,
+  "artefact": "music-clap-audio-1.onnx",
+  "artefact_version": "1",
+  "model": "laion/larger_clap_music_and_speech",
+  "precision": "fp32",
+  "opset": 17,
+  "exported_at": "2026-08-18T04:37:28+00:00",
+  "features": {
+    "extractor": "ClapFeatureExtractor",
+    "sampling_rate": 48000,
+    "max_length_s": 10.0,
+    "nb_max_samples": 480000,
+    "feature_size": 64,
+    "fft_window_size": 1024,
+    "hop_length": 480,
+    "frequency_min": 50.0,
+    "frequency_max": 14000.0,
+    "n_frames": 1001,
+    "mel_scale": "slaney",
+    "mel_norm": "slaney",
+    "mel_floor": 1e-10,
+    "power": 2.0,
+    "log_mel": "dB",
+    "log_reference": 1.0,
+    "log_min_value": 1e-10,
+    "center": true,
+    "pad_mode": "reflect",
+    "window": "hann",
+    "window_periodic": true,
+    "padding": "repeatpad",
+    "padding_value": 0.0,
+    "truncation": "rand_trunc",
+    "truncation_rule": "head"
+  },
+  "graph": {
+    "input": "input_features",
+    "input_shape": [
+      "batch",
+      1,
+      1001,
+      64
+    ],
+    "output": "audio_embeds",
+    "is_longer_required": false,
+    "enable_fusion": false
+  },
+  "embedding": {
+    "dim": 512,
+    "normalised": true,
+    "pooling": "mean_then_l2",
+    "window_seconds": 10.0,
+    "max_windows": 12,
+    "window_trim_fraction": 0.02
+  }
+}

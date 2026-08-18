@@ -334,6 +334,24 @@ redistribution problem was ours and stays fixed; the "is a personal
 subscription allowed to power a service" question is the customer's, asked
 explicitly, off by default.
 
+### 2.5b Music ingest (`MUSIC_INGEST_PLAN.md` step 2, 2026-08-18)
+
+Dashboard music ingest reads variables the container already has; there is
+**nothing new to set**, which is the point of listing them here — an operator
+debugging "the companion gets a 403" needs to know which existing secret it is.
+
+| Variable | Read by | Effect when unset |
+|---|---|---|
+| `DASH_REPORT_TOKEN` | `musicweb.config.fleet_token()` → `fleet_auth.require_fleet_token` | **every `/music/api/fleet/ingest/*` call is 403.** Fail-closed: what is behind those routes is `INSERT INTO tracks` and a library-wide re-score. Search, streaming, the queue drain and the base-rig indexer are unaffected |
+| `DASH_SESSION_SECRET` | `musicweb.config.session_secret()` → `fleet_auth.require_identity`, and `MusicGate`'s identity stamping | fleet calls are 403 `identity_unconfigured`, and the ingest panel 401s for every editor. The dashboard already refuses to boot without it |
+| `MUSIC_INGEST_TOKEN` | the OLDER browser-upload route (`POST /music/api/ingest`) only | unchanged: required standalone, unnecessary behind the dashboard login. It has nothing to do with the fleet routes |
+
+Two constants, in `musicweb/config.py` rather than the environment because they
+are a protocol between the server and the companion, not a per-site choice:
+`LEASE_SECONDS = 300` and `HEARTBEAT_SECONDS = 30` (ytdl's and b-roll's
+numbers — ten missed heartbeats is a comfortable margin over a laptop lid
+closing), and `MAX_BATCH_ITEMS = 500`.
+
 ### 2.6 Mounts and cadences
 
 | Var | Default | Notes |

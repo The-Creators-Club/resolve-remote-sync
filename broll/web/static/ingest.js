@@ -1203,8 +1203,14 @@ function ingestRenderLive() {
                      (lb.gate === "no-model" && model.percent != null);
     if (fetching) {
       const pct = model.percent != null ? ` ${Math.round(model.percent)}%` : "";
-      bits.push(`downloading the ${ingTierLabel(model.tier || ing.tier)} model${pct}` +
-                (pct ? " (a few GB, this can take a while on the first run)" : ""));
+      // rate/eta arrive from companion 0.9.1+ (parallel ranged download);
+      // an older companion sends neither and the line falls back to "a few GB".
+      const rate = model.rate_bytes_per_s > 0
+        ? ` at ${(model.rate_bytes_per_s / 1e6).toFixed(0)} MB/s` : "";
+      const eta = model.eta_seconds > 0
+        ? `, about ${Math.max(1, Math.round(model.eta_seconds / 60))} min left` : "";
+      bits.push(`downloading the ${ingTierLabel(model.tier || ing.tier)} model${pct}${rate}${eta}` +
+                (!rate && pct ? " (a few GB, this can take a while on the first run)" : ""));
     } else if (lb.gate) {
       bits.push(ingGateLabel(lb.gate));
     }

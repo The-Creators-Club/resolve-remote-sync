@@ -46,3 +46,8 @@ rclone.conf
 # files still live here on the base rig — see private/README.md — they are just
 # not ours to ship (COMMERCIAL_READINESS.md item 10 / section B, 2026-08-17).
 private/
+
+# local vendor-feed working dir (tools/publish_feed.py --feed-dir): copies of
+# artefacts + the signed channel; the GitHub release is the published truth
+feed/
+dist/

@@ -123,9 +123,12 @@ Two things about that are load-bearing:
   require the trailing slash, so `/music` matches no route and the parent router 307s to
   `/music/`. Only then is the page's base directory `/music/`, making `api/stats` resolve
   to `/music/api/stats` rather than `/api/stats`. Do not "optimise" that redirect away.
-- `main.py` still serves `/app.js` and `/style.css` as **explicit routes** rather than a
-  `/static` mount. Relative URLs make the subdirectory pointless, and `tests/test_api.py`
-  pins those two content types. This differs from b-roll; it is deliberate.
+- `main.py` still serves `/app.js`, `/ingest.js` and `/style.css` as **explicit routes**
+  rather than a `/static` mount. Relative URLs make the subdirectory pointless, and
+  `tests/test_api.py` pins the content types. This differs from b-roll; it is deliberate.
+  `ingest.js` (2026-08-18) is a second CLASSIC script that shares `app.js`'s helpers
+  through the global scope, so it is served and loaded after it, never bundled and never
+  a module.
 
 ## Dashboard ingest: the fleet routes and what they need (2026-08-18)
 

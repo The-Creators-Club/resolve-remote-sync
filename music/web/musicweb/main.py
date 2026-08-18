@@ -55,6 +55,20 @@ def appjs():
                     media_type='application/javascript')
 
 
+@app.get('/ingest.js')
+def ingestjs():
+    """The ingest panel (docs/MUSIC_INGEST_PLAN.md step 4).
+
+    A THIRD sibling route rather than a /static mount, for the reason above:
+    two files did not justify a subdirectory and three do not either, and the
+    content type is pinned by tests/test_api.py the same way. It is a second
+    CLASSIC script -- it shares app.js's helpers through the global scope, so
+    it must be served and loaded, never bundled or turned into a module.
+    """
+    return Response((config.STATIC_DIR / 'ingest.js').read_text(encoding='utf-8'),
+                    media_type='application/javascript')
+
+
 @app.get('/style.css')
 def css():
     return Response((config.STATIC_DIR / 'style.css').read_text(encoding='utf-8'),

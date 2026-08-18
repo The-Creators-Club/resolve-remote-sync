@@ -555,7 +555,19 @@ function wireDropzone() {
   window.addEventListener('drop', async e => {
     if (!hasFiles(e)) return;
     e.preventDefault(); depth = 0; zone.classList.remove('on');
+    // Both halves of the DataTransfer are read HERE, synchronously: it is
+    // neutered the instant either handler yields, and `files` is what the
+    // fallback below needs after ingest.js has had its await.
     const files = Array.from(e.dataTransfer.files || []);
+    // The companion flow takes the drop when this editor has one (music
+    // ingest step 4): their own machine analyses the audio and uploads it,
+    // instead of the browser posting it here for the base rig to index.
+    // `miHandleDrop` answers false when there is no companion (or one too old
+    // for /music/ingest/*), which falls through to that older path -- it is
+    // the documented fallback, not a dead branch.
+    if (typeof miHandleDrop === 'function' && await miHandleDrop(e.dataTransfer, files)) {
+      return;
+    }
     if (files.length) await ingest(files);
   });
 }

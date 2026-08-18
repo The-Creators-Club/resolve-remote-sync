@@ -79,12 +79,110 @@
   <div class="dropinner">
     <div class="dropicon">&#8623;</div>
     <strong>Drop audio to add it to the library</strong>
-    <span class="muted">It is copied to the library, analysed and indexed. .ogg is transcoded to mp3.</span>
+    <span class="muted">Your own machine analyses it and uploads it. .ogg is transcoded to mp3.</span>
   </div>
 </div>
+
+<!-- The ingest panel (docs/MUSIC_INGEST_PLAN.md step 4). Opened by a drop, or
+     by the picker buttons inside it; ingest.js stays inert if this markup is
+     missing, which is what an older cached index.html looks like. -->
+<section id="mi-panel" class="hidden mi-panel" aria-label="Add music to the library">
+  <div class="mi-inner">
+    <button id="mi-close" class="text-btn">&times; close</button>
+    <h2>Add music</h2>
+
+    <div class="companion-status">
+      <span id="mi-dot" class="status-dot status-unknown"></span>
+      <span id="mi-companion-text">checking&hellip;</span>
+      <button id="mi-recheck" class="text-btn">recheck</button>
+    </div>
+    <p class="muted">
+      Your own machine does the work: the CC Sync companion converts, analyses
+      with the CLAP model and uploads the finished track to the library. The
+      dashboard never sees the audio.
+    </p>
+
+    <!-- Persistent, not a toast: a refusal from the companion (503 from
+         /music/ingest/run) has to still be on screen when the editor comes
+         back to it. Cleared by dismissing it, or by a run that is accepted. -->
+    <div id="mi-notice" class="mi-notice hidden" role="alert">
+      <span id="mi-notice-text"></span>
+      <button id="mi-notice-dismiss" class="text-btn">dismiss</button>
+    </div>
+
+    <div class="mi-drop">
+      <div class="mi-drop-head">Drag audio or folders anywhere on this page</div>
+      <div class="muted">or choose from this computer&hellip;</div>
+      <div class="mi-pick-row">
+        <button type="button" id="mi-pick-files" class="primary-btn">Choose files&hellip;</button>
+        <button type="button" id="mi-pick-folder" class="primary-btn">Choose a folder&hellip;</button>
+      </div>
+      <div class="muted">
+        Files chosen this way are analysed where they are - they are not copied
+        into the browser first.
+      </div>
+    </div>
+
+    <div id="mi-stage" class="hidden">
+      <h3>Tracks</h3>
+      <div id="mi-preview-head" class="mi-preview-head"></div>
+      <div id="mi-preview" class="mi-preview"></div>
+
+      <h3>When to run</h3>
+      <form id="mi-form" class="mi-form" autocomplete="off">
+        <label class="radio-option">
+          <input type="radio" name="mi-run-mode" value="idle" checked>
+          <span>Only when idle
+            <span class="muted">Starts when you step away, pauses the moment you come back - the way proxy generation already works.</span>
+          </span>
+        </label>
+        <label class="radio-option">
+          <input type="radio" name="mi-run-mode" value="foreground">
+          <span>Foreground
+            <span class="muted">Starts now and keeps going while you work. It uses one CPU core, not the GPU.</span>
+          </span>
+        </label>
+      </form>
+
+      <div id="mi-summary" class="mi-summary"></div>
+      <div class="mi-actions">
+        <button type="button" id="mi-run" class="primary-btn">Run</button>
+        <button type="button" id="mi-clear" class="text-btn">clear</button>
+      </div>
+    </div>
+
+    <div id="mi-live" class="hidden">
+      <h3>Running</h3>
+      <div id="mi-live-body"></div>
+      <div class="mi-actions">
+        <button type="button" id="mi-pause" class="primary-btn">Pause</button>
+        <button type="button" id="mi-resume" class="primary-btn">Resume</button>
+        <button type="button" id="mi-start-now" class="primary-btn">Start now</button>
+        <button type="button" id="mi-pause-upload" class="primary-btn">Pause uploads</button>
+        <button type="button" id="mi-cancel" class="text-btn">cancel batch&hellip;</button>
+      </div>
+    </div>
+
+    <h3>Batches</h3>
+    <div id="mi-scope-tabs" class="mode-toggles">
+      <button type="button" class="mode-btn" data-scope="mine">Mine</button>
+      <button type="button" class="mode-btn hidden" data-scope="all">All machines</button>
+    </div>
+    <div id="mi-batch-list" class="mi-batch-list"></div>
+  </div>
+</section>
+
 <div id="toast" class="toast hidden"></div>
 
 <audio id="audio" preload="none"></audio>
 <script src="app.js"></script>
+<!-- A second classic script, not a module: it shares app.js's helpers
+     ($, el, toast, fmtDur, COMPANION) through the global scope, and its URLs
+     are document-relative for the same reason every other one here is. It
+     must load AFTER app.js, and no name may be declared in both -- two
+     classic scripts share one global lexical environment and a duplicate
+     `const` is a SyntaxError that blanks the whole page, search included
+     (tests/test_ingest_ui.py). -->
+<script src="ingest.js"></script>
 </body>
 </html>

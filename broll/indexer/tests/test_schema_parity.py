@@ -23,7 +23,7 @@ def _index_names(conn: sqlite3.Connection, table: str) -> set[str]:
 def test_fresh_schema_is_at_latest_version(schema_path: Path):
     conn = sqlite3.connect(":memory:")
     conn.executescript(schema_path.read_text(encoding="utf-8"))
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == LATEST_VERSION == 10
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == LATEST_VERSION == 11
     conn.close()
 
 

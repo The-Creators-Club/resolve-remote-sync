@@ -123,7 +123,7 @@ def test_migrate_upgrades_v1_to_latest_preserving_rows(v1_db):
 
     conn = sqlite3.connect(str(v1_db))
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == LATEST_VERSION == 10
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == LATEST_VERSION == 11
 
         cols = {r[1] for r in conn.execute("PRAGMA table_info(segments)").fetchall()}
         assert "onscreen_text" in cols
@@ -179,12 +179,12 @@ def test_migrate_is_idempotent(v1_db):
     assert "applied" in first
 
     second = migrate_sqlite_db(v1_db)
-    assert "already at user_version 10" in second
+    assert f"already at user_version {LATEST_VERSION}" in second
     assert "nothing to do" in second
 
     conn = sqlite3.connect(str(v1_db))
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == LATEST_VERSION
         # still exactly one video, one segment — second run inserted nothing extra
         assert conn.execute("SELECT COUNT(*) FROM videos").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM segments").fetchone()[0] == 1
@@ -220,7 +220,7 @@ def test_migrate_uses_bundled_fallback_when_repo_root_migrations_missing(v1_db, 
     assert "005_duplicates.sql" in report
     conn = sqlite3.connect(str(v1_db))
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 10
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == LATEST_VERSION
         conn.execute("SELECT * FROM embeddings LIMIT 0")
         video_cols = {r[1] for r in conn.execute("PRAGMA table_info(videos)").fetchall()}
         assert "full_hash" in video_cols and "duplicate_of" in video_cols

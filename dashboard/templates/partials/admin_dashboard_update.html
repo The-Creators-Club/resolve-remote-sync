@@ -1,0 +1,106 @@
+{# The dashboard's own code updates (ZERO_TOUCH_PLAN.md WP K, 2026-08-18).
+
+   Deliberately NOT inside admin_packages.html: that partial is re-swapped by
+   htmx every 30s, which would throw away a progress panel mid-update. This
+   one is loaded once and refreshed by static/dashboard_update.js, which owns
+   the polling while an update runs. #}
+<div class="admin-packages-box" id="dashboard-update" data-running="{{ dash_update.running }}">
+  <div class="side-head">[ DASHBOARD ]
+    <span class="muted">this dashboard's own code. The container image is the runtime; only a matching bundle can be applied from here.</span></div>
+
+  {% if error %}
+    <div class="banner">▲ {{ error }}</div>
+  {% endif %}
+
+  <div class="muted">
+    running <span class="mono-sm">{{ dash_update.running }}</span>
+    · code from <span class="mono-sm">{{ dash_update.source or "?" }}</span>
+    {% if dash_update.image %}· image carries <span class="mono-sm">{{ dash_update.image }}</span>{% endif %}
+    {% if dash_update.runtime_id %}· runtime <span class="mono-sm" title="{{ dash_update.runtime_id }}">{{ dash_update.runtime_id[:12] }}</span>{% endif %}
+  </div>
+
+  {% if dash_update.current.reverted_reason %}
+    <div class="banner">▲ reverted automatically: {{ dash_update.current.reverted_reason }}</div>
+  {% endif %}
+
+  {% if not dash_update.image_mode %}
+    <div class="muted" style="margin-top:0.6rem">
+      This deployment updates from the base rig, not over the air: its code is bind-mounted
+      from the NAS by <span class="mono-sm">server/install_dashboard_app.py</span>.
+      Move it to the container image (docs/DOCKER.md) to update it from this page.
+    </div>
+  {% else %}
+    <div id="dashupd-progress" class="muted" style="margin-top:0.6rem"
+         data-in-progress="{{ 1 if dash_update.in_progress else 0 }}"
+         data-step="{{ dash_update.step }}">
+      {% if dash_update.in_progress %}
+        working: {{ dash_update.step }} - {{ dash_update.message }}
+      {% elif dash_update.last_error %}
+        <span class="chip red">[ LAST UPDATE FAILED ]</span> {{ dash_update.last_error }}
+      {% endif %}
+    </div>
+
+    {% if dash_update.code_updates %}
+      <table class="editors" style="margin-top:0.6rem">
+        <thead><tr><th>VERSION</th><th>SIZE</th><th>PUBLISHED</th><th>NOTES</th><th></th></tr></thead>
+        <tbody>
+        {% for u in dash_update.code_updates %}
+          <tr class="editor-row">
+            <td class="mono-sm">{{ u.version }}</td>
+            <td class="mono-sm">{{ u.size_bytes | human_bytes }}</td>
+            <td class="muted">{{ u.published_at | ago if u.published_at else "" }}</td>
+            <td class="muted">{{ u.notes }}</td>
+            <td>
+              <button class="btn" type="button" data-dashupd-apply="{{ u.version }}">[ UPDATE NOW ]</button>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <div class="muted" style="margin-top:0.6rem">no code update is available for this runtime</div>
+    {% endif %}
+
+    {% if dash_update.runtime_updates %}
+      <div class="muted" style="margin-top:0.8rem">
+        {% for u in dash_update.runtime_updates %}
+          <div>
+            <span class="chip amber">[ RUNTIME UPDATE ]</span>
+            dashboard <span class="mono-sm">{{ u.version }}</span> needs a new container image:
+            it brings dependencies this container does not have. Apply it in your NAS's own UI:
+            <span class="mono-sm">{{ dash_update.nas_hint }}</span>
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    {% if dash_update.current.version %}
+      <div class="muted" style="margin-top:0.8rem">
+        installed tree <span class="mono-sm">{{ dash_update.current.version }}</span>
+        {% if dash_update.current.applied_at %}applied {{ dash_update.current.applied_at | ago }}{% endif %}
+        <button class="btn" type="button"
+                data-dashupd-rollback="{{ dash_update.current.previous }}">[ ROLLBACK
+          {% if dash_update.current.previous %}TO {{ dash_update.current.previous }}{% else %}TO THE IMAGE{% endif %} ]</button>
+      </div>
+    {% endif %}
+
+    {% if dash_update.backups %}
+      <div class="side-head" style="margin-top:1.2rem">[ DATABASE BACKUPS ]
+        <span class="muted">taken before each update, under /data/backups</span></div>
+      <table class="editors">
+        <thead><tr><th>WHEN</th><th>NAME</th><th>FROM</th><th>DATABASES</th><th>SIZE</th></tr></thead>
+        <tbody>
+        {% for b in dash_update.backups[:10] %}
+          <tr class="editor-row">
+            <td class="muted">{{ b.created_at | ago if b.created_at else "" }}</td>
+            <td class="mono-sm">{{ b.name }}</td>
+            <td class="mono-sm muted">{{ b.from_version }}</td>
+            <td class="muted">{{ b.databases | join(", ") }}</td>
+            <td class="mono-sm">{{ b.size_bytes | human_bytes }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  {% endif %}
+</div>

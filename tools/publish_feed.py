@@ -45,6 +45,10 @@ which docs/RELEASE_FEED.md documents in full.
     python tools/publish_feed.py --manifest companion\dist\ccsync-release.json \
         --feed-dir .\feed --base-url https://releases.ccsync.app/v1
 
+    python tools/publish_feed.py --artifact dist/ccsync-dashboard-0.5.1.tar.gz \
+        --kind dashboard --platform linux --version 0.5.1 \
+        --feed-dir .\feed --github-repo ccsync/ccsync-releases --github-upload
+
     python tools/publish_feed.py --set-image 1.2.3@sha256:deadbeef... --feed-dir .\feed
 
     python tools/publish_feed.py --verify .\feed
@@ -124,12 +128,15 @@ def canonical_channel_bytes(channel: dict[str, Any]) -> bytes:
 
 
 def _sign_artifact(artifact: Path, *, kind: str, platform: str, version: str,
-                   min_version: str, signed_binary: bool, published_at: str, key: str) -> dict:
+                   min_version: str, signed_binary: bool, published_at: str, key: str,
+                   runtime_id: str = "") -> dict:
     """Run sign_release.main in-process and capture its JSON -- the SAME
     record shape and the SAME key file tools/sign_release.py uses everywhere
     else, imported rather than duplicated (see the module docstring)."""
     argv = ["--artifact", str(artifact), "--kind", kind, "--platform", platform,
             "--version", version, "--min-version", min_version]
+    if runtime_id:
+        argv += ["--runtime-id", runtime_id]
     if signed_binary:
         argv.append("--signed-binary")
     if published_at:
@@ -148,6 +155,28 @@ def _sign_artifact(artifact: Path, *, kind: str, platform: str, version: str,
         return json.loads(buf.getvalue())
     except ValueError:
         raise PublishFeedError("sign_release produced no JSON", EXIT_USAGE)
+
+
+def bundle_manifest(artifact: Path) -> dict[str, Any]:
+    """The `manifest.json` inside a dashboard bundle, or {}.
+
+    Read so `--runtime-id` does not have to be re-typed from the builder's
+    output (ZERO_TOUCH_PLAN.md WP K): the value is SIGNED, so a hand-typed one
+    that disagrees with the bundle is a channel every customer refuses and
+    only the offline key can fix. Best-effort by design -- anything that is
+    not a readable tarball with a manifest simply falls back to the flag,
+    which then refuses on its own if it is empty."""
+    import tarfile
+
+    try:
+        with tarfile.open(artifact, "r:gz") as tar:
+            member = tar.extractfile("manifest.json")
+            if member is None:
+                return {}
+            data = json.loads(member.read().decode("utf-8"))
+    except (OSError, ValueError, KeyError, tarfile.TarError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def load_channel(feed_dir: Path, channel_name: str) -> dict[str, Any]:
@@ -421,6 +450,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     ap.add_argument("--version", default="")
     ap.add_argument("--min-version", default="0.0.0")
     ap.add_argument("--published-at", default="")
+    ap.add_argument("--runtime-id", default="",
+                    help="--kind dashboard only: the image runtime the bundle was built "
+                         "against (tools/build_dashboard_bundle.py prints it). Signed.")
     ap.add_argument("--signed-binary", dest="signed_binary", action="store_true", default=None)
     ap.add_argument("--notes", default="")
     ap.add_argument("--feed-dir", default="")
@@ -487,12 +519,30 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
             artifact = Path(args.artifact).expanduser()
             if not artifact.is_file():
                 raise PublishFeedError(f"no artifact at {artifact}", EXIT_USAGE)
+            if args.kind in sign_release.RUNTIME_ID_KINDS:
+                manifest_in_bundle = bundle_manifest(artifact)
+                inside = str(manifest_in_bundle.get("runtime_id") or "")
+                if not args.runtime_id and inside:
+                    args.runtime_id = inside
+                    print(f"[publish-feed] runtime_id read from the bundle: {inside}", file=out)
+                elif args.runtime_id and inside and args.runtime_id.strip() != inside:
+                    raise PublishFeedError(
+                        f"--runtime-id {args.runtime_id!r} disagrees with the bundle's own "
+                        f"manifest ({inside!r}) -- the value is SIGNED, so publishing the "
+                        "wrong one gives every customer a runtime mismatch nobody can fix "
+                        "without the offline key. Drop the flag (it is read from the bundle).",
+                        EXIT_USAGE)
             signed = _sign_artifact(
                 artifact, kind=args.kind, platform=args.platform, version=args.version,
                 min_version=args.min_version, signed_binary=bool(args.signed_binary),
                 published_at=args.published_at, key=args.key,
+                runtime_id=args.runtime_id.strip(),
             )
-            record = {k: signed[k] for k in release_pubkey.RECORD_FIELDS}
+            # record_fields, not RECORD_FIELDS: a `dashboard` record's
+            # signature also covers `runtime_id` (ZERO_TOUCH_PLAN.md WP K), and
+            # a channel that carried the signature but dropped the field would
+            # fail verification at every customer with no way to tell why.
+            record = {k: signed[k] for k in release_pubkey.record_fields(args.kind)}
             record["signature"] = signed["signature"]
             record["pubkey_id"] = signed["pubkey_id"]
             base = args.base_url.rstrip("/")

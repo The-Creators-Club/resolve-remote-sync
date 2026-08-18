@@ -775,6 +775,19 @@ def _scope_editors_view(view: dict[str, Any], scope: auth.Scope) -> dict[str, An
 
 # ------------------------------------------------------------------ routes
 
+def _code_block(settings) -> dict[str, Any]:
+    """/api/v1/health's `code` object. Best-effort: a dashboard that cannot
+    work out where its own code came from still has to answer the
+    healthcheck, so every failure here is an empty block, never a 500."""
+    try:
+        from . import dashboard_update
+
+        return dashboard_update.health_code_block(settings)
+    except Exception:  # noqa: BLE001
+        log.exception("could not describe the running code root")
+        return {"running": VERSION, "image": "", "source": "", "runtime_id": ""}
+
+
 @router.get("/health")
 def api_health(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
     """Liveness for anyone; detail only for authenticated callers.
@@ -808,6 +821,15 @@ def api_health(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -
     return {
         "ok": bool(collector["syncthing_reachable"]) or not settings.syncthing_url,
         "version": VERSION,
+        # WHICH CODE IS LIVE (ZERO_TOUCH_PLAN.md WP K, 2026-08-18). `ok` and
+        # `version` above are untouched -- ship.ps1, the onboarding wizard and
+        # the container healthcheck read those two and nothing else. This
+        # block says whether `version` came from the container image or from a
+        # code bundle applied over the air, which is the first question after
+        # "is it up?" once a dashboard can update itself. Authenticated
+        # callers only, like every other field here; imported lazily because
+        # dashboard_update imports this module for _require_admin.
+        "code": _code_block(settings),
         "syncthing_reachable": collector["syncthing_reachable"],
         # True = the last poll succeeded but finished too long ago, i.e. the
         # collector thread is dead/wedged. That state also clears

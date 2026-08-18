@@ -18,9 +18,9 @@ from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 
 from . import (
-    ai_providers, api, assignments, auth, broll, crash_report, db, internal_sftp,
-    local_users, music, oidc, release_feed, secrets_boot, sessions, setup_api,
-    setup_routes, site_store, ui, ytdl,
+    ai_providers, api, assignments, auth, broll, crash_report, dashboard_update, db,
+    internal_sftp, local_users, music, oidc, release_feed, secrets_boot, sessions,
+    setup_api, setup_routes, site_store, ui, ytdl,
 )
 from .collector import Collector
 from .settings import Settings
@@ -313,6 +313,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             feed_poller = release_feed.FeedPoller(settings, app.state)
             feed_poller.start()
         app.state.feed_poller = feed_poller
+        # The over-the-air code update's boot watchdog (ZERO_TOUCH_PLAN.md WP
+        # K, 2026-08-18): clears /data/code/boot_attempts.json once this
+        # process has been up long enough to count as a healthy boot. Two
+        # boots that never get here revert the installed tree at the NEXT
+        # boot (deploy/select_code_root.py). Best-effort and never fatal --
+        # a dashboard that cannot write that file still has a fleet to serve.
+        try:
+            dashboard_update.start_boot_watchdog(settings)
+        except Exception:  # noqa: BLE001
+            log.exception("could not arm the code-update boot watchdog")
         try:
             yield
         finally:
@@ -320,6 +330,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 collector.stop()
             if feed_poller is not None:
                 feed_poller.stop()
+            # ...and the other half: an update that has finished staging asks
+            # for this shutdown, and run.sh's loop reads exit 75 as
+            # "re-select the code root and exec me again". The flag is
+            # consumed (cleared) inside finish_restart before it exits, so a
+            # later crash can never be mistaken for a requested restart.
+            try:
+                dashboard_update.finish_restart(settings)
+            except Exception:  # noqa: BLE001
+                log.exception("could not complete the requested code-update restart")
 
     # No interactive docs, matching both mounts (broll.BLOCKED_PATHS /
     # music.BLOCKED_PATHS 404 theirs). FastAPI's defaults published the whole
@@ -713,6 +732,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # touches a credential, which is easier to audit in one file.
     app.include_router(ai_providers.router)
     app.include_router(release_feed.router)
+    # The dashboard's own code updates (ZERO_TOUCH_PLAN.md WP K): its own
+    # module and its own router, beside the feed's, because it consumes the
+    # same channel but writes nothing to companion_packages -- a dashboard
+    # bundle is APPLIED, never PUBLISHED (release_feed.DASHBOARD_KIND).
+    app.include_router(dashboard_update.router)
     app.include_router(ui.router)
     # The admin project<->editor assignment matrix (2026-08-17): one page,
     # /admin/assignments, that writes nothing itself -- it calls the selection

@@ -86,6 +86,16 @@ COPY --from=deps /venv /venv
 # rather than one shared /opt/ccsync directory.
 COPY dashboard/src /app/src
 COPY dashboard/deploy /app/deploy
+# templates/ and static/ resolve as parents[2] of the package directory --
+# /app/templates and /app/static -- because ui.py and app.py compute them from
+# their own __file__ (they were beside the package under the old editable
+# install and still are in bind-mount mode, where the whole dashboard/ tree is
+# mounted at /app). WITHOUT THESE TWO LINES an image-mode container answers
+# /api/v1/health perfectly and 500s on every page (2026-08-18, found while
+# building WP K's bundle, which has to carry the same two directories for the
+# same reason).
+COPY dashboard/templates /app/templates
+COPY dashboard/static /app/static
 COPY broll/web /broll-app
 COPY music/web /music-app
 COPY ytdl/web /ytdl-app
@@ -102,6 +112,30 @@ COPY ytdl/web /ytdl-app
 # read-for-everyone is what lets the container run as ANY uid (see below).
 RUN : > /venv/.image-baked \
     && chmod -R a+rX /venv /app /broll-app /music-app /ytdl-app
+
+# WHICH RUNTIME THIS IMAGE IS (ZERO_TOUCH_PLAN.md WP K, 2026-08-18). The
+# dashboard can install a newer copy of its own CODE from the signed vendor
+# feed and re-exec into it, but it can never bring a dependency: the venv
+# above is the image's and this container has no Docker socket. So every code
+# bundle is stamped with the runtime it was built against, and
+# `dashboard_update.py` / `select_code_root.py` refuse anything whose stamp is
+# not this file's content -- those updates need the NAS's own image-update
+# click instead.
+#
+# BASE_IMAGE is re-declared here so the value used is this build's ACTUAL one,
+# including a `--build-arg` override: an override changes what `import` can
+# find, so it must change the id. The recipe itself lives in exactly one place
+# (dashboard/src/ccsync_dashboard/runtime_id.py), imported here and by
+# tools/build_dashboard_bundle.py, because two implementations would be two
+# answers to "may this update be applied".
+ARG BASE_IMAGE
+RUN PYTHONPATH=/app/src /venv/bin/python -c \
+    "import os, pathlib; from ccsync_dashboard.runtime_id import runtime_id_from_paths; \
+     pathlib.Path('/venv/.runtime-id').write_text(runtime_id_from_paths( \
+        '/app/deploy/requirements.lock', '/app/deploy/Dockerfile', \
+        base_image=os.environ.get('BASE_IMAGE', '')))" \
+    && chmod a+r /venv/.runtime-id \
+    && echo "runtime id: $(cat /venv/.runtime-id)"
 
 # A non-root default so `docker run` with no `user:` is still unprivileged.
 # 3000:3000 matches this fleet's service account (setup_tree.py's broll:broll),

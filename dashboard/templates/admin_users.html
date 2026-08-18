@@ -1,5 +1,6 @@
 {% extends "base.html" %}
-{% block title %}CC SYNC: USERS{% endblock %}
+{% block title %}CC SYNC: USERS  <script src="/static/dashboard_update.js" defer></script>
+{% endblock %}
 {% block layout %}
   <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
@@ -28,5 +29,12 @@
     <div style="margin-top:1.6rem" hx-get="/partials/admin/packages" hx-trigger="every 30s" hx-swap="innerHTML">
       {% include "partials/admin_packages.html" %}
     </div>
+    {# The dashboard's OWN code (ZERO_TOUCH_PLAN.md WP K). Loaded on its own
+       trigger and, unlike the packages panel above, NOT polled: an update in
+       flight owns this panel and static/dashboard_update.js refreshes it,
+       because a 30s swap would throw the progress away mid-update. #}
+    <div style="margin-top:1.6rem" hx-get="/partials/admin/dashboard-update"
+         hx-trigger="load" hx-swap="innerHTML"></div>
   </main>
+  <script src="/static/dashboard_update.js" defer></script>
 {% endblock %}

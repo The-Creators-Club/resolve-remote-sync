@@ -46,8 +46,25 @@ from ccsync_companion import release_pubkey  # noqa: E402
 
 import release_key as release_key_mod  # noqa: E402  (tools/release_key.py)
 
-PLATFORMS = ("windows", "macos")
-KINDS = ("companion", "onboard")
+# `linux` joined the list with the `dashboard` kind (ZERO_TOUCH_PLAN.md WP K,
+# 2026-08-18): the dashboard's code bundle runs in a Linux container and
+# nowhere else, and the feed's (kind, platform, version) key wants a real
+# platform rather than a blank one.
+PLATFORMS = ("windows", "macos", "linux")
+# `dashboard` is NOT a companion-style package: it is never published into
+# `companion_packages` and no editor machine ever downloads one. It is the
+# dashboard's own code, applied by the container to itself
+# (dashboard/src/ccsync_dashboard/dashboard_update.py). It signs one extra
+# field, `runtime_id` -- see release_pubkey.KIND_EXTRA_FIELDS.
+KINDS = ("companion", "onboard", "dashboard")
+
+# The kinds whose signed record carries a runtime_id, and which therefore need
+# `--runtime-id` on the command line. Read from the record module rather than
+# repeated here, so adding a kind there is the only edit.
+RUNTIME_ID_KINDS = tuple(
+    kind for kind, fields in release_pubkey.KIND_EXTRA_FIELDS.items()
+    if "runtime_id" in fields
+)
 
 
 def package_filename(kind: str, platform: str, version: str, head: bytes = b"") -> str:
@@ -59,6 +76,11 @@ def package_filename(kind: str, platform: str, version: str, head: bytes = b"") 
     disagree, the publish is refused instead of quietly serving a record
     that describes a different file (dashboard/tests/test_packages.py
     test_signed_filename_matches_the_server_choice pins it)."""
+    if kind == "dashboard":
+        # Must stay identical to tools/build_dashboard_bundle.bundle_filename:
+        # the filename is signed, and the dashboard checks the name it
+        # extracted against the signed one.
+        return f"ccsync-dashboard-{version}.tar.gz"
     if kind == "onboard":
         if platform == "windows":
             return f"ccsync-onboard-{version}.exe"
@@ -79,6 +101,7 @@ def build_record(
     min_version: str,
     published_at: str,
     signed_binary: bool,
+    runtime_id: str = "",
 ) -> dict:
     data_head = b""
     digest = hashlib.sha256()
@@ -94,7 +117,7 @@ def build_record(
             digest.update(chunk)
     if size == 0:
         raise SystemExit(f"{artifact} is empty -- nothing to sign")
-    return {
+    record = {
         "kind": kind,
         "platform": platform,
         "version": version,
@@ -105,6 +128,12 @@ def build_record(
         "published_at": published_at,
         "signed_binary": bool(signed_binary),
     }
+    # Only for the kinds whose canonical record covers it: putting a
+    # runtime_id on a companion record would change bytes every companion in
+    # the field verifies (release_pubkey.KIND_EXTRA_FIELDS).
+    if kind in RUNTIME_ID_KINDS:
+        record["runtime_id"] = str(runtime_id or "")
+    return record
 
 
 def query_suffix(record: dict, signature: str, pubkey_id: str) -> str:
@@ -136,6 +165,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--signed-binary", action="store_true",
                     help="the artifact carries a real Authenticode / Developer ID "
                          "signature (NOT ad-hoc, NOT unsigned)")
+    ap.add_argument("--runtime-id", default="",
+                    help="required for --kind dashboard: the image runtime the bundle was "
+                         "built against (tools/build_dashboard_bundle.py prints it, and it "
+                         "is inside the bundle's manifest.json). It is SIGNED, because it "
+                         "is what decides whether a dashboard may apply the bundle at all")
     ap.add_argument("--key", default="", help="release key file (default ~/.ccsync-release/release.key)")
     ap.add_argument("--out", default="", help="also write the JSON here")
     args = ap.parse_args(argv)
@@ -145,6 +179,14 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"no artifact at {artifact}")
     if not args.min_version.replace(".", "").isdigit() or not args.min_version:
         raise SystemExit(f"--min-version must be dotted-numeric, got {args.min_version!r}")
+    if args.kind in RUNTIME_ID_KINDS and not args.runtime_id.strip():
+        # Refused rather than defaulted to "": a dashboard record with a blank
+        # runtime_id verifies fine and is then refused by every customer as a
+        # runtime mismatch, which is a very slow way to learn about a typo.
+        raise SystemExit(
+            f"--kind {args.kind} needs --runtime-id (it is part of the signed record). "
+            "tools/build_dashboard_bundle.py prints it, and it is in the bundle's "
+            "manifest.json.")
 
     secret = release_key_mod.read_secret(release_key_mod.key_path(args.key))
     record = build_record(
@@ -155,6 +197,7 @@ def main(argv: list[str] | None = None) -> int:
         min_version=args.min_version,
         published_at=args.published_at.strip() or utcnow_iso(),
         signed_binary=args.signed_binary,
+        runtime_id=args.runtime_id.strip(),
     )
     signature = base64.b64encode(
         ed25519.sign(secret, release_pubkey.canonical_record(record))

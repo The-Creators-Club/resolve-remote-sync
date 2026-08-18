@@ -75,6 +75,30 @@ RECORD_FIELDS: tuple[str, ...] = (
     "signed_binary",
 )
 
+# Fields the signature covers for ONE KIND ONLY (ZERO_TOUCH_PLAN.md WP K,
+# 2026-08-18). A `dashboard` record -- the dashboard's own code bundle, which
+# the container applies to itself -- carries a tenth signed field,
+# `runtime_id`: the id of the image runtime the bundle was built against
+# (dashboard/src/ccsync_dashboard/runtime_id.py). It has to be INSIDE the
+# signature, because it is what decides whether an update may be applied at
+# all; an unsigned runtime_id would let anyone able to serve the feed relabel
+# a bundle as compatible with a runtime it was never built for.
+#
+# Scoped to the kind rather than added to RECORD_FIELDS on purpose. Adding a
+# field to EVERY record would need a v2 prefix and an overlap release (an old
+# companion canonicalises only the fields it knows and would reject every new
+# record -- see RECORD_FIELDS above). No companion ever sees a `dashboard`
+# record: they are applied by the dashboard itself and are never published
+# into `companion_packages`. So every companion/onboard record canonicalises
+# byte for byte as it always did, and the new kind gets the field it needs.
+KIND_EXTRA_FIELDS: dict = {"dashboard": ("runtime_id",)}
+
+
+def record_fields(kind) -> tuple:
+    """The exact field list the signature covers for this record's kind."""
+    return RECORD_FIELDS + tuple(KIND_EXTRA_FIELDS.get(str(kind or ""), ()))
+
+
 
 def canonical_record(record: Mapping[str, Any]) -> bytes:
     """The exact bytes the release key signs.
@@ -86,7 +110,7 @@ def canonical_record(record: Mapping[str, Any]) -> bytes:
     saw. Raises on a missing field: an unsignable record must never
     canonicalise to *something*."""
     out: dict[str, Any] = {}
-    for field in RECORD_FIELDS:
+    for field in record_fields(record.get("kind", "")):
         if field not in record:
             raise KeyError(f"release record is missing {field!r}")
         value = record[field]

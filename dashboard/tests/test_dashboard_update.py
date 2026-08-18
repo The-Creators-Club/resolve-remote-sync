@@ -686,3 +686,21 @@ def test_a_snapshot_is_skipped_with_a_reason_not_a_crash(world):
     result = dashboard_update.snapshot_before(world["settings"], "test")
     assert result["ok"] is False
     assert "NAS API key" in result["reason"]
+
+
+def test_an_older_bundle_than_the_running_code_is_a_rollback_candidate_not_an_update(world, monkeypatch):
+    """Live 2026-08-18: running 0.6.3 (applied from the volume) over image
+    0.6.1, the feed held 0.6.2 and 0.6.4, and code_updates listed BOTH --
+    0.6.2 passed the newer-than-image test. An update list must only hold
+    versions newer than what is running; the rest is rollback material and
+    is offered as exactly that. Newest first in every list."""
+    from ccsync_dashboard import dashboard_update as du
+
+    monkeypatch.setattr(du, "VERSION", "0.6.3")
+    older = make_dashboard_record(b"older", version="0.6.2")
+    newer = make_dashboard_record(b"newer", version="0.6.4")
+    newest = make_dashboard_record(b"newest", version="0.6.5")
+    check(world, [older, newest, newer], monkeypatch)
+    status = world["client"].get("/api/v1/admin/dashboard-update").json()
+    assert [u["version"] for u in status["code_updates"]] == ["0.6.5", "0.6.4"]
+    assert [u["version"] for u in status["rollback_candidates"]] == ["0.6.2"]

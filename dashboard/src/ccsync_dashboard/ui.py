@@ -1560,7 +1560,7 @@ def partial_admin_dashboard_update(request: Request, conn: sqlite3.Connection = 
         log.exception("could not build the dashboard-update view")
         view = {"image_mode": False, "running": dashboard_update.VERSION,
                 "image": "", "source": "", "runtime_id": "", "current": {},
-                "code_updates": [], "runtime_updates": [],
+                "code_updates": [], "runtime_updates": [], "rollback_candidates": [],
                 "nas_hint": "", "in_progress": False, "step": "idle", "message": "",
                 "last_error": "", "backups": [], "boot_attempts": 0}
         error = f"could not read the code update state: {exc}"

@@ -61,6 +61,16 @@
       <div class="muted" style="margin-top:0.6rem">no code update is available for this runtime</div>
     {% endif %}
 
+    {% if dash_update.rollback_candidates %}
+      <div class="muted" style="margin-top:0.6rem">
+        older bundles on the feed (a rollback, not an update):
+        {% for u in dash_update.rollback_candidates %}
+          <button class="btn" type="button" data-dashupd-apply="{{ u.version }}"
+                  title="go back to {{ u.version }}">[ ROLL BACK TO {{ u.version }} ]</button>
+        {% endfor %}
+      </div>
+    {% endif %}
+
     {% if dash_update.runtime_updates %}
       <div class="muted" style="margin-top:0.8rem">
         {% for u in dash_update.runtime_updates %}

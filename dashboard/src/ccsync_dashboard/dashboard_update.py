@@ -1059,6 +1059,8 @@ def status(settings, app_state) -> dict[str, Any]:
     records = release_feed.dashboard_records(release_feed.verified_records(app_state))
     code_updates: list[dict[str, Any]] = []
     runtime_updates: list[dict[str, Any]] = []
+    rollback_candidates: list[dict[str, Any]] = []
+    running = version_tuple(VERSION)
     for record in records:
         version = str(record.get("version") or "")
         if not version or version == VERSION:
@@ -1076,10 +1078,21 @@ def status(settings, app_state) -> dict[str, Any]:
             "notes": str(record.get("notes") or ""),
             "runtime_id": str(record.get("runtime_id") or ""),
         }
+        # Newer than the image but OLDER than what is running is not an
+        # update either: with 0.6.3 live, 0.6.2 sat in code_updates beside
+        # 0.6.4 (2026-08-18) and a caller that took the first entry tried to
+        # go backwards. Kept in its own list -- it IS a legitimate rollback
+        # target -- so the page can offer it as such and never as an update.
+        if running and version_tuple(version) <= running:
+            rollback_candidates.append(entry)
+            continue
         if str(record.get("runtime_id") or "") == running_rid and running_rid:
             code_updates.append(entry)
         else:
             runtime_updates.append(entry)
+    code_updates.sort(key=lambda e: version_tuple(e["version"]), reverse=True)
+    runtime_updates.sort(key=lambda e: version_tuple(e["version"]), reverse=True)
+    rollback_candidates.sort(key=lambda e: version_tuple(e["version"]), reverse=True)
     state = read_state(settings)
     return {
         "image_mode": image_mode(),
@@ -1094,6 +1107,7 @@ def status(settings, app_state) -> dict[str, Any]:
             "reverted_reason": str(current.get("reverted_reason") or ""),
         },
         "code_updates": code_updates,
+        "rollback_candidates": rollback_candidates,
         "runtime_updates": runtime_updates,
         "nas_hint": nas_update_hint(settings),
         "in_progress": bool(state.get("in_progress")),

@@ -80,7 +80,21 @@ log = logging.getLogger("ccsync.config")
 # come from the site manifest (CR-16); crash reports are written locally
 # (CR-19). Minor bump, not patch: the loopback contract and the signed
 # channel are visible interface changes for the dashboard and the SPAs.
-VERSION = "0.8.1"
+# 0.9.0: ingest -- an editor drags clips onto the b-roll page or tracks onto
+# the music page and THIS machine does the work (docs/BROLL_INGEST_PLAN.md,
+# docs/MUSIC_INGEST_PLAN.md, 2026-08-18). Sixteen new loopback routes
+# (`/broll/ingest/*` and `/music/ingest/*`, eight each), the first PUT this
+# listener has ever answered (octet-stream, per-file cap, streamed to
+# staging), two orchestrators over one kind strategy (broll_ingest.py,
+# music_ingest.py, ingest_kinds.py), the vendored local Qwen3-VL sidecar and
+# the vendored CLAP audio tower as an ONNX artefact fetched once per machine,
+# and a WorkProgressWindow the proxy generator now shares. Indexing takes
+# precedence over proxy generation while a batch runs. New frozen
+# dependencies: numpy, onnxruntime, xxhash (+35 MB). Also the Creators Club
+# mark as the product default and a taskbar identity of our own (KNOWN_BUGS
+# CR-25, CR-24). Minor bump, not patch: a whole new contract with both SPAs,
+# and an editor on an older build 404s every route of it.
+VERSION = "0.9.0"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"

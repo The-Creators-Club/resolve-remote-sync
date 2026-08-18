@@ -111,7 +111,11 @@ from ccsync_companion import site as site_mod
 # contract: CAPABILITY MISSING: markers + exit 3, RESOLVE-MAPPING-STATUS:
 # marker, and the existing-config rclone_path repair. The .sh and this file
 # must ship as a pair, same as the .ps1.
-INSTALLER_VERSION = "1.0.31"
+# 1.0.32: the 1.0.21 rule again, for companion 0.9.0 (ingest) -- plus a real
+# change of its own, since build_onboard.spec/build_onboard_macos.spec now
+# bundle the Creators Club mark as the DEFAULT rather than the neutral one
+# (KNOWN_BUGS CR-25), which is the first thing a new editor sees.
+INSTALLER_VERSION = "1.0.32"
 
 # NO DEFAULT since 2026-08-17 (WP0, docs/SYNOLOGY_PORT_PLAN.md). These used
 # to be one deployment's tailnet and LAN addresses compiled into every

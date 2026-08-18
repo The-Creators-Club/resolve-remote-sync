@@ -76,3 +76,10 @@ music/web/musicweb/identity.py text eol=lf
 music/indexer/music_models.py text eol=lf
 music/indexer/mel_numpy.py text eol=lf
 companion/src/ccsync_companion/music_clap/** text eol=lf
+
+# Lockfiles are HASHED: dashboard/deploy/requirements.lock is half of the
+# dashboard's runtime_id (WP K), and every lock is fed to pip --require-hashes
+# from Linux runners and containers. A CRLF working copy hashed differently
+# from CI on the first image-mode deploy (2026-08-18); LF everywhere.
+*.lock text eol=lf
+requirements*.txt text eol=lf

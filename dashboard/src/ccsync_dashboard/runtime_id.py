@@ -71,8 +71,15 @@ def runtime_id(lock_bytes: bytes, base_image: str) -> str:
 
     Bytes in, string out, no filesystem: the two callers reach their inputs
     very differently (a repo checkout vs. a half-built image layer) and only
-    the recipe is shared."""
-    lock_digest = hashlib.sha256(lock_bytes).hexdigest()
+    the recipe is shared.
+
+    Line endings are normalised to LF first. Measured 2026-08-18 on the
+    first image-mode deploy: the CI-built image said b8088534..., the base
+    rig's checkout said f24cb99a..., and the only difference was git's
+    autocrlf giving the Windows working copy a CRLF requirements.lock. A
+    runtime id that depends on which OS read the file would refuse every
+    over-the-air update built on Windows as a "runtime change"."""
+    lock_digest = hashlib.sha256(lock_bytes.replace(b"\r\n", b"\n")).hexdigest()
     message = (
         RUNTIME_PREFIX
         + b"base_image=" + str(base_image).strip().encode("utf-8") + b"\n"

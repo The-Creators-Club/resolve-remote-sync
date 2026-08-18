@@ -75,6 +75,22 @@ deployment runs image mode yet. Two `COPY` lines added; **every image built
 before 2026-08-18, including anything `.github/workflows/image.yml` has
 already pushed to GHCR, is unusable for the UI and must be rebuilt.**
 
+### WPK-6 — the pre-recreate ZFS snapshot had been failing silently on every deploy — FIXED in repo 2026-08-18
+Seen on the first image-mode migration: `FAILED to snapshot
+tank/apps/ccsync-dashboard@...: dataset does not exist`, then `WARNING: no
+pre-recreate snapshot ... Continuing`. `TrueNASBackend.resolve_dataset` asks
+`df --output=source` which dataset a path lives in, and on this box the app
+dir is a plain directory in the pool root, so df answers `tank` -- a name with
+no slash, which the code treated as "not a dataset" and fell back to the naive
+`tank/apps/ccsync-dashboard`. Every `--recreate` since the snapshot rule
+landed (item 8) has run with nothing behind it; nobody read the WARNING
+because the deploy went on to succeed. Fixed: a slash-less answer is a
+dataset (a pool root), and only a device path / blank / whitespace answer
+falls back. Two tests pin it. Sibling finding, same run: the runtime_id
+differed between the CI image and this checkout only because git's autocrlf
+gave the Windows working copy a CRLF `requirements.lock`; `runtime_id()` now
+normalises line endings and every lockfile is `eol=lf` in `.gitattributes`.
+
 ### WPK-2 — nothing works until an image is rebuilt with `/venv/.runtime-id`
 The whole two-tier rule keys off that file, and only an image built from the
 updated Dockerfile has it. Until then `image_mode()` is false everywhere:

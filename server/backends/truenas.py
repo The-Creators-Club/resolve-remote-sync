@@ -877,7 +877,16 @@ class TrueNASBackend:
             dry_run=False, timeout=60)
         found = (out or "").strip().splitlines()[-1:] or [""]
         dataset = found[0].strip()
-        if rc != 0 or not dataset or dataset.startswith("/") or "/" not in dataset:
+        # A pool ROOT is a dataset too: on this fleet's box /mnt/tank/apps is
+        # a plain directory in `tank` itself, and df answers "tank" -- no
+        # slash. Requiring one sent every deploy back to the naive
+        # `tank/apps/ccsync-dashboard`, which does not exist, so the
+        # pre-recreate snapshot silently failed on every deploy until the
+        # first image-mode migration read the WARNING (2026-08-18). What is
+        # refused now is only what cannot be a dataset: an empty answer, a
+        # device path (/dev/...), or something with whitespace in it.
+        if (rc != 0 or not dataset or dataset == "Filesystem"
+                or dataset.startswith("/") or any(c.isspace() for c in dataset)):
             return naive
         if dataset != naive:
             print(f"{path} is inside dataset {dataset} (not a dataset of its own) "

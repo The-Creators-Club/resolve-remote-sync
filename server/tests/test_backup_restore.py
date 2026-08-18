@@ -93,6 +93,26 @@ def test_truenas_takes_a_zfs_snapshot_of_the_dataset_the_path_is_in():
     assert "zfs snapshot 'tank/apps@ccsync-20260817-1400'" in ssh.text
 
 
+def test_a_directory_in_the_pool_root_snapshots_the_pool_root_dataset():
+    """This fleet's box: /mnt/tank/apps/ccsync-dashboard is a plain directory
+    in `tank` itself, so df answers a name with no slash. That is a dataset
+    like any other; treating it as "not an answer" sent every deploy back to
+    the naive tank/apps/ccsync-dashboard, which does not exist, and the
+    pre-recreate snapshot failed silently on every deploy until the first
+    image-mode migration read the WARNING (2026-08-18)."""
+    ssh = FakeSsh(answers=[("df --output=source", (0, "Filesystem\ntank\n", ""))])
+    ok, ident = truenas(ssh).snapshot_now(f"{APPS}/ccsync-dashboard", "ccsync-pre-recreate-x", False)
+    assert ok and ident == "tank@ccsync-pre-recreate-x", ident
+    assert "zfs snapshot 'tank@ccsync-pre-recreate-x'" in ssh.text
+
+
+def test_a_device_path_or_blank_from_df_still_falls_back():
+    for answer in ("/dev/sda1", "", "tank apps"):
+        ssh = FakeSsh(answers=[("df --output=source", (0, f"Filesystem\n{answer}\n", ""))])
+        ok, ident = truenas(ssh).snapshot_now(TREE, "ccsync-x", False)
+        assert ok and ident == "tank/TheCreatorsPool@ccsync-x", (answer, ident)
+
+
 def test_truenas_falls_back_to_the_path_when_df_cannot_answer():
     """df is how a DIRECTORY inside a dataset is resolved to its dataset. When
     it cannot answer, the string form is still a legitimate guess -- and `zfs

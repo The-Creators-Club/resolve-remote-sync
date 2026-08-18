@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>Footage preview</title>
+<!-- The client folder viewer (docs/CLIENT_FOLDERS.md, 2026-08-18). Served at
+     .../share/<token>/ so every URL below is document-relative and resolves
+     INSIDE that prefix: ../assets/ is the same static tree the b-roll SPA
+     uses, mounted a second time under /share/assets so a Tailscale Funnel
+     that publishes only /broll/share carries the whole page. Never a
+     root-relative /static or /api here (tests/test_mounted_prefix.py). -->
+<link rel="icon" type="image/svg+xml" href="../assets/favicon.svg">
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="../assets/share.css">
+</head>
+<body class="share-body">
+
+<header class="share-header">
+  <div class="topbar">
+    <!-- The product mark (the same white-on-transparent CC mark the tray and
+         every popup carry, 2026-08-18 ruling: branded like Resolve/Premiere).
+         A copy of companion/.../assets/cc_mark_white.png -- this tree is
+         deployed on its own and cannot reach the companion's. -->
+    <span class="brand"><img class="share-mark" src="../assets/brand_mark.png" alt=""><span id="share-org">Footage</span> <span class="dim">//</span> PREVIEW</span>
+    <span id="share-count" class="share-count muted"></span>
+  </div>
+  <div class="rule">────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</div>
+  <div class="share-intro">
+    <h1 id="share-title">Loading…</h1>
+    <p id="share-desc" class="share-desc"></p>
+    <p id="share-contact" class="share-contact hidden"></p>
+    <p class="muted small">
+      Hover a thumbnail to scrub through the clip. Click it to play the preview and see what is in it.
+      Previews are low resolution. Full-quality masters are supplied on licence.
+    </p>
+  </div>
+</header>
+
+<main id="share-grid-view">
+  <div id="share-grid" class="results-grid share-grid"></div>
+  <div id="share-empty" class="muted hidden">This folder is empty.</div>
+</main>
+
+<section id="share-detail" class="share-detail hidden" aria-label="Clip preview">
+  <div class="share-detail-bar">
+    <button id="share-back" class="text-btn" type="button">← back to the folder</button>
+    <span class="share-detail-nav">
+      <button id="share-prev" class="text-btn" type="button" title="previous clip (left arrow)">← prev</button>
+      <span id="share-pos" class="muted small"></span>
+      <button id="share-next" class="text-btn" type="button" title="next clip (right arrow)">next →</button>
+    </span>
+  </div>
+  <div class="detail-layout share-layout">
+    <div class="player-col">
+      <video id="share-player" controls controlslist="nodownload noremoteplayback" disablepictureinpicture preload="metadata" playsinline></video>
+      <div class="keyhelp">
+        <b>space</b> play/pause · <b>←/→</b> previous/next clip · <b>Esc</b> back to the folder
+      </div>
+    </div>
+    <div class="segments-col">
+      <div id="share-meta" class="video-meta"></div>
+      <h3 class="segments-col-heading">What is in this clip</h3>
+      <div id="share-segments" class="segment-list"></div>
+    </div>
+  </div>
+</section>
+
+<footer class="share-footer muted small">
+  <span id="share-footer-org"></span>
+  <span id="share-footer-contact"></span>
+</footer>
+
+<div id="toast-container"></div>
+
+<script src="../assets/sprite.js"></script>
+<script src="../assets/share.js"></script>
+</body>
+</html>

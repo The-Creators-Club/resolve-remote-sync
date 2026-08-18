@@ -49,6 +49,9 @@ DATA_ROOT/
   sprites/{id}.jpg    # sprite sheet, 1 frame / 2s, 10 columns, 240px-wide cells
   posters/{id}.jpg    # single poster frame (~640px wide)
   sheets/{id}/*.jpg   # contact sheets (indexer working files, keep for debugging)
+  client_shares.db    # client folders + their links (docs/CLIENT_FOLDERS.md). A SEPARATE
+                      # file on purpose: broll.db is replaced wholesale by an index publish
+                      # and a customer's client links must survive that
 ```
 
 On the NAS, `DATA_ROOT` **is** the shared archive root
@@ -206,6 +209,28 @@ is `docs/API.md` §6a. What it adds to *this* component:
   <BROLL_ARCHIVE_CREATORS_DIR>/<shoot>/<sub folders>` — the same layout
   `build_archive.dest_dir` writes, so what an editor sees in search is where
   the file actually is.
+
+### Client folders (2026-08-18)
+
+Curated sets of clips with a token link a prospective licensee opens with no
+account (`docs/CLIENT_FOLDERS.md`). What it adds to *this* component:
+
+- **`client_shares.db`** beside `broll.db` (`app/client_folders.py`): tables
+  `client_folders`, `client_folder_items`, `client_share_settings`,
+  `user_version 1`. Items carry `video_id` AND `(share, rel_path)`, and are
+  re-resolved by name when the id no longer matches, so a rebuilt index keeps
+  its folders.
+- **Two route groups**, again in separate modules for the same reason as
+  ingest: `routes_client_folders.py` (`/api/client-folders`, the editor,
+  identity stamped by `BrollGate`) and `routes_share.py` (`/share/{token}/…`,
+  the public, read-only, token re-checked per request, an allow-list of
+  `videos` columns and never a path). The static tree is mounted a second time
+  at `/share/assets` so the viewer page (`static/share.html` + `share.js`,
+  document-relative URLs) needs nothing outside `/share/`; that prefix is what
+  the operator publishes past the tailnet.
+- **`static/sprite.js`**: the sprite-sheet geometry, extracted from `app.js` so
+  both pages read the sheets with one copy of the arithmetic
+  (`tests/test_sprite_geometry.py` pins it against the generator).
 
 ## Companion API contract
 

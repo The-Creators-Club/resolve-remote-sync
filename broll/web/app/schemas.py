@@ -224,3 +224,41 @@ class ShareRootIn(BaseModel):
     source: Literal["originals", "proxies"] = "originals"
     description: str = ""
     indexed: bool = True
+
+
+# --- client folders (docs/CLIENT_FOLDERS.md, 2026-08-18) -------------------------
+# Lengths are enforced in app.client_folders (one place, shared with any
+# non-HTTP caller); these models only shape the JSON.
+
+
+class ClientFolderCreateIn(BaseModel):
+    title: str
+    description: str = ""
+    contact: str = ""
+    expires_at: str | None = None
+
+
+class ClientFolderUpdateIn(BaseModel):
+    """PATCH semantics: a field left out is left alone. `expires_at` sent as
+    an explicit null clears the expiry -- see routes_client_folders."""
+
+    title: str | None = None
+    description: str | None = None
+    contact: str | None = None
+    expires_at: str | None = None
+
+
+class ClientFolderItemsIn(BaseModel):
+    video_ids: list[int] = Field(min_length=1, max_length=500)
+
+
+class ClientFolderNoteIn(BaseModel):
+    note: str = ""
+
+
+class ClientFolderOrderIn(BaseModel):
+    video_ids: list[int] = Field(max_length=500)
+
+
+class ClientShareSettingsIn(BaseModel):
+    public_base_url: str = ""

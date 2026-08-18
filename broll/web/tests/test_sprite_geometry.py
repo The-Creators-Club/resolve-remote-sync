@@ -21,7 +21,9 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[3]
-APP_JS = REPO / "broll" / "web" / "static" / "app.js"
+# sprite.js since 2026-08-18: the geometry moved out of app.js so the client
+# folder viewer (share.js) reads the SAME copy. Both pages load it first.
+APP_JS = REPO / "broll" / "web" / "static" / "sprite.js"
 FFMPEG_TOOLS = REPO / "broll" / "indexer" / "broll_index" / "ffmpeg_tools.py"
 
 pytestmark = pytest.mark.skipif(
@@ -33,7 +35,7 @@ pytestmark = pytest.mark.skipif(
 def _js_const(name: str) -> float:
     m = re.search(rf"^const {name} = ([0-9.]+);", APP_JS.read_text(encoding="utf-8"),
                   re.M)
-    assert m, f"{name} is not defined in app.js"
+    assert m, f"{name} is not defined in sprite.js"
     return float(m.group(1))
 
 
@@ -118,10 +120,13 @@ def test_positionsprite_reads_the_grid_rather_than_rebuilding_it():
 def test_the_card_is_sized_by_the_same_geometry_as_the_overlay():
     """A card sized off the source aspect ratio while the overlay is offset by
     the sheet's real cell height shows a sliver of the next row."""
-    js = APP_JS.read_text(encoding="utf-8")
-    body = js[js.index("function buildCard"):]
-    body = body[:body.index("\n}")]
-    assert "spriteGeometry(video).cellHeight" in body
+    # Both card builders: the SPA's (app.js) and the client viewer's
+    # (share.js). Each sizes its thumb off the shared geometry.
+    for name, fn in (("app.js", "function buildCard"), ("share.js", "function shareCard")):
+        js = (APP_JS.parent / name).read_text(encoding="utf-8")
+        body = js[js.index(fn):]
+        body = body[:body.index("\n}")]
+        assert "spriteGeometry(video).cellHeight" in body, name
 
 
 @pytest.mark.parametrize("duration_s,expected_interval", [

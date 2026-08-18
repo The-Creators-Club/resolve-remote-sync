@@ -635,6 +635,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             or (path.startswith("/api/v1/companion/package/") and _companion_token_ok(request))
             # the indexer pushing into the mounted b-roll app, token-gated
             or (path.startswith("/broll/api/ingest/") and _broll_ingest_token_ok(request))
+            # a CLIENT FOLDER's public viewer (docs/CLIENT_FOLDERS.md,
+            # 2026-08-18): a prospective licensee opening the link an editor
+            # sent them. No session by design -- the 128-bit token in the
+            # path is the credential, checked on every request by the b-roll
+            # app's routes_share (revoked/expired = 404), and nothing under
+            # it writes or reveals a path. This is the ONE prefix an operator
+            # publishes past the tailnet (Tailscale Funnel on its own port),
+            # which is why it must stay exactly `/broll/share/` and why the
+            # viewer's every asset URL is document-relative under it.
+            or path.startswith("/broll/share/")
             # the ytdl local-download client config: unauthenticated-read BY
             # DESIGN (docs/YTDL_LOCAL_DOWNLOAD.md §4) -- the companion's
             # yt-dlp sidecar manager reads it before it holds anything to

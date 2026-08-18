@@ -32,6 +32,7 @@ Index written 2026-08-17 (`COMMERCIAL_READINESS.md` item 13).
 | [`GOTCHAS.md`](GOTCHAS.md) | The accumulated "why is it doing that" list. Read it before debugging anything |
 | [`INDEXERS.md`](INDEXERS.md) | The GPU indexers: what runs where, and what a customer without a GPU gets |
 | [`YTDL_LOCAL_DOWNLOAD.md`](YTDL_LOCAL_DOWNLOAD.md) | The YouTube downloader's fleet job model and the local-download path |
+| [`CLIENT_FOLDERS.md`](CLIENT_FOLDERS.md) | Curated b-roll folders with a link a prospective licensee can open: how to use them, what the client sees, and publishing the one path prefix with Tailscale Funnel |
 | [`DOCKER.md`](DOCKER.md) | The two ways the dashboard container gets its code and its dependencies |
 | [`CI.md`](CI.md) | What runs on a runner, and what still only runs on the base rig |
 | [`PRODUCT_REPO.md`](PRODUCT_REPO.md) | The customer-facing repo, how it is exported, and what is withheld |

@@ -22,6 +22,7 @@ what the NAS holds and where.
 | `dashboard.db` — projects, editors, ticks, transfer history | `<apps_root>/data/dashboard.db` (container: `/data`) | NAS snapshots of the **apps** dataset |
 | `broll.db` — the b-roll search index | `<tree_name>/Assets/B-roll Archive/broll.db` | NAS snapshots + the `.prev-<ts>` a publish leaves behind |
 | `music.db` — the music index (incl. editors' queued ingests) | `<apps_root>/music-data/music.db` | NAS snapshots + `.prev-<ts>` / `.old.<ts>` |
+| `client_shares.db` — client folders and their links (`docs/CLIENT_FOLDERS.md`) | `<tree_name>/Assets/B-roll Archive/client_shares.db`, beside `broll.db` | NAS snapshots. **Deliberately not** in `broll.db`, so a publish cannot replace it; restore like any file (§4a), never one of the `-wal`/`-shm` pair without the other |
 | `ytdl.db` | `<apps_root>/ytdl-data/ytdl.db` | NAS snapshots of the apps dataset |
 | The deployed app code | `<apps_root>/app` | git, plus `app.old.<ts>` from the last deploy |
 | An editor's local copy | `P:\` on their machine | **Nothing.** It is a replica, not a backup. |

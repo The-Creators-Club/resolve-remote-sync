@@ -136,6 +136,17 @@ def _build_fake_broll(data_root_env: str) -> dict[str, types.ModuleType]:
     def media(name: str) -> dict:
         return {"name": name}
 
+    # The client folder viewer (docs/CLIENT_FOLDERS.md): the ONE prefix of
+    # the sub-app the dashboard answers with no session at all. Echoed so the
+    # tests can tell "reached the sub-app anonymously" from "bounced to login".
+    @broll_app.get("/share/{token}/api/folder")
+    def share_folder(token: str, x_ccsync_user: str | None = Header(default=None)) -> dict:
+        return {"token": token, "user": x_ccsync_user}
+
+    @broll_app.get("/api/client-folders")
+    def client_folders(x_ccsync_user: str | None = Header(default=None)) -> dict:
+        return {"user": x_ccsync_user}
+
     main.app = broll_app
     pkg.config, pkg.db, pkg.main = config, db, main
     return {"app": pkg, "app.config": config, "app.db": db, "app.main": main}
@@ -593,3 +604,37 @@ def test_a_batch_uid_that_is_not_32_hex_gets_no_carve_out(tmp_path, broll_env):
             r = c.post(f"/broll/api/fleet/ingest/batches/{uid}/claim", json={},
                        headers=headers, follow_redirects=False)
             assert r.status_code == 401, uid
+
+
+# --- client folders: the public viewer prefix (docs/CLIENT_FOLDERS.md) --------
+
+def test_a_client_folder_link_reaches_the_sub_app_with_no_session(tmp_path, broll_env):
+    """/broll/share/<token>/... is the only part of the mount a stranger may
+    reach: it is the link an editor sends a prospective licensee, and the
+    128-bit token in the path is the credential (routes_share re-checks it on
+    every request). login_gate must let it through untouched, and BrollGate
+    must stamp NO identity on it -- an anonymous request is anonymous."""
+    app = _broll_app(tmp_path)
+    with TestClient(app) as c:
+        r = c.get("/broll/share/AbCdEfGhIjKlMnOpQrStUv/api/folder", follow_redirects=False)
+        assert r.status_code == 200, r.text
+        assert r.json() == {"token": "AbCdEfGhIjKlMnOpQrStUv", "user": None}
+
+
+def test_the_curation_api_is_still_behind_login(tmp_path, broll_env):
+    """The share prefix is open; the editor's own /api/client-folders is not,
+    and a signed-in editor reaches it with the gate's identity stamp."""
+    app = _broll_app(tmp_path)
+    with TestClient(app) as c:
+        r = c.get("/broll/api/client-folders", follow_redirects=False)
+        assert r.status_code == 401
+        as_user(c, "jsmith")
+        assert c.get("/broll/api/client-folders").json() == {"user": "jsmith"}
+
+
+def test_a_broll_tree_without_the_client_folders_module_still_mounts(tmp_path, broll_env):
+    """The fake package here has no app.client_folders, exactly like a b-roll
+    tree shipped before the feature: the storage shim's import of it is
+    best-effort and the mount comes up MOUNTED regardless."""
+    app = _broll_app(tmp_path)
+    assert app.state.broll_status == broll.MOUNTED

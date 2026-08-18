@@ -1,0 +1,71 @@
+/* The client folder viewer (share.html), on top of style.css.
+   docs/CLIENT_FOLDERS.md, 2026-08-18. Same theme as the archive the editor
+   browses (style.css is loaded first): mono, square, red-dim structure. Only
+   the page frame is new; the cards, thumbs, sprite overlay, player and
+   segment list are the SPA's own classes. */
+
+.share-body { padding: 0 20px 40px; }
+
+.share-header { padding-top: 12px; }
+.share-header .topbar {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+}
+.share-header .brand {
+  color: var(--red); letter-spacing: 0.1em; font-size: 14px;
+  text-shadow: 0 0 12px rgba(255, 33, 64, 0.55);
+}
+.share-header .brand .dim { color: var(--red-dim); }
+.share-header .brand { display: inline-flex; align-items: center; gap: 10px; }
+/* White on transparent, so it reads on the dark ground; sized to the line. */
+.share-mark { height: 30px; width: auto; display: inline-block; opacity: 0.95; }
+.share-header .rule { color: var(--red-dim); overflow: hidden; white-space: nowrap; font-size: 11px; line-height: 1; }
+.share-count { font-size: 12px; }
+
+.share-intro { max-width: 900px; margin: 12px 0 18px; }
+.share-intro h1 {
+  font-size: 18px; margin: 0 0 6px; color: var(--text); letter-spacing: 0.04em;
+}
+.share-desc { margin: 0 0 6px; white-space: pre-wrap; line-height: 1.6; }
+.share-contact { margin: 0 0 6px; }
+.share-contact a { color: var(--red); }
+.share-contact a:hover { color: var(--red-hot); text-decoration: underline; }
+
+.share-grid { margin-top: 6px; }
+/* Under the thumbnail: the curator's caption, or the clip's name. Text under
+   a card is what the SPA deliberately dropped for editors (they choose by
+   eye); a client is READING a folder somebody wrote for them. */
+.share-caption {
+  padding: 5px 7px 6px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  max-height: 3.9em;
+  overflow: hidden;
+}
+.share-caption .share-caption-name { color: var(--text); }
+
+.share-detail-bar {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  margin: 4px 0 8px;
+}
+.share-detail-nav { display: flex; gap: 12px; align-items: center; }
+#share-player {
+  width: 100%;
+  min-height: 200px;
+  max-height: 68vh;
+  background: #000;
+  display: block;
+  border: 1px solid var(--red-dim);
+}
+.share-layout { margin-top: 0; }
+@media (max-width: 860px) {
+  .share-layout { grid-template-columns: 1fr; }
+}
+.share-note { color: var(--text); font-style: italic; margin: 6px 0 8px; }
+
+.share-footer {
+  margin-top: 40px; padding-top: 10px;
+  border-top: 1px dotted var(--red-dim);
+  display: flex; gap: 18px; flex-wrap: wrap;
+}

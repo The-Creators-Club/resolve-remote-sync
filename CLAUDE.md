@@ -107,6 +107,17 @@ run alongside the tray app — it would hold port 8899.
   which an image update takes with it. Accepting the wizard's notice is what
   turns the feature flag on. No key, code or token is ever in
   `/api/v1/site`, a log, or an API response (masked `sk-…abcd`).
+- **Client folders** (`docs/CLIENT_FOLDERS.md`, 2026-08-18): editors curate
+  archive clips into a folder and hand a client a link, `/broll/share/<token>/`,
+  which the dashboard's `login_gate` opens with NO session: the 128-bit token
+  is the credential, `broll/web/app/routes_share.py` re-checks it and clip
+  membership on every request, and nothing under it writes or names a path.
+  Every asset the viewer needs is under that one prefix on purpose (its own
+  `/share/assets` mount, document-relative URLs), because that prefix is what
+  the operator publishes past the tailnet with Tailscale Funnel on a separate
+  port. The ledger is `client_shares.db` beside `broll.db`, NOT tables in it:
+  `publish_db.py` replaces `broll.db` and must never be able to take a
+  customer's client links with it.
 - The 8899 loopback is origin-allow-listed (`loopback_guard.py`,
   2026-08-17): only the configured dashboard origin gets CORS headers, and a
   POST needs that origin or the `~/.ccsync/loopback-token` header. If

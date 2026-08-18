@@ -55,6 +55,13 @@ the middleware, but every route (and `ui.page_setup`) re-checks via
 `setup_routes.require_setup_access`/`first_run_open`, which is fail-closed —
 see §5's "Setup wizard" for what that means today.
 
+**Open on a link token instead of a session:** `/broll/share/*` — a client
+folder's public viewer (`docs/CLIENT_FOLDERS.md`). The 128-bit token in the
+path is the credential; the b-roll app re-checks it (and clip membership) on
+every request, revoked/expired is a 404, and nothing under it writes. It is
+the ONE prefix an operator publishes past the tailnet (Tailscale Funnel on its
+own port), which is why it must stay exactly `/broll/share/`.
+
 **Open to a companion token instead of a session:**
 `/api/v1/selection/*`, `/api/v1/companion/package/*`, `/broll/api/ingest/*`
 (ingest token), `/ytdl/api/config/ytdl-client` (unauthenticated read by
@@ -745,7 +752,8 @@ its policy.
 | `/download`, `/download/{platform}` | the drawer's `[ INSTALLER ]` entry (2026-08-18): the click IS the download. `/download` 303s to this browser's package for a Windows or macOS User-Agent, and renders `/installer`'s two-platform chooser when the UA names neither -- it no longer guesses Windows for anything unrecognised. `/installer` is that chooser on its own URL; it is not a hub page |
 | `/login`, `/logout` | the HTML login/logout forms |
 | `/auth/oidc/login`, `/auth/oidc/callback` | the two OIDC legs. Inert unless `DASH_AUTH_METHOD=oidc` — they answer 503 with the break-glass URL otherwise, and the callback authenticates on a signed flow cookie plus a verified `id_token`, never on being reachable |
-| `/broll/*` | the b-roll SPA and its API. Ingest routes take `X-Ingest-Token`; the ingest **panel** and **fleet** routes are §6a |
+| `/broll/*` | the b-roll SPA and its API. Ingest routes take `X-Ingest-Token`; the ingest **panel** and **fleet** routes are §6a. `/broll/api/client-folders` is the client-folder curation API (session, identity-stamped like §6a's panel; the public base URL is admin-only) |
+| `/broll/share/{token}/…` | a client folder's **public** viewer (`docs/CLIENT_FOLDERS.md`, 2026-08-18): the page, `api/folder`, `api/videos/{id}`, `media/{proxy,sprite,poster}/{id}` and `../assets/*`. No session — the token is the credential; read-only; one 404 for revoked, expired and unknown |
 | `/music/*` | the music SPA and its API. The bare `/music` → `/music/` redirect is load-bearing |
 | `/ytdl/*` | the downloader SPA, **only when the feature is on** |
 | `/static/*`, `/favicon.ico` | assets |

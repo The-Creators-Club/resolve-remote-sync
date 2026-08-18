@@ -63,6 +63,9 @@
          (ingest.js), so this button is for the editor who wants the native
          picker rather than a drag. -->
     <button id="ingest-btn" class="icon-btn" title="Add clips to the archive (or drag clips/folders anywhere on this page)">&#43;</button>
+    <!-- Client folders (docs/CLIENT_FOLDERS.md): curate clips for a
+         prospective licensee and hand them a link. clientfolders.js. -->
+    <button id="cf-btn" class="icon-btn" title="Client folders: curate clips and get a link to send to a client">&#9776;</button>
     <button id="settings-btn" class="icon-btn" title="Settings">&#9881;</button>
   </div>
 </header>
@@ -121,6 +124,7 @@
         </span>
         <button id="send-resolve-btn" class="primary-btn">Append to Timeline &#9166;</button>
         <button id="place-resolve-btn" class="primary-btn">Place at Playhead &#8679;&#9166;</button>
+        <button id="cf-add-detail-btn" class="text-btn cf-add-detail" title="Add this clip to a client folder">+ client folder</button>
       </div>
 
       <div class="keyhelp">
@@ -263,6 +267,47 @@
   </div>
 </section>
 
+<!-- Client folders panel (docs/CLIENT_FOLDERS.md, 2026-08-18). All of its
+     content is drawn by clientfolders.js; this is the shell. -->
+<section id="cf-panel" class="hidden" aria-label="Client folders">
+  <div class="cf-inner">
+    <button id="cf-close" class="text-btn">&times; close</button>
+    <h2>Client folders</h2>
+    <p class="muted small">
+      Curate clips for a prospective client and send them one link. They see the
+      folder the way you browse the archive here (thumbnails, hover-scrub, a
+      preview player and what is in each clip), with no login. Previews only,
+      never originals.
+    </p>
+    <div id="cf-list-view">
+      <div class="cf-toolbar">
+        <button type="button" id="cf-new" class="primary-btn">+ New folder</button>
+        <button type="button" id="cf-refresh" class="text-btn">refresh</button>
+      </div>
+      <div id="cf-list" class="cf-list"></div>
+      <div id="cf-admin" class="cf-admin hidden">
+        <h3>Public link base</h3>
+        <p class="muted small">
+          The address your clients reach the viewer on: the NAS's Tailscale
+          Funnel origin, scheme and host and port, no path. Blank means links
+          are minted against this dashboard's own address, which only works
+          for people already on the tailnet. Admins only. See
+          docs/CLIENT_FOLDERS.md for the Funnel setup.
+        </p>
+        <div class="cf-base-row">
+          <input id="cf-base-input" type="url" placeholder="https://" spellcheck="false">
+          <button type="button" id="cf-base-save" class="primary-btn">Save</button>
+        </div>
+      </div>
+    </div>
+    <div id="cf-detail-view" class="hidden"></div>
+  </div>
+</section>
+
+<!-- The "add to client folder" popover, opened from a card's + or the detail
+     view's button; one instance, repositioned. -->
+<div id="cf-popover" class="cf-popover hidden" role="menu"></div>
+
 <div id="settings-panel" class="hidden">
   <div class="settings-inner">
     <button id="settings-close" class="text-btn">&times; close</button>
@@ -295,11 +340,16 @@
 
 <div id="toast-container"></div>
 
+<!-- Sprite-sheet geometry FIRST: app.js reads its globals, and so does the
+     client folder viewer page (share.html), which is why it is its own file. -->
+<script src="static/sprite.js"></script>
 <script src="static/app.js"></script>
-<!-- A second classic script, not a module: it shares app.js's helpers
-     ($, el, toast, fetchJson) through the global scope, and its URLs
+<!-- Classic scripts, not modules: they share app.js's helpers
+     ($, el, toast, fetchJson) through the global scope, and their URLs
      follow the same document-relative rule (tests/test_mounted_prefix.py).
-     tests/test_ingest_ui.py pins that the two files declare no name twice. -->
+     tests/test_ingest_ui.py pins that no two of these files declare a name
+     twice. -->
 <script src="static/ingest.js"></script>
+<script src="static/clientfolders.js"></script>
 </body>
 </html>

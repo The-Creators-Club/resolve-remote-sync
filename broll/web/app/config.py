@@ -223,3 +223,17 @@ def parse_shares() -> list[dict[str, str]]:
             continue
         shares.append({"share": share, "description": desc.strip()})
     return shares
+
+
+# --- client folders (docs/CLIENT_FOLDERS.md, 2026-08-18) -------------------------
+
+def get_org_name() -> str:
+    """Whose footage the public client page says it is showing.
+
+    DASH_SITE_ORG_NAME is what the dashboard container already carries for its
+    own brand strings (settings.site_org_name); read here by environment for
+    the same reason DASH_SESSION_SECRET is -- this app is deployed as its own
+    tree and cannot import ccsync_dashboard. Blank falls back to the product
+    name, never to a customer's (COMMERCIAL_READINESS.md item 10).
+    """
+    return os.environ.get("DASH_SITE_ORG_NAME", "").strip() or "CC Sync"

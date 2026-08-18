@@ -402,3 +402,11 @@ def _init_broll_storage() -> None:
     ):
         d.mkdir(parents=True, exist_ok=True)
     ensure_schema(broll_config.get_db_path())
+    # Client folders (docs/CLIENT_FOLDERS.md, 2026-08-18) keep their own
+    # database beside broll.db. Best-effort import: a b-roll tree from before
+    # the feature has no such module and must still mount exactly as before.
+    try:
+        from app import client_folders  # type: ignore[import-not-found]
+    except ImportError:
+        return
+    client_folders.ensure_schema()

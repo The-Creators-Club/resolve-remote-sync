@@ -115,7 +115,7 @@ from ccsync_companion import site as site_mod
 # change of its own, since build_onboard.spec/build_onboard_macos.spec now
 # bundle the Creators Club mark as the DEFAULT rather than the neutral one
 # (KNOWN_BUGS CR-25), which is the first thing a new editor sees.
-INSTALLER_VERSION = "1.0.32"
+INSTALLER_VERSION = "1.0.33"
 
 # NO DEFAULT since 2026-08-17 (WP0, docs/SYNOLOGY_PORT_PLAN.md). These used
 # to be one deployment's tailnet and LAN addresses compiled into every

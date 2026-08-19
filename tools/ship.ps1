@@ -264,6 +264,29 @@ if (-not $DashboardOnly) {
         Write-Step "bump `$InstallerVersion in installer\windows_bootstrap.ps1 AND INSTALLER_VERSION in onboarding\steps.py AND installer\macos_bootstrap.sh AND build_onboard_macos.spec's CFBundleShortVersionString, then re-run"
         exit 1
     }
+
+    # --- will step 2b's Authenticode gate refuse? ASK NOW (SHIP-5, 2026-08-19)
+    # The gate itself stays where it is, on the BUILT exe, because a configured
+    # signing identity is not the same as a signature that came out Valid. But
+    # whether it CAN pass is knowable at second zero: the build signs only when
+    # one of these is set, so "neither set, and no -AllowUnsignedBinary" is a
+    # guaranteed refusal in step 2b. Measured 2026-08-19: that refusal arrived
+    # after the dashboard deploy, the server suite, the onboarding suite, the
+    # companion AND dashboard suites and a PyInstaller build -- 20 minutes to be
+    # told something that was true before any of it started. Same lesson as the
+    # two version checks above; third instance.
+    if (-not $AllowUnsignedBinary -and
+        -not $env:CCSYNC_SIGN_THUMBPRINT -and -not $env:CCSYNC_SIGN_PFX) {
+        Write-Fail "no code-signing identity is configured, so step 2b WILL refuse to make this build current."
+        Write-Step "Set CCSYNC_SIGN_THUMBPRINT (or CCSYNC_SIGN_PFX + CCSYNC_SIGN_PFX_PASSWORD)"
+        Write-Step "for a signed build, or re-run with -AllowUnsignedBinary for a deliberate"
+        Write-Step "internal one. See docs\RELEASE.md 'Code signing'."
+        Write-Step "Refusing HERE, before the deploy and ~20 minutes of tests, rather than after them."
+        exit 1
+    }
+    if (-not $AllowUnsignedBinary) {
+        Write-Step "code signing: identity configured"
+    }
 }
 
 # --- 0. the suite that guards what step 1 is about to do --------------------

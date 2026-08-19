@@ -142,6 +142,26 @@ foreach ($n in $SecretNames) {
         [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)))
     $loaded += $n
 }
+# DASH_RELEASE_PUBKEYS is NOT in the store and must not be: it is the PUBLIC
+# half, derivable from the key file any time, and DPAPI-wrapping a public key
+# would only imply it were secret. It is exported here because every consumer
+# reads it from the environment and ship's step 1 REFUSES without it -- in
+# image mode the container's select_code_root.py verifies each code tree
+# against these keys before booting it, so an empty value means the image
+# always wins and no over-the-air update can ever apply (ZERO_TOUCH_PLAN.md
+# WP K). Before 2026-08-19 ship's own error text said this script exported it
+# and it did not, which cost a run.
+$keyFile = Join-Path (Join-Path $env:USERPROFILE '.ccsync-release') 'release.key'
+if (Test-Path -LiteralPath $keyFile) {
+    $pub = & python (Join-Path $PSScriptRoot 'release_key.py') pubkey --quiet 2>$null
+    if ($LASTEXITCODE -eq 0 -and $pub) {
+        Set-Item -LiteralPath 'env:DASH_RELEASE_PUBKEYS' -Value ($pub.Trim())
+        $loaded += 'DASH_RELEASE_PUBKEYS (derived)'
+    }
+    else { Write-Warn2 "could not read the public key from $keyFile -- ship step 1 will refuse" }
+}
+else { Write-Warn2 "no release key at $keyFile -- DASH_RELEASE_PUBKEYS unset, ship step 1 will refuse" }
+
 if ($loaded.Count -eq 0) {
     Write-Warn2 "$Path decrypted but held nothing -- re-run with -Save"
 }

@@ -108,7 +108,16 @@ LIST_KEYS = ("template_folders", "shared_asset_folders")
 # switch -- the vendor build does not download YouTube material until a
 # customer says it may. Never the other way round: a client that cannot tell
 # must not assume yes.
-FEATURE_KEYS = ("youtube_download", "youtube_unblock")
+#
+# THIS TUPLE IS THE WHITELIST. normalise() rebuilds `features` from it, so a
+# flag the dashboard publishes but this tuple does not name is stripped
+# before feature_enabled() ever sees it -- and feature_enabled fails closed,
+# so the flag is silently dead. That is exactly how `auto_update` shipped
+# inert in 0.9.3 (ultrareview 2026-08-19, companion 0.9.41): the dashboard
+# sent it, the tests monkeypatched feature_enabled, and nobody ran a real
+# manifest through normalise(). Every new flag goes here AND in
+# tests/test_site.py's round-trip test.
+FEATURE_KEYS = ("youtube_download", "youtube_unblock", "auto_update")
 # 0 for sftp_concurrency means "the server didn't say" -- unlike config.toml,
 # where an explicit 0 means "disable the flag entirely".
 INT_KEYS = {"sftp_port": 22, "sftp_concurrency": 0}

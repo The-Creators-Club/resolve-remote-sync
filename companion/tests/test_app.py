@@ -1618,7 +1618,9 @@ def _update_app(tmp_path, monkeypatch, offer_version="9.9.9"):
     swap itself (that has its own tests in test_upgrade.py)."""
     app = _make_app(tmp_path, dashboard_url="http://dash.example.com")
     applied: list[str] = []
-    monkeypatch.setattr(app, "apply_upgrade", lambda: applied.append("applied"))
+    # Returns None, which the pushed-update thread reads as "applied" -- the
+    # refusal tests below install their own stub that returns a reason.
+    monkeypatch.setattr(app, "apply_upgrade", lambda **kw: applied.append("applied"))
     monkeypatch.setattr(app, "_notify_tray", lambda *a, **kw: None)
     if offer_version:
         app.upgrade._available = {"version": offer_version, "url": "/x",
@@ -1691,6 +1693,129 @@ def test_a_reply_with_no_upgrade_command_changes_nothing(tmp_path, monkeypatch):
     _join_upgrade_threads()
 
     assert applied == []
+
+
+def _refusing_update_app(tmp_path, monkeypatch, outcomes):
+    """apply_upgrade answers from `outcomes` in order ("" = swapped), and
+    records the quiet_refusals flag it was called with."""
+    app, _ = _update_app(tmp_path, monkeypatch)
+    calls: list[bool] = []
+    toasts: list[str] = []
+
+    def fake_apply(*, quiet_refusals=False):
+        calls.append(quiet_refusals)
+        return outcomes.pop(0) if outcomes else ""
+
+    monkeypatch.setattr(app, "apply_upgrade", fake_apply)
+    monkeypatch.setattr(app, "_notify_tray", lambda msg, *a, **kw: toasts.append(msg))
+    return app, calls, toasts
+
+
+def test_a_push_refused_by_an_open_window_is_retried_not_parked(tmp_path, monkeypatch):
+    """ultrareview 2026-08-19. The latch was set before apply_upgrade ran
+    and never cleared, so ruskin's PC -- whose out-of-tree popup holds the
+    lock from three seconds after launch (CR-27) -- got ONE "Can't update
+    while a CCSync window is open" and then ignored the standing push until
+    the tray was restarted. The request rides every report; once the editor
+    closes the window, the next report after the pause must try again."""
+    from ccsync_companion import app as app_mod
+
+    app, calls, toasts = _refusing_update_app(tmp_path, monkeypatch, ["popup", "popup", ""])
+    command = {"commands": {"upgrade": {"apply": True, "version": "9.9.9",
+                                        "requested_at": "2026-08-19T10:00:00Z"}}}
+    clock = [1000.0]
+    monkeypatch.setattr(app_mod.time, "monotonic", lambda: clock[0])
+
+    app._apply_pushed_update(command)
+    _join_upgrade_threads()
+    assert calls == [False]                       # first attempt, toasts allowed
+    assert app._pushed_update_applying == ""      # the latch is RELEASED on refusal
+
+    # The very next report (30 s later) does NOT hammer: the retry is held off.
+    clock[0] += 30
+    app._apply_pushed_update(command)
+    _join_upgrade_threads()
+    assert calls == [False]
+
+    # After the pause it tries again -- quietly, the editor was already told.
+    clock[0] += app_mod.PUSHED_UPDATE_RETRY_SECONDS
+    app._apply_pushed_update(command)
+    _join_upgrade_threads()
+    assert calls == [False, True]
+
+    clock[0] += app_mod.PUSHED_UPDATE_RETRY_SECONDS + 1
+    app._apply_pushed_update(command)
+    _join_upgrade_threads()
+    assert calls == [False, True, True]           # third attempt swapped ("")
+    assert app._pushed_update_applying != ""      # ...and the latch stays set: we are restarting
+
+    # One "your administrator is updating" balloon for the whole episode.
+    assert [t for t in toasts if "administrator" in t] == \
+        ["Your administrator is updating CCSync to v9.9.9."]
+
+
+def test_a_failed_download_waits_longer_before_the_next_try(tmp_path, monkeypatch):
+    from ccsync_companion import app as app_mod
+
+    app, calls, _ = _refusing_update_app(tmp_path, monkeypatch, ["failed", ""])
+    command = {"commands": {"upgrade": {"apply": True, "version": "9.9.9",
+                                        "requested_at": "2026-08-19T10:00:00Z"}}}
+    clock = [1000.0]
+    monkeypatch.setattr(app_mod.time, "monotonic", lambda: clock[0])
+
+    app._apply_pushed_update(command)
+    _join_upgrade_threads()
+    clock[0] += app_mod.PUSHED_UPDATE_RETRY_SECONDS + 1
+    app._apply_pushed_update(command)
+    _join_upgrade_threads()
+    assert calls == [False]                       # a stand-down pause is not enough
+    clock[0] += app_mod.PUSHED_UPDATE_FAILED_RETRY_SECONDS
+    app._apply_pushed_update(command)
+    _join_upgrade_threads()
+    assert calls == [False, True]
+
+
+def test_an_admin_re_push_is_a_fresh_attempt_at_once(tmp_path, monkeypatch):
+    """Cancel + push again on the dashboard mints a new requested_at; the
+    companion keys on the REQUEST, so the admin is not made to wait out a
+    retry timer they cannot see."""
+    from ccsync_companion import app as app_mod
+
+    app, calls, toasts = _refusing_update_app(tmp_path, monkeypatch, ["popup", ""])
+    clock = [1000.0]
+    monkeypatch.setattr(app_mod.time, "monotonic", lambda: clock[0])
+
+    app._apply_pushed_update({"commands": {"upgrade": {
+        "apply": True, "version": "9.9.9", "requested_at": "2026-08-19T10:00:00Z"}}})
+    _join_upgrade_threads()
+    clock[0] += 5
+    app._apply_pushed_update({"commands": {"upgrade": {
+        "apply": True, "version": "9.9.9", "requested_at": "2026-08-19T10:05:00Z"}}})
+    _join_upgrade_threads()
+    assert calls == [False, False]                # a new request is announced again
+    assert len([t for t in toasts if "administrator" in t]) == 2
+
+
+def test_apply_upgrade_names_why_it_stood_down(tmp_path, monkeypatch):
+    """The outcome string is what the pushed path retries on; the tray
+    click ignores it. A held popup lock is "popup", quietly when asked."""
+    app = _make_app(tmp_path, dashboard_url="http://dash.example.com")
+    toasts: list[str] = []
+    monkeypatch.setattr(app, "_notify_tray", lambda msg, *a, **kw: toasts.append(msg))
+    assert app.apply_upgrade() == "no-offer"
+    app.upgrade._available = {"version": "9.9.9", "url": "/x", "sha256": "0" * 64, "size_bytes": 1}
+    with app._popup_active_lock:
+        assert app.apply_upgrade() == "popup"
+        assert len(toasts) == 1
+        assert app.apply_upgrade(quiet_refusals=True) == "popup"
+        assert len(toasts) == 1
+    app._consolidate_active = True
+    assert app.apply_upgrade() == "consolidate"
+    app._consolidate_active = False
+    monkeypatch.setattr(app.upgrade, "apply", lambda: False)
+    assert app.apply_upgrade() == "failed"
+    monkeypatch.setattr(app.upgrade, "apply", lambda: True)
+    assert app.apply_upgrade() == ""
 
 
 def test_auto_update_is_off_unless_the_site_says_otherwise(tmp_path, monkeypatch):

@@ -419,6 +419,30 @@ def test_the_role_is_stored_on_the_machine_not_only_on_its_projects(env):
     ).fetchone()[0] == 0
 
 
+def test_a_report_with_no_mode_keeps_the_stored_role(env):
+    """ultrareview 2026-08-19. The COALESCE on machine_state.mode was
+    described as CR-28's defence against a build too old to send `mode`,
+    but api.py defaulted a missing mode to "editor" BEFORE the upsert, so
+    the SQL never saw a NULL and a mode-less report re-labelled the base rig.
+    The default now stays with editor_media_project (NOT NULL column); the
+    machine row gets None and keeps what it knew."""
+    client, conn, _now = env
+    client.post("/api/v1/report", json=report("base1", "Creator_1", mode="base"),
+                headers=hdr("base1"))
+    assert dbmod.base_only_editors(conn) == {"base1"}
+
+    client.post("/api/v1/report", json=report("base1", "Creator_1"), headers=hdr("base1"))
+
+    row = conn.execute(
+        "SELECT mode FROM machine_state WHERE editor_username='base1'").fetchone()
+    assert row["mode"] == "base"
+    assert dbmod.base_only_editors(conn) == {"base1"}
+    # An explicit answer still wins, in either direction.
+    client.post("/api/v1/report", json=report("base1", "Creator_1", mode="editor"),
+                headers=hdr("base1"))
+    assert dbmod.base_only_editors(conn) == set()
+
+
 def test_a_person_with_a_base_rig_and_a_laptop_still_queues(env):
     """base_only_editors means EVERY machine, not any. An editor who also
     keeps a base-mode machine must not have their laptop's backlog hidden."""

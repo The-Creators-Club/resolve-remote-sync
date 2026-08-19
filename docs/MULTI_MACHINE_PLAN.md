@@ -360,7 +360,7 @@ untouched. Do this only when the owner actually wants the fleet page to read
 | A new machine starts empty and the editor thinks sync is broken | No inheritance is the deliberate choice | The tray says "no projects are set for this computer yet"; the wizard's copy-plan default; the dashboard shows the machine with an empty plan rather than omitting it |
 | Two machines, one NAS account, two rclone remotes on one SFTP home | Lane A uploads from both | Already true for any editor with a laptop today; lane A is add-only and path-canonical. Worth one integration test, not a design change |
 | `machine_id` lost (profile reset) | Machine arrives as new, with an empty plan | Recoverable in the UI: "this looks like <old machine>, adopt its plan?" keyed on the Syncthing device ID match. Ship the prompt with WP5, not before |
-| Hostname collisions inside one person | Two `DESKTOP-ABC` under one user | Solved by construction: the key is the minted id, the hostname is a label |
+| Hostname collisions inside one person | Two `DESKTOP-ABC` under one user | NOT solved by construction (CR-42, 2026-08-19): the plan, prefs, state and lane tables are keyed on the hostname, the minted id is an attribute of the registry row. What IS guaranteed: a rename is never allowed to destroy a plan. `adopt_renamed_machine` refuses when the new name is already one of this editor's registered computers, both plans stay, the collision is logged, and an admin copies or clears one by hand. Two LIVE machines under one name thrash each other's `machine_state` row and are unsupported |
 
 ---
 

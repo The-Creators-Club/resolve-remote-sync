@@ -63,9 +63,12 @@ def test_a_manifest_without_features_reads_as_every_feature_off():
     """A dashboard that predates the flags sends no `features` at all. The
     absence is a NO, and the whole point of the switch."""
     site = site_mod.normalise({"schema": 1, "org_name": "Someone"})
-    assert site["features"] == {"youtube_download": False,
-                                "youtube_unblock": False}
-    assert site_mod.feature_enabled("youtube_download", site) is False
+    # Every whitelisted flag, each one off -- spelled via FEATURE_KEYS so
+    # adding a flag (CR-40: auto_update) does not need this test re-pinned.
+    assert site["features"] == {key: False for key in site_mod.FEATURE_KEYS}
+    assert set(site_mod.FEATURE_KEYS) >= {"youtube_download", "youtube_unblock", "auto_update"}
+    for key in site_mod.FEATURE_KEYS:
+        assert site_mod.feature_enabled(key, site) is False
 
 
 @pytest.mark.parametrize("value", ["true", 1, "1", {}, [], "yes"])
@@ -92,7 +95,9 @@ def test_an_unreadable_cache_is_off(monkeypatch):
 def test_the_flags_survive_a_save_and_reload_round_trip():
     _site(download=True, unblock=True)
     cached = site_mod.cached_site()
-    assert cached["features"] == {"youtube_download": True, "youtube_unblock": True}
+    assert cached["features"]["youtube_download"] is True
+    assert cached["features"]["youtube_unblock"] is True
+    assert cached["features"]["auto_update"] is False   # not in _site(): stays off
     assert json.loads(site_mod.site_path().read_text(encoding="utf-8"))["features"]
 
 

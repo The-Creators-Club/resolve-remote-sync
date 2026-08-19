@@ -3469,13 +3469,26 @@ def _register_machine(
     if machine_id:
         previous = db.machine_by_machine_id(conn, editor, machine_id)
         if previous is not None and previous["machine"] != machine:
-            log.info(
-                "%s: machine %r is the computer previously known as %r (same "
-                "machine_id) -- moving its sync plan across rather than "
-                "starting it empty",
-                editor, machine, previous["machine"],
-            )
-            db.adopt_renamed_machine(conn, editor, previous["machine"], machine)
+            if db.adopt_renamed_machine(conn, editor, previous["machine"], machine):
+                log.info(
+                    "%s: machine %r is the computer previously known as %r (same "
+                    "machine_id) -- moving its sync plan across rather than "
+                    "starting it empty",
+                    editor, machine, previous["machine"],
+                )
+            else:
+                # The name is TAKEN by another of this editor's computers.
+                # Nothing moves and nothing is deleted: both plans stay where
+                # they are, this report is recorded under the name it used,
+                # and the stale row keeps its plan until an admin copies or
+                # clears it (ultrareview 2026-08-19, db.adopt_renamed_machine).
+                log.warning(
+                    "%s: machine %r reports the machine_id of %r, but %r is "
+                    "already a different registered computer -- NOT moving the "
+                    "plan (a hostname collision is an admin decision, not a "
+                    "silent overwrite). Both plans are untouched.",
+                    editor, machine, previous["machine"], machine,
+                )
     db.upsert_machine(
         conn, editor, machine, now,
         machine_id=machine_id,
@@ -4259,7 +4272,15 @@ def api_report(
     # stored (its old home, below) because it belongs to the MACHINE, not to
     # a project: a base rig that has never sent a manifest still has to be
     # knowable as one, or it lands in [ QUEUED ] forever (CR-28).
-    mode = (payload.mode or "editor").strip().lower()
+    # Two shapes on purpose (ultrareview 2026-08-19). `reported_mode` is
+    # None when the report carried no `mode`, and THAT is what reaches
+    # machine_state: its COALESCE keeps the stored role for a report from a
+    # build too old to send one, which is CR-28's defence -- it was a no-op
+    # while the default was applied here first, with the comment in db.py
+    # describing a guard the code did not have. `mode` keeps the default for
+    # editor_media_project, whose column is NOT NULL.
+    reported_mode = (payload.mode or "").strip().lower() or None
+    mode = reported_mode or "editor"
     # The machine registry (WP1). Before machine_state, because the rename
     # adoption below has to run before anything keyed on the new name is
     # written -- otherwise a renamed PC gets a fresh, empty everything.
@@ -4269,7 +4290,7 @@ def api_report(
         resolve_project=resolve_project or None, verified=verified,
         platform=(payload.platform or "").strip().lower() or None,
         companion_version=(payload.companion_version or "").strip() or None,
-        mode=mode,
+        mode=reported_mode,
         transport=flatten_transport_health(payload.transport_health, received_at),
         guard=flatten_sync_guard(payload.sync_guard, received_at),
         ingest=flatten_broll_ingest(payload.broll_ingest, received_at),

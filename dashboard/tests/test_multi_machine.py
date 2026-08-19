@@ -105,6 +105,55 @@ def test_a_renamed_computer_keeps_its_plan(env):
     assert [s["slug"] for s in dbmod.selections_for_machine(conn, "ruskin", "RUSKIN-PC")] == ["p1"]
 
 
+def test_a_rename_onto_another_live_computers_name_destroys_neither_plan(env):
+    """ultrareview 2026-08-19. adopt_renamed_machine DELETEd whatever sat at
+    the new name before moving the old rows across, so an editor who renamed
+    PC B to PC A's old name (or restored an image carrying A's machine.json
+    onto a box called B) silently lost B's plan, and upsert_machine then
+    wrote A's identity over B's. MULTI_MACHINE_PLAN.md §6's "solved by
+    construction" was not: every table but the registry is keyed on the
+    hostname. Both plans must survive; the collision is an admin's call."""
+    client, conn, _now = env
+    report(client, "ruskin", "DESKTOP-1", machine_id="mid-1", syncthing_device_id="DEV-A")
+    report(client, "ruskin", "WORK-PC", machine_id="mid-2", syncthing_device_id="DEV-B")
+    client.put("/api/v1/selection/ruskin/p1?machine=DESKTOP-1")
+    client.put("/api/v1/selection/ruskin/p2?machine=WORK-PC")
+
+    # DESKTOP-1 comes back calling itself WORK-PC.
+    report(client, "ruskin", "WORK-PC", machine_id="mid-1", syncthing_device_id="DEV-A")
+
+    # Nothing was deleted: WORK-PC's plan is still p2, DESKTOP-1's still p1.
+    assert [s["slug"] for s in dbmod.selections_for_machine(conn, "ruskin", "WORK-PC")] == ["p2"]
+    assert [s["slug"] for s in dbmod.selections_for_machine(conn, "ruskin", "DESKTOP-1")] == ["p1"]
+    assert sorted(m["machine"] for m in dbmod.fetch_machines(conn, "ruskin")) == \
+        ["DESKTOP-1", "WORK-PC"]
+
+    # ...and the next report from the same machine does not thrash: it is
+    # the most recently heard-from holder of mid-1, so no rename branch.
+    report(client, "ruskin", "WORK-PC", machine_id="mid-1", syncthing_device_id="DEV-A")
+    assert [s["slug"] for s in dbmod.selections_for_machine(conn, "ruskin", "WORK-PC")] == ["p2"]
+    assert [s["slug"] for s in dbmod.selections_for_machine(conn, "ruskin", "DESKTOP-1")] == ["p1"]
+
+
+def test_adopt_renamed_machine_refuses_a_taken_name(env):
+    """The unit behind the test above: the registry row at the new name is
+    the whole test. A name nobody holds is adopted as before."""
+    client, conn, now = env
+    dbmod.upsert_machine(conn, "ruskin", "OLD", now, machine_id="mid-1")
+    dbmod.add_selection(conn, "ruskin", "p1", "admin", now, machine="OLD")
+    dbmod.upsert_machine(conn, "ruskin", "TAKEN", now, machine_id="mid-2")
+    dbmod.add_selection(conn, "ruskin", "p2", "admin", now, machine="TAKEN")
+    conn.commit()
+
+    assert dbmod.adopt_renamed_machine(conn, "ruskin", "OLD", "TAKEN") is False
+    assert [s["slug"] for s in dbmod.selections_for_machine(conn, "ruskin", "TAKEN")] == ["p2"]
+    assert [s["slug"] for s in dbmod.selections_for_machine(conn, "ruskin", "OLD")] == ["p1"]
+
+    assert dbmod.adopt_renamed_machine(conn, "ruskin", "OLD", "FRESH") is True
+    assert [s["slug"] for s in dbmod.selections_for_machine(conn, "ruskin", "FRESH")] == ["p1"]
+    assert dbmod.selections_for_machine(conn, "ruskin", "OLD") == []
+
+
 def test_another_editors_machine_id_moves_nothing(env):
     """The rename branch only fires within one account: an id from somebody
     else's report names nothing here."""

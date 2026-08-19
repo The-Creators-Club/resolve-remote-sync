@@ -140,6 +140,14 @@ UI_SHUTDOWN_GRACE_SECONDS = 10.0
 # 102, every start, for hours). One-shot meant the only route back was a
 # tray item nobody knew to look for, with all three lanes parked.
 LICENCE_RETRY_SECONDS = 60.0
+# A pushed update that could not swap (a CCSync window open, a consolidate
+# in flight, a failed download) is RETRIED, not latched off (ultrareview
+# 2026-08-19): the request rides every report until the dashboard sees the
+# new version, so the attempt must be allowed to recur -- but not every 30 s,
+# and not with a fresh toast each time. A stand-down is transient (the editor
+# closes the window); a failed download probably is not, so it waits longer.
+PUSHED_UPDATE_RETRY_SECONDS = 90.0
+PUSHED_UPDATE_FAILED_RETRY_SECONDS = 600.0
 
 
 def _hard_exit(code: int) -> None:
@@ -746,12 +754,20 @@ class CompanionApp:
         # other window open, and the same sentence once a minute forever is
         # how a log stops being read (upgrade.py's _log_refusal precedent).
         self._licence_defer_logged = False
-        # Pushed updates (2026-08-18): one attempt per version, and one log
-        # line per refused version -- the request rides EVERY report until
-        # the dashboard sees the new version, so both of these would
-        # otherwise repeat every 30 seconds for as long as it stands.
+        # Pushed updates (2026-08-18): one attempt IN FLIGHT per request,
+        # and one log line per refused version -- the request rides EVERY
+        # report until the dashboard sees the new version, so both of these
+        # would otherwise repeat every 30 seconds for as long as it stands.
+        # `_applying` is the request key (version@requested_at) of the
+        # attempt currently running; it is CLEARED when that attempt comes
+        # back without swapping, and `_retry_at` then holds the next attempt
+        # off. Before 0.9.41 it was set once and never cleared, so the first
+        # "Can't update while a CCSync window is open" parked the push for
+        # the life of the process (ultrareview 2026-08-19).
         self._pushed_update_applying = ""
         self._pushed_update_refused = ""
+        self._pushed_update_announced = ""
+        self._pushed_update_retry_at = 0.0
         # macOS took the tree away from us, rather than the editor unplugging
         # it: the ad-hoc-signed companion loses its Full Disk Access grant on
         # every self-upgrade (item 16). Checked once after an upgrade, read by
@@ -3880,24 +3896,35 @@ class CompanionApp:
             return "consolidate"
         return ""
 
-    def apply_upgrade(self) -> None:
+    def apply_upgrade(self, *, quiet_refusals: bool = False) -> str:
         """Download, verify, swap the exe and restart. Blocking (a ~20 MB
         download) -- the tray calls this on a daemon thread. On failure the
-        current build keeps running and the tray says so."""
+        current build keeps running and the tray says so.
+
+        Returns "" when the swap went through (the process is on its way
+        out), else why not: "popup" | "consolidate" (stood down, transient)
+        | "failed" | "no-offer". The pushed-update path reads this to decide
+        whether to try again (ultrareview 2026-08-19); the tray click and
+        auto-update ignore it. `quiet_refusals` skips the stand-down toasts
+        -- a retry of a push the editor has already been told about must not
+        repeat the same balloon every minute while their window stays open.
+        """
         info = self.upgrade.available
         if info is None:
-            return
+            return "no-offer"
         blocker = self._standing_down_would_kill_work()
         if blocker == "popup":
-            self._notify_tray(
-                "Can't update while a CCSync window is open. Close it and try again.",
-                "ccsync-companion")
-            return
+            if not quiet_refusals:
+                self._notify_tray(
+                    "Can't update while a CCSync window is open. Close it and try again.",
+                    "ccsync-companion")
+            return "popup"
         if blocker:
-            self._notify_tray(
-                "Can't update while media is being copied in. Let it finish, then try again.",
-                "ccsync-companion")
-            return
+            if not quiet_refusals:
+                self._notify_tray(
+                    "Can't update while media is being copied in. Let it finish, then try again.",
+                    "ccsync-companion")
+            return "consolidate"
         # "Installing", not "Updating": the offered build may be OLDER than
         # the running one (upgrade.py's "different, not newer"), and every
         # other string on this path now refuses to call that an update.
@@ -3913,6 +3940,8 @@ class CompanionApp:
                 "Tray → Copy diagnostics for your admin.",
                 "ccsync-companion",
             )
+            return "failed"
+        return ""
 
     def transport_health(self) -> dict[str, Any]:
         """Connection-path + orphan diagnostics for the report payload
@@ -4211,20 +4240,58 @@ class CompanionApp:
                         (offer or {}).get("version") or "nothing",
                     )
                 return
-            if self._pushed_update_applying == wanted:
+            # The key is the REQUEST, not the version: an admin who cancels
+            # and pushes the same build again gets a fresh attempt at once
+            # (new requested_at), instead of waiting out the retry timer.
+            key = f"{wanted}@{command.get('requested_at') or ''}"
+            if self._pushed_update_applying == key:
                 return          # already on it; the swap takes a few seconds
-            self._pushed_update_applying = wanted
-            log.info("applying pushed update to v%s (requested by %s)",
-                     wanted, command.get("requested_by") or "an admin")
-            self._notify_tray(
-                f"Your administrator is updating CCSync to v{wanted}.",
-                "ccsync-companion",
-            )
+            if self._pushed_update_announced == key and time.monotonic() < self._pushed_update_retry_at:
+                return          # stood down a moment ago; give the editor time to close the window
+            self._pushed_update_applying = key
+            first_attempt = self._pushed_update_announced != key
+            if first_attempt:
+                self._pushed_update_announced = key
+                log.info("applying pushed update to v%s (requested by %s)",
+                         wanted, command.get("requested_by") or "an admin")
+                self._notify_tray(
+                    f"Your administrator is updating CCSync to v{wanted}.",
+                    "ccsync-companion",
+                )
+            else:
+                log.info("retrying pushed update to v%s", wanted)
             threading.Thread(
-                target=self.apply_upgrade, name="ccsync-pushed-upgrade", daemon=True,
+                target=self._run_pushed_update, args=(key, wanted, first_attempt),
+                name="ccsync-pushed-upgrade", daemon=True,
             ).start()
         except Exception:
             log.exception("could not apply the pushed update")
+
+    def _run_pushed_update(self, key: str, wanted: str, first_attempt: bool) -> None:
+        """The pushed-update thread body: one apply_upgrade, and if it came
+        back without swapping, release the latch so the next report can try
+        again after a pause. Before this (0.9.3) the latch was set on the
+        reporter thread and never released: ruskin's PC, whose out-of-tree
+        popup holds the lock from three seconds after launch (CR-27), got
+        ONE "Can't update while a CCSync window is open", then silently
+        ignored the push until the tray was restarted -- on precisely the
+        machine unattended updates were built for (ultrareview 2026-08-19)."""
+        outcome = "failed"
+        try:
+            outcome = self.apply_upgrade(quiet_refusals=not first_attempt)
+            if outcome is None:     # a stub with no return value: treat as applied
+                outcome = ""
+        except Exception:
+            log.exception("pushed update to v%s raised", wanted)
+        finally:
+            if outcome:
+                wait = (PUSHED_UPDATE_FAILED_RETRY_SECONDS if outcome in ("failed", "no-offer")
+                        else PUSHED_UPDATE_RETRY_SECONDS)
+                self._pushed_update_retry_at = time.monotonic() + wait
+                if self._pushed_update_applying == key:
+                    self._pushed_update_applying = ""
+                log.info("pushed update to v%s did not apply (%s); will try again in %ds",
+                         wanted, outcome, int(wait))
 
     def _apply_fleet_halt(self, resp: Any) -> None:
         """Adopt the dashboard's fleet halt flag from a report reply.

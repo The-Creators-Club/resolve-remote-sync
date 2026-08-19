@@ -285,6 +285,16 @@ Auto-update never takes an OLDER build — a rollback stays a deliberate push,
 because a rollback taken silently is a one-click loss of everything the
 running build fixed (seen live 2026-07-25).
 
+A refused push is **retried, not parked** (CR-41, companion 0.9.41): when the
+stand-down test says no, the companion tries again on a later report (90 s
+after a window/consolidate refusal, 10 min after a failed download) and tells
+the editor once per request, not once per try. Cancelling and pushing again
+on the dashboard is a new request and gets a fresh attempt at once. Before
+0.9.41 the first refusal silently ended the push until the tray restarted.
+Both paths need a companion that reads the flag/command: `auto_update` was
+stripped by the companion's manifest whitelist before 0.9.41 (CR-40), so a
+fleet on 0.9.3 or 0.9.4 ignores it however the site is configured.
+
 ### 5. Upgrade THIS machine
 
 The base rig is not part of the tray upgrade flow if you are testing a build

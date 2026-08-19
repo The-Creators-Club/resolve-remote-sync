@@ -440,3 +440,38 @@ def test_a_site_can_select_a_different_mark_and_a_bad_one_is_ignored(monkeypatch
     monkeypatch.setenv(theme.BRAND_LOGO_ENV, str(tmp_path / "gone.png"))
     assert theme.window_mark_path() == theme.asset_path("cc_mark_white.png")
     theme._WINDOW_ICON_CACHE.clear()
+
+
+# -- features: the whitelist IS the reader (ultrareview 2026-08-19) ----------
+
+# What the dashboard actually publishes under `features` (api.api_site). A
+# flag that is here but not in site.FEATURE_KEYS is stripped by normalise()
+# and silently dead, because feature_enabled fails closed -- which is how
+# `auto_update` shipped inert in 0.9.3. This is the test that would have
+# caught it: a REAL manifest through the REAL normalise, not a monkeypatched
+# feature_enabled.
+PUBLISHED_FEATURES = ("youtube_download", "youtube_unblock", "auto_update")
+
+
+@pytest.mark.parametrize("flag", PUBLISHED_FEATURES)
+def test_every_published_flag_survives_normalise_and_reads_on(flag):
+    manifest = dict(GOOD, features={name: name == flag for name in PUBLISHED_FEATURES})
+    site = site_mod.normalise(manifest)
+    assert site["features"][flag] is True
+    # `site=` on purpose: that is the real reader (conftest's autouse patch
+    # defers to it whenever a manifest is in hand).
+    assert site_mod.feature_enabled(flag, site) is True
+    for other in PUBLISHED_FEATURES:
+        if other != flag:
+            assert site_mod.feature_enabled(other, site) is False
+
+
+def test_auto_update_round_trips_through_the_cache():
+    """fetch -> normalise -> save -> cached_site -> feature_enabled is the
+    path the running companion takes; every hop must keep the flag."""
+    manifest = dict(GOOD, features={"youtube_download": False,
+                                    "youtube_unblock": False,
+                                    "auto_update": True})
+    assert site_mod.save_site(site_mod.normalise(manifest)) is True
+    assert site_mod.feature_enabled("auto_update") is True
+    assert site_mod.feature_enabled("youtube_download") is False

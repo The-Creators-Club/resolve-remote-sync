@@ -1305,6 +1305,89 @@ because this is YouTube's to change and the lever must not be a release.
 **Needs the companion shipped.** The argv is baked into the frozen exe; there
 is no lever on a running 0.9.3.
 
+## The 2026-08-19 ultrareview of the day's work (CR-40..CR-43)
+
+`/code-review ultra 163f2e0` over the five 08-19 commits (per-machine plans,
+release tooling, the ytdl requester-first pass: 83 files, +6.5k). Four
+findings, all verified against the code, all fixed the same day -- dashboard
+0.7.3, companion 0.9.41. The first two are in the headline feature of
+MULTI_MACHINE_PLAN.md §9 (updates without a click) and would have shipped it
+half-working; neither has been in the field.
+
+### CR-40 — the `auto_update` site flag was dead on arrival in the companion
+`site.normalise()` rebuilds the manifest's `features` from a hardcoded
+whitelist, `FEATURE_KEYS = ("youtube_download", "youtube_unblock")`, so the
+`auto_update: true` the dashboard published was stripped before
+`feature_enabled("auto_update")` ever read it -- and `feature_enabled` fails
+closed, so the gate at `_on_upgrade_available` returned every time. A site
+with `DASH_SITE_AUTO_UPDATE=1` would have seen zero unattended upgrades and
+no log line saying why. Every test of the path monkeypatched
+`feature_enabled` directly, which is how a real manifest never went through
+the real `normalise()`.
+
+FIXED in repo 2026-08-19, companion 0.9.41: `"auto_update"` is in
+`FEATURE_KEYS`, the comment above it now says the tuple IS the whitelist,
+and `test_site.py` runs every flag the dashboard publishes through
+`normalise()` -> `save_site()` -> `cached_site()` -> `feature_enabled()`.
+The admin push (`commands.upgrade` on the report reply) never depended on
+the manifest and was unaffected.
+
+### CR-41 — a pushed update parked itself on the first "Can't update while a window is open"
+`_apply_pushed_update` set `_pushed_update_applying` on the reporter thread
+BEFORE starting the apply thread, and nothing ever cleared it: not the popup
+stand-down, not the consolidate stand-down, not a failed download. The
+dashboard re-sends the request on every report until the machine reports the
+new version -- which it never does -- so every subsequent report hit the
+debounce and returned silently. ruskin's PC, whose out-of-tree popup takes
+the lock three seconds after launch (CR-27), would have got ONE toast and
+then ignored the push until the tray was restarted: on exactly the machine
+§9 names as the reason unattended updates exist.
+
+FIXED in repo 2026-08-19, companion 0.9.41: `apply_upgrade` returns why it
+did not swap (`"popup" | "consolidate" | "failed" | "no-offer"`, `""` on
+success), the push runs through `_run_pushed_update`, which releases the
+latch when the attempt comes back without swapping and holds the next try
+off (`PUSHED_UPDATE_RETRY_SECONDS` = 90 s after a stand-down, 600 s after a
+failed download). Retries pass `quiet_refusals=True` so the editor is told
+once per request, not every minute. The debounce key is the REQUEST
+(`version@requested_at`), so an admin who cancels and pushes again gets a
+fresh attempt at once.
+
+### CR-42 — a rename onto another live computer's name destroyed that computer's plan
+`adopt_renamed_machine` DELETEd whatever sat at the new hostname before
+moving the old rows across, and `upsert_machine`'s COALESCE then wrote the
+incoming `machine_id` / Syncthing device over the existing row's. An editor
+who renamed PC B to decommissioned PC A's name, or restored an image
+carrying A's `machine.json` onto a box called B, silently lost B's plan and
+sticky root -- with a friendly "moving its sync plan across" in the log.
+MULTI_MACHINE_PLAN.md §6 called a same-person hostname collision "solved by
+construction"; it is not, because every table but the registry is keyed on
+the hostname (the deliberate WP1 choice).
+
+FIXED in repo 2026-08-19, dashboard 0.7.3: `adopt_renamed_machine` returns
+False and writes nothing when the new name is already a registered computer
+of that editor; `_register_machine` logs a WARNING naming both machines and
+records the report under the name it used. Both plans stay exactly where
+they were -- under-sharing is the safe direction; an admin copies or clears
+one by hand ("give this computer another one's plan"). `machine_by_machine_id`
+orders by `last_seen DESC` so the row that just reported wins the id lookup
+and the rename branch does not re-fire every 30 s. §6 now says so.
+
+### CR-43 — `machine_state.mode`'s COALESCE was a no-op (the comment described a guard the code lacked)
+`api.py` defaulted a missing `mode` to `"editor"` BEFORE the upsert, so
+`excluded.mode` was never NULL and the COALESCE that the comment presented
+as CR-28's defence against a mode-less report never engaged: such a report
+would have re-labelled the base rig an editor machine. No live impact (every
+0.4.x+ companion sends `mode`), but a misleading comment at the boundary
+between two pieces of code that must agree invites the refactor that
+reintroduces CR-28.
+
+FIXED in repo 2026-08-19, dashboard 0.7.3: the machine row receives `None`
+when the report omitted `mode` (the COALESCE is real now); the
+`editor_media_project` write keeps the `"editor"` default because its column
+is NOT NULL. `test_presence.py` pins a mode-less report keeping a stored
+`base`.
+
 ## Open — residuals from the 2026-08-14 fix pass
 
 ### R16 — eight 08-14 findings deliberately not fixed

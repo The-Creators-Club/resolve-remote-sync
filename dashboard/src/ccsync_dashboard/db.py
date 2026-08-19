@@ -1695,8 +1695,14 @@ def machine_by_machine_id(
     renamed their PC, and their plan should not silently become empty."""
     if not machine_id:
         return None
+    # Most recently heard from FIRST. Two rows can carry one id after a
+    # refused rename adoption (the renamed computer's report is recorded
+    # under its new name, the old row keeps its plan): the live one is the
+    # one that just reported, and returning it is what stops the rename
+    # branch re-firing on every report (ultrareview 2026-08-19).
     row = conn.execute(
-        "SELECT * FROM machines WHERE editor_username=? AND machine_id=?",
+        """SELECT * FROM machines WHERE editor_username=? AND machine_id=?
+           ORDER BY last_seen DESC, machine ASC LIMIT 1""",
         (editor, machine_id),
     ).fetchone()
     return dict(row) if row else None
@@ -1772,7 +1778,7 @@ def copy_machine_plan(
 
 def adopt_renamed_machine(
     conn: sqlite3.Connection, editor: str, old_machine: str, new_machine: str
-) -> None:
+) -> bool:
     """Somebody renamed their PC. Carry what belongs to the COMPUTER across.
 
     Only the plan and the sticky root move: manifests, lane reports and
@@ -1781,9 +1787,28 @@ def adopt_renamed_machine(
     evict_extra_machines). The plan does not rebuild -- nobody re-ticks four
     projects because Windows was renamed -- so without this a rename reads as
     a brand-new computer with an empty plan, which is the one outcome that
-    silently stops an editor syncing."""
+    silently stops an editor syncing.
+
+    REFUSED (returns False, nothing written) when `new_machine` is already a
+    registered computer of this editor. Until 2026-08-19 this DELETEd
+    whatever sat at the new name before moving the old rows across, so an
+    editor who renamed PC B to PC A's name -- or restored an image carrying
+    PC A's machine.json onto a box called B -- silently lost PC B's plan and
+    sticky root, and upsert_machine then wrote A's identity over B's
+    (ultrareview 2026-08-19). MULTI_MACHINE_PLAN.md §6 calls a same-person
+    hostname collision "solved by construction"; it is not, because every
+    table but this registry is keyed on the hostname. So the one thing this
+    must never do is destroy a plan to resolve one: both stay, the collision
+    is logged, and an admin copies or clears a plan by hand. Under-sharing is
+    the safe direction."""
     if not old_machine or not new_machine or old_machine == new_machine:
-        return
+        return False
+    taken = conn.execute(
+        "SELECT 1 FROM machines WHERE editor_username=? AND machine=?",
+        (editor, new_machine),
+    ).fetchone()
+    if taken is not None:
+        return False
     for table in ("selections", "editor_prefs"):
         conn.execute(
             f"DELETE FROM {table} WHERE editor_username=? AND machine=?",
@@ -1797,6 +1822,7 @@ def adopt_renamed_machine(
         "DELETE FROM machines WHERE editor_username=? AND machine=?",
         (editor, old_machine),
     )
+    return True
 
 
 def add_selection(
@@ -2218,6 +2244,9 @@ def upsert_machine_state(
              -- companion that has one, and a report from a build too old to
              -- send it must not silently re-label the base rig an editor
              -- machine -- which would put it back in [ QUEUED ] (CR-28).
+             -- This only holds because api.py passes None (not "editor")
+             -- when the report omitted it -- the default used to be applied
+             -- there first, which made this a no-op (ultrareview 2026-08-19).
              mode=COALESCE(excluded.mode, machine_state.mode)""",
         (editor, machine, detected_project_root, now, resolve_project, int(verified),
          platform, companion_version,

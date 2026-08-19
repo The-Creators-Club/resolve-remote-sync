@@ -1170,3 +1170,59 @@ def test_no_grace_at_all_when_the_feature_is_off(con, monkeypatch):
         raise AssertionError('it waited for a claim with the feature off')
 
     assert worker._await_local_claim(con, job['id'], sleep=never) is False
+
+
+# --------------------------- CR-37: a dead run must not pin the next one
+
+def test_a_new_run_forgets_the_last_ones_executor_entirely(con, monkeypatch):
+    """CR-37 (2026-08-19). Measured on the live fleet, job 50:
+
+        06:10:15.477  POST /jobs/50/download  200      <- pin cleared here
+        06:10:15.479  job 50: the local download lease held by ruskin expired;
+                      the server is taking the job back
+        06:10:15.592  POST /jobs/50/claim     410 "pinned to the server"
+
+    `download_mode` stayed `local` from a run that had ended half an hour
+    earlier -- a job that finishes while local keeps the value, and a `done`
+    job is never picked up again for the worker to reclaim it. So this
+    endpoint's own nudge sent _phase_download down the reclaim path for a dead
+    run, reclaim_download re-pinned the job (correctly: reclaim is one-way
+    WITHIN a run), and the editor's machine was refused on every retry after.
+    """
+    monkeypatch.setattr(config, 'LOCAL_DOWNLOAD', True)
+    job = _job(con, ids=('aaaaaaaaaaa',))
+    job_id = job['id']
+
+    # The state a finished local run leaves behind.
+    db.claim_download(con, job_id, USER, config.LEASE_SECONDS)
+    db.set_phase(con, job_id, 'done')
+    stale = db.get_job(con, job_id)
+    assert stale['download_mode'] == db.MODE_LOCAL
+
+    db.clear_mode_lock(con, job_id)
+
+    fresh = db.get_job(con, job_id)
+    assert fresh['mode_lock'] in (None, '')
+    # ALL FOUR, not just the pin: any one of them left behind is a reclaim
+    # waiting to re-pin the job the moment the worker looks at it.
+    assert fresh['download_mode'] == db.MODE_SERVER
+    assert not fresh['claimed_by']
+    assert not fresh['lease_expires_at']
+    assert not db.lease_active(fresh)
+
+
+def test_the_editors_machine_can_claim_a_revived_job(client, con, monkeypatch):
+    """The end-to-end shape of CR-37, through the API the SPA actually uses:
+    press DOWNLOAD on a finished job that once ran locally, and the claim that
+    follows must be granted rather than answered 410."""
+    monkeypatch.setattr(config, 'LOCAL_DOWNLOAD', True)
+    job = _job(con, ids=('aaaaaaaaaaa',))
+    job_id = job['id']
+    db.claim_download(con, job_id, USER, config.LEASE_SECONDS)
+    db.set_video(con, job_id, 'aaaaaaaaaaa', dl_state='failed',
+                 dl_error='bot check')
+    db.set_phase(con, job_id, 'done')
+
+    r = client.post(f'/api/jobs/{job_id}/download')
+    assert r.status_code == 200, r.text
+    assert db.claim_download(con, job_id, USER, config.LEASE_SECONDS) is True

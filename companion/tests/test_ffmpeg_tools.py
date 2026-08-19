@@ -963,3 +963,44 @@ def test_probe_video_passes_utf8_and_no_console_window(monkeypatch):
         assert captured["creationflags"] == ft.subprocess.CREATE_NO_WINDOW
     else:
         assert captured["creationflags"] == 0
+
+
+# -- the container, and who gets to choose it -----------------------------
+
+def test_both_builders_default_to_mp4_and_take_the_container_from_the_caller():
+    """R14 (2026-08-19). The Blackmagic Proxy Generator watches FOLDERS, not
+    files, and recognises only its own `Proxy/<stem>.mov` -- so every ffmpeg
+    proxy this companion wrote was invisible to it and it re-encoded 172 clips
+    the fleet had already proxied (~3.8 GB). proxy_gen now writes .mov.
+
+    A PARAMETER and not a constant, because two pipelines share these builders:
+    b-roll INGEST calls preview_proxy_cmd for the browsing proxy the b-roll web
+    app serves with a hardcoded `Content-Type: video/mp4`, and moving that one
+    would put QuickTime bytes behind an mp4 label. The default is what ingest
+    gets; proxy_gen passes the other explicitly.
+    """
+    for build in (ft.own_proxy_cmd, ft.preview_proxy_cmd):
+        default = build("ffmpeg", "in.mov", "out.partial", nvenc=False)
+        assert default[default.index("-f") + 1] == "mp4"
+        moved = build("ffmpeg", "in.mov", "out.partial", nvenc=False,
+                      container="mov")
+        assert moved[moved.index("-f") + 1] == "mov"
+        # ...and NOTHING else about the argv moved with it. The codec, the
+        # scaler, the hvc1 tag and faststart are the spec; only the muxer name
+        # is the caller's.
+        assert [a for a in default if a != "mp4"] == [a for a in moved if a != "mov"]
+
+
+def test_the_generator_asks_for_the_extension_it_writes():
+    """The two have to agree or ffmpeg writes an mp4 into a file called .mov:
+    proxy_gen encodes to `<stem><GENERATED_EXT>.partial`, and ".partial" names
+    no muxer, so `-f` is the only thing deciding the container."""
+    from ccsync_companion import proxy_gen, proxy_scan
+    import inspect
+    src = inspect.getsource(proxy_gen.ProxyGenerator._build_cmd)
+    assert 'proxy_scan.GENERATED_EXT.lstrip(".")' in src
+    assert 'container=container' in src
+    # And the ingest path must NOT have picked it up on the way past.
+    from ccsync_companion import broll_ingest_media
+    assert 'container' not in inspect.signature(
+        broll_ingest_media.preview_proxy_cmd).parameters

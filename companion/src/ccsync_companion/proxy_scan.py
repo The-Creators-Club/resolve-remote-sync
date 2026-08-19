@@ -43,10 +43,25 @@ from .sync import rclone_lane
 # to the "ccsync" logger (see shutdown_guard.py's note on the same trap).
 log = logging.getLogger("ccsync.proxy_scan")
 
-# What the generator writes. .mp4 rather than BPG's .mov because these are
-# HEVC/H.264 in an mp4 container; both extensions are proxies as far as
-# PROXY_EXTENSIONS and Resolve's adjacent-Proxy auto-link are concerned.
-GENERATED_EXT = ".mp4"
+# What the generator writes. `.mov` since 2026-08-19 (R14's open decision,
+# taken by the owner): the Blackmagic Proxy Generator watches FOLDERS rather
+# than files and recognises only its own `Proxy/<stem>.mov`, so every ffmpeg
+# proxy this companion had made was invisible to it -- handing BPG one editor's
+# folder (6 BRAW gaps) queued 179 items, 173 of which already had a proxy,
+# ~3.8 GB of duplicate encodes. Nothing else in the fleet cared which of the
+# two it was: PROXY_EXTENSIONS holds both and always has, and Resolve's
+# adjacent-Proxy auto-link takes either.
+#
+# The codec did NOT change with the container -- these are still HEVC (own
+# footage) and H.264 (previews), now in a QuickTime container that takes the
+# same `hvc1` tag and the same `+faststart`.
+#
+# EXISTING `.mp4` PROXIES STAY VALID and are not re-made: every "does this clip
+# have a proxy" test in this module goes through PROXY_EXTENSIONS, so the
+# estate already on disk still counts as proxied here. BPG cannot see them and
+# will re-encode those particular clips once if it is ever pointed at their
+# folder, which is the one-off cost of the switch.
+GENERATED_EXT = ".mov"
 
 # In-progress name for a proxy being encoded. Already excluded by every lane
 # filter in both directions (rclone_lane.IN_PROGRESS_EXCLUDE_RULES, and

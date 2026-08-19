@@ -1198,6 +1198,71 @@ server's 400 ("nothing new is selected") and 409 ("you already have a job
 running") already arrive as toasts, and a permanently grey button is not a
 better error message than either.
 
+### CR-36 — GET LINKS never offered the job to the editor's own machine
+Found 2026-08-19 chasing "it is still downloading on the server". `dispatchLocal`
+was called from `startDownload` -- the review-grid path -- and from nowhere
+else, so **every pasted-link job this fleet has ever run downloaded on the
+NAS**, for every editor, since the feature shipped. A paste has no review step,
+so there was no second place the offer could have been made from. Jobs 48, 49
+and 51 (all `kind=urls`) each went server-side with no claim in the log at all.
+
+Since lane B stopped carrying YouTube originals down on 2026-08-16, the editor
+who pasted the link was the one person guaranteed not to end up with the clip.
+
+FIXED in repo 2026-08-19, dashboard 0.7.2: `runUrls` dispatches after the
+server accepts the job, on the same contract `startDownload` uses -- not
+awaited, and a companion that cannot take it changes nothing.
+
+### CR-37 — clearing the executor pin lasted two milliseconds
+The one the owner was actually looking at. Job 50, on the live fleet:
+
+    06:10:15.477  POST /jobs/50/download  200      <- pin cleared (YTDL-WEB-7)
+    06:10:15.479  job 50: the local download lease held by ruskin expired;
+                  the server is taking the job back
+    06:10:15.592  POST /jobs/50/claim     410 "this job is pinned to the server"
+
+`start_download` clears `mode_lock` because the pin belonged to the run that
+ended. But `download_mode` stayed `local` from that dead run -- a job that
+finishes while local keeps the value, and a `done` job is never picked up again
+for the worker to reclaim it -- so the nudge this same request sends took
+`_phase_download` down the reclaim path for a run that had ended half an hour
+earlier, and `reclaim_download` re-pinned the job. Correctly, in its own terms:
+reclaim is one-way WITHIN a run. The editor's machine was then refused on every
+retry, permanently.
+
+FIXED in repo 2026-08-19, dashboard 0.7.2: `db.clear_mode_lock` clears all four
+columns of the last run's executor state (`mode_lock`, `download_mode`,
+`claimed_by`, `lease_expires_at`). Safe for the reason clearing the pin was:
+`start_download` accepts only `ready_for_review` and `done`, so the previous run
+is over and there is no lease to preserve. The reclaim's accounting is not lost
+either -- `mark_pending`, which the same request calls next, re-queues exactly
+the rows that failed or were never fetched, which is the set the reclaim would
+have produced.
+
+### CR-38 — requester-first was invisible, so four separate failures all read as "it doesn't work"
+Not a defect of its own: the shape of CR-29, CR-31, CR-34, CR-36 and CR-37 put
+together. The page never said which machine it was about to ask, never said
+that it had asked, and never said why the answer was no -- §11 kept every
+machine-side refusal deliberately quiet, on the reasoning that the editor could
+not act on it and the server would do the job anyway. That reasoning died on
+2026-08-16, when lane B stopped bringing YouTube originals down: from then on
+"the server did it" was not a detail, it was the difference between having the
+footage and not having it. The owner, 2026-08-19: "we need a switch for download
+locally and we need an error and some feedback for when it doesn't do it."
+
+DONE in repo 2026-08-19, dashboard 0.7.2:
+- **the switch** -- an "on this machine" tickbox beside the quality picker,
+  remembered per browser, defaulting to ON, and hidden outright when the
+  fleet's `local_download` flag is off. Read at dispatch time, not at page
+  load. A page served without the element (a cached `index.html`) reads as
+  ticked, so a stale asset cannot become a silent fleet-wide opt-out.
+- **the feedback** -- every path that ends server-side names its reason once:
+  no tray app, a companion too old, a reasoned refusal, a timeout, an
+  out-of-scope quality, a refused hand-off. Each says what it means for the
+  clip ("YouTube originals only sync upwards, so use the download history to
+  fetch a clip onto this machine"), and each is said once per reason so a poll
+  cannot turn it into a stream.
+
 ## Open — residuals from the 2026-08-14 fix pass
 
 ### R16 — eight 08-14 findings deliberately not fixed

@@ -1920,16 +1920,26 @@ class ProxyGenerator:
                    info: dict[str, Any]) -> list[str]:
         path = str(clip.get("path") or "")
         kind = clip.get("kind") or proxy_scan.classify_footage(path)
+        # BOTH tiers write proxy_scan.GENERATED_EXT's container (R14,
+        # 2026-08-19): the Blackmagic Proxy Generator watches FOLDERS, not
+        # files, and recognises only its own `Proxy/<stem>.mov` -- so an
+        # ffmpeg proxy in an mp4 was invisible to it and it re-encoded 172
+        # clips this fleet had already proxied. The b-roll INGEST pipeline
+        # calls the same preview builder and deliberately does NOT pass this:
+        # the browser serves those bytes as `video/mp4`.
+        container = proxy_scan.GENERATED_EXT.lstrip(".")
         if kind == proxy_scan.KIND_PREVIEW:
             # The b-roll 540p spec verbatim, so a proxy made for a YouTube
             # download doubles as its b-roll preview.
             cmd = ffmpeg_tools.preview_proxy_cmd(
-                self.ffmpeg_path, path, partial, nvenc=nvenc
+                self.ffmpeg_path, path, partial, nvenc=nvenc,
+                container=container,
             )
         else:
             cmd = ffmpeg_tools.own_proxy_cmd(
                 self.ffmpeg_path, path, partial, nvenc=nvenc,
                 max_height=self.max_height, bitrate=self.bitrate,
+                container=container,
                 # The ship-blocker: Resolve's LinkProxyMedia refuses a proxy
                 # whose timecode does not match the original
                 # (proxy_relink.py:35-37).

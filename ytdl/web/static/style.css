@@ -808,6 +808,22 @@ h2 {
 
 .gridfoot { font-size: 11px; margin: 10px 2px; }
 
+/* The "on this machine" switch (2026-08-19). It sits in the search bar with
+   the pickers, so it takes their height and muted colour rather than a form
+   control's browser default — the point is that it reads as one more thing you
+   choose about a download, not as a setting somewhere else. Hidden outright
+   when the fleet's local_download flag is off; app.js owns that class. */
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.switch input { margin: 0; accent-color: var(--green); cursor: pointer; }
+
 /* ---------- downloads ---------- */
 
 /* Which machine is fetching this job's clips (docs/YTDL_LOCAL_DOWNLOAD.md §9).

@@ -519,6 +519,29 @@ def probe_video(ffmpeg_path: str, path: str | Path) -> dict:
 # test on a machine with no ffmpeg -- which is every CI-shaped machine and most
 # of the fleet.
 
+# The muxer both builders name explicitly, and the ONE thing `container`
+# changes about either argv (R14, 2026-08-19).
+#
+# It has to be explicit at all because the generator encodes to
+# `<name>.<ext>.partial` and ffmpeg picks its muxer by extension: ".partial"
+# names none, so without `-f` every encode dies at muxer init (EINVAL) before a
+# single frame -- the whole 1040-clip base-rig queue, overnight 2026-08-11.
+#
+# It is a PARAMETER because two pipelines share these builders and only one of
+# them wants to move. `proxy_gen` writes `Proxy/<stem>.mov` so the Blackmagic
+# Proxy Generator recognises companion output as done: BPG watches folders
+# rather than files and knows only its own `.mov`, so handing it one editor's
+# folder re-encoded 172 clips this fleet had already proxied, ~3.8 GB of
+# duplicates. B-roll INGEST keeps `.mp4`, because the browser serves those
+# bytes with a hardcoded `Content-Type: video/mp4`
+# (`broll/web/app/routes_media.py`) -- R14 was written before ingest shared
+# this builder and says the b-roll browser is untouched; that is only true if
+# the container stays a per-caller choice.
+#
+# Both containers take `-movflags +faststart` and the `hvc1` tag: they are the
+# same QuickTime family, and only the muxer name differs.
+PROXY_CONTAINER = "mp4"
+
 # -- own footage: HEVC Main-10, 1080p, ~7 Mbps ----------------------------
 #
 # Chosen to match the FF4-era Resolve proxies already in the tree, so a
@@ -567,6 +590,7 @@ def own_proxy_cmd(
     max_height: int = OWN_MAX_HEIGHT,
     bitrate: str = OWN_BITRATE,
     timecode: Optional[str] = None,
+    container: str = PROXY_CONTAINER,
 ) -> list[str]:
     """argv for an own-footage proxy: HEVC Main-10, `max_height`p, ~`bitrate`.
 
@@ -639,11 +663,12 @@ def own_proxy_cmd(
         "-tag:v", "hvc1",
         "-c:a", "aac", "-b:a", OWN_AUDIO_BITRATE,
         "-movflags", "+faststart",
-        # The generator encodes to `<name>.mp4.partial` and ffmpeg chooses the
-        # muxer by extension: ".partial" names none, so without an explicit
+        # The generator encodes to `<name>.<ext>.partial` and ffmpeg chooses
+        # the muxer by extension: ".partial" names none, so without an explicit
         # format EVERY encode dies at muxer init (EINVAL) before a single
         # frame -- the whole 1040-clip base-rig queue, overnight 2026-08-11.
-        "-f", "mp4",
+        # `container` is the caller's, not this builder's: see PROXY_CONTAINER.
+        "-f", container,
         str(dest),
     ]
     return cmd
@@ -680,6 +705,7 @@ def preview_proxy_cmd(
     cq: int = PROXY_CQ,
     crf: int = PROXY_CRF,
     timecode: Optional[str] = None,
+    container: str = PROXY_CONTAINER,
 ) -> list[str]:
     """argv for a 540p browsing proxy -- byte-for-byte the b-roll spec.
 
@@ -724,11 +750,13 @@ def preview_proxy_cmd(
     cmd += [
         "-c:a", "aac", "-b:a", PROXY_AUDIO_BITRATE,
         "-movflags", "+faststart",
-        # The one deliberate divergence from the b-roll indexer's argv, and it
-        # changes no output byte: the indexer writes straight to `<name>.mp4`,
-        # this pipeline writes to `<name>.mp4.partial`, and ffmpeg cannot pick
-        # a muxer from ".partial" (EINVAL at init, overnight 2026-08-11).
-        "-f", "mp4",
+        # The one deliberate divergence from the b-roll indexer's argv, and at
+        # the default container it changes no output byte: the indexer writes
+        # straight to `<name>.mp4`, this pipeline writes to
+        # `<name>.<ext>.partial`, and ffmpeg cannot pick a muxer from
+        # ".partial" (EINVAL at init, overnight 2026-08-11). `container` is the
+        # caller's: proxy_gen asks for mov (R14), b-roll ingest does not.
+        "-f", container,
         str(dest),
     ]
     return cmd

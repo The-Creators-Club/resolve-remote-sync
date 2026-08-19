@@ -338,6 +338,11 @@ async function loadHealth() {
   // outright all leave this page dispatching nothing and badging nothing, which
   // is the rollback story -- flag off is byte-for-byte the old page.
   state.localDownload = h.local_download === true;
+  // The switch follows the flag, on every health tick and not just at boot:
+  // loadHealth is re-asked on an interval so an admin who turns the feature on
+  // does not have to walk the fleet asking for reloads (YTDL-39), and the
+  // control that feature owns should appear on the same terms.
+  initLocalSwitch();
   const pip = $('#health');
   const claudeOk = h.claude === 'ok';
   // The AI backend is chosen by the dashboard's Settings -> AI providers page
@@ -1279,6 +1284,17 @@ async function runUrls() {
       urls, project_slug: slug,
       quality: $('#quality').value,
     });
+    // GET LINKS offers the job to this editor's machine too (CR-36,
+    // 2026-08-19). It never did: dispatchLocal lived only in startDownload,
+    // the review-grid path, so EVERY pasted link this fleet has ever fetched
+    // downloaded on the NAS -- and since 2026-08-16 no lane brings a YouTube
+    // original back down, so the editor who pasted the link was the one person
+    // guaranteed not to end up with the clip. A paste has no review step, so
+    // this is the only place the offer can be made.
+    //
+    // Same contract as startDownload's: not awaited, the server has already
+    // accepted the job, and a companion that cannot take it changes nothing.
+    dispatchLocal(r.job_id, $('#quality').value);
     detach();
     $('#progress').classList.remove('hidden');
     await attach(r.job_id);
@@ -1395,38 +1411,115 @@ function explainCompanionRefusal(reason) {
         true, 12000);
 }
 
+// The editor's own switch (2026-08-19, the owner: "we need a switch for
+// download locally and we need an error and some feedback for when it doesn't
+// do it"). Remembered per browser, defaulting to ON: requester-first is what
+// puts an editor's clips on their own disk, and since 2026-08-16 no lane
+// brings a YouTube original back down from the NAS.
+//
+// It is a PREFERENCE, not a promise. Unticked means "do not even ask this
+// machine"; ticked means "ask, and tell me what the answer was" -- which is
+// the part that was missing. The server still decides, and every refusal path
+// below now ends at a sentence rather than at silence.
+const LOCAL_KEY = 'ytdl.local';
+
+function localWanted() {
+  if (!state.localDownload) return false;      // the fleet flag is off
+  const box = $('#localdl');
+  // `!== false` and not a truthiness test: an absent element, or one served by
+  // a cached index.html from before this switch existed, must behave the way
+  // the page did WITHOUT the switch -- which is "offer it to this machine".
+  // Reading `undefined` as "unticked" would have turned a stale asset into a
+  // silent, fleet-wide opt-out of the whole feature.
+  return !box || box.checked !== false;
+}
+
+function initLocalSwitch() {
+  const label = $('#locallabel');
+  const box = $('#localdl');
+  if (!label || !box) return;
+  // Hidden entirely when the fleet flag is off: a switch for a feature the
+  // server will not honour is worse than no switch (§10, phase 1).
+  label.classList.toggle('hidden', !state.localDownload);
+  try {
+    const saved = localStorage.getItem(LOCAL_KEY);
+    if (saved !== null) box.checked = saved === '1';
+  } catch { /* privacy mode: the default (on) applies to this visit */ }
+  box.onchange = () => {
+    try { localStorage.setItem(LOCAL_KEY, box.checked ? '1' : '0'); }
+    catch { /* it still applies to this download */ }
+    toast(box.checked
+      ? 'downloads will be offered to this machine first'
+      : 'downloads will run on the server. YouTube originals only sync '
+        + 'upwards, so you can fetch one later from the download history.');
+  };
+}
+
+// Why this machine is not doing the download, said ONCE per reason. §11 used
+// to keep every machine-side refusal quiet on the grounds that the editor
+// could not act on it and the server would do the job anyway. That was wrong
+// in the one way that mattered: the clips then live on the NAS and no lane
+// brings them down, so "the server did it" is not a detail, it is the whole
+// outcome (the owner, 2026-08-19).
+let lastLocalNote = '';
+function noteLocalSkipped(why) {
+  if (why === lastLocalNote) return;
+  lastLocalNote = why;
+  toast(`Downloading on the server: ${why}. YouTube originals only sync `
+        + 'upwards, so use the download history to fetch a clip onto this '
+        + 'machine.', false, 12000);
+}
+
 // Is there a companion on this machine willing to do the work? 200 with
 // ok:false is a companion saying WHY not (no yt-dlp, disk nearly full, an older
 // naming template than the server's -- §5/§6); it is a no, like every other
 // answer that is not a yes.
 async function companionCapabilities() {
   let body = null;
+  // Told apart so the sentence at the bottom can be the true one: a refused
+  // connection is "no tray app", an abort is "it never answered".
+  let unreachable = false;
   for (const budget of [PROBE_MS, PROBE_RETRY_MS]) {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), budget);
     let timedOut = false;
     try {
       const res = await fetch(`${COMPANION_URL}/ytdl/capabilities`, {signal: ctl.signal});
-      if (!res.ok) return null;            // 404: a companion predating 0.8.0
+      if (!res.ok) {                       // 404: a companion predating 0.8.0
+        noteLocalSkipped('the CC Sync companion on this machine is too old to '
+                         + 'download YouTube clips (upgrade it from the tray)');
+        return null;
+      }
       body = await res.json();
     } catch (e) {
       // Nothing listening, the abort above, or Chrome's local-network
       // permission refusing a plain-HTTP origin. Only the abort is worth a
       // second go: the other two answer instantly and would answer the same.
       timedOut = !!(e && e.name === 'AbortError');
+      unreachable = !timedOut;
     } finally {
       clearTimeout(timer);
     }
     if (body || !timedOut) break;
   }
   if (body && body.ok === true) return body;
-  // §11 keeps machine-side refusals (an old yt-dlp, no ffmpeg) quiet: the
-  // editor cannot act on them and the server does the job. The ONE reason
-  // that is the editor's own to fix is said out loud: the YouTube terms not
-  // yet accepted in the tray, which read as a broken feature when nothing on
-  // the page mentioned it (owner, 2026-08-18). Server-side download either way.
+  // Every refusal now ENDS AT A SENTENCE. §11 used to keep machine-side ones
+  // quiet -- an old yt-dlp, no ffmpeg -- on the grounds that the editor could
+  // not act on them and the server would do the job anyway. Since 2026-08-16
+  // "the server did it" means the clip stays on the NAS, so that reasoning
+  // stopped holding and the owner asked for the feedback out loud
+  // (2026-08-19). The terms refusal keeps its own louder toast: it is the one
+  // an editor fixes in the tray in ten seconds.
   if (body && /terms/i.test(String(body.reason || ""))) {
     explainCompanionRefusal(String(body.reason));
+  } else if (body) {
+    noteLocalSkipped(String(body.reason || 'this machine declined the job'));
+  } else if (unreachable) {
+    noteLocalSkipped('the CC Sync companion is not answering on this machine '
+                     + '(is the tray app running? self-test: open '
+                     + 'http://127.0.0.1:8899/status)');
+  } else {
+    noteLocalSkipped('the CC Sync companion did not answer in time');
   }
   return null;
 }
@@ -1439,7 +1532,13 @@ async function companionCapabilities() {
 // probe that TIMED OUT -- see PROBE_RETRY_MS -- which is the opposite case: a
 // companion that is there and answering, just not within a second.)
 async function dispatchLocal(jobId, quality) {
-  if (!state.localDownload || !jobId) return false;
+  if (!jobId) return false;
+  // The editor's switch is read HERE, at the moment of dispatch, rather than
+  // remembered from page load: unticking it mid-session has to take effect on
+  // the next download and not the next reload. Unticked is a deliberate
+  // choice, so it says nothing -- noteLocalSkipped is for the times the page
+  // TRIED and could not.
+  if (!localWanted()) return false;
   const cap = await companionCapabilities();
   if (!cap) return false;
   // The rungs that companion actually runs (COMP-BROLL-10). The server refuses
@@ -1448,7 +1547,11 @@ async function dispatchLocal(jobId, quality) {
   // theirs. A companion that does not declare the field, or a quality this page
   // does not know, dispatches exactly as before.
   if (Array.isArray(cap.scope_qualities) && quality
-      && !cap.scope_qualities.includes(quality)) return false;
+      && !cap.scope_qualities.includes(quality)) {
+    noteLocalSkipped(`this machine only downloads `
+      + `${cap.scope_qualities.join(', ')} and this job is ${quality}`);
+    return false;
+  }
   try {
     const res = await fetch(`${COMPANION_URL}/ytdl/download`, {
       method: 'POST',
@@ -1460,8 +1563,14 @@ async function dispatchLocal(jobId, quality) {
     // 202 dispatched; 409 already busy, 503 declined (its claim was refused, or
     // the capability went away between the probe and now) -- and any of those
     // simply means the server worker keeps the job, which it has all along.
-    return res.status === 202;
+    if (res.status === 202) return true;
+    noteLocalSkipped(res.status === 409
+      ? 'this machine is already downloading another job'
+      : `this machine declined the job (HTTP ${res.status})`);
+    return false;
   } catch {
+    noteLocalSkipped('the CC Sync companion stopped answering between the '
+                     + 'check and the hand-off');
     return false;
   }
 }

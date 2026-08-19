@@ -777,7 +777,10 @@ def start_download(job_id: int, request: Request):
     # the one the plan's second-chance sweep expects to be used for clips that
     # failed on an editor's IP, was permanently refused to that editor's machine
     # and ran from the NAS's IP instead. This is a fresh human request; the pin
-    # belonged to the run that ended.
+    # belonged to the run that ended -- and since CR-37 (2026-08-19) so does the
+    # rest of that run's executor state, because clearing the pin alone was
+    # undone by the reclaim this function's own nudge triggers, two
+    # milliseconds later, for a run that ended half an hour ago.
     db.clear_mode_lock(c, job_id)
     db.set_job(c, job_id, dl_total=n, dl_done=0, dl_failed=0)
     db.set_phase(c, job_id, 'downloading')

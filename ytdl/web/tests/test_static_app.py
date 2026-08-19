@@ -1665,9 +1665,11 @@ scenarios['a_companion_that_cannot_take_it_is_never_handed_it'] = async () => {
   return {dead: loopback(dead), old: loopback(old), unable: loopback(unable),
           refused: loopback(refused).map(c => c.url),
           busy: loopback(busy).map(c => c.url),
-          // not one of them says a word to the editor
-          quiet: [dead, old, unable, refused, busy]
-            .map(p => [p.get('toast').hidden, p.warnText()]),
+          // every one of them now SAYS SO (2026-08-19, the owner). Silence was
+          // the old rule and it stopped being defensible when "the server did
+          // it" started meaning "the clip stays on the NAS".
+          spoken: [dead, old, unable, refused, busy]
+            .map(p => [p.get('toast').hidden, p.get('toast').textContent]),
           terms: {calls: loopback(terms).map(c => c.url),
                   toast_hidden: terms.get('toast').hidden,
                   toast_text: terms.get('toast').textContent,
@@ -1738,7 +1740,7 @@ scenarios['an_out_of_scope_job_is_never_handed_over'] = async () => {
           // the server was still given the selection in every case
           submitted: [inScope, outOfScope, undeclared]
             .map(p => p.calls.filter(c => c.url === 'api/jobs/90/download').length),
-          quiet: [outOfScope.get('toast').hidden, outOfScope.warnText()]};
+          spoken: [outOfScope.get('toast').hidden, outOfScope.get('toast').textContent]};
 };
 
 // §9: the badge is derived from the poll payload every tick and remembered
@@ -2549,13 +2551,18 @@ def test_a_capable_companion_is_probed_then_handed_the_job_id(spa):
     assert r['review_hidden'] is True and r['toast_hidden'] is True, r
 
 
-def test_no_companion_no_dispatch_and_no_word_about_it(spa):
-    """§11's first column. Nothing listening, a tray predating the routes, a
-    stale yt-dlp, a claim that lost the race, a companion already busy with
-    another job: all five end at the server worker doing the job exactly as
-    today, and none of them says anything to the editor. The one exception,
-    since 2026-08-18: terms not yet accepted in the tray, which the editor
-    can fix and is told about."""
+def test_no_companion_no_dispatch_and_the_editor_is_told_why(spa):
+    """§11's first column, REVERSED on 2026-08-19 at the owner's request:
+    "we need an error and some feedback for when it doesn't do it".
+
+    Nothing listening, a tray predating the routes, a stale yt-dlp, a claim
+    that lost the race, a companion already busy: all five still end at the
+    server worker doing the job exactly as before -- and all five now say so.
+    The old rule (silence, because the editor could not act on it and the
+    server would do the job anyway) stopped holding on 2026-08-16, when lane B
+    stopped bringing YouTube originals down: from then on "the server did it"
+    was not a detail, it was the difference between having the footage and
+    not."""
     r = spa['a_companion_that_cannot_take_it_is_never_handed_it']
     for name in ('dead', 'old', 'unable'):
         assert [c['url'] for c in r[name]] == [CAPABILITIES], f'{name}: {r[name]}'
@@ -2563,9 +2570,12 @@ def test_no_companion_no_dispatch_and_no_word_about_it(spa):
     # once, consequence nil
     assert r['refused'] == [CAPABILITIES, LOCAL_DOWNLOAD], r['refused']
     assert r['busy'] == [CAPABILITIES, LOCAL_DOWNLOAD], r['busy']
-    for hidden, warn in r['quiet']:
-        assert hidden is True, 'a failed fast path toasted at the editor'
-        assert warn == '', warn
+    for hidden, said in r['spoken']:
+        assert hidden is False, 'a failed fast path said nothing at all'
+        assert 'Downloading on the server' in said, said
+        # ...and every one of them names what to do about the clip that is now
+        # only on the NAS, which is the whole reason this stopped being silent.
+        assert 'download history' in said, said
     assert r['badges'] == ['downloading on the server'] * 5, r['badges']
     # ...except the terms, which are the editor's to accept: probed, not
     # dispatched, told in the owner's words, and still downloading server-side
@@ -2605,7 +2615,9 @@ def test_a_job_this_machine_cannot_name_correctly_is_not_dispatched(spa):
     assert r['out_of_scope'] == [CAPABILITIES], r['out_of_scope']
     assert r['undeclared'] == [CAPABILITIES, LOCAL_DOWNLOAD], r['undeclared']
     assert r['submitted'] == [1, 1, 1], 'the server lost a selection'
-    assert r['quiet'] == [True, ''], 'a fast path that did not fire said so'
+    hidden, said = r['spoken']
+    assert hidden is False, 'the out-of-scope skip was silent (CR: 2026-08-19)'
+    assert 'only downloads' in said, said
 
 
 def test_the_badge_flips_on_its_own_when_the_server_reclaims(spa):
@@ -3100,13 +3112,48 @@ def test_the_local_dispatch_is_gated_on_the_servers_own_flag():
     js = _js()
     health = js[js.index('async function loadHealth()'):js.index('// ------', js.index('async function loadHealth()'))]
     assert 'state.localDownload = h.local_download === true;' in health, health
-    assert 'if (!state.localDownload' in _dispatch(), _dispatch()
+    # The gate moved into localWanted() when the editor's own switch was added
+    # (2026-08-19). Both halves still have to hold: the fleet flag is checked
+    # FIRST and answers false on its own, so a fleet that never enabled the
+    # feature cannot be opted back into it by a checkbox.
+    js = _js()
+    wanted = js[js.index('function localWanted()'):js.index('function initLocalSwitch()')]
+    assert 'if (!state.localDownload) return false;' in wanted, wanted
+    assert 'if (!localWanted()) return false;' in _dispatch(), _dispatch()
 
 
-def test_the_probe_is_bounded_and_every_failure_of_it_is_silent():
+def test_the_switch_defaults_to_on_when_the_page_has_no_checkbox():
+    """A cached index.html from before the switch existed still has to dispatch.
+    Reading a missing `checked` as "unticked" would have made a stale asset a
+    silent, fleet-wide opt-out of requester-first downloads."""
+    js = _js()
+    wanted = js[js.index('function localWanted()'):js.index('function initLocalSwitch()')]
+    assert 'box.checked !== false' in wanted, wanted
+
+
+def test_the_links_button_offers_the_job_to_this_machine_too():
+    """CR-36 (2026-08-19): dispatchLocal lived only in startDownload, the
+    review-grid path, so EVERY pasted link this fleet ever fetched downloaded
+    on the NAS -- and since 2026-08-16 no lane brings a YouTube original back
+    down, so the editor who pasted the link was the one person guaranteed not
+    to end up with the clip. A paste has no review step, so runUrls is the only
+    place the offer can be made."""
+    js = _js()
+    body = js[js.index('async function runUrls()'):js.index('async function startDownload()')]
+    assert 'dispatchLocal(' in body, body
+    # AFTER the server has accepted it, exactly as startDownload does: the job
+    # downloads either way, and the offer is a shortcut on top (§2 step 1).
+    assert body.index('dispatchLocal(') > body.index("post('api/jobs/urls'"), body
+
+
+def test_the_probe_is_bounded_and_every_failure_of_it_is_explained():
     """§2 step 2: 1 s, then the server path. It sits between the editor clicking
     DOWNLOAD and the page moving on, and a tray app that is wedged (or a browser
-    refusing the local connection) must cost that second and nothing else."""
+    refusing the local connection) must cost that second and nothing else.
+
+    The BOUND is unchanged; the silence is not. Every exit now ends at
+    noteLocalSkipped (2026-08-19, the owner) -- see
+    test_no_companion_no_dispatch_and_the_editor_is_told_why for why."""
     js = _js()
     assert 'const PROBE_MS = 1000;' in js
     # ...and ONE longer second go for a companion that is there but busy
@@ -3126,14 +3173,19 @@ def test_the_probe_is_bounded_and_every_failure_of_it_is_silent():
     assert 'clearTimeout(timer)' in body, body
     # 200 with ok:false is a companion saying why not; it is a no like any other
     assert 'body.ok === true' in body, body
-    assert 'if (!res.ok) return null' in body, body
-    # not one word to the editor: this is a fast path, not a feature they have
-    # to watch fail (§11)
-    for banned in ('toast(', 'setBanner('):
-        assert banned not in body + _dispatch(), banned
-    # ...with ONE exception since 2026-08-18: the terms not accepted in the
-    # tray, which the editor can fix, goes through explainCompanionRefusal and
-    # only when the reason names the terms
+    assert 'if (!res.ok) {' in body, body
+    # EVERY exit says why. The four the probe itself can reach -- a 404 (a
+    # companion predating the routes), a reasoned no, an unreachable loopback,
+    # and a timeout -- plus the two dispatchLocal can (out of scope, and a
+    # refused hand-off).
+    assert body.count('noteLocalSkipped(') == 4, body
+    assert _dispatch().count('noteLocalSkipped(') >= 2, _dispatch()
+    # ...still through ONE funnel that says each reason once, so a poll or a
+    # re-click cannot turn an explanation into a stream of them.
+    note = js[js.index('function noteLocalSkipped('):js.index('// Is there a companion')]
+    assert 'if (why === lastLocalNote) return;' in note, note
+    # The terms refusal keeps its own louder wording: it is the one an editor
+    # fixes in the tray in ten seconds (owner, 2026-08-18).
     assert '/terms/i.test(' in body and 'explainCompanionRefusal(' in body, body
 
 

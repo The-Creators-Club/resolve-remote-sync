@@ -67,6 +67,19 @@
           <option value="2160p">2160p</option>
           <option value="best">best</option>
         </select>
+        <!-- WHERE the clips are fetched, as a switch the editor can see
+             (2026-08-19, the owner). Requester-first downloads were an
+             invisible optimisation for a week and failed invisibly four
+             different ways (CR-29, CR-31, CR-34, CR-36) -- every one of them
+             read as "the feature does not work" because nothing on the page
+             ever said it had been tried. Ticked = offer each job to this
+             machine first; unticked = the NAS does it, which is what every
+             fleet did before 0.8.0. app.js hides this entirely when the
+             server's local_download flag is off. -->
+        <label id="locallabel" class="switch hidden"
+               title="Download onto THIS computer instead of the NAS. YouTube originals only sync upwards, so a clip the server fetches stays on the NAS until you ask for it.">
+          <input id="localdl" type="checkbox" checked> on this machine
+        </label>
         <select id="period" title="YouTube's own upload-date filter">
           <option value="">any date</option>
           <option value="today">today</option>

@@ -844,9 +844,34 @@ def clear_mode_lock(c, job_id):
     only `ready_for_review` and `done`: there is no run in flight for this to
     unpin, so neither the close-out pin nor the reclaim pin is undermined --
     both are about the run that just ended, and this is the next one.
+
+    It clears the whole of the last run's EXECUTOR STATE, not just the pin
+    (CR-37, 2026-08-19). Clearing the pin alone lasted two milliseconds:
+
+        06:10:15.477  POST /jobs/50/download  200      <- pin cleared here
+        06:10:15.479  job 50: the local download lease held by ruskin expired;
+                      the server is taking the job back
+        06:10:15.592  POST /jobs/50/claim     410 "pinned to the server"
+
+    `download_mode` stayed `local` from a run that had ended half an hour
+    earlier -- a job that finishes while local keeps the value, and a `done`
+    job is never picked up again for the worker to reclaim it. So the nudge
+    this same request sends took `_phase_download` down the reclaim path for a
+    dead run, and `reclaim_download` re-pinned the job to the server (correctly:
+    reclaim is one-way WITHIN a run). The editor's machine then had its claim
+    refused on every retry, for good.
+
+    Resetting all four columns is safe for the same reason clearing the pin is:
+    the accepted phases mean the previous run is OVER, so there is no lease to
+    preserve and nothing in flight to credit. The reclaim's accounting is not
+    lost either -- that run's clips are already `done` or `failed` on their
+    rows, and mark_pending (which start_download calls next) re-queues exactly
+    the ones that failed or were never fetched, which is the same set the
+    reclaim would have produced.
     """
-    c.execute('UPDATE jobs SET mode_lock=NULL, updated_at=? WHERE id=?',
-              (now(), job_id))
+    c.execute("UPDATE jobs SET mode_lock=NULL, download_mode=?, claimed_by=NULL, "
+              'lease_expires_at=NULL, updated_at=? WHERE id=?',
+              (MODE_SERVER, now(), job_id))
     c.commit()
 
 

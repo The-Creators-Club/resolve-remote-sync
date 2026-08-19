@@ -368,14 +368,14 @@ def test_a_clip_is_encoded_verified_and_published(tmp_path):
 
     assert gen.encode_once() == proxy_gen.RESULT_DONE
 
-    final = src.parent / "Proxy" / "A001.mp4"
+    final = src.parent / "Proxy" / f"A001{proxy_scan.GENERATED_EXT}"
     assert final.is_file()
-    assert not (src.parent / "Proxy" / "A001.mp4.partial").exists()
+    assert not (src.parent / "Proxy" / f"A001{proxy_scan.GENERATED_EXT}.partial").exists()
     assert gen.gap()["generated"] == 1
     # The encode wrote the .partial, never the final name: a half-written file
     # under a final name is one lane B would hand to the whole fleet.
     encode_cmd = ffmpeg.calls[0]
-    assert encode_cmd[-1].endswith(".mp4.partial")
+    assert encode_cmd[-1].endswith(proxy_scan.GENERATED_EXT + ".partial")
     # ...and the source timecode rode along (LinkProxyMedia refuses without it).
     assert "-timecode" in encode_cmd and "01:00:00:00" in encode_cmd
     # The verification decode really ran, on the partial.
@@ -446,7 +446,12 @@ def test_first_writer_wins_at_publish_time(tmp_path):
     just made, so ours is thrown away instead."""
     src = _original(tmp_path)
     ffmpeg = _FakeFfmpeg()
-    winner = src.parent / "Proxy" / "A001.mov"
+    # Deliberately the container we are NOT writing (R14 moved us to .mov), so
+    # this still exercises what it was written for: proxy_scan counts EITHER
+    # extension as a proxy, so a BPG .mov or a lane-B .mp4 arriving mid-encode
+    # both mean "somebody else got there first".
+    other = ".mp4" if proxy_scan.GENERATED_EXT == ".mov" else ".mov"
+    winner = src.parent / "Proxy" / f"A001{other}"
 
     class _RacingFfmpeg(_FakeFfmpeg):
         def __call__(self, cmd, should_stop, ceiling):
@@ -461,8 +466,8 @@ def test_first_writer_wins_at_publish_time(tmp_path):
 
     assert gen.encode_once() == proxy_gen.RESULT_DONE
     assert winner.read_bytes() == b"somebody else got there first"
-    assert not (src.parent / "Proxy" / "A001.mp4").exists()
-    assert not (src.parent / "Proxy" / "A001.mp4.partial").exists()
+    assert not (src.parent / "Proxy" / f"A001{proxy_scan.GENERATED_EXT}").exists()
+    assert not (src.parent / "Proxy" / f"A001{proxy_scan.GENERATED_EXT}.partial").exists()
 
 
 def test_a_publish_that_hits_a_sharing_violation_leaves_the_partial(tmp_path, monkeypatch):
@@ -478,7 +483,7 @@ def test_a_publish_that_hits_a_sharing_violation_leaves_the_partial(tmp_path, mo
 
     monkeypatch.setattr(os, "replace", _refuse)
     assert gen.encode_once() == proxy_gen.RESULT_FAILED
-    assert (src.parent / "Proxy" / "A001.mp4.partial").is_file()
+    assert (src.parent / "Proxy" / f"A001{proxy_scan.GENERATED_EXT}.partial").is_file()
     assert gen.gap()["failed"] == 1
 
 
@@ -503,8 +508,8 @@ def test_the_user_coming_back_kills_the_encode_and_requeues_the_front(tmp_path):
 
     gen._encode_fn = _ReturningUser()
     assert gen.encode_once() == proxy_gen.RESULT_INTERRUPTED
-    assert not (src.parent / "Proxy" / "A001.mp4.partial").exists()
-    assert not (src.parent / "Proxy" / "A001.mp4").exists()
+    assert not (src.parent / "Proxy" / f"A001{proxy_scan.GENERATED_EXT}.partial").exists()
+    assert not (src.parent / "Proxy" / f"A001{proxy_scan.GENERATED_EXT}").exists()
     assert gen._queue[0]["path"] == str(src)
     assert len(gen._queue) == 2
 
@@ -540,7 +545,7 @@ def test_shutdown_stops_the_encode(tmp_path):
     gen._queue = [_clip(src)]
     gen.stop()
     assert gen.encode_once() == proxy_gen.RESULT_INTERRUPTED
-    assert not (src.parent / "Proxy" / "A001.mp4.partial").exists()
+    assert not (src.parent / "Proxy" / f"A001{proxy_scan.GENERATED_EXT}.partial").exists()
 
 
 def test_pausing_stops_the_encode_in_flight(tmp_path):
@@ -628,7 +633,7 @@ def test_a_stuck_encode_is_killed_and_counted(tmp_path):
     gen._queue = [_clip(src)]
 
     assert gen.encode_once() == proxy_gen.RESULT_FAILED
-    assert not (src.parent / "Proxy" / "A001.mp4.partial").exists()
+    assert not (src.parent / "Proxy" / f"A001{proxy_scan.GENERATED_EXT}.partial").exists()
     assert gen.gap()["failed"] == 1
 
 
@@ -699,8 +704,8 @@ def test_a_proxy_that_does_not_decode_is_never_published(tmp_path):
     gen._queue = [_clip(src)]
 
     assert gen.encode_once() == proxy_gen.RESULT_FAILED
-    assert not (src.parent / "Proxy" / "A001.mp4").exists()
-    assert not (src.parent / "Proxy" / "A001.mp4.partial").exists()
+    assert not (src.parent / "Proxy" / f"A001{proxy_scan.GENERATED_EXT}").exists()
+    assert not (src.parent / "Proxy" / f"A001{proxy_scan.GENERATED_EXT}.partial").exists()
 
 
 def test_a_proxy_shorter_than_its_source_is_never_published(tmp_path):
@@ -715,7 +720,7 @@ def test_a_proxy_shorter_than_its_source_is_never_published(tmp_path):
     gen = _make_gen(tmp_path, probe_fn=_probe_fn)
     gen._queue = [_clip(src)]
     assert gen.encode_once() == proxy_gen.RESULT_FAILED
-    assert not (src.parent / "Proxy" / "A001.mp4").exists()
+    assert not (src.parent / "Proxy" / f"A001{proxy_scan.GENERATED_EXT}").exists()
 
 
 def test_a_proxy_a_hair_short_is_fine(tmp_path):
@@ -1162,7 +1167,7 @@ def test_a_tick_scans_notifies_and_encodes(tmp_path):
     )
     state = gen.tick()
     assert state == proxy_gen.STATE_NOTHING_TO_DO  # the queue drained
-    assert (src.parent / "Proxy" / "A001.mp4").is_file()
+    assert (src.parent / "Proxy" / f"A001{proxy_scan.GENERATED_EXT}").is_file()
     assert len(sent) == 1
 
 
@@ -1303,8 +1308,8 @@ def test_a_drain_encodes_several_clips_at_once(tmp_path):
     thread.join(timeout=30)
 
     assert not thread.is_alive()
-    assert (first.parent / "Proxy" / "A001.mp4").is_file()
-    assert (second.parent / "Proxy" / "A002.mp4").is_file()
+    assert (first.parent / "Proxy" / f"A001{proxy_scan.GENERATED_EXT}").is_file()
+    assert (second.parent / "Proxy" / f"A002{proxy_scan.GENERATED_EXT}").is_file()
 
 
 def test_resolve_running_demotes_the_drain_to_one_encode(tmp_path):
@@ -1329,7 +1334,9 @@ def test_resolve_running_demotes_the_drain_to_one_encode(tmp_path):
 
     assert not thread.is_alive()
     assert ffmpeg.peak == 1, "Resolve was rendering and four ffmpegs joined it"
-    assert all((path.parent / "Proxy" / path.name).is_file() for path in clips)
+    assert all((path.parent / "Proxy" /
+                (path.stem + proxy_scan.GENERATED_EXT)).is_file()
+               for path in clips)
 
 
 def test_a_demotion_probe_that_cannot_answer_demotes(tmp_path):
@@ -1385,8 +1392,8 @@ def test_a_forced_run_drains_at_the_full_width(tmp_path):
     thread.join(timeout=30)
 
     assert not thread.is_alive()
-    assert (first.parent / "Proxy" / "A001.mp4").is_file()
-    assert (second.parent / "Proxy" / "A002.mp4").is_file()
+    assert (first.parent / "Proxy" / f"A001{proxy_scan.GENERATED_EXT}").is_file()
+    assert (second.parent / "Proxy" / f"A002{proxy_scan.GENERATED_EXT}").is_file()
 
 
 def test_the_user_coming_back_stops_every_worker_and_requeues_them_all(tmp_path):
@@ -1623,11 +1630,11 @@ def test_stale_partials_are_reported_never_deleted(tmp_path):
     removal of a file under local_root."""
     proxy_dir = tmp_path / "Projects" / "2026" / "FF5" / "Nuclear" / "Proxy"
     proxy_dir.mkdir(parents=True)
-    stale = proxy_dir / "A001.mp4.partial"
+    stale = proxy_dir / f"A001{proxy_scan.GENERATED_EXT}.partial"
     stale.write_bytes(b"half an encode")
     old = time.time() - (24 * 3600)
     os.utime(stale, (old, old))
-    live = proxy_dir / "A002.mp4.partial"
+    live = proxy_dir / f"A002{proxy_scan.GENERATED_EXT}.partial"
     live.write_bytes(b"being written right now")
     (proxy_dir / "A003.mp4").write_bytes(b"a finished proxy")
     # A .partial OUTSIDE a Proxy dir is rclone's own marker, not ours.
@@ -2028,7 +2035,7 @@ def test_the_encode_asks_ffmpeg_for_a_progress_stream(tmp_path):
     encode_cmd = ffmpeg.calls[0]
     assert encode_cmd[1:3] == ["-progress", "pipe:1"]
     # The output path stays LAST -- several callers index it that way.
-    assert encode_cmd[-1].endswith(".mp4.partial")
+    assert encode_cmd[-1].endswith(proxy_scan.GENERATED_EXT + ".partial")
     # The verification decode does NOT ask for one: nothing watches it.
     verify = next(cmd for cmd in ffmpeg.calls if _FakeFfmpeg._is_verify(cmd))
     assert "-progress" not in verify
@@ -2208,7 +2215,7 @@ class TestProxySourceRefusal:
         assert (proxy_gen.is_proxy_path(path) is not None) is expected
 
     def test_a_proxy_is_never_encoded(self, tmp_path):
-        proxy = tmp_path / "Projects" / "2026" / "FF5" / "Proxy" / "A001.mp4"
+        proxy = tmp_path / "Projects" / "2026" / "FF5" / "Proxy" / f"A001{proxy_scan.GENERATED_EXT}"
         proxy.parent.mkdir(parents=True)
         proxy.write_bytes(b"x" * 1000)
         stamp = time.time() - SETTLED

@@ -108,11 +108,22 @@ def test_expected_proxies_is_proxy_relinks_list(tmp_path):
     )
 
 
-def test_partial_path_is_the_mp4_proxy_plus_partial(tmp_path):
+def test_partial_path_is_the_generated_proxy_plus_partial(tmp_path):
+    """Bound to GENERATED_EXT rather than spelling the container out: it moved
+    from .mp4 to .mov on 2026-08-19 (R14, so BPG can see companion output) and
+    a literal here is eight tests that break for no reason next time."""
     original = tmp_path / "Panel" / "A001.mov"
     assert proxy_scan.partial_path(str(original)) == str(
-        tmp_path / "Panel" / "Proxy" / "A001.mp4.partial"
+        tmp_path / "Panel" / "Proxy" / f"A001{proxy_scan.GENERATED_EXT}.partial"
     )
+
+
+def test_the_generated_container_is_one_the_fleet_already_accepts():
+    """The switch is only safe because both extensions were proxies all along:
+    PROXY_EXTENSIONS is what proxy_scan, proxy_relink and Resolve's
+    adjacent-Proxy auto-link all read, so the .mp4 estate on disk stays valid
+    and nothing re-encodes it."""
+    assert proxy_scan.GENERATED_EXT in proxy_scan.PROXY_EXTENSIONS
 
 
 def test_partial_path_of_nothing_is_empty():

@@ -334,8 +334,12 @@ def test_update_item_is_never_adjacent_to_quit():
     you must never mis-click."""
     from ccsync_companion.tray import _build_menu
 
+    # 99.0.0, not "0.9.9": the label reads "Update available" only for a build
+    # NEWER than the running one, and 0.9.9 stopped being that the day the
+    # companion became 0.9.41 (two-digit patch, 2026-08-19) -- this test was
+    # the one that noticed, on CI, after the local run had passed at 0.9.5.
     labels = _menu_labels(
-        _build_menu(_FakeAppWithUpgrade({"dashboard_url": ""}, {"version": "0.9.9"}))
+        _build_menu(_FakeAppWithUpgrade({"dashboard_url": ""}, {"version": "99.0.0"}))
     )
     update_i = next(i for i, la in enumerate(labels) if "Update available" in la)
     quit_i = next(i for i, la in enumerate(labels) if la.startswith("Quit"))

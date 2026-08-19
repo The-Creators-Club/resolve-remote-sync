@@ -58,6 +58,17 @@
               <input type="hidden" name="disabled" value="{{ '0' if u.disabled else '1' }}">
               <button class="btn" type="submit">{% if u.disabled %}[ ENABLE ]{% else %}[ DISABLE ]{% endif %}</button>
             </form>
+            {# Deletion is the irreversible twin of DISABLE, so it is second and
+               it asks first. The confirm names what survives as well as what
+               goes: an admin who wanted "stop this person signing in" wants
+               DISABLE, and finding that out from the prompt is cheaper than
+               finding it out afterwards. #}
+            <form class="inline-form" hx-post="/partials/admin/users/delete"
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML"
+                  hx-confirm="Delete the account {{ u.username }}? Their login, SSH keys, browser sessions and report tokens go with it. Their sync history and project selections are kept. Use DISABLE instead to stop them signing in without removing the account.">
+              <input type="hidden" name="username" value="{{ u.username }}">
+              <button class="btn" type="submit">[ DELETE ]</button>
+            </form>
           </td>
         </tr>
       {% endfor %}

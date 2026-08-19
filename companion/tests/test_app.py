@@ -1503,6 +1503,99 @@ def test_the_prompt_is_offered_once_per_run_but_the_tray_can_reopen_it(tmp_path,
     assert len(calls) == 2
 
 
+def test_a_dialog_that_never_got_a_window_is_offered_again(tmp_path, monkeypatch):
+    """CR-27 [measured on ruskin's PC, 2026-08-18]. The clip popup takes the
+    popup lock ~3s before the licence dialog asks for it, on EVERY start of a
+    machine whose projects reference clips outside the tree -- so the one-shot
+    offer produced no window at all, three lanes stayed parked, and the log
+    said "not stacking a second modal on it" once per launch for hours."""
+    app, _started, shown = _licence_app(tmp_path, monkeypatch, answer=True)
+
+    # The retry is UNBOUNDED on purpose -- it has to outlast a clip popup an
+    # editor leaves open for hours -- so nothing inside the loop ends it while
+    # the lock is held. The test plays the part the tray's quit plays in the
+    # product: let it lose the race a few times, then set the same
+    # _stop_event. Driving it synchronously without this spins forever
+    # (measured: four pytest runs stuck at 100% CPU, 2026-08-19).
+    real_show = app._show_licence_dialog
+    attempts: list[int] = []
+
+    def _show_and_then_quit():
+        attempts.append(1)
+        real_show()
+        if len(attempts) == 3:
+            app._stop_event.set()
+
+    monkeypatch.setattr(app, "_show_licence_dialog", _show_and_then_quit)
+    app._popup_active_lock.acquire()            # the clip popup got there first
+    try:
+        app._licence_watch(first_delay=0.0, interval=0.0)
+    finally:
+        app._popup_active_lock.release()
+    assert len(attempts) == 3, "losing the race must be retried, not written off"
+    assert shown == [], "the dialog cannot be shown while another window holds the lock"
+    assert app._licence_asked is False, "a lost race must not count as having asked"
+
+    # The editor closes the clip popup; the next retry gets its window.
+    monkeypatch.setattr(app, "_show_licence_dialog", real_show)
+    app._stop_event.clear()
+    app._licence_watch(first_delay=0.0, interval=0.0)
+    assert len(shown) == 1
+    assert app._licence_asked is True
+
+
+def test_the_retry_stops_once_the_document_has_been_put_in_front_of_someone(
+        tmp_path, monkeypatch):
+    """Declining is an answer. A modal that comes back a minute later is how
+    an editor learns to dismiss it unread -- the tray item is the way back."""
+    app, _started, shown = _licence_app(tmp_path, monkeypatch, answer=False)
+
+    app._licence_watch(first_delay=0.0, interval=0.0)
+    app._licence_watch(first_delay=0.0, interval=0.0)
+
+    assert len(shown) == 1
+    assert app._licence_asked is True
+
+
+def test_the_retry_stops_when_the_licence_is_accepted(tmp_path, monkeypatch):
+    app, started, shown = _licence_app(tmp_path, monkeypatch, answer=True)
+
+    app._licence_watch(first_delay=0.0, interval=0.0)
+
+    assert len(shown) == 1
+    assert app.eula_problem() is None
+    assert "lane_a_video_up" in started
+    # A second watcher (a restart of the loop) finds nothing to do.
+    app._licence_watch(first_delay=0.0, interval=0.0)
+    assert len(shown) == 1
+
+
+def test_the_retry_gives_up_on_a_build_with_no_licence_document(tmp_path, monkeypatch):
+    """A packaging fault is not something a retry can fix, and the same ERROR
+    once a minute forever is how a log stops being read."""
+    from ccsync_companion import eula as eula_mod
+
+    app, _started, shown = _licence_app(tmp_path, monkeypatch, answer=True)
+    monkeypatch.setattr(eula_mod, "bundled_text", lambda: "")
+
+    app._licence_watch(first_delay=0.0, interval=0.0)
+    app._licence_watch(first_delay=0.0, interval=0.0)
+
+    assert shown == []
+    assert app._licence_asked is True
+
+
+def test_the_retry_stands_down_at_shutdown(tmp_path, monkeypatch):
+    """It waits on _stop_event like every other loop here, so a Quit or a
+    self-upgrade is not held up by a licence nobody accepted."""
+    app, _started, shown = _licence_app(tmp_path, monkeypatch, answer=True)
+    app._stop_event.set()
+
+    app._licence_watch(first_delay=0.0, interval=0.0)
+
+    assert shown == []
+
+
 def test_nothing_is_offered_once_the_licence_is_accepted(tmp_path, monkeypatch):
     calls: list[bool] = []
 
@@ -1514,6 +1607,134 @@ def test_nothing_is_offered_once_the_licence_is_accepted(tmp_path, monkeypatch):
     app.prompt_licence_acceptance()
     app.prompt_licence_acceptance(force=True)
     assert calls == []
+
+
+# -- updates without a click (2026-08-18) -----------------------------------
+
+
+def _update_app(tmp_path, monkeypatch, offer_version="9.9.9"):
+    """An app holding a signed offer, with apply_upgrade replaced by a
+    recorder -- what is under test is WHETHER it is called, never the exe
+    swap itself (that has its own tests in test_upgrade.py)."""
+    app = _make_app(tmp_path, dashboard_url="http://dash.example.com")
+    applied: list[str] = []
+    monkeypatch.setattr(app, "apply_upgrade", lambda: applied.append("applied"))
+    monkeypatch.setattr(app, "_notify_tray", lambda *a, **kw: None)
+    if offer_version:
+        app.upgrade._available = {"version": offer_version, "url": "/x",
+                                  "sha256": "0" * 64, "size_bytes": 1}
+    return app, applied
+
+
+def _join_upgrade_threads():
+    import threading as _t
+
+    for thread in list(_t.enumerate()):
+        if thread.name in {"ccsync-pushed-upgrade", "ccsync-auto-upgrade"}:
+            thread.join(timeout=5)
+
+
+def test_an_admin_can_push_an_update_to_a_machine(tmp_path, monkeypatch):
+    """The editor clicks nothing. ruskin's PC sat two versions behind for a
+    day with its lanes parked, and nothing on the dashboard could move it."""
+    app, applied = _update_app(tmp_path, monkeypatch)
+
+    app._apply_pushed_update(
+        {"commands": {"upgrade": {"apply": True, "version": "9.9.9",
+                                  "requested_by": "alex"}}})
+    _join_upgrade_threads()
+
+    assert applied == ["applied"]
+
+
+def test_a_push_for_a_build_we_are_not_being_offered_is_refused(tmp_path, monkeypatch):
+    """The command names a VERSION, never a URL: the bytes come from the
+    signed offer already in hand, so a push can never install anything the
+    editor's own tray click could not have."""
+    app, applied = _update_app(tmp_path, monkeypatch, offer_version="1.2.3")
+
+    app._apply_pushed_update({"commands": {"upgrade": {"apply": True, "version": "9.9.9"}}})
+    _join_upgrade_threads()
+
+    assert applied == []
+
+
+def test_a_push_with_no_offer_at_all_is_refused(tmp_path, monkeypatch):
+    app, applied = _update_app(tmp_path, monkeypatch, offer_version="")
+
+    app._apply_pushed_update({"commands": {"upgrade": {"apply": True, "version": "9.9.9"}}})
+    _join_upgrade_threads()
+
+    assert applied == []
+
+
+def test_a_standing_push_is_applied_once_not_every_report(tmp_path, monkeypatch):
+    """The request rides EVERY report until the dashboard sees the new
+    version -- i.e. every 30 seconds for the minute the swap takes."""
+    app, applied = _update_app(tmp_path, monkeypatch)
+    command = {"commands": {"upgrade": {"apply": True, "version": "9.9.9"}}}
+
+    app._apply_pushed_update(command)
+    app._apply_pushed_update(command)
+    app._apply_pushed_update(command)
+    _join_upgrade_threads()
+
+    assert applied == ["applied"]
+
+
+def test_a_reply_with_no_upgrade_command_changes_nothing(tmp_path, monkeypatch):
+    app, applied = _update_app(tmp_path, monkeypatch)
+
+    app._apply_pushed_update({"commands": {"halt": {"active": False}}})
+    app._apply_pushed_update({})
+    app._apply_pushed_update(None)
+    _join_upgrade_threads()
+
+    assert applied == []
+
+
+def test_auto_update_is_off_unless_the_site_says_otherwise(tmp_path, monkeypatch):
+    """site.feature_enabled fails CLOSED: no manifest, an older dashboard or
+    an unreadable cache all mean "wait for the click"."""
+    from ccsync_companion import site as site_mod
+
+    app, applied = _update_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(site_mod, "feature_enabled", lambda name, site=None: False)
+
+    app._on_upgrade_available({"version": "9.9.9"})
+    _join_upgrade_threads()
+
+    assert applied == []
+
+
+def test_auto_update_takes_a_newer_build_with_no_click(tmp_path, monkeypatch):
+    from ccsync_companion import site as site_mod
+
+    app, applied = _update_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(site_mod, "feature_enabled",
+                        lambda name, site=None: name == "auto_update")
+
+    app._on_upgrade_available({"version": "9.9.9"})
+    _join_upgrade_threads()
+
+    assert applied == ["applied"]
+
+
+def test_auto_update_never_rolls_a_machine_backwards(tmp_path, monkeypatch):
+    """"Different, not newer" is what the dashboard advertises, and a
+    rollback offer taken silently is a one-click loss of everything the
+    running build fixed (seen live 2026-07-25). An admin rolling one back
+    deliberately has the push path, which says so."""
+    from ccsync_companion import site as site_mod
+
+    app, applied = _update_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(site_mod, "feature_enabled",
+                        lambda name, site=None: name == "auto_update")
+
+    app._on_upgrade_available({"version": "0.0.1"})
+    _join_upgrade_threads()
+
+    assert applied == []
 
 
 # -- CORE-H1: a blank local_root must not scatter media into the CWD --------

@@ -261,6 +261,30 @@ version), or with `check_deploy_drift.ps1 -AdminUser <you>`, which lists
 A machine too old to self-upgrade (pre-0.4.0) needs the manual path:
 `installer/FIRST_UPGRADE.md` → `windows_upgrade.ps1` from the package folder.
 
+**…unless you push it (2026-08-18).** "Each editor clicked the tray item" is
+how a fleet-wide fix ends up landing whenever each owner happens to notice a
+balloon — ruskin's PC sat two versions behind for a day with its lanes parked.
+Two ways round it, both in `docs/MULTI_MACHINE_PLAN.md` §9:
+
+- **One machine, deliberately.** Settings → Packages lists out-of-date
+  machines; each row has **[ UPDATE NOW ]** (`POST /api/v1/admin/machines/
+  {editor}/{machine}/update`). It records a version, which rides
+  `commands.upgrade` on that machine's **next report** — the same channel as
+  the fleet halt, so it arrives within one report interval with no push
+  infrastructure and no inbound connection to an editor's PC. The request
+  clears itself when the machine reports that version.
+- **Every machine, standing.** `site.toml [features] auto_update = true`
+  (off in the vendor build, published in `GET /api/v1/site`). A companion
+  then applies any offer that is **newer** than what it runs, unattended.
+
+Neither can install anything the tray click could not: the command names a
+VERSION and the bytes come from the signed offer the companion already holds
+(release-key verified, floor-checked), and `apply_upgrade`'s stand-down test
+still refuses while a CCSync window is open or media is being copied in.
+Auto-update never takes an OLDER build — a rollback stays a deliberate push,
+because a rollback taken silently is a one-click loss of everything the
+running build fixed (seen live 2026-07-25).
+
 ### 5. Upgrade THIS machine
 
 The base rig is not part of the tray upgrade flow if you are testing a build

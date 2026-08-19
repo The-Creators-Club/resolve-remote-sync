@@ -158,6 +158,14 @@ services:
       # See compose.yaml: the CLI AI providers flag (2026-08-18). "0" in the
       # vendor build, and no binary is installed for it at any setting.
       DASH_SITE_AI_CLI_PROVIDERS: "0"
+      # Unattended updates (2026-08-18, docs/MULTI_MACHINE_PLAN.md §9). "0"
+      # is the vendor build: companions offer a new build in their tray and
+      # an admin can push one machine at a time from Settings, Packages. "1"
+      # lets a companion apply a NEWER build with nobody clicking -- safe
+      # only because every package record is signature-verified by the build
+      # already running, and the swap still refuses while a CCSync window is
+      # open or media is being copied in.
+      DASH_SITE_AUTO_UPDATE: "0"
       TRUENAS_HOST: "{{NAS_HOST}}"
       TRUENAS_USER: "{{NAS_USER}}"
       TRUENAS_PW: "REPLACE_ME"

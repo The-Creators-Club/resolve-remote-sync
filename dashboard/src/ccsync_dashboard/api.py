@@ -413,21 +413,48 @@ def build_transfers_view(
     # every source joins selections (only TICKED projects sync, so only
     # ticked projects can be queued), and files already in the live table
     # above are subtracted (queued means not yet syncing).
+    # ...and a THIRD scoping rule since CR-28 (2026-08-18): a machine that
+    # does not sync cannot have a backlog. fetch_sync_backlog has excluded
+    # base-mode machines since it was written (`WHERE emp.mode != 'base'`);
+    # the two sources below never did, so the base rig sat in [ QUEUED ]
+    # under a [ GETTING READY ] chip that could never clear -- it works
+    # directly off the NAS tree, so it never gets a completion row, so
+    # "ticked and nothing known yet" stayed true for as long as the tick did.
+    base_editors = db.base_only_editors(conn)
     queues = db.fetch_sync_backlog(conn, editor=editor)
+    # WHOSE COMPUTER is this Syncthing device? (WP2/WP4.) The share is made
+    # with a device, and only the machine registry can say which of an
+    # editor's computers that device is -- without it, one person's laptop
+    # showed the desktop's backlog and vice versa.
+    machine_plans = db.fetch_machine_selections(conn)
     lane_c_q = """SELECT c.project_id, c.device_id AS device_row, c.need_items,
-                         c.need_bytes, p.slug, p.label, d.editor_username
+                         c.need_bytes, p.slug, p.label, d.editor_username,
+                         m.machine
                   FROM completion_current c
                   JOIN projects p ON p.id = c.project_id
                   JOIN devices d ON d.id = c.device_id
-                  JOIN selections s ON s.editor_username = d.editor_username
-                                   AND s.project_slug = p.slug
+                  LEFT JOIN machines m ON m.syncthing_device_id = d.device_id
                   WHERE d.is_server = 0 AND c.need_items > 0"""
     for r in conn.execute(lane_c_q):
-        if editor is not None and (r["editor_username"] or "") != editor:
+        who = r["editor_username"] or ""
+        if editor is not None and who != editor:
+            continue
+        if who in base_editors:
+            continue
+        machine = r["machine"] or ""
+        planned = machine_plans.get(r["slug"], [])
+        if machine:
+            if (who, machine) not in planned:
+                continue
+        elif not any(e == who for e, _m in planned):
+            # A device we cannot resolve to a computer (it has never reported
+            # a machine_id, or its Syncthing identity changed): fall back to
+            # the person-level question, which is what this query asked
+            # before the registry existed.
             continue
         missing = db.fetch_missing(conn, r["project_id"], r["device_row"])
         queues.append({
-            "editor": r["editor_username"], "machine": "",
+            "editor": who, "machine": machine,
             "slug": r["slug"], "label": r["label"],
             "lane": "c", "direction": "down", "kind": "everything else",
             "n_files": r["need_items"], "bytes": r["need_bytes"],
@@ -471,27 +498,43 @@ def build_transfers_view(
     # share + index exchange spin up -- and the page said "everything that
     # should be somewhere is there" mid-provisioning (2026-07-26). Show it
     # as preparing instead of absent.
-    pending_q = """SELECT s.editor_username AS editor, s.project_slug AS slug, p.label
-                   FROM selections s JOIN projects p ON p.slug = s.project_slug AND p.active = 1"""
-    pending_params: list[Any] = []
-    if editor is not None:
-        pending_q += " WHERE s.editor_username = ?"
-        pending_params.append(editor)
+    # One row per (COMPUTER, project) since WP2: the plan belongs to a
+    # machine, so "getting ready" does too -- a person with a desktop and a
+    # laptop is preparing on one of them, not in the abstract.
+    labels = {
+        r["slug"]: r["label"] for r in conn.execute(
+            "SELECT slug, label FROM projects WHERE active = 1")
+    }
+    pending_rows = [
+        {"editor": e, "machine": m, "slug": slug, "label": labels[slug]}
+        for slug, pairs in machine_plans.items() if slug in labels
+        for e, m in pairs
+        if editor is None or e == editor
+    ]
     queued_pairs = {(q["editor"], q["slug"]) for q in queues}
-    for r in conn.execute(pending_q, pending_params):
+    for r in pending_rows:
         if (r["editor"], r["slug"]) in queued_pairs:
             continue
+        if (r["editor"] or "") in base_editors:
+            # "Getting ready" is a promise that syncing starts in a minute or
+            # two. For a base rig it never does (CR-28).
+            continue
+        # Completion for THIS computer where the device is resolvable, and
+        # for any of the person's devices where it is not (a device that has
+        # never reported a machine_id is all we had before WP1).
         has_completion = conn.execute(
             """SELECT 1 FROM completion_current c
                JOIN devices d ON d.id = c.device_id
                JOIN projects p ON p.id = c.project_id
-               WHERE p.slug = ? AND d.editor_username = ?""",
-            (r["slug"], r["editor"]),
+               LEFT JOIN machines m ON m.syncthing_device_id = d.device_id
+               WHERE p.slug = ? AND d.editor_username = ?
+                 AND (m.machine IS NULL OR m.machine = ?)""",
+            (r["slug"], r["editor"], r["machine"]),
         ).fetchone()
         if has_completion:
             continue  # known state: fully synced or already queued above
         queues.append({
-            "editor": r["editor"], "machine": "", "slug": r["slug"],
+            "editor": r["editor"], "machine": r["machine"], "slug": r["slug"],
             "label": r["label"], "lane": "c", "direction": "down",
             "kind": "preparing", "n_files": 0, "bytes": 0, "files": [],
             "truncated": False, "manifest_truncated": False, "pending": True,
@@ -1009,6 +1052,11 @@ def api_site(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> 
             # install a JS challenge solver for a feature they cannot use.
             "youtube_unblock": bool(site["features"]["youtube_download"]
                                     and site["features"]["youtube_unblock"]),
+            # Unattended updates (2026-08-18). Published because the
+            # COMPANION is the client that acts on it -- and read fail-closed
+            # there, so a dashboard too old to send it, or a companion that
+            # cannot reach one, keeps waiting for a human click.
+            "auto_update": site["features"]["auto_update"],
         },
         # Which LOCAL vision model the b-roll indexer should load: "good"
         # (Qwen3-VL 4B, needs 8 GB VRAM) or "best" (Qwen3-VL 8B, needs 12 GB),
@@ -1106,7 +1154,8 @@ def api_editors(
 
 
 def build_queue_view(conn: sqlite3.Connection, editor: str, now: str | None = None,
-                     projects_view: dict[str, Any] | None = None) -> dict[str, Any]:
+                     projects_view: dict[str, Any] | None = None,
+                     machine: str | None = None) -> dict[str, Any]:
     """The editor's ordered sync queue with per-project progress, for MY QUEUE.
 
     `projects_view` lets a caller that has already built the fleet snapshot
@@ -1130,7 +1179,7 @@ def build_queue_view(conn: sqlite3.Connection, editor: str, now: str | None = No
         if r["current_project"] and r["speed_bps"] is not None
     }
     items = []
-    for sel in db.fetch_selections(conn, editor):
+    for sel in db.fetch_selections(conn, editor, machine=machine):
         slug = sel["slug"]
         project = projects.get(slug)
         my_rows = [e for e in project["editors"] if e["editor_username"] == editor] if project else []
@@ -1348,10 +1397,25 @@ def _project_roots_view(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     ]
 
 
-def _selection_view(conn: sqlite3.Connection, editor: str) -> dict[str, Any]:
-    rows = db.fetch_selections(conn, editor)
+def _machine_arg(machine: str | None) -> str | None:
+    """The `?machine=` query parameter, normalised.
+
+    Absent or blank means "not saying", which every caller reads as the
+    person-level answer -- NOT as db.ANY_MACHINE, which is a real machine
+    value (the unassigned bucket) and must never be reachable from a URL."""
+    value = (machine or "").strip()
+    return value or None
+
+
+def _selection_view(conn: sqlite3.Connection, editor: str,
+                    machine: str | None = None) -> dict[str, Any]:
+    rows = db.fetch_selections(conn, editor, machine=machine)
     return {
         "editor": editor,
+        "machine": machine or "",
+        # Every computer this person has, so a companion (and the wizard) can
+        # offer "copy the plan from ..." without a second round trip.
+        "machines": db.machines_of(conn, editor),
         "generated_at": db.utcnow_iso(),
         # Sticky Resolve-project -> destination-root mappings (admin-managed).
         "project_roots": _project_roots_view(conn),
@@ -1468,16 +1532,25 @@ def _require_selection_untick(request: Request, editor: str,
 
 @router.get("/selection/{editor}")
 def api_get_selection(
-    editor: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+    editor: str, request: Request, machine: str | None = None,
+    conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict[str, Any]:
+    """This computer's plan, or -- with no `machine` -- the union of the
+    person's computers (WP2).
+
+    The union is what a companion too old to name itself gets, and for every
+    single-machine editor it IS that machine's plan. Deliberately not the
+    intersection: an old build that over-syncs fills a drive, an old build
+    that under-syncs is an editor who quietly cannot open a project."""
     editor = editor.strip().lower()
     _require_selection_read(request, editor, conn)
-    return _selection_view(conn, editor)
+    return _selection_view(conn, editor, machine=_machine_arg(machine))
 
 
 @router.put("/selection/{editor}/{slug}")
 def api_tick(
-    editor: str, slug: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+    editor: str, slug: str, request: Request, machine: str | None = None,
+    conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict[str, Any]:
     editor = editor.strip().lower()
     user = _require_selection_write(request, editor)
@@ -1486,24 +1559,60 @@ def api_tick(
     ).fetchone()
     if project is None:
         raise HTTPException(status_code=404, detail=f"unknown or inactive project {slug!r}")
-    added = db.add_selection(conn, editor, slug, created_by=user, now=db.utcnow_iso())
+    if editor in db.base_only_editors(conn):
+        # CR-28: this account's machines all work directly off the NAS tree.
+        # A tick would sync nothing, show nothing and clear never -- which is
+        # exactly what the base rig's stray tick did to the fleet page.
+        # UNTICKING stays allowed (below), so an existing one can be removed.
+        raise HTTPException(
+            status_code=409,
+            detail="this is a base rig account: it works directly off the NAS "
+                   "and syncs nothing, so projects cannot be ticked for it",
+        )
+    target = _machine_arg(machine)
+    known = db.machines_of(conn, editor)
+    if target is not None and target not in known:
+        # A hostname this account has never reported: a stale page after a
+        # rename, or a typed URL. Refusing beats writing a plan for a
+        # computer that does not exist, which nothing would ever read and
+        # nobody would see was there.
+        raise HTTPException(
+            status_code=404,
+            detail=f"{editor!r} has no computer named {target!r}",
+        )
+    now = db.utcnow_iso()
+    if target is None:
+        # No machine named: every computer this person has, which is what the
+        # person-level control in the grid means and what an old client (or a
+        # bookmarked URL) can express. An editor with no machine on record
+        # yet gets the unassigned bucket, which their first report inherits.
+        added = db.add_selection_for_person(conn, editor, slug, user, now)
+    else:
+        added = db.add_selection(conn, editor, slug, created_by=user, now=now,
+                                 machine=target)
     conn.commit()
     _nudge_collector(request)
-    view = _selection_view(conn, editor)
+    view = _selection_view(conn, editor, machine=target)
     view["changed"] = added
     return view
 
 
 @router.delete("/selection/{editor}/{slug}")
 def api_untick(
-    editor: str, slug: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+    editor: str, slug: str, request: Request, machine: str | None = None,
+    conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict[str, Any]:
     editor = editor.strip().lower()
     _require_selection_untick(request, editor, conn)
-    removed = db.remove_selection(conn, editor, slug)
+    target = _machine_arg(machine)
+    # No machine named removes it EVERYWHERE, including the unassigned
+    # bucket: under-sharing is the safe direction for a removal, and an old
+    # client asking for "stop syncing this" must not leave it running on one
+    # of the person's computers.
+    removed = db.remove_selection(conn, editor, slug, machine=target)
     conn.commit()
     _nudge_collector(request)
-    view = _selection_view(conn, editor)
+    view = _selection_view(conn, editor, machine=target)
     view["changed"] = removed
     return view
 
@@ -2271,6 +2380,64 @@ def api_admin_disable_user(
     return {"ok": True, "view": build_admin_users_view(settings, conn)}
 
 
+def _purge_user_credentials(request: Request, conn: sqlite3.Connection, username: str, *,
+                            by: str) -> dict[str, int]:
+    """Everything that can still ACT as `username` once the account row is
+    gone. Deleting the row alone is not enough: a session cookie is a bearer
+    token whose server-side record decides (sessions.py), and a per-editor
+    report token authenticates a MACHINE, not a login -- either would keep
+    working against an account nobody can sign into any more.
+
+    Token revocation is a soft delete on this connection (the caller commits);
+    session revocation is NOT, because the session store opens its own
+    short-lived connection to the same SQLite file -- call this while an
+    uncommitted write transaction is open on `conn` and the two deadlock.
+    Hence the ordering contract: commit the delete, then call this."""
+    revoked_tokens = 0
+    for row in db.fetch_editor_report_tokens(conn, editor=username):
+        if db.revoke_editor_report_token(conn, row["token_id"],
+                                         revoked_by=f"admin:{by} (account deleted)"):
+            revoked_tokens += 1
+    conn.commit()
+    store = auth.session_store(request)
+    revoked_sessions = (
+        store.revoke_user(username, by=f"admin:{by} (account deleted)")
+        if store is not None else 0
+    )
+    return {"sessions_revoked": revoked_sessions, "report_tokens_revoked": revoked_tokens}
+
+
+@router.delete("/admin/users/{username}")
+def api_admin_delete_user(
+    username: str, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """Delete a LOCAL account. Local mode only, for the same reason disable is
+    (see api_admin_disable_user): the NasBackend Protocol has no delete, and a
+    NAS account owns a home directory whose fate is not this endpoint's to
+    decide.
+
+    409, not 422, for the two guard refusals (last enabled admin, deleting
+    yourself): the request is well-formed and would be fine against a
+    different account -- it conflicts with the state of this one."""
+    admin = _require_admin(request)
+    _require_local_mode(request)
+    settings = request.app.state.settings
+    username = username.strip().lower()
+    if local_users.get_user(conn, username) is None:
+        raise HTTPException(status_code=404, detail=f"{username!r} is not a local account")
+    try:
+        deleted = local_users.delete_user(conn, username, requested_by=admin)
+    except local_users.LocalUserError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    conn.commit()
+    purged = _purge_user_credentials(request, conn, username, by=admin)
+    log.warning("admin %r deleted local account %r (%d session(s), %d report token(s) revoked)",
+                admin, username, purged["sessions_revoked"], purged["report_tokens_revoked"])
+    return {"ok": True, "deleted": {**deleted, **purged},
+            "view": build_admin_users_view(settings, conn)}
+
+
 class AddSshKeyIn(BaseModel):
     key_text: str = Field(min_length=1)
     label: str = ""
@@ -2469,6 +2636,98 @@ def api_set_fleet_halt(
         "ENGAGED" if state["active"] else "released", admin, state["reason"] or "(no reason)",
     )
     return {"ok": True, "halt": state}
+
+
+class PushUpdateIn(BaseModel):
+    # Absent = "whatever is current for that machine's platform", which is
+    # what the button on the packages page means. An explicit version is
+    # still allowed so a rollback can be pushed the same way.
+    version: str | None = Field(default=None, max_length=32)
+
+
+@router.post("/admin/machines/{editor}/{machine}/update")
+def api_push_machine_update(
+    editor: str, machine: str, request: Request,
+    payload: PushUpdateIn | None = None,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """Ask ONE machine to apply a published build on its next report.
+
+    The editor still does not have to click anything, and nothing here
+    bypasses a check: the companion applies it only if the signed offer it is
+    already holding is that exact version (release_trust + the downgrade
+    floor), and only when swapping the exe would not kill work in progress.
+    So this is "click Update now on their behalf", not a remote installer.
+    """
+    admin = _require_admin(request)
+    editor, machine = editor.strip().lower(), machine.strip()
+    row = conn.execute(
+        "SELECT platform FROM machines WHERE editor_username=? AND machine=?",
+        (editor, machine),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"no machine {machine!r} for {editor!r}")
+    version = ((payload.version if payload else None) or "").strip()
+    if not version:
+        current = db.get_current_package(
+            conn, (row["platform"] or "").strip().lower(), kind="companion")
+        if current is None:
+            raise HTTPException(
+                status_code=409,
+                detail="no current companion package is published for that machine's platform",
+            )
+        version = current["version"]
+    if not db.request_machine_update(conn, editor, machine, version, admin, db.utcnow_iso()):
+        raise HTTPException(status_code=404, detail=f"no machine {machine!r} for {editor!r}")
+    conn.commit()
+    log.info("%s asked %s/%s to update to v%s", admin, editor, machine, version)
+    return {"ok": True, "editor": editor, "machine": machine, "version": version}
+
+
+@router.delete("/admin/machines/{editor}/{machine}/update")
+def api_cancel_machine_update(
+    editor: str, machine: str, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    _require_admin(request)
+    editor, machine = editor.strip().lower(), machine.strip()
+    db.clear_machine_update_request(conn, editor, machine)
+    conn.commit()
+    return {"ok": True}
+
+
+@router.post("/admin/machines/{editor}/{machine}/copy-plan")
+def api_copy_machine_plan(
+    editor: str, machine: str, request: Request, source: str = "",
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """Copy one of this person's computers' plans onto another of them.
+
+    A new machine starts empty (no inheritance -- see MULTI_MACHINE_PLAN.md
+    §3.2), and this is what makes that a one-click state rather than a
+    re-tick of everything."""
+    admin = _require_admin(request)
+    editor, machine, source = editor.strip().lower(), machine.strip(), source.strip()
+    known = set(db.machines_of(conn, editor))
+    if machine not in known:
+        raise HTTPException(status_code=404, detail=f"no machine {machine!r} for {editor!r}")
+    if source not in known:
+        raise HTTPException(status_code=404, detail=f"no machine {source!r} for {editor!r}")
+    if source == machine:
+        raise HTTPException(status_code=422, detail="source and target are the same computer")
+    if editor in db.base_only_editors(conn):
+        raise HTTPException(
+            status_code=409,
+            detail="this is a base rig account: it works directly off the NAS "
+                   "and syncs nothing, so projects cannot be ticked for it",
+        )
+    count = db.copy_machine_plan(conn, editor, source, machine, admin, db.utcnow_iso())
+    conn.commit()
+    _nudge_collector(request)
+    log.info("%s copied %s's plan from %s to %s (%d project(s))",
+             admin, editor, source, machine, count)
+    return {"ok": True, "editor": editor, "machine": machine,
+            "source": source, "projects": count}
 
 
 @router.post("/admin/devices/approve")
@@ -2672,12 +2931,22 @@ def build_packages_view(conn: sqlite3.Connection, settings, now: str | None = No
             current[entry["platform"]] = entry["version"]
         packages.append(entry)
     editors = build_editors_view(conn, now)
+    # Which of these already has a pushed update outstanding (v25), so the
+    # page can say "asked, waiting for its next report" instead of offering
+    # the same button again.
+    pending_updates = {
+        (r["editor_username"], r["machine"]): r["update_requested_version"]
+        for r in db.fetch_machines(conn)
+        if r.get("update_requested_version")
+    }
     outdated = [
         {
             "editor_username": e["editor_username"],
             "machine": e["machine"],
             "companion_version": e["companion_version"],
             "received_at": e["received_at"],
+            "update_requested": pending_updates.get(
+                (e["editor_username"], e["machine"])),
         }
         for e in editors["editors"]
         if e["companion_outdated"]
@@ -3185,6 +3454,36 @@ class TransportHealthIn(BaseModel):
     express: ExpressReportIn | None = None
 
 
+def _register_machine(
+    conn: sqlite3.Connection, editor: str, machine: str, payload: "ReportIn", now: str
+) -> None:
+    """Keep the machine registry (v23) current from this report, adopting a
+    renamed computer rather than treating it as a new one (WP1).
+
+    The rename branch is the whole reason `machine_id` exists: a hostname is
+    a label an editor can change, and the plan is keyed on it. It only fires
+    when the minted id matches a machine of the SAME editor -- an id from
+    somebody else's report names nothing here, so it can move nothing."""
+    machine_id = (payload.machine_id or "").strip() or None
+    device_id = (payload.syncthing_device_id or "").strip() or None
+    if machine_id:
+        previous = db.machine_by_machine_id(conn, editor, machine_id)
+        if previous is not None and previous["machine"] != machine:
+            log.info(
+                "%s: machine %r is the computer previously known as %r (same "
+                "machine_id) -- moving its sync plan across rather than "
+                "starting it empty",
+                editor, machine, previous["machine"],
+            )
+            db.adopt_renamed_machine(conn, editor, previous["machine"], machine)
+    db.upsert_machine(
+        conn, editor, machine, now,
+        machine_id=machine_id,
+        platform=(payload.platform or "").strip().lower() or None,
+        syncthing_device_id=device_id,
+    )
+
+
 def flatten_transport_health(
     health: "TransportHealthIn | None", now: str
 ) -> dict[str, Any] | None:
@@ -3673,6 +3972,19 @@ def music_cancel_requested(settings: Any, editor: str, machine: str) -> list[str
 class ReportIn(BaseModel):
     editor_name: str = Field(min_length=1, max_length=64)
     machine: str = Field(min_length=1, max_length=128)
+    # WP1 (MULTI_MACHINE_PLAN.md): the computer's own identity, minted once
+    # into ~/.ccsync/machine.json and reported thereafter. It is an
+    # IDENTIFIER, not a credential -- nothing is authorised by it, exactly as
+    # nothing is authorised by `machine` -- and it rides inside the same
+    # authenticated report. What it buys: a hostname change stops looking
+    # like a new computer with an empty plan, and a regenerated Syncthing key
+    # stops looking like a stranger (the 2026-07-27 incident).
+    machine_id: str | None = Field(default=None, max_length=64)
+    # This machine's own Syncthing device ID (GET /rest/system/status myID).
+    # The enforce cycle shares a folder with a DEVICE; without this it can
+    # only resolve devices by their OWNER'S name, so both of one person's
+    # computers get every project either of them is ticked for.
+    syncthing_device_id: str | None = Field(default=None, max_length=128)
     companion_version: str | None = Field(default=None, max_length=64)
     platform: str | None = Field(default=None, max_length=32)  # 'windows' | 'macos'
     reported_at: str = Field(max_length=64)
@@ -3943,11 +4255,21 @@ def api_report(
             if match is not None:
                 detected_slug = labels[match]
                 db.sticky_project_root(conn, resolve_project, detected_slug, received_at)
+    # The machine's ROLE. Read here rather than where the media manifest is
+    # stored (its old home, below) because it belongs to the MACHINE, not to
+    # a project: a base rig that has never sent a manifest still has to be
+    # knowable as one, or it lands in [ QUEUED ] forever (CR-28).
+    mode = (payload.mode or "editor").strip().lower()
+    # The machine registry (WP1). Before machine_state, because the rename
+    # adoption below has to run before anything keyed on the new name is
+    # written -- otherwise a renamed PC gets a fresh, empty everything.
+    _register_machine(conn, editor, machine, payload, received_at)
     db.upsert_machine_state(
         conn, editor, machine, detected_slug, received_at,
         resolve_project=resolve_project or None, verified=verified,
         platform=(payload.platform or "").strip().lower() or None,
         companion_version=(payload.companion_version or "").strip() or None,
+        mode=mode,
         transport=flatten_transport_health(payload.transport_health, received_at),
         guard=flatten_sync_guard(payload.sync_guard, received_at),
         ingest=flatten_broll_ingest(payload.broll_ingest, received_at),
@@ -3967,7 +4289,7 @@ def api_report(
         )
 
     # -- media presence (all optional; absent field ⇒ table untouched) --
-    mode = (payload.mode or "editor").strip().lower()
+    # (`mode` is read above, with the machine_state write that now stores it.)
 
     # Live transfers: replace the whole set for this (editor, machine) so an
     # empty/absent list clears finished transfers.
@@ -4051,6 +4373,35 @@ def api_report(
         "reason": halt_state["reason"],
         "at": halt_state["set_at"],
     }}
+    # A PUSHED UPDATE (v25): an admin asked this machine to take a build
+    # rather than waiting for its owner to click "Update now". Rides the same
+    # reply as the halt, for the same reason -- it reaches every tray within
+    # one report interval with no push infrastructure and no inbound
+    # connection to an editor's PC.
+    #
+    # Present only while there is one outstanding, and CLEARED here the
+    # moment the machine reports the version that was asked for: a standing
+    # request would re-apply the same build after every restart. It names a
+    # version and nothing else; the bytes still come from the signed offer
+    # the companion already holds.
+    update_request = db.machine_update_request(conn, editor, machine)
+    if update_request:
+        running = (payload.companion_version or "").strip()
+        if running and running == update_request["version"]:
+            db.clear_machine_update_request(conn, editor, machine)
+            # Committed HERE: the report's own commit is above us, and an
+            # uncommitted clear would re-offer the same update on the next
+            # report forever (and re-apply it after every restart).
+            conn.commit()
+            log.info("%s/%s is now on v%s -- the pushed update is done",
+                     editor, machine, running)
+        else:
+            result["commands"]["upgrade"] = {
+                "apply": True,
+                "version": update_request["version"],
+                "requested_by": update_request["by_user"],
+                "requested_at": update_request["at"],
+            }
     # B-roll ingest cancels (BROLL_INGEST_PLAN.md §4.2). Present ONLY when
     # there is something to cancel -- unlike `halt`, an empty list is not an
     # instruction and this rides every tick of every machine. The companion's

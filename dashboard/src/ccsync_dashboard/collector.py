@@ -779,7 +779,16 @@ class Collector:
                     continue
                 for dev in folder.get("devices", []):
                     editor = shape_map.get(dev["deviceID"])
-                    if editor and db.add_selection(conn, editor, folder["id"], "seed", now):
+                    if not editor:
+                        continue
+                    # Seed onto the COMPUTER that device is, when the registry
+                    # knows it; onto the unassigned bucket when it does not,
+                    # which is what every pre-WP1 share resolves to and what
+                    # the first report from that machine adopts.
+                    known = db.machine_by_device_id(conn, dev["deviceID"])
+                    machine = known["machine"] if known else db.ANY_MACHINE
+                    if db.add_selection(conn, editor, folder["id"], "seed", now,
+                                        machine=machine):
                         db.record_known_editor(conn, editor, "seed", now)
                         seeded += 1
             # Only claim the one-shot seed is DONE when the snapshot could
@@ -831,7 +840,22 @@ class Collector:
                     "for them (or rename the device to their username).",
                     name, device_id)
 
-        selections = db.fetch_all_selections(conn)
+        # PER COMPUTER since v24 (MULTI_MACHINE_PLAN.md WP3). A folder is
+        # shared with a DEVICE, and a device is one machine -- but until the
+        # machine registry existed the only way back from a device to a plan
+        # was its owner's name, so both of one person's computers got every
+        # project either was ticked for. `machine_devices` is the exact map;
+        # a device that is not in it (never reported a machine_id, or its
+        # Syncthing identity was regenerated) falls back to the person, which
+        # is precisely the old behaviour and the safe direction.
+        selections = db.fetch_machine_selections(conn)
+        editor_selections = db.fetch_all_selections(conn)
+        machine_devices: dict[tuple[str, str], str] = {}
+        for row in db.fetch_machines(conn):
+            device_id = row.get("syncthing_device_id")
+            if device_id:
+                machine_devices[(row["editor_username"], row["machine"])] = device_id
+        mapped_device_ids = set(machine_devices.values())
         plans: list[tuple[str, set[str], set[str]]] = []   # (slug, desired, actual)
         for folder in folders:
             slug = folder["id"]
@@ -851,8 +875,20 @@ class Collector:
                 for editor_device_ids in editor_devices.values():
                     desired |= editor_device_ids
             else:
-                for editor in selections.get(slug, []):
-                    desired |= editor_devices.get(editor, set())
+                for editor, machine in selections.get(slug, []):
+                    device_id = machine_devices.get((editor, machine))
+                    if device_id:
+                        desired.add(device_id)
+                # ...plus every device of a ticked editor that no machine
+                # claims. A per-machine plan cannot address a device the
+                # registry has never seen, and dropping it here would unshare
+                # a working editor the moment they upgraded the dashboard
+                # ahead of their companion (the B16 failure shape again).
+                for editor in editor_selections.get(slug, []):
+                    desired |= {
+                        d for d in editor_devices.get(editor, set())
+                        if d not in mapped_device_ids
+                    }
             # devices outside the config snapshot entirely (shouldn't happen) stay put
             desired |= actual - set(id_to_editor) - {my_id}
             if desired == actual:

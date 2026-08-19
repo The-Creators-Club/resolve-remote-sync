@@ -377,3 +377,79 @@ def test_freshly_ticked_project_shows_as_preparing(env):
     conn.commit()
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
     assert "GETTING READY" in client.get("/partials/transfers").text
+
+
+# -- CR-28: the base rig is not a queue -------------------------------------
+
+
+def test_a_base_rig_never_appears_in_the_queue(env):
+    """CR-28 [seen live 2026-08-18]. `alex · 2026/FF5/Animals [ GETTING
+    READY ] ... syncing starts within a minute or two` sat on the fleet page
+    for ten hours, on the machine that works directly off the NAS and syncs
+    nothing. It never syncs, so it never gets a completion row, so "ticked
+    and nothing known yet" is true for as long as the tick is."""
+    client, conn, now = env
+    client.post("/api/v1/report", json=report("base1", "Creator_1", mode="base"),
+                headers=hdr("base1"))
+    dbmod.add_selection(conn, "base1", "2026-ff5-energy-transition", "admin", now)
+    conn.commit()
+
+    view = build_transfers_view(conn)
+    assert [q for q in view["queues"] if q["editor"] == "base1"] == []
+
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
+    assert "GETTING READY" not in client.get("/partials/transfers").text
+
+
+def test_the_role_is_stored_on_the_machine_not_only_on_its_projects(env):
+    """v22. `mode` used to be persisted only onto editor_media_project rows,
+    so a base rig that had never sent a media manifest was indistinguishable
+    from an editor machine -- which is the state a fresh base rig is in."""
+    client, conn, _now = env
+    client.post("/api/v1/report", json=report("base1", "Creator_1", mode="base"),
+                headers=hdr("base1"))
+
+    row = conn.execute(
+        "SELECT mode FROM machine_state WHERE editor_username='base1'").fetchone()
+    assert row["mode"] == "base"
+    assert dbmod.base_only_editors(conn) == {"base1"}
+    # No manifest was ever sent, so the old source knows nothing about it.
+    assert conn.execute(
+        "SELECT COUNT(*) FROM editor_media_project WHERE editor_username='base1'"
+    ).fetchone()[0] == 0
+
+
+def test_a_person_with_a_base_rig_and_a_laptop_still_queues(env):
+    """base_only_editors means EVERY machine, not any. An editor who also
+    keeps a base-mode machine must not have their laptop's backlog hidden."""
+    client, conn, now = env
+    client.post("/api/v1/report", json=report("mixed", "Creator_1", mode="base"),
+                headers=hdr("mixed"))
+    client.post("/api/v1/report", json=report("mixed", "Razer", mode="editor"),
+                headers=hdr("mixed"))
+    dbmod.add_selection(conn, "mixed", "2026-ff5-energy-transition", "admin", now)
+    conn.commit()
+
+    assert dbmod.base_only_editors(conn) == set()
+    view = build_transfers_view(conn)
+    assert [q for q in view["queues"] if q["editor"] == "mixed"]
+
+
+def test_ticking_a_project_for_a_base_rig_is_refused(env):
+    """The tick is what created the phantom row, so the fix closes the hole
+    as well as hiding the symptom -- and UNTICKING stays open, or an existing
+    one could never be removed."""
+    client, conn, now = env
+    client.post("/api/v1/report", json=report("base1", "Creator_1", mode="base"),
+                headers=hdr("base1"))
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "owen"))
+
+    r = client.put("/api/v1/selection/base1/2026-ff5-energy-transition")
+    assert r.status_code == 409
+    assert "base rig" in r.json()["detail"]
+    assert dbmod.fetch_selections(conn, "base1") == []
+
+    dbmod.add_selection(conn, "base1", "2026-ff5-energy-transition", "admin", now)
+    conn.commit()
+    assert client.delete("/api/v1/selection/base1/2026-ff5-energy-transition").status_code == 200
+    assert dbmod.fetch_selections(conn, "base1") == []

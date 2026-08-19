@@ -139,6 +139,46 @@ def test_is_local_admin(conn):
     assert local_users.is_local_admin(conn, "owen") is False
 
 
+def test_delete_user_removes_the_row_and_its_keys(conn):
+    local_users.create_user(conn, "jsmith", "correct-horse-battery-staple", "editor")
+    local_users.add_ssh_key(
+        conn, "jsmith",
+        "ssh-ed25519 QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE= jsmith@laptop",
+        label="laptop")
+    result = local_users.delete_user(conn, "JSmith", requested_by="owen")
+    conn.commit()
+    assert result == {"username": "jsmith", "role": "editor", "ssh_keys_removed": 1}
+    assert local_users.get_user(conn, "jsmith") is None
+    assert local_users.keys_for(conn, "jsmith") == []
+    assert local_users.verify_password(conn, "jsmith", "correct-horse-battery-staple") is False
+
+
+def test_delete_unknown_user_refused(conn):
+    with pytest.raises(local_users.LocalUserError, match="not a local account"):
+        local_users.delete_user(conn, "nobody")
+
+
+def test_delete_refuses_self_and_the_last_enabled_admin(conn):
+    local_users.create_user(conn, "owen", "correct-horse-battery-owen", "admin")
+    with pytest.raises(local_users.LocalUserError, match="signed in as"):
+        local_users.delete_user(conn, "owen", requested_by="Owen")
+    with pytest.raises(local_users.LocalUserError, match="last enabled admin"):
+        local_users.delete_user(conn, "owen", requested_by="root")
+
+    # A second enabled admin is what makes the first one deletable.
+    local_users.create_user(conn, "boss", "correct-horse-battery-boss", "admin")
+    assert local_users.count_enabled_admins(conn) == 2
+    local_users.delete_user(conn, "owen", requested_by="boss")
+    assert local_users.count_enabled_admins(conn) == 1
+
+
+def test_delete_of_an_editor_ignores_the_admin_count(conn):
+    local_users.create_user(conn, "jsmith", "correct-horse-battery-staple", "editor")
+    assert local_users.count_enabled_admins(conn) == 0
+    local_users.delete_user(conn, "jsmith")
+    assert local_users.get_user(conn, "jsmith") is None
+
+
 def test_warn_missing_admin_users_logs_for_unknown_names(conn, caplog):
     local_users.create_user(conn, "owen", "correct-horse-battery-staple", "admin")
     conn.commit()

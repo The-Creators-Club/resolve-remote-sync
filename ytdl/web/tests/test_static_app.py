@@ -1704,10 +1704,16 @@ scenarios['a_hung_probe_is_abandoned_after_a_second'] = async () => {
   const p = h.app.dispatchLocal(90);
   await flush();
   await h.timers.fire();                  // the PROBE_MS abort
+  await flush();
+  await h.timers.fire();                  // ...and the PROBE_RETRY_MS one
+  await flush();
   // Bounded on purpose: an unbounded await on a probe that was never abandoned
   // would hang the whole harness instead of failing this one scenario.
   const stuck = {};
   const out = await Promise.race([p, flush(50).then(() => stuck)]);
+  // calls === 2 because a TIMED-OUT probe is retried once (PROBE_RETRY_MS,
+  // 2026-08-19). A hung tray app therefore costs both budgets and then gives
+  // up -- still bounded, which is the whole point of this scenario.
   return {during, abandoned: out === false, never_gave_up: out === stuck,
           calls: loopback(h).length};
 };
@@ -2582,7 +2588,10 @@ def test_a_probe_that_is_never_answered_is_abandoned(spa):
     assert r['never_gave_up'] is False, \
         'the probe has no timeout: it waits on the companion forever'
     assert r['abandoned'] is True, r
-    assert r['calls'] == 1, 'the abandoned probe still dispatched'
+    # Two probes, not one: a companion that TIMES OUT gets a single longer
+    # second go (PROBE_RETRY_MS, 2026-08-19). Both are bounded, and neither is
+    # a dispatch -- what must never happen is handing the job over.
+    assert r['calls'] == 2, 'the abandoned probe still dispatched'
 
 
 def test_a_job_this_machine_cannot_name_correctly_is_not_dispatched(spa):
@@ -3091,10 +3100,18 @@ def test_the_probe_is_bounded_and_every_failure_of_it_is_silent():
     refusing the local connection) must cost that second and nothing else."""
     js = _js()
     assert 'const PROBE_MS = 1000;' in js
+    # ...and ONE longer second go for a companion that is there but busy
+    # (2026-08-19; 3.9 s measured mid-sync-pass). Both budgets are bounded and
+    # both are tried in the same loop, so "abandoned" still means abandoned.
+    assert 'const PROBE_RETRY_MS = 5000;' in js
     body = js[js.index('async function companionCapabilities('):js.index('async function dispatchLocal(')]
     assert '`${COMPANION_URL}/ytdl/capabilities`' in body, body
     assert 'new AbortController()' in body and 'ctl.abort()' in body, body
-    assert 'setTimeout(() => ctl.abort(), PROBE_MS)' in body, body
+    assert 'for (const budget of [PROBE_MS, PROBE_RETRY_MS])' in body, body
+    assert 'setTimeout(() => ctl.abort(), budget)' in body, body
+    # the retry is for a TIMEOUT only: nothing listening still fails at once
+    assert "e.name === 'AbortError'" in body, body
+    assert 'if (body || !timedOut) break;' in body, body
     # the timer is only half of it: the signal has to reach the fetch
     assert '{signal: ctl.signal}' in body, body
     assert 'clearTimeout(timer)' in body, body

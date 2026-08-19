@@ -61,7 +61,7 @@
   <div class="side-head" style="margin-top:1.2rem">[ OUT-OF-DATE MACHINES ]</div>
   {% if packages.outdated_machines %}
     <table class="editors">
-      <thead><tr><th>EDITOR</th><th>MACHINE</th><th>RUNNING</th><th>LAST REPORT</th></tr></thead>
+      <thead><tr><th>EDITOR</th><th>MACHINE</th><th>RUNNING</th><th>LAST REPORT</th><th></th></tr></thead>
       <tbody>
       {% for m in packages.outdated_machines %}
         <tr class="editor-row">
@@ -69,6 +69,29 @@
           <td class="mono-sm">{{ m.machine }}</td>
           <td class="mono-sm"><span class="chip amber">[ {{ m.companion_version or "?" }} ]</span></td>
           <td class="muted">{{ m.received_at | ago }}</td>
+          {# Pushed update (2026-08-18): the editor does not have to click
+             anything. Their companion applies the build it is ALREADY being
+             offered, on its next report, if swapping the exe would not kill
+             work in progress. #}
+          <td class="mono-sm">
+            {% if m.update_requested %}
+              <span class="chip">asked for {{ m.update_requested }}</span>
+              <form class="inline-form" hx-post="/partials/admin/machines/update/cancel"
+                    hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+                <input type="hidden" name="editor" value="{{ m.editor_username }}">
+                <input type="hidden" name="machine" value="{{ m.machine }}">
+                <button class="btn" type="submit" title="withdraw the request">[ CANCEL ]</button>
+              </form>
+            {% else %}
+              <form class="inline-form" hx-post="/partials/admin/machines/update"
+                    hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+                <input type="hidden" name="editor" value="{{ m.editor_username }}">
+                <input type="hidden" name="machine" value="{{ m.machine }}">
+                <button class="btn" type="submit"
+                        title="update this machine to the current build on its next report, without waiting for its editor to click">[ UPDATE NOW ]</button>
+              </form>
+            {% endif %}
+          </td>
         </tr>
       {% endfor %}
       </tbody>

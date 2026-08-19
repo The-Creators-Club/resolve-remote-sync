@@ -395,10 +395,15 @@ def test_a_key_never_appears_in_the_open_site_manifest(env):
     assert "ai_cli_providers" not in manifest
 
 
-def test_the_features_block_of_the_open_manifest_is_still_exactly_two(env):
+def test_the_cli_flag_is_not_in_the_open_manifests_features_block(env):
+    """The manifest gains a key when a CLIENT needs one, and no companion,
+    installer or indexer has any use for this flag. (auto_update joined the
+    block 2026-08-18 because the companion is exactly the client that acts on
+    it -- see test_site.py, which pins the full set.)"""
     client, _conn, _settings = env
     features = client.get("/api/v1/site").json()["features"]
-    assert set(features) == {"youtube_download", "youtube_unblock"}
+    assert "ai_cli_providers" not in features
+    assert set(features) == {"youtube_download", "youtube_unblock", "auto_update"}
 
 
 def test_a_bad_key_is_a_422_that_does_not_echo_it(env):

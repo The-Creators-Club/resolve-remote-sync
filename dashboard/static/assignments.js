@@ -29,8 +29,15 @@
     }, 4000);
   }
 
-  function selectionUrl(editor, slug) {
-    return "/api/v1/selection/" + encodeURIComponent(editor) + "/" + encodeURIComponent(slug);
+  // ?machine= (2026-08-18): the plan belongs to a COMPUTER, so every cell
+  // names one. A cell for an editor whose companion has never reported has
+  // an empty machine and writes without the parameter, which the dashboard
+  // reads as "every computer this person has" -- for them, none yet, so it
+  // lands in the unassigned bucket their first report adopts.
+  function selectionUrl(editor, slug, machine) {
+    var url = "/api/v1/selection/" + encodeURIComponent(editor) + "/" + encodeURIComponent(slug);
+    if (machine) url += "?machine=" + encodeURIComponent(machine);
+    return url;
   }
 
   // One write, used by both a single click and the column tools. Marks the
@@ -39,7 +46,7 @@
   function writeCell(box, checked) {
     box.disabled = true;
     box.classList.add("is-saving");
-    return fetch(selectionUrl(box.dataset.editor, box.dataset.slug), {
+    return fetch(selectionUrl(box.dataset.editor, box.dataset.slug, box.dataset.machine), {
       method: checked ? "PUT" : "DELETE",
       credentials: "same-origin",
       headers: { "X-CSRF-Token": CSRF },
@@ -66,10 +73,12 @@
     });
   });
 
-  function columnBoxes(editor) {
+  function columnBoxes(editor, machine) {
     return Array.prototype.filter.call(
       grid.querySelectorAll(".matrix-check"),
-      function (b) { return b.dataset.editor === editor; }
+      function (b) {
+        return b.dataset.editor === editor && (b.dataset.machine || "") === (machine || "");
+      }
     );
   }
 
@@ -77,17 +86,18 @@
   // write for one editor at once would be a hundred simultaneous rows
   // hitting that editor's selection queue -- easy to reorder (position is
   // insertion order), hard to reason about if one of them 404s midway.
-  function runColumn(editor, wanted) {
-    var boxes = columnBoxes(editor).filter(function (b) { return b.checked !== wanted; });
+  function runColumn(editor, machine, wanted) {
+    var who = machine ? (editor + " on " + machine) : editor;
+    var boxes = columnBoxes(editor, machine).filter(function (b) { return b.checked !== wanted; });
     if (!boxes.length) return;
     var i = 0;
     var failed = 0;
     (function next() {
       if (i >= boxes.length) {
         if (failed) {
-          toast(failed + " of " + boxes.length + " change(s) failed for " + editor, "err");
+          toast(failed + " of " + boxes.length + " change(s) failed for " + who, "err");
         } else {
-          toast((wanted ? "ticked all for " : "unticked all for ") + editor, "ok");
+          toast((wanted ? "ticked all for " : "unticked all for ") + who, "ok");
         }
         return;
       }
@@ -103,8 +113,49 @@
   grid.addEventListener("click", function (evt) {
     var allBtn = evt.target.closest && evt.target.closest("[data-col-all]");
     var noneBtn = evt.target.closest && evt.target.closest("[data-col-none]");
-    if (allBtn) runColumn(allBtn.getAttribute("data-col-all"), true);
-    if (noneBtn) runColumn(noneBtn.getAttribute("data-col-none"), false);
+    if (allBtn) {
+      runColumn(allBtn.getAttribute("data-col-all"),
+                allBtn.getAttribute("data-col-machine"), true);
+    }
+    if (noneBtn) {
+      runColumn(noneBtn.getAttribute("data-col-none"),
+                noneBtn.getAttribute("data-col-machine"), false);
+    }
+  });
+
+  // "copy from ..." (2026-08-18): a new computer starts with an empty plan on
+  // purpose, so this is the one click that fills it from another of the same
+  // person's machines. A full reload afterwards, deliberately: the whole
+  // column changes, and re-deriving 100 checkboxes in JS from a response is
+  // how the grid and the database drift apart.
+  grid.addEventListener("change", function (evt) {
+    var sel = evt.target;
+    if (!sel.classList || !sel.classList.contains("assign-copy")) return;
+    var source = sel.value;
+    if (!source) return;
+    var editor = sel.getAttribute("data-copy-editor");
+    var target = sel.getAttribute("data-copy-target");
+    sel.disabled = true;
+    fetch("/api/v1/admin/machines/" + encodeURIComponent(editor) + "/" +
+          encodeURIComponent(target) + "/copy-plan?source=" + encodeURIComponent(source), {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "X-CSRF-Token": CSRF },
+    }).then(function (resp) {
+      if (!resp.ok) {
+        return resp.json().catch(function () { return {}; }).then(function (body) {
+          throw new Error(body.detail || ("HTTP " + resp.status));
+        });
+      }
+      return resp.json();
+    }).then(function (body) {
+      toast("copied " + body.projects + " project(s) from " + source + " to " + target, "ok");
+      window.location.reload();
+    }).catch(function (err) {
+      sel.disabled = false;
+      sel.value = "";
+      toast("could not copy the plan: " + err.message, "err");
+    });
   });
 
   var filter = document.getElementById("assign-filter");

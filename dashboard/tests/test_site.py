@@ -323,13 +323,16 @@ def _features(tmp_path, **flags):
 
 
 def test_the_manifest_publishes_both_feature_flags_off_by_default(tmp_path):
+    # auto_update joined them 2026-08-18 (unattended updates) and is false
+    # unless a site says otherwise, for the same fail-closed reason.
     assert _features(tmp_path) == {"youtube_download": False,
-                                   "youtube_unblock": False}
+                                   "youtube_unblock": False,
+                                   "auto_update": False}
 
 
 def test_a_site_that_turned_the_downloader_on_says_so(tmp_path):
     assert _features(tmp_path, site_feature_youtube_download=True) == {
-        "youtube_download": True, "youtube_unblock": False}
+        "youtube_download": True, "youtube_unblock": False, "auto_update": False}
 
 
 def test_unblock_is_never_published_without_the_downloader(tmp_path):
@@ -345,7 +348,7 @@ def test_the_features_block_carries_no_secret(tmp_path):
     """The manifest is OPEN (app.py's _OPEN_EXACT). Whether a feature is on is
     not a secret; nothing else may join it here."""
     features = _features(tmp_path)
-    assert set(features) == {"youtube_download", "youtube_unblock"}
+    assert set(features) == {"youtube_download", "youtube_unblock", "auto_update"}
     assert all(isinstance(v, bool) for v in features.values())
 
 

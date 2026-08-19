@@ -25,6 +25,7 @@ from .api import (
 # The fleet-read redaction the JSON API applies, imported under a name that
 # says where the rule lives: ONE definition, two callers (COMMERCIAL_READINESS.md
 # §C L1, 2026-08-17). See api.py's "scoping fleet reads" block.
+from .api import _purge_user_credentials as api_purge_user_credentials
 from .api import _scope_editors_view as api_scope_editors_view
 from .api import _scope_projects_view as api_scope_projects_view
 from .nas import NasBackend, NasError, is_valid_username, looks_like_ssh_pubkey
@@ -765,7 +766,20 @@ def partial_toggle(
         ).fetchone()
         if project is None:
             raise HTTPException(status_code=404, detail=f"unknown project {slug!r}")
-        db.add_selection(conn, editor, slug, created_by=user, now=db.utcnow_iso())
+        if editor in db.base_only_editors(conn):
+            # Same refusal as PUT /api/v1/selection (CR-28) -- the checkbox is
+            # rendered disabled for a base rig, and this is the path a stale
+            # page or a second tab would still take.
+            raise HTTPException(
+                status_code=409,
+                detail="this is a base rig account: it works directly off the "
+                       "NAS and syncs nothing, so projects cannot be ticked for it",
+            )
+        # The sidebar checkbox is the PERSON: every computer they use. Its
+        # title says so, and the assignments grid is where one machine at a
+        # time lives (MULTI_MACHINE_PLAN.md WP5).
+        db.add_selection_for_person(conn, editor, slug, created_by=user,
+                                    now=db.utcnow_iso())
     conn.commit()
     # Reconcile Syncthing sharing promptly -- ticking used to wait out
     # interval_enforce (up to 60s) before anything started (2026-07-26).
@@ -838,6 +852,12 @@ def _sidebar_context(request: Request, conn, current: str | None,
         "current_slug": current or None,
         "selected_slugs": selected,
         "toggle_editor": toggle_editor,
+        # CR-28: the base rig's checkboxes are disabled rather than absent --
+        # an existing tick still has to be visible (and removable) on the
+        # account that has one.
+        "toggle_editor_base": bool(
+            toggle_editor and toggle_editor in db.base_only_editors(conn)
+        ),
     }
 
 
@@ -1262,6 +1282,36 @@ async def partial_admin_disable_user(request: Request, conn: sqlite3.Connection 
     })
 
 
+@router.post("/partials/admin/users/delete")
+async def partial_admin_delete_user(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    """Delete a LOCAL account, same guards and same credential purge as
+    api.api_admin_delete_user -- the button on the Users page must not be a
+    softer door than the JSON route. The refusals come back as this partial's
+    banner rather than an HTTP error, because htmx swaps the response in
+    either case and an admin needs to READ why it refused."""
+    admin = _require_admin_page(request)
+    settings = request.app.state.settings
+    form = await _form(request)
+    username = form.get("username", "").strip().lower()
+
+    error = None
+    if str(settings.auth_method or "smb").strip().lower() != "local":
+        error = "this action is only available with DASH_AUTH_METHOD=local"
+    else:
+        try:
+            local_users.delete_user(conn, username, requested_by=admin)
+        except local_users.LocalUserError as exc:
+            error = str(exc)
+        else:
+            conn.commit()
+            api_purge_user_credentials(request, conn, username, by=admin)
+
+    return _render(request, "partials/admin_users.html", {
+        "admin_users": build_admin_users_view(settings, conn),
+        "error": error,
+    })
+
+
 @router.post("/partials/admin/users/keys/add")
 async def partial_admin_add_ssh_key(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     _require_admin_page(request)
@@ -1610,6 +1660,54 @@ async def partial_admin_package_current(
         conn.commit()
 
     return _render(request, "partials/admin_packages.html", _packages_and_feed(conn, request, error))
+
+
+@router.post("/partials/admin/machines/update")
+async def partial_admin_machine_update(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    """Ask one machine to take the current build on its next report (v25).
+
+    The same write as POST /api/v1/admin/machines/{editor}/{machine}/update,
+    from the page that already lists which machines are behind. Nothing is
+    installed from here: the companion applies the signed offer it is already
+    holding, and only when swapping the exe would not kill work in progress."""
+    admin = _require_admin_page(request)
+    form = await _form(request)
+    editor = form.get("editor", "").strip().lower()
+    machine = form.get("machine", "").strip()
+    error = None
+    row = conn.execute(
+        "SELECT platform FROM machines WHERE editor_username=? AND machine=?",
+        (editor, machine),
+    ).fetchone()
+    current = db.get_current_package(
+        conn, ((row["platform"] if row else "") or "").strip().lower(), kind="companion",
+    ) if row is not None else None
+    if row is None:
+        error = f"no machine {machine!r} for {editor!r}"
+    elif current is None:
+        error = "no current companion package is published for that machine's platform"
+    elif not db.request_machine_update(conn, editor, machine, current["version"],
+                                       admin or "admin", db.utcnow_iso()):
+        error = f"no machine {machine!r} for {editor!r}"
+    else:
+        conn.commit()
+    return _render(request, "partials/admin_packages.html",
+                   _packages_and_feed(conn, request, error))
+
+
+@router.post("/partials/admin/machines/update/cancel")
+async def partial_admin_machine_update_cancel(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    _require_admin_page(request)
+    form = await _form(request)
+    db.clear_machine_update_request(
+        conn, form.get("editor", "").strip().lower(), form.get("machine", "").strip())
+    conn.commit()
+    return _render(request, "partials/admin_packages.html",
+                   _packages_and_feed(conn, request, None))
 
 
 @router.post("/partials/admin/packages/delete")

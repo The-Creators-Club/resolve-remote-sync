@@ -882,6 +882,59 @@ def test_payload_includes_platform_key():
     assert calls[0]["platform"] in {"windows", "macos", "linux"}
 
 
+# -- this computer's identity (WP1, MULTI_MACHINE_PLAN.md) ------------------
+
+
+def test_payload_carries_the_machine_id_and_syncthing_device_id():
+    """The dashboard keys a sync plan on (editor, machine-name); the id is
+    what lets it recognise the same computer after a rename, and the device
+    id is what lets it share a folder with THIS machine rather than with
+    every device named after its owner."""
+    calls = []
+    reporter = DashboardReporter(
+        lambda: [], _cfg(), http_post=lambda u, d, h, t: calls.append(d) or {},
+        get_machine_id=lambda: "abc123",
+        get_syncthing_device_id=lambda: "DEV-1",
+    )
+    reporter.post_once()
+    assert calls[0]["machine_id"] == "abc123"
+    assert calls[0]["syncthing_device_id"] == "DEV-1"
+
+
+def test_a_machine_with_no_id_reports_none_rather_than_failing():
+    """A read-only home directory must not stop a machine reporting at all."""
+    calls = []
+    reporter = DashboardReporter(
+        lambda: [], _cfg(), http_post=lambda u, d, h, t: calls.append(d) or {},
+        get_machine_id=lambda: "",
+        get_syncthing_device_id=lambda: (_ for _ in ()).throw(RuntimeError("no syncthing")),
+    )
+    reporter.post_once()
+    assert calls[0]["machine_id"] is None
+    assert calls[0]["syncthing_device_id"] is None
+
+
+def test_the_machine_id_is_read_once_not_on_every_tick():
+    """It is a disk read on a 30 s cadence otherwise. The device id is NOT
+    cached negatively: lane C supervision restarts Syncthing, and the first
+    ticks of a run can legitimately land before it answers."""
+    reads = []
+    device_answers = iter(["", "", "DEV-9", "DEV-9"])
+    reporter = DashboardReporter(
+        lambda: [], _cfg(), http_post=lambda u, d, h, t: {},
+        get_machine_id=lambda: (reads.append(1), "abc123")[1],
+        get_syncthing_device_id=lambda: next(device_answers),
+    )
+    calls = []
+    reporter._http_post = lambda u, d, h, t: calls.append(d) or {}
+    reporter.post_once()
+    reporter.post_once()
+    reporter.post_once()
+
+    assert len(reads) == 1
+    assert [c["syncthing_device_id"] for c in calls] == [None, None, "DEV-9"]
+
+
 # -- per-machine version + never-raise numeric config (AUDIT_3 M-5 / #14) ----
 
 

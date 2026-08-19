@@ -60,11 +60,40 @@ def _assignments_view(conn: sqlite3.Connection) -> dict[str, Any]:
     editors = sorted(db.known_editor_usernames(conn))
     ticks = db.fetch_all_selections(conn)  # slug -> [editor_username, ...]
     ticked_pairs = {(slug, e) for slug, es in ticks.items() for e in es}
+    # COLUMNS ARE COMPUTERS since 2026-08-18 (MULTI_MACHINE_PLAN.md WP5): one
+    # person can own two editing machines and give each its own plan. An
+    # editor whose companion has never reported gets a single column with no
+    # machine name -- the unassigned bucket, which their first report adopts.
+    machine_ticks = db.fetch_machine_selections(conn)
+    columns: list[dict[str, Any]] = []
+    for editor in editors:
+        machines = db.machines_of(conn, editor)
+        if not machines:
+            columns.append({"editor": editor, "machine": "", "label": editor,
+                            "sub": "no computer yet"})
+            continue
+        for machine in machines:
+            columns.append({"editor": editor, "machine": machine,
+                            "label": editor, "sub": machine,
+                            # The other computers this plan can be copied from
+                            # -- a new machine starts empty by design, and
+                            # this is the one click that fills it.
+                            "siblings": [m for m in machines if m != machine]})
+    ticked_cells = {
+        (slug, e, m) for slug, pairs in machine_ticks.items() for e, m in pairs
+    }
     return {
         "projects": projects,
         "editors": editors,
+        "columns": columns,
+        "ticked_cells": ticked_cells,
         "ticked_pairs": ticked_pairs,
         "presence": _editor_presence(conn),
+        # A base rig column is READ-ONLY (CR-28): every one of that account's
+        # machines works directly off the NAS tree, so a tick would sync
+        # nothing and could never clear. The write endpoint refuses it; the
+        # grid says so before anyone clicks.
+        "base_editors": db.base_only_editors(conn),
     }
 
 

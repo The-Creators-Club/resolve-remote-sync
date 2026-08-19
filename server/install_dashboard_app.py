@@ -1144,6 +1144,12 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                    # which was the whole point of item 1 -- so this projects
                    # one site.toml key and provisions nothing.
                    ai_cli_providers: str = "0",
+                   # Unattended updates (2026-08-18). "0" here is the vendor
+                   # build and the safe default: with it off, a companion
+                   # still offers the build in its tray and an admin can push
+                   # one machine at a time from the packages page. Projects
+                   # one site.toml key; provisions nothing.
+                   auto_update: str = "0",
                    anthropic_api_key: str = "",
                    # WHERE THE CODE COMES FROM (2026-08-18, docs/DOCKER.md).
                    # "bind" is the default in the SIGNATURE too, not
@@ -1324,6 +1330,9 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # GET /api/v1/site: no companion, installer or indexer
                     # has any use for it.
                     "DASH_SITE_AI_CLI_PROVIDERS": ai_cli_providers,
+                    # Published in GET /api/v1/site, unlike the key above:
+                    # the COMPANION is the client that acts on this one.
+                    "DASH_SITE_AUTO_UPDATE": auto_update,
                     **({
                         # THE UNBLOCK HALF, present only when the customer
                         # asked for it (COMMERCIAL_READINESS.md item 3). Both
@@ -3656,6 +3665,9 @@ def main():
     # (docs/legal/YOUTUBE_FEATURE_NOTICE.md), which belongs in their manifest
     # where it is written down, not in one operator's shell history.
     ai_cli_providers = "1" if site_bool("features", "ai_cli_providers") else "0"
+    # Same reasoning as the line above: whether editors' machines take builds
+    # unattended belongs in the site manifest, where it is written down.
+    auto_update = "1" if site_bool("features", "auto_update") else "0"
     if youtube_download == "1" and not anthropic_api_key and not args.dry_run:
         print("NOTE: the YouTube downloader is enabled for this site but "
               "ANTHROPIC_API_KEY is not set. Everything deploys; /ytdl will "
@@ -4252,6 +4264,7 @@ def main():
         youtube_download=youtube_download,
         youtube_unblock=youtube_unblock,
         ai_cli_providers=ai_cli_providers,
+        auto_update=auto_update,
         anthropic_api_key=anthropic_api_key,
         mode=mode,
         ccsync_image=ccsync_image,

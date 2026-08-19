@@ -8,19 +8,20 @@
     {% include "partials/settings_nav.html" %}
     <div class="detail-head"><h1>[ ASSIGNMENTS ]</h1></div>
     <p class="muted" style="margin: 0.4rem 0 0.9rem; max-width: 62ch;">
-      tick a project onto an editor's machine, or pull it back. Every cell
-      here is the same write the editor switcher's checkboxes make (lane C
-      shares, lane A/B scope, the enforce cycle) -- there is no second
-      selection store.
+      tick a project onto one computer, or pull it back. One column per
+      computer: a person with a desktop and a laptop gets a column each, and
+      the two sync different things. Every cell here is the same write the
+      editor switcher's checkboxes make (lane C shares, lane A/B scope, the
+      enforce cycle) - there is no second selection store.
     </p>
     <div class="assign-toolbar">
       <input class="assign-filter" type="search" id="assign-filter"
              placeholder="filter projects…" aria-label="filter projects">
       <span class="muted mono-sm">
-        {{ assignments.projects | length }} project(s) &times; {{ assignments.editors | length }} editor(s)
+        {{ assignments.projects | length }} project(s) &times; {{ assignments.columns | length }} computer(s)
       </span>
     </div>
-    {% if not assignments.editors %}
+    {% if not assignments.columns %}
       <div class="muted">no known editors yet -- one appears here once they
         sign in, tick a project of their own, or their companion reports.</div>
     {% elif not assignments.projects %}
@@ -31,18 +32,36 @@
         <thead>
           <tr>
             <th class="assign-project-head">PROJECT</th>
-            {% for e in assignments.editors %}
+            {% for c in assignments.columns %}
             <th>
               <div class="assign-editor-head">
-                <span class="name">{{ e }}</span>
-                <span class="dot {{ assignments.presence.get(e, '') }}"
-                      title="companion presence for {{ e }}">&#9679;</span>
+                <span class="name">{{ c.label }}</span>
+                <span class="dot {{ assignments.presence.get(c.editor, '') }}"
+                      title="companion presence for {{ c.editor }}">&#9679;</span>
+                <span class="muted mono-sm" title="this computer">{{ c.sub }}</span>
+                {% if c.editor in assignments.base_editors %}
+                <span class="muted mono-sm"
+                      title="this account works directly off the NAS tree, so it syncs nothing">base rig</span>
+                {% else %}
                 <span class="assign-colbtns">
-                  <button type="button" class="btn" data-col-all="{{ e }}"
-                          title="tick every project for {{ e }}">[ ALL ]</button>
-                  <button type="button" class="btn" data-col-none="{{ e }}"
-                          title="untick every project for {{ e }}">[ NONE ]</button>
+                  <button type="button" class="btn"
+                          data-col-all="{{ c.editor }}" data-col-machine="{{ c.machine }}"
+                          title="tick every project for {{ c.sub }}">[ ALL ]</button>
+                  <button type="button" class="btn"
+                          data-col-none="{{ c.editor }}" data-col-machine="{{ c.machine }}"
+                          title="untick every project for {{ c.sub }}">[ NONE ]</button>
+                  {% if c.siblings %}
+                  <select class="assign-copy" data-copy-editor="{{ c.editor }}"
+                          data-copy-target="{{ c.machine }}"
+                          title="give this computer the same projects as another of {{ c.editor }}'s">
+                    <option value="">copy from…</option>
+                    {% for other in c.siblings %}
+                    <option value="{{ other }}">{{ other }}</option>
+                    {% endfor %}
+                  </select>
+                  {% endif %}
                 </span>
+                {% endif %}
               </div>
             </th>
             {% endfor %}
@@ -52,13 +71,18 @@
           {% for p in assignments.projects %}
           <tr data-project-label="{{ p.label | lower }}">
             <td class="assign-project" title="{{ p.label }}">{{ p.label }}</td>
-            {% for e in assignments.editors %}
+            {% for c in assignments.columns %}
             <td class="assign-cell">
               <input type="checkbox" class="proj-check matrix-check"
-                     data-slug="{{ p.slug }}" data-editor="{{ e }}"
-                     {{ 'checked' if (p.slug, e) in assignments.ticked_pairs }}
-                     title="sync &quot;{{ p.label }}&quot; to {{ e }}"
-                     aria-label="sync {{ p.label }} to {{ e }}">
+                     data-slug="{{ p.slug }}" data-editor="{{ c.editor }}"
+                     data-machine="{{ c.machine }}"
+                     {{ 'checked' if (p.slug, c.editor, c.machine) in assignments.ticked_cells }}
+                     {% if c.editor in assignments.base_editors %}disabled
+                     title="{{ c.editor }} is a base rig: it works directly off the NAS and syncs nothing"
+                     {% else %}
+                     title="sync &quot;{{ p.label }}&quot; to {{ c.sub }}"
+                     {% endif %}
+                     aria-label="sync {{ p.label }} to {{ c.editor }} on {{ c.sub }}">
             </td>
             {% endfor %}
           </tr>

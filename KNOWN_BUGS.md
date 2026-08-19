@@ -947,7 +947,159 @@ container:**
 Until 1 is verified, the manual path stays documented and the page still
 prints the login command beside the wizard.
 
+### CR-27 — the licence dialog CR-22 added can never open on a machine with stray clips — FIXED in repo 2026-08-18, STILL UNSHIPPED, and it cost another 18 hours on 2026-08-19
+CR-22 gave a self-upgraded machine two ways back: a dialog three seconds after
+the tray starts, and a tray item. On the first machine in the fleet to take
+the 0.9.0 offer, **only the tray item ever existed**, and nobody knew to look
+for it. `app.prompt_licence_acceptance` takes `_popup_active_lock`, and the
+offline-clips popup (`app.py`'s *"N clip(s) outside <root>"*) takes that lock
+~3 seconds earlier on every single start:
+
+```
+18:24:46 INFO  ccsync.app: popup: 65 clip(s) outside F:\Creators_Club
+18:24:49 INFO  ccsync.app: licence dialog: another CCSync window is open -- not stacking a second modal on it
+```
+
+The `_licence_prompted = False` reset in that branch is written for "ask again
+next start" — but the collision is not a coincidence of timing, it is the
+steady state of any editor whose Resolve projects reference clips outside the
+tree (here: 65, then 102, every start, for hours). Reproduced verbatim on
+0.9.0 and again on 0.9.2 after a remote upgrade the same evening. Net effect:
+ruskin's three lanes sat parked from 18:24 local with 514 files / 12.3 GB
+queued behind them, and the only route out was an admin telling him which tray
+item to click.
+
+Fixed with the re-arm: `app._licence_watch()` (a thread, not the old
+`threading.Timer(3.0, ...)`) keeps offering the document every
+`LICENCE_RETRY_SECONDS` for as long as the gate is live AND the dialog has
+never actually been shown. It stops on `_licence_asked`, which is set once
+the document reaches a person -- accepting or declining is their call, and a
+modal that comes back after a DECLINE is how an editor learns to dismiss it
+unread. A build with no bundled `assets/EULA.md` settles immediately (a
+packaging fault is not something a retry fixes), a Tk root that cannot be
+built at logon does not (that one a retry does fix), and the deferral logs
+once per run and then at DEBUG. `_stop_event` ends it, so a Quit or a
+self-upgrade is never held up by a licence nobody accepted.
+
+### CR-28 — the base rig sits in [ QUEUED ] forever, because a tick belongs to a person and not to a computer — FIXED in repo 2026-08-18, unshipped
+Seen on the fleet page 2026-08-18: `alex · 2026/FF5/Animals [ GETTING READY ]
+just ticked; sharing and first file lists are being set up, syncing starts
+within a minute or two`, ten hours after the tick, on the machine that works
+directly off the NAS and syncs nothing. `api.build_transfers_view`'s pending
+block (the GETTING READY source) joins `selections` to `projects` and nothing
+else, so it reads "ticked, and no completion row yet" as "starting up" — a
+condition a base-mode machine satisfies permanently, because it never syncs
+and therefore never gets a completion row. `db.fetch_sync_backlog` already
+excludes base machines (`WHERE emp.mode != 'base'`); the other two queue
+sources in the same view do not.
+
+The deeper cause is that `selections` is keyed `(editor_username,
+project_slug)` while every consumer downstream of it is keyed by machine, and
+`mode` is only ever persisted onto `editor_media_project` rows.
+
+Fixed as WP0 of `docs/MULTI_MACHINE_PLAN.md`: `machine_state.mode` (schema
+v22) records the role on the machine's own row, so a base rig that has never
+sent a media manifest is still knowable as one; `db.base_only_editors` is the
+one predicate all three queue sources now share; and the tick itself is
+refused (409, *"this is a base rig account: it works directly off the NAS and
+syncs nothing"*) on `PUT /api/v1/selection/...`, on the sidebar toggle route,
+and visibly -- the checkbox renders disabled and the assignments column says
+`base rig`. UNTICKING stays open, or the row that started this could never be
+removed. The rest of that plan (per-machine sync plans, so one person can own
+two editing machines) landed in the same pass.
+
+**Live data still owed on the NAS**: the stray row
+`('alex','2026-ff5-animals')` predates the refusal and is invisible but
+present -- `DELETE FROM selections WHERE editor_username='alex'` after the
+dashboard carrying v22-v25 is deployed.
+
 ---
+
+### CR-27a — CR-27 recurred on the same machine, because the fix is in the repo and not on the editor
+Investigated 2026-08-19. ruskin's three lanes were parked again from
+2026-08-18 18:24 to 2026-08-19 12:10 local -- roughly 18 hours -- with the
+same `lane_report_current.detail`:
+
+```
+NOT SYNCING: The CC Sync licence agreement has not been accepted on this machine.
+```
+
+`~/.ccsync/eula_accepted.json` was absent and his log carried the CR-27
+collision verbatim on 2026-08-18 23:01 and 2026-08-19 11:54, plus one new
+line at 11:24:39 -- `licence agreement DECLINED (or dismissed)` -- i.e. when
+the document finally did reach him he closed it, and CR-27's re-arm
+deliberately stops after `_licence_asked`. He accepted at 12:10:54 and the
+lanes came straight back.
+
+Nothing new to fix in the code: CR-27's `_licence_watch` is the fix and it is
+sitting in the repo at companion 0.9.3 while the fleet runs 0.9.2. **The
+lesson is the shipping order, not the logic** -- a gate that parks sync was
+released (0.9.0) before the dialog that clears it worked. Two things worth
+carrying:
+
+- the dashboard shows a parked machine as `state=idle, queued=0`, which is
+  visually identical to "nothing to do". `detail` holds the whole diagnosis
+  and no page reads it. A machine that is refusing to sync for a reason the
+  editor can fix should say so on the fleet page.
+- a DECLINE is indistinguishable from a dismissal (a closed window). Treating
+  "they clicked the X" as "they read it and said no" is what left the re-arm
+  disarmed here.
+
+### CR-29 — requester-first YouTube downloads never ran once, because a busy companion cannot answer in a second
+Measured on ruskin's machine 2026-08-19. Every ytdl job ever created is
+`download_mode: server` -- **45 of 45, across every editor** -- despite the
+NAS having `YTDL_LOCAL_DOWNLOAD=1`, his companion answering
+`/ytdl/capabilities` with `ok: true`, and yt-dlp/ffmpeg/deno all present in
+`%LOCALAPPDATA%\ccsync\tools`. R18 blamed the flag and the missing ffmpeg;
+both were fixed, and the feature still never engaged.
+
+The cause is the probe budget. `app.js` allowed the capability probe
+`PROBE_MS = 1000` and made exactly one attempt. Timed on the live machine
+with the client's own HTTP stack pre-warmed, so the number is the server's:
+
+```
+warm-stack, server warm  :    6 ms
+after 60s companion idle : 3949 ms      <- aborts, job silently goes server-side
+after 120s idle          :    3 ms
+```
+
+`capabilities()` does no I/O by design and answers in single-digit
+milliseconds warm, so this is not that function being slow -- it is the
+request waiting behind whatever else the companion is doing (his lanes had
+just restarted, so it was mid-sync-pass). Intermittent, multi-second, and
+invisible: the editor sees "downloading on the server" and no error, which
+reads as the feature not existing. The exact confound is worth naming for
+whoever picks this up: a *client*-side first-call cost looks identical, which
+is why the number above was re-measured with the stack warmed first.
+
+FIXED in repo 2026-08-19 (`ytdl/web/static/app.js`): the probe now tries
+`PROBE_MS` and then, **only if the first attempt timed out**, `PROBE_RETRY_MS
+= 5000`. A refusal (nothing listening, Chrome blocking the local-network
+request) still fails in milliseconds and is not retried, so a machine with no
+tray app costs exactly what it did before. Nothing the editor waits on:
+`startDownload` never awaits the probe, and a late claim is the handover
+`claim_download`'s lease design already supports.
+
+Not fixed, and deliberately left: **why** a request that does no I/O waits
+four seconds. That is a companion-side question, it needs a companion
+release, and this deploy is the dashboard.
+
+Still true regardless, and NOT a bug: a job that does fall back to the server
+stays on the NAS. Lane B has not pulled `/Youtube/**` down since 2026-08-16
+(owner's policy reversal, R18), so the editor gets `Youtube/<term>/Proxy/`
+previews and no original. That is the intended behaviour and the reason CR-29
+mattered: requester-first was the only route by which an editor's own
+YouTube clips reached their disk, and it had never once run.
+
+### CR-30 — "cancelling: it stops after the video in flight" on a job with nothing in flight
+Hit by the owner 2026-08-19 on job 42, parked in `ready_for_review` since
+2026-08-18 and blocking every new search and every GET LINKS
+(`db.active_job` counts `ready_for_review` as active, one job per editor).
+Clicking CANCEL answered with the downloading-phase copy, so it read as a
+cancel that had not taken -- the job had in fact gone straight to `cancelled`.
+
+FIXED in repo 2026-08-19: the toast is phase-aware, `cancelled` for anything
+not actually downloading. The blocking itself is correct and stays.
 
 ## Open — residuals from the 2026-08-14 fix pass
 

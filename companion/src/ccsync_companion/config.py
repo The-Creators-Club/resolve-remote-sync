@@ -94,7 +94,7 @@ log = logging.getLogger("ccsync.config")
 # mark as the product default and a taskbar identity of our own (KNOWN_BUGS
 # CR-25, CR-24). Minor bump, not patch: a whole new contract with both SPAs,
 # and an editor on an older build 404s every route of it.
-VERSION = "0.9.2"
+VERSION = "0.9.3"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"

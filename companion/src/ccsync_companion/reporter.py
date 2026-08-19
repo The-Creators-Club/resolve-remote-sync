@@ -206,6 +206,8 @@ class DashboardReporter:
         get_local_manifest: Optional[GetLocalManifestFn] = None,
         get_media_tree: Optional[GetMediaTreeFn] = None,
         get_mode: Optional[GetModeFn] = None,
+        get_machine_id: Optional[Callable[[], str]] = None,
+        get_syncthing_device_id: Optional[Callable[[], str]] = None,
         get_editor_name: Optional[GetEditorNameFn] = None,
         get_identity_token: Optional[GetIdentityTokenFn] = None,
         on_report_response: Optional[OnReportResponseFn] = None,
@@ -237,6 +239,14 @@ class DashboardReporter:
         self._get_local_manifest = get_local_manifest
         self._get_media_tree = get_media_tree
         self._get_mode = get_mode
+        # WP1: both are cached forever after the first success. The id is a
+        # file read and the device id an HTTP call to the local Syncthing, and
+        # neither changes while this process lives -- a report every 30 s must
+        # not pay for either more than once.
+        self._get_machine_id = get_machine_id
+        self._get_syncthing_device_id = get_syncthing_device_id
+        self._machine_id_cache: Optional[str] = None
+        self._syncthing_device_id_cache: Optional[str] = None
         self._get_editor_name = get_editor_name
         self._get_identity_token = get_identity_token
         self._on_report_response = on_report_response
@@ -310,6 +320,39 @@ class DashboardReporter:
     def enabled(self) -> bool:
         return bool(self.dashboard_url)
 
+    def _machine_id(self) -> Optional[str]:
+        """This computer's minted id, or None when this build/machine has
+        none. Cached: it is a file read that cannot change under us, and the
+        empty answer is cached too so a read-only home directory is not
+        re-tried every 30 seconds."""
+        if self._machine_id_cache is None:
+            value = ""
+            if self._get_machine_id is not None:
+                try:
+                    value = str(self._get_machine_id() or "")
+                except Exception:
+                    log.exception("get_machine_id() failed")
+            self._machine_id_cache = value
+        return self._machine_id_cache or None
+
+    def _syncthing_device_id(self) -> Optional[str]:
+        """This machine's own Syncthing device ID, or None while Syncthing is
+        not answering. NOT cached negatively for the process lifetime: lane C
+        supervision restarts Syncthing, and the first few reports of a run can
+        legitimately land before it is up."""
+        if self._syncthing_device_id_cache:
+            return self._syncthing_device_id_cache
+        if self._get_syncthing_device_id is None:
+            return None
+        try:
+            value = str(self._get_syncthing_device_id() or "")
+        except Exception:
+            log.debug("get_syncthing_device_id() failed", exc_info=True)
+            return None
+        if value:
+            self._syncthing_device_id_cache = value
+        return value or None
+
     # -- payload -----------------------------------------------------
     def _build_payload(self, light: bool = False, editor_name: Optional[str] = None) -> dict[str, Any]:
         """Build the report payload. LIGHT ticks (light=True) omit
@@ -327,6 +370,16 @@ class DashboardReporter:
         payload: dict[str, Any] = {
             "editor_name": editor_name,
             "machine": platform.node(),
+            # WP1 (MULTI_MACHINE_PLAN.md): the hostname is the key the plan
+            # hangs on, and an editor can change it in ten seconds. This is
+            # what lets the dashboard recognise the same computer afterwards
+            # instead of handing it an empty plan. Read through a getter so
+            # nothing here touches the disk on a 30 s cadence.
+            "machine_id": self._machine_id(),
+            # ...and which Syncthing device this machine IS, so a folder can
+            # be shared with THIS computer rather than with every device
+            # carrying its owner's name.
+            "syncthing_device_id": self._syncthing_device_id(),
             "companion_version": config_mod.VERSION,
             "platform": upgrade_mod.platform_key(),
             "reported_at": datetime.now(timezone.utc).isoformat(),

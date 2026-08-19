@@ -33,6 +33,7 @@ from . import canon
 from . import config as config_mod
 from . import crash_report
 from . import eula as eula_mod
+from . import machine as machine_mod
 from . import idle as idle_mod
 from . import luts as luts_mod
 from . import music_worker
@@ -127,6 +128,18 @@ def setup_logging(cfg: dict[str, Any]) -> None:
 # relaunch exits with "another ccsync-companion is already running" and the
 # machine has no companion until someone finds a terminal (2026-08-05).
 UI_SHUTDOWN_GRACE_SECONDS = 10.0
+
+# How often the licence offer is retried while the gate is live and the
+# dialog has never actually been SHOWN (KNOWN_BUGS CR-27, 2026-08-18). It is
+# not a nag interval: the loop stops the moment the document has been put in
+# front of somebody, accepted or declined. It exists because the first
+# attempt loses a race it will keep losing -- the out-of-tree clip popup
+# takes `_popup_active_lock` about three seconds before the licence dialog
+# asks for it, on every start, on any machine whose Resolve projects
+# reference clips outside the tree (measured on ruskin's PC: 65 clips, then
+# 102, every start, for hours). One-shot meant the only route back was a
+# tray item nobody knew to look for, with all three lanes parked.
+LICENCE_RETRY_SECONDS = 60.0
 
 
 def _hard_exit(code: int) -> None:
@@ -721,6 +734,24 @@ class CompanionApp:
         # reading. Declining leaves the tray item (Accept the licence
         # agreement…) as the way back.
         self._licence_prompted = False
+        # ...but "offered once" has to mean once SHOWN, not once attempted
+        # (CR-27, 2026-08-18). This flag is what _licence_watch() stops on:
+        # it is set when the document has actually been put in front of
+        # somebody (accepted, declined or dismissed), and stays False when
+        # the attempt never got a window at all -- the popup-lock race that
+        # left a whole machine parked with nothing on screen to explain it.
+        self._licence_asked = False
+        # One INFO line per run for that deferral, then DEBUG: the retry runs
+        # every LICENCE_RETRY_SECONDS for as long as the editor keeps the
+        # other window open, and the same sentence once a minute forever is
+        # how a log stops being read (upgrade.py's _log_refusal precedent).
+        self._licence_defer_logged = False
+        # Pushed updates (2026-08-18): one attempt per version, and one log
+        # line per refused version -- the request rides EVERY report until
+        # the dashboard sees the new version, so both of these would
+        # otherwise repeat every 30 seconds for as long as it stands.
+        self._pushed_update_applying = ""
+        self._pushed_update_refused = ""
         # macOS took the tree away from us, rather than the editor unplugging
         # it: the ad-hoc-signed companion loses its Full Disk Access grant on
         # every self-upgrade (item 16). Checked once after an upgrade, read by
@@ -1047,10 +1078,7 @@ class CompanionApp:
             # newer"). Calling a downgrade an update is how a rollback offer
             # becomes a one-click loss of everything the running build fixed
             # (seen live 2026-07-25: v0.4.5 offered "Update ... → v0.4.3").
-            on_available=lambda info: self._notify_tray(
-                upgrade_mod.offer_toast(info["version"]),
-                "ccsync-companion",
-            ),
+            on_available=self._on_upgrade_available,
         )
 
         # New-project onboarding (project_setup.py): the report response's
@@ -1078,6 +1106,11 @@ class CompanionApp:
             # be what the dashboard sees, or a base-role machine with
             # mode="editor" left in config.toml reports the wrong mode.
             get_mode=self.effective_mode,
+            # WP1 (MULTI_MACHINE_PLAN.md): who this COMPUTER is, so a person
+            # with two machines can have two sync plans, and a renamed PC
+            # keeps the one it had.
+            get_machine_id=machine_mod.machine_id,
+            get_syncthing_device_id=self.syncthing_device_id,
             get_editor_name=self.editor_identity,
             get_identity_token=lambda: self.identity.token,
             on_report_response=self._on_report_response,
@@ -1151,6 +1184,10 @@ class CompanionApp:
         # The fleet halt rides the same reply (item 9, 2026-08-17) -- see
         # _apply_fleet_halt for why it is not its own request.
         self._apply_fleet_halt(resp)
+        # ...and so does a PUSHED UPDATE (2026-08-18). AFTER
+        # note_report_response above, which is what put the signed offer in
+        # self.upgrade.available -- the push names a version, never a URL.
+        self._apply_pushed_update(resp)
 
     def _on_resolve_project_changed(self, name: str) -> None:
         if self.project_setup is not None:
@@ -2962,6 +2999,22 @@ class CompanionApp:
                 log.exception("pop_completions failed for %s", getattr(lane, "name", lane))
         return out
 
+    def syncthing_device_id(self) -> str:
+        """This machine's own Syncthing device ID, or "" when Syncthing is
+        not reachable (an unmanaged machine has no admin client at all).
+
+        The dashboard needs it to share a folder with THIS computer rather
+        than with every device named after its owner (WP3). Never raises:
+        the reporter treats "" as "ask again next tick"."""
+        admin = self.syncthing_admin
+        if admin is None:
+            return ""
+        try:
+            return str((admin.system_status() or {}).get("myID", "") or "")
+        except Exception:
+            log.debug("syncthing device id unavailable", exc_info=True)
+            return ""
+
     def effective_mode(self) -> str:
         """"base" or "editor" -- the identity-derived role when signed in
         and the dashboard sent one, else config.toml's static `mode`. Same
@@ -3459,6 +3512,41 @@ class CompanionApp:
             target=self._show_licence_dialog, name="ccsync-licence", daemon=True,
         ).start()
 
+    def _licence_watch(self, first_delay: float = 3.0,
+                       interval: float = LICENCE_RETRY_SECONDS) -> None:
+        """Keep offering the licence until it has actually been SHOWN once.
+
+        CR-27, 2026-08-18. The startup offer used to be a single
+        `threading.Timer(3.0, prompt_licence_acceptance)`, and on the first
+        machine in the fleet to self-upgrade past the gate it never produced
+        a window: the out-of-tree clip popup takes `_popup_active_lock` about
+        three seconds earlier, every start, and that machine had 65 clips
+        outside the tree (then 102). The lost-race branch resets
+        `_licence_prompted` "so the next start still asks" -- but the next
+        start loses the same race, because the clips are still outside the
+        tree. Three lanes sat parked for hours behind a dialog nobody could
+        see.
+
+        This is the re-arm. It stops on `_licence_asked` (the document
+        reached a person -- accepting or declining is their call, and a modal
+        that comes back after a DECLINE is how an editor learns to dismiss it
+        unread) and on the gate clearing. `first_delay` is the original three
+        seconds: the tray icon thread has only just started, and this
+        dialog's failure path wants somewhere to put a notification.
+        """
+        if self._stop_event.wait(first_delay):
+            return
+        while True:
+            if not self.eula_problem():
+                return          # accepted here, or in the wizard, or fails open
+            if self._licence_asked:
+                return
+            self._show_licence_dialog()
+            if self._licence_asked or not self.eula_problem():
+                return
+            if self._stop_event.wait(interval):
+                return
+
     def _show_licence_dialog(self) -> None:
         """The dialog, under the popup lock like every other Tk root here."""
         document = eula_mod.bundled_text()
@@ -3472,10 +3560,24 @@ class CompanionApp:
             self._notify_tray(
                 "NOT SYNCING: this build is missing its licence document. "
                 "Tray → Copy diagnostics for your admin.", "ccsync-companion")
+            # Settled, for _licence_watch's purposes: retrying a packaging
+            # fault every minute produces the same ERROR forever and no
+            # window. The tray item still reaches this path on request.
+            self._licence_asked = True
             return
         if not self._popup_active_lock.acquire(blocking=False):
-            log.info("licence dialog: another CCSync window is open -- not "
-                     "stacking a second modal on it")
+            # NOT the end of the attempt any more (CR-27): _licence_asked
+            # stays False, so _licence_watch comes back in a minute and keeps
+            # coming back until this window is closed. The clip popup wins
+            # this race on every start of an affected machine, so "the next
+            # start still asks" was a promise the next start could not keep.
+            if not self._licence_defer_logged:
+                self._licence_defer_logged = True
+                log.info("licence dialog: another CCSync window is open -- not "
+                         "stacking a second modal on it; retrying every %.0fs "
+                         "until it can be shown", LICENCE_RETRY_SECONDS)
+            else:
+                log.debug("licence dialog: still behind another CCSync window")
             self._licence_prompted = False   # ...so the next start still asks
             return
         try:
@@ -3489,10 +3591,17 @@ class CompanionApp:
                 document,
             )
         except Exception:
+            # Left UNSETTLED on purpose: a Tk root that cannot be built at
+            # logon (no window station yet) is the one failure here that a
+            # retry a minute later genuinely fixes.
             log.exception("could not show the licence dialog")
             return
         finally:
             self._popup_active_lock.release()
+
+        # It has been read by somebody. Whatever they answered, the automatic
+        # offer is done (CR-27) -- the tray item is the way back from here.
+        self._licence_asked = True
 
         if not accepted:
             log.warning("licence agreement DECLINED (or dismissed) -- this "
@@ -4012,6 +4121,110 @@ class CompanionApp:
                 log.warning("halt: could not %s Syncthing folder %s",
                             "pause" if paused else "resume", folder_id, exc_info=True)
         return written
+
+    def _on_upgrade_available(self, info: dict[str, Any]) -> None:
+        """A new offer arrived. Tell the editor, and -- where the site has
+        turned unattended updates on -- take it without waiting for a click.
+
+        The toast wording comes from offer_toast, not a hardcoded "Update
+        available": the dashboard advertises whatever it publishes as
+        `current`, which may be OLDER than what this machine runs
+        (upgrade.py's "different, not newer"). Calling a downgrade an update
+        is how a rollback offer became a one-click loss of everything the
+        running build fixed (seen live 2026-07-25: v0.4.5 offered
+        "Update ... -> v0.4.3").
+
+        AUTO-APPLY (2026-08-18) is the same distinction, with teeth: a site
+        that turned `auto_update` on is saying "take new builds", not "take
+        whatever the dashboard says", so a rollback is still offered and
+        never taken silently. An admin pushing one deliberately has its own
+        path (_apply_pushed_update), which is explicit about being a
+        rollback. site.feature_enabled fails CLOSED: no manifest, an older
+        dashboard, an unreadable cache all mean "wait for the click"."""
+        try:
+            self._notify_tray(
+                upgrade_mod.offer_toast(info["version"]), "ccsync-companion")
+        except Exception:
+            log.exception("could not notify about the available build")
+        try:
+            if not site_mod.feature_enabled("auto_update"):
+                return
+            rank = upgrade_mod.compare_to_running(info.get("version"))
+            if rank != upgrade_mod.VERSION_NEWER:
+                log.info(
+                    "auto-update: v%s is not newer than v%s -- leaving it to the "
+                    "tray. Rolling a fleet BACKWARDS is an admin decision, not "
+                    "something that happens because a flag is on",
+                    info.get("version"), config_mod.VERSION,
+                )
+                return
+            log.info("auto-update: applying v%s (this site has unattended "
+                     "updates on)", info.get("version"))
+            threading.Thread(
+                target=self.apply_upgrade, name="ccsync-auto-upgrade", daemon=True,
+            ).start()
+        except Exception:
+            log.exception("auto-update check failed -- leaving the offer to the tray")
+
+    def _apply_pushed_update(self, resp: Any) -> None:
+        """Apply the build an admin asked this machine to take.
+
+        2026-08-18. Until now the ONLY thing that could install a published
+        build was the editor clicking "Update now" in their own tray, so a
+        fleet-wide fix landed whenever each owner happened to notice a
+        balloon -- ruskin's PC sat two versions behind for a day while its
+        lanes were parked, and nobody could do anything about it from here.
+
+        WHAT THIS DOES NOT DO. It does not fetch anything the tray click
+        would not have fetched: the bytes come from `self.upgrade.available`,
+        the offer this dashboard advertised in THIS reply, already checked
+        against the release public keys baked into the running build and
+        against this machine's downgrade floor (upgrade._accept_offer). The
+        command carries a version and nothing else, and a version that does
+        not match the offer in hand is refused. It also cannot interrupt
+        work: apply_upgrade's stand-down test (an open window, a consolidate
+        in flight) applies exactly as it does for the click.
+
+        Never raises: this runs on the reporter thread."""
+        try:
+            command = None
+            if isinstance(resp, dict):
+                commands = resp.get("commands")
+                if isinstance(commands, dict):
+                    command = commands.get("upgrade")
+            if not isinstance(command, dict) or not command.get("apply"):
+                return
+            wanted = str(command.get("version") or "").strip()
+            if not wanted or wanted == config_mod.VERSION:
+                return
+            offer = self.upgrade.available
+            if offer is None or str(offer.get("version") or "") != wanted:
+                # The dashboard asked for a build it is not currently
+                # offering us (a rollback published between two ticks, a
+                # platform mismatch, an offer this machine's floor refused).
+                # Say so once per version rather than every 30 seconds.
+                if self._pushed_update_refused != wanted:
+                    self._pushed_update_refused = wanted
+                    log.warning(
+                        "pushed update to v%s IGNORED: this machine is not being "
+                        "offered that build (holding %s)", wanted,
+                        (offer or {}).get("version") or "nothing",
+                    )
+                return
+            if self._pushed_update_applying == wanted:
+                return          # already on it; the swap takes a few seconds
+            self._pushed_update_applying = wanted
+            log.info("applying pushed update to v%s (requested by %s)",
+                     wanted, command.get("requested_by") or "an admin")
+            self._notify_tray(
+                f"Your administrator is updating CCSync to v{wanted}.",
+                "ccsync-companion",
+            )
+            threading.Thread(
+                target=self.apply_upgrade, name="ccsync-pushed-upgrade", daemon=True,
+            ).start()
+        except Exception:
+            log.exception("could not apply the pushed update")
 
     def _apply_fleet_halt(self, resp: Any) -> None:
         """Adopt the dashboard's fleet halt flag from a report reply.
@@ -5687,9 +5900,14 @@ class CompanionApp:
                     # the same reason the update toast below is: the tray icon
                     # thread has only just started, and this dialog's failure
                     # path wants somewhere to put a notification.
-                    timer = threading.Timer(3.0, self.prompt_licence_acceptance)
-                    timer.daemon = True
-                    timer.start()
+                    #
+                    # A THREAD, not a one-shot Timer, since CR-27: the first
+                    # attempt loses the popup lock on any machine with clips
+                    # outside the tree, and losing it must not end the offer.
+                    threading.Thread(
+                        target=self._licence_watch, name="ccsync-licence-watch",
+                        daemon=True,
+                    ).start()
 
             if just_upgraded:
                 log.info("self-upgrade to v%s completed", config_mod.VERSION)

@@ -86,6 +86,51 @@ def test_tick_shares_unshared_folder(conn, fake, collector):
     assert devices == {SERVER_ID, EDITOR_ID}
 
 
+# -- per-machine plans (MULTI_MACHINE_PLAN.md WP3, 2026-08-18) --------------
+
+
+def test_a_dashboard_ahead_of_its_fleet_shares_exactly_what_it_did_before(
+        conn, fake, collector):
+    """THE DEPLOY-ORDER PROPERTY. v24 moves the plan onto computers, but no
+    companion has reported a Syncthing device id yet, so no device can be
+    resolved to a machine. Every share must come out exactly as the
+    person-level cycle produced it -- otherwise upgrading the dashboard
+    unshares a working fleet, which is the B16 shape."""
+    collector.run_cycle(conn, ["config", "enforce"])          # seeds jsmith
+    assert folder_devices(fake) == {SERVER_ID, EDITOR_ID, EDITOR2_ID}
+
+    dbmod.upsert_machine(conn, "jsmith", "JS-DESKTOP", dbmod.utcnow_iso())
+    conn.commit()
+    collector.run_cycle(conn, ["enforce"])
+
+    assert folder_devices(fake) == {SERVER_ID, EDITOR_ID, EDITOR2_ID}
+
+
+def test_once_a_machine_owns_the_device_the_share_follows_its_own_plan(
+        conn, fake, collector):
+    """...and once the companion HAS reported which device it is, a tick for
+    the other computer stops reaching this one."""
+    collector.run_cycle(conn, ["config", "enforce"])
+    now = dbmod.utcnow_iso()
+    dbmod.upsert_machine(conn, "jsmith", "JS-DESKTOP", now, syncthing_device_id=EDITOR_ID)
+    dbmod.upsert_machine(conn, "jsmith", "JS-LAPTOP", now, syncthing_device_id="LAPTOPX-LAPTOPX")
+    # The seeded row is the unassigned bucket; give the LAPTOP a plan of its
+    # own and the desktop keeps the bucket.
+    dbmod.add_selection(conn, "jsmith", "2026-ff5-elections", "admin", now, machine="JS-LAPTOP")
+    conn.commit()
+    collector.run_cycle(conn, ["enforce"])
+    assert EDITOR_ID in folder_devices(fake)
+
+    # Now the desktop gets an explicit plan that does NOT include this folder.
+    dbmod.add_selection(conn, "jsmith", "2026-ff5-elections", "admin", now, machine="JS-DESKTOP")
+    conn.commit()
+    collector.run_cycle(conn, ["enforce"])
+
+    assert EDITOR_ID not in folder_devices(fake)
+    assert SERVER_ID in folder_devices(fake)          # the server is never dropped
+    assert EDITOR2_ID in folder_devices(fake)         # unmapped devices untouched (B16)
+
+
 def test_enforce_noop_makes_no_puts(conn, fake, collector):
     collector.run_cycle(conn, ["config", "enforce"])
     fake.state.pop("put_folder_calls", None)

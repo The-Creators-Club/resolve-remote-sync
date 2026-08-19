@@ -214,7 +214,8 @@ def test_features_block_shape(conn):
     # manifest still carries exactly the two.
     assert manifest["features"] == {"youtube_download": True,
                                     "youtube_unblock": False,
-                                    "ai_cli_providers": False}
+                                    "ai_cli_providers": False,
+                                    "auto_update": False}
 
 
 # ------------------------------------------------------------------- seed

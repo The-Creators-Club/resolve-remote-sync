@@ -149,8 +149,25 @@ def creator_shares(cfg) -> set[str]:
     return {n for n, s in cfg.shares.items() if s.source == "proxies"}
 
 
-def dest_dir(video: dict, creators: set[str]) -> str:
-    """The clip's folder in the archive, without a filename or Proxy/ level."""
+def archive_folders(cfg) -> dict[str, str]:
+    """share -> the folder name it takes under Creators_Club/.
+
+    Only the shares that asked for a different one (`archive_name`); every
+    other share falls back to its own key, which is what dest_dir does with a
+    missing entry.
+    """
+    return {n: s.archive_name for n, s in cfg.shares.items() if s.archive_name}
+
+
+def dest_dir(video: dict, creators: set[str],
+             folders: dict[str, str] | None = None) -> str:
+    """The clip's folder in the archive, without a filename or Proxy/ level.
+
+    `folders` renames the top level for a share whose key is not the name an
+    editor should read on the NAS (config's `archive_name`). It is the folder
+    ONLY -- the row is still stored under the share key -- and it is optional
+    at every call site so a caller without a config still routes correctly.
+    """
     if video["share"] in creators:
         # Own shoots keep the structure they were captured in (day / camera).
         # The source's own Proxy/ component is dropped: in the archive that
@@ -158,12 +175,14 @@ def dest_dir(video: dict, creators: set[str]) -> str:
         parts = [p for p in PurePosixPath(video["rel_path"]).parent.parts
                  if p.lower() != "proxy"]
         sub = "/".join(safe_name(p) for p in parts)
-        return f"{CREATORS}/{safe_name(video['share'])}/{sub}".replace("//", "/").rstrip("/")
+        top = (folders or {}).get(video["share"]) or video["share"]
+        return f"{CREATORS}/{safe_name(top)}/{sub}".replace("//", "/").rstrip("/")
     return f"{DOWNLOADS}/{video['category'] or UNCATEGORISED_DIR}"
 
 
 def dest_rel(video: dict, creators: set[str], suffix: str = ".mp4", *,
-             as_preview: bool = True, stem: str | None = None) -> str:
+             as_preview: bool = True, stem: str | None = None,
+             folders: dict[str, str] | None = None) -> str:
     """Where this clip belongs in the archive, as a forward-slash relative path.
 
     ONE rule for both collections: the best available media sits in the folder,
@@ -190,7 +209,7 @@ def dest_rel(video: dict, creators: set[str], suffix: str = ".mp4", *,
     preview beneath it always share a name and neither moves between runs.
     """
     stem = stem or safe_name(PurePosixPath(video["rel_path"]).stem)
-    folder = dest_dir(video, creators)
+    folder = dest_dir(video, creators, folders)
     return (f"{folder}/{PROXY_DIR}/{stem}{suffix}" if as_preview
             else f"{folder}/{stem}{suffix}")
 
@@ -454,6 +473,7 @@ def main() -> int:
     dest_root = Path(args.dest)
     proxies = cfg.data_root / "proxies"
     creators = creator_shares(cfg)
+    folders = archive_folders(cfg)
 
     videos = eligible(cfg.db.path, creators)
     if args.limit:
@@ -470,7 +490,7 @@ def main() -> int:
     no_still = {kind: 0 for kind in STILL_DIRS}
     for v in videos:
         # One name per clip, used by both slots below, so they can never diverge.
-        name = claim_name(dest_dir(v, creators),
+        name = claim_name(dest_dir(v, creators, folders),
                           safe_name(PurePosixPath(v["rel_path"]).stem),
                           taken, published=published.get(v["id"]))
 
@@ -481,7 +501,8 @@ def main() -> int:
         top = archive_source(v, cfg, share_roots, proxies)
         if top is not None:
             plan.append((v, top, dest_root / dest_rel(
-                v, creators, top.suffix.lower(), as_preview=False, stem=name)))
+                v, creators, top.suffix.lower(), as_preview=False, stem=name,
+                folders=folders)))
         else:
             missing.append(v)
 
@@ -491,7 +512,8 @@ def main() -> int:
         preview = preview_source(v, top, proxies)
         if preview is not None:
             plan.append((v, preview, dest_root / dest_rel(
-                v, creators, preview.suffix.lower(), as_preview=True, stem=name)))
+                v, creators, preview.suffix.lower(), as_preview=True, stem=name,
+                folders=folders)))
 
         # The STILLS: poster and sprite, by id, in flat top-level folders. Not
         # run through dedupe() -- `{video_id}.jpg` cannot collide, and passing

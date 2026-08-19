@@ -284,6 +284,21 @@ class Settings:
     # path and need no flag at all.
     site_feature_ai_cli_providers: bool = False
 
+    # UNATTENDED UPDATES (2026-08-18). Off by default and per site, because
+    # it changes who decides when an editing machine restarts its companion.
+    # ON: a companion applies any build this dashboard offers as soon as
+    # swapping the exe would not kill work in progress -- no balloon, no
+    # click. OFF (the shipped default): the tray offer is the only automatic
+    # path, and an admin can still push one machine at a time from the
+    # packages page.
+    #
+    # It is defensible only because the offer is signed: every package record
+    # carries an Ed25519 signature made by the offline release key, verified
+    # against the public halves baked into the build already running
+    # (COMMERCIAL_READINESS.md item 4). Without that, this flag would be
+    # "whoever controls the dashboard controls every editor's machine".
+    site_feature_auto_update: bool = False
+
     # Published companion builds (the upgrade channel). Empty = default to a
     # "packages" dir next to the SQLite file, which in production lands under
     # /data -- the only volume that survives a redeploy -- with no compose
@@ -572,6 +587,7 @@ class Settings:
             site_feature_youtube_download=env.get("DASH_SITE_YOUTUBE_DOWNLOAD", "") == "1",
             site_feature_youtube_unblock=env.get("DASH_SITE_YOUTUBE_UNBLOCK", "") == "1",
             site_feature_ai_cli_providers=env.get("DASH_SITE_AI_CLI_PROVIDERS", "") == "1",
+            site_feature_auto_update=env.get("DASH_SITE_AUTO_UPDATE", "") == "1",
             broll_enabled=env.get("DASH_BROLL_ENABLED", "") == "1",
             broll_ingest_token=env.get("BROLL_INGEST_TOKEN", "").strip(),
             packages_dir=env.get("DASH_PACKAGES_DIR", ""),

@@ -14,13 +14,16 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from build_archive import creator_shares, dest_dir, dest_rel  # noqa: E402
+from build_archive import (  # noqa: E402
+    archive_folders, creator_shares, dest_dir, dest_rel,
+)
 
 
 class _Share:
-    def __init__(self, source="originals", index=True):
+    def __init__(self, source="originals", index=True, archive_name=""):
         self.source = source
         self.index = index
+        self.archive_name = archive_name
 
 
 class _Cfg:
@@ -89,3 +92,30 @@ def test_every_share_lands_in_exactly_one_collection(source):
     video = {"share": "s", "rel_path": "a/b.mov", "category": "x/y"}
     folder = dest_dir(video, creator_shares(cfg))
     assert folder.startswith("Creators_Club/") ^ folder.startswith("Downloads/")
+
+
+def test_archive_name_renames_the_folder_but_not_the_share():
+    """`disinfo` on disk, "Disinformation" on the NAS (owner's call, 2026-08-19).
+
+    The two must stay separable: the key is what every videos row is stored
+    under, so a rename that reached it would orphan the lot. Only the top level
+    of the archive path moves, and the shoot's own subfolders are untouched --
+    they are how an editor looks for the clip.
+    """
+    cfg = _Cfg({
+        "disinfo": _Share(source="proxies", archive_name="Disinformation"),
+        "ff2": _Share(source="proxies"),
+    })
+    folders = archive_folders(cfg)
+    assert folders == {"disinfo": "Disinformation"}
+
+    video = {"share": "disinfo", "rel_path": "Footage/Bento/Proxy/A001.mov",
+             "category": None}
+    creators = creator_shares(cfg)
+    assert dest_dir(video, creators, folders) == "Creators_Club/Disinformation/Footage/Bento"
+    assert dest_rel(video, creators, ".mov", as_preview=False, folders=folders) ==         "Creators_Club/Disinformation/Footage/Bento/A001.mov"
+
+    # A share without one keeps its key, and so does a caller with no config.
+    plain = {"share": "ff2", "rel_path": "E1/Day 1/Proxy/B002.mov", "category": None}
+    assert dest_dir(plain, creators, folders) == "Creators_Club/ff2/E1/Day 1"
+    assert dest_dir(video, creators) == "Creators_Club/disinfo/Footage/Bento"

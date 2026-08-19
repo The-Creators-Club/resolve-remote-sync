@@ -165,6 +165,30 @@ projects you tick on the dashboard, so approval plus a tick is all it takes.
 Until the admin has approved this device, nothing syncs on lane C
 (audio/GFX/AE/subs/docs).
 
+### 3.1 A second computer for the same person (2026-08-18)
+
+Use the SAME account. Run this guide again on the new machine, send the admin
+its Syncthing device ID, and it appears as a second computer under your name
+everywhere on the dashboard -- with **its own list of ticked projects**, so a
+laptop can carry one project while the desktop carries five
+(`docs/MULTI_MACHINE_PLAN.md`).
+
+Two things follow from that:
+
+- **A new computer starts with NOTHING ticked**, deliberately: nobody wants a
+  laptop to start pulling 50 GB because a desktop had it. The admin can give
+  it another of your machines' lists in one click (Settings -> Assignments,
+  the `copy from…` box in that computer's column), or you tick what you want
+  on it.
+- **The sidebar checkboxes are the PERSON**: ticking there means "every
+  computer I use". Per-computer lists live on the assignments grid. Unticking
+  anywhere removes it everywhere, which is the safe direction -- "stop
+  syncing this" must not leave it running on your other machine.
+
+You do NOT need a second account (`yourname_laptop`). That was the old
+workaround, it still works, and it is why the fleet page used to count
+machines as people.
+
 ## 3.5 About `~/.ccsync/config.toml`
 
 The bootstrap script fills in everything needed for syncing: `editor_name`,

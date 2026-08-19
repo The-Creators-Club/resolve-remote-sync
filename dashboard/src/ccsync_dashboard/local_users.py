@@ -246,6 +246,65 @@ def disable_user(conn: sqlite3.Connection, username: str, disabled: bool = True)
                 (1 if disabled else 0, username))
 
 
+
+def count_enabled_admins(conn: sqlite3.Connection) -> int:
+    """How many local accounts could still sign in and administer. Note what
+    it does NOT count: DASH_ADMIN_USERS names an admin additively (see
+    warn_missing_admin_users) and is the break-glass path, but it is settings,
+    not a row, and this module never reads settings -- so the delete guard
+    below is deliberately the conservative one."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0"
+    ).fetchone()
+    return int(row[0])
+
+
+def delete_user(conn: sqlite3.Connection, username: str, *,
+                requested_by: str = "") -> dict[str, Any]:
+    """Delete a local account and the SSH keys that authenticate it.
+
+    Two refusals, both LocalUserError, because both are an admin locking
+    themselves or the fleet out of the appliance rather than a typo:
+
+      * deleting the account you are signed in as -- the session survives the
+        row (a cookie is a bearer token, sessions.py), so this would quietly
+        leave one browser holding admin over an appliance that no longer has
+        an account to sign back into;
+      * deleting the last ENABLED admin. DASH_ADMIN_USERS is still a way back
+        in, but it needs a redeploy on the appliance shape, so refusing here
+        is the difference between a mistake and a site visit.
+
+    Deliberately NOT touched: known_editors, selections, editor_prefs,
+    machine_state and transfer history. Those record what the FLEET did -- an
+    editor's machine may still be syncing while their login is being taken
+    away, and erasing the grid row would make that machine an unmapped
+    stranger (B16) instead of a known editor. Credentials that can still ACT
+    as this account (browser sessions, per-editor report tokens) are the
+    caller's job: they live outside this connection's transaction. See
+    api._purge_user_credentials, the one implementation both routes call.
+    """
+    username = (username or "").strip().lower()
+    if get_user(conn, username) is None:
+        raise LocalUserError(f"{username!r} is not a local account")
+    if username == (requested_by or "").strip().lower():
+        raise LocalUserError(
+            "you cannot delete the account you are signed in as - sign in as another "
+            "admin to remove this one"
+        )
+    user = get_user(conn, username)
+    if user["role"] == "admin" and not user["disabled"] and count_enabled_admins(conn) <= 1:
+        raise LocalUserError(
+            "this is the last enabled admin account - create another admin before "
+            "deleting it"
+        )
+    keys = len(keys_for(conn, username))
+    conn.execute("DELETE FROM user_ssh_keys WHERE username = ?", (username,))
+    conn.execute("DELETE FROM users WHERE username = ?", (username,))
+    log.warning("local user %r deleted by %r (%d ssh key(s) removed)",
+                username, requested_by or "?", keys)
+    return {"username": username, "role": user["role"], "ssh_keys_removed": keys}
+
+
 def add_ssh_key(conn: sqlite3.Connection, username: str, key_text: str, *,
                 label: str = "", now: str | None = None) -> dict[str, Any]:
     """The key the sftp sidecar's AuthorizedKeysCommand will hand back for

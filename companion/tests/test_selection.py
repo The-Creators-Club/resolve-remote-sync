@@ -62,7 +62,7 @@ def test_fetch_url_uses_lowercased_editor_name(tmp_path):
 
     client = SelectionClient(_cfg(editor_name="Owen"), tmp_path, http_get=fake_get)
     client.fetch()
-    assert calls[0] == "http://dash.example.com/api/v1/selection/owen"
+    assert calls[0].startswith("http://dash.example.com/api/v1/selection/owen?machine=")
 
 
 def test_fetch_url_quotes_editor_name_with_space(tmp_path):
@@ -77,7 +77,8 @@ def test_fetch_url_quotes_editor_name_with_space(tmp_path):
 
     client = SelectionClient(_cfg(editor_name="owen chen"), tmp_path, http_get=fake_get)
     client.fetch()
-    assert calls[0] == "http://dash.example.com/api/v1/selection/owen%20chen"
+    assert calls[0].startswith(
+        "http://dash.example.com/api/v1/selection/owen%20chen?machine=")
 
 
 def test_fetch_uses_editor_name_fn_when_provided(tmp_path):
@@ -98,8 +99,10 @@ def test_fetch_uses_editor_name_fn_when_provided(tmp_path):
     )
     client.fetch()
     client.fetch()
-    assert calls[0].endswith("/selection/owen")
-    assert calls[1].endswith("/selection/jamie")
+    # ...and each names THIS computer, so a person with two machines gets
+    # the plan for the one asking (WP6).
+    assert "/selection/owen?machine=" in calls[0]
+    assert "/selection/jamie?machine=" in calls[1]
 
 
 def test_fetch_skips_request_when_editor_name_fn_returns_blank(tmp_path):

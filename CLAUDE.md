@@ -118,6 +118,35 @@ run alongside the tray app — it would hold port 8899.
   port. The ledger is `client_shares.db` beside `broll.db`, NOT tables in it:
   `publish_db.py` replaces `broll.db` and must never be able to take a
   customer's client links with it.
+- **A sync plan belongs to a COMPUTER, not to a person** (2026-08-18,
+  `docs/MULTI_MACHINE_PLAN.md`): `selections` is keyed
+  `(editor_username, machine, project_slug)` -- the same `(editor, machine)`
+  key `machine_state`, `editor_media_project` and the lane reports already
+  use -- so one person can own two editing machines with two plans. The
+  registry is `machines` (v23): hostname as the key, plus the
+  companion-minted `machine_id` (`~/.ccsync/machine.json`, survives a rename)
+  and that machine's Syncthing device id, which is what lets the enforce
+  cycle share a folder with ONE of an editor's computers. `machine = ''` is
+  the unassigned bucket, resolved in `db.selections_for_machine`, and a
+  machine with a plan is never also handed it. A request with no `?machine=`
+  is the PERSON: the union to read, every computer to tick, everywhere to
+  untick (under-sharing is the safe direction for a removal). **Deploy the
+  dashboard before the companions** -- a per-machine table read by a
+  person-level enforce cycle is the B16 unshare-the-fleet shape.
+- **A base rig can hold no tick** (CR-28): `machine_state.mode` (v22) records
+  the role on the machine's own row, `db.base_only_editors` is the one
+  predicate every queue source shares, and the tick itself 409s. It syncs
+  nothing, so a tick could never clear -- which is how the base rig sat in
+  [ QUEUED ] under a permanent GETTING READY chip.
+- **An update can reach a machine without its editor clicking** (2026-08-18,
+  `MULTI_MACHINE_PLAN.md` §9): Settings -> Packages has [ UPDATE NOW ] per
+  out-of-date machine (`commands.upgrade` on that machine's next report, the
+  channel the fleet halt already uses), and `site.toml [features]
+  auto_update` (off in the vendor build) lets a companion take any NEWER
+  build unattended. Neither installs anything the tray click could not: the
+  command names a VERSION and the bytes come from the signed offer already in
+  hand, `apply_upgrade`'s stand-down test still refuses mid-popup/consolidate,
+  and auto-update never rolls a machine backwards.
 - The 8899 loopback is origin-allow-listed (`loopback_guard.py`,
   2026-08-17): only the configured dashboard origin gets CORS headers, and a
   POST needs that origin or the `~/.ccsync/loopback-token` header. If

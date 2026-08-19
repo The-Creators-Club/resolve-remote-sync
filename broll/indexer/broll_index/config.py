@@ -86,6 +86,20 @@ class ShareConfig:
     # produce cues that are noise in the search index -- actively worse than
     # nothing, because a query can match a grip saying "is it rolling".
     transcribe: bool = True
+    # The folder this share's clips get on the NAS, when that should read
+    # differently from the share key. Empty = use the key.
+    #
+    # The two are not the same thing and must not be conflated: the key is what
+    # every `videos` row is stored under, so renaming it would orphan the lot.
+    # This is only the name an editor reads in `Creators_Club/` and in the
+    # folder browser, where "disinfo" and "wct" mean nothing to anyone who was
+    # not on the shoot (owner's call, 2026-08-19).
+    #
+    # Changing it after a build MOVES nothing: build_archive never deletes at
+    # the destination, so the old folder stays put and the next run copies
+    # everything again under the new name. Set it before the first copy of a
+    # share, or plan the move by hand.
+    archive_name: str = ""
 
 
 @dataclass
@@ -333,6 +347,7 @@ def _build_shares(raw: dict[str, Any]) -> dict[str, ShareConfig]:
             exclude=[str(p).strip("/") for p in exclude],
             index=bool(entry.get("index", True)),
             transcribe=bool(entry.get("transcribe", True)),
+            archive_name=str(entry.get("archive_name") or "").strip().strip("/"),
         )
     return shares
 

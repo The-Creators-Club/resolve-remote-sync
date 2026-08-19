@@ -239,6 +239,14 @@ services:
       # was ours; the flag only decides whether we will run one already
       # there, on the customer's own subscription and their own say-so.
       DASH_SITE_AI_CLI_PROVIDERS: "0"
+      # Unattended updates (2026-08-18, docs/MULTI_MACHINE_PLAN.md §9). "0"
+      # is the vendor build: companions offer a new build in their tray and
+      # an admin can push one machine at a time from Settings, Packages. "1"
+      # lets a companion apply a NEWER build with nobody clicking -- safe
+      # only because every package record is signature-verified by the build
+      # already running, and the swap still refuses while a CCSync window is
+      # open or media is being copied in.
+      DASH_SITE_AUTO_UPDATE: "0"
       # Published companion builds (upgrade channel). Optional: defaults to
       # a "packages" dir next to DASH_DB_PATH, i.e. /data/packages -- which
       # is already persistent. Only set this to move them elsewhere.

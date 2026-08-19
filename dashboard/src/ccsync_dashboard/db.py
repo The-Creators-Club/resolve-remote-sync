@@ -620,6 +620,155 @@ def connect(path: str | Path) -> sqlite3.Connection:
 # `docker restart` mid-migration is routine) resumes on the next start
 # instead of re-running an already-applied `ALTER TABLE ... ADD COLUMN` and
 # crash-looping on `duplicate column name`. See the db.py migration finding.
+# v22: the machine's ROLE, on the machine's own row (KNOWN_BUGS CR-28,
+# 2026-08-18). `mode` ("base" | "editor") has ridden every report since 0.4.x
+# and was only ever persisted onto `editor_media_project` -- one row per
+# project, written only when a media manifest arrives. So the fleet's answer
+# to "does this computer sync at all?" lived in a per-project table, and the
+# two queue sources that did not join it showed the BASE RIG sitting in
+# [ QUEUED ] with a [ GETTING READY ] chip, permanently: it never syncs, so it
+# never gets a completion row, so "ticked and no completion yet" stays true
+# forever. `editor_media_project.mode` stays exactly as it is
+# (fetch_sync_backlog reads it) and both are written from the same report.
+SCHEMA_V22 = """
+ALTER TABLE machine_state ADD COLUMN mode TEXT;
+"""
+
+# v23: the MACHINE REGISTRY (docs/MULTI_MACHINE_PLAN.md WP1, 2026-08-18).
+# One row per computer, which is the thing the fleet actually syncs to. Until
+# now a machine existed only as a string on other tables' keys, learned from
+# whatever `platform.node()` returned on the last report.
+#
+# Keyed `(editor_username, machine)` -- the SAME key machine_state,
+# editor_media, editor_media_project, lane_report_current, active_transfers
+# and media_tree_clips already use. A synthetic id as the primary key was the
+# first design (see the plan's §3.1) and was dropped for exactly this reason:
+# it would have made the plan the ONE thing that could not be joined to its
+# siblings without a lookup, in queries that are already the widest in here.
+#
+# `machine_id` is therefore an ATTRIBUTE, not the key: a UUID the companion
+# mints once into ~/.ccsync/machine.json and reports thereafter. It survives
+# a hostname change and a Syncthing key regeneration, which is what makes
+# "this is the same computer under a new name / a new device ID" answerable
+# at all -- the 2026-07-27 stuck-lane-C incident took a day to diagnose for
+# want of it. `syncthing_device_id` is the companion's own myID, which is what
+# lets the enforce cycle share a folder with THAT machine rather than with
+# every device carrying its owner's name.
+#
+# Backfilled from machine_state, so the fleet has its registry the moment
+# this runs, without waiting for anyone to upgrade.
+SCHEMA_V23 = """
+CREATE TABLE IF NOT EXISTS machines (
+  editor_username     TEXT NOT NULL,
+  machine             TEXT NOT NULL,        -- hostname as reported; a LABEL
+  machine_id          TEXT,                 -- companion-minted, stable across renames
+  platform            TEXT,
+  syncthing_device_id TEXT,
+  first_seen          TEXT NOT NULL,
+  last_seen           TEXT NOT NULL,
+  PRIMARY KEY (editor_username, machine)
+);
+CREATE INDEX IF NOT EXISTS machines_by_machine_id ON machines(machine_id);
+CREATE INDEX IF NOT EXISTS machines_by_device ON machines(syncthing_device_id);
+INSERT OR IGNORE INTO machines
+    (editor_username, machine, platform, first_seen, last_seen)
+  SELECT editor_username, machine, platform, reported_at, reported_at
+    FROM machine_state;
+"""
+
+# v24: the sync plan belongs to a COMPUTER, not to a person (WP2 + WP7).
+# `selections` was keyed (editor_username, project_slug) while every consumer
+# of it -- the lane A/B backlog, the lane C shares, the companion's own queue
+# -- is per machine, so one person's two computers could not hold two
+# different sets of projects. The fleet's answer until today was a SECOND
+# ACCOUNT per machine (`alex` and `alex_laptop` are one human), which counts
+# machines as people everywhere else in the product.
+#
+# The migration FANS OUT: one row per (existing tick x that editor's known
+# machines), which leaves a fleet of one-machine editors byte-identical to
+# what it had. A tick belonging to an editor with no machine on record keeps
+# `machine = ''`.
+#
+# `machine = ''` is the UNASSIGNED bucket and the only inheritance in here: it
+# applies to every machine of that editor that has no rows of its own. It
+# exists for three real cases -- an editor who ticked before their companion
+# ever reported, a companion too old to say which machine is asking, and the
+# collector's one-shot seed from pre-existing Syncthing shares -- and a normal
+# fleet has none of them after this migration. Resolution is spelled once, in
+# selections_for_machine().
+#
+# editor_prefs follows the same reasoning (WP7): project_root_override is a
+# property of a machine's Resolve setup, not of the person sitting at it.
+SCHEMA_V24 = """
+CREATE TABLE selections_v24 (
+  editor_username TEXT NOT NULL,
+  machine         TEXT NOT NULL DEFAULT '',   -- '' = unassigned (see above)
+  project_slug    TEXT NOT NULL,
+  position        INTEGER NOT NULL,
+  created_at      TEXT NOT NULL,
+  created_by      TEXT NOT NULL,
+  PRIMARY KEY (editor_username, machine, project_slug)
+);
+INSERT OR IGNORE INTO selections_v24
+    (editor_username, machine, project_slug, position, created_at, created_by)
+  SELECT s.editor_username, m.machine, s.project_slug, s.position,
+         s.created_at, s.created_by
+    FROM selections s JOIN machines m ON m.editor_username = s.editor_username;
+INSERT OR IGNORE INTO selections_v24
+    (editor_username, machine, project_slug, position, created_at, created_by)
+  SELECT s.editor_username, '', s.project_slug, s.position,
+         s.created_at, s.created_by
+    FROM selections s
+   WHERE NOT EXISTS (SELECT 1 FROM machines m
+                      WHERE m.editor_username = s.editor_username);
+DROP TABLE selections;
+ALTER TABLE selections_v24 RENAME TO selections;
+CREATE INDEX IF NOT EXISTS selections_by_slug ON selections(project_slug);
+
+CREATE TABLE editor_prefs_v24 (
+  editor_username       TEXT NOT NULL,
+  machine               TEXT NOT NULL DEFAULT '',
+  project_root_override TEXT,
+  updated_at            TEXT NOT NULL,
+  updated_by            TEXT NOT NULL,
+  PRIMARY KEY (editor_username, machine)
+);
+INSERT OR IGNORE INTO editor_prefs_v24
+    (editor_username, machine, project_root_override, updated_at, updated_by)
+  SELECT p.editor_username, m.machine, p.project_root_override,
+         p.updated_at, p.updated_by
+    FROM editor_prefs p JOIN machines m ON m.editor_username = p.editor_username;
+INSERT OR IGNORE INTO editor_prefs_v24
+    (editor_username, machine, project_root_override, updated_at, updated_by)
+  SELECT p.editor_username, '', p.project_root_override, p.updated_at, p.updated_by
+    FROM editor_prefs p
+   WHERE NOT EXISTS (SELECT 1 FROM machines m
+                      WHERE m.editor_username = p.editor_username);
+DROP TABLE editor_prefs;
+ALTER TABLE editor_prefs_v24 RENAME TO editor_prefs;
+"""
+
+# v25: PUSHED UPDATES (docs/MULTI_MACHINE_PLAN.md §OTA, 2026-08-18). Until
+# now the only thing that could apply a published build was an editor
+# clicking "Update now" in their own tray -- so a fleet-wide fix landed
+# whenever each machine's owner happened to notice a balloon, and ruskin's
+# PC sat two versions behind for a day while its lanes were parked.
+#
+# An admin asking for one machine to update is recorded HERE and delivered on
+# that machine's next report, in the `commands` block the fleet halt already
+# rides (api.py). No push infrastructure, no inbound connection to an editor's
+# PC, and nothing new to authenticate.
+#
+# The request names a VERSION. A companion applies it only if the offer it is
+# already holding -- signature-verified on arrival, floor-checked, from this
+# dashboard -- is that version, so a pushed update can never install anything
+# the editor's own tray click could not have.
+SCHEMA_V25 = """
+ALTER TABLE machines ADD COLUMN update_requested_version TEXT;
+ALTER TABLE machines ADD COLUMN update_requested_at TEXT;
+ALTER TABLE machines ADD COLUMN update_requested_by TEXT;
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -645,6 +794,10 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (19, SCHEMA_V19),
     (20, SCHEMA_V20),
     (21, SCHEMA_V21),
+    (22, SCHEMA_V22),
+    (23, SCHEMA_V23),
+    (24, SCHEMA_V24),
+    (25, SCHEMA_V25),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -976,6 +1129,42 @@ def count_shared_token_machines(conn: sqlite3.Connection) -> dict[str, Any]:
             result["machines"].append(f"{row['editor_username']}/{row['machine']}")
     result["machines"].sort()
     return result
+
+
+def machine_modes(conn: sqlite3.Connection) -> dict[tuple[str, str], str]:
+    """(editor, machine) -> "base" | "editor", for every machine that has
+    ever reported (CR-28, 2026-08-18).
+
+    `machine_state.mode` (v22) is the answer; `editor_media_project.mode` is
+    the fallback for a machine that reported manifests before v22 and has not
+    reported since. A machine with neither is absent from this map, and every
+    caller treats absent as "editor" -- an unknown machine must not be
+    silently excluded from the queue, which is the direction that hides real
+    work."""
+    modes: dict[tuple[str, str], str] = {}
+    for sql in (
+        "SELECT DISTINCT editor_username, machine, mode FROM editor_media_project",
+        "SELECT editor_username, machine, mode FROM machine_state",
+    ):
+        for row in conn.execute(sql):
+            mode = str(row["mode"] or "").strip().lower()
+            if mode:
+                modes[(row["editor_username"], row["machine"])] = mode
+    return modes
+
+
+def base_only_editors(conn: sqlite3.Connection) -> set[str]:
+    """Usernames whose every known machine is a base rig.
+
+    The base rig works directly off the NAS tree: it syncs nothing, so it can
+    never make progress against a tick, and a tick on its account is what put
+    `alex · 2026/FF5/Animals [ GETTING READY ]` on the fleet page permanently
+    (CR-28). An account with NO machines at all is not base-only -- it is
+    unknown, and unknown must not be treated as "cannot sync"."""
+    by_editor: dict[str, set[str]] = {}
+    for (editor, _machine), mode in machine_modes(conn).items():
+        by_editor.setdefault(editor, set()).add(mode)
+    return {editor for editor, modes in by_editor.items() if modes == {"base"}}
 
 
 def known_editor_usernames(conn: sqlite3.Connection) -> set[str]:
@@ -1433,73 +1622,406 @@ def set_feed_state(conn: sqlite3.Connection, **fields: Any) -> None:
     )
 
 
-def add_selection(
-    conn: sqlite3.Connection, editor: str, slug: str, created_by: str, now: str
+# The unassigned bucket: a plan row that names no machine applies to every
+# machine of that editor which has none of its own (v24's comment). Spelled
+# once, here, so no caller has to remember the empty string means something.
+ANY_MACHINE = ""
+
+
+def machines_of(conn: sqlite3.Connection, editor: str) -> list[str]:
+    """This editor's known machines, oldest first. The registry is the
+    authority; machine_state is not consulted, because v23 backfilled the
+    registry from it and every report keeps it current."""
+    return [
+        r["machine"] for r in conn.execute(
+            "SELECT machine FROM machines WHERE editor_username=? ORDER BY first_seen, machine",
+            (editor,),
+        )
+    ]
+
+
+def upsert_machine(
+    conn: sqlite3.Connection, editor: str, machine: str, now: str,
+    machine_id: str | None = None, platform: str | None = None,
+    syncthing_device_id: str | None = None,
+) -> None:
+    """Record that this computer exists and was heard from (v23).
+
+    Every learned attribute is COALESCEd: a light report carries no platform,
+    an old companion carries no machine_id, and a companion whose Syncthing
+    is momentarily unreachable carries no device id. None of those is
+    evidence that what we already knew is wrong."""
+    conn.execute(
+        """INSERT INTO machines
+             (editor_username, machine, machine_id, platform, syncthing_device_id,
+              first_seen, last_seen)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(editor_username, machine) DO UPDATE SET
+             machine_id=COALESCE(excluded.machine_id, machines.machine_id),
+             platform=COALESCE(excluded.platform, machines.platform),
+             syncthing_device_id=COALESCE(excluded.syncthing_device_id,
+                                          machines.syncthing_device_id),
+             last_seen=excluded.last_seen""",
+        (editor, machine, machine_id or None, platform or None,
+         syncthing_device_id or None, now, now),
+    )
+
+
+def fetch_machines(conn: sqlite3.Connection, editor: str | None = None) -> list[dict[str, Any]]:
+    q = "SELECT * FROM machines"
+    params: list[Any] = []
+    if editor is not None:
+        q += " WHERE editor_username=?"
+        params.append(editor)
+    q += " ORDER BY editor_username, first_seen, machine"
+    return [dict(r) for r in conn.execute(q, params)]
+
+
+def machine_by_device_id(conn: sqlite3.Connection, device_id: str) -> dict[str, Any] | None:
+    """Which computer is this Syncthing device? The enforce cycle's join
+    (WP3): a folder is shared with a DEVICE, and only this mapping can say
+    which of an editor's two computers that device is."""
+    row = conn.execute(
+        "SELECT * FROM machines WHERE syncthing_device_id=?", (device_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def machine_by_machine_id(
+    conn: sqlite3.Connection, editor: str, machine_id: str
+) -> dict[str, Any] | None:
+    """The same computer under a different hostname. Used when a report
+    arrives whose minted id we know but whose name we do not -- somebody
+    renamed their PC, and their plan should not silently become empty."""
+    if not machine_id:
+        return None
+    row = conn.execute(
+        "SELECT * FROM machines WHERE editor_username=? AND machine_id=?",
+        (editor, machine_id),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def request_machine_update(
+    conn: sqlite3.Connection, editor: str, machine: str, version: str,
+    requested_by: str, now: str,
 ) -> bool:
-    """Tick. Returns False if already ticked. Position = end of the queue."""
+    """Ask one machine to take `version` on its next report (v25).
+
+    False when there is no such machine: a request that names nothing must
+    read as a failure to the admin, not as a silent success."""
+    cur = conn.execute(
+        """UPDATE machines
+              SET update_requested_version=?, update_requested_at=?,
+                  update_requested_by=?
+            WHERE editor_username=? AND machine=?""",
+        (version, now, requested_by, editor, machine),
+    )
+    return cur.rowcount > 0
+
+
+def clear_machine_update_request(
+    conn: sqlite3.Connection, editor: str, machine: str
+) -> None:
+    """Called when the machine reports the version that was asked for -- the
+    request is DONE, and a standing one would re-apply the same build after
+    every restart."""
+    conn.execute(
+        """UPDATE machines
+              SET update_requested_version=NULL, update_requested_at=NULL,
+                  update_requested_by=NULL
+            WHERE editor_username=? AND machine=?""",
+        (editor, machine),
+    )
+
+
+def machine_update_request(
+    conn: sqlite3.Connection, editor: str, machine: str
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        """SELECT update_requested_version AS version, update_requested_at AS at,
+                  update_requested_by AS by_user
+             FROM machines WHERE editor_username=? AND machine=?""",
+        (editor, machine),
+    ).fetchone()
+    if row is None or not row["version"]:
+        return None
+    return dict(row)
+
+
+def copy_machine_plan(
+    conn: sqlite3.Connection, editor: str, source: str, target: str,
+    copied_by: str, now: str,
+) -> int:
+    """Give `target` the same projects as `source`, replacing whatever it
+    had. Returns how many projects it now holds.
+
+    A new computer starts with an EMPTY plan on purpose (the plan doc's §3.2:
+    inheritance would silently start a 50 GB download on a laptop nobody
+    asked to fill). This is the affordance that makes that bearable -- the
+    admin's "same as the desktop, please" in one click."""
+    slugs = [r["slug"] for r in selections_for_machine(conn, editor, source)]
+    conn.execute(
+        "DELETE FROM selections WHERE editor_username=? AND machine=?",
+        (editor, target),
+    )
+    for slug in slugs:
+        add_selection(conn, editor, slug, created_by=copied_by, now=now, machine=target)
+    return len(slugs)
+
+
+def adopt_renamed_machine(
+    conn: sqlite3.Connection, editor: str, old_machine: str, new_machine: str
+) -> None:
+    """Somebody renamed their PC. Carry what belongs to the COMPUTER across.
+
+    Only the plan and the sticky root move: manifests, lane reports and
+    transfers are observations of a moment and rebuild themselves under the
+    new name within one report cycle (the stale rows age out through
+    evict_extra_machines). The plan does not rebuild -- nobody re-ticks four
+    projects because Windows was renamed -- so without this a rename reads as
+    a brand-new computer with an empty plan, which is the one outcome that
+    silently stops an editor syncing."""
+    if not old_machine or not new_machine or old_machine == new_machine:
+        return
+    for table in ("selections", "editor_prefs"):
+        conn.execute(
+            f"DELETE FROM {table} WHERE editor_username=? AND machine=?",
+            (editor, new_machine),
+        )
+        conn.execute(
+            f"UPDATE {table} SET machine=? WHERE editor_username=? AND machine=?",
+            (new_machine, editor, old_machine),
+        )
+    conn.execute(
+        "DELETE FROM machines WHERE editor_username=? AND machine=?",
+        (editor, old_machine),
+    )
+
+
+def add_selection(
+    conn: sqlite3.Connection, editor: str, slug: str, created_by: str, now: str,
+    machine: str = ANY_MACHINE,
+) -> bool:
+    """Tick, for ONE computer. Returns False if already ticked. Position =
+    end of that machine's queue (the order its sequencer works through)."""
     next_pos = conn.execute(
-        "SELECT COALESCE(MAX(position), 0) + 1 FROM selections WHERE editor_username=?",
-        (editor,),
+        """SELECT COALESCE(MAX(position), 0) + 1 FROM selections
+            WHERE editor_username=? AND machine=?""",
+        (editor, machine),
     ).fetchone()[0]
     cur = conn.execute(
         """INSERT OR IGNORE INTO selections
-             (editor_username, project_slug, position, created_at, created_by)
-           VALUES (?, ?, ?, ?, ?)""",
-        (editor, slug, next_pos, now, created_by),
+             (editor_username, machine, project_slug, position, created_at, created_by)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (editor, machine, slug, next_pos, now, created_by),
     )
     return cur.rowcount > 0
 
 
-def remove_selection(conn: sqlite3.Connection, editor: str, slug: str) -> bool:
-    cur = conn.execute(
-        "DELETE FROM selections WHERE editor_username=? AND project_slug=?", (editor, slug)
-    )
+def add_selection_for_person(
+    conn: sqlite3.Connection, editor: str, slug: str, created_by: str, now: str
+) -> bool:
+    """Tick for EVERY computer this person has (the person-level control).
+
+    The sidebar checkbox and a tick with no `?machine=` both mean "I want
+    this project", which is every machine they use. Writing the unassigned
+    bucket instead would be silently ineffective for anyone whose machines
+    already have plans of their own -- the bucket only applies where there is
+    no plan. An editor with no computer on record yet DOES get the bucket,
+    which their first report adopts."""
+    targets = machines_of(conn, editor) or [ANY_MACHINE]
+    # A list, not a generator: any() short-circuits, and the second computer
+    # would never get its row.
+    return any([
+        add_selection(conn, editor, slug, created_by=created_by, now=now, machine=m)
+        for m in targets
+    ])
+
+
+def remove_selection(
+    conn: sqlite3.Connection, editor: str, slug: str, machine: str | None = None
+) -> bool:
+    """Untick. `machine=None` means EVERY machine of this editor, including
+    the unassigned bucket: it is what the person-level control does, and what
+    an old companion's DELETE (which cannot name a machine) has to mean --
+    under-sharing is the safe direction for a removal."""
+    if machine is None:
+        cur = conn.execute(
+            "DELETE FROM selections WHERE editor_username=? AND project_slug=?",
+            (editor, slug),
+        )
+    else:
+        cur = conn.execute(
+            """DELETE FROM selections
+                WHERE editor_username=? AND machine=? AND project_slug=?""",
+            (editor, machine, slug),
+        )
     return cur.rowcount > 0
 
 
-def fetch_selections(conn: sqlite3.Connection, editor: str) -> list[dict[str, Any]]:
-    """Editor's ticked projects in queue order, joined to project label/path.
+def selections_for_machine(
+    conn: sqlite3.Connection, editor: str, machine: str
+) -> list[dict[str, Any]]:
+    """What THIS computer syncs: its own rows, plus the unassigned bucket if
+    it has none of its own.
+
+    The one inheritance rule in the model, and it is a migration/compat
+    affordance rather than a feature: rows with machine='' come from an
+    editor who ticked before their companion ever reported, a companion too
+    old to say which machine is asking, or the collector's one-shot seed from
+    pre-existing shares. A machine that has been given a plan of its own is
+    never also handed the bucket -- that would make "untick this project on
+    the laptop" impossible to express."""
+    rows = _selection_rows(conn, editor, machine=machine)
+    if rows:
+        return rows
+    return _selection_rows(conn, editor, machine=ANY_MACHINE)
+
+
+def _selection_rows(
+    conn: sqlite3.Connection, editor: str, machine: str | None
+) -> list[dict[str, Any]]:
+    q = """SELECT s.project_slug AS slug, s.machine, s.position, s.created_at,
+                  s.created_by, p.label, p.active
+             FROM selections s LEFT JOIN projects p ON p.slug = s.project_slug
+            WHERE s.editor_username = ?"""
+    params: list[Any] = [editor]
+    if machine is not None:
+        q += " AND s.machine = ?"
+        params.append(machine)
+    q += " ORDER BY s.position, s.machine"
+    return [dict(r) for r in conn.execute(q, params)]
+
+
+def fetch_selections(
+    conn: sqlite3.Connection, editor: str, machine: str | None = None
+) -> list[dict[str, Any]]:
+    """Ticked projects in queue order, joined to project label/path.
     Selections whose project no longer exists or is inactive are kept in the
-    row (slug only) but flagged, so the UI can surface them."""
-    rows = conn.execute(
-        """SELECT s.project_slug AS slug, s.position, s.created_at, s.created_by,
-                  p.label, p.active
-           FROM selections s LEFT JOIN projects p ON p.slug = s.project_slug
-           WHERE s.editor_username = ?
-           ORDER BY s.position""",
-        (editor,),
-    )
-    return [dict(r) for r in rows]
+    row (slug only) but flagged, so the UI can surface them.
+
+    `machine=None` is the UNION across this editor's computers -- what a
+    companion too old to name itself gets, and what the person-level views
+    show. Deliberately the union and not the intersection: an old build that
+    over-syncs fills a drive, an old build that under-syncs is an editor who
+    quietly cannot open a project (MULTI_MACHINE_PLAN.md §5)."""
+    if machine is not None:
+        return selections_for_machine(conn, editor, machine)
+    rows = _selection_rows(conn, editor, machine=None)
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for row in rows:
+        if row["slug"] in seen:
+            continue
+        seen.add(row["slug"])
+        unique.append(row)
+    return unique
 
 
 def fetch_all_selections(conn: sqlite3.Connection) -> dict[str, list[str]]:
-    """slug -> [editor_username...] over all selections."""
+    """slug -> [editor_username...] over all selections (deduped per editor).
+
+    The person-level view the assignments grid and the project pages draw:
+    "somebody's computer holds this". fetch_machine_selections is the
+    per-computer answer."""
     grouped: dict[str, list[str]] = {}
     for row in conn.execute(
-        "SELECT project_slug, editor_username FROM selections ORDER BY editor_username"
+        "SELECT DISTINCT project_slug, editor_username FROM selections "
+        "ORDER BY editor_username"
     ):
         grouped.setdefault(row["project_slug"], []).append(row["editor_username"])
     return grouped
 
 
+def fetch_machine_selections(
+    conn: sqlite3.Connection,
+) -> dict[str, list[tuple[str, str]]]:
+    """slug -> [(editor_username, machine)...], the unassigned bucket
+    resolved against each editor's machines. This is what the enforce cycle
+    and the queue builders need: a share is made with a computer."""
+    by_editor_machines: dict[str, list[str]] = {}
+    for row in conn.execute("SELECT editor_username, machine FROM machines"):
+        by_editor_machines.setdefault(row["editor_username"], []).append(row["machine"])
+    own: dict[tuple[str, str], set[str]] = {}
+    bucket: dict[str, set[str]] = {}
+    for row in conn.execute("SELECT editor_username, machine, project_slug FROM selections"):
+        if row["machine"] == ANY_MACHINE:
+            bucket.setdefault(row["editor_username"], set()).add(row["project_slug"])
+        else:
+            own.setdefault(
+                (row["editor_username"], row["machine"]), set()
+            ).add(row["project_slug"])
+    grouped: dict[str, list[tuple[str, str]]] = {}
+    for (editor, machine), slugs in own.items():
+        for slug in slugs:
+            grouped.setdefault(slug, []).append((editor, machine))
+    for editor, slugs in bucket.items():
+        machines = by_editor_machines.get(editor)
+        if not machines:
+            # No computer on record yet -- an editor who ticked before their
+            # companion ever reported. The pair is kept with an EMPTY machine
+            # rather than dropped: callers match it on the person, which is
+            # all anyone can know here, and dropping it would read as "this
+            # project is ticked for nobody" (the B16 direction).
+            for slug in slugs:
+                grouped.setdefault(slug, []).append((editor, ANY_MACHINE))
+            continue
+        for machine in machines:
+            if (editor, machine) in own:
+                continue          # has a plan of its own; the bucket does not apply
+            for slug in slugs:
+                grouped.setdefault(slug, []).append((editor, machine))
+    for slug in grouped:
+        grouped[slug] = sorted(set(grouped[slug]))
+    return grouped
+
+
 def set_project_root_override(
-    conn: sqlite3.Connection, editor: str, slug: str | None, updated_by: str, now: str
+    conn: sqlite3.Connection, editor: str, slug: str | None, updated_by: str, now: str,
+    machine: str = ANY_MACHINE,
 ) -> None:
     conn.execute(
-        """INSERT INTO editor_prefs (editor_username, project_root_override, updated_at, updated_by)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(editor_username) DO UPDATE SET
+        """INSERT INTO editor_prefs
+             (editor_username, machine, project_root_override, updated_at, updated_by)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(editor_username, machine) DO UPDATE SET
              project_root_override=excluded.project_root_override,
              updated_at=excluded.updated_at, updated_by=excluded.updated_by""",
-        (editor, slug, now, updated_by),
+        (editor, machine, slug, now, updated_by),
     )
 
 
-def get_project_root_override(conn: sqlite3.Connection, editor: str) -> str | None:
+def get_project_root_override(
+    conn: sqlite3.Connection, editor: str, machine: str | None = None
+) -> str | None:
+    """This machine's sticky destination root, falling back to the editor's
+    unassigned one (v24/WP7: where a project lands is a property of the
+    machine's Resolve setup, not of the person)."""
+    if machine is not None:
+        row = conn.execute(
+            """SELECT project_root_override FROM editor_prefs
+                WHERE editor_username=? AND machine=?""",
+            (editor, machine),
+        ).fetchone()
+        if row is not None and row["project_root_override"]:
+            return row["project_root_override"]
     row = conn.execute(
-        "SELECT project_root_override FROM editor_prefs WHERE editor_username=?", (editor,)
+        """SELECT project_root_override FROM editor_prefs
+            WHERE editor_username=? AND machine=? """,
+        (editor, ANY_MACHINE),
     ).fetchone()
-    return row["project_root_override"] if row else None
+    if row is not None:
+        return row["project_root_override"]
+    if machine is None:
+        # No bucket row: any machine's answer is better than none for the
+        # person-level callers (the admin view).
+        row = conn.execute(
+            "SELECT project_root_override FROM editor_prefs WHERE editor_username=?",
+            (editor,),
+        ).fetchone()
+        return row["project_root_override"] if row else None
+    return None
 
 
 def upsert_machine_state(
@@ -1507,6 +2029,7 @@ def upsert_machine_state(
     detected_project_root: str | None, now: str,
     resolve_project: str | None = None, verified: bool = False,
     platform: str | None = None, companion_version: str | None = None,
+    mode: str | None = None,
     transport: Mapping[str, Any] | None = None,
     guard: Mapping[str, Any] | None = None,
     ingest: Mapping[str, Any] | None = None,
@@ -1558,12 +2081,14 @@ def upsert_machine_state(
               music_ingest_active, music_ingest_batch, music_ingest_state,
               music_ingest_gate, music_ingest_done, music_ingest_total,
               music_ingest_failed, music_ingest_track, music_ingest_percent,
-              music_ingest_warning, music_ingest_at)
+              music_ingest_warning, music_ingest_at,
+              mode)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                    ?, ?, ?,
-                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                   ?)
            ON CONFLICT(editor_username, machine) DO UPDATE SET
              detected_project_root=excluded.detected_project_root,
              reported_at=excluded.reported_at,
@@ -1688,7 +2213,12 @@ def upsert_machine_state(
                                        THEN machine_state.music_ingest_warning
                                        ELSE excluded.music_ingest_warning END,
              music_ingest_at=COALESCE(excluded.music_ingest_at,
-                                      machine_state.music_ingest_at)""",
+                                      machine_state.music_ingest_at),
+             -- COALESCEd, not written blind: `mode` rides every report from a
+             -- companion that has one, and a report from a build too old to
+             -- send it must not silently re-label the base rig an editor
+             -- machine -- which would put it back in [ QUEUED ] (CR-28).
+             mode=COALESCE(excluded.mode, machine_state.mode)""",
         (editor, machine, detected_project_root, now, resolve_project, int(verified),
          platform, companion_version,
          t.get("relayed"), t.get("direct"), t.get("orphan_partials"),
@@ -1704,7 +2234,8 @@ def upsert_machine_state(
          p.get("missing"), p.get("state"), p.get("left"),
          int(bool(m.get("active"))), m.get("batch"), m.get("state"),
          m.get("gate"), m.get("done"), m.get("total"), m.get("failed"),
-         m.get("track"), m.get("percent"), m.get("warning"), m.get("at")),
+         m.get("track"), m.get("percent"), m.get("warning"), m.get("at"),
+         mode),
     )
     evict_extra_machines(conn, editor)
 
@@ -1910,6 +2441,16 @@ def evict_extra_machines(
     for machine in victims:
         conn.execute(
             "DELETE FROM machine_state WHERE editor_username=? AND machine=?",
+            (editor, machine),
+        )
+        # The registry (v23) is filled from the same attacker-chosen string,
+        # so it needs the same cap. Its PLAN is deliberately left alone: 20
+        # machines back is far past any real fleet, but a laptop that has
+        # been off for a month is not a reason to silently forget which
+        # projects it holds -- and re-reporting under the same name picks the
+        # rows straight back up.
+        conn.execute(
+            "DELETE FROM machines WHERE editor_username=? AND machine=?",
             (editor, machine),
         )
     return len(victims)
@@ -2550,12 +3091,22 @@ def fetch_sync_backlog(
     rclone's --transfers per lane) still count as queued until the next
     manifest refresh. `files_per_group` caps the per-group name list only;
     n_files/bytes are full totals."""
+    # The selections join is per COMPUTER since v24: this machine's own plan,
+    # or the unassigned bucket when it has none of its own (the SQL spelling
+    # of selections_for_machine). Before that, one person's laptop was told
+    # it was behind on everything their desktop was ticked for.
     pair_q = """SELECT emp.editor_username AS editor, emp.machine,
                        emp.project_slug AS slug, emp.truncated,
                        p.id AS project_id, p.label
                 FROM editor_media_project emp
                 JOIN selections s ON s.editor_username = emp.editor_username
                                  AND s.project_slug = emp.project_slug
+                                 AND (s.machine = emp.machine
+                                      OR (s.machine = ''
+                                          AND NOT EXISTS (
+                                            SELECT 1 FROM selections own
+                                             WHERE own.editor_username = emp.editor_username
+                                               AND own.machine = emp.machine)))
                 JOIN projects p ON p.slug = emp.project_slug AND p.active = 1
                 WHERE emp.mode != 'base'"""
     params: list[Any] = []

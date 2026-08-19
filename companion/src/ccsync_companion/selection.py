@@ -26,6 +26,16 @@ from urllib.parse import quote
 
 from . import config as config_mod
 from . import upgrade as upgrade_mod
+
+
+def _machine_name() -> str:
+    """The same string the reporter sends as `machine` -- the hostname. The
+    dashboard keys a machine's plan on (editor, machine), so these two must
+    never disagree; imported lazily-ish here rather than passed in because
+    reporter.py reads it the same way."""
+    import platform
+
+    return platform.node()
 from .sync.repath import normalized_safe_rel
 
 log = logging.getLogger("ccsync.selection")
@@ -195,7 +205,16 @@ class SelectionClient:
             and (time.monotonic() - self._last_failure_at) < self.fetch_ttl
         ):
             return None
-        url = f"{self.dashboard_url.rstrip('/')}/api/v1/selection/{quote(editor_name, safe='')}"
+        # ?machine= (WP1/WP6, MULTI_MACHINE_PLAN.md): ask for THIS computer's
+        # plan, not the person's. A dashboard too old to know the parameter
+        # ignores it and answers exactly as before, so this is safe to send
+        # unconditionally -- and a companion too old to send it gets the
+        # union of its owner's machines, which for a one-machine editor IS
+        # this machine's plan.
+        url = (
+            f"{self.dashboard_url.rstrip('/')}/api/v1/selection/"
+            f"{quote(editor_name, safe='')}?machine={quote(_machine_name(), safe='')}"
+        )
         headers = self._headers()
         try:
             response = self._http_get(url, headers, self.timeout)
@@ -319,6 +338,12 @@ class SelectionClient:
         editor = str(self._editor_name_fn() or "").strip().lower()
         if not editor:
             return False, "no editor identity yet -- sign in first"
+        # NO ?machine= here, deliberately: "Remove this project from this
+        # machine" has to make the SERVER stop sharing it, and an untick that
+        # named only this computer would leave the tick standing on the
+        # person's other machine -- with the folder still shared to this one
+        # if it is in the unassigned bucket. Removals go wide (the dashboard
+        # applies the same rule for the same reason).
         url = (
             f"{self.dashboard_url.rstrip('/')}/api/v1/selection/"
             f"{quote(editor, safe='')}/{quote(str(slug), safe='')}"

@@ -1321,7 +1321,14 @@ async function cancelJob() {
   if (!state.jobId) return;
   try {
     await post(`api/jobs/${state.jobId}/cancel`);
-    toast('cancelling: it stops after the video in flight');
+    // The old copy said "it stops after the video in flight" for EVERY phase.
+    // On a job parked in ready_for_review nothing is in flight and nothing ever
+    // will be, so it read as a cancel that had not worked and the editor was
+    // left blocked by their own job (owner hit this on job 42, 2026-08-19).
+    // The phase is on screen already, so say the one thing that differs.
+    toast(state.phase === 'downloading'
+      ? 'cancelling: it stops after the video in flight'
+      : 'cancelled');
   } catch (e) {
     toast(e.message, true);
   }
@@ -1348,10 +1355,22 @@ async function cancelJob() {
 // has to watch fail -- the clips arrive either way and the only visible
 // difference is the badge in the downloads header (§9).
 
-// One second, then the probe is abandoned. It sits between the editor clicking
-// DOWNLOAD and the page showing them the job, and a companion that cannot
-// answer a locally-computed question in a second is not one to hand a job to.
+// One second, then the FIRST probe is abandoned. It sits between the editor
+// clicking DOWNLOAD and the page showing them the job, so nothing listening on
+// 8899 must never cost more than that.
 const PROBE_MS = 1000;
+
+// ...but a companion that IS there and merely busy gets a second, longer go
+// (2026-08-19). Measured on a live editor machine: /ytdl/capabilities answers
+// in 3-6 ms warm and 3.9 s while the companion is mid-sync-pass -- a request
+// that does no I/O still waits behind whatever else holds the interpreter. With
+// one 1 s attempt that machine silently downloaded on the server EVERY time:
+// 45 jobs out of 45 across the whole fleet, which read as "requester-first
+// downloads don't work" rather than as a timeout. Retried ONLY on a timeout,
+// never on a refusal, so a machine with no tray app still fails in milliseconds.
+// Costs the editor nothing visible either way: startDownload never awaits this,
+// and a late claim is the handover the lease design is already built around.
+const PROBE_RETRY_MS = 5000;
 
 // The one companion refusal the editor can fix (the YouTube terms in the tray)
 // is said once; everything else in the fast path stays silent (see §11 and
@@ -1370,37 +1389,44 @@ function explainCompanionRefusal(reason) {
 // naming template than the server's -- §5/§6); it is a no, like every other
 // answer that is not a yes.
 async function companionCapabilities() {
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), PROBE_MS);
-  try {
-    const res = await fetch(`${COMPANION_URL}/ytdl/capabilities`, {signal: ctl.signal});
-    if (!res.ok) return null;              // 404: a companion predating 0.8.0
-    const body = await res.json();
-    if (body && body.ok === true) return body;
-    // §11 keeps machine-side refusals (an old yt-dlp, no ffmpeg) quiet: the
-    // editor cannot act on them and the server does the job. The ONE reason
-    // that is the editor's own to fix is said out loud: the YouTube terms not
-    // yet accepted in the tray, which read as a broken feature when nothing on
-    // the page mentioned it (owner, 2026-08-18). Server-side download either way.
-    if (body && /terms/i.test(String(body.reason || ""))) {
-      explainCompanionRefusal(String(body.reason));
+  let body = null;
+  for (const budget of [PROBE_MS, PROBE_RETRY_MS]) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), budget);
+    let timedOut = false;
+    try {
+      const res = await fetch(`${COMPANION_URL}/ytdl/capabilities`, {signal: ctl.signal});
+      if (!res.ok) return null;            // 404: a companion predating 0.8.0
+      body = await res.json();
+    } catch (e) {
+      // Nothing listening, the abort above, or Chrome's local-network
+      // permission refusing a plain-HTTP origin. Only the abort is worth a
+      // second go: the other two answer instantly and would answer the same.
+      timedOut = !!(e && e.name === 'AbortError');
+    } finally {
+      clearTimeout(timer);
     }
-    return null;
-  } catch {
-    // Nothing listening, the abort above, or Chrome's local-network permission
-    // refusing a plain-HTTP origin -- indistinguishable here, and all the same
-    // answer: the server downloads it.
-    return null;
-  } finally {
-    clearTimeout(timer);
+    if (body || !timedOut) break;
   }
+  if (body && body.ok === true) return body;
+  // §11 keeps machine-side refusals (an old yt-dlp, no ffmpeg) quiet: the
+  // editor cannot act on them and the server does the job. The ONE reason
+  // that is the editor's own to fix is said out loud: the YouTube terms not
+  // yet accepted in the tray, which read as a broken feature when nothing on
+  // the page mentioned it (owner, 2026-08-18). Server-side download either way.
+  if (body && /terms/i.test(String(body.reason || ""))) {
+    explainCompanionRefusal(String(body.reason));
+  }
+  return null;
 }
 
-// Exactly ONE attempt per submission: no retry loop and no polling of the
-// loopback. A companion that was not there when the editor clicked DOWNLOAD is
-// not going to be handed a job that the server has already started, and a
-// retry loop against a machine that is asleep would be a background fetch
-// nobody ever sees fail.
+// One DISPATCH per submission: no polling of the loopback and no second
+// handover attempt. A companion that was not there when the editor clicked
+// DOWNLOAD is not going to be handed a job that the server has already
+// started, and a retry loop against a machine that is asleep would be a
+// background fetch nobody ever sees fail. (companionCapabilities does retry a
+// probe that TIMED OUT -- see PROBE_RETRY_MS -- which is the opposite case: a
+// companion that is there and answering, just not within a second.)
 async function dispatchLocal(jobId, quality) {
   if (!state.localDownload || !jobId) return false;
   const cap = await companionCapabilities();

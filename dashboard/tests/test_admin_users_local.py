@@ -179,3 +179,150 @@ def test_partial_disable_and_keys_via_htmx(env):
     resp = env.post("/partials/admin/users/keys/remove",
                     data={"username": "newbie", "fingerprint": fingerprint})
     assert resp.status_code == 200
+
+
+# ------------------------------------------------------------------- delete
+#
+# Deleting an account is the one Users-page action that cannot be undone, so
+# the guards are tested as hard as the happy path: the two lockouts it must
+# refuse, and the credentials that would otherwise outlive the row.
+
+def _make(client, username, role="editor", password="correct-horse-battery-new"):
+    resp = client.post("/api/v1/admin/users",
+                       json={"username": username, "role": role, "password": password})
+    assert resp.status_code == 200, resp.text
+
+
+def test_delete_local_user_removes_account_and_keys(env):
+    as_user(env, "owen")
+    _make(env, "newbie")
+    env.post("/api/v1/admin/users/newbie/keys", json={"key_text": KEY, "label": "laptop"})
+
+    resp = env.delete("/api/v1/admin/users/newbie")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["deleted"]["ssh_keys_removed"] == 1
+    assert body["view"]["local_users"] == []
+    assert auth.verify_credentials(env.app.state.settings, "newbie",
+                                   "correct-horse-battery-new") is False
+
+    conn = dbmod.connect(env.app.state.settings.db_path)
+    assert local_users.get_user(conn, "newbie") is None
+    # The sftp sidecar serves keys straight out of this table (internal_sftp.py):
+    # an orphan row would keep authenticating an account that no longer exists.
+    assert local_users.keys_for(conn, "newbie") == []
+    conn.close()
+
+
+def test_delete_revokes_sessions_and_report_tokens(env):
+    as_user(env, "owen")
+    _make(env, "newbie")
+    conn = dbmod.connect(env.app.state.settings.db_path)
+    dbmod.create_editor_report_token(conn, "newbie", created_by="owen")
+    conn.commit()
+    conn.close()
+    env.app.state.session_store.create("sid-for-newbie", "newbie", client="laptop")
+
+    resp = env.delete("/api/v1/admin/users/newbie")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["deleted"]["sessions_revoked"] == 1
+    assert resp.json()["deleted"]["report_tokens_revoked"] == 1
+    assert env.app.state.session_store.list_for_user("newbie") == []
+    conn = dbmod.connect(env.app.state.settings.db_path)
+    assert dbmod.fetch_editor_report_tokens(conn, editor="newbie") == []
+    conn.close()
+
+
+def test_delete_keeps_fleet_records(env):
+    """Their machine may still be syncing while the login is taken away, and a
+    grid row that vanishes turns a known editor into an unmapped stranger."""
+    as_user(env, "owen")
+    _make(env, "newbie")
+    conn = dbmod.connect(env.app.state.settings.db_path)
+    assert "newbie" in dbmod.known_editor_usernames(conn)
+    conn.close()
+
+    assert env.delete("/api/v1/admin/users/newbie").status_code == 200
+
+    conn = dbmod.connect(env.app.state.settings.db_path)
+    assert "newbie" in dbmod.known_editor_usernames(conn)
+    conn.close()
+
+
+def test_cannot_delete_the_account_you_are_signed_in_as(env):
+    as_user(env, "owen")
+    _make(env, "owen2", role="admin")
+    as_user(env, "owen2")
+    resp = env.delete("/api/v1/admin/users/owen2")
+    assert resp.status_code == 409
+    assert "signed in as" in resp.json()["detail"]
+    assert auth.is_admin(env.app.state.settings, "owen2") is True
+
+
+def test_cannot_delete_the_last_enabled_admin(env):
+    as_user(env, "owen")  # break-glass DASH_ADMIN_USERS admin, not a local row
+    _make(env, "boss", role="admin")
+    resp = env.delete("/api/v1/admin/users/boss")
+    assert resp.status_code == 409
+    assert "last enabled admin" in resp.json()["detail"]
+
+    # A second admin makes the first deletable again.
+    _make(env, "boss2", role="admin")
+    assert env.delete("/api/v1/admin/users/boss").status_code == 200
+
+
+def test_a_disabled_admin_is_not_the_last_enabled_admin(env):
+    as_user(env, "owen")
+    _make(env, "boss", role="admin")
+    assert env.post("/api/v1/admin/users/boss/disable", json={"disabled": True}).status_code == 200
+    assert env.delete("/api/v1/admin/users/boss").status_code == 200
+
+
+def test_delete_unknown_user_is_404(env):
+    as_user(env, "owen")
+    assert env.delete("/api/v1/admin/users/nobody").status_code == 404
+
+
+def test_delete_requires_admin(env):
+    as_user(env, "owen")
+    _make(env, "newbie")
+    env.cookies.clear()
+    assert env.delete("/api/v1/admin/users/newbie").status_code == 401
+    as_user(env, "jsmith")
+    assert env.delete("/api/v1/admin/users/newbie").status_code == 403
+
+
+def test_delete_is_400_outside_local_mode(tmp_path):
+    """Same carve-out as disable: the NasBackend Protocol has no delete, and a
+    NAS account owns a home directory this endpoint does not get to judge."""
+    settings = Settings(
+        db_path=str(tmp_path / "smb2.db"), session_secret=SECRET,
+        admin_users=frozenset({"owen"}), auth_method="smb",
+    )
+    with TestClient(create_app(settings)) as client:
+        as_user(client, "owen")
+        assert client.delete("/api/v1/admin/users/jsmith").status_code == 400
+
+
+def test_partial_delete_via_htmx(env):
+    as_user(env, "owen")
+    env.post("/partials/admin/users/create", data={
+        "username": "newbie", "password": "correct-horse-battery-new",
+    })
+    resp = env.post("/partials/admin/users/delete", data={"username": "newbie"})
+    assert resp.status_code == 200
+    assert b"newbie" not in resp.content
+    assert auth.verify_credentials(env.app.state.settings, "newbie",
+                                   "correct-horse-battery-new") is False
+
+
+def test_partial_delete_refusal_renders_a_banner_not_an_error(env):
+    as_user(env, "owen")
+    env.post("/partials/admin/users/create", data={
+        "username": "boss", "role": "admin", "password": "correct-horse-battery-new",
+    })
+    resp = env.post("/partials/admin/users/delete", data={"username": "boss"})
+    assert resp.status_code == 200
+    assert b"last enabled admin" in resp.content
+    assert auth.is_admin(env.app.state.settings, "boss") is True

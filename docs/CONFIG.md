@@ -96,6 +96,7 @@ it stops and names it; that is the enforcement.
 |---|---|---|
 | `youtube_download` | `false` | **F**. The `/ytdl` page. Off means the mount does not exist, the fleet routes 404, and companions hide their YouTube items. A legal decision, not a technical one — [`legal/YOUTUBE_FEATURE_NOTICE.md`](legal/YOUTUBE_FEATURE_NOTICE.md) |
 | `youtube_unblock` | `false` | **F**. The PO-token provider, the deno n-challenge solver, the cookie sign-in. **The vendor build ships none of them installed.** Requires `youtube_download`; alone it does nothing and the manifest will not report it true |
+| `auto_update` | `false` | **F**. Editors' companions apply a published build with **nobody clicking** (2026-08-18). Off ships the old behaviour: the tray offers it, and an admin can push one machine at a time from Settings → Packages. On is only defensible because every package record is signed by the offline release key and verified by the build already running ([`RELEASE.md`](RELEASE.md)); the swap still refuses while a CCSync window is open or media is being copied in, and a build that is **older** than the running one is never taken silently — a rollback is a deliberate push |
 | `ai_cli_providers` | `false` | **F**. Lets the downloader's two AI calls use a **Claude Code / Codex CLI on the dashboard host** (§2.5a): one the customer installed themselves, or one the **SET UP wizard** fetched from the publisher at their click. Nothing is bundled either way. Using a personal subscription to power a service may breach its terms — the customer's decision, taken on the wizard's first step. Accepting that notice is what turns this flag on. **Not published in `GET /api/v1/site`**: no client needs it |
 
 ### `[releases]`
@@ -322,6 +323,7 @@ fallback** — nothing else is spent in its place.
 | `OPENAI_API_KEY` / `OPENAI_BASE_URL` | **S** | Provider 4. Plain `urllib` against `/chat/completions` — **no new dependency** was taken for two HTTP calls |
 | `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` | **S** | Provider 5, OpenAI-compatible, same implementation |
 | `DASH_SITE_AI_CLI_PROVIDERS` | **F** | `"1"` turns providers 1 and 3 on for this site. Off in the vendor build |
+| `DASH_SITE_AUTO_UPDATE` | **F** | `"1"` lets companions take published builds unattended (`[features] auto_update`). Off in the vendor build. Published in `GET /api/v1/site`, unlike the row above: the companion is the client that acts on it |
 | `YTDL_CLAUDE_CODE_ARGS` / `YTDL_CODEX_ARGS` | | How the **customer's own** CLI is invoked non-interactively (prompt on stdin). One string each, so a customer on a different CLI build can correct a flag without a release |
 
 **Where keys typed on Settings live:** `<DASH_DB_PATH's parent>/secrets/ai/`,

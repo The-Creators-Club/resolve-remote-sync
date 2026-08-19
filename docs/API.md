@@ -367,13 +367,32 @@ editor has no business learning that another editor's device id exists.
 
 ---
 
-## 4. Selection (which projects sync to whom)
+## 4. Selection (which projects sync to which computer)
 
 | Route | Auth |
 |---|---|
-| `GET /selection/{editor}` | session (self or admin), **or** a companion token + a matching identity — or a per-editor token, which is itself the identity |
-| `PUT /selection/{editor}/{slug}` | **session only** (self or admin) |
-| `DELETE /selection/{editor}/{slug}` | session, **or** the companion credential above |
+| `GET /selection/{editor}?machine=` | session (self or admin), **or** a companion token + a matching identity — or a per-editor token, which is itself the identity |
+| `PUT /selection/{editor}/{slug}?machine=` | **session only** (self or admin) |
+| `DELETE /selection/{editor}/{slug}?machine=` | session, **or** the companion credential above |
+| `POST /admin/machines/{editor}/{machine}/copy-plan?source=` | admin session |
+| `POST\|DELETE /admin/machines/{editor}/{machine}/update` | admin session |
+
+**`?machine=` (2026-08-18, `docs/MULTI_MACHINE_PLAN.md`).** The plan belongs
+to a computer, so every route above takes one. Omitting it means the PERSON,
+and each verb reads that the safe way: `GET` returns the **union** of their
+computers' plans (what a companion too old to name itself gets, and for a
+one-machine editor exactly their plan), `PUT` ticks it on **every** computer
+they have, and `DELETE` removes it from **all** of them including the
+unassigned bucket — under-sharing is the safe direction for a removal, and
+"stop syncing this" must not leave it running on their other machine. The
+value is a hostname (`machine` in the report payload), never the minted
+`machine_id`.
+
+`copy-plan` gives one computer another's plan verbatim (a new machine starts
+EMPTY on purpose). The `update` pair is the pushed upgrade: it records a
+version that rides `commands.upgrade` on that machine's next report, and the
+companion applies it only if the signed offer it already holds is that
+version — see §9 of the plan.
 
 The asymmetry is deliberate. Ticking starts syncing data *to* a machine, so it
 stays session-only; unticking is how the tray's "Remove this project from this
@@ -423,6 +442,7 @@ Every route here requires a session belonging to a user in `DASH_ADMIN_USERS`
 | `POST /admin/users/{username}/disable` | **local mode only** (`400` otherwise): `{disabled: bool}` |
 | `POST /admin/users/{username}/keys` | **local mode only**: add an SSH key — `{key_text, label?}` → `{"fingerprint": "SHA256:…"}` |
 | `DELETE /admin/users/{username}/keys/{fingerprint}` | **local mode only**: revoke a key |
+| `DELETE /admin/users/{username}` | **local mode only**: delete a local account. Also deletes its SSH keys, revokes its browser sessions and revokes its per-editor report tokens — everything that could still act as it. Fleet records (grid row, selections, prefs, transfer history) are kept on purpose. `404` unknown account; `409` for the two lockout guards: the account you are signed in as, and the last enabled admin |
 | `POST /admin/devices/approve` | approve a pending Syncthing device: `{username, device_id}` — unchanged, Syncthing device approval is independent of which auth method identifies editors |
 
 The NAS-account rows above need NAS credentials in the container

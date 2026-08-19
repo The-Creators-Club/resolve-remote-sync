@@ -262,9 +262,22 @@ org_name = "Your Studio"
 #   the customer's decision, which is why it is a key here and not a default.
 #   API keys (Anthropic / OpenAI / DeepSeek, entered on the same page) are the
 #   supported path and need no flag. docs/CONFIG.md 2.5a.
+#
+# auto_update -- editors' companions apply a published build as soon as this
+#   dashboard offers it, without anyone clicking "Update now" in their tray
+#   (2026-08-18). OFF by default, because it changes who decides when an
+#   editing machine restarts its companion: a swap takes seconds and never
+#   interrupts work in progress (the companion refuses while a CCSync window
+#   is open or media is being copied in), but "seconds, unannounced, mid
+#   session" is a site's call to make. It is only defensible at all because
+#   every package record carries an offline Ed25519 signature the running
+#   build verifies before it will install anything -- see docs/RELEASE.md.
+#   With it off, an admin can still push a build to ONE machine at a time
+#   from Settings, Packages ("UPDATE NOW" beside each out-of-date machine).
 youtube_download = false
 youtube_unblock = false
 ai_cli_providers = false
+auto_update = false
 
 [stack]
 # The uid:gid the dashboard container runs as: the service account that owns

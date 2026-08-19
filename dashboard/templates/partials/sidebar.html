@@ -6,10 +6,19 @@
 {% macro project_row(p) %}
   <div class="project-link {{ 'current' if p.slug == current_slug }}">
     {% if toggle_editor %}
-    <input type="checkbox" class="proj-check" title="sync this project to {{ toggle_editor }}"
-           {{ 'checked' if p.slug in selected_slugs }}
-           hx-post="/partials/selection/{{ toggle_editor }}/{{ p.slug }}/toggle?view=sidebar{{ '&slug_page=' ~ current_slug if current_slug }}{{ as_qs }}"
-           hx-target="closest .projects" hx-swap="outerHTML">
+    {# A base rig works directly off the NAS tree, so a tick for it would sync
+       nothing and could never clear -- it is what put the base rig in
+       [ QUEUED ] under a permanent GETTING READY chip (CR-28). The write
+       paths refuse it too; this is the half the editor can see. #}
+    <input type="checkbox" class="proj-check"
+           {% if toggle_editor_base %}disabled
+             title="{{ toggle_editor }} is a base rig: it works directly off the NAS and syncs nothing"
+           {% else %}
+             title="sync this project to every computer {{ toggle_editor }} uses. Per-computer plans live on Settings, Assignments."
+             hx-post="/partials/selection/{{ toggle_editor }}/{{ p.slug }}/toggle?view=sidebar{{ '&slug_page=' ~ current_slug if current_slug }}{{ as_qs }}"
+             hx-target="closest .projects" hx-swap="outerHTML"
+           {% endif %}
+           {{ 'checked' if p.slug in selected_slugs }}>
     {% endif %}
     <a class="proj-name" href="/project/{{ p.slug }}" title="{{ p.label }}">
       <span class="dot {{ p.status }}">●</span>

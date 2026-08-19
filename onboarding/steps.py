@@ -115,6 +115,13 @@ from ccsync_companion import site as site_mod
 # change of its own, since build_onboard.spec/build_onboard_macos.spec now
 # bundle the Creators Club mark as the DEFAULT rather than the neutral one
 # (KNOWN_BUGS CR-25), which is the first thing a new editor sees.
+# 1.0.35: page 2 stopped asking whether this machine is THE base rig
+# (2026-08-19, owner's call). The two answers are now "I'm a remote editor"
+# and "I'm physically connected to the server/NAS": a site can have a whole
+# office of machines wired to the NAS, and the role only ever described how
+# this ONE computer reaches the footage. The stored values ("editor"/"base")
+# and every branch keyed on them are unchanged. Published as 1.0.34 or
+# earlier -- 1.0.35 was bumped but never built, so this copy rides it.
 INSTALLER_VERSION = "1.0.35"
 
 # NO DEFAULT since 2026-08-17 (WP0, docs/SYNOLOGY_PORT_PLAN.md). These used

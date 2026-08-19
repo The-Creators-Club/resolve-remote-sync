@@ -99,9 +99,17 @@ def test_editor_role_can_never_enable_sync_on_a_base_flagged_config(tmp_path):
     assert app._sync_enabled is False
     _sign_in_with_role(app, "jsmith", "editor")
     assert app._sync_enabled is False
-    # ...and the reported mode still follows the dashboard, so an admin can
-    # SEE the disagreement rather than it being silently resolved.
-    assert app.effective_mode() == "editor"
+    # REVERSED 2026-08-19 (docs/MULTI_BASE_RIG_PLAN.md WP0). This used to
+    # assert "editor" -- the reported mode followed the dashboard so an admin
+    # could SEE the disagreement rather than have it silently resolved. That
+    # reasoning assumed the role was about a machine; it is derived from the
+    # dashboard's ADMIN list, so it is about the PERSON, and it said "editor"
+    # for every wired office machine whose owner is not an admin. The cost of
+    # believing it: `machine_state.mode` is what CR-28's queue exclusion
+    # reads, so such a machine sat in [ QUEUED ] under a GETTING READY chip
+    # that could never clear. Surfacing the disagreement is the dashboard's
+    # job (WP2's chip), not the reported truth's.
+    assert app.effective_mode() == "base"
 
 
 def test_no_role_from_dashboard_falls_back_to_static_config(tmp_path):
@@ -118,6 +126,25 @@ def test_sign_out_reverts_to_static_config(tmp_path):
     app.identity.sign_out()
     app._apply_identity_role()
     assert app._sync_enabled is True  # back to config.toml's sync_enabled=true
+
+
+def test_a_wired_machine_owned_by_a_non_admin_reports_base(tmp_path):
+    """WP0, the case the whole plan exists for: Billy's office desktop works
+    directly off the NAS, and Billy is not a dashboard admin -- so /verify
+    hands his sign-in role="editor" on every one of his three computers. The
+    machine's own file is what knows which one this is."""
+    app = _make_app(tmp_path, sync_enabled=False, mode="base")
+    _sign_in_with_role(app, "billy", "editor")
+    assert app.effective_mode() == "base"
+    assert app._sync_enabled is False
+
+
+def test_a_remote_machine_of_the_same_person_still_reports_editor(tmp_path):
+    """...and his laptop, same account, same role, is untouched."""
+    app = _make_app(tmp_path, sync_enabled=True)
+    _sign_in_with_role(app, "billy", "editor")
+    assert app.effective_mode() == "editor"
+    assert app._sync_enabled is True
 
 
 def _make_app(tmp_path, **overrides) -> CompanionApp:

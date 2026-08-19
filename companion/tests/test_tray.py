@@ -108,6 +108,65 @@ def test_sync_disabled_is_never_green():
     assert compute_overall_color(_idle3(), app) == "orange"
 
 
+def test_sync_disabled_on_the_base_rig_is_green():
+    """2026-08-19: the base rig has no lanes BY DESIGN -- its tree is the
+    server tree -- so the amber above could never clear on the one machine
+    the admin watches all day. The tooltip already said "up to date"."""
+    app = _FakeApp({"dashboard_url": "", "mode": "base"},
+                   identity=_FakeIdentity("alex"))
+    app._sync_enabled = False
+    assert compute_overall_color(_idle3(), app) == "green"
+
+
+def test_a_base_machine_whose_owner_is_not_an_admin_is_still_green():
+    """The dashboard derives the sign-in role from its ADMIN list, so an
+    office machine wired straight to the NAS is told role="editor" while its
+    own config.toml says mode="base" and its lanes never start. The local
+    file is what decides here, in the same monotonic direction
+    _apply_identity_role() uses."""
+    app = _FakeApp({"dashboard_url": "", "mode": "base"},
+                   identity=_FakeIdentity("ruskin"))
+    app.effective_mode = lambda: "editor"
+    app._sync_enabled = False
+    assert compute_overall_color(_idle3(), app) == "green"
+
+
+def test_the_base_role_from_the_dashboard_also_counts():
+    """effective_mode() is the same precedence _apply_identity_role() uses:
+    a signed-in role="base" makes a machine the base rig even when its
+    config.toml never said so."""
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    app.effective_mode = lambda: "base"
+    app._sync_enabled = False
+    assert compute_overall_color(_idle3(), app) == "green"
+
+
+def test_the_base_rig_still_goes_red_on_a_lane_error():
+    app = _FakeApp({"dashboard_url": "", "mode": "base"},
+                   identity=_FakeIdentity("alex"))
+    app._sync_enabled = False
+    statuses = _idle3() + [_status("lane_c_syncthing", "error")]
+    assert compute_overall_color(statuses, app) == "red"
+
+
+def test_the_base_rig_still_goes_red_when_it_is_not_set_up():
+    app = _FakeApp({"dashboard_url": "", "mode": "base"},
+                   identity=_FakeIdentity("alex"))
+    app._sync_enabled = False
+    app.config_problems = ["remote_root is blank -- ..."]
+    assert compute_overall_color(_idle3(), app) == "red"
+
+
+def test_the_base_rig_still_goes_orange_with_its_tree_missing():
+    """P: unmapped on the base rig is not "nothing to sync", it is the NAS
+    share gone: the watcher, the fixer and Resolve itself are all blind."""
+    app = _FakeApp({"dashboard_url": "", "mode": "base"},
+                   identity=_FakeIdentity("alex"))
+    app._sync_enabled = False
+    app._root_absent = True
+    assert compute_overall_color(_idle3(), app) == "orange"
+
+
 def test_config_problems_are_red():
     """DEL-3: lanes no longer start at all in this state, so it must not
     read as anything other than broken."""

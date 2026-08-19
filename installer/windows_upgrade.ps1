@@ -293,10 +293,14 @@ else {
         Add-TopLevelKey 'dashboard_token = ""'
         $added += "dashboard_token (blank -- fleet reporting stays off until you set it)"
     }
-    # mode: default editor; only add if absent so a base rig's mode="base" is
-    # kept. Harmless even if wrong: once the editor signs in, the dashboard's
-    # role (DASH_ADMIN_USERS) overrides this static value entirely -- see
-    # companion app.py's _apply_identity_role()/effective_mode().
+    # mode: default editor; only add if absent so a machine wired to the NAS
+    # keeps its mode="base". NOT harmless if wrong, and no longer overridden
+    # by the dashboard (2026-08-19, docs/MULTI_BASE_RIG_PLAN.md WP0): the
+    # sign-in role comes from DASH_ADMIN_USERS, i.e. from the PERSON, so it
+    # cannot know which of that person's computers this is. `base` here now
+    # WINS over it -- see companion app.py's effective_mode(). Writing
+    # `editor` onto a wired machine would put it back in the sync queue for
+    # ever (CR-28's shape), which is why this only ever adds a missing key.
     if (-not (Test-Key "mode")) {
         Add-TopLevelKey 'mode = "editor"'
         $added += "mode (editor)"

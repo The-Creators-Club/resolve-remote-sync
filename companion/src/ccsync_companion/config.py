@@ -94,7 +94,17 @@ log = logging.getLogger("ccsync.config")
 # mark as the product default and a taskbar identity of our own (KNOWN_BUGS
 # CR-25, CR-24). Minor bump, not patch: a whole new contract with both SPAs,
 # and an editor on an older build 404s every route of it.
-VERSION = "0.9.41"
+# 0.9.42: a site can have MORE THAN ONE machine wired to the NAS
+# (docs/MULTI_BASE_RIG_PLAN.md WP0, 2026-08-19). `effective_mode()` answers
+# "base" when EITHER the sign-in role or this machine's own config.toml says
+# so; it used to be the role alone, and that role comes from the dashboard's
+# admin list, i.e. from the PERSON. An office desktop working straight off
+# the share, owned by someone who is not an admin, therefore reported
+# "editor" while its lanes were correctly down -- and `machine_state.mode` is
+# what the dashboard's queue exclusion reads, so it sat in [ QUEUED ] under a
+# GETTING READY chip that could never clear. The tray icon is green on such a
+# machine too: "sync is off" is its correct permanent state, not a warning.
+VERSION = "0.9.42"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"

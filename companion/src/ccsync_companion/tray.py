@@ -119,6 +119,29 @@ def _identity_is_valid(app: "CompanionApp") -> bool:
         return False
 
 
+def _is_base_rig(app: "CompanionApp") -> bool:
+    """Is this machine the base rig -- the one whose local_root IS the NAS
+    share, so it has no sync lanes by design?
+
+    EITHER source says so, deliberately. effective_mode() answers with the
+    signed-in role, which the dashboard derives from its ADMIN list rather
+    than from the machine (api.py's /login): an office machine sitting on the
+    NAS whose owner is not an admin is told role="editor" while its own
+    config.toml says mode="base" and its lanes are down. Same monotonic
+    direction as _apply_identity_role(): a machine that says it does not sync
+    stays that way whatever the server says.
+    """
+    try:
+        if str(getattr(app, "config", {}).get("mode", "") or "").strip().lower() == "base":
+            return True
+    except Exception:
+        pass
+    try:
+        return str(app.effective_mode() or "").strip().lower() == "base"
+    except Exception:
+        return False
+
+
 def compute_overall_color(
     statuses: list[LaneStatus], app: "CompanionApp | None" = None
 ) -> str:
@@ -131,6 +154,9 @@ def compute_overall_color(
     fine" while literally nothing synced (AUDIT_2 UX-1/UX-2). The icon must
     never be green unless this machine is signed in, unpaused, correctly
     configured and caught up.
+
+    ONE carve-out (2026-08-19): on the base rig "caught up" is vacuously
+    true -- see the sync_enabled branch below.
     """
     if any(s.state == STATE_ERROR for s in statuses):
         return "red"
@@ -147,7 +173,16 @@ def compute_overall_color(
                 return "orange"
             if app.is_paused():
                 return "orange"
-            if not getattr(app, "_sync_enabled", True):
+            if not getattr(app, "_sync_enabled", True) and not _is_base_rig(app):
+                # "Sync is off" is amber on an EDITOR machine (UX-1 above:
+                # nothing arrives and nothing leaves), but on the base rig it
+                # is the correct, permanent configuration -- its tree IS the
+                # server tree, there is nothing to sync and nothing that could
+                # ever catch up. The tooltip has always said "up to date"
+                # there; only the icon disagreed, so the one machine the admin
+                # looks at all day sat at a steady amber that could never
+                # clear and taught them to ignore amber (2026-08-19, owner's
+                # call: the base rig is green unless something is wrong).
                 return "orange"
         except Exception:
             log.exception("compute_overall_color: app state read failed")

@@ -3032,11 +3032,28 @@ class CompanionApp:
             return ""
 
     def effective_mode(self) -> str:
-        """"base" or "editor" -- the identity-derived role when signed in
-        and the dashboard sent one, else config.toml's static `mode`. Same
-        precedence as _apply_identity_role(); used for dashboard reporting
-        (get_mode) so admins see the role actually in effect, not just
-        whatever's written in this machine's local file."""
+        """"base" or "editor" -- what this MACHINE actually is, for dashboard
+        reporting (get_mode) and every tray/menu question that asks.
+
+        EITHER source saying "base" makes it base (2026-08-19,
+        docs/MULTI_BASE_RIG_PLAN.md WP0). It used to be the role alone
+        whenever the dashboard sent one, which was the same precedence
+        _apply_identity_role() uses -- but that role is derived from the
+        dashboard's ADMIN list (api.py's /verify), i.e. from the PERSON, and
+        a site can have any number of machines wired straight to the NAS.
+        An office desktop working directly off the share, owned by someone
+        who is not a dashboard admin, therefore reported mode="editor" while
+        its lanes were correctly down: `machine_state.mode` is what CR-28's
+        queue exclusion reads, so that machine sat in [ QUEUED ] under a
+        GETTING READY chip that could never clear -- CR-28 again, one
+        machine at a time.
+
+        Same monotonic direction as _apply_identity_role(): a machine that
+        says it does not sync stays that way whatever the server says
+        (AUDIT_2 CORE-C1). Nothing here can start a lane; the reverse
+        precedence could only ever hide a wired machine's true state."""
+        if str(self.config.get("mode", "") or "").strip().lower() == "base":
+            return "base"
         role = self.identity.role
         if role is not None:
             return role

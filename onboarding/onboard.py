@@ -16,11 +16,14 @@ Flow (Back/Next through a single window, frames swapped in place):
                     machine already accepted this version of the document
                     (2026-08-17, COMMERCIAL_READINESS.md item 3).
     1. Welcome   -- what this does + installer/bundled-companion versions.
-    2. Role      -- EDITOR (remote) or BASE rig, both platforms; sets the
-                    dashboard-URL default (tailnet vs LAN) and which pages
-                    follow. Today's studio base rig is Windows, but the
-                    commercial deployments this is built for can run a Mac
-                    as the base rig, so the question is asked everywhere.
+    2. Role      -- "I'm a remote editor" or "I'm physically connected to
+                    the server/NAS" (the `base` role internally), both
+                    platforms; sets the dashboard-URL default (tailnet vs
+                    LAN) and which pages follow. NOT a question about being
+                    THE base rig: a site can have a whole office of machines
+                    on the NAS (2026-08-19). Today's studio machine is
+                    Windows, but the commercial deployments this is built
+                    for can run a Mac there too, so it is asked everywhere.
     3. Tailscale -- EDITOR ONLY: must be installed + joined before the
                     dashboard (on the tailnet) is reachable. "Check
                     connection" gates Next. (winget install on Windows,
@@ -360,9 +363,14 @@ class OnboardWizard:
 
     def show_role(self) -> None:
         frame = self._new_page()
-        _heading(frame, "STEP 1: WHAT IS THIS MACHINE?")
-        _label(frame, "Pick the role for this computer. If this is not the studio\n"
-                       "base rig, it is almost certainly a remote editor.",
+        _heading(frame, "STEP 1: HOW IS THIS MACHINE CONNECTED?")
+        # NOT "are you THE base rig?" any more (2026-08-19, owner's call): a
+        # site can have any number of machines wired straight to the NAS -- a
+        # whole office of them -- so the question is how THIS computer reaches
+        # the footage, which is also the only thing the answer changes.
+        _label(frame, "Pick how this computer reaches the footage. Any number of\n"
+                       "machines can sit on the studio network and work straight\n"
+                       "off the NAS.",
                wraplength=560).pack(anchor="w", pady=(0, 12))
 
         def _radio(parent, text, value, subtitle):
@@ -380,21 +388,22 @@ class OnboardWizard:
                    wraplength=540).pack(anchor="w", padx=(24, 0))
 
         if IS_MACOS:
-            _radio(frame, "REMOTE EDITOR", "editor",
+            _radio(frame, "I'M A REMOTE EDITOR", "editor",
                    "You edit from elsewhere. Installs the sync tools and points\n"
                    "Resolve's P:\\ mapping at your local copy of the project tree.")
-            _radio(frame, "BASE RIG (the studio machine)", "base",
-                   "This machine sits on the studio LAN and works directly off the\n"
-                   "NAS share mounted under /Volumes. Installs only the companion\n"
-                   "app -- no sync tools, and your NAS mounts are NOT touched.")
+            _radio(frame, "I'M PHYSICALLY CONNECTED TO THE SERVER/NAS", "base",
+                   "This machine is on the studio network and works directly off\n"
+                   "the NAS share mounted under /Volumes. Installs only the\n"
+                   "companion app - no sync tools, and your NAS mounts are NOT\n"
+                   "touched.")
         else:
-            _radio(frame, "REMOTE EDITOR", "editor",
+            _radio(frame, "I'M A REMOTE EDITOR", "editor",
                    "You edit from elsewhere. Installs Tailscale, the sync tools,\n"
                    "and maps the P: project drive (re-created fresh).")
-            _radio(frame, "BASE RIG (the studio machine)", "base",
-                   "This machine sits on the studio LAN and works directly off the\n"
-                   "NAS. Installs only the companion app -- no sync tools, and your\n"
-                   "P:/T: drive mappings are NOT touched.")
+            _radio(frame, "I'M PHYSICALLY CONNECTED TO THE SERVER/NAS", "base",
+                   "This machine is on the studio network and works directly off\n"
+                   "the NAS. Installs only the companion app - no sync tools, and\n"
+                   "your P:/T: drive mappings are NOT touched.")
 
         adv = tk.Frame(frame, bg=theme.BG)
         adv.pack(anchor="w", pady=(8, 8))
@@ -661,7 +670,7 @@ class OnboardWizard:
                    fg=theme.MUTED, font=theme.mono(9), wraplength=560).pack(anchor="w", pady=(2, 10))
         elif role == "base":
             _label(frame, "The project-tree folder on the NAS mapping this machine\n"
-                           "edits from (the drive your admin mapped for the base rig).",
+                           "edits from (the drive your admin mapped to the NAS share).",
                    fg=theme.MUTED, font=theme.mono(9), wraplength=560).pack(anchor="w", pady=(2, 10))
         elif IS_MACOS:
             _label(frame, "Best on an external SSD, plugged in right now:\n"
@@ -1020,7 +1029,7 @@ class OnboardWizard:
 
     def show_finish_base(self) -> None:
         frame = self._new_page()
-        _heading(frame, "DONE: BASE RIG READY")
+        _heading(frame, "DONE: CONNECTED TO THE NAS")
         icon_word = "menu bar" if IS_MACOS else "tray"
         _label(frame, "The companion app is installed, signed in as\n"
                        f"{self.verified_username}, and will start automatically at login.\n\n"

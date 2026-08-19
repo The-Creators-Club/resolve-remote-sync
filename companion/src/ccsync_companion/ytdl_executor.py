@@ -182,6 +182,13 @@ YOUTUBE_HOSTS = frozenset({
 })
 YOUTUBE_HOST_SUFFIXES = (".googlevideo.com",)
 
+# The YouTube player client an editor's machine asks as (CR-39, 2026-08-19).
+# `web_safari` because it is the one that WORKS without a PO-token provider --
+# build_argv carries the measured table of what the others do. Not a list:
+# yt-dlp would pick the best format across every client named, which is how a
+# PO-token-bound URL gets chosen again and 403s.
+DEFAULT_PLAYER_CLIENT = "web_safari"
+
 # HTTP to the dashboard. Short: every one of these calls is a small JSON
 # round trip on the tailnet, and a wedged one must not outlive the lease it is
 # there to hold (180 s).
@@ -1559,7 +1566,20 @@ class DownloadJob:
         leave a `.part` behind (SAQBbd1Rxmo, 2026-08-13), and a clip that has
         finished failing has no resume state worth keeping -- the server's
         second-chance sweep starts it over from nothing (§2 step 7).
+
+        LOGGED since CR-39 (2026-08-19). It was not, and that is most of why
+        CR-39 took a morning of studio time to find: every local download was
+        failing on a 403 three seconds in, this function reported it to the
+        server and reset the row, and the companion log went from "job 53 -- 1
+        clip(s)" straight to the next job with nothing in between. The editor
+        saw the badge flash "downloading on your machine" and settle back on
+        "the server", and there was no line anywhere on their machine saying
+        why. A clip failure is ordinary -- the server retries it -- but
+        ordinary is not the same as invisible.
         """
+        log.warning("ytdl: job %s clip %s failed on this machine (%s) -- the "
+                    "server will retry it", self.job_id, video_id,
+                    str(error or "no error text")[:300])
         disown_output(outdir, video_id, before)
         clear_partials(outdir, video_id)
         self._drop_scratch_info(video_id)
@@ -1705,6 +1725,33 @@ class DownloadJob:
         deno = sidecar_tools.managed_deno()
         if deno:
             argv += ["--js-runtimes", f"deno:{deno}"]
+        # THE PLAYER CLIENT, and it is the difference between this feature
+        # working and not (CR-39, 2026-08-19). yt-dlp's default client set
+        # hands back format URLs that need a GVS PO token, and an editor's
+        # machine has no provider for one -- the NAS does, the bgutil sidecar
+        # (downloader.pot_opts, ytdl/web/DEPLOY.md), which is why the server
+        # never hit this and the requester always did. Measured on a live
+        # editor machine, same clip, same binary, same minute:
+        #
+        #     default (android_vr)  ERROR: unable to download video data:
+        #                           HTTP Error 403: Forbidden
+        #     ios                   "requires a GVS PO Token which was not
+        #                           provided ... may yield HTTP Error 403"
+        #     tv                    "The page needs to be reloaded"
+        #     web                   works, but falls to format 18 -- 360p
+        #     web_safari            works, 17.3 MB, full quality, exit 0
+        #
+        # web_safari serves HLS, which carries no PO-token requirement. The
+        # 403 arrived ~3 s in and _fail_clip reports it without logging, so
+        # every local download since 0.8.0 looked like "it flashed
+        # 'downloading on your machine' and went back to the server".
+        #
+        # Config-overridable because this is YouTube's to change, and the day
+        # it does an operator needs a lever that is not a release. Empty
+        # string means "send nothing", i.e. yt-dlp's own default set.
+        client = _player_client(self.deps.cfg)
+        if client:
+            argv += ["--extractor-args", f"youtube:player_client={client}"]
         # A signed-in cookies.txt, when the editor pointed us at one. This is
         # what passes the bot check and unlocks age-gated clips on the
         # requester's own machine; absent, the download is anonymous (public
@@ -1771,6 +1818,22 @@ def _cookies_file(cfg: dict[str, Any]) -> Optional[str]:
         return ytdl_cookies.resolve(cfg)
     except Exception:
         return None
+
+
+def _player_client(cfg: dict[str, Any]) -> str:
+    """Which YouTube player client yt-dlp should ask as. Never raises.
+
+    See build_argv for the measurements. `ytdl_player_client` in config.toml
+    overrides it; an explicit empty string means "send no --extractor-args at
+    all", which is yt-dlp's own default set and the behaviour before CR-39.
+    """
+    try:
+        value = cfg.get("ytdl_player_client", None)
+    except Exception:
+        return DEFAULT_PLAYER_CLIENT
+    if value is None:
+        return DEFAULT_PLAYER_CLIENT
+    return str(value).strip()
 
 
 def _positive_number(value: Any, fallback: float) -> float:

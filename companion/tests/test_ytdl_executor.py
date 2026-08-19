@@ -1967,3 +1967,59 @@ def test_a_shutdown_stops_the_retry_at_once(tmp_path):
     with pytest.raises(ConnectionRefusedError):
         client.manifest(7)
     assert len(calls) == 1
+
+
+# ------------------- CR-39: the client that works without a PO token
+
+def test_the_argv_names_a_player_client_that_needs_no_po_token(tmp_path):
+    """CR-39 (2026-08-19), and it is the reason requester-first downloads
+    produced almost nothing for a week. yt-dlp's DEFAULT client set hands back
+    media URLs bound to a GVS PO token; the NAS has a provider for one (the
+    bgutil sidecar) and an editor's machine has none, so the server always
+    succeeded and the requester 403'd. Measured on a live editor machine, same
+    clip, same binary, same minute:
+
+        default (android_vr)  ERROR: unable to download video data:
+                              HTTP Error 403: Forbidden
+        ios                   "requires a GVS PO Token which was not provided"
+        tv                    "The page needs to be reloaded"
+        web                   works, but falls to format 18 -- 360p
+        web_safari            works, 17.3 MB, full quality, exit 0
+
+    ...and on a clip that HAD downloaded locally 90 minutes earlier, the
+    default client 403'd while web_safari returned the same 16.2 MB: YouTube
+    tightened enforcement during the day, which is why this read as "it worked
+    once and then stopped".
+    """
+    job = ex.DownloadJob(7, ex.Deps(make_cfg(tmp_path)))
+    argv = job.build_argv("https://www.youtube.com/watch?v=" + VID1,
+                          str(tmp_path), "1080p")
+    assert "--extractor-args" in argv
+    assert argv[argv.index("--extractor-args") + 1] == \
+        "youtube:player_client=web_safari"
+
+
+def test_one_client_and_not_a_list():
+    """A comma-separated list would let yt-dlp pick the best format ACROSS the
+    clients it asked -- which is how a PO-token-bound URL gets chosen again and
+    403s. The point of naming a client is to be held to it."""
+    assert "," not in ex.DEFAULT_PLAYER_CLIENT
+
+
+def test_an_operator_can_override_the_client_without_a_release(tmp_path):
+    """This is YouTube's to change, and the day it does, the lever must not be
+    a build. An explicit empty string sends no --extractor-args at all, which
+    is yt-dlp's own default set and the behaviour before CR-39."""
+    cfg = make_cfg(tmp_path)
+    cfg["ytdl_player_client"] = "tv_embedded"
+    job = ex.DownloadJob(7, ex.Deps(cfg))
+    argv = job.build_argv("https://www.youtube.com/watch?v=" + VID1,
+                          str(tmp_path), "1080p")
+    assert argv[argv.index("--extractor-args") + 1] == \
+        "youtube:player_client=tv_embedded"
+
+    cfg["ytdl_player_client"] = ""
+    job = ex.DownloadJob(7, ex.Deps(cfg))
+    argv = job.build_argv("https://www.youtube.com/watch?v=" + VID1,
+                          str(tmp_path), "1080p")
+    assert "--extractor-args" not in argv

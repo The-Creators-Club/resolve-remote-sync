@@ -1263,6 +1263,48 @@ DONE in repo 2026-08-19, dashboard 0.7.2:
   fetch a clip onto this machine"), and each is said once per reason so a poll
   cannot turn it into a stream.
 
+### CR-39 — the editor's machine had no PO token, so YouTube 403'd every download it tried
+THE root cause of "requester-first doesn't work", under all the others. Found
+2026-08-19 by running the companion's own argv on a live editor machine.
+
+yt-dlp's DEFAULT player client hands back media URLs bound to a GVS PO token.
+The NAS has a provider for one -- the bgutil sidecar
+(`downloader.pot_opts`, `ytdl/web/DEPLOY.md`) -- and an editor's machine has
+none. So the server could always fetch the bytes and the requester's machine
+could not. Measured on ruskin's box, one clip, one binary, one minute:
+
+    default (android_vr)  ERROR: unable to download video data:
+                          HTTP Error 403: Forbidden
+    ios                   "requires a GVS PO Token which was not provided ...
+                          may yield HTTP Error 403"
+    tv                    "The page needs to be reloaded"
+    web                   works, but falls to format 18 -- 360p, 6 MB
+    web_safari            works, 17.3 MB, full quality, exit 0
+
+...and on `zhOvgxGbXvc`, a clip that HAD downloaded locally 90 minutes
+earlier, the default client 403'd after 10.3 MB while web_safari returned the
+same 16.2 MB. YouTube tightened enforcement during the day, which is exactly
+why this read as "it worked once and then stopped": job 46 landed 2 clips at
+13:06 and every clip after it failed, including ones that had worked at 13:06.
+
+The failure was also INVISIBLE. `_fail_clip` reported the 403 to the server and
+reset the row without logging, so the companion log went from "job 53 -- 1
+clip(s)" straight to the next job. The editor saw the badge flash "downloading
+on your machine" and settle back on "the server", with no line anywhere on
+their machine saying why -- which is what CR-38's feedback was added for, one
+layer up.
+
+FIXED in repo 2026-08-19, companion 0.9.4: `build_argv` sends
+`--extractor-args youtube:player_client=web_safari`. ONE client and not a list:
+yt-dlp picks the best format across every client named, which is how a
+PO-token-bound URL gets chosen again. Overridable per machine with
+`ytdl_player_client` in config.toml (empty string = yt-dlp's own default set),
+because this is YouTube's to change and the lever must not be a release.
+`_fail_clip` logs the failure now.
+
+**Needs the companion shipped.** The argv is baked into the frozen exe; there
+is no lever on a running 0.9.3.
+
 ## Open — residuals from the 2026-08-14 fix pass
 
 ### R16 — eight 08-14 findings deliberately not fixed

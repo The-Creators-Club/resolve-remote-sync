@@ -1101,6 +1101,103 @@ cancel that had not taken -- the job had in fact gone straight to `cancelled`.
 FIXED in repo 2026-08-19: the toast is phase-aware, `cancelled` for anything
 not actually downloading. The blocking itself is correct and stays.
 
+### CR-31 — a three second dashboard outage cost an editor 20 of 22 clips
+Found 2026-08-19 while answering "are ruskin's YouTube downloads reaching him".
+Job 46 was the FIRST job in the fleet ever to run on the requester's machine
+(CR-29's probe retry, live since dashboard 0.7.0 that morning). It ran for 58
+seconds and downloaded 2 of 22 clips. Then the dashboard container restarted --
+exit 0, back up in ~3 s -- and the clip-status POST that landed in the gap
+raised `ConnectionRefusedError`. `FleetClient._call` did not catch it, so it
+left `_download_all`, left `run()`, and the catch-all logged `job 46 failed`.
+The lease lapsed, the server reclaimed the job, and the other 20 clips
+downloaded onto the NAS, which lane B has not brought YouTube originals down
+from since 2026-08-16. The editor lost them to an outage he never saw.
+
+FIXED in repo 2026-08-19, companion 0.9.4: `_call` retries a raised TRANSPORT
+failure for up to `CALL_RETRY_BUDGET_SECONDS` (60 s, budgeted on ELAPSED time
+because six attempts that each hit the 15 s HTTP timeout is 90 s of wall clock,
+not six seconds) with exponential backoff, aborting at once on the job's stop
+predicate. An HTTP STATUS is still never retried: 410 ends the job, and every
+other code is an answer the caller branches on.
+
+### CR-32 — a clip the server downloaded could not reach the editor who asked for it
+The consequence of the 2026-08-16 policy reversal that nobody had a route
+around. Lane B stopped carrying the Youtube tree down on the reasoning that
+requester-first downloads put every editor's own clips on their own disk. Every
+way that falls back to the server -- no companion, no capability, a lapsed
+lease (CR-31), a clip the requester's IP was bot-checked on and the server's
+second-chance sweep fetched, or simply losing the race (CR-34) -- leaves the
+original on the NAS with nothing to move it. Measured on job 46: 2 mp4s on the
+editor's disk, 20 on the NAS, and a `.credits.json` for all 22 (Syncthing
+carries the sidecars; the .stignore excludes video).
+
+FIXED in repo 2026-08-19, companion 0.9.4: `POST /ytdl/fetch` on the 8899
+loopback pulls ONE original down, through broll_fetch's existing registry
+(same two-at-once cap, same rclone tuning, same shutdown kill) with
+`PROJECTS_REMOTE_REL` as its third NAS-side folder. `/ytdl/reveal` now answers
+`absent: true` when the ledger has a clip this machine does not, and the page
+turns that into [ GET IT FROM THE NAS ] with a progress toast.
+**Needs the companion shipped: the deployed build 404s on `/ytdl/fetch`.**
+
+### CR-33 — every clip whose format ladder made yt-dlp test a format died instantly
+Hit by the owner 2026-08-19 on two GET LINKS jobs in a row:
+
+    failed: [Errno 13] Permission denied: '/tmpf1m0z55x.tmp'
+
+A path that appears nowhere in this repo. yt-dlp resolves its scratch directory
+as `sanitize_path(join(paths['home'], paths['temp']), force=windowsfilenames)`,
+and with no `paths` at all that is `sanitize_path('', force=True)`, which in
+2026.07.04 is `os.path.normpath('') == '.'`. `_check_formats` then opens a probe
+file in `.` -- and the container's cwd is `/` (run.sh never chdirs), which uid
+3000 cannot write. Both halves were ours: `windowsfilenames: True` is half of
+the naming contract with `ytdl_common`, and nothing ever gave the process a
+writable working directory. Latent since the feature shipped; it only fires for
+clips whose ladder makes yt-dlp test a format, which is why other jobs the same
+morning downloaded 42 clips without a murmur.
+
+FIXED in repo 2026-08-19, dashboard 0.7.1: `build_opts` sets
+`paths: {"home": outdir}`. `home` and not `temp` -- temp is where `.part` files
+and fragments go, and moving those out of the clip's folder would take the
+partial-cleanup, dedupe and disown paths with it. `prepare_filename` is
+byte-identical with and without it (the outtmpl is absolute, so it wins
+`os.path.join`), verified in the live container. The worker also logs
+`exc_info` on a clip failure now: `str(exc)` alone made this a bug hunt.
+
+### CR-34 — the server won the race for every small selection, so requester-first never engaged
+Third distinct reason after R18's two and CR-29's one, and the first that is
+pure scheduling: every guard between the two executors was correct and the
+outcome was still wrong. `start_download` writes the pending rows and nudges
+the worker in ONE request; the SPA then probes the loopback and the companion
+claims. Measured on job 50 (one clip): `/download` returned at T+0.000, the
+worker took the row, the claim landed at T+0.161 and the download-manifest
+truthfully said 0 clips. The companion logged `job 50 -- 0 clip(s)`, stood
+down, and the clip downloaded onto the NAS. Job 46's 22 clips only worked at
+all because the worker was 2 clips in when the claim landed and handed back the
+other 20.
+
+FIXED in repo 2026-08-19, dashboard 0.7.1: `_phase_download` waits up to
+`LOCAL_CLAIM_GRACE_SECONDS` (4 s, `YTDL_LOCAL_CLAIM_GRACE_SECONDS`) for a lease
+before taking the first row, and returns if one appears. Ends the instant the
+claim lands, so a job with a companion behind it pays nothing; a job without
+one pays a few seconds once, against a download of minutes. Skipped entirely
+when `LOCAL_DOWNLOAD` is off, because that flag is the rollback switch and has
+to mean byte-for-byte the old behaviour.
+
+### CR-35 — DOWNLOAD greyed out for good after the first clip
+Reported by the owner 2026-08-19 with 67 clips in the grid: download one, and
+the button dies. `start_download` has accepted `done` as well as
+`ready_for_review` since YTDL-16 -- pressing DOWNLOAD on a finished job is the
+documented retry path, and `mark_pending` re-queues exactly the rows that
+failed or were never fetched -- but the SPA's `#download` button tested
+`phase !== 'ready_for_review'` and disabled itself. The editor's only route to
+a second clip was another whole search: another Claude spend and another twenty
+minutes of yt-dlp.
+
+FIXED in repo 2026-08-19, dashboard 0.7.1: the button accepts both phases. The
+server's 400 ("nothing new is selected") and 409 ("you already have a job
+running") already arrive as toasts, and a permanently grey button is not a
+better error message than either.
+
 ## Open — residuals from the 2026-08-14 fix pass
 
 ### R16 — eight 08-14 findings deliberately not fixed

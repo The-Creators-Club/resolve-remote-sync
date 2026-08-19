@@ -187,6 +187,29 @@ YOUTUBE_HOST_SUFFIXES = (".googlevideo.com",)
 # there to hold (180 s).
 HTTP_TIMEOUT_SECONDS = 15.0
 
+# How long a fleet call keeps retrying a TRANSPORT failure before it gives up
+# (CR-31, 2026-08-19). The dashboard container restarted mid-job -- a three
+# second outage -- and the clip-status POST that landed in it raised
+# ConnectionRefused, which propagated out of _download_all, out of run(), and
+# ended the whole local download at clip 2 of 22. The lease then expired and
+# the server reclaimed the job, so the remaining 20 clips downloaded onto the
+# NAS, where lane B does not bring YouTube originals down: the editor lost
+# their footage to a blip they never saw.
+#
+# Sized against the lease, not against patience. The server's lease is 180 s
+# and the heartbeat thread renews it every 30 s, so the worst case is a lease
+# that is already 30 s old when the retry starts: 30 + this budget + one final
+# HTTP_TIMEOUT_SECONDS has to stay comfortably under 180. It is a budget on
+# ELAPSED time rather than an attempt count for exactly that reason -- six
+# attempts that each time out at 15 s is 90 s of wall clock, not six seconds.
+#
+# TRANSPORT failures only. An HTTP status is an ANSWER (default_request's rule)
+# and 410 is the end of the job: retrying either of those is how a reclaim
+# becomes a ping-pong.
+CALL_RETRY_BUDGET_SECONDS = 60.0
+CALL_RETRY_FIRST_BACKOFF = 2.0
+CALL_RETRY_MAX_BACKOFF = 15.0
+
 # One clip's whole yt-dlp run, merge included. Generous for an editor on a
 # hotel link and a 1080p feature-length clip; bounded because an unbounded
 # wait would hold the job's lease -- and therefore the server's fallback --
@@ -682,10 +705,20 @@ class FleetClient:
     """
 
     def __init__(self, deps: Deps, editor: str,
-                 timeout: float = HTTP_TIMEOUT_SECONDS) -> None:
+                 timeout: float = HTTP_TIMEOUT_SECONDS,
+                 should_stop: Optional[Callable[[], bool]] = None,
+                 sleep: Optional[Callable[[float], None]] = None,
+                 clock: Optional[Callable[[], float]] = None) -> None:
         self.deps = deps
         self.editor = editor
         self.timeout = timeout
+        # The job's own stop predicate, so a retry loop does not sit out its
+        # budget after the tray has been told to quit or the lease is known
+        # lost. Defaulting to "never stop" keeps every existing caller (and
+        # every test that builds a bare client) working unchanged.
+        self.should_stop = should_stop or (lambda: False)
+        self._sleep = sleep or time.sleep
+        self._clock = clock or time.monotonic
 
     def _url(self, suffix: str) -> str:
         return f"{self.deps.dashboard_url}{API_PREFIX}{suffix}"
@@ -706,11 +739,54 @@ class FleetClient:
         }
 
     def _call(self, method: str, suffix: str, body: Optional[dict] = None):
-        status, parsed = self.deps.request(
-            method, self._url(suffix), body, self._headers(), self.timeout)
-        if status == 410:
-            raise LeaseLost(_detail_of(parsed) or "this job is no longer yours")
-        return status, parsed
+        """One fleet call, retrying a TRANSPORT failure inside the lease.
+
+        The retry exists because of CR-31: `deps.request` raises for "no route,
+        DNS, timeout, a body that is not JSON", and every one of those used to
+        end the job -- the exception left _call, left _download_all, and
+        run()'s catch-all logged "job N failed" and stopped with 20 of 22 clips
+        undownloaded. A dashboard restart is three seconds; the lease is 180.
+        Nothing about that is a reason to hand the job back.
+
+        What is NOT retried, and must never be: a status code. 410 is the end
+        of the job (the module's second rule) and every other code is an answer
+        the caller branches on. Only the raised transport failure gets another
+        go, and only until CALL_RETRY_BUDGET_SECONDS is spent -- after which
+        the exception propagates exactly as it did before, because a dashboard
+        that has been unreachable for a minute has already let the lease lapse
+        and the server is downloading what we did not.
+        """
+        deadline = self._clock() + CALL_RETRY_BUDGET_SECONDS
+        backoff = CALL_RETRY_FIRST_BACKOFF
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                status, parsed = self.deps.request(
+                    method, self._url(suffix), body, self._headers(),
+                    self.timeout)
+            except Exception as exc:
+                # No budget left, or the job is over anyway: raise, and let the
+                # caller do what it has always done with an unreachable server.
+                if self.should_stop() or self._clock() >= deadline:
+                    raise
+                # Logged at WARNING on the first go and DEBUG after: an outage
+                # long enough to matter should be one line in the log an editor
+                # can be asked for, not a stream of them.
+                log.log(logging.WARNING if attempt == 1 else logging.DEBUG,
+                        "ytdl: %s %s failed (%s) -- retrying for up to %.0fs",
+                        method, suffix, exc, CALL_RETRY_BUDGET_SECONDS)
+                self._sleep(min(backoff, max(0.0, deadline - self._clock())))
+                backoff = min(backoff * 2, CALL_RETRY_MAX_BACKOFF)
+                if self.should_stop():
+                    raise
+                continue
+            if attempt > 1:
+                log.info("ytdl: %s %s succeeded on attempt %s", method, suffix,
+                         attempt)
+            if status == 410:
+                raise LeaseLost(_detail_of(parsed) or "this job is no longer yours")
+            return status, parsed
 
     def claim(self, job_id: int, ytdlp_version: Optional[str],
               free_bytes: Optional[int]) -> Optional[dict]:
@@ -1253,7 +1329,15 @@ class DownloadJob:
             return
 
         editor = cap["editor"]
-        self.client = FleetClient(self.deps, editor)
+        # should_stop is the job's own predicate: _call's retry (CR-31) must
+        # not sit out a 60 s budget after the tray has asked us to quit or the
+        # heartbeat has already learned the lease is gone.
+        # The sleep is the stop Event's wait, not time.sleep: a tray shutdown
+        # during a backoff should be felt at once rather than up to
+        # CALL_RETRY_MAX_BACKOFF later.
+        self.client = FleetClient(self.deps, editor,
+                                  should_stop=self._should_stop,
+                                  sleep=self._stop.wait)
         lease = self.client.claim(self.job_id, cap["ytdlp_version"], free)
         if lease is None:
             return

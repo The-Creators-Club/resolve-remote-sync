@@ -67,6 +67,15 @@ ARCHIVE_REMOTE_REL = "Assets/B-roll Archive"
 # The music library's NAS-side folder; the local half is
 # music_server.MUSIC_LIBRARY_REL. Same pinning rule as the archive pair.
 MUSIC_REMOTE_REL = "Assets/Music"
+# The project tree's NAS-side folder; the local half is
+# ytdl_server.PROJECTS_REL. Third caller, third folder, same registry
+# (CR-32, 2026-08-19): a YouTube original the SERVER downloaded lands only on
+# the NAS -- lane B has not carried `/Youtube/**` down since 2026-08-16 -- so
+# without a per-file pull there was no route by which the editor who asked for
+# the clip could ever hold it. Unlike the archive and the library, this folder
+# IS partly synced: the fetch is for the files the lane deliberately leaves
+# behind, and it writes them exactly where a lane would have.
+PROJECTS_REMOTE_REL = "Projects"
 
 STATE_DOWNLOADING = "downloading"
 STATE_DONE = "done"

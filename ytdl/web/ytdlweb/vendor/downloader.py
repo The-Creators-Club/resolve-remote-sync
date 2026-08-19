@@ -198,6 +198,30 @@ def build_opts(outdir: str, quality: str, container: str = "mp4",
         # is /.cache, which uid 3000 cannot create. Left alone it raises
         # PermissionError and re-fetches the solver on EVERY call.
         "cachedir": cache_dir(),
+        # [vendor] CR-33 (2026-08-19). yt-dlp resolves its scratch directory as
+        # `sanitize_path(os.path.join(paths['home'], paths['temp']),
+        # force=windowsfilenames)`, and with no `paths` at all that is
+        # sanitize_path('', force=True) -- which in 2026.07.04 is
+        # os.path.normpath('') == '.'. `_check_formats` then opens a probe file
+        # in '.', and this process's cwd is '/' (run.sh never chdirs), which
+        # uid 3000 cannot write:
+        #
+        #   [Errno 13] Permission denied: '/tmpf1m0z55x.tmp'
+        #
+        # Every clip whose format ladder made yt-dlp test a format failed on
+        # that, instantly and with no other symptom, while clips that skipped
+        # the test downloaded normally -- so it read as "some YouTube links are
+        # broken" rather than as a path bug (an editor, 2026-08-19).
+        #
+        # `home` and not `temp`: temp is where yt-dlp puts `.part` files and
+        # fragments, and moving those out of the clip's own folder would take
+        # the partial-cleanup, dedupe and disown paths with it. `home` is only
+        # ever JOINED with the filename, and outtmpl above is absolute, so an
+        # absolute path wins os.path.join and prepare_filename is byte-identical
+        # with and without this (measured in the live container). windowsfilenames
+        # stays on: it is half of the naming contract with ytdl_common, which the
+        # companion's copy of the outtmpl has to match exactly.
+        "paths": {"home": outdir},
     }
     if cookies_browser:
         opts["cookiesfrombrowser"] = (cookies_browser, None, None, None)

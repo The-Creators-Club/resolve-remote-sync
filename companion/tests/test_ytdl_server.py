@@ -893,3 +893,162 @@ def test_the_readme_snippet_documents_the_projects_share(tmp_path):
     text = readme_path.read_text(encoding="utf-8")
     assert "projects" in text.lower()
     assert "<local_root>/Projects" in text
+
+
+# ---------------------------------------------------------------------------
+# POST /ytdl/fetch -- CR-32, getting a NAS-only original onto this machine
+# ---------------------------------------------------------------------------
+
+
+def _cfg(tmp_path) -> dict:
+    return {
+        "local_root": str(tmp_path),
+        "remote": "creators_club_sftp",
+        "remote_root": "/mnt/tank/TheCreatorsPool/Creators_Club",
+        "rclone_path": "rclone",
+    }
+
+
+def test_a_clip_already_here_is_not_a_download(tree, tmp_path):
+    """A re-click, a poll that crossed the finish line, or a clip this machine
+    downloaded itself. `done` without spending an rclone on it."""
+    root, _clip = tree
+
+    def never(*a, **kw):
+        pytest.fail("it started a download for a file that was already here")
+
+    status, body = ytdl_server.build_fetch_response(
+        {"rel_path": REL}, _mounts(root), ccsync_cfg=_cfg(tmp_path),
+        fetcher=never)
+    assert status == 200
+    assert body["ok"] is True and body["state"] == "done"
+
+
+def test_a_missing_clip_is_fetched_from_the_projects_folder_on_the_nas(tmp_path):
+    """The whole point of CR-32. Lane B has not carried `/Youtube/**` down
+    since 2026-08-16, so a job that fell back to the server left its originals
+    on the NAS with no route to the editor who asked for them. Measured on one
+    live job 2026-08-19: 2 clips on the editor's disk, 20 on the NAS.
+
+    Pinned here: the NAS-side folder it hangs off. `Assets/B-roll Archive`
+    would silently fetch nothing, forever.
+    """
+    from ccsync_companion import broll_fetch
+
+    root = tmp_path / "Projects"
+    (root / Path(*REL.split("/"))).parent.mkdir(parents=True)
+    seen: list = []
+
+    def fetcher(cfg, rel_path, dest, remote_rel=None):
+        seen.append((rel_path, dest, remote_rel))
+        return {"state": "downloading", "progress": {"percent": 12}}
+
+    status, body = ytdl_server.build_fetch_response(
+        {"rel_path": REL}, _mounts(root), ccsync_cfg=_cfg(tmp_path),
+        fetcher=fetcher)
+
+    assert status == 200
+    assert body["ok"] is True and body["state"] == "downloading"
+    assert body["progress"] == {"percent": 12}
+    rel_path, dest, remote_rel = seen[0]
+    assert rel_path == REL
+    assert remote_rel == broll_fetch.PROJECTS_REMOTE_REL == "Projects"
+    # The destination is THIS machine's translation of the rel path, derived
+    # from the mount table -- never anything the page sent.
+    assert Path(dest) == root / Path(*REL.split("/"))
+
+
+def test_a_fetch_that_lands_nothing_is_a_failure_not_a_success(tmp_path):
+    """poll_fetch pops `done` and leaves the filesystem as the authority
+    (broll_fetch's header). A `done` with no file is a download that reported
+    success and left nothing -- the one shape that would otherwise send the
+    editor to an empty folder with a cheerful message."""
+    root = tmp_path / "Projects"
+    (root / Path(*REL.split("/"))).parent.mkdir(parents=True)
+
+    status, body = ytdl_server.build_fetch_response(
+        {"rel_path": REL}, _mounts(root), ccsync_cfg=_cfg(tmp_path),
+        fetcher=lambda *a, **kw: {"state": "done"})
+    assert status == 200
+    assert body["ok"] is False and body["state"] == "failed"
+
+
+def test_a_fetch_out_of_the_tree_is_refused_before_any_rclone(tmp_path):
+    """Same containment as reveal's, and it has to be: this one WRITES. The
+    page names a path, so the path is the attack surface."""
+    root = tmp_path / "Projects"
+    root.mkdir(parents=True)
+
+    def never(*a, **kw):
+        pytest.fail("it started a download for a path outside the tree")
+
+    status, body = ytdl_server.build_fetch_response(
+        {"rel_path": "../../../etc/passwd"}, _mounts(root),
+        ccsync_cfg=_cfg(tmp_path), fetcher=never)
+    assert status == 400
+    assert body["ok"] is False
+
+
+def test_a_machine_that_cannot_reach_the_nas_says_so_and_downloads_nothing(tmp_path):
+    """The refusals are editor-facing text and this route shows them in the
+    same toast reveal uses. Driven through the REAL broll_fetch.poll_fetch,
+    with no fetcher stub: prereq_error runs before a job is registered or a
+    thread is started, so an unconfigured machine costs no rclone -- and the
+    route must pass the sentence through rather than inventing its own.
+    """
+    root = tmp_path / "Projects"
+    (root / Path(*REL.split("/"))).parent.mkdir(parents=True)
+
+    cfg = _cfg(tmp_path)
+    cfg["remote"] = ""
+    status, body = ytdl_server.build_fetch_response(
+        {"rel_path": REL}, _mounts(root), ccsync_cfg=cfg)
+    assert status == 200
+    assert body["ok"] is False and body["state"] == "failed"
+    assert "remote" in body["message"]
+
+
+def test_a_fetch_into_a_tree_that_is_not_mounted_is_refused(tmp_path, monkeypatch):
+    """fetch_refusal's own question, and the reason it exists (2026-08-17,
+    COMMERCIAL_READINESS item 5): on macOS an rclone write into an absent
+    /Volumes/<Name> does not fail -- it creates the directory on the BOOT
+    volume and fills the internal disk. This route creates its own destination
+    directories, so it has to ask the guard before it writes anything."""
+    from ccsync_companion import broll_fetch, root_guard
+
+    root = tmp_path / "Projects"
+    (root / Path(*REL.split("/"))).parent.mkdir(parents=True)
+
+    def never(*a, **kw):
+        pytest.fail("it started a download into an unmounted tree")
+
+    monkeypatch.setattr(broll_fetch.root_guard, "probe_root",
+                        lambda _root: root_guard.ROOT_ABSENT)
+    status, body = ytdl_server.build_fetch_response(
+        {"rel_path": REL}, _mounts(root), ccsync_cfg=_cfg(tmp_path),
+        fetcher=never)
+    assert status == 200
+    assert body["ok"] is False and body["state"] == "failed"
+    assert "mounted" in body["message"]
+
+
+def test_reveal_marks_an_absent_clip_so_the_page_can_offer_the_fetch(tree, tmp_path):
+    """`absent` is the cue for the [ GET IT FROM THE NAS ] action. It rides on
+    BOTH reveal answers -- ok:false (nothing to open) and ok:true (the folder
+    opened, the clip was not in it) -- because both are the same dead end to
+    the editor."""
+    root, clip = tree
+    clip.unlink()
+
+    status, body = ytdl_server.build_reveal_response(
+        {"rel_path": REL}, _mounts(root), spawner=lambda argv: None,
+        platform="win32")
+    assert status == 200
+    assert body["absent"] is True
+
+    # ...and a clip that IS here is not offered a download it does not need.
+    clip.write_bytes(b"fake video bytes")
+    status, body = ytdl_server.build_reveal_response(
+        {"rel_path": REL}, _mounts(root), spawner=lambda argv: None,
+        platform="win32")
+    assert body["ok"] is True and body["absent"] is False

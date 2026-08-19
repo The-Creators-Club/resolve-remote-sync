@@ -969,6 +969,38 @@ def _reclaim_local_job(c, job, outdir):
     return landed, queued
 
 
+def _await_local_claim(c, job_id, sleep=time.sleep):
+    """Give the requester's machine first refusal on this job. -> did it claim.
+
+    CR-34 (2026-08-19), and it is a scheduling bug rather than a logic one:
+    every guard around the two executors was correct and the outcome was still
+    wrong. `start_download` writes the pending rows and nudges this worker in
+    one request; the SPA then probes 127.0.0.1:8899 and the companion claims.
+    Measured live: claim at T+161 ms, worker already holding the only row. The
+    companion asked for its manifest, was told 0 clips -- truthfully, the row
+    was `downloading` on the server by then -- logged "0 clip(s)" and stood
+    down. The clip landed on the NAS, where lane B has not brought YouTube
+    originals down since 2026-08-16. Nothing was corrupted; the editor simply
+    never got their footage, on every selection small enough that the worker
+    did not still have clips left to hand back.
+
+    Polled rather than evented because the claim arrives on a request thread in
+    this process today and might not tomorrow (the row in SQLite is the only
+    thing both ends agree on), and because the poll is the honest expression of
+    "wait for at most N seconds": it ends the instant a lease appears.
+    """
+    if not config.LOCAL_DOWNLOAD or config.LOCAL_CLAIM_GRACE_SECONDS <= 0:
+        return False
+    deadline = time.monotonic() + config.LOCAL_CLAIM_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        if db.lease_active(db.get_job(c, job_id)):
+            log.info('job %s: the requester claimed it during the grace '
+                     'period; the server stands down', job_id)
+            return True
+        sleep(0.1)
+    return False
+
+
 def _phase_download(c, job):
     """Fetch the editor's selection into <project>/Youtube/<term_dir>/.
 
@@ -998,6 +1030,19 @@ def _phase_download(c, job):
     # pending list is read because it is what decides what is still pending.
     if job['download_mode'] == db.MODE_LOCAL:
         _reclaim_local_job(c, job, outdir)
+
+    # Hold the door open for the requester's own machine (CR-34). See
+    # config.LOCAL_CLAIM_GRACE_SECONDS: without this the worker takes the first
+    # row ~160 ms before the browser's claim can land, and every one-or-two-clip
+    # selection downloads onto the NAS instead of onto the editor's disk.
+    #
+    # Returning here rather than falling through to the loop (whose first
+    # iteration would make the same check and the same exit) only because the
+    # explicit version cannot be broken by a later edit to the loop. A claim
+    # that arrives AFTER the grace is still handled exactly as before.
+    if _await_local_claim(c, job_id):
+        _clear_progress(job_id)
+        return
 
     pending = db.pending_videos(c, job_id)
     if not job['dl_total']:
@@ -1082,7 +1127,15 @@ def _phase_download(c, job):
             res, note = _download_video(job_id, vid, v['url'], outdir,
                                         job['quality'], hook, status)
         except Exception as exc:  # noqa: BLE001 - one dead video, not one dead job
-            log.warning('job %s: download failed for %s (%s)', job_id, vid, exc)
+            # exc_info since CR-33: the clip row shows the editor `str(exc)`,
+            # which for that bug was "[Errno 13] Permission denied:
+            # '/tmpf1m0z55x.tmp'" -- a path that appears nowhere in this repo,
+            # from a frame nothing recorded. Diagnosing it needed the failure
+            # reproduced by hand inside the container. The traceback costs a few
+            # lines in the container log and is the difference between a bug
+            # report and a bug hunt; the editor-facing text is unchanged.
+            log.warning('job %s: download failed for %s (%s)', job_id, vid, exc,
+                        exc_info=True)
             _record_failure(c, job_id, vid, outdir, before, exc)
             if _bot_checked(exc):
                 raise BotCheckError(BOT_CHECK_NOTE) from exc

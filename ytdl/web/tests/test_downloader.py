@@ -218,3 +218,54 @@ def test_an_avc_file_at_a_reduced_frame_rate_is_stream_copied(monkeypatch, tmp_p
     _fake_run(monkeypatch, stdout=_streams(avg='24000/1001', r='24/1'))
     assert downloader.ensure_edit_ready(str(src), 'h264') == str(src)
     assert src.read_bytes() == b'avc'
+
+
+# ------------------------------------------------------ the scratch directory
+
+def test_yt_dlps_scratch_dir_is_the_outdir_and_never_the_process_cwd(tmp_path):
+    """CR-33 (2026-08-19): every clip whose format ladder made yt-dlp TEST a
+    format died instantly with
+
+        [Errno 13] Permission denied: '/tmpf1m0z55x.tmp'
+
+    yt-dlp resolves its scratch dir as sanitize_path(join(paths['home'],
+    paths['temp']), force=windowsfilenames). With no `paths` that is
+    sanitize_path('', force=True), which is os.path.normpath('') == '.' -- and
+    the container's cwd is '/', which uid 3000 cannot write. Nothing in this
+    repo ever named that path, which is what made it hard to find.
+
+    The assertion is on `paths['home']` rather than on the resolved scratch dir
+    because the resolution is yt-dlp's; what this file owns is that we hand it
+    a real, writable, absolute directory instead of nothing at all.
+    """
+    opts = downloader.build_opts(str(tmp_path), quality='1080p')
+    assert opts['paths'] == {'home': str(tmp_path)}
+
+
+def test_the_scratch_dir_did_not_move_the_output_filename(tmp_path):
+    """`home` is joined with the filename, and the outtmpl is ABSOLUTE -- so
+    os.path.join keeps the absolute half and the naming contract with
+    ytdl_common (which the companion's outtmpl has to match byte for byte) is
+    untouched. This is the half of CR-33's fix that could have gone wrong
+    silently: a clip filed one directory up would still download.
+    """
+    yt_dlp = pytest.importorskip('yt_dlp')
+    opts = downloader.build_opts(str(tmp_path), quality='1080p')
+    info = {'id': 'abc123', 'title': 'A Clip', 'uploader': 'Someone', 'ext': 'mp4'}
+
+    with_paths = yt_dlp.YoutubeDL(dict(opts, quiet=True)).prepare_filename(info)
+    without = dict(opts)
+    without.pop('paths')
+    bare = yt_dlp.YoutubeDL(dict(without, quiet=True)).prepare_filename(info)
+
+    assert with_paths == bare
+    assert str(tmp_path) in with_paths
+
+
+def test_temp_is_left_alone_so_partials_stay_beside_their_clip(tmp_path):
+    """Setting paths['temp'] would move `.part` files and fragments out of the
+    clip's folder, and the partial-cleanup, dedupe and disown paths in worker.py
+    all rglob that folder. CR-33 deliberately set only `home`.
+    """
+    opts = downloader.build_opts(str(tmp_path), quality='1080p')
+    assert 'temp' not in opts['paths']

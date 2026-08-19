@@ -213,6 +213,26 @@ DEV_PROJECTS = os.environ.get('YTDL_DEV_PROJECTS') or ''
 # what guards those, and a companion can only act on a job id the SPA gave it.
 LOCAL_DOWNLOAD = (os.environ.get('YTDL_LOCAL_DOWNLOAD') or '') == '1'
 
+# How long the worker holds the door open for the requester's own machine
+# before it starts downloading itself (CR-34, 2026-08-19).
+#
+# start_download nudges this worker in the same millisecond the SPA starts
+# probing the requester's loopback, and the worker wins: measured on a live
+# one-clip job, /download returned at T+0.000, the worker took the row, and the
+# companion's claim landed at T+0.161 to find `pending_videos` empty. It logged
+# "job 50 -- 0 clip(s)", stood down, and the clip downloaded onto the NAS --
+# which no lane brings back down. Every SMALL selection went that way; job 46's
+# 22 clips only worked because the worker was two clips in when the claim
+# landed and handed back the other 20.
+#
+# So: when the feature is on, `_phase_download` waits up to this long for a
+# claim before it takes the first row. Costs a job with no companion behind it
+# a couple of seconds once, which is nothing beside the download that follows,
+# and costs a job WITH one nothing at all -- the wait ends the moment the lease
+# appears. Zero disables it, which is also what an off LOCAL_DOWNLOAD means.
+LOCAL_CLAIM_GRACE_SECONDS = float(
+    os.environ.get('YTDL_LOCAL_CLAIM_GRACE_SECONDS') or '4')
+
 # How long a claim is good for, and how often the holder must say it is alive.
 # 180/30 ship as the plan's numbers: three heartbeats' worth of slack, so one
 # missed beat (a suspended laptop, a busy tray) does not cost the lease, and a

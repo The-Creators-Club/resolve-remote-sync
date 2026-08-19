@@ -1102,3 +1102,71 @@ def test_the_feature_ships_off_and_nothing_else_changes(client, con,
 def test_the_flag_is_reported_when_it_is_on(client, monkeypatch):
     monkeypatch.setattr(config, 'LOCAL_DOWNLOAD', True)
     assert client.get('/api/health').json()['local_download'] is True
+
+
+# ------------------------------------------ CR-34: who gets to the row first
+
+def test_the_worker_holds_the_door_open_for_the_requesters_machine(
+        con, monkeypatch, fake_downloader):
+    """CR-34 (2026-08-19). Every guard between the two executors was correct
+    and the outcome was still wrong: `start_download` writes the pending rows
+    and nudges the worker in ONE request, and the worker took the only row
+    ~160 ms before the browser's claim could land. The companion then asked for
+    its manifest, was told 0 clips (truthfully -- the row was `downloading` on
+    the server), logged "job 50 -- 0 clip(s)" and stood down. The clip landed
+    on the NAS, which no lane brings back down.
+
+    Measured on the live fleet, not imagined: job 50, one clip, /download at
+    T+0.000 and the claim at T+0.161.
+    """
+    monkeypatch.setattr(config, 'LOCAL_DOWNLOAD', True)
+    monkeypatch.setattr(config, 'LOCAL_CLAIM_GRACE_SECONDS', 5.0)
+    job = _job(con, ids=('aaaaaaaaaaa',))
+
+    # The claim lands DURING the grace, exactly as the companion's does.
+    ticks = {'n': 0}
+
+    def sleep(_seconds):
+        ticks['n'] += 1
+        if ticks['n'] == 2:
+            db.claim_download(con, job['id'], USER, config.LEASE_SECONDS)
+
+    assert worker._await_local_claim(con, job['id'], sleep=sleep) is True
+
+    worker.run_job(con, job['id'])
+    # Not one byte fetched by the server, and the row is still the companion's
+    # to take: `pending`, which is what its manifest is built from.
+    assert fake_downloader.calls == []
+    assert db.get_video(con, job['id'], 'aaaaaaaaaaa')['dl_state'] == 'pending'
+
+
+def test_the_grace_ends_and_the_server_downloads_when_nobody_claims(
+        con, monkeypatch, fake_downloader):
+    """The other half, and the one that must not regress: a fleet with no
+    companion able to take the job waits a couple of seconds ONCE and then
+    behaves exactly as it always did. The wait is bounded by the clock, not by
+    an answer that may never come."""
+    monkeypatch.setattr(config, 'LOCAL_DOWNLOAD', True)
+    monkeypatch.setattr(config, 'LOCAL_CLAIM_GRACE_SECONDS', 0.3)
+    job = _job(con, ids=('aaaaaaaaaaa',))
+
+    assert worker._await_local_claim(con, job['id'], sleep=lambda _s: None) is False
+
+    worker.run_job(con, job['id'])
+    fresh = db.get_job(con, job['id'])
+    assert fresh['phase'] == 'done'
+    assert [c[0] for c in fake_downloader.calls] == ['aaaaaaaaaaa']
+
+
+def test_no_grace_at_all_when_the_feature_is_off(con, monkeypatch):
+    """LOCAL_DOWNLOAD off is the rollback switch (§10), and it has to mean
+    byte-for-byte the old behaviour -- including not making every job on every
+    fleet that never enabled this wait for a claim that cannot come."""
+    monkeypatch.setattr(config, 'LOCAL_DOWNLOAD', False)
+    monkeypatch.setattr(config, 'LOCAL_CLAIM_GRACE_SECONDS', 60.0)
+    job = _job(con, ids=('aaaaaaaaaaa',))
+
+    def never(_seconds):
+        raise AssertionError('it waited for a claim with the feature off')
+
+    assert worker._await_local_claim(con, job['id'], sleep=never) is False

@@ -2929,12 +2929,21 @@ def test_the_reveal_goes_to_the_companion_loopback_with_a_relative_path():
     letter."""
     js = _js()
     assert "const COMPANION_URL = 'http://127.0.0.1:8899';" in js
-    body = js[js.index('async function reveal(d)'):js.index('function noCompanion(')]
+    # Sliced to reveal() ALONE. It used to run to `function noCompanion(`,
+    # which stopped being the next thing in the file when CR-32 put the fetch
+    # between them -- and the count below then read the fetch's error paths as
+    # reveal's.
+    body = js[js.index('async function reveal(d)'):
+              js.index('// ------------------------------------------------- '
+                       'getting a clip off the NAS')]
     assert '`${COMPANION_URL}/ytdl/reveal`' in body, body
     assert 'rel_path: d.reveal_path' in body, body
     # every failure shape ends at the same place: a message and the path --
     # nothing listening, a companion too old for the route, and any refusal
     assert body.count('noCompanion(') == 3, body
+    # ...and the ONE answer that is not a failure: the clip is on the NAS, so
+    # it is offered rather than mourned (CR-32).
+    assert body.count('offerFetch(') == 1, body
 
 
 def test_the_absent_companion_never_reaches_an_error_state():
@@ -3226,3 +3235,36 @@ def test_the_executor_badge_reads_as_a_status_chip_not_a_warning():
     assert 'var(--green)' in local, local
     # beside the badge it acts on, not shoved to the right edge with [ CANCEL ]
     assert '#dlserver { margin-left: 0; }' in css
+
+
+def test_download_stays_available_on_a_finished_job_in_source():
+    """CR-35 (2026-08-19). start_download has accepted `done` as well as
+    `ready_for_review` since YTDL-16 -- pressing DOWNLOAD on a finished job is
+    the documented retry, and the one route to a clip the editor did not pick
+    the first time. The grid's button did not agree, so it greyed out for good
+    the moment the first download finished and the only way to a second clip
+    out of 67 was another whole search (an editor, 2026-08-19).
+    """
+    js = _js()
+    body = js[js.index("$('#download').textContent"):
+              js.index('function card(v)')]
+    assert "'ready_for_review'" in body and "'done'" in body
+    # ...and it is still disabled with nothing ticked: the button's OTHER job.
+    assert '!sel.length' in body
+
+
+def test_an_absent_clip_is_offered_a_fetch_in_source():
+    """CR-32: reveal's `absent` is what turns "it is on the NAS" from a dead
+    end into a download. Both halves pinned -- the flag the companion sets and
+    the route the page calls -- because either alone is a button that does
+    nothing."""
+    js = _js()
+    assert 'body.absent' in js
+    assert '/ytdl/fetch' in js
+    body = js[js.index('async function runFetch(d)'):js.index('function fetchLine(d, body)')]
+    # A 404 is an old companion, not a broken feature: same distinction reveal
+    # already makes.
+    assert 'res.status === 404' in body
+    # The poll is what shows progress; without it the toast lies about a
+    # download that is still running.
+    assert "body.state === 'downloading'" in body and 'setTimeout' in body

@@ -1089,7 +1089,18 @@ function renderGrid() {
   $('#reviewsum').textContent =
     `${plural(vis.length, 'clip', 'clips')} · ${sel.length} selected`;
   $('#download').textContent = `DOWNLOAD ${sel.length}`;
-  $('#download').disabled = !sel.length || m.job.phase !== 'ready_for_review';
+  // `done` as well as `ready_for_review` (CR-35, 2026-08-19). start_download
+  // has accepted both since YTDL-16 -- pressing DOWNLOAD on a finished job is
+  // the documented way to fetch the clips that failed, and mark_pending re-
+  // queues exactly the rows that failed or were never fetched -- but this line
+  // did not, so the button died the moment the first download finished. The
+  // editor's only route to a SECOND clip out of a grid of 67 was another whole
+  // search: another Claude spend, another twenty minutes of yt-dlp (an editor,
+  // 2026-08-19). The 400 for "nothing new is selected" and the 409 for "you
+  // already have a job running" are the server's to give, and both already
+  // arrive as a toast; a permanently grey button is not a better error message.
+  $('#download').disabled =
+    !sel.length || !['ready_for_review', 'done'].includes(m.job.phase);
 }
 
 function card(v) {
@@ -1645,6 +1656,14 @@ async function reveal(d) {
   }
   let body = null;
   try { body = await res.json(); } catch { /* not JSON; status is all we have */ }
+  // `absent` is the companion saying "the NAS has this clip and I do not"
+  // (CR-32). It rides on BOTH answers: ok:false when there was nothing to open
+  // at all, and ok:true when the folder opened but the clip was not in it. Both
+  // are the same dead end for the editor, and both are now offerable.
+  if (body && body.absent) {
+    offerFetch(d, (body && body.message) || 'that clip is not on this machine');
+    return;
+  }
   if (!res.ok || !body || body.ok === false) {
     const message = (body && (body.message || body.error))
       || `the companion answered HTTP ${res.status}`;
@@ -1652,6 +1671,82 @@ async function reveal(d) {
     return;
   }
   toast((body && body.message) || 'opened the folder on this machine');
+}
+
+// ------------------------------------------------- getting a clip off the NAS
+//
+// CR-32 (2026-08-19). A job that ran on the SERVER leaves its originals on the
+// NAS, and lane B has not carried the Youtube tree down since 2026-08-16 -- so
+// until this button there was no route at all by which the editor who asked for
+// the clip could end up holding it. Measured on one live job: 2 clips on the
+// editor's disk, 20 on the NAS. (Written without a leading slash on purpose:
+// test_mounted_prefix scans the shipped bytes, comments included, and a
+// root-relative-looking token is exactly what it is there to catch.)
+//
+// Offered at the moment the editor hits the wall rather than as a permanent
+// button on every row: the page cannot know which clips are local, and a
+// [ GET ] beside a clip that is already here is a button that does nothing.
+
+const FETCH_POLL_MS = 1500;
+
+function offerFetch(d, why) {
+  toast(`${why}`, false, 20000,
+        {label: '[ GET IT FROM THE NAS ]', run: () => runFetch(d)});
+}
+
+async function runFetch(d) {
+  let res;
+  try {
+    res = await fetch(`${COMPANION_URL}/ytdl/fetch`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({rel_path: d.reveal_path}),
+    });
+  } catch {
+    noCompanion(d, 'couldn’t reach the CC Sync companion to fetch that clip');
+    return;
+  }
+  if (res.status === 404) {
+    // The route landed in 0.9.4. An older tray app is an upgrade away from
+    // this working, which is a different sentence from "it is broken".
+    noCompanion(d, 'your companion is too old to fetch clips from the NAS; it '
+                + 'will be able to after the next upgrade');
+    return;
+  }
+  let body = null;
+  try { body = await res.json(); } catch { /* status is all we have */ }
+  if (!res.ok || !body) {
+    noCompanion(d, `the companion answered HTTP ${res.status}`);
+    return;
+  }
+  if (body.state === 'downloading') {
+    // One poll chain per click, and the companion's own registry is what stops
+    // two of them becoming two rclones: jobs are keyed by destination, so a
+    // second click joins the first download instead of racing it.
+    toast(fetchLine(d, body), false, FETCH_POLL_MS * 2);
+    setTimeout(() => runFetch(d), FETCH_POLL_MS);
+    return;
+  }
+  if (body.ok) {
+    // Here now. Open the folder, which is what the original click was for.
+    toast(body.message || 'the clip is on this machine now');
+    reveal(d);
+    return;
+  }
+  noCompanion(d, body.message || 'the download failed');
+}
+
+// The progress line, degrading to a bare "downloading" whenever the companion
+// sends no numbers (the first poll, always) rather than showing "NaN%".
+function fetchLine(d, body) {
+  const p = body.progress || {};
+  const name = winPath(d.reveal_path).split('\\').pop();
+  // `percent` is present only once rclone has reported a total (broll_fetch's
+  // FetchJob.progress computes it there and nowhere else), so its absence is
+  // the ordinary first-poll state, not an error.
+  return Number.isFinite(p.percent)
+    ? `getting ${name} from the NAS - ${p.percent}%`
+    : `getting ${name} from the NAS...`;
 }
 
 // The dead end, made useful. The FOLDER, not the file -- opening it is what

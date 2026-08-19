@@ -1859,3 +1859,111 @@ def test_a_server_with_no_executor_deps_has_no_capability(tmp_path, monkeypatch)
         srv.server_close()
         thread.join(timeout=5)
     assert status == 200 and body["ok"] is False
+
+
+# --------------------------------------------- CR-31: a blip is not a verdict
+
+def test_a_transport_failure_is_retried_inside_the_lease(tmp_path):
+    """CR-31 (2026-08-19). The dashboard container restarted mid-job -- three
+    seconds -- and the clip-status POST that landed in the gap raised
+    ConnectionRefused. It left _call, left _download_all, and run()'s catch-all
+    ended the whole local download at clip 2 of 22. The server then reclaimed
+    the expired lease and downloaded the remaining 20 onto the NAS, where lane
+    B does not bring YouTube originals down: the editor lost their footage to
+    an outage they never saw.
+
+    The lease is 180 s and the heartbeat renews it every 30. Nothing about a
+    three second gap is a reason to hand a job back.
+    """
+    calls: list = []
+    slept: list = []
+
+    def request(method, url, body, headers, timeout):
+        calls.append(url)
+        if len(calls) < 3:
+            raise ConnectionRefusedError(10061, "actively refused")
+        return 200, {"ok": True}
+
+    deps = ex.Deps(make_cfg(tmp_path), request_fn=request)
+    client = ex.FleetClient(deps, "editor2", sleep=slept.append,
+                            clock=lambda: 0.0)
+    client.clip_status(7, VID1, "done", filepath_rel="x.mp4")
+
+    assert len(calls) == 3
+    # Backing off, not hammering: the first wait is the configured one and each
+    # is longer than the last.
+    assert slept == [ex.CALL_RETRY_FIRST_BACKOFF,
+                     ex.CALL_RETRY_FIRST_BACKOFF * 2]
+
+
+def test_the_retry_is_bounded_by_the_lease_and_then_gives_up(tmp_path):
+    """A dashboard that has been unreachable for a minute has already let the
+    lease lapse, and the server is downloading what this machine did not. The
+    budget is on ELAPSED time, not on an attempt count: six attempts that each
+    time out at HTTP_TIMEOUT_SECONDS is 90 s of wall clock, not six seconds."""
+    calls: list = []
+    now = {"t": 0.0}
+
+    def request(method, url, body, headers, timeout):
+        calls.append(url)
+        now["t"] += 30.0          # each attempt burns half the budget
+        raise ConnectionRefusedError(10061, "actively refused")
+
+    deps = ex.Deps(make_cfg(tmp_path), request_fn=request)
+    client = ex.FleetClient(deps, "editor2", sleep=lambda s: None,
+                            clock=lambda: now["t"])
+    with pytest.raises(ConnectionRefusedError):
+        client.manifest(7)
+    # Two attempts, not "until the heat death". The deadline is fixed when the
+    # call starts (t=0 + 60 s): the first attempt ends at t=30 and there is
+    # budget left, the second ends at t=60 and there is not, so it propagates.
+    assert len(calls) == 2
+
+
+def test_a_status_code_is_never_retried(tmp_path):
+    """default_request's rule, and this is the half that must not drift: an
+    HTTP status is an ANSWER. Retrying a 410 would turn the server's one-way
+    reclaim into a ping-pong, and retrying a 500 would multiply a server-side
+    error by six."""
+    calls: list = []
+
+    def request(method, url, body, headers, timeout):
+        calls.append(url)
+        return 500, {"detail": "boom"}
+
+    deps = ex.Deps(make_cfg(tmp_path), request_fn=request)
+    client = ex.FleetClient(deps, "editor2", sleep=lambda s: None)
+    client.clip_status(7, VID1, "done", filepath_rel="x.mp4")
+    assert len(calls) == 1
+
+    calls.clear()
+
+    def gone(method, url, body, headers, timeout):
+        calls.append(url)
+        return 410, {"detail": "reclaimed"}
+
+    client = ex.FleetClient(ex.Deps(make_cfg(tmp_path), request_fn=gone),
+                            "editor2", sleep=lambda s: None)
+    with pytest.raises(ex.LeaseLost):
+        client.heartbeat(7)
+    assert len(calls) == 1
+
+
+def test_a_shutdown_stops_the_retry_at_once(tmp_path):
+    """The tray asking to quit must be felt during a backoff, not up to
+    CALL_RETRY_MAX_BACKOFF later -- which is why the job passes its stop
+    Event's wait() as the sleep."""
+    calls: list = []
+    stopping = {"yes": False}
+
+    def request(method, url, body, headers, timeout):
+        calls.append(url)
+        stopping["yes"] = True
+        raise ConnectionRefusedError(10061, "actively refused")
+
+    deps = ex.Deps(make_cfg(tmp_path), request_fn=request)
+    client = ex.FleetClient(deps, "editor2", sleep=lambda s: None,
+                            should_stop=lambda: stopping["yes"])
+    with pytest.raises(ConnectionRefusedError):
+        client.manifest(7)
+    assert len(calls) == 1

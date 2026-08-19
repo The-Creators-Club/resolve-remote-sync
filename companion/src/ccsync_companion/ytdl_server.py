@@ -1,7 +1,15 @@
 """The YouTube downloader page's "open the folder" action, as a /ytdl route.
 
     POST /ytdl/reveal   {"rel_path": "<path under the Projects root>"}
-    -> {"ok": bool, "message": "<something an editor can read>"}
+    -> {"ok": bool, "absent": bool, "message": "<something an editor can read>"}
+
+    POST /ytdl/fetch    {"rel_path": "<path under the Projects root>"}
+    -> {"ok": bool, "state": "downloading"|"done"|"failed", ...}
+
+`absent` and `/ytdl/fetch` are the two halves of CR-32 (2026-08-19): reveal
+says the clip is on the NAS and not here, and fetch is how the editor gets it.
+Before them, a job that fell back to the server left its originals somewhere no
+lane would ever bring them from.
 
 It hangs off broll_server's listener for exactly the reason the /music/*
 group does: 127.0.0.1:8899 has one server, and a second one holding that port
@@ -151,9 +159,13 @@ SELECT_SWITCH = "/select,"
 # originals sync UP only (2026-08-16); the ones on the NAS that this machine
 # never downloaded stay there. Shared by both not-here branches so the two
 # never drift into telling different stories.
+#
+# Since CR-32 (2026-08-19) this is no longer a dead end, and the sentence says
+# so: POST /ytdl/fetch pulls the one clip down. The explanation stays because
+# "why isn't it here already" is still the editor's actual question.
 NOT_HERE_WHY = ("YouTube originals only sync up, so a clip another editor "
                 "downloaded, or one the server downloaded, stays on the NAS "
-                "(P:\\ on the base rig).")
+                "until you ask for it.")
 
 
 def windows_command_line(argv: list) -> str:
@@ -270,6 +282,12 @@ def build_reveal_response(
 
     path = Path(local)
     folder = path.parent
+    # `absent` is the page's cue to offer the fetch (CR-32): the clip is in the
+    # dashboard's ledger, so the NAS has it, and this machine does not. It rides
+    # on the reveal answer rather than being a probe of its own because the
+    # click that discovers the dead end is the click that should be able to fix
+    # it -- one round trip, no new state in the page.
+    absent = False
     if file_check(str(path)):
         target, select = str(path), True
         message = f"Showing {path.name} in {folder}"
@@ -284,11 +302,13 @@ def build_reveal_response(
         target, select = str(folder), False
         message = (f"{path.name} is not on this machine - opened {folder} instead. "
                    f"{NOT_HERE_WHY}")
+        absent = True
     else:
         # Nothing to point a file manager at. Spawning "explorer <missing>" here
         # would open the editor's Documents folder and look like a bug.
         return 200, {
             "ok": False,
+            "absent": True,
             "message": f"{path} is not on this machine. {NOT_HERE_WHY}",
         }
 
@@ -296,6 +316,7 @@ def build_reveal_response(
     if argv is None:
         return 200, {
             "ok": False,
+            "absent": absent,
             "message": f"opening a folder is only supported on Windows and macOS. "
                        f"The file is at {target}",
         }
@@ -306,5 +327,107 @@ def build_reveal_response(
     except (OSError, ValueError) as exc:
         # ValueError: windows_command_line refused a `"` in the path.
         log.warning("ytdl: could not open the file manager (%s)", exc)
-        return 200, {"ok": False, "message": f"could not open the file manager: {exc}"}
-    return 200, {"ok": True, "message": message}
+        return 200, {"ok": False, "absent": absent,
+                     "message": f"could not open the file manager: {exc}"}
+    return 200, {"ok": True, "absent": absent, "message": message}
+
+
+# -- fetching one clip from the NAS -----------------------------------------
+
+
+def build_fetch_response(
+    body: dict,
+    mounts: dict,
+    ccsync_cfg: Optional[dict] = None,
+    fetcher: Optional[Callable[..., dict]] = None,
+    isfile: Optional[Callable[[str], bool]] = None,
+) -> tuple[int, dict]:
+    """POST /ytdl/fetch. Returns (http_status, json_body).
+
+    Body: {"rel_path": "2026/FF5/Energy Transition/Youtube/<term>/clip.mp4"} --
+    the SAME string /ytdl/reveal takes, and for the same reason: the page is
+    served from the NAS and knows the clip only as a path under the projects
+    root. It names a file it has already seen in the dashboard's download
+    ledger; it does not get to name a destination.
+
+    Why this route exists (CR-32, 2026-08-19). Lane B has not carried
+    `/Youtube/**` down since the 2026-08-16 policy reversal, because requester-
+    first downloads were supposed to put every editor's own clips on their own
+    disk. When a job falls back to the server -- no companion, no capability,
+    a lease that lapsed (CR-31), or a clip the requester's IP was bot-checked
+    on and the server's second-chance sweep fetched -- the original lands on
+    the NAS and NOTHING brought it to the person who asked for it. Measured on
+    a live job 2026-08-19: 2 clips on the editor's disk, 20 on the NAS, and no
+    button anywhere that would move them.
+
+    It is broll_fetch's registry, not a second downloader: one job per
+    destination path, the same two-at-once cap, the same `rclone copyto` with
+    the operator's transport tuning, the same kill on shutdown. The ONLY new
+    thing is the NAS-side folder it hangs off (broll_fetch.PROJECTS_REMOTE_REL).
+
+    Answers the same three states the b-roll insert does, which is what the
+    page polls:
+      {"ok": true,  "state": "done"}         -- it is here now (or already was)
+      {"ok": true,  "state": "downloading", "progress": {...}}
+      {"ok": false, "state": "failed", "message": "<editor-readable>"}
+    """
+    # Deferred for broll_server's import cycle, exactly as build_reveal_response
+    # does it.
+    from . import broll_fetch
+    from . import broll_server
+    from . import site as site_mod
+
+    # Same gate, same reasoning as reveal's: a feature that is off has no
+    # surface. The SITE flag alone -- an editor who turned off local EXECUTION
+    # (`ytdl_local_downloads = false`) is exactly the editor whose clips are all
+    # on the NAS, so this is the route they need most.
+    if not site_mod.feature_enabled("youtube_download"):
+        return 200, {"ok": False, "state": broll_fetch.STATE_FAILED,
+                     "message": "the YouTube downloader is not enabled for "
+                                "this site"}
+
+    rel_path = body.get("rel_path")
+    try:
+        local = local_path_for(rel_path, mounts)
+    except broll_server.PathTraversalError as exc:
+        return 400, {"ok": False, "state": broll_fetch.STATE_FAILED,
+                     "message": str(exc)}
+    except broll_server.MountNotConfiguredError as exc:
+        return 200, {"ok": False, "state": broll_fetch.STATE_FAILED,
+                     "message": str(exc)}
+
+    file_check = isfile if isfile is not None else os.path.isfile
+    if file_check(local):
+        # Already here: a re-click, a poll that crossed the finish line, or a
+        # clip this machine downloaded itself. Not an error, and not a reason
+        # to spend an rclone on it.
+        return 200, {"ok": True, "state": broll_fetch.STATE_DONE,
+                     "message": f"{Path(local).name} is on this machine"}
+
+    cfg = ccsync_cfg or {}
+    refusal = broll_fetch.fetch_refusal(cfg, local)
+    if refusal:
+        return 200, {"ok": False, "state": broll_fetch.STATE_FAILED,
+                     "message": refusal}
+
+    fetch = (fetcher if fetcher is not None else broll_fetch.poll_fetch)(
+        cfg, str(rel_path), local,
+        remote_rel=broll_fetch.PROJECTS_REMOTE_REL)
+    state = fetch.get("state")
+    if state == broll_fetch.STATE_DOWNLOADING:
+        return 200, {"ok": True, "state": state,
+                     "progress": fetch.get("progress") or {},
+                     "message": f"downloading {Path(local).name} from the NAS"}
+    if state == broll_fetch.STATE_DONE:
+        # poll_fetch pops `done` and leaves the filesystem as the authority, so
+        # the caller re-checks rather than believing the state (broll_fetch's
+        # header). A file that is still not there is a download that reported
+        # success and left nothing -- a failure, said plainly.
+        if file_check(local):
+            return 200, {"ok": True, "state": state,
+                         "message": f"{Path(local).name} is on this machine"}
+        return 200, {"ok": False, "state": broll_fetch.STATE_FAILED,
+                     "message": "the download finished but the file is not "
+                                "there - try again"}
+    return 200, {"ok": False, "state": broll_fetch.STATE_FAILED,
+                 "message": fetch.get("message") or "the download failed"}

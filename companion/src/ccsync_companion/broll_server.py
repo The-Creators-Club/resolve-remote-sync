@@ -31,8 +31,10 @@ Since port step 8 (2026-08-10) it also carries the MUSIC library's
   GET  /music/status
   POST /music/send
   POST /music/reveal      (2026-08-14, MUSIC-6)
-and since 2026-08-11 the YouTube downloader page's reveal-in-file-manager:
+and since 2026-08-11 the YouTube downloader page's reveal-in-file-manager,
+joined 2026-08-19 (CR-32) by the pull that makes a NAS-only original reachable:
   POST /ytdl/reveal
+  POST /ytdl/fetch
 and since 2026-08-14 (companion 0.8.0) the local download executor -- the
 requester's own machine fetching its own YouTube clips instead of the NAS:
   GET  /ytdl/capabilities
@@ -1843,6 +1845,22 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
                 return
             mounts = self.server.companion_config.get(ytdl_server.MOUNTS_KEY, {})
             status, result = ytdl_server.build_reveal_response(body, mounts)
+            self._send_json(status, result)
+        elif path == "/ytdl/fetch":
+            # The other end of reveal's `absent` (CR-32): pull ONE original the
+            # server downloaded onto this machine. Same body as /ytdl/reveal --
+            # a rel_path under the projects root and nothing else -- and the
+            # same "message" key, because the page shows both in the same toast.
+            body = self._read_json_body("message")
+            if body is _REFUSED:
+                return
+            if body is None or not isinstance(body, dict):
+                self._send_json(400, {"ok": False, "message": "invalid JSON body"})
+                return
+            mounts = self.server.companion_config.get(ytdl_server.MOUNTS_KEY, {})
+            status, result = ytdl_server.build_fetch_response(
+                body, mounts, ccsync_cfg=getattr(self.server, "ccsync_cfg", None)
+            )
             self._send_json(status, result)
         elif path == "/ytdl/download":
             body = self._read_json_body("message")

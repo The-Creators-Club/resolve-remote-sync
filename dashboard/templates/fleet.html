@@ -13,7 +13,9 @@
      now (the live window), what is queued behind it, and where the fixer
      writes. #}
   <main class="main">
-    <div hx-get="/partials/fleet" hx-trigger="every 15s" hx-swap="innerHTML">
+    {# Named so the [ RESUME ] button inside the grid can swap this same
+       container (CR-45): the partial itself has no single root element. #}
+    <div class="fleet-grid-wrap" hx-get="/partials/fleet" hx-trigger="every 15s" hx-swap="innerHTML">
       {% include "partials/fleet_grid.html" %}
     </div>
 

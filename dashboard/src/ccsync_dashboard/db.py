@@ -769,6 +769,24 @@ ALTER TABLE machines ADD COLUMN update_requested_at TEXT;
 ALTER TABLE machines ADD COLUMN update_requested_by TEXT;
 """
 
+# v26: RESUME PROXY DOWNLOAD FROM THE DASHBOARD (KNOWN_BUGS CR-45,
+# 2026-08-20). Lane B's circuit breaker could only ever be cleared at the
+# editor's own tray, so a machine that tripped one sat with proxy download
+# stopped until its owner was next at the keyboard -- ruskin's PC spent a day
+# like that on 2026-08-19, over a folder move that had deleted nothing.
+#
+# Recorded HERE and delivered in the `commands` block the fleet halt and the
+# pushed update already ride. Nothing about the decision moves: resuming is
+# still an operator asserting the server is worth syncing from, and the admin
+# who just checked the NAS is the operator best placed to say so.
+#
+# The request is cleared when the machine reports its breaker no longer
+# tripped, which is what keeps it from clearing a LATER, unrelated trip.
+SCHEMA_V26 = """
+ALTER TABLE machines ADD COLUMN lane_b_resume_requested_at TEXT;
+ALTER TABLE machines ADD COLUMN lane_b_resume_requested_by TEXT;
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -798,6 +816,7 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (23, SCHEMA_V23),
     (24, SCHEMA_V24),
     (25, SCHEMA_V25),
+    (26, SCHEMA_V26),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -1751,6 +1770,55 @@ def machine_update_request(
         (editor, machine),
     ).fetchone()
     if row is None or not row["version"]:
+        return None
+    return dict(row)
+
+
+def request_lane_b_resume(
+    conn: sqlite3.Connection, editor: str, machine: str,
+    requested_by: str, now: str,
+) -> bool:
+    """Ask one machine to clear its lane B breaker on its next report (v26).
+
+    False when there is no such machine, on the same reasoning as
+    request_machine_update: a request that names nothing must read as a
+    failure to the admin rather than a silent success."""
+    cur = conn.execute(
+        """UPDATE machines
+              SET lane_b_resume_requested_at=?, lane_b_resume_requested_by=?
+            WHERE editor_username=? AND machine=?""",
+        (now, requested_by, editor, machine),
+    )
+    return cur.rowcount > 0
+
+
+def clear_lane_b_resume_request(
+    conn: sqlite3.Connection, editor: str, machine: str
+) -> None:
+    """Called when the machine reports its breaker is no longer tripped.
+
+    This is what bounds the request in time. A standing one would sit on the
+    machine and silently clear the NEXT trip -- which could be the real one
+    the breaker exists for -- so "resume" has to mean this trip and no
+    other."""
+    conn.execute(
+        """UPDATE machines
+              SET lane_b_resume_requested_at=NULL, lane_b_resume_requested_by=NULL
+            WHERE editor_username=? AND machine=?""",
+        (editor, machine),
+    )
+
+
+def lane_b_resume_request(
+    conn: sqlite3.Connection, editor: str, machine: str
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        """SELECT lane_b_resume_requested_at AS at,
+                  lane_b_resume_requested_by AS by_user
+             FROM machines WHERE editor_username=? AND machine=?""",
+        (editor, machine),
+    ).fetchone()
+    if row is None or not row["at"]:
         return None
     return dict(row)
 

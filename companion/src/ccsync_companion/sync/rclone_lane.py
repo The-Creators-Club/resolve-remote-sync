@@ -1036,6 +1036,65 @@ def list_remote_top(
     ]
 
 
+def list_remote_files(
+    rclone_path: str,
+    remote: str,
+    remote_root: str,
+    subpath: Optional[str] = None,
+    run_fn: Optional[Callable[[list[str], float], Optional[str]]] = None,
+    # Ten minutes, against list_remote_top's sixty seconds, because this one
+    # IS the tree walk that one refuses to be. It runs at most once per pass
+    # and only when the alternative is stopping the lane, so a slow answer
+    # still beats no answer -- but it must not hang the sequencer forever.
+    timeout: float = 600.0,
+) -> Optional[dict[str, set[int]]]:
+    """`{basename: {size, ...}}` for every file under the remote side of a
+    lane B pass, or None when the listing failed.
+
+    The relocation probe's other half (KNOWN_BUGS CR-44, 2026-08-20). Keyed
+    by BASENAME rather than path on purpose: the question it answers is
+    "this file left the folder rclone was syncing -- is it still on the NAS
+    somewhere else?", and the path is the one thing a move changes. Size is
+    what keeps that from being a guess: two proxies sharing a basename in
+    different folders is ordinary, two sharing a basename AND an exact byte
+    count is the same file.
+
+    None (a failed listing) and {} (a genuinely empty remote) are different
+    answers and the caller must not confuse them -- an empty remote is the
+    case where every local file really is a deletion, which is precisely
+    when the breaker must be free to trip.
+    """
+    if not remote or not remote_root:
+        return None
+    remote_side = f"{remote}:{_join_remote_path(remote_root, subpath or '')}"
+    # `s` then `p`: the size is numeric and cannot contain the separator, so
+    # splitting on the FIRST one leaves the whole (arbitrary, ";"-containing,
+    # CJK, fullwidth-punctuation) filename intact as the remainder.
+    cmd = [rclone_path, "lsf", "-R", "--files-only", "--format", "sp",
+           "--separator", ";", remote_side]
+    runner = run_fn or _run_lsf
+    try:
+        output = runner(cmd, timeout)
+    except Exception as exc:
+        log.debug("remote relocation listing failed for %s: %s", remote_side, exc)
+        return None
+    if output is None:
+        return None
+    found: dict[str, set[int]] = {}
+    for line in output.splitlines():
+        size_text, sep, path = line.partition(";")
+        if not sep:
+            continue
+        try:
+            size = int(size_text.strip())
+        except ValueError:
+            continue
+        name = path.strip().rstrip("/").rsplit("/", 1)[-1]
+        if name:
+            found.setdefault(name, set()).add(size)
+    return found
+
+
 # rclone's per-file line under --dry-run on a `copy`. Measured against the
 # bundled 1.74.4: "clip.mov: Skipped copy as --dry-run is set (size 4.2Gi)".
 # It is NOT one of the "Copied"/"Moved"/"Deleted" shapes RcloneRunTally
@@ -2876,6 +2935,62 @@ class RcloneLane(LaneAdapter):
             return 0
         return total
 
+    def _trashed_this_pass(self) -> list[tuple[str, int]]:
+        """(basename, size) for every file this run put in its --backup-dir.
+
+        Reads _last_backup_dir WITHOUT clearing it, exactly as
+        _backup_dir_bytes does and for the same reason: _notify_trash runs
+        after the accounting and still needs it."""
+        backup_dir = self._last_backup_dir
+        out: list[tuple[str, int]] = []
+        if not backup_dir:
+            return out
+        try:
+            for dirpath, _dirnames, filenames in os.walk(backup_dir):
+                for name in filenames:
+                    try:
+                        out.append((name, os.path.getsize(os.path.join(dirpath, name))))
+                    except OSError:
+                        continue
+        except OSError:
+            return out
+        return out
+
+    def _count_relocations(self, subpath: Optional[str]) -> int:
+        """How many of this pass's trashed files are still on the NAS, under
+        a different path (KNOWN_BUGS CR-44, 2026-08-20).
+
+        Called by the breaker, and only when a pass is about to trip it. An
+        editor who drags `Interviewees/Creator_Interviews` into `B-roll/`
+        deletes nothing, but every proxy under it vanishes from the path
+        lane B is syncing, and the breaker used to read that as the tree
+        being emptied (ruskin's PC, 2026-08-19: 100 files in one pass,
+        stopped for a day, and every byte was still on the server).
+
+        A trashed file's own remote path is gone by construction -- rclone
+        moved it out precisely BECAUSE the remote does not have it there --
+        so any basename+size match in the recursive listing is at some other
+        path, which is what "moved" means. Returns 0 on any failure: see
+        LaneBBreaker._count_relocations for why that is the safe direction.
+        """
+        trashed = self._trashed_this_pass()
+        if not trashed:
+            return 0
+        remote_files = list_remote_files(
+            self.rclone_path, self.remote, self.remote_root, subpath,
+            run_fn=self._remote_list_fn,
+        )
+        if not remote_files:
+            # None = the listing failed, {} = the remote really is empty.
+            # Neither is evidence of a move, and the empty case is the one
+            # the breaker exists for.
+            return 0
+        relocated = 0
+        for name, size in trashed:
+            if size in remote_files.get(name, ()):
+                relocated += 1
+        return relocated
+
     def _account_pass(
         self, result: RcloneRunResult, subpath: Optional[str], local_proxies: int
     ) -> bool:
@@ -2888,7 +3003,8 @@ class RcloneLane(LaneAdapter):
         try:
             scope = str(subpath or "").replace("\\", "/").strip("/")
             return self.breaker.note_pass(
-                scope, result.deleted, self._backup_dir_bytes(), local_proxies
+                scope, result.deleted, self._backup_dir_bytes(), local_proxies,
+                relocation_probe=lambda: self._count_relocations(subpath),
             ) is not None
         except Exception:
             log.exception("%s: breaker accounting failed", self.name)

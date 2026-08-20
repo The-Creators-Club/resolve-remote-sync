@@ -20,6 +20,7 @@ from ccsync_companion.sync.rclone_lane import (
     DIRECTION_DOWN,
     DIRECTION_UP,
     RcloneLane,
+    list_remote_files,
     list_remote_top,
     scan_pending_uploads,
     scan_size_mismatches,
@@ -487,3 +488,166 @@ def test_the_breaker_state_file_is_json_a_human_can_read(tmp_path):
     breaker.trip("because")
     data = json.loads((tmp_path / "breaker.json").read_text(encoding="utf-8"))
     assert data["tripped"] is True and data["reason"] == "because"
+
+
+# -- moved, not deleted (KNOWN_BUGS CR-44, 2026-08-20) ----------------------
+#
+# The breaker's blind spot until now: an editor drags a folder somewhere else
+# in the project and every proxy under it leaves the path lane B is syncing
+# at once. Nothing was deleted, everything is still on the NAS, and the
+# breaker read it as the tree being emptied -- ruskin's PC, 2026-08-19.
+
+
+def test_a_pass_that_only_relocated_files_does_not_trip(tmp_path):
+    breaker = _breaker(tmp_path, lane_b_max_deletes_per_pass=10)
+    # 100 files left the folder; all 100 are still on the NAS elsewhere.
+    assert breaker.note_pass("Projects/X", 100, 0,
+                             relocation_probe=lambda: 100) is None
+    assert not breaker.tripped
+    # ...and they are off the cumulative counter too, or the NEXT ordinary
+    # pass trips on a leak that never happened.
+    assert breaker.report()["deletes"] == 0
+    assert breaker.report()["last_pass_deletes"] == 0
+
+
+def test_real_deletions_hiding_behind_a_move_still_trip(tmp_path):
+    breaker = _breaker(tmp_path, lane_b_max_deletes_per_pass=10)
+    # 100 trashed, 80 of them relocations -- 20 real deletions is still over
+    # the cap of 10, and the reason says so without hiding the moves.
+    reason = breaker.note_pass("Projects/X", 100, 0, relocation_probe=lambda: 80)
+    assert reason is not None
+    assert "20 file(s)" in reason
+    assert "80 were moved to a new folder" in reason
+    assert breaker.tripped
+
+
+def test_the_probe_is_not_run_on_a_pass_that_was_never_going_to_trip(tmp_path):
+    # It costs a recursive listing of the whole scope. On the ~99% of passes
+    # that are nowhere near a limit it must not be spent at all.
+    calls: list[int] = []
+
+    def probe():
+        calls.append(1)
+        return 0
+
+    breaker = _breaker(tmp_path, lane_b_max_deletes_per_pass=10)
+    assert breaker.note_pass("Projects/X", 3, 0, relocation_probe=probe) is None
+    assert calls == []
+
+
+def test_a_probe_that_throws_leaves_the_breaker_as_strict_as_before(tmp_path):
+    def probe():
+        raise OSError("the NAS went away mid-listing")
+
+    breaker = _breaker(tmp_path, lane_b_max_deletes_per_pass=10)
+    assert breaker.note_pass("Projects/X", 50, 0, relocation_probe=probe) is not None
+    assert breaker.tripped
+
+
+def test_a_probe_cannot_claim_more_moves_than_the_pass_had_deletions(tmp_path):
+    # A bug in the probe must not be able to talk the breaker out of a trip.
+    breaker = _breaker(tmp_path, lane_b_max_deletes_per_pass=10)
+    assert breaker.note_pass("Projects/X", 50, 0,
+                             relocation_probe=lambda: 5000) is None
+    assert breaker.report()["deletes"] == 0
+
+
+def test_relocations_do_not_dodge_the_cumulative_rule_for_real_deletions(tmp_path):
+    breaker = _breaker(tmp_path, lane_b_max_deletes_per_pass=100,
+                       lane_b_max_deletes_cumulative=30)
+    # Three passes of 20, half of each a genuine deletion: the moves come off
+    # the counter, the deletions stay on it, and the leak still trips.
+    assert breaker.note_pass("Projects/X", 20, 0, relocation_probe=lambda: 10) is None
+    assert breaker.note_pass("Projects/X", 20, 0, relocation_probe=lambda: 10) is None
+    reason = breaker.note_pass("Projects/X", 20, 0, relocation_probe=lambda: 10)
+    assert reason is not None and "slow leak" in reason
+
+
+def test_list_remote_files_keys_by_basename_and_size(tmp_path):
+    # Sizes first, then the path -- and a filename containing the separator
+    # and fullwidth punctuation, which is what yt-dlp names actually look
+    # like in this tree.
+    output = (
+        "12;Projects/2026/X/Proxy/a.mov\n"
+        "34;Projects/2026/X/B-roll/a.mov\n"
+        "56;Projects/2026/X/Proxy/News ; clip [abc].mov\n"
+        "not-a-size;Projects/2026/X/junk\n"
+        "\n"
+    )
+    found = list_remote_files("rclone", "nas", "root", "Projects/2026/X",
+                              run_fn=lambda cmd, timeout: output)
+    assert found["a.mov"] == {12, 34}
+    assert found["News ; clip [abc].mov"] == {56}
+    assert "junk" not in found
+
+
+def test_list_remote_files_tells_a_failed_listing_from_an_empty_one(tmp_path):
+    # None and {} must not be confused: an empty remote is exactly the case
+    # the breaker exists for, and it must stay free to trip there.
+    assert list_remote_files("rclone", "nas", "root", None,
+                             run_fn=lambda cmd, timeout: None) is None
+    assert list_remote_files("rclone", "nas", "root", None,
+                             run_fn=lambda cmd, timeout: "") == {}
+
+
+def _lane_b_with_trash(tmp_path, breaker, remote_recursive, trashed=("a.mov", "b.mov", "c.mov")):
+    """A lane B whose last pass moved `trashed` into its backup dir, with the
+    recursive remote listing the relocation probe will see."""
+    trash = tmp_path / "local" / ".ccsync-trash" / "20260820-120000" / "Proxy"
+    trash.mkdir(parents=True)
+    for name in trashed:
+        (trash / name).write_bytes(b"x" * 7)
+
+    def remote_list(cmd, timeout):
+        if "-R" in cmd:
+            return remote_recursive
+        return "Projects"
+
+    lines = [
+        '{"level":"info","msg":"%s: Moved into backup dir"}\n' % name
+        for name in trashed
+    ]
+    lane = RcloneLane(
+        direction=DIRECTION_DOWN,
+        local_root=str(tmp_path / "local"),
+        remote="nas",
+        remote_root="Creators_Club",
+        state_dir=tmp_path / "state",
+        breaker=breaker,
+        remote_list_fn=remote_list,
+        popen_factory=_factory(lines, 0, []),
+    )
+    # run_once() computes its own --backup-dir (a fresh timestamp), so pin
+    # it to the one this fixture actually populated.
+    lane._backup_dir = lambda subpath=None: str(trash.parent)
+    return lane
+
+
+def test_a_lane_pass_that_moved_a_folder_does_not_trip(tmp_path):
+    # End to end through the lane: rclone reports three files moved into the
+    # backup dir, and all three are still on the NAS under a new path.
+    breaker = _breaker(tmp_path, lane_b_max_deletes_per_pass=2)
+    lane = _lane_b_with_trash(tmp_path, breaker, "".join(
+        f"7;Projects/2026/X/B-roll/{name}\n" for name in ("a.mov", "b.mov", "c.mov")
+    ))
+    status = lane.run_once()
+    assert not breaker.tripped, "a folder move is not an emptied tree"
+    assert status.state == STATE_IDLE
+
+
+def test_a_lane_pass_whose_files_really_are_gone_still_trips(tmp_path):
+    breaker = _breaker(tmp_path, lane_b_max_deletes_per_pass=2)
+    lane = _lane_b_with_trash(tmp_path, breaker, "")     # the NAS has none of them
+    lane.run_once()
+    assert breaker.tripped
+
+
+def test_a_same_named_file_at_a_different_size_is_not_a_move(tmp_path):
+    # A re-encode (the base rig superseding .mp4 proxies with .mov ones)
+    # really is a deletion of the old bytes, and must keep counting as one.
+    breaker = _breaker(tmp_path, lane_b_max_deletes_per_pass=2)
+    lane = _lane_b_with_trash(tmp_path, breaker, "".join(
+        f"999;Projects/2026/X/Proxy/{name}\n" for name in ("a.mov", "b.mov", "c.mov")
+    ))
+    lane.run_once()
+    assert breaker.tripped

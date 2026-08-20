@@ -414,3 +414,86 @@ def test_only_an_admin_can_push_an_update(env):
     client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "ruskin"))
 
     assert client.post("/api/v1/admin/machines/ruskin/DESKTOP-1/update").status_code == 403
+
+
+# -- resuming proxy download from the dashboard (v26, CR-45) ----------------
+#
+# The lane B breaker could only ever be cleared at the editor's own tray, so
+# a machine that tripped one sat with proxy download stopped until its owner
+# was next at the keyboard -- ruskin's PC spent a day like that on
+# 2026-08-19, over a folder move that had deleted nothing.
+
+
+def _guard(tripped, reason="the NAS listed the tree as empty"):
+    return {"lane_b_breaker": {"tripped": tripped, "reason": reason if tripped else None,
+                               "tripped_at": "2026-08-19T17:49:58+00:00" if tripped else None}}
+
+
+def test_an_admin_can_ask_one_machine_to_resume_proxy_download(env):
+    client, _conn, _now = env
+    report(client, "ruskin", "DESKTOP-1", sync_guard=_guard(True))
+
+    r = client.post("/api/v1/admin/machines/ruskin/DESKTOP-1/resume-lane-b")
+    assert r.status_code == 200, r.text
+
+    reply = report(client, "ruskin", "DESKTOP-1", sync_guard=_guard(True))
+    command = reply["commands"]["resume_lane_b"]
+    assert command["apply"] is True
+    assert command["requested_by"] == "owen"
+
+
+def test_the_request_clears_itself_once_the_machine_reports_it_resumed(env):
+    """A standing request would sit on the machine and silently clear the
+    NEXT trip -- which could be the real one the breaker exists for."""
+    client, conn, _now = env
+    report(client, "ruskin", "DESKTOP-1", sync_guard=_guard(True))
+    client.post("/api/v1/admin/machines/ruskin/DESKTOP-1/resume-lane-b")
+
+    reply = report(client, "ruskin", "DESKTOP-1", sync_guard=_guard(False))
+    assert "resume_lane_b" not in reply["commands"]
+    assert dbmod.lane_b_resume_request(conn, "ruskin", "DESKTOP-1") is None
+
+    # ...and a LATER trip is not cleared by the request that is now gone.
+    reply = report(client, "ruskin", "DESKTOP-1", sync_guard=_guard(True))
+    assert "resume_lane_b" not in reply["commands"]
+
+
+def test_a_companion_too_old_to_send_a_guard_section_keeps_the_request(env):
+    """Otherwise "no guard" reads as "not tripped" and the admin's click is
+    thrown away without ever reaching the machine."""
+    client, conn, _now = env
+    report(client, "ruskin", "DESKTOP-1", sync_guard=_guard(True))
+    client.post("/api/v1/admin/machines/ruskin/DESKTOP-1/resume-lane-b")
+
+    reply = report(client, "ruskin", "DESKTOP-1")           # no sync_guard at all
+    assert reply["commands"]["resume_lane_b"]["apply"] is True
+    assert dbmod.lane_b_resume_request(conn, "ruskin", "DESKTOP-1") is not None
+
+
+def test_resuming_an_unknown_machine_is_a_404(env):
+    client, _conn, _now = env
+    report(client, "ruskin", "DESKTOP-1")
+    r = client.post("/api/v1/admin/machines/ruskin/NOPE/resume-lane-b")
+    assert r.status_code == 404
+
+
+def test_an_admin_can_withdraw_a_resume_request(env):
+    client, conn, _now = env
+    report(client, "ruskin", "DESKTOP-1", sync_guard=_guard(True))
+    client.post("/api/v1/admin/machines/ruskin/DESKTOP-1/resume-lane-b")
+    assert dbmod.lane_b_resume_request(conn, "ruskin", "DESKTOP-1") is not None
+
+    r = client.request("DELETE", "/api/v1/admin/machines/ruskin/DESKTOP-1/resume-lane-b")
+    assert r.status_code == 200
+    assert dbmod.lane_b_resume_request(conn, "ruskin", "DESKTOP-1") is None
+
+    reply = report(client, "ruskin", "DESKTOP-1", sync_guard=_guard(True))
+    assert "resume_lane_b" not in reply["commands"]
+
+
+def test_a_machine_with_no_request_is_told_nothing(env):
+    client, _conn, _now = env
+    reply = report(client, "ruskin", "DESKTOP-1", sync_guard=_guard(True))
+    assert "resume_lane_b" not in reply["commands"]
+    # ...and the halt, which is always present, still is.
+    assert "halt" in reply["commands"]

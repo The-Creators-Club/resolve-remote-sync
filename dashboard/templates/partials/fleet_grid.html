@@ -31,7 +31,8 @@
 {% if fleet.breaker_tripped %}
 <div class="banner alarm">⛔ PROXY DOWNLOAD STOPPED on {{ fleet.breaker_tripped | length }} machine(s):
   {% for m in fleet.breaker_tripped %}{{ m.editor }}/{{ m.machine }}{{ ", " if not loop.last }}{% endfor %}.
-  Check the server, then have each editor use the tray's "Resume proxy download".
+  Check the server, then use [ RESUME ] below (or have each editor use the tray's
+  "Resume proxy download").
 </div>
 {% endif %}
 {% if fleet.halted %}
@@ -74,7 +75,15 @@
         {% if e.transport.orphan_partials %}<span class="chip amber" title="{{ e.transport.orphan_partial_bytes | human_bytes }} of orphaned rclone .partial files left on the NAS by an interrupted lane A. Never deleted automatically; remove them by hand to reclaim the space.">[ ORPHANS: {{ e.transport.orphan_partials }} ]</span>{% endif %}
         {# The safety latches, first among the chips: they outrank every
            transport diagnostic beside them (item 9). #}
-        {% if e.guard.breaker_tripped %}<span class="chip red" title="{{ e.guard.breaker_reason }}, tripped {{ e.guard.breaker_at | ago }}. Lane A and lane C are still running; nothing was deleted.">[ PROXY DOWNLOAD STOPPED ]</span>{% endif %}
+        {% if e.guard.breaker_tripped %}<span class="chip red" title="{{ e.guard.breaker_reason }}, tripped {{ e.guard.breaker_at | ago }}. Lane A and lane C are still running; nothing was deleted.">[ PROXY DOWNLOAD STOPPED ]</span>
+          {# CR-45: only the editor's own tray could clear this, so a remote
+             machine stayed parked until its owner was next at the keyboard.
+             The companion does exactly what the tray click does. #}
+          {% if session_is_admin %}{% if e.guard.resume_requested %}<span class="chip amber" title="waiting for {{ e.machine }} to report in and pick this up">[ RESUME ASKED ]</span>{% else %}<form class="inline-form" hx-post="/partials/admin/machines/resume-lane-b" hx-target="closest .fleet-grid-wrap" hx-swap="innerHTML">
+            <input type="hidden" name="editor" value="{{ e.editor_username }}">
+            <input type="hidden" name="machine" value="{{ e.machine }}">
+            <button class="btn" type="submit" title="clear this machine's proxy-download breaker on its next report. Only once you have checked the server.">[ RESUME ]</button>
+          </form>{% endif %}{% endif %}{% endif %}
         {% if e.guard.halt_active %}<span class="chip red" title="{{ e.guard.halt_reason }}">[ SYNC HALTED{{ " (FLEET)" if e.guard.halt_scope == "fleet" }} ]</span>{% endif %}
         {% if e.guard.skipped_exists %}<span class="chip amber" title="{{ e.guard.skipped_exists }} file(s) exist on the NAS under the same name at a different size. Lane A is copy --ignore-existing, so this machine's newer versions will never upload.">[ WON'T UPLOAD: {{ e.guard.skipped_exists }} ]</span>{% endif %}
         {% if e.guard.trash_bytes and e.guard.trash_bytes > 5000000000 %}<span class="chip amber" title="{{ e.guard.trash_count }} recoverable file(s) in this machine's .ccsync-trash. Pruned automatically after 14 days.">[ TRASH: {{ e.guard.trash_bytes | human_bytes }} ]</span>{% endif %}

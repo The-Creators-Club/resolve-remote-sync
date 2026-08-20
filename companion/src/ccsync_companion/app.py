@@ -1204,6 +1204,9 @@ class CompanionApp:
         # note_report_response above, which is what put the signed offer in
         # self.upgrade.available -- the push names a version, never a URL.
         self._apply_pushed_update(resp)
+        # ...and an admin clearing this machine's lane B breaker (CR-45,
+        # 2026-08-20).
+        self._apply_resume_lane_b(resp)
 
     def _on_resolve_project_changed(self, name: str) -> None:
         if self.project_setup is not None:
@@ -4060,11 +4063,15 @@ class CompanionApp:
             guard["removal_overrides"] = list(self._removal_overrides)[-5:]
         return guard
 
-    def resume_lane_b(self) -> tuple[bool, str]:
-        """Tray-facing: clear the lane B breaker after the operator has
-        checked the server. Returns (ok, message); never raises."""
+    def resume_lane_b(self, by: str = "tray") -> tuple[bool, str]:
+        """Clear the lane B breaker after the operator has checked the
+        server. Returns (ok, message); never raises.
+
+        `by` is only ever a log label -- "tray" for the editor's own click,
+        an admin's username when the dashboard asked (CR-45). Both are the
+        same assertion about the server; neither is more privileged."""
         try:
-            if not self._lane_b.resume_after_trip("tray"):
+            if not self._lane_b.resume_after_trip(by):
                 return False, "proxy download is not stopped"
         except Exception:
             log.exception("resume_lane_b failed")
@@ -4309,6 +4316,51 @@ class CompanionApp:
                     self._pushed_update_applying = ""
                 log.info("pushed update to v%s did not apply (%s); will try again in %ds",
                          wanted, outcome, int(wait))
+
+    def _apply_resume_lane_b(self, resp: Any) -> None:
+        """An admin cleared this machine's lane B breaker from the dashboard
+        (KNOWN_BUGS CR-45, 2026-08-20).
+
+        The breaker is deliberately an OPERATOR decision -- resuming asserts
+        that the server is in a state worth syncing from, which is the exact
+        judgement the software could not make. What it was not, until now, is
+        an operator decision the operator could reach: only the editor's own
+        tray could clear it, so a remote machine sat parked until its owner
+        was next at the keyboard (ruskin's PC, 2026-08-19, a day of it). The
+        admin who checked the NAS is *more* qualified to make that call than
+        the editor being asked to click through a warning about it.
+
+        Idempotent by construction, and that is why it tests `tripped` rather
+        than remembering which request it has seen: the dashboard keeps the
+        request standing until this machine reports the breaker clear, so a
+        companion that restarts mid-flight simply resumes again -- and one
+        that has already resumed does nothing, even if the reply still
+        carries the command. A LATER, unrelated trip is never cleared by a
+        stale request, because the dashboard has dropped it by then.
+
+        Never raises: this runs on the reporter thread."""
+        try:
+            command = None
+            if isinstance(resp, dict):
+                commands = resp.get("commands")
+                if isinstance(commands, dict):
+                    command = commands.get("resume_lane_b")
+            if not isinstance(command, dict) or not command.get("apply"):
+                return
+            if not self.lane_b_breaker.tripped:
+                return
+            by = str(command.get("requested_by") or "your administrator").strip()
+            ok, message = self.resume_lane_b(by=f"{by} (dashboard)")
+            if not ok:
+                log.warning("dashboard asked to resume proxy download: %s", message)
+                return
+            log.warning("lane B breaker resumed by %s from the dashboard", by)
+            self._notify_tray(
+                f"{by} checked the server and started proxy download again.",
+                "ccsync-companion: proxy download resumed",
+            )
+        except Exception:
+            log.exception("could not apply the dashboard's resume-proxy-download request")
 
     def _apply_fleet_halt(self, resp: Any) -> None:
         """Adopt the dashboard's fleet halt flag from a report reply.

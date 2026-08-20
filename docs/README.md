@@ -76,6 +76,8 @@ Index written 2026-08-17 (`COMMERCIAL_READINESS.md` item 13).
 | [`BROLL_INGEST_PLAN.md`](BROLL_INGEST_PLAN.md) | Drag-and-drop b-roll ingest: the design, the contracts and what was deviated from |
 | [`MUSIC_INGEST_PLAN.md`](MUSIC_INGEST_PLAN.md) | The same for music, reusing the b-roll machinery, plus what it deliberately does not compute |
 | [`MULTI_MACHINE_PLAN.md`](MULTI_MACHINE_PLAN.md) | One person, several computers: the sync plan belongs to a machine (schema v22-v25), the base rig holds no tick, and how an update reaches a machine without its editor clicking |
+| [`TREE_LAYOUT_PLAN.md`](TREE_LAYOUT_PLAN.md) | The plan that executes that audit: one layout object published in the manifest (`projects_dir`, `proxy_dir_name`, the `Assets/*` roles, `Youtube`, fixer targets, extensions), plus the Setup step that learns a customer's template from their own sample projects |
+| [`TREE_LAYOUT_AGNOSTICISM.md`](TREE_LAYOUT_AGNOSTICISM.md) | The 2026-08-19 audit of what a customer can change about the tree by config (root, depth, template folders) versus what is code (`Projects`, `Assets/*`, the `Proxy/` sibling rule that defines the lanes, the archive taxonomy), with sales qualification questions and a costed work list |
 | `../SPEC.md` | The internal architecture document — history, rationale, known flaws |
 | `../KNOWN_BUGS.md` | The live defect ledger (numbered entries, per-platform prefixes) |
 | `../CLAUDE.md` | Repo conventions, test commands, and the one ship command |

@@ -1697,6 +1697,29 @@ async def partial_admin_machine_update(
                    _packages_and_feed(conn, request, error))
 
 
+@router.post("/partials/admin/machines/resume-lane-b")
+async def partial_admin_resume_lane_b(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    """Clear one machine's lane B breaker on its next report (v26, CR-45).
+
+    The same write as POST
+    /api/v1/admin/machines/{editor}/{machine}/resume-lane-b, from the fleet
+    page that is already showing the red chip. Re-renders the fleet grid so
+    the admin sees the request land."""
+    admin = _require_admin_page(request)
+    form = await _form(request)
+    editor = form.get("editor", "").strip().lower()
+    machine = form.get("machine", "").strip()
+    db.request_lane_b_resume(conn, editor, machine, admin, db.utcnow_iso())
+    conn.commit()
+    scope = auth.scope_for(request)
+    return _render(request, "partials/fleet_grid.html", {
+        "view": api_scope_projects_view(build_projects_view(conn), scope),
+        "fleet": api_scope_editors_view(build_editors_view(conn), scope),
+    })
+
+
 @router.post("/partials/admin/machines/update/cancel")
 async def partial_admin_machine_update_cancel(
     request: Request, conn: sqlite3.Connection = Depends(get_conn)

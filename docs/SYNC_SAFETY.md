@@ -46,10 +46,21 @@ When it trips:
 * one tray toast, one `ERROR` log line, a tray menu line, and a
   `sync_guard.lane_b_breaker` report field that raises a dashboard alarm.
 
-Clearing it is an explicit operator act: tray → **Resume proxy download…**,
-behind a confirm dialog that names the reason. That resets the counters too —
-resuming without clearing them re-trips on the cumulative rule next pass, which
-reads as "the button doesn't work".
+Clearing it is an explicit operator act, and there are two ways to be that
+operator (CR-45, 2026-08-20): the editor at tray → **Resume proxy
+download…**, behind a confirm dialog that names the reason, or an admin at
+Dashboard → FLEET → **[ RESUME ]** beside the red chip, which asks that one
+machine to do the same thing on its next report. Either way it resets the
+counters too — resuming without clearing them re-trips on the cumulative rule
+next pass, which reads as "the button doesn't work".
+
+The admin route exists because the tray-only rule meant a remote machine
+stayed parked until its owner was next at the keyboard, and the admin who
+checked the NAS is the person best placed to say it is healthy. It changes
+who can reach the decision, not the decision: the companion does exactly what
+the tray click does, only while its breaker is actually tripped, and the
+request is dropped as soon as that machine reports itself clear so it can
+never sit there and silently clear some later trip.
 
 ## 2. `.ccsync-trash` retention
 
@@ -231,8 +242,19 @@ Undocumented but read the same way, for the rare tune:
    imported? Is the share mounted? Is the project still shared to that editor?
 4. If it names a pass that trashed too much: look in that machine's
    `<local_root>/.ccsync-trash/<timestamp>/` — everything is there.
-5. Once the server is right, tell the editor to use tray →
-   **Resume proxy download…**. There is no remote resume: someone has to look.
+5. Once the server is right, clear it: Dashboard → FLEET → **[ RESUME ]**
+   on that machine, or tell the editor to use tray → **Resume proxy
+   download…**. Someone still has to look — that is the point of the latch —
+   but since CR-45 the someone no longer has to be sitting at the machine.
+   The dashboard button needs companion 0.9.43+ on the far end; older builds
+   ignore the command, so those still need the tray click.
+
+A trip that names a pass which trashed a lot of files is worth one check
+before anything else: **was a folder MOVED on the NAS?** Since CR-44 the
+breaker asks that question itself (it re-lists the scope and matches trashed
+files on basename + exact size before tripping), so a move should no longer
+reach you as an alarm — but a move to a *different project*, outside the
+scope being synced, still looks like a deletion and still trips.
 
 **Halting the fleet.** Dashboard → USERS → FLEET SYNC HALT, with a reason.
 Every companion stops within one report interval and shows the reason. Release

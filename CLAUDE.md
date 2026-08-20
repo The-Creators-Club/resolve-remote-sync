@@ -319,10 +319,15 @@ Full runbook, including what each version number means and how to roll back:
 - Lane B can STOP ITSELF: `sync/lane_guard.py`'s circuit breaker parks proxy
   download in `paused` (never `error`) whenever the NAS stops looking like
   the tree or a pass trashes too much; lanes A and C keep running, and only a
-  human at the tray clears it. Before "lane B isn't downloading", check
-  `~/.ccsync/state/lane_b_breaker.json`, the tray line, or the grid chip. Same
-  for `sync_halt.json`. Never make a safety latch in-memory-only.
-  `docs/SYNC_SAFETY.md`.
+  human clears it — the editor at the tray, or an admin at Dashboard → FLEET
+  → [ RESUME ] (CR-45, companion 0.9.43+, delivered in the same `commands`
+  block as the halt and the pushed update). A pass that is about to trip
+  first asks whether the files were MOVED rather than deleted, by re-listing
+  the scope and matching basename + exact size (CR-44); that probe is lazy,
+  and every failure in it falls back to "treat them as deletions". Before
+  "lane B isn't downloading", check `~/.ccsync/state/lane_b_breaker.json`,
+  the tray line, or the grid chip. Same for `sync_halt.json`. Never make a
+  safety latch in-memory-only. `docs/SYNC_SAFETY.md`.
 - Every media-pool write goes through `resolve_bridge.replace_clip` /
   `link_proxy_media`, which take a `SaveProject`+export save point and write an
   undo journal under `~/.ccsync/resolve_edits` — add new Resolve mutations

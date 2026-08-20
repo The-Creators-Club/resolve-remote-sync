@@ -372,13 +372,25 @@ class LaneBBreaker:
 
     # -- triggers 2 and 3: what a pass actually did ---------------------
     def note_pass(
-        self, scope: str, deleted: int, moved_bytes: int, local_proxies: int = 0
+        self, scope: str, deleted: int, moved_bytes: int, local_proxies: int = 0,
+        relocation_probe: Optional[Callable[[], int]] = None,
     ) -> Optional[str]:
         """Account one lane B pass. Returns the trip reason, or None.
 
         `local_proxies` is the proxy count under the same scope BEFORE the
         pass (see count_local_proxies); 0 disables the fraction rule and
-        leaves the absolute caps."""
+        leaves the absolute caps.
+
+        `relocation_probe` answers "how many of the files this pass trashed
+        are still on the NAS, at a different path?" -- i.e. how many were a
+        REORGANISATION rather than a deletion (2026-08-20, KNOWN_BUGS CR-44).
+        It is called at most once per pass and ONLY when the pass would
+        otherwise trip, because it costs a recursive listing of the scope:
+        on the ~99% of passes that are nowhere near a limit it must not be
+        spent at all. A move is the common benign shape -- an editor drags a
+        folder in Explorer and every proxy under it "disappears" from the
+        server at once -- and it was tripping the breaker on exactly the
+        event the breaker has nothing to say about."""
         deleted = max(0, int(deleted or 0))
         moved_bytes = max(0, int(moved_bytes or 0))
         with self._lock:
@@ -392,11 +404,20 @@ class LaneBBreaker:
         limit = self.max_deletes_per_pass
         if local_proxies >= self.min_local_sample:
             limit = min(limit, max(1, int(local_proxies * self.max_delete_fraction)))
+        if deleted <= limit and cumulative <= self.max_deletes_cumulative:
+            return None
+        # About to trip on one rule or the other -- NOW it is worth asking
+        # whether what left the folder actually left the server.
+        relocated = self._count_relocations(relocation_probe, deleted)
+        if relocated:
+            deleted, cumulative = self._discount_relocations(relocated)
         if deleted > limit:
             return self._trip_and_return(
                 f"one proxy-download pass moved {deleted} file(s) out of "
                 f"{scope or 'the tree'} into {TRASH_DIR_NAME} (the limit is {limit}"
                 + (f" of {local_proxies} local proxies" if local_proxies else "")
+                + (f"; a further {relocated} were moved to a new folder on the NAS "
+                   "rather than deleted" if relocated else "")
                 + "). Nothing was deleted -- they are all recoverable -- but proxy "
                   "download is stopped until someone checks the server."
             )
@@ -408,6 +429,50 @@ class LaneBBreaker:
                 "someone checks the server."
             )
         return None
+
+    def _count_relocations(
+        self, probe: Optional[Callable[[], int]], deleted: int
+    ) -> int:
+        """Run the relocation probe, clamped and never raising.
+
+        A probe that throws, or that answers nonsense, must leave the
+        breaker exactly as strict as it was without one: this is the code
+        path that decides NOT to stop a lane that is deleting files, so
+        every failure here has to fall back to 0 (= "treat them all as
+        deletions")."""
+        if probe is None:
+            return 0
+        try:
+            relocated = int(probe() or 0)
+        except Exception:
+            log.exception("lane B breaker: the relocation probe failed -- "
+                          "treating every trashed file as a deletion")
+            return 0
+        if relocated <= 0:
+            return 0
+        # Clamp: the probe counts files it found on the remote, and a bug
+        # there must not be able to talk the breaker out of a real trip by
+        # claiming more relocations than the pass had deletions.
+        return min(relocated, deleted)
+
+    def _discount_relocations(self, relocated: int) -> tuple[int, int]:
+        """Take `relocated` back off this pass's and the cumulative counters.
+
+        The cumulative rule is the one that would otherwise punish a big
+        reorganisation twice: once on the pass it happened, and again for
+        every pass afterwards because the count never came back down."""
+        with self._lock:
+            self._last_pass_deletes = max(0, self._last_pass_deletes - relocated)
+            self._deletes = max(0, self._deletes - relocated)
+            deleted = self._last_pass_deletes
+            cumulative = self._deletes
+            self._persist_locked()
+        log.info(
+            "lane B: %d of this pass's trashed file(s) are still on the NAS under a "
+            "different path -- a folder was reorganised, not emptied; not counting "
+            "them against the breaker", relocated,
+        )
+        return deleted, cumulative
 
 
 # -- .ccsync-trash retention ----------------------------------------------

@@ -1388,6 +1388,88 @@ when the report omitted `mode` (the COALESCE is real now); the
 is NOT NULL. `test_presence.py` pins a mode-less report keeping a stored
 `base`.
 
+## The lane B breaker's two blind spots (CR-44, CR-45, 2026-08-20)
+
+Both found by working ruskin's PC on 2026-08-19, where proxy download sat
+stopped for a day and neither the trip nor the recovery was the breaker's
+finest hour. Nothing was ever lost: the trip was correct in the narrow sense
+that the server no longer had the files at the path lane B was syncing, and
+`.ccsync-trash` held every byte throughout. The trip was still WRONG about
+what had happened, and the fix for that could not be delivered without the
+second change.
+
+### CR-44 — a folder MOVED on the NAS reads as a folder emptied
+
+Lane B is `rclone sync` down, so it learns exactly one thing about a local
+file: whether the remote has it at that path. An editor who drags
+`Interviewees/Creator_Interviews` into `B-roll/Creator Intel Reel Shooting
+CCT` deletes nothing, but every proxy underneath leaves the path lane B is
+watching in one pass, and the breaker read that as the tree being emptied.
+
+Measured on ruskin/DESKTOP-LQQ41TC, 2026-08-19: 148 originals and 214
+proxies moved between the 17:00 and 18:00 ZFS snapshots (Season 1's own file
+count went 3519 -> 3518, which is how the move was told from a deletion);
+lane B trashed 100 of his local copies at 17:49, tripped, and stopped. The
+reorganisation was routine and every byte was on the server the whole time.
+
+FIXED in repo 2026-08-20, companion 0.9.43: `LaneBBreaker.note_pass` takes a
+`relocation_probe`, and `RcloneLane._count_relocations` answers it by listing
+the scope recursively (`rclone lsf -R --format sp`) and matching each trashed
+file on BASENAME + EXACT SIZE. A trashed file's own remote path is gone by
+construction -- rclone moved it out precisely because the remote lacks it
+there -- so any match is at another path, which is what "moved" means.
+Relocations come off both the per-pass and the cumulative counters.
+
+Three properties worth keeping if this is ever touched:
+
+* the probe is LAZY. It costs a recursive listing, so it runs only on a pass
+  that is about to trip, never on the ~99% that are nowhere near a limit.
+* every failure falls back to 0, i.e. "treat them all as deletions". A probe
+  that throws, or a listing that fails, must leave the breaker exactly as
+  strict as it was without one, and the count is clamped to the pass's own
+  deletions so a bug there cannot talk it out of a real trip.
+* a failed listing (None) and an empty remote ({}) are different answers. The
+  empty remote is the case the breaker exists for and must stay free to trip.
+
+A re-encode is still a deletion, on purpose: when the base rig superseded the
+`Nuclear_Restart_Montage` `.mp4` proxies with `.mov` ones the same afternoon,
+the old bytes really did go, and the size match refuses to call that a move.
+
+### CR-45 — only the editor's own tray could clear it
+
+The breaker is deliberately an operator decision: resuming asserts the server
+is in a state worth syncing from, which is the exact judgement the software
+could not make. What it was not, until now, is a decision the operator could
+REACH. There was no dashboard action, no admin API, and the companion's
+command channel carried only `upgrade` and `halt`; the 8899 loopback has no
+resume route. The state is read once in `CompanionApp.__init__`, so editing
+`lane_b_breaker.json` under a running companion does nothing and is then
+overwritten.
+
+So a remote machine stayed parked until its owner was next at the keyboard.
+ruskin's PC spent 2026-08-19 that way, and the admin who had already checked
+the NAS and knew the trip was benign could do nothing but send a message.
+
+FIXED in repo 2026-08-20, dashboard 0.7.4 + companion 0.9.43: schema v26 adds
+`machines.lane_b_resume_requested_at/_by`, delivered in the same `commands`
+block the fleet halt and the pushed update ride. `[ RESUME ]` sits beside the
+red chip on the fleet page for admins, with `POST|DELETE
+/api/v1/admin/machines/{editor}/{machine}/resume-lane-b` behind it.
+
+Nothing about the decision moved. The companion does exactly what the tray
+click does, and only while its breaker is actually tripped -- so it is
+idempotent by construction rather than by remembering which request it saw.
+The request is CLEARED when the machine reports its breaker no longer
+tripped, which is what stops a standing one from silently clearing a later,
+unrelated trip; a report carrying no guard section at all keeps it, or a
+companion too old to send one would look like "not tripped" forever and the
+admin's click would never be delivered.
+
+**Deploy the dashboard before the companions**, as ever -- but note the
+inverse gap here: the dashboard half is inert until a companion that knows
+`resume_lane_b` is on the machine, so this does NOT help any machine still on
+0.9.42 or earlier. Ruskin's current trip needs the tray click regardless.
+
 ## Open — residuals from the 2026-08-14 fix pass
 
 ### R16 — eight 08-14 findings deliberately not fixed

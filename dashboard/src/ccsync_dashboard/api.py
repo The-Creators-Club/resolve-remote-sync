@@ -671,13 +671,24 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
     ingest = db.fetch_broll_ingest_map(conn)
     music_ingest = db.fetch_music_ingest_map(conn)
     proxies = db.fetch_proxy_coverage_map(conn)
+    # Which machines have an admin's "resume proxy download" still in flight
+    # (v26, CR-45), so the button can say "asked" rather than inviting a
+    # second click at a machine that has simply not reported yet.
+    pending_resumes = {
+        (r["editor_username"], r["machine"])
+        for r in conn.execute(
+            "SELECT editor_username, machine FROM machines "
+            "WHERE lane_b_resume_requested_at IS NOT NULL"
+        ).fetchall()
+    }
     result = []
     for entry in machines.values():
         key = (entry["editor_username"], entry["machine"])
         entry["status"] = health.worst(l["chip"] for l in entry["lanes"])
         entry["verified"] = verified.get(key, False)
         entry["transport"] = transport.get(key) or {}
-        entry["guard"] = guards.get(key) or {}
+        entry["guard"] = dict(guards.get(key) or {})
+        entry["guard"]["resume_requested"] = key in pending_resumes
         entry["ingest"] = ingest.get(key) or {}
         entry["music_ingest"] = music_ingest.get(key) or {}
         entry["proxy"] = proxies.get(key) or {}
@@ -2696,6 +2707,44 @@ def api_cancel_machine_update(
     return {"ok": True}
 
 
+@router.post("/admin/machines/{editor}/{machine}/resume-lane-b")
+def api_resume_machine_lane_b(
+    editor: str, machine: str, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """Clear ONE machine's lane B circuit breaker on its next report (v26).
+
+    This is "click Resume proxy download on their behalf", not an override:
+    the companion does exactly what the tray button does, and it does it
+    only while its breaker is actually tripped. What changes is who can
+    reach the decision -- the admin who just checked the NAS, rather than
+    only the editor sitting in front of the machine.
+
+    Deliberately allowed against a machine whose last report showed no trip:
+    the admin may be getting in front of one, and the request simply expires
+    unused when the machine reports clear.
+    """
+    admin = _require_admin(request)
+    editor, machine = editor.strip().lower(), machine.strip()
+    if not db.request_lane_b_resume(conn, editor, machine, admin, db.utcnow_iso()):
+        raise HTTPException(status_code=404, detail=f"no machine {machine!r} for {editor!r}")
+    conn.commit()
+    log.info("%s asked %s/%s to resume proxy download", admin, editor, machine)
+    return {"ok": True, "editor": editor, "machine": machine}
+
+
+@router.delete("/admin/machines/{editor}/{machine}/resume-lane-b")
+def api_cancel_machine_lane_b_resume(
+    editor: str, machine: str, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    _require_admin(request)
+    editor, machine = editor.strip().lower(), machine.strip()
+    db.clear_lane_b_resume_request(conn, editor, machine)
+    conn.commit()
+    return {"ok": True}
+
+
 @router.post("/admin/machines/{editor}/{machine}/copy-plan")
 def api_copy_machine_plan(
     editor: str, machine: str, request: Request, source: str = "",
@@ -4422,6 +4471,36 @@ def api_report(
                 "version": update_request["version"],
                 "requested_by": update_request["by_user"],
                 "requested_at": update_request["at"],
+            }
+    # RESUME PROXY DOWNLOAD (v26, KNOWN_BUGS CR-45): an admin cleared this
+    # machine's lane B breaker from the fleet page, because until now only
+    # the editor's own tray could and a remote machine therefore stayed
+    # parked until its owner was next at the keyboard.
+    #
+    # Cleared the moment the machine reports the breaker is no longer
+    # tripped -- which is both "the request is done" and the thing that
+    # stops it from clearing some later, unrelated trip. A companion that
+    # has already resumed ignores a command it sees again, so the overlap
+    # between resuming and the next report costs nothing.
+    resume_request = db.lane_b_resume_request(conn, editor, machine)
+    if resume_request:
+        guard = payload.sync_guard
+        breaker = guard.lane_b_breaker if guard is not None else None
+        # Only a report that CARRIED a guard section can retire the request:
+        # a companion too old to send one would otherwise look like "not
+        # tripped" forever and the admin's click would never be delivered.
+        if breaker is not None and not breaker.tripped:
+            db.clear_lane_b_resume_request(conn, editor, machine)
+            # Committed HERE for the same reason the pushed update's clear
+            # is: the report's own commit is above us.
+            conn.commit()
+            log.info("%s/%s has resumed proxy download -- the request is done",
+                     editor, machine)
+        else:
+            result["commands"]["resume_lane_b"] = {
+                "apply": True,
+                "requested_by": resume_request["by_user"],
+                "requested_at": resume_request["at"],
             }
     # B-roll ingest cancels (BROLL_INGEST_PLAN.md §4.2). Present ONLY when
     # there is something to cancel -- unlike `halt`, an empty list is not an

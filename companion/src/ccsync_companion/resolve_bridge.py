@@ -30,7 +30,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Optional
 
-from . import canon, proxy_relink, resolve_journal, resolve_prefs, ui_state
+from . import canon, proxy_relink, resolve_journal, resolve_prefs, script_server, ui_state
 
 log = logging.getLogger("ccsync.resolve")
 
@@ -308,6 +308,22 @@ def connect():
     all indistinguishable -- same message to the caller, nothing in the log,
     impossible to diagnose remotely (AUDIT_2 §2-low)."""
     with _bridge_call("connect"):
+        # BEFORE anything touches fusionscript: a client that connects to the
+        # script server while Resolve is still launching -- server spawned,
+        # Resolve not yet registered with it -- takes the server down, and
+        # Resolve gives up on scripting for its whole session (CR-68,
+        # 2026-08-21; the mechanism and the log proof are in
+        # script_server.py). The probe reads the TCP table, opens nothing,
+        # and fails OPEN, so the only thing it can ever withhold is a
+        # connection that would have killed the API.
+        try:
+            phase, why = script_server.state()
+        except Exception:  # pragma: no cover -- state() never raises
+            phase, why = script_server.UNKNOWN, ""
+        if phase == script_server.STARTING:
+            _note_starting(why)
+            return None
+        _note_starting(None)
         try:
             _ensure_env_and_syspath()
         except Exception:
@@ -333,6 +349,41 @@ def connect():
             # describe_disconnection() below.
             log.debug("resolve: scriptapp('Resolve') returned None -- no connection")
         return app
+
+
+# One INFO line per launch window, not one per poll per thread: the watcher
+# asks every 3 s and the window is usually under a second, but a Resolve that
+# is slow to register (a stalled project library) could hold it for minutes.
+_starting_lock = threading.Lock()
+_starting_since: Optional[float] = None
+
+
+def _note_starting(why: Optional[str]) -> None:
+    global _starting_since
+    with _starting_lock:
+        if why is None:
+            if _starting_since is not None:
+                log.info(
+                    "resolve: script server has its host now -- connecting "
+                    "(held off for %.1fs)", time.monotonic() - _starting_since,
+                )
+            _starting_since = None
+            return
+        if _starting_since is None:
+            _starting_since = time.monotonic()
+            log.info(
+                "resolve: Resolve is starting up (%s) -- holding off every "
+                "scripting call until it has registered, so the server is not "
+                "taken down with a premature connection (CR-68)", why,
+            )
+
+
+def script_server_starting() -> bool:
+    """Is Resolve in its launch window right now? Cheap; never raises."""
+    try:
+        return script_server.is_starting()
+    except Exception:
+        return False
 
 
 def try_connect() -> bool:
@@ -362,6 +413,10 @@ def try_connect() -> bool:
 _NOT_CONNECTED = "\x00ccsync:not-connected"
 
 NOT_RUNNING_MESSAGE = "DaVinci Resolve is not running"
+# The launch window (CR-68): Resolve is up, its script server is up, and it
+# has not registered yet. Not a fault and not the NO_SCRIPTING state below,
+# which is what a premature connection in THIS state used to produce.
+STARTING_MESSAGE = "DaVinci Resolve is starting up"
 # The order matters and is not obvious: fusionscript.dll keeps process-global
 # IPC state, and a long-running client whose Resolve has restarted underneath
 # it can wedge the NEW Resolve's scripting server for EVERY client -- at which
@@ -412,10 +467,12 @@ def describe_disconnection() -> str:
     Call only when connect() has already returned None -- this does not
     itself test the connection.
     """
+    if script_server_starting():
+        return STARTING_MESSAGE
     return NO_SCRIPTING_MESSAGE if _resolve_process_present() else NOT_RUNNING_MESSAGE
 
 
-DISCONNECTION_MESSAGES = (NOT_RUNNING_MESSAGE, NO_SCRIPTING_MESSAGE)
+DISCONNECTION_MESSAGES = (NOT_RUNNING_MESSAGE, NO_SCRIPTING_MESSAGE, STARTING_MESSAGE)
 
 
 def is_disconnection_message(message: Any) -> bool:

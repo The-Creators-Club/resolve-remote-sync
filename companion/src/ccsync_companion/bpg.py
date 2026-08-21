@@ -295,6 +295,15 @@ def parse_watch_folders(value: Any) -> list[str]:
     while index < len(text):
         char = text[index]
         if char == "\\" and index + 1 < len(text):
+            if text[index + 1] == "x":
+                # Qt's \xHHHH: greedy over hex digits, one UTF-16 code unit.
+                end = index + 2
+                while end < len(text) and text[end] in "0123456789abcdefABCDEF":
+                    end += 1
+                if end > index + 2:
+                    buf.append(chr(int(text[index + 2:end], 16) & 0xFFFF))
+                    index = end
+                    continue
             buf.append(text[index + 1])
             index += 2
             continue
@@ -310,7 +319,70 @@ def parse_watch_folders(value: Any) -> list[str]:
         buf.append(char)
         index += 1
     out.append("".join(buf).strip())
-    return [entry for entry in out if entry]
+    # Qt's \x escapes are UTF-16 code units: rejoin surrogate pairs.
+    return [entry.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+            for entry in out if entry]
+
+
+def _qt_escape_text(path: str) -> str:
+    r"""Backslash-escape one string the way Qt 5's QSettings INI writer does.
+
+    BPG reads its .ini as Latin-1 (Qt 5 with no iniCodec), so a non-Latin-1
+    character can only reach it as Qt's own `\xHHHH` escape: the UTF-16 code
+    unit in hex, which Qt's reader turns back into the character. Writing the
+    UTF-8 bytes instead (what this did until 2026-08-21, CR-69) gave BPG a
+    mojibake folder -- the real folder name arrived as `ç¬¬ä¸‰å±†...` -- that
+    it listed, never found on disk, and rewrote as `\xe7\xac\xac...` on exit,
+    so every later launch saw an uncovered folder and appended another copy.
+
+    Qt's reader is greedy after `\x`: it keeps consuming hex digits, so a
+    character that FOLLOWS an escape and is itself a hex digit (`0-9a-fA-F`)
+    must be escaped too or it is swallowed into the code point -- Qt's writer
+    has the same `escapeNextIfDigit` rule. Astral characters are two code
+    units, as they are in QString.
+    """
+    out: list[str] = []
+    escape_next_digit = False
+    for char in path:
+        code = ord(char)
+        if code > 0xFFFF:
+            code -= 0x10000
+            units = (0xD800 | (code >> 10), 0xDC00 | (code & 0x3FF))
+        else:
+            units = (code,)
+        for unit in units:
+            if unit == 0x5C:
+                out.append("\\\\")
+                escape_next_digit = False
+            elif unit == 0x22:
+                out.append('\\"')
+                escape_next_digit = False
+            elif unit < 0x20 or unit > 0x7E or (
+                    escape_next_digit and chr(unit) in "0123456789abcdefABCDEF"):
+                out.append("\\x%x" % unit)
+                escape_next_digit = True
+            else:
+                out.append(chr(unit))
+                escape_next_digit = False
+    return "".join(out)
+
+
+def _mojibake_of(entry: str, wanted: Sequence[str]) -> bool:
+    r"""Is `entry` the Latin-1 misreading of one of the folders we want?
+
+    The damage CR-69 left behind in the field: our UTF-8 bytes, read by BPG as
+    Latin-1 and written back by it as \xHH escapes, parse to a string whose
+    Latin-1 encoding is the UTF-8 of the real folder. Only OUR past entries
+    can have that shape, so dropping them rewrites nothing of the editor's.
+    """
+    try:
+        decoded = entry.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return False
+    if decoded == entry:
+        return False
+    target = _norm(decoded)
+    return any(target == _norm(item) for item in wanted)
 
 
 def _escape_watch_folder(path: str) -> str:
@@ -319,9 +391,9 @@ def _escape_watch_folder(path: str) -> str:
     Verified against a live BPG on 2026-08-13: `P:\\\\Projects\\\\...` with
     unescaped interior spaces is what it accepts (the window listed the folder
     and costed the encode). Quoting is only for the characters that would
-    otherwise end the element.
+    otherwise end the element; non-ASCII goes through _qt_escape_text.
     """
-    escaped = path.replace("\\", "\\\\").replace('"', '\\"')
+    escaped = _qt_escape_text(path)
     if (any(char in escaped for char in ',;="')
             or escaped != escaped.strip()):
         return '"' + escaped + '"'
@@ -435,8 +507,20 @@ def ensure_watch_folders(wanted: Sequence[str], *, path: str = "",
         match = _WATCH_LINE_RE.search(content)
         current = match.group("value") if match else ""
         existing = parse_watch_folders(current)
+        stale = [entry for entry in existing if _mojibake_of(entry, dirs)]
+        if stale:
+            # Our own pre-CR-69 entries: BPG shows them garbled and they
+            # watch nothing. The ONE case this function rewrites existing
+            # text -- and only with the entries the parser understood.
+            existing = [entry for entry in existing if entry not in stale]
+            current = ", ".join(_escape_watch_folder(entry) for entry in existing)
+            log.info(
+                "bpg: dropping %d garbled watch folder entr%s an earlier "
+                "companion wrote with the wrong escaping (CR-69)",
+                len(stale), "y" if len(stale) == 1 else "ies",
+            )
         missing = [entry for entry in dirs if not _is_covered(entry, existing)]
-        if not missing:
+        if not missing and not stale:
             result["ok"] = True
             return result
         room = max(0, MAX_WATCH_FOLDERS - len(existing))
@@ -459,7 +543,7 @@ def ensure_watch_folders(wanted: Sequence[str], *, path: str = "",
             missing = missing[:allowed]
         addition = ", ".join(_escape_watch_folder(entry) for entry in missing)
         kept = "" if current.strip() in ("", INVALID_MARKER) else current.strip()
-        value = (kept + ", " + addition) if kept else addition
+        value = (kept + ", " + addition) if (kept and addition) else (kept or addition)
         if match:
             start, end = match.span()
             updated = content[:start] + match.group("key") + value + content[end:]

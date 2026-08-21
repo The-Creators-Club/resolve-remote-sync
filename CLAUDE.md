@@ -345,6 +345,15 @@ Full runbook, including what each version number means and how to roll back:
   "lane B isn't downloading", check `~/.ccsync/state/lane_b_breaker.json`,
   the tray line, or the grid chip. Same for `sync_halt.json`. Never make a
   safety latch in-memory-only. `docs/SYNC_SAFETY.md`.
+- **Never call `scriptapp("Resolve")` outside `resolve_bridge.connect()`**
+  (CR-68, 2026-08-21). Resolve's script server (`fuscript.exe`, TCP 1144)
+  exits when its last client leaves, and a client that connects before
+  Resolve has registered with it kills scripting for that whole Resolve
+  session, for every client on the machine - the "close Resolve, close the
+  companion, reopen both in order" dance. `connect()` asks
+  `script_server.state()` (TCP table, no connection, fail-open) first and
+  holds off during the launch window. `docs/GOTCHAS.md` §15 has the
+  drop-in guard for other Resolve clients on the same machine.
 - Every media-pool write goes through `resolve_bridge.replace_clip` /
   `link_proxy_media`, which take a `SaveProject`+export save point and write an
   undo journal under `~/.ccsync/resolve_edits` — add new Resolve mutations

@@ -2722,6 +2722,112 @@ the dashboard can go out first exactly as the per-machine plans required.
 Everything the pass declined on the merits, rather than left as a seam, is in
 CR-66 with its reason.
 
+## Resolve's launch window, and BPG's INI escaping (CR-68, CR-69, 2026-08-21)
+
+Two owner reports the evening of 2026-08-21, both fixed in repo as
+**companion 0.9.45**, unshipped (ships with the 0.9.44 pass; dashboard
+unchanged). Suite after: companion 4457 passed / 2 skipped.
+
+### CR-68 - a client polling during Resolve's launch kills scripting for the session - FIXED in repo
+**Symptom, every editor, for months.** Companion already running, Resolve
+launched afterwards: Resolve hangs 10-20 s during launch, then no scripting
+client on the machine can connect (`scriptapp("Resolve")` returns None, the
+tray says "running but isn't accepting scripting connections") until the
+editor closes Resolve, closes the companion, opens Resolve and THEN the
+companion. The MCP server and the MulticamPipeline "Timeline cards" tool
+trip the same thing.
+
+**Mechanism, proven from Resolve's own log** (`Support/logs/
+davinci_resolve.log`, 14:23 and 15:03 on 2026-08-21, both followed by the
+dance and a clean relaunch). Resolve's scripting is brokered by a child
+process, `fuscript.exe`, spawned 90-470 s into Resolve's launch (after the
+project library), listening on TCP **1144**. Resolve then connects to it and
+registers as the "HostApp"; a client connects to 1144 and is handed
+Resolve's own port (49152 here). **The server exits when its last connection
+closes.** A client that connects between "server started" and "Resolve
+registered" gets no host, disconnects, and takes the server with it:
+
+    Started script server: 30320 / Failed to connect to script server, retrying
+    Started script server: 27240 / Failed to connect to script server, retrying
+    Started script server: 8392  / Failed to connect to script server
+    Script server log:
+    90.859 Script Server Started
+    91.125 Incoming connection      <- the companion's 3 s watcher poll
+    91.125 HostApp create
+    91.234 HostApp destroy
+    91.234 Script Server Terminated: done: 1, err: 0
+
+Three attempts (the "hang"), then Resolve never retries, so the API is dead
+for that process's lifetime. The TCP table on the base rig showed 24
+TIME_WAIT connections to 1144 in one two-minute window: the companion's
+threads connecting and dropping on every poll. It is a race, not a
+certainty (the 15:43 launch that day connected fine with the companion up),
+which is why it read as flaky for so long. This is the same class of
+failure R12's "stale client wedges the new Resolve" entry described from
+the other side; `_maybe_recover_stale_bridge` restarts the companion when
+its Resolve exits, and that restart is itself a fresh poller that can land
+in the next launch's window.
+
+**Fix: never connect until Resolve has registered.** New
+`companion/src/ccsync_companion/script_server.py` reads the kernel's TCP
+table (Windows `GetExtendedTcpTable` v4+v6 plus a Toolhelp32 process
+snapshot, ~6 ms, no subprocess; macOS `lsof -F`, untested against a live
+Mac as the studio Mac was unreachable) and answers READY (a LISTEN on 1144
+owned by `fuscript`, and an ESTABLISHED connection to 1144 owned by
+fuscript's PARENT process), STARTING (the listener with no such host), or
+UNKNOWN (no listener, foreign process on the port, unreadable table, any
+doubt). `resolve_bridge.connect()` asks before touching fusionscript and
+returns None on STARTING only; everything else behaves exactly as before
+(fail OPEN by construction). A new `STARTING_MESSAGE` ("DaVinci Resolve is
+starting up") replaces the NO_SCRIPTING advice during the window - that
+advice was telling editors to do the one dance that worked, because the
+advice-giver was the thing breaking it. One INFO line per window, not one
+per poll. Tests: `tests/test_script_server.py`,
+`tests/test_resolve_bridge_launch_window.py`; conftest pins the probe to
+UNKNOWN so no test reads the developer's machine.
+
+**Proven live on the base rig, 2026-08-21 16:49 and 16:52** (two threads
+calling `scriptapp("Resolve")` every 0.5 s, Resolve launched by the
+harness, TCP table sampled at 50 ms, companion stopped so the harness was
+the only poller). WITHOUT the guard: three `Started script server` lines
+(16:49:40), each listener alive 50-100 ms before the harness's connection
+took it down, `Failed to connect to script server` three times, the
+harness never connected in 38 polls, scripting dead for the session.
+WITH the guard, same harness: listener up at +15.9 s, Resolve registered
+at +16.4 s (a 0.5 s window), both threads held off (8 skips), connected at
++16.8 s, ONE `Started script server` line and no failure. Deterministic
+both ways on this rig.
+
+**Not done / for the owner.** (a) The other products: copy
+`script_server.py` (it is stdlib-only) and gate every `scriptapp()` behind
+`is_starting()`; a shared machine needs EVERY client to behave. (b)
+macOS `lsof` path untested against a live Mac. (c)
+`resolve_prefs.resolve_is_running` counts the Blackmagic Proxy Generator
+(`Resolve.exe -pg`) as Resolve, so "running but not accepting scripting"
+appears while only BPG is up; cosmetic, left.
+
+### CR-69 - BPG watch folder with a non-ASCII name is written garbled, never watched, and re-added every launch - FIXED in repo
+**Symptom** (base rig, 2026-08-21, screenshot): the companion launched the
+Blackmagic Proxy Generator with a watch folder listed as `ç¬¬ä¸‰å±†...` for
+a CJK shoot name; BPG showed it, found no folder, and did not start.
+`ProxyGeneratorSettings.ini` held two copies of it.
+
+**Mechanism.** BPG is Qt 5 with a Latin-1 INI codec. `bpg.ensure_watch_
+folders` wrote the path's UTF-8 bytes raw; BPG read them as Latin-1, showed
+the mojibake, and on exit rewrote the entry as `\xe7\xac\xac...` (each byte
+as Qt's `\xHH`). The companion's parser did not understand `\x`, so the next
+launch saw the folder as uncovered and appended another copy.
+
+**Fix.** `_qt_escape_text` writes non-ASCII as Qt's own `\xHHHH` UTF-16
+code units (surrogate pairs for astral characters, and Qt's
+escape-the-next-hex-digit rule, because its reader is greedy);
+`parse_watch_folders` decodes `\x` escapes and rejoins surrogates; and the
+one case the function now rewrites existing text is dropping entries whose
+Latin-1 encoding is the UTF-8 of a folder we want - i.e. only our own past
+damage, never an editor's `P:\Café`. Tests: `tests/test_bpg_qt_escape.py`.
+The live base-rig INI still carries the two garbled entries until the next
+BPG launch from a 0.9.45 companion cleans them.
+
 ## Open — residuals from the 2026-08-14 fix pass
 
 ### R16 — eight 08-14 findings deliberately not fixed

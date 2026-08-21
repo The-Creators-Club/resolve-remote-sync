@@ -938,3 +938,53 @@ Corollaries worth knowing before you debug one of these:
 stopped arriving: is `syncthing.exe` in Task Manager? Then
 `~/.ccsync/state/syncthing_supervisor.json` (`attempts`, `last_error`) and the
 companion log's `ccsync.sync.supervisor` lines.
+
+## 15. Resolve's script server, and why a poll can kill it (CR-68)
+
+Resolve's scripting API is not inside Resolve.exe. Late in launch (90-470 s
+on the base rig: the project library connects first) Resolve spawns
+`fuscript.exe`, which listens on TCP **1144**; Resolve then connects to it
+and registers as the "HostApp". `fusionscript.dll`'s `scriptapp("Resolve")`
+connects to 1144, is handed Resolve's own port, and talks to that.
+
+The rule that matters: **the script server exits when its last connection
+closes**. Any client that connects between "Started script server" and
+Resolve's own registration finds no host, drops, and the server exits with
+it. Resolve tries three times (the 10-20 s launch hang), logs
+`Failed to connect to script server`, and never tries again: scripting is
+dead for that Resolve process, for every client on the machine. The only
+cure was quit Resolve, quit every poller, start Resolve, start the pollers.
+
+Who was polling: the companion's watcher (3 s), the media-tree refresh, the
+MCP server, the MulticamPipeline tools. The race is short (the window is
+~0.3 s) and so it looked intermittent for months.
+
+**Diagnosis.** `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\logs\
+davinci_resolve.log`: search `script server`. A healthy launch has ONE
+`Started script server: <pid>`; the broken one has three with `Failed to
+connect` between them and a "Script server log:" block showing `Incoming
+connection` / `HostApp destroy` / `Terminated: done: 1`. `netstat -ano |
+findstr :1144` on a healthy machine shows fuscript LISTENING and exactly one
+ESTABLISHED pair owned by Resolve.exe; a long tail of TIME_WAIT rows is a
+poller.
+
+**The fix in the companion** is `ccsync_companion/script_server.py`: read the
+TCP table (no connection, ~6 ms), and refuse to call `scriptapp` while a
+`fuscript` listener exists with no ESTABLISHED connection from its parent
+process. Everything else fails open. `resolve_bridge.connect()` is the one
+chokepoint, so nothing else in the companion needs to know.
+
+**For any other Resolve client on the same machine** (the MCP server, the
+MulticamPipeline tools): copy `script_server.py` next to your code - it is
+stdlib-only, Windows via ctypes and macOS via lsof - and gate every
+`scriptapp()` call:
+
+    from script_server import is_starting
+    if is_starting():
+        return None          # Resolve is launching; try again next poll
+    app = dvr.scriptapp("Resolve")
+
+One badly behaved client is enough to take the server down for all of them,
+so every client on a machine has to carry the guard. "Wait N seconds after
+Resolve.exe appears" does not work: the server starts 90-470 s in, and it is
+the server's start, not the process's, that opens the window.

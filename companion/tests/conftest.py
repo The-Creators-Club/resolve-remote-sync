@@ -176,6 +176,18 @@ def _no_live_resolve(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_live_script_server_probe(monkeypatch):
+    """The CR-68 launch-window probe reads THIS machine's TCP table. A test
+    that wants the window open patches `script_server_starting` / `state`
+    itself; its patch is applied after this one and wins."""
+    from ccsync_companion import resolve_bridge, script_server
+
+    monkeypatch.setattr(resolve_bridge, "script_server_starting", lambda: False)
+    monkeypatch.setattr(script_server, "state", lambda: (script_server.UNKNOWN, "test"))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_resolve_journal():
     """No test inherits another's save point or rate-limit window.
 

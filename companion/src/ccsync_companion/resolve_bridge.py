@@ -323,6 +323,13 @@ def connect():
         if phase == script_server.STARTING:
             _note_starting(why)
             return None
+        if phase == script_server.ABSENT:
+            # No server at all: Resolve is closed, or launching and not there
+            # yet. scriptapp() here would sit in a ~4 s retry loop and greet
+            # the server the moment it appears -- the 0.9.45 failure. Quiet:
+            # this is the normal state for hours at a time.
+            _note_starting(None)
+            return None
         _note_starting(None)
         try:
             _ensure_env_and_syspath()

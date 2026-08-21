@@ -45,8 +45,22 @@ def test_connect_holds_off_while_resolve_is_starting(monkeypatch, caplog, real_c
     assert any("held off for" in r.message for r in caplog.records)
 
 
+def test_no_server_at_all_holds_off_too(monkeypatch, caplog, real_connect):
+    """The 0.9.45 hole: scriptapp() with no server blocks ~4 s retrying, so a
+    'just checking' call made before the server appears is the killer."""
+    touched = {"env": False}
+    monkeypatch.setattr(resolve_bridge, "_ensure_env_and_syspath",
+                        lambda: touched.__setitem__("env", True))
+    monkeypatch.setattr(script_server, "state", lambda: (script_server.ABSENT, "no listener"))
+    with caplog.at_level(logging.INFO, logger="ccsync.resolve"):
+        assert real_connect() is None
+    assert touched["env"] is False
+    # Quiet: Resolve being closed is the normal state for hours.
+    assert not any("holding off" in r.message for r in caplog.records)
+
+
 def test_an_unknown_probe_fails_open(monkeypatch, real_connect):
-    """No listener, no table, a foreign process on the port: the old path,
+    """An unreadable table, a foreign process on the port: the old path,
     unchanged."""
     reached = {"env": False}
 
@@ -55,7 +69,7 @@ def test_an_unknown_probe_fails_open(monkeypatch, real_connect):
         _stop()
 
     monkeypatch.setattr(resolve_bridge, "_ensure_env_and_syspath", env)
-    monkeypatch.setattr(script_server, "state", lambda: (script_server.UNKNOWN, "no listener"))
+    monkeypatch.setattr(script_server, "state", lambda: (script_server.UNKNOWN, "table unreadable"))
     assert real_connect() is None
     assert reached["env"] is True
 

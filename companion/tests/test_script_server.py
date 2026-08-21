@@ -18,10 +18,20 @@ PROCS = {
 LISTEN = (ss._LISTEN, 1144, 0, FUSCRIPT)
 
 
-def test_no_listener_is_unknown_and_fails_open():
+def test_no_listener_is_absent_and_holds_off():
+    """0.9.45 failed open here and died for it: scriptapp() with no server
+    blocks ~4 s retrying, and greets the server the moment it appears."""
     phase, why = ss.classify([], PROCS, ME)
-    assert phase == ss.UNKNOWN
+    assert phase == ss.ABSENT
     assert "no script server" in why
+
+
+@pytest.mark.parametrize("phase,expected", [
+    (ss.READY, True), (ss.UNKNOWN, True), (ss.STARTING, False), (ss.ABSENT, False),
+])
+def test_ready_to_connect_only_for_ready_or_fail_open(monkeypatch, phase, expected):
+    monkeypatch.setattr(ss, "state", lambda: (phase, "x"))
+    assert ss.ready_to_connect() is expected
 
 
 def test_server_up_with_no_host_is_the_launch_window():
@@ -104,14 +114,14 @@ def test_lsof_output_parses_to_the_same_tables():
     assert ss.classify(rows, procs, 999)[0] == ss.READY
 
 
-def test_lsof_with_nothing_matching_is_unknown():
+def test_lsof_with_nothing_matching_is_absent():
     rows, procs = ss.parse_lsof("")
-    assert ss.classify(rows, procs, 999)[0] == ss.UNKNOWN
+    assert ss.classify(rows, procs, 999)[0] == ss.ABSENT
 
 
-def test_garbled_lsof_is_unknown_not_an_exception():
+def test_garbled_lsof_is_absent_not_an_exception():
     rows, procs = ss.parse_lsof("pabc\nngarbage\nTST=ESTABLISHED\nTST=WEIRD\n")
-    assert ss.classify(rows, procs, 999)[0] == ss.UNKNOWN
+    assert ss.classify(rows, procs, 999)[0] == ss.ABSENT
 
 
 def test_state_caches_briefly_and_never_raises(monkeypatch):
@@ -150,4 +160,4 @@ def test_the_windows_tables_read_without_error():
     procs = ss._windows_processes()
     assert rows and all(len(r) == 4 for r in rows)
     assert os.getpid() in procs
-    assert ss._probe_uncached()[0] in (ss.READY, ss.STARTING, ss.UNKNOWN)
+    assert ss._probe_uncached()[0] in (ss.READY, ss.STARTING, ss.ABSENT, ss.UNKNOWN)

@@ -40,19 +40,26 @@ script server, and an ESTABLISHED connection to 1144 owned by the server's
 PARENT process (Resolve). Reading the TCP table costs ~6 ms on Windows and
 opens nothing, so it can be asked before every `scriptapp` call.
 
-Three answers, and the difference between the last two matters:
+Four answers:
 
-    READY     host registered        -> connect as usual
+    READY     host registered        -> connect
     STARTING  server up, no host yet -> DO NOT connect; this is the window
-    UNKNOWN   no server seen, or the table could not be read / the listener
-              is not fuscript / any other doubt -> fail OPEN, i.e. behave
-              exactly as before this module existed
+    ABSENT    no server listening    -> DO NOT connect either (see below)
+    UNKNOWN   the table could not be read / the listener is not fuscript /
+              unsupported platform -> fail OPEN, i.e. the old behaviour
 
-Fail-open is deliberate: a misread here must at worst restore the old
-behaviour, never leave a working Resolve unreachable. The only state that
-withholds a connection is a positively identified script server with no
-registered host, and that state cannot last: Resolve registers within a
-second of spawning it, or the server dies on its own and the listener goes.
+ABSENT holds off too, and that is the lesson of the first shipped version
+(0.9.45, same evening): `scriptapp("Resolve")` with no server present does
+not fail fast -- measured 4.0 s per call on the base rig, 8 s when a second
+thread queues behind it, retrying its connect the whole time. A client that
+"just checked whether Resolve is up" is therefore INSIDE a connect loop at
+the very moment the server appears, and a table snapshot taken before the
+call cannot see that. 0.9.45 failed open on "no listener", went into that
+4 s loop, and killed the server exactly as before (two launches, 17:56 and
+17:57 on 2026-08-21); the test harness that had proven the idea skipped on
+"no listener" as well, which is why it passed. So: connect only when there
+is positively something registered to connect to. Fail-open is kept for the
+cases where the probe itself is the thing in doubt.
 """
 
 from __future__ import annotations
@@ -70,6 +77,7 @@ log = logging.getLogger("ccsync.resolve.script_server")
 
 READY = "ready"
 STARTING = "starting"
+ABSENT = "absent"
 UNKNOWN = "unknown"
 
 # Fusion's script server port. Fixed in every Resolve release to date (it is
@@ -113,7 +121,7 @@ def classify(
     listeners = [pid for state, lport, _rport, pid in tcp_rows
                  if state == _LISTEN and lport == SCRIPT_SERVER_PORT]
     if not listeners:
-        return UNKNOWN, "no script server listening on %d" % SCRIPT_SERVER_PORT
+        return ABSENT, "no script server listening on %d" % SCRIPT_SERVER_PORT
     server_pids = [pid for pid in listeners
                    if processes.get(pid, ("", 0))[0] in _SERVER_NAMES]
     if not server_pids:
@@ -315,6 +323,18 @@ def state() -> tuple[str, str]:
 def is_starting() -> bool:
     """True only in the window where connecting would kill the script server."""
     return state()[0] == STARTING
+
+
+def ready_to_connect() -> bool:
+    """May scriptapp() be called right now? READY, or UNKNOWN (fail open).
+
+    STARTING and ABSENT both say no: in the first a connection kills the
+    server, in the second scriptapp() sits in a multi-second retry loop that
+    becomes the first case the moment the server appears. Never raises."""
+    try:
+        return state()[0] in (READY, UNKNOWN)
+    except Exception:
+        return True
 
 
 def reset_cache() -> None:

@@ -2807,10 +2807,27 @@ at +16.4 s (a 0.5 s window), both threads held off (8 skips), connected at
 +16.8 s, ONE `Started script server` line and no failure. Deterministic
 both ways on this rig.
 
-**Not done / for the owner.** (a) The other products: copy
-`script_server.py` (it is stdlib-only) and gate every `scriptapp()` behind
-`is_starting()`; a shared machine needs EVERY client to behave. (b)
-macOS `lsof` path untested against a live Mac. (c)
+**0.9.45 was not enough - the second pass, same evening (companion
+0.9.46).** Two launches with 0.9.45 running (17:56 and 17:57) died the old
+way, and the companion log shows why: no "holding off" line, because
+`connect()` probed BEFORE the listener existed, got "no listener", failed
+OPEN and called `scriptapp()` - and `scriptapp("Resolve")` with no server
+present does not fail fast. Measured in the run #1 harness log: **4.0 s per
+call, 8 s when a second thread queues behind it**, retrying its connect the
+whole time. So a client that "just checked" is inside a connect loop at the
+moment the server appears, and no snapshot taken before the call can see
+that. The run #2 harness had passed only because its guard ALSO skipped on
+"no listener". Fix: a fourth state, ABSENT, and `connect()` proceeds only on
+READY (or UNKNOWN = the probe itself is unusable); STARTING and ABSENT both
+hold. `ready_to_connect()` is the one predicate, and the two ports use it
+(`not ready_to_connect()`, never `is_starting()`). The other product that
+killed the 17:42 launch (two connections 0.08 s apart) was the pre-patch
+Timeline Cards process, restarted at 17:43:30 by the owner.
+
+**Not done / for the owner.** (a) macOS `lsof` path untested against a
+live Mac. (b) The Resolve MCP server's copy is in its working tree,
+uncommitted, next to that repo's earlier in-flight mutex work; restart the
+MCP server to pick it up. (c)
 `resolve_prefs.resolve_is_running` counts the Blackmagic Proxy Generator
 (`Resolve.exe -pg`) as Resolve, so "running but not accepting scripting"
 appears while only BPG is up; cosmetic, left.

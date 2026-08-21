@@ -12,6 +12,7 @@ Index written 2026-08-17 (`COMMERCIAL_READINESS.md` item 13).
 | Doc | What it is |
 |---|---|
 | [`INSTALL.md`](INSTALL.md) | **Start here.** Requirements, the order of operations, the secrets, the feature switches, and a verification checklist |
+| [`HOW_IT_WORKS.md`](HOW_IT_WORKS.md) | **Customer-facing.** Plain-English, end-to-end explanation of the whole product for non-technical owners, producers and editors; glossary and troubleshooting table |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | The system overview: components, the three sync lanes, the dashboard and its mounts, auth, trust boundaries, what is stored where, and the platform envelope |
 | [`CONFIG.md`](CONFIG.md) | Every configuration key: `site.toml`, the dashboard's environment, the companion's `config.toml`, the indexers |
 | [`API.md`](API.md) | The dashboard's HTTP API — routes, auth per route, request/response shapes |
@@ -93,6 +94,7 @@ and are deliberately left as they were; do not copy commands out of them.
 | [`bug-hunt-2026-08.md`](bug-hunt-2026-08.md) | The original August bug-hunt worklist, archived when the fix fleet completed |
 | [`bug-hunt-2026-08-11.md`](bug-hunt-2026-08-11.md) | The 127-finding hunt |
 | [`bug-hunt-2026-08-14.md`](bug-hunt-2026-08-14.md) | The 94-finding hunt |
+| [`bug-hunt-2026-08-21.md`](bug-hunt-2026-08-21.md) | The 78-finding hunt plus the 53-issue design review; unfixed as of writing |
 | [`synology-spikes-2026-08-17.md`](synology-spikes-2026-08-17.md) | The eight day-1 spikes run against real Synology hardware |
 | [`macos-first-run-2026-08-04.md`](macos-first-run-2026-08-04.md) | The first macOS bring-up session |
 | [`macos-first-run-2026-08-05.md`](macos-first-run-2026-08-05.md) | The follow-up session |

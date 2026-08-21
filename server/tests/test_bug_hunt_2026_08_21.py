@@ -246,6 +246,9 @@ def test_a_blank_owner_still_means_no_chown_at_all():
 # --------------------------------------------------------------------------
 
 def test_a_synology_publish_stages_inside_the_apps_root(monkeypatch):
+    # A Synology backend reads the NAS password at construction; CI has no
+    # secrets (the base rig always does, which is how this passed locally).
+    monkeypatch.setenv("TRUENAS_PW", "test-only")
     calls = []
 
     def guarded(cmd, dry_run, timeout):

@@ -48,6 +48,11 @@ def resolve_process(monkeypatch):
     green or red depending on whether the developer happened to have Resolve
     open. Returns a setter so each test states its own world.
     """
+    # These tests model a Resolve whose scripting has been dead for a long
+    # time: skip the NO_SERVER_MESSAGE grace (tested in
+    # test_resolve_bridge_launch_window) so the dead-server wording answers.
+    monkeypatch.setattr(resolve_bridge, "_no_server_since",
+                        resolve_bridge.time.monotonic() - 10 * resolve_bridge.NO_SERVER_GRACE_SECONDS)
     def _set(present: bool) -> None:
         monkeypatch.setattr(resolve_bridge, "_probe_cache", None)
         monkeypatch.setattr(resolve_prefs, "resolve_is_running", lambda: present)
@@ -672,7 +677,7 @@ def test_a_running_resolve_that_wont_connect_says_so(
     # The actionable half -- and the ORDER matters (2026-08-12): a stale
     # companion client can wedge every new Resolve session, so a Resolve-only
     # restart provably cannot fix this state.
-    assert "Restart the companion first" in result["message"]
+    assert "restart the companion" in result["message"]
     assert "reopen Resolve" in result["message"]
     assert result["message"] != resolve_bridge.NOT_RUNNING_MESSAGE
 
@@ -838,7 +843,7 @@ def test_ever_connected_survives_resolve_going_away(
     state = resolve_bridge.session_state()
     assert state["connected"] is False
     assert state["ever_connected"] is True
-    assert state["reason"] == resolve_bridge.NO_SCRIPTING_MESSAGE
+    assert state["reason"] == resolve_bridge.NO_SERVER_MESSAGE
 
 
 def test_no_project_open_still_counts_as_connected(monkeypatch):
@@ -1079,7 +1084,7 @@ def test_a_disconnection_is_never_masked_by_the_cache(monkeypatch, resolve_proce
 
     result = resolve_bridge.poll_timeline_items()
     assert result["ok"] is False
-    assert result["message"] == resolve_bridge.NO_SCRIPTING_MESSAGE
+    assert result["message"] == resolve_bridge.NO_SERVER_MESSAGE
     assert result["items"] == []
 
 

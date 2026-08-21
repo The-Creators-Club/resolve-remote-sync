@@ -1265,7 +1265,7 @@ def test_the_line_carries_the_distinguished_reason():
     from ccsync_companion.tray import resolve_bridge_line
 
     line = resolve_bridge_line(_bridge(False, ever=True, reason=NO_SCRIPTING_MESSAGE))
-    assert "Restart the companion first" in line
+    assert "restart the companion" in line
 
 
 class _BridgeApp(_FakeApp):

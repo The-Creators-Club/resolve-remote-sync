@@ -528,6 +528,11 @@ def resolve_process(monkeypatch):
     probe, so without pinning it the test reads whatever the developer has
     open. Returns a setter.
     """
+    # These tests model a Resolve whose scripting has been dead for a long
+    # time: skip the NO_SERVER_MESSAGE grace (tested in
+    # test_resolve_bridge_launch_window) so the dead-server wording answers.
+    monkeypatch.setattr(resolve_bridge, "_no_server_since",
+                        resolve_bridge.time.monotonic() - 10 * resolve_bridge.NO_SERVER_GRACE_SECONDS)
     def _set(present: bool) -> None:
         monkeypatch.setattr(resolve_bridge, "_probe_cache", None)
         monkeypatch.setattr(resolve_prefs, "resolve_is_running", lambda: present)

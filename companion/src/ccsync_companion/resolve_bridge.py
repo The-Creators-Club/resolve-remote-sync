@@ -433,9 +433,22 @@ STARTING_MESSAGE = "DaVinci Resolve is starting up"
 # (app._maybe_recover_stale_bridge), so this advice is the manual fallback.
 NO_SCRIPTING_MESSAGE = (
     "DaVinci Resolve is running but isn't accepting scripting connections. "
-    "Restart the companion first (tray → Exit, then relaunch), THEN quit and "
-    "reopen Resolve."
+    "Quit and reopen Resolve. If that does not help, also restart the companion "
+    "(tray → Exit, then relaunch) before reopening Resolve."
 )
+# No script server and a Resolve process: for the first minutes that is a
+# Resolve launching (the server is spawned 90-470 s in) or shutting down
+# (Resolve.exe lingers well after its windows go, and the process probe is
+# cached 30 s on top). Only when it STAYS that way is it the dead-at-launch
+# state NO_SCRIPTING_MESSAGE describes (owner report 2026-08-21: the tray
+# gave the restart-everything advice within seconds of a normal quit).
+NO_SERVER_MESSAGE = (
+    "DaVinci Resolve is open but its scripting isn't available right now "
+    "(starting up or shutting down)"
+)
+NO_SERVER_GRACE_SECONDS = 600.0
+_no_server_lock = threading.Lock()
+_no_server_since: Optional[float] = None
 
 # A process probe costs a spawn (tasklist/pgrep) and the watcher asks on every
 # failed poll -- every 3 s with Resolve closed. Cached so that costs two spawns
@@ -474,12 +487,30 @@ def describe_disconnection() -> str:
     Call only when connect() has already returned None -- this does not
     itself test the connection.
     """
+    global _no_server_since
     if script_server_starting():
         return STARTING_MESSAGE
-    return NO_SCRIPTING_MESSAGE if _resolve_process_present() else NOT_RUNNING_MESSAGE
+    if not _resolve_process_present():
+        with _no_server_lock:
+            _no_server_since = None
+        return NOT_RUNNING_MESSAGE
+    with _no_server_lock:
+        now = time.monotonic()
+        if _no_server_since is None:
+            _no_server_since = now
+        stale = (now - _no_server_since) >= NO_SERVER_GRACE_SECONDS
+    return NO_SCRIPTING_MESSAGE if stale else NO_SERVER_MESSAGE
 
 
-DISCONNECTION_MESSAGES = (NOT_RUNNING_MESSAGE, NO_SCRIPTING_MESSAGE, STARTING_MESSAGE)
+def _reset_no_server_clock() -> None:
+    global _no_server_since
+    with _no_server_lock:
+        _no_server_since = None
+
+
+DISCONNECTION_MESSAGES = (
+    NOT_RUNNING_MESSAGE, NO_SCRIPTING_MESSAGE, STARTING_MESSAGE, NO_SERVER_MESSAGE,
+)
 
 
 def is_disconnection_message(message: Any) -> bool:
@@ -504,6 +535,7 @@ def _explain_disconnection(result: dict[str, Any]) -> dict[str, Any]:
         note_connection(False, result["message"])
     else:
         # Past connect(), whatever else went wrong: the bridge is up.
+        _reset_no_server_clock()
         note_connection(True)
     return result
 

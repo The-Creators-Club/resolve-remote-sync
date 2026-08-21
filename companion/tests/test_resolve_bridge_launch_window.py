@@ -102,7 +102,21 @@ def test_the_launch_window_is_described_as_starting_not_as_a_dead_server(monkeyp
     assert resolve_bridge.describe_disconnection() == resolve_bridge.STARTING_MESSAGE
     assert resolve_bridge.is_disconnection_message(resolve_bridge.STARTING_MESSAGE)
     monkeypatch.setattr(resolve_bridge, "script_server_starting", lambda: False)
+    monkeypatch.setattr(resolve_bridge, "_no_server_since", None)
+    # No server + a Resolve process: launching or shutting down, for a while.
+    assert resolve_bridge.describe_disconnection() == resolve_bridge.NO_SERVER_MESSAGE
+    assert resolve_bridge.is_disconnection_message(resolve_bridge.NO_SERVER_MESSAGE)
+    # ...and only once it has stayed that way is scripting declared dead.
+    monkeypatch.setattr(resolve_bridge, "_no_server_since",
+                        resolve_bridge.time.monotonic() - resolve_bridge.NO_SERVER_GRACE_SECONDS - 1)
     assert resolve_bridge.describe_disconnection() == resolve_bridge.NO_SCRIPTING_MESSAGE
+    # A successful enumeration resets the clock.
+    resolve_bridge._explain_disconnection({"ok": True})
+    assert resolve_bridge._no_server_since is None
+    # Resolve gone entirely resets it too.
+    monkeypatch.setattr(resolve_prefs, "resolve_is_running", lambda: False)
+    monkeypatch.setattr(resolve_bridge, "_probe_cache", None)
+    assert resolve_bridge.describe_disconnection() == resolve_bridge.NOT_RUNNING_MESSAGE
 
 
 def test_starting_message_has_no_em_dash():

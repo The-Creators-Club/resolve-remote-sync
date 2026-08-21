@@ -4133,7 +4133,7 @@ def test_diagnostics_answer_whether_the_bridge_ever_connected(tmp_path):
     line = next(l for l in app.build_diagnostics().splitlines()
                 if l.startswith("resolve bridge:"))
     assert "has connected this session: yes" in line
-    assert "Restart the companion first" in line
+    assert "restart the companion" in line
 
 
 def test_the_bridge_state_read_is_cached_not_a_probe(tmp_path, monkeypatch):

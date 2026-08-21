@@ -135,6 +135,39 @@ def proxy_path(track_id):
     """
     return PROXIES_DIR / f'{int(track_id)}{PROXY_EXT}'
 
+
+def drop_proxy(track_id):
+    """Delete the proxy sitting at `track_id`, if any. -> True if one went.
+
+    THE ID IS REUSED (music-4, 2026-08-21). `tracks.id` is INTEGER PRIMARY KEY
+    without AUTOINCREMENT, so SQLite hands a new insert max(rowid)+1: delete
+    the highest row and the next track created takes its id -- and, because the
+    proxy is chosen on existence alone, its 128k mp3 as well. Every editor
+    previewing the new cue then heard the deleted one, with the right waveform
+    and the right tags beside it, while `?original=1` and Resolve both played
+    the right file. music_index/proxies.py has documented the hazard since the
+    generator was written; the only broom was a manual base-rig --prune, and
+    nothing at all swept the NAS's own /music-proxies -- which is where rows
+    have been created since dashboard ingest landed (2026-08-18).
+
+    So every path that FREES an id or CREATES a row at one drops the file with
+    it. Best-effort by design: a proxy is a cache, and failing to remove one
+    must never fail the write it belongs to.
+    """
+    try:
+        path = proxy_path(track_id)
+    except (TypeError, ValueError):
+        return False
+    try:
+        path.unlink()
+        return True
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        # A read-only proxies mount, or a Windows share holding the file open.
+        # The reader's fallback is the original, so the worst case is bandwidth.
+        return False
+
 # The Resolve half lives in the companion now (port step 8, 2026-08-10):
 # ccsync_companion/music_worker.py and music_server.py, reached by the BROWSER
 # on 127.0.0.1:8899. Nothing here talks to Resolve, and nothing here should --

@@ -45,14 +45,35 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 FEED_DIR = REPO_ROOT / "feed"
 FEED_REPO = "The-Creators-Club/ccsync-releases"
 
+# Only builds from THIS branch are publishable (release-pipeline-7,
+# 2026-08-21). `gh run list` had no --branch filter and the headSha was
+# printed and nothing more, so anyone who dispatched release-windows on a
+# feature branch or an old commit made that artifact the next thing this rig
+# signed and handed to every customer.
+RELEASE_BRANCH = "main"
+
 # workflow -> what its artifact publishes as. The dashboard is absent on
 # purpose: its bundle carries a runtime_id that must be read out of the tarball
 # (build_dashboard_bundle.py prints it), and publish_feed.py wants it passed
 # explicitly -- so a dashboard release stays a deliberate two-step rather than
 # something this sweeps up. Add it here the day that stops being true.
+#
+# `onboard` joined on 2026-08-21 (release-pipeline-4). The installer channel
+# was never published through the feed at all, so a customer dashboard fed
+# only from the vendor channel showed an EMPTY [ INSTALLER ] page and told its
+# admin to run a vendor-internal PowerShell script -- no new Windows or Mac
+# editor could be onboarded at that site. Both workflows now write a
+# ccsync-onboard.json beside their wizard artefact, in the same shape as the
+# companion's ccsync-release.json.
 SOURCES = [
-    {"workflow": "release-windows.yml", "kind": "companion", "platform": "windows"},
-    {"workflow": "release-macos.yml", "kind": "companion", "platform": "macos"},
+    {"workflow": "release-windows.yml", "kind": "companion", "platform": "windows",
+     "manifest": "ccsync-release.json"},
+    {"workflow": "release-macos.yml", "kind": "companion", "platform": "macos",
+     "manifest": "ccsync-release.json"},
+    {"workflow": "release-windows.yml", "kind": "onboard", "platform": "windows",
+     "manifest": "ccsync-onboard.json"},
+    {"workflow": "release-macos.yml", "kind": "onboard", "platform": "macos",
+     "manifest": "ccsync-onboard.json"},
 ]
 
 
@@ -87,26 +108,60 @@ def preflight() -> None:
              "trusted by no companion in the field (docs/RELEASE.md, key rotation).")
 
 
-def published_versions() -> set[tuple[str, str, str]]:
-    """(kind, platform, version) already in the LOCAL feed.
+def published_channel() -> dict:
+    """The channel THE WORLD reads, downloaded from the release.
 
-    The local feed is the one publish_feed.py rewrites, so it is what a second
-    publish of the same version would collide with. Missing feed = nothing
-    published yet, which is a legitimate first run rather than an error.
+    NOT feed/channel.json (release-pipeline-1, 2026-08-21): that directory is
+    gitignored and exists on one machine, so on any other it says "nothing is
+    published" about a feed carrying the entire fleet's history. publish_feed
+    is imported rather than re-implemented -- it is the one place that knows
+    how to fetch, and it verifies the signature the same way.
+
+    An empty dict means the feed is genuinely empty (a first publish). A
+    failure to ASK is fatal: guessing "nothing published" is how a republish
+    of an existing version would be attempted, or a rollback missed.
     """
-    ch = FEED_DIR / "channel.json"
-    if not ch.exists():
-        return set()
-    try:
-        data = json.loads(ch.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        fail(f"{ch} is unreadable ({exc}) -- refusing to guess what is published")
-    return {(p.get("kind", ""), p.get("platform", ""), p.get("version", ""))
-            for p in data.get("packages", [])}
+    sys.path.insert(0, str(REPO_ROOT / "tools"))
+    sys.path.insert(0, str(REPO_ROOT / "companion" / "src"))
+    import publish_feed  # noqa: E402  (in-repo, pure python)
+
+    with tempfile.TemporaryDirectory(prefix="ccsync-channel-") as tmp:
+        channel, signature, status = publish_feed.fetch_published_channel(
+            FEED_REPO, publish_feed.DEFAULT_GITHUB_TAG,
+            runner=lambda argv: run(argv), dest=Path(tmp), out=sys.stdout)
+        if status == "absent":
+            return {}
+        if status != "ok" or channel is None:
+            fail(f"could not read the published channel: {status}")
+        ok, detail = publish_feed.verify_channel_signature(
+            channel, signature, publish_feed.release_pubkey.RELEASE_PUBKEYS)
+        if not ok:
+            fail(f"the published channel does not verify ({detail}) -- refusing to "
+                 "publish on top of a feed this build does not trust")
+        return channel
+
+
+def version_tuple(version: str) -> tuple:
+    """Comparable form. Numeric per component, so 0.10.0 > 0.9.9 -- after
+    0.9.9 comes 0.10.0 and never 1.0 (owner's rule, 2026-08-18)."""
+    parts = []
+    for chunk in str(version or "").replace("+", ".").split("."):
+        digits = "".join(c for c in chunk if c.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
+def newest_published(channel: dict, kind: str, platform: str) -> str:
+    versions = [str(p.get("version") or "") for p in channel.get("packages", [])
+                if p.get("kind") == kind and p.get("platform") == platform]
+    return max(versions, key=version_tuple, default="")
 
 
 def latest_green_run(workflow: str) -> dict | None:
+    # --branch: a green run of THIS workflow on a feature branch is a build,
+    # not a release (release-pipeline-7).
     rc, out, err = run(["gh", "run", "list", "--workflow", workflow,
+                        "--branch", RELEASE_BRANCH,
                         "--status", "success", "--limit", "1",
                         "--json", "databaseId,headSha,displayTitle,createdAt"])
     if rc != 0:
@@ -115,8 +170,20 @@ def latest_green_run(workflow: str) -> dict | None:
     return runs[0] if runs else None
 
 
-def find_manifest(root: Path) -> Path | None:
-    hits = sorted(root.rglob("ccsync-release.json"))
+def commit_is_on_main(sha: str) -> bool:
+    """True when `sha` is an ancestor of origin/main.
+
+    --branch above filters by the branch the run was DISPATCHED on, which a
+    force-push or a deleted branch can make a lie; this asks git. Unknown
+    (no origin/main locally) counts as NOT verified -- the caller refuses
+    rather than signs (release-pipeline-7)."""
+    rc, _out, _err = run(["git", "-C", str(REPO_ROOT), "merge-base",
+                          "--is-ancestor", sha, f"origin/{RELEASE_BRANCH}"])
+    return rc == 0
+
+
+def find_manifest(root: Path, name: str) -> Path | None:
+    hits = sorted(root.rglob(name))
     return hits[0] if hits else None
 
 
@@ -164,7 +231,7 @@ def publish(meta: dict, artifact: Path, manifest_path: Path, kind: str,
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--kind", choices=["companion"], default=None,
+    ap.add_argument("--kind", choices=["companion", "onboard"], default=None,
                     help="only this kind (default: every source below)")
     ap.add_argument("--platform", choices=["windows", "macos"], default=None,
                     help="only this platform")
@@ -173,13 +240,26 @@ def main() -> int:
     ap.add_argument("--force", action="store_true",
                     help="publish even if that version is already in the feed "
                          "(publish_feed.py may still refuse)")
+    ap.add_argument("--make-current", action="store_true",
+                    help="also point the channel's `current` at what is published "
+                         "(otherwise the record is STAGED and customers keep being "
+                         "offered what they are offered now)")
+    ap.add_argument("--allow-older", action="store_true",
+                    help="publish a version LOWER than the newest already on the "
+                         "channel for that kind/platform. A deliberate rollback; "
+                         "refused by default (release-pipeline-7)")
     ap.add_argument("--min-version", default=None,
                     help="downgrade floor to stamp into the record")
     args = ap.parse_args()
 
     preflight()
-    already = published_versions()
+    # What THE WORLD has, not what this rig's feed/ dir has.
+    channel = published_channel()
+    already = {(p.get("kind", ""), p.get("platform", ""), p.get("version", ""))
+               for p in channel.get("packages", [])}
     extra = ["--min-version", args.min_version] if args.min_version else []
+    if args.make_current:
+        extra.append("--make-current")
 
     wanted = [s for s in SOURCES
               if (args.kind is None or s["kind"] == args.kind)
@@ -199,6 +279,15 @@ def main() -> int:
                 continue
             step(f"run {run_info['databaseId']} ({run_info['headSha'][:7]}, "
                  f"{run_info['createdAt']})")
+            # The run says it was dispatched on main; git says whether that
+            # commit is actually IN main (release-pipeline-7). A force-push or
+            # a deleted branch makes the first claim a lie, and this rig signs
+            # what it publishes.
+            if not commit_is_on_main(run_info["headSha"]):
+                fail(f"{wf} run {run_info['databaseId']} is at {run_info['headSha'][:7]}, "
+                     f"which is not an ancestor of origin/{RELEASE_BRANCH} -- "
+                     "refusing to sign a build the release branch does not contain. "
+                     "git fetch origin, then re-run; or merge the commit first.")
 
             dest = Path(tmp) / f"{kind}-{plat}"
             dest.mkdir(parents=True, exist_ok=True)
@@ -212,9 +301,9 @@ def main() -> int:
                 skipped.append(f"{kind}/{plat}: no downloadable artifact")
                 continue
 
-            manifest_path = find_manifest(dest)
+            manifest_path = find_manifest(dest, src["manifest"])
             if manifest_path is None:
-                step("no ccsync-release.json in the artifact -- skipping")
+                step(f"no {src['manifest']} in the artifact -- skipping")
                 skipped.append(f"{kind}/{plat}: no manifest")
                 continue
 
@@ -232,10 +321,20 @@ def main() -> int:
                 step("WARNING: this build was made with tests skipped")
 
             if (kind, plat, version) in already and not args.force:
-                step(f"v{version} is already in the feed -- nothing to do "
+                step(f"v{version} is already on the published channel -- nothing to do "
                      "(--force to republish)")
                 skipped.append(f"{kind}/{plat}: v{version} already published")
                 continue
+
+            # A LOWER version than the channel already carries is a rollback,
+            # and until 2026-08-21 nothing here noticed one (release-pipeline-7):
+            # combined with the missing `current` pointer, an older record
+            # appended after a newer one offered the whole fleet a downgrade.
+            newest = newest_published(channel, kind, plat)
+            if newest and version_tuple(version) < version_tuple(newest) and not args.allow_older:
+                fail(f"{kind}/{plat} v{version} is OLDER than v{newest}, which is already "
+                     "on the channel -- refusing. Pass --allow-older for a deliberate "
+                     "rollback (and --make-current, or nobody is offered it).")
 
             publish(meta, artifact, manifest_path, kind, args.dry_run, extra)
             published.append(f"{kind}/{plat} v{version}")

@@ -263,6 +263,86 @@ def test_storage_run_probes_and_creates_shared_asset_folders(conn, tmp_path):
     assert check_state.status == "ok"
 
 
+# dash-admin-1 (2026-08-21): every compose file mounts ONLY <tree>/Projects at
+# /projects, so `Path(projects_dir).parent` was `/` -- the container's own root
+# filesystem -- and the task created /Assets/Luts there (or failed silently and
+# reported ok), while its check looked for those folders on the NAS tree and
+# flipped the required task back to todo on the very next click, for ever.
+
+
+def test_tree_root_is_none_for_the_deployed_projects_only_mount(conn):
+    settings = Settings(projects_dir="/projects")
+    assert setup_engine._tree_root(ctx(conn, settings)) is None
+
+
+def test_tree_root_is_the_parent_when_the_whole_tree_is_mounted(conn, tmp_path):
+    projects = tmp_path / "tree" / "Projects"
+    projects.mkdir(parents=True)
+    settings = Settings(projects_dir=str(projects))
+    assert setup_engine._tree_root(ctx(conn, settings)) == projects.parent
+
+
+def test_tree_root_honours_an_explicit_dash_tree_dir(conn, tmp_path, monkeypatch):
+    tree = tmp_path / "elsewhere"
+    tree.mkdir()
+    projects = tmp_path / "tree" / "Projects"
+    projects.mkdir(parents=True)
+    monkeypatch.setenv("DASH_TREE_DIR", str(tree))
+    settings = Settings(projects_dir=str(projects))
+    assert setup_engine._tree_root(ctx(conn, settings)) == tree
+
+
+def test_storage_is_ok_and_creates_nothing_when_only_projects_is_mounted(
+        conn, tmp_path, monkeypatch):
+    """The shape a real deployment has. The task must go -- and STAY -- green
+    on a writable Projects mount instead of holding the Setup badge for ever
+    over folders this container cannot see."""
+    projects = tmp_path / "Projects"
+    projects.mkdir()
+    settings = Settings(projects_dir=str(projects))
+    # Stands in for /projects -> / , which cannot be built inside tmp_path.
+    monkeypatch.setattr(setup_engine, "_tree_root", lambda _ctx: None)
+
+    state = setup_engine.run_do_it(ctx(conn, settings), "storage")
+    assert state.status == "ok"
+    assert "does not mount" in state.detail
+    assert not (tmp_path / "Assets").exists()
+    assert setup_engine.run_check(ctx(conn, settings), "storage").status == "ok"
+    assert "storage" not in setup_engine.outstanding_required(conn)
+
+
+def test_storage_warns_instead_of_claiming_ok_when_a_mkdir_fails(conn, tmp_path):
+    tree_root = tmp_path / "tree"
+    projects = tree_root / "Projects"
+    projects.mkdir(parents=True)
+    # A FILE where the Assets directory belongs: every mkdir under it raises,
+    # which is what an unwritable mount does on a real deployment.
+    (tree_root / "Assets").write_text("not a directory", encoding="utf-8")
+    settings = Settings(projects_dir=str(projects))
+
+    state = setup_engine.run_do_it(ctx(conn, settings), "storage")
+    assert state.status == "warn"
+    assert "Assets/Luts" in state.detail
+
+
+def test_storage_uses_the_shared_asset_folders_from_the_manifest(conn, tmp_path):
+    """dash-admin-3: the list an admin saved on Settings, not the import-time
+    environment copy in provision.py."""
+    tree_root = tmp_path / "tree"
+    projects = tree_root / "Projects"
+    projects.mkdir(parents=True)
+    settings = Settings(projects_dir=str(projects))
+    site_store.set_many(conn, {"shared_asset_folders": "Assets/Luts, Assets/SFX"},
+                        updated_by="test")
+    conn.commit()
+
+    state = setup_engine.run_do_it(ctx(conn, settings), "storage")
+    assert state.status == "ok"
+    assert (tree_root / "Assets" / "SFX").is_dir()
+    assert not (tree_root / "Assets" / "Stills").exists()   # not in this site's list
+    assert setup_engine.run_check(ctx(conn, settings), "storage").status == "ok"
+
+
 def test_storage_run_fails_when_projects_dir_missing(conn, tmp_path):
     settings = Settings(projects_dir=str(tmp_path / "does-not-exist"))
     state = setup_engine.run_do_it(ctx(conn, settings), "storage")

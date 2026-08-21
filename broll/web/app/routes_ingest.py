@@ -55,15 +55,29 @@ def verify_ingest_token(x_ingest_token: str | None = Header(default=None)) -> No
 
 @router.post("/video", dependencies=[Depends(verify_ingest_token)])
 def ingest_video(body: VideoIn, conn: sqlite3.Connection = Depends(get_db)) -> dict:
+    # Say so when the indexer sends a field this contract does not carry.
+    # Pydantic drops unknown keys silently, which is how `error` reached this
+    # endpoint on every failed clip for months and was never written: the row
+    # said 'error' and would not say why (broll-5, 2026-08-21). A write the
+    # server cannot honour in full is still better than a refused write here
+    # (see VideoIn), so this is a log line and not a 422 -- but it is not
+    # nothing.
+    unknown = sorted(body.model_extra or ())
+    if unknown:
+        log.warning("ingest video %s/%s: ignoring field(s) the ingest contract does "
+                    "not carry: %s", body.share, body.rel_path, ", ".join(unknown))
     with conn:
         conn.execute(
             """
             INSERT INTO videos
                 (share, rel_path, hash, size_bytes, duration_s, fps, width,
                  height, codec, shot_date, category, category_hint, in_inbox, status,
+                 error, full_hash, duplicate_of, archive_path, original_path,
+                 original_size_bytes, original_verified_at,
                  sprite_cell_w, sprite_cell_h, sprite_cols, sprite_cells,
                  sprite_interval_s)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, 'discovered'),
+                    ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?)
             ON CONFLICT(share, rel_path) DO UPDATE SET
                 hash = excluded.hash,
@@ -79,6 +93,20 @@ def ingest_video(body: VideoIn, conn: sqlite3.Connection = Depends(get_db)) -> d
                 in_inbox = excluded.in_inbox,
                 status = CASE WHEN excluded.status IS NOT NULL
                               THEN excluded.status ELSE videos.status END,
+                -- COALESCE, so a later scan/probe upsert (which sends none of
+                -- these) cannot blank what the error, duplicates or origins
+                -- pass recorded. Same rule the indexer's own sqlite backend
+                -- follows -- update_video writes the fields it was given and
+                -- leaves the rest alone (broll-5, 2026-08-21).
+                error = COALESCE(excluded.error, videos.error),
+                full_hash = COALESCE(excluded.full_hash, videos.full_hash),
+                duplicate_of = COALESCE(excluded.duplicate_of, videos.duplicate_of),
+                archive_path = COALESCE(excluded.archive_path, videos.archive_path),
+                original_path = COALESCE(excluded.original_path, videos.original_path),
+                original_size_bytes = COALESCE(excluded.original_size_bytes,
+                                               videos.original_size_bytes),
+                original_verified_at = COALESCE(excluded.original_verified_at,
+                                                videos.original_verified_at),
                 -- COALESCE, like category above: only the proxy stage sends
                 -- sprite geometry, and a later scan/probe upsert must not
                 -- blank it back to "unknown" (BROLL-1, 2026-08-11).
@@ -104,6 +132,13 @@ def ingest_video(body: VideoIn, conn: sqlite3.Connection = Depends(get_db)) -> d
                 body.category_hint,
                 1 if body.in_inbox else 0,
                 body.status,
+                body.error,
+                body.full_hash,
+                body.duplicate_of,
+                body.archive_path,
+                body.original_path,
+                body.original_size_bytes,
+                body.original_verified_at,
                 body.sprite_cell_w,
                 body.sprite_cell_h,
                 body.sprite_cols,

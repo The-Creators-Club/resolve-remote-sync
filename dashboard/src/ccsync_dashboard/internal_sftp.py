@@ -6,11 +6,11 @@ theirs.
 NOT under `/api/v1` and NOT behind the session -- the sidecar is a separate
 container with no cookie jar and no browser (docs/ZERO_TOUCH_PLAN.md §3.1's
 compose shape). The gate is a bearer token instead, read from
-`CCSYNC_INTERNAL_TOKEN` or the file agent D's SetupEngine generates at
-`<data dir>/secrets/internal_token` (this module only ever READS that file).
-A deployment with neither configured answers 503 on both routes -- an
-internal endpoint that authenticates everyone when unconfigured is worse
-than one that refuses outright.
+`CCSYNC_INTERNAL_TOKEN` or from `<data dir>/secrets/ccsync_internal_token`,
+the file `secrets_boot.ensure_secrets` writes at first boot (this module only
+ever READS it). A deployment with neither configured answers 503 on both
+routes -- an internal endpoint that authenticates everyone when unconfigured
+is worse than one that refuses outright.
 
 Contract for the sidecar (see docs/API.md):
   GET  /internal/sftp/users        -> {"users": [{"username","uid","gid"}, ...]}
@@ -44,21 +44,37 @@ def get_conn(request: Request) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+# The secrets file this token really lives in, and the name this module
+# looked for until 2026-08-21 (dash-admin-2). `secrets_boot.ensure_secrets`
+# names every secret file after its ENVIRONMENT VARIABLE, lowercased, so the
+# token it generates (and the one it adopts from the appliance's
+# `internal.env`, which is what the sftp sidecar itself reads) is at
+# `ccsync_internal_token`. Nothing has ever written `internal_token`: on an
+# appliance where compose sets no CCSYNC_INTERNAL_TOKEN for the dashboard,
+# this module found no file, answered 503, and every
+# `AuthorizedKeysCommand` call from the sidecar was refused -- no editor
+# could authenticate to lanes A/B at all. The old name stays as a fallback
+# because a hand-provisioned deployment may hold one.
+TOKEN_FILES = ("ccsync_internal_token", "internal_token")
+
+
 def _configured_token(settings) -> str | None:
     """The bearer token this deployment accepts, or None when nothing is
-    configured. CCSYNC_INTERNAL_TOKEN wins when set; otherwise the file agent
-    D's SetupEngine writes at first boot -- this module reads it fresh on
-    every call (not cached) so a rotated secret takes effect without a
-    restart, which the sidecar itself will need on the same schedule."""
+    configured. CCSYNC_INTERNAL_TOKEN wins when set; otherwise the first of
+    TOKEN_FILES that exists -- read fresh on every call (not cached) so a
+    rotated secret takes effect without a restart, which the sidecar itself
+    will need on the same schedule."""
     token = (getattr(settings, "internal_token", "") or "").strip()
     if token:
         return token
-    path = settings.secrets_path("internal_token")
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    return text or None
+    for name in TOKEN_FILES:
+        try:
+            text = settings.secrets_path(name).read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if text:
+            return text
+    return None
 
 
 def _require_internal_token(request: Request, authorization: str | None) -> None:

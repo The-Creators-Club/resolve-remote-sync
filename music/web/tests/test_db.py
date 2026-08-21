@@ -1,4 +1,5 @@
 """Storage layer: percentile ranks, blob round-trips, thread-local connections."""
+import os
 import sqlite3
 import threading
 import time
@@ -156,6 +157,79 @@ def test_invalidate_closes_nothing_another_thread_is_using(tmp_path, monkeypatch
     invalidated.set()
     t.join(timeout=5)
     assert done.is_set() and not errors, errors
+
+
+# --- music-2: nobody calls invalidate() after a publish ------------------------
+
+def test_a_file_replaced_at_the_same_path_is_noticed_without_api_reload(
+        tmp_path, monkeypatch):
+    """MUSIC-10 taught /api/reload to drop the cached connections. Nothing
+    taught anything else to (music-2, 2026-08-21): `publish_db.py --which music
+    --apply` swaps the index by rename and restarts nothing, and anyio hands
+    the next request the most recently idle thread -- which on a dashboard
+    polled every 2 s never dies. Browse, facets, audio lookups and search all
+    went on answering from the deleted inode, indefinitely.
+    """
+    live, staged = tmp_path / 'music.db', tmp_path / 'staged.db'
+    _isolated_pool(monkeypatch, live)
+    monkeypatch.setattr(db, '_open_identity', None)
+
+    first = db.con()
+    first.execute("INSERT INTO tracks(rel_path,filename) VALUES('a.wav','a.wav')")
+    first.commit()
+    assert db.con() is first             # a second request, same thread, cached
+
+    fresh = db.connect(staged)
+    db.init(fresh)
+    for rel in ('a.wav', 'b.wav'):
+        fresh.execute('INSERT INTO tracks(rel_path,filename) VALUES(?,?)', (rel, rel))
+    fresh.commit()
+    fresh.close()
+    # Windows will not replace a file this process holds open, and what is
+    # under test is the STAT, not the handle -- so the cached connection is
+    # closed by hand here. It is still the cached one: only con() replaces it.
+    first.close()
+    os.replace(staged, live)
+
+    after = db.con()
+    assert after is not first
+    assert after.execute('SELECT COUNT(*) FROM tracks').fetchone()[0] == 2
+
+
+def test_repointing_the_path_is_not_a_swap(tmp_path, monkeypatch):
+    """Only "this path now names a different file" is a swap. An eval sweep or
+    a test that repoints DB_PATH has changed database, and must not be able to
+    close connections it does not own (music-2, 2026-08-21)."""
+    one, two = tmp_path / 'one.db', tmp_path / 'two.db'
+    _isolated_pool(monkeypatch, one)
+    monkeypatch.setattr(db, '_open_identity', None)
+
+    first = db.con()
+    assert db.con() is first
+    other = db.connect(two)
+    db.init(other)
+    other.close()
+    monkeypatch.setattr(db.config, 'DB_PATH', two)
+    assert db.con() is first
+
+
+def test_file_state_changes_when_another_process_writes(tmp_path, monkeypatch):
+    """The fingerprint search.index() watches. A drain apply commits from its
+    own connection, so the -wal half is what moves first on a busy container."""
+    live = tmp_path / 'music.db'
+    _isolated_pool(monkeypatch, live)
+    con = db.con()
+    con.execute("INSERT INTO tracks(rel_path,filename) VALUES('a.wav','a.wav')")
+    con.commit()
+    before = db.file_state()
+
+    other = db.connect(live)
+    other.execute("INSERT INTO tracks(rel_path,filename) VALUES('b.wav','b.wav')")
+    other.commit()
+    other.close()
+
+    assert before is not None
+    assert db.file_state() != before
 
 
 # --- MUSIC-3: a row whose file has gone ---------------------------------------

@@ -32,10 +32,22 @@ log = logging.getLogger(__name__)
 # projects.active=1 drops folders that have disappeared from syncthing's config
 # but whose selections rows survive; ORDER BY position is the editor's own sync
 # order, which is the order they think about their projects in.
-_SQL = ('SELECT s.project_slug AS slug, p.label AS label '
+#
+# GROUPED BY SLUG since dashboard schema v24 (ytdl-web-2, 2026-08-21). A sync
+# plan belongs to a COMPUTER, not to a person: `selections` is keyed
+# (editor_username, machine, project_slug), and the v24 migration fanned every
+# pre-existing row out to one row per machine the editor owns. This query has
+# no machine to filter on -- the browser asking is a person, and CLAUDE.md's
+# rule for a request with no machine is "the PERSON: the union to read" -- so
+# without the grouping an editor with a laptop and a desktop saw every project
+# in the picker twice. MIN(position) keeps the editor's own order, and the
+# whole thing still runs unchanged against a pre-v24 dashboard.
+_SQL = ('SELECT s.project_slug AS slug, p.label AS label, '
+        '       MIN(s.position) AS position '
         'FROM selections s JOIN projects p '
         '  ON p.slug = s.project_slug AND p.active = 1 '
-        'WHERE s.editor_username = ? ORDER BY s.position')
+        'WHERE s.editor_username = ? '
+        'GROUP BY s.project_slug, p.label ORDER BY position, p.label')
 
 
 def _dev_projects():
@@ -102,3 +114,49 @@ def resolve_project(user, slug):
         if p['slug'] == slug:
             return p
     return None
+
+
+# The dashboard's `machines` registry (its schema v23): hostname as the key,
+# plus the companion-minted machine_id that survives a rename. Read here for
+# ONE cosmetic purpose, below.
+_MACHINE_SQL = ('SELECT machine FROM machines '
+                'WHERE editor_username = ? AND machine_id = ? '
+                'ORDER BY last_seen DESC LIMIT 1')
+
+
+def machine_label(user, machine_id):
+    """The hostname the dashboard has on file for this machine_id, or None.
+
+    COSMETIC ONLY (data-model-7, CR-66, 2026-08-21). Since the download lease
+    is keyed on (editor, machine_id), an editor's second computer is refused
+    with a 409 -- and "9f3c1a2b7e...  is already downloading this job" is not a
+    sentence anybody can act on. This turns it into the name of the computer
+    they left running.
+
+    Resolved from the REGISTRY rather than taken from the claim body on
+    purpose: routes_fleet's rule is that the body decides nothing, and echoing
+    a self-asserted hostname back to a different machine would be one editor's
+    string in another's log line. Best-effort by construction -- no dashboard
+    database, no such machine, an older dashboard with no `machines` table, all
+    answer None and the caller names the id instead.
+    """
+    machine_id = str(machine_id or '').strip()
+    if not machine_id or not config.DASH_DB:
+        return None
+    path = Path(config.DASH_DB)
+    if not path.is_file():
+        return None
+    try:
+        # Same read-only URI handle ticked_projects opens, for the same reason:
+        # SQLite itself refuses the write rather than us remembering not to.
+        con = sqlite3.connect(f'file:{path.as_posix()}?mode=ro', uri=True, timeout=5)
+    except sqlite3.Error:
+        return None
+    try:
+        row = con.execute(_MACHINE_SQL, (user, machine_id)).fetchone()
+    except sqlite3.Error as exc:
+        log.debug('could not name machine %s (%s)', machine_id, exc)
+        return None
+    finally:
+        con.close()
+    return (str(row[0]).strip() or None) if row else None

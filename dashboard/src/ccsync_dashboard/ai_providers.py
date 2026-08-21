@@ -58,7 +58,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
@@ -388,11 +388,16 @@ def cli_enabled(conn: sqlite3.Connection, settings: Any) -> bool:
     FAILS CLOSED and reads the same DB-row-then-environment precedence every
     other site feature does (`site_store`): the row when there is one, else
     `DASH_SITE_AI_CLI_PROVIDERS`. Off is the vendor build's shape.
+
+    Delegates to `site_store.feature_enabled` since 2026-08-21
+    (product-surface-1): this function's precedence WAS the intended one and
+    the /ytdl mount's env-only read was not, so the rule moved to the one
+    predicate every feature gate now calls rather than staying a second
+    implementation of it here.
     """
-    stored = row_value(conn, "features.ai_cli_providers")
-    if stored is not None:
-        return stored.strip() == "1"
-    return bool(getattr(settings, "site_feature_ai_cli_providers", False))
+    from . import site_store
+
+    return site_store.feature_enabled(conn, settings, "ai_cli_providers")
 
 
 def cli_path(conn: sqlite3.Connection, name: str, settings: Any = None) -> str:
@@ -630,17 +635,24 @@ def resolve_provider(availability: Mapping[str, bool], preference: str = AUTO) -
 
 def provider_states(
     conn: sqlite3.Connection, settings: Any, *, probe: bool = True,
-    force: bool = False,
+    force: bool = False, only: Sequence[str] | None = None,
 ) -> list[dict]:
     """One row per provider, in chain order, for the API and the page.
 
     `probe=False` is for a caller that must not spend a subprocess (or a
     token) -- it reports a CLI as `unknown` rather than guessing, which the
     page renders as "test it".
+
+    `only` narrows the rows to those providers, keeping each one's real chain
+    RANK. It exists for `resolved()` (ytdl-web-5, 2026-08-21): probing a CLI
+    is a real billed/subscription call, and the resolver has no business
+    spending one on a provider the admin has pinned away from.
     """
     allow_cli = cli_enabled(conn, settings)
     rows: list[dict] = []
     for rank, name in enumerate(PROVIDER_ORDER, start=1):
+        if only is not None and name not in only:
+            continue
         provider = PROVIDERS[name]
         row = {
             "name": name,
@@ -731,8 +743,27 @@ def availability(rows: list[dict]) -> dict[str, bool]:
 
 
 def resolved(conn: sqlite3.Connection, settings: Any, *, probe: bool = True) -> ProviderChoice:
+    """Which provider an AI call will use.
+
+    THE PIN IS READ FIRST (ytdl-web-5, 2026-08-21). This used to build the
+    whole table before `resolve_provider` ever looked at the preference, so a
+    site with `ai_cli_providers` on and an API provider pinned spent a real
+    one-token Claude Code / Codex call -- the very subscription the admin
+    pinned away from -- every time the 600 s probe cache expired, and blocked
+    the ytdl worker for up to 70 s inside a job to learn an availability it
+    then ignored. With a pin there is exactly one provider whose availability
+    can change the answer, so exactly one is probed; `resolve_provider` still
+    REFUSES a pin that is not available rather than falling through the chain.
+
+    With no pin this is unchanged: the ordered probe, whose reason string
+    names what it chose over what.
+    """
+    pref = preference(conn)
+    if pref != AUTO:
+        rows = provider_states(conn, settings, probe=probe, only=(pref,))
+        return resolve_provider(availability(rows), pref)
     rows = provider_states(conn, settings, probe=probe)
-    return resolve_provider(availability(rows), preference(conn))
+    return resolve_provider(availability(rows), pref)
 
 
 # ------------------------------------------------- what the ytdl app is told

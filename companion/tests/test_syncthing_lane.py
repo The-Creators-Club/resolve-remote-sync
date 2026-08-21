@@ -686,3 +686,62 @@ def test_api_reachable_is_true_for_a_401_and_false_for_a_dead_port(
     rejecting = SyncthingLane(
         api_key="k", http_get=_http_get_requiring("another-key", []))
     assert rejecting.api_reachable() is True
+
+
+# -- comp-lane-c-4 / comp-lane-c-3 (2026-08-21) -----------------------------
+
+
+def test_no_api_key_anywhere_still_asks_the_supervisor_to_start_syncthing(tmp_path):
+    """No key anywhere means no config.xml anywhere -- a wiped or
+    never-generated home, which `syncthing serve --home=...` regenerates.
+    This branch returned before telling the supervisor anything, so the one
+    thing that could repair it was never asked, and an incident opened
+    before the file vanished could never be closed."""
+    supervisor = _RecordingSupervisor("starting the sync engine")
+    lane = SyncthingLane(
+        api_key="", config_xml_path=tmp_path / "gone" / "config.xml",
+        http_get=_dead_http_get, expected_folder_ids=["proj-1"],
+        supervisor=supervisor,
+    )
+    status = lane.check_once()
+    assert status.state == STATE_ERROR
+    assert "no Syncthing API key" in status.last_error
+    assert supervisor.ticks == [False]
+
+
+def test_the_lanes_own_device_id_is_re_read_on_a_slow_cadence(monkeypatch, tmp_path):
+    """A regenerated Syncthing home has a NEW myID, and the lane compared
+    every remote device against the id it learned at startup."""
+    cfg_xml = tmp_path / "config.xml"
+    cfg_xml.write_text(
+        "<configuration><gui><apikey>k</apikey></gui></configuration>", encoding="utf-8")
+    answers = iter([{"myID": "DEV-1"}, {"myID": "DEV-2"}])
+
+    def http_get(url, api_key, timeout):
+        if url.endswith("/rest/system/status"):
+            return next(answers)
+        return {}
+
+    lane = SyncthingLane(api_key="k", config_xml_path=cfg_xml, http_get=http_get)
+    assert lane._get_my_device_id() == "DEV-1"
+    assert lane._get_my_device_id() == "DEV-1"
+    monkeypatch.setattr(syncthing_lane, "DEVICE_ID_REFRESH_SECONDS", 0.0)
+    assert lane._get_my_device_id() == "DEV-2"
+
+
+def test_a_failed_device_id_refresh_keeps_the_last_known_one(monkeypatch, tmp_path):
+    cfg_xml = tmp_path / "config.xml"
+    cfg_xml.write_text(
+        "<configuration><gui><apikey>k</apikey></gui></configuration>", encoding="utf-8")
+    state = {"up": True}
+
+    def http_get(url, api_key, timeout):
+        if not state["up"]:
+            raise ConnectionRefusedError("restarting")
+        return {"myID": "DEV-1"}
+
+    lane = SyncthingLane(api_key="k", config_xml_path=cfg_xml, http_get=http_get)
+    assert lane._get_my_device_id() == "DEV-1"
+    monkeypatch.setattr(syncthing_lane, "DEVICE_ID_REFRESH_SECONDS", 0.0)
+    state["up"] = False
+    assert lane._get_my_device_id() == "DEV-1"

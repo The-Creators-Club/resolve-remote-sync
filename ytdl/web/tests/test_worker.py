@@ -1357,6 +1357,84 @@ def test_a_database_locked_at_boot_does_not_kill_the_worker_thread(con, monkeypa
     assert ticks == [con]
 
 
+# ------------------------------------------- the AI health cache heals itself
+# ytdl-web-4 (2026-08-21): the boot probe was the only probe anything ever ran,
+# and the worker starts at MOUNT time -- on a NAS reboot, routinely before the
+# uplink is up. A boot-time failure then pinned the red pip on every editor's
+# page until somebody ignored the warning and submitted a job.
+
+def _cache(state, age):
+    return lambda: {'claude': state, 'checked_at': time.time() - age,
+                    'detail': '', 'provider': ''}
+
+
+def test_a_red_health_cache_is_probed_again_once_the_worker_is_idle(monkeypatch):
+    probes = []
+    monkeypatch.setattr(worker.claude_cli, 'health',
+                        _cache('missing', worker.UNHEALTHY_RECHECK + 1))
+    monkeypatch.setattr(worker.claude_cli, 'refresh_health',
+                        lambda force=False: probes.append(force) or
+                        {'claude': 'ok', 'provider': 'anthropic_api'})
+    assert worker.recheck_health() is True
+    assert probes == [False], 'the re-probe must respect _MIN_PROBE_INTERVAL'
+
+
+def test_a_green_cache_is_never_re_probed(monkeypatch):
+    """A probe is a real (tiny) billed call, and on a site with the CLI
+    providers on it can be a slow one. Nothing is wrong: do not spend it."""
+    probes = []
+    monkeypatch.setattr(worker.claude_cli, 'health', _cache('ok', 99999))
+    monkeypatch.setattr(worker.claude_cli, 'refresh_health',
+                        lambda force=False: probes.append(force))
+    assert worker.recheck_health() is False
+    assert probes == []
+
+
+def test_a_wedged_provider_is_not_probed_once_per_idle_tick(monkeypatch):
+    """IDLE_WAIT is 5 s. UNHEALTHY_RECHECK is what keeps an hour of downtime
+    from becoming 720 probes."""
+    probes = []
+    monkeypatch.setattr(worker.claude_cli, 'health',
+                        _cache('unauthenticated', worker.UNHEALTHY_RECHECK - 30))
+    monkeypatch.setattr(worker.claude_cli, 'refresh_health',
+                        lambda force=False: probes.append(force))
+    assert worker.recheck_health() is False
+    assert probes == []
+
+
+def test_a_failing_probe_never_kills_the_worker(monkeypatch):
+    def boom(force=False):
+        raise RuntimeError('the network went away mid-probe')
+
+    monkeypatch.setattr(worker.claude_cli, 'health', _cache('error', 99999))
+    monkeypatch.setattr(worker.claude_cli, 'refresh_health', boom)
+    assert worker.recheck_health() is False
+
+
+def test_the_idle_loop_is_what_asks_for_the_re_probe(con, monkeypatch):
+    """The seam matters as much as the function: nothing else in the tree calls
+    refresh_health, so a helper nobody invokes would fix nothing."""
+    asked = []
+
+    def probe():
+        asked.append(1)
+        raise SystemExit    # the only way out of a loop that never returns
+
+    monkeypatch.setattr(worker.db, 'con', lambda: con)
+    monkeypatch.setattr(worker, '_boot_recovery', lambda c: None)
+    monkeypatch.setattr(worker, '_tick', lambda c: False)
+    monkeypatch.setattr(worker, 'IDLE_WAIT', 0.01)
+    monkeypatch.setattr(worker.claude_cli, 'refresh_health', lambda force=False: None)
+    monkeypatch.setattr(worker, 'recheck_health', probe)
+
+    # In THIS thread, unlike the re-acquire test above: everything the loop
+    # touches is patched, and a SystemExit raised on a daemon thread is
+    # swallowed by threading.excepthook rather than failing the test.
+    with pytest.raises(SystemExit):
+        worker._run()
+    assert asked == [1]
+
+
 def test_ensure_started_is_disabled_by_the_test_guard():
     """YTDL_WORKER=0 is what keeps a daemon thread out of this suite (and out
     of the dashboard's mount tests, which import a fake ytdlweb)."""

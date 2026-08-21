@@ -58,6 +58,15 @@ verify_ssl = "0"
 # key is recorded, printed, and every later run is checked against it -- a key
 # that CHANGES is a refusal. Also settable as --host-key / $CCSYNC_SSH_HOSTKEY.
 # ssh_hostkey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA..."
+# The TCP port THE OPERATOR SCRIPTS reach the NAS's sshd on. Unset it falls
+# back to [net] sftp_port (the same sshd on every site this repo has met) and
+# then to 22. Set it only where the two differ. Until 2026-08-21 (server-7)
+# every script here hardcoded 22, so a site that moved sshd -- DSM often does
+# -- had a working fleet and an operator toolchain that could not reach the
+# box at all. $CCSYNC_SSH_PORT wins over this. The host-key pin above is
+# recorded PER PORT, the way OpenSSH spells it, so moving sshd means a fresh
+#   ssh-keyscan -p <port> -t ed25519 <host>
+# ssh_port = "22"
 
 [tree]
 # The dataset / shared folder the tree lives in, and the tree's own directory
@@ -144,6 +153,28 @@ rclone_remote = "ccsync_sftp"
 # two disagreeing is what produces "failed to calculate hash" on every lane
 # pass. Set it only alongside editor_shell = "shell".
 shell_type = "unix"            # Synology: "none"
+# WHOSE X-Forwarded-* THE DASHBOARD BELIEVES, comma separated (addresses or
+# CIDRs). This decides what auth.client_ip calls "the client", which is what
+# the login throttle buckets per IP and what the admin sessions page shows.
+#
+# Unset, the deploy builds the list itself: 127.0.0.1, ::1, the docker bridge
+# range below, and this node's [net] bind_tailnet. The bridge is in there
+# because the stack publishes its port with compose `ports:`, so a request
+# `tailscale serve` makes from the NAS host is NATed and reaches the container
+# FROM THE BRIDGE GATEWAY -- with that untrusted, every request in the fleet
+# shared one client IP and one editor with caps lock on could 429 /login for
+# everybody (trust-model-3, 2026-08-21).
+#
+# Set it only to narrow that: naming a proxy here means believing any
+# X-Forwarded-For it sends. $DASH_TRUSTED_PROXIES in the deploying shell wins
+# over both. docs/CONFIG.md, and install_dashboard_app.trusted_proxies_for.
+# trusted_proxies = "127.0.0.1,::1,172.18.0.1"
+# The address range docker hands its bridge networks, used to build the list
+# above. Docker's own default pool is 172.16.0.0/12 and WHICH /16 this stack
+# lands on is decided by the daemon at `up`, not here -- so the range is what
+# can be stated in advance. 192.168.0.0/16 is in docker's pool too and is
+# deliberately not the default: on a studio LAN that is everybody's desk.
+# docker_bridge_cidr = "172.16.0.0/12"
 
 [syncthing]
 # Syncthing's GUI, as seen FROM THE DASHBOARD CONTAINER (the NAS's own LAN
@@ -229,6 +260,29 @@ org_name = "Your Studio"
 # derived at query time, never stored on a row.
 # default_collection = "studio"
 # default_collection_label = "Our Footage"
+#
+# WHICH ARCHIVE SHARES HOLD YOUR OWN FOOTAGE, comma separated. Everything not
+# listed browses as a download, under the subject taxonomy rather than the
+# own-footage root. EMPTY IS THE DEFAULT and it is the safe direction: an
+# unconfigured archive shows everything as Downloads, where filing somebody's
+# bought footage as theirs would be the worse mistake.
+#
+# This was one customer's project name, hardcoded as the default in both
+# compose templates and the deploy script, until 2026-08-21
+# (product-surface-3). ONE TRANSITIONAL EXCEPTION, and it expires: a manifest
+# with NO [broll] TABLE AT ALL still gets that historical value, because the
+# fleet running today predates the key and a redeploy that emptied its
+# own-footage collection would look like the archive had lost 7,000 clips.
+# Writing ANY [broll] key -- including this one -- turns the fallback off.
+# creators_shares = "mofa-disaster"
+#
+# The top-level FOLDER own-footage shoots are INGESTED under, inside the
+# archive tree:  <archive root>/<this>/<share>/<shoot dirs>/
+# Unset it is "Creators_Club", and that default cannot simply change: the
+# ~7,000 files already published sit under that name and would have to be
+# moved. New writes only, so a second customer sets this and their shoots
+# file under their own name (COMMERCIAL_READINESS.md items 4/10).
+# archive_creators_dir = "Creators_Club"
 
 [features]
 # OPTIONAL FEATURES, OFF UNLESS THIS SITE TURNS THEM ON (2026-08-17,
@@ -289,6 +343,14 @@ gid = "3001"
 # Their names, used for `chown -R <owner>:<group>` on the project tree.
 owner = "broll"
 group = "editors"
+# The GROUP on the container's PRIVATE directories (data/, venv/, music-data/,
+# ytdl-data/) -- emphatically NOT `gid` above. With group `editors` and mode
+# 770, every editor could write into /data and swap the interpreter run.sh
+# execs (AUDIT C-2). Unset it is `uid`, i.e. the service account's own group,
+# which on a tree built by server/README.md's recipe is `broll` (3000) and is
+# what the deploy has emitted since 2026-08-11. Name it only where the service
+# account's private group is a different gid (server-4, 2026-08-21).
+# private_gid = "3000"
 # What an editor account IS on the NAS (COMMERCIAL_READINESS.md item 7):
 #
 #   "sftp-only"  (DEFAULT, and the right answer) nologin + an sshd

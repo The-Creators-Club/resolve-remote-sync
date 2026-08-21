@@ -12,7 +12,15 @@ Target (INTERNAL benchmark baseline, not marketing copy — see `bench/README.md
 
 Canonical layout = the studio's existing project template (`AE/ Audio/ B-roll/ Interviewees/ Render in Place/ Subs/ Youtube/`; a site can override the list via `site.toml [tree] template_folders`), which already uses **per-folder `Proxy/` subfolders** — the exact convention Resolve + Blackmagic Proxy Generator auto-link from. Final NAS home: `/mnt/tank/TheCreatorsPool/Creators_Club/Projects/<year>/<series>/<project>`.
 
-## Current state (verified)
+## Starting state, verified 2026-07-22 (HISTORICAL — none of it is current)
+
+This section is the survey the design was written against, kept because it
+explains why several choices were made. It has not been true since the first
+week: Tailscale is authenticated and is the only publish path
+(`docs/TENANCY.md`), Syncthing is installed and provisioned on the NAS
+(`server/setup_syncthing_folder.py`), and the project tree is populated rather
+than greenfield. For what is actually deployed today read `CLAUDE.md`,
+`docs/SERVER.md` and `KNOWN_BUGS.md`, never this list.
 
 - TrueNAS 25.10.4: `resolve-projectserver` (postgres:13) RUNNING, bound 0.0.0.0:5432. **Tailscale app RUNNING but logged out** — needs re-auth.
 - Syncthing 2.1.2 available in TrueNAS stable app catalog (not installed).
@@ -76,7 +84,7 @@ New repo: `E:\Projects\resolve-remote-sync`
 - `docs/EDITOR_SETUP.md`, `docs/SERVER.md`.
 
 ### 5. Fleet dashboard (`dashboard/`, added 2026-07)
-- Web dashboard served off the NAS (TrueNAS custom app, port 8480, tailnet-only, no login): project list with health dots, per-project editor rows (online, completion %, has X of Y files, missing-file lists), companion fleet strip.
+- Web dashboard served off the NAS (TrueNAS custom app, port 8480). **It had no login when this was written; it has had one since the commercial-readiness pass (2026-08-17)** — every page is behind a session (`login_gate`), admin actions behind an admin role, companions authenticate with per-editor `cce1.…` tokens, and the tailnet is a second layer rather than the only one. One prefix is deliberately outside it: `/broll/share/<token>/`, the client preview link, whose 128-bit token IS the credential and which is the one thing an operator may publish past the tailnet with a Tailscale Funnel on its own port (`docs/CLIENT_FOLDERS.md`). Contents: project list with health dots, per-project editor rows (online, completion %, has X of Y files, missing-file lists), companion fleet strip.
 - Backed by SQLite (WAL) at `/mnt/tank/apps/ccsync-dashboard/data/dashboard.db`: an in-process collector polls the server Syncthing REST API (`/rest/db/completion`, `/rest/db/remoteneed`) for lane C state across all editor devices; keeps 30 days of completion history with anti-bloat snapshot rules.
 - Lanes A/B have no server-side status API, so the companion gained a reporter thread that POSTs its `LaneStatus` for all three lanes to `POST /api/v1/report` every 60s (`dashboard_url`/`dashboard_token` config keys; static shared token via `DASH_REPORT_TOKEN`).
 - Known limitation / future work: lanes A/B are **status-only** (state, queue counts, errors). The server cannot see an editor's local originals/proxy trees, so per-file lane A/B inventory would need the companion to report rclone `check` summaries — deliberately deferred.

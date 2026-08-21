@@ -35,6 +35,36 @@ def test_projects_are_the_editors_ticked_ones_in_sync_order(client):
     assert [p['label'] for p in r['projects']] == [p[1] for p in PROJECTS]
 
 
+def test_an_editor_with_two_machines_sees_each_project_once(client):
+    """ytdl-web-2 (2026-08-21). A sync plan belongs to a COMPUTER since
+    dashboard schema v24, so `selections` holds one row per (editor, machine,
+    project) and the v24 migration fanned every pre-existing row out to one per
+    machine the editor owns. The picker asks as a PERSON -- no machine in the
+    request -- and CLAUDE.md's answer to that is "the union to read", a union
+    and not a multiset. Without the grouping every editor with a laptop and a
+    desktop saw every project in the dropdown twice.
+    """
+    import sqlite3
+
+    from ytdlweb import config
+
+    con = sqlite3.connect(config.DASH_DB)
+    try:
+        for slug, _label, pos in PROJECTS:
+            con.execute('INSERT OR IGNORE INTO selections VALUES(?,?,?,?,?,?)',
+                        (USER, 'owen-laptop', slug, pos, '2026-08-19', 'seed'))
+        con.commit()
+        r = client.get('/api/projects').json()
+    finally:
+        # The dashboard fixture database is session-scoped and shared, so the
+        # second machine goes away again with this test.
+        con.execute("DELETE FROM selections WHERE machine='owen-laptop'")
+        con.commit()
+        con.close()
+
+    assert [p['slug'] for p in r['projects']] == [p[0] for p in PROJECTS]
+
+
 def test_an_inactive_project_is_not_offered(client):
     """A selections row survives a folder disappearing from syncthing; the
     projects.active=1 join is what stops it being offered as a destination."""

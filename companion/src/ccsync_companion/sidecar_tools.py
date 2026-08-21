@@ -443,11 +443,15 @@ def ensure(cfg: Optional[dict[str, Any]] = None,
         # their machine out. Same answer: nothing is downloaded onto the disk.
         #
         # NB since 2026-08-18 this gate covers DENO ONLY in practice: the
-        # ffmpeg pair is installed by ensure_ffmpeg_pair(), which b-roll
-        # ingest and the proxy generator call whether or not YouTube is on
-        # (docs/BROLL_INGEST_PLAN.md §3.3). What this branch still guarantees
-        # is what it always meant here: with the downloader off, THIS function
-        # downloads nothing at all.
+        # ffmpeg pair is installed by ensure_ffmpeg_pair(), which the sidecar
+        # thread calls directly whenever the downloader is off
+        # (ytdlp_manager._loop, docs/BROLL_INGEST_PLAN.md §3.3) because
+        # b-roll ingest and proxy generation need a merger whatever the site
+        # says about YouTube. That wiring did not exist until comp-ytdl-2
+        # (2026-08-21): this early return was the only path, so a vendor-build
+        # machine reached ensure_ffmpeg_pair never and had no ffmpeg at all.
+        # What this branch still guarantees is what it always meant here: with
+        # the downloader off, THIS function downloads nothing at all.
         return {"ok": False, "action": ACTION_DISABLED,
                 "message": "the YouTube downloader is off for this site or "
                            "switched off in config"}

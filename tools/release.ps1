@@ -97,11 +97,13 @@ param(
 # $env:CCSYNC_SIGN_TIMESTAMP_URL overrides the RFC3161 timestamp server. A
 # timestamp is not optional: without one every signature this build ever made
 # turns invalid the day the certificate expires.
+# Read here only to decide WHETHER a signature was meant to happen (the
+# UNSIGNED BUILD advisory below). The signing itself, including the .pfx
+# password and the timestamp URL, lives in tools/sign_windows_binary.ps1 --
+# one call site, shared with the onboard.exe build and CI
+# (installer-onboard-tools-1, 2026-08-21). It reads the same environment.
 $SignThumbprint = "$env:CCSYNC_SIGN_THUMBPRINT".Trim()
 $SignPfx = "$env:CCSYNC_SIGN_PFX".Trim()
-$SignPfxPassword = "$env:CCSYNC_SIGN_PFX_PASSWORD"
-$SignTimestampUrl = "$env:CCSYNC_SIGN_TIMESTAMP_URL".Trim()
-if (-not $SignTimestampUrl) { $SignTimestampUrl = "http://timestamp.digicert.com" }
 
 if (-not $DashboardUrl -and $env:CCSYNC_DASHBOARD_URL) { $DashboardUrl = $env:CCSYNC_DASHBOARD_URL }
 if (-not $DashboardUrl) { $DashboardUrl = "<your-dashboard-url>" }
@@ -657,49 +659,21 @@ else {
 $SignedBinary = $false
 $SignAdvisory = ""
 
-function Find-SignTool {
-    $cmd = Get-Command signtool.exe -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
-    # The SDK does not put signtool on PATH. Newest x64 build first.
-    $roots = @("${env:ProgramFiles(x86)}\Windows Kits\10\bin", "$env:ProgramFiles\Windows Kits\10\bin")
-    foreach ($root in $roots) {
-        if (-not (Test-Path -LiteralPath $root)) { continue }
-        $found = Get-ChildItem -Path $root -Filter signtool.exe -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match '\\x64\\' } |
-            Sort-Object FullName -Descending | Select-Object -First 1
-        if ($found) { return $found.FullName }
-    }
-    return ""
-}
+# ONE signtool call site, tools\sign_windows_binary.ps1, shared with
+# installer\build_editor_package.ps1's onboard.exe step and
+# .github/workflows/release-windows.yml (installer-onboard-tools-1,
+# 2026-08-21). It used to live here, inline, which is how the artefact a
+# fresh install double-clicks ended up as the one binary nothing signed.
+$SignScript = Join-Path $PSScriptRoot "sign_windows_binary.ps1"
 
 if (-not $DryRun -and (Test-Path -LiteralPath $ExePath)) {
     if (-not $SignThumbprint -and -not $SignPfx) {
         $SignAdvisory = "no CCSYNC_SIGN_THUMBPRINT and no CCSYNC_SIGN_PFX in the environment"
     }
-    else {
-        $signtool = Find-SignTool
-        if (-not $signtool) {
-            $SignAdvisory = "signtool.exe not found (install the Windows 10/11 SDK 'Signing Tools' feature)"
-        }
-        else {
-            $signArgs = @("sign", "/fd", "sha256", "/tr", $SignTimestampUrl, "/td", "sha256")
-            if ($SignThumbprint) {
-                $signArgs += @("/sha1", $SignThumbprint)
-            }
-            else {
-                $signArgs += @("/f", $SignPfx)
-                if ($SignPfxPassword) { $signArgs += @("/p", $SignPfxPassword) }
-            }
-            $signArgs += $ExePath
-            Write-Step "signing with signtool ($(if ($SignThumbprint) { "thumbprint $SignThumbprint" } else { "pfx $SignPfx" }))..."
-            # NOT through Invoke-Native's 2>&1 pipe: the password would end up
-            # in a transcript. signtool prints its own progress.
-            & $signtool @signArgs | Out-Null
-            if ($LASTEXITCODE -ne 0) {
-                Write-Fail "signtool exited $LASTEXITCODE -- the exe is NOT signed and this run stops. Fix the certificate (or unset CCSYNC_SIGN_* to build unsigned deliberately)."
-                exit 1
-            }
-        }
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $SignScript -Path $ExePath
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "signing failed -- the exe is NOT signed and this run stops (see the [sign] line above)."
+        exit 1
     }
     $status = (Get-AuthenticodeSignature -LiteralPath $ExePath).Status
     $SignedBinary = ($status -eq "Valid")

@@ -253,6 +253,103 @@ def test_the_ledger_is_a_separate_database_that_survives_replacing_the_index(as_
     assert anon.get(f"/share/{folder['token']}/media/poster/{new_id}.jpg").status_code == 200
 
 
+def test_a_rebuild_that_gives_the_old_id_to_another_clip_serves_none_of_it(
+        as_editor, seeded, conn, data_root):
+    """broll-1, 2026-08-21. The test above rebuilds with ids that no longer
+    exist, which 404s by accident. A real rebuild REUSES the low numbers: the
+    curated clip moves up, and its old id lands on some other clip. The page
+    redraws correctly either way (resolve_items re-resolves by name), so the
+    media and detail routes must not answer on the bare stored id either.
+    """
+    folder = _create(as_editor, title="Acme")
+    _add(as_editor, folder["id"], seeded["harbor"])
+    old_id, tok = seeded["harbor"], folder["token"]
+
+    conn.execute("DELETE FROM videos")
+    conn.commit()
+    # The rebuilt index: harbor.mov renumbered, and its old id inherited by a
+    # clip nobody curated into anything.
+    new_id = insert_video(conn, id=4120, share="ff3", rel_path="day1/harbor.mov",
+                          duration_s=42.0)
+    intruder = insert_video(conn, id=old_id, share="broll",
+                            rel_path="Downloads/politics/protest.mp4", duration_s=9.0)
+    insert_segment(conn, intruder, t_start=0, t_end=9,
+                   description="a protest nobody licensed", setting="street")
+    for sub, ext, blob in (("posters", "jpg", b"\xff\xd8\xff\xd9"),
+                           ("sprites", "jpg", b"\xff\xd8\xff\xd9"),
+                           ("proxies", "mp4", b"\x00\x00\x00\x18ftypmp42" + b"x" * 64)):
+        (data_root / sub / f"{new_id}.{ext}").write_bytes(blob)
+
+    anon = TestClient(broll_app)
+    # The folder still draws, under the clip's NEW id.
+    body = anon.get(f"/share/{tok}/api/folder").json()
+    assert [i["id"] for i in body["items"]] == [new_id]
+    assert anon.get(f"/share/{tok}/api/videos/{new_id}").status_code == 200
+    for kind, ext in (("poster", "jpg"), ("sprite", "jpg"), ("proxy", "mp4")):
+        assert anon.get(f"/share/{tok}/media/{kind}/{new_id}.{ext}").status_code == 200
+
+    # The old id is now somebody else's footage. The files for it are still on
+    # disk (they were harbor's), so only the membership check stands between
+    # the token holder and a clip that was never shared with them.
+    detail = anon.get(f"/share/{tok}/api/videos/{old_id}")
+    assert detail.status_code == 404, "an uncurated clip's segments went out"
+    assert "protest" not in detail.text
+    for kind, ext in (("poster", "jpg"), ("sprite", "jpg"), ("proxy", "mp4")):
+        r = anon.get(f"/share/{tok}/media/{kind}/{old_id}.{ext}")
+        assert r.status_code == 404, f"{kind}: an uncurated clip was served"
+
+
+def test_a_rebuild_leaves_the_tick_on_and_a_second_add_makes_no_duplicate(
+        as_editor, seeded, conn):
+    """broll-4, 2026-08-21. The popover's ticks and add_items both used to
+    compare the raw stored id, so after a renumbering rebuild a clip that IS
+    in the folder showed as un-ticked and "+" filed it a second time --
+    UNIQUE (folder_id, video_id) does not catch a second row with a new id --
+    and the client's page then listed the clip twice."""
+    folder = _create(as_editor)
+    _add(as_editor, folder["id"], seeded["harbor"])
+    conn.execute("DELETE FROM videos WHERE id = ?", (seeded["harbor"],))
+    new_id = insert_video(conn, id=4120, share="ff3", rel_path="day1/harbor.mov",
+                          duration_s=42.0)
+    conn.commit()
+
+    r = as_editor.get("api/client-folders", params={"video_id": new_id})
+    assert r.status_code == 200, r.text
+    mine = [f for f in r.json()["folders"] if f["id"] == folder["id"]]
+    assert mine and mine[0]["contains"] is True, "the clip IS in the folder"
+
+    again = _add(as_editor, folder["id"], new_id)
+    assert again["added"] == [] and again["already"] == [new_id]
+    items = as_editor.get(f"api/client-folders/{folder['id']}").json()["items"]
+    assert [i["name"] for i in items] == ["harbor"]
+    theirs = TestClient(broll_app).get(f"/share/{folder['token']}/api/folder").json()["items"]
+    assert [i["id"] for i in theirs] == [new_id]
+
+
+def test_a_folder_that_already_holds_the_same_clip_twice_draws_it_once(
+        as_editor, seeded, conn):
+    """The folders written before broll-4 was fixed: two rows, one clip. The
+    second row cannot be made any more, but the ones that exist must not show
+    the client a duplicate card."""
+    folder = _create(as_editor)
+    _add(as_editor, folder["id"], seeded["harbor"])
+    conn.execute("DELETE FROM videos WHERE id = ?", (seeded["harbor"],))
+    new_id = insert_video(conn, id=4120, share="ff3", rel_path="day1/harbor.mov",
+                          duration_s=42.0)
+    conn.commit()
+    shares = cf.open_connection()
+    shares.execute(
+        "INSERT INTO client_folder_items (folder_id, video_id, share, rel_path, ord, "
+        "added_by, added_at) VALUES (?, ?, 'ff3', 'day1/harbor.mov', 9, 'jsmith', ?)",
+        (folder["id"], new_id, cf.now_iso()))
+    shares.commit()
+
+    theirs = TestClient(broll_app).get(
+        f"/share/{folder['token']}/api/folder").json()
+    assert [i["id"] for i in theirs["items"]] == [new_id]
+    assert theirs["n_items"] == 1
+
+
 def test_a_clip_that_left_the_index_is_reported_to_the_editor_and_hidden_from_the_client(as_editor, seeded, conn):
     folder = _create(as_editor)
     _add(as_editor, folder["id"], seeded["harbor"], seeded["drone"])
@@ -291,6 +388,21 @@ def test_the_viewer_and_everything_it_needs_answer_under_the_share_prefix(mounte
         assert r.status_code == 200, f"{path} -> {r.status_code}"
     r = mounted.get(f"/broll/share/{tok}", follow_redirects=False)
     assert r.status_code == 303 and r.headers["location"] == f"{tok}/"
+
+
+def test_the_share_assets_mount_carries_the_viewer_and_nothing_else(mounted, seeded):
+    """broll-3, 2026-08-21. /broll/share is the ONE prefix an operator
+    publishes past the tailnet with a Funnel, and the mount behind it points
+    at the whole static tree -- which is also where the editors' SPA lives.
+    An anonymous internet client must not be able to read app.js's API surface
+    off it."""
+    for name in ("app.js", "index.html", "ingest.js", "clientfolders.js"):
+        r = mounted.get(f"/broll/share/assets/{name}")
+        assert r.status_code == 404, f"{name} is served past the tailnet"
+    # ...while the viewer's own files still answer (the test above pins the
+    # rest of the page); the editors' door keeps serving them under /static.
+    assert mounted.get("/broll/share/assets/brand_mark.png").status_code == 200
+    assert mounted.get("/broll/static/app.js").status_code == 200
 
 
 def test_the_viewer_page_and_script_use_only_document_relative_urls():

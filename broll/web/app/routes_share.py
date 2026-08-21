@@ -10,7 +10,8 @@ strength of the token alone, to anyone, read-only:
     GET /share/{token}/media/proxy/{id}.mp4     (Range-capable, the 540p preview)
     GET /share/{token}/media/sprite/{id}.jpg
     GET /share/{token}/media/poster/{id}.jpg
-    GET /share/assets/...                 -> the static tree (main.py mounts it)
+    GET /share/assets/...                 -> the viewer's own files, and only
+                                             those (main.py: SHARE_ASSETS)
 
 WHY THE TRAILING SLASH IS LOAD-BEARING. The viewer page is plain static HTML
 whose every URL is document-relative (`../assets/share.js`, `api/folder`,
@@ -90,13 +91,15 @@ def _member_id(conn: sqlite3.Connection, index: sqlite3.Connection,
                folder: sqlite3.Row, video_id: int) -> int:
     """`video_id` if this folder may show it, else 404.
 
-    The direct membership row is the common case and one indexed lookup. The
-    fallback re-resolves the folder by (share, rel_path) for an archive that
-    was rebuilt with new ids after the folder was made -- the same rule
-    resolve_items applies when it draws the page, so a thumbnail the page
-    shows is a thumbnail this will serve.
+    The direct membership row is the common case and one indexed lookup -- but
+    only when the index row under that id is still the clip the item names
+    (member_video_id checks; broll-1, 2026-08-21). The fallback re-resolves
+    the folder by (share, rel_path) for an archive that was rebuilt with new
+    ids after the folder was made -- the same rule resolve_items applies when
+    it draws the page, so a thumbnail the page shows is a thumbnail this will
+    serve, AND nothing else.
     """
-    if cf.member_video_id(conn, folder["id"], video_id):
+    if cf.member_video_id(conn, index, folder["id"], video_id):
         return video_id
     if video_id in cf.public_video_ids(conn, index, folder["id"]):
         return video_id
@@ -174,9 +177,14 @@ def share_video(token: str, video_id: int, folder: sqlite3.Row = Depends(_live_f
     v = dict(row)
     video = {k: v.get(k) for k in cf.PUBLIC_VIDEO_COLUMNS}
     video["name"] = cf._display_name(v["rel_path"])
+    # By name as well as by id, for the same reason _member_id re-checks it: a
+    # rebuilt index hands the clip a new id, and the curator's caption is
+    # filed under the old one (broll-1, 2026-08-21). The grid gets this right
+    # via resolve_items; the detail panel used to lose the note.
     note_row = conn.execute(
-        "SELECT note FROM client_folder_items WHERE folder_id = ? AND video_id = ?",
-        (folder["id"], vid)).fetchone()
+        "SELECT note FROM client_folder_items WHERE folder_id = ? "
+        "AND (video_id = ? OR (share = ? AND rel_path = ?))",
+        (folder["id"], vid, v["share"], v["rel_path"])).fetchone()
     segments = [
         {"t_start": r["t_start"], "t_end": r["t_end"], "description": r["description"],
          "setting": r["setting"], "motion": r["motion"]}

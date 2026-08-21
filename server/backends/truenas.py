@@ -865,14 +865,26 @@ class TrueNASBackend:
         mountpoints: /mnt/tank/TheCreatorsPool/Creators_Club is a folder in
         `tank/TheCreatorsPool` on this fleet's box, and whether
         /mnt/tank/apps/ccsync-dashboard is its own dataset is a per-site
-        choice. `zfs snapshot` on a directory fails, so ask df -- which needs
-        no privilege and answers with the dataset name ZFS mounted there --
-        and fall back to the string form if it cannot be read.
+        choice. `zfs snapshot` on a directory fails, so ask df -- which answers
+        with the dataset name ZFS mounted there -- and fall back to the string
+        form if it cannot be read.
+
+        UNDER SUDO, like every other filesystem probe in this package
+        (SERVER-9, OPS-5). server-2 (2026-08-21): statfs needs search
+        permission on every component of the path, and TRUENAS_USER has no
+        traverse on the 2770 tree (setup_tree.py's own comment, common.py's
+        check_tree). So for setup_tree's `<tree>/Projects` the unprivileged df
+        was refused on every run, the naive string was returned,
+        `zfs snapshot tank/.../Projects` could not exist, and the chown -R ran
+        with nothing behind it under a WARNING nobody had reason to read. The
+        deploy path only ever worked because /mnt/<pool>/apps happens to be
+        root:root 755.
         """
         naive = self.dataset_of(path)
         if dry_run or not naive:
             return naive
         rc, out, _err = self.calls.ssh(
+            'echo "$SUDO_PW" | sudo -S -p "" '
             f"df --output=source {common.shell_quote(path)} | tail -n 1",
             dry_run=False, timeout=60)
         found = (out or "").strip().splitlines()[-1:] or [""]
@@ -970,9 +982,25 @@ class TrueNASBackend:
         if not dataset:
             return [("failed", f"{path!r} is not under /mnt -- no dataset to schedule")]
         if not self.DATASET_RE.match(dataset):
+            # server-6 (2026-08-21): the refusal itself is right -- a recursive
+            # hourly task on a POOL snapshots everything on it, which is the
+            # whole reason DATASET_RE exists -- but it used to name [tree]
+            # pool_root whatever the target was, and on this fleet the target
+            # that lands here is the APPS root: /mnt/tank/apps is a plain
+            # directory in `tank`, so df answers "tank" and dashboard.db has
+            # had no scheduled snapshot behind it at all. The remedy is a
+            # dataset at that path, so say that, and name the path that
+            # resolved here rather than a key that may have nothing to do
+            # with it.
             return [("failed", f"refusing to schedule snapshots on {dataset!r}: that is "
-                               f"a pool, not a dataset. Name the dataset the tree lives "
-                               f"in (site.toml [tree] pool_root).")]
+                               f"a pool, not a dataset, and a recursive task there would "
+                               f"snapshot everything on it. {path} is a plain directory "
+                               f"in {dataset!r}, so it has NO snapshot floor of its own. "
+                               f"Give it a dataset: `zfs create -p "
+                               f"{self.dataset_of(path) or dataset}` (or one at its "
+                               f"parent), move the directory's contents into it, and "
+                               f"re-run. The paths come from site.toml [tree] pool_root "
+                               f"and [apps] root.")]
 
         existing = []
         if not dry_run:

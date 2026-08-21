@@ -83,6 +83,9 @@ anthropic:
   retry_max_delay_s: 60
   max_concurrency: 4      # API calls in flight; parallel_claude.py --workers sets this
   thinking: disabled      # "adaptive" buys reasoning tokens on EVERY call — see the docs
+                          # (on claude-fable-5 thinking is always on: "disabled"
+                          #  is sent as "say nothing", not as an explicit off,
+                          #  which that model rejects — broll-2, 2026-08-21)
 
 sampling:
   scene_threshold: 0.3     # ffmpeg select='gt(scene,N)'

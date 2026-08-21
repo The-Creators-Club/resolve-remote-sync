@@ -97,10 +97,14 @@ def test_sidecar_env_files_reflect_the_current_values(tmp_path):
     syncthing_env = (tmp_path / "secrets" / "syncthing.env").read_text(encoding="utf-8")
     assert "STGUIAPIKEY=syncthing-key-abc" in syncthing_env
 
-    sftp_env = (tmp_path / "secrets" / "sftp.env").read_text(encoding="utf-8")
+    # internal.env, the file compose.appliance.yaml's sftp service actually
+    # env_files (dash-admin-2, 2026-08-21) -- it used to be written to
+    # sftp.env, which nothing has ever read.
+    sftp_env = (tmp_path / "secrets" / "internal.env").read_text(encoding="utf-8")
     assert "CCSYNC_INTERNAL_TOKEN=internal-token-xyz" in sftp_env
     assert "APP_UID=3000" in sftp_env
     assert "APP_GID=3001" in sftp_env
+    assert not (tmp_path / "secrets" / "sftp.env").exists()
 
 
 def test_sidecar_env_files_are_rewritten_every_call_to_track_rotation(tmp_path):
@@ -145,3 +149,66 @@ def test_create_app_bootstraps_only_when_settings_is_none(tmp_path, monkeypatch)
 
     create_app(Settings(db_path=str(tmp_path / "s.db"), session_secret="x" * 24))
     assert calls == []
+
+
+# ------------------------------------------- agreeing with the sidecars' files
+# dash-admin-2 (2026-08-21): compose.appliance.yaml's secrets-init writes
+# syncthing.env / internal.env BEFORE this container starts, because the two
+# sidecars read an env_file at their own startup and have no generator. This
+# module used to look only at <data>/secrets/<lower env name>, generate a
+# SECOND value, and overwrite syncthing.env with it -- so Syncthing 403'd
+# until its container was restarted and the sftp sidecar presented a token the
+# dashboard had never heard of: every AuthorizedKeysCommand call 401'd and no
+# editor could authenticate to lanes A/B at all.
+
+
+def _seed_like_secrets_init(secrets_dir):
+    secrets_dir.mkdir(parents=True, exist_ok=True)
+    (secrets_dir / "syncthing.env").write_text("STGUIAPIKEY=from-secrets-init\n",
+                                               encoding="utf-8")
+    (secrets_dir / "internal.env").write_text(
+        "CCSYNC_INTERNAL_TOKEN=sidecar-token-abc\n", encoding="utf-8")
+
+
+def test_the_dashboard_adopts_the_tokens_the_sidecars_already_hold(tmp_path):
+    secrets_dir = tmp_path / "secrets"
+    _seed_like_secrets_init(secrets_dir)
+    env = {"DASH_DB_PATH": str(tmp_path / "dashboard.db")}
+
+    provenance = secrets_boot.ensure_secrets(env)
+
+    assert env["SYNCTHING_API_KEY"] == "from-secrets-init"
+    assert env["CCSYNC_INTERNAL_TOKEN"] == "sidecar-token-abc"
+    assert provenance["CCSYNC_INTERNAL_TOKEN"] == "sidecar-file"
+    # ...and the sidecars' own files are left saying the same thing, so the
+    # running sftp sidecar's bearer token still matches what the dashboard
+    # expects on /internal/sftp/keys/<user>.
+    internal_env = (secrets_dir / "internal.env").read_text(encoding="utf-8")
+    assert "CCSYNC_INTERNAL_TOKEN=sidecar-token-abc" in internal_env
+    syncthing_env = (secrets_dir / "syncthing.env").read_text(encoding="utf-8")
+    assert "STGUIAPIKEY=from-secrets-init" in syncthing_env
+    # The canonical file name every other reader uses now exists too.
+    assert (secrets_dir / "ccsync_internal_token").read_text(
+        encoding="utf-8").strip() == "sidecar-token-abc"
+
+
+def test_the_environment_still_beats_a_sidecar_file(tmp_path):
+    secrets_dir = tmp_path / "secrets"
+    _seed_like_secrets_init(secrets_dir)
+    env = {"DASH_DB_PATH": str(tmp_path / "dashboard.db"),
+           "CCSYNC_INTERNAL_TOKEN": "rotated-by-the-operator"}
+    provenance = secrets_boot.ensure_secrets(env)
+    assert provenance["CCSYNC_INTERNAL_TOKEN"] == "env"
+    assert "CCSYNC_INTERNAL_TOKEN=rotated-by-the-operator" in (
+        secrets_dir / "internal.env").read_text(encoding="utf-8")
+
+
+def test_a_comment_or_an_export_prefix_in_a_sidecar_file_is_tolerated(tmp_path):
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir(parents=True)
+    (secrets_dir / "internal.env").write_text(
+        "# written by secrets-init\nexport CCSYNC_INTERNAL_TOKEN=\"quoted-token\"\n",
+        encoding="utf-8")
+    env = {"DASH_DB_PATH": str(tmp_path / "dashboard.db")}
+    secrets_boot.ensure_secrets(env)
+    assert env["CCSYNC_INTERNAL_TOKEN"] == "quoted-token"

@@ -338,3 +338,88 @@ def test_inspect_and_apply_from_the_command_line(nas_and_rig, capsys):
     assert again.execute('SELECT state FROM ingest_queue WHERE uid=?',
                          (uid,)).fetchone()['state'] == db.DONE
     again.close()
+
+
+# --- music-3: the rows the drain could NOT analyse -----------------------------
+
+def _park(rig, uid, error='RuntimeError: no decodable audio'):
+    """What index_music._park does to the pulled copy."""
+    qid = rig.execute('SELECT id FROM ingest_queue WHERE uid=?', (uid,)).fetchone()['id']
+    db.queue_mark_failed(rig, qid, error)
+    return [(uid, error)]
+
+
+def test_a_failed_drain_row_is_parked_on_the_live_index_too(nas_and_rig):
+    """music-3, 2026-08-21. The failure used to exist only in the pulled copy:
+    on the NAS the row stayed `pending`, so the editor's panel counted it as
+    waiting forever, the duplicate defences went on holding the file, and the
+    next drain decoded the same broken file again."""
+    nas, rig, uid, tmp = nas_and_rig
+    failures = _park(rig, uid)
+
+    bundle = tmp / 'drain.db'
+    drain.export_bundle(rig, [], bundle, failures=failures)
+    report = drain.apply_bundle(nas, bundle)
+
+    assert report['failed'] == [uid]
+    row = nas.execute('SELECT state,error,attempts FROM ingest_queue WHERE uid=?',
+                      (uid,)).fetchone()
+    assert row['state'] == db.FAILED
+    assert 'no decodable audio' in row['error']
+    assert row['attempts'] == 1
+
+
+def test_a_failure_is_refused_when_the_file_has_changed_since_the_pull(nas_and_rig):
+    """Same agreement rule a successful row gets: different bytes at that path
+    means the thing that failed is not the thing sitting there now, so the row
+    stays pending for the next drain to look at properly."""
+    nas, rig, uid, tmp = nas_and_rig
+    failures = _park(rig, uid)
+    nas.execute("UPDATE ingest_queue SET content_hash='something-else' WHERE uid=?",
+                (uid,))
+    nas.commit()
+
+    bundle = tmp / 'drain.db'
+    drain.export_bundle(rig, [], bundle, failures=failures)
+    report = drain.apply_bundle(nas, bundle)
+
+    assert report['failed'] == []
+    assert [uid for uid, _why in report['skipped']] == [uid]
+    assert nas.execute('SELECT state FROM ingest_queue WHERE uid=?',
+                       (uid,)).fetchone()['state'] == db.PENDING
+
+
+def test_a_row_already_done_is_never_forced_back_to_failed(nas_and_rig):
+    """A sweep on the NAS can have indexed the file in the meantime
+    (queue_reconcile). A stale failure must not undo that."""
+    nas, rig, uid, tmp = nas_and_rig
+    failures = _park(rig, uid)
+    tid = _analyse(nas, 'first.wav')
+    qid = nas.execute('SELECT id FROM ingest_queue WHERE uid=?', (uid,)).fetchone()['id']
+    db.queue_mark_done(nas, qid, tid)
+
+    bundle = tmp / 'drain.db'
+    drain.export_bundle(rig, [], bundle, failures=failures)
+    report = drain.apply_bundle(nas, bundle)
+
+    assert report['failed'] == []
+    assert nas.execute('SELECT state FROM ingest_queue WHERE uid=?',
+                       (uid,)).fetchone()['state'] == db.DONE
+
+
+def test_a_bundle_without_the_failures_table_still_applies(nas_and_rig):
+    """Additive in both directions, which is why BUNDLE_VERSION is unchanged:
+    an older base rig's bundle has no such table and simply reports none."""
+    nas, rig, uid, tmp = nas_and_rig
+    _drain(rig, uid, 'first.wav')
+    bundle = tmp / 'drain.db'
+    drain.export_bundle(rig, [uid], bundle)
+
+    old = sqlite3.connect(bundle)
+    old.execute('DROP TABLE bundle_failures')
+    old.commit()
+    old.close()
+
+    report = drain.apply_bundle(nas, bundle)
+    assert report['applied'] == [uid]
+    assert report['failed'] == []

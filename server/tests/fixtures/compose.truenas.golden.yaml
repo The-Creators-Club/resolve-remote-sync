@@ -174,6 +174,23 @@ services:
       # `tailscale serve` both set it); "1" pins Secure on the session cookie,
       # which is what an https-published dashboard wants.
       DASH_COOKIE_SECURE: "auto"
+      # WHOSE X-Forwarded-* THIS DASHBOARD BELIEVES, and with it what
+      # auth.client_ip calls "the client" (trust-model-3, 2026-08-21).
+      # Nothing set it until then, so every deployment ran on the dashboard's
+      # own default of loopback only -- which this container never sees. The
+      # stack publishes its port with `ports:` below, so a connection
+      # `tailscale serve` makes from the NAS host is NATed and arrives FROM
+      # THE DOCKER BRIDGE GATEWAY: with that peer untrusted, every request in
+      # the fleet shared one client IP, so the login throttle's per-IP budget
+      # (5 failures, then backoff doubling to an hour) was ONE bucket for
+      # everybody and one editor with caps lock on could 429 /login and
+      # /api/v1/verify for every editor and every companion.
+      #
+      # Rendered from site.toml [net] trusted_proxies, else loopback + [net]
+      # docker_bridge_cidr (default 172.16.0.0/12) + this node's tailnet
+      # address. See install_dashboard_app.trusted_proxies_for for why
+      # trusting the bridge is the smaller exposure of the two.
+      DASH_TRUSTED_PROXIES: "127.0.0.1,::1,172.16.0.0/12,100.64.0.1"
       DASH_DB_PATH: "/data/dashboard.db"
       # Opt-in crash reporting (COMMERCIAL_READINESS.md item 13). The container
       # ALWAYS writes crash JSON here and sends it NOWHERE; setting
@@ -193,8 +210,21 @@ services:
       BROLL_DATA_ROOT: "/broll-data"
       BROLL_SHARES: "broll:Main b-roll archive"
       # Shares that hold OUR OWN footage rather than downloads; they browse
-      # under a Creators_Club root instead of the subject taxonomy.
+      # under the own-footage root below instead of the subject taxonomy.
+      # This was the literal "mofa-disaster" -- ONE CUSTOMER'S PROJECT NAME,
+      # in the file every operator pastes -- until 2026-08-21
+      # (product-surface-3). site.toml [broll] creators_shares; blank means
+      # the whole archive browses as Downloads, which is the right answer for
+      # a site that has not said. A manifest with no [broll] table at all
+      # still renders the historical value for one more release: see
+      # install_dashboard_app.broll_creators_shares_default().
       BROLL_CREATORS_SHARES: "mofa-disaster"
+      # ...and the top-level FOLDER those shoots are ingested under, inside
+      # the archive tree: <archive root>/<this>/<share>/<shoot dirs>/. Blank
+      # leaves broll/web's own default, which cannot change on its own -- the
+      # ~7,000 files already published sit under it. site.toml [broll]
+      # archive_creators_dir (product-surface-3, 2026-08-21).
+      BROLL_ARCHIVE_CREATORS_DIR: ""
       # What that own-footage collection is CALLED -- a slug that travels in
       # every search URL, and the label the folder tree shows. It was the
       # literal "creators_club" (one customer's name) until 2026-08-17
@@ -551,6 +581,25 @@ services:
       timeout: 10s
       retries: 3
       start_period: 120s
+    # A CAP ON THIS CONTAINER'S STDOUT (ops-efficiency-7, 2026-08-21).
+    # docker's json-file driver has NO cap of its own, and whether the host's
+    # daemon.json sets one depends on the NAS vendor -- which is exactly the
+    # thing this product stopped assuming. Every companion posts
+    # /api/v1/report every 5 s while a lane syncs and every open dashboard tab
+    # polls /partials/* every 2 s, so an appliance nobody logs into eats the
+    # apps dataset (also snapshotted hourly) and makes `docker logs` useless
+    # for the one time somebody needs it. run.sh drops uvicorn's access log
+    # for the same reason; this is the floor under everything else.
+    #
+    # 100 MB total, five files, so a rotation still leaves the last few hours
+    # of an incident to read. Kept in step with
+    # install_dashboard_app.LOG_ROTATION, which is what the TrueNAS path
+    # POSTs.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   # yt-dlp's PO-token provider -- the one piece that makes YouTube extraction
   # work from this NAS at all. Measured against the live container on

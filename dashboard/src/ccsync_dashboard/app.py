@@ -2,13 +2,24 @@
 
 The collector runs as an in-process daemon thread started by the lifespan
 handler -- one container, one process, one worker (the SQLite concurrency
-model depends on workers=1; see db.py).
+model depends on workers=1; see db.py). A watchdog thread beside it restarts
+that collector when it dies and exits 75 when it is wedged, because a
+container answering 200 with a dead collector is the failure nobody notices
+(DASH-2 / ops-efficiency-6, 2026-08-21).
+
+`secrets_boot.ensure_secrets()` runs on BOTH entry points: the no-argument
+`create_app()` that deploy/run.sh's `uvicorn --factory` calls, and `run()`
+below (dash-core-7, 2026-08-21 -- it used to build Settings.from_env() itself
+and skip the bootstrap, so `ccsync-dashboard` on an appliance booted with no
+session secret and login silently switched off).
 """
 from __future__ import annotations
 
 import logging
 import os
 import re
+import sys
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -151,6 +162,157 @@ MAX_DEFAULT_BODY_BYTES = 4 * 1024 * 1024
 _BODY_LIMIT_METHODS = ("POST", "PUT", "PATCH")
 
 
+# ------------------------------------------------------- collector watchdog
+# ops-efficiency-6, 2026-08-21. Docker's restart policies act on a process
+# that EXITS; a collector THREAD that died leaves a container answering 200
+# for ever (DASH-2) -- which is the case deploy/compose.yaml's healthcheck was
+# added for and cannot itself recover, because plain Docker treats health as
+# informational. So the recovery is in-process: restart the thread, and when
+# that cannot be made to work, exit 75. deploy/run.sh's image-mode loop
+# re-execs on 75 (tests/test_run_sh_restart_loop.py pins it), and in
+# bind-mount mode the process simply exits, which `restart: unless-stopped`
+# does act on. Either way something comes back.
+WATCHDOG_INTERVAL_SECONDS = 30.0
+# How many times a dead thread is restarted in place before the process gives
+# up on itself. A thread that dies three times is dying for a reason this
+# process cannot fix.
+WATCHDOG_RESTART_LIMIT = 3
+# A thread that is ALIVE but has not come round its loop in this long is
+# wedged inside one call (a Syncthing that hangs rather than refuses), and no
+# in-process trick can take it back -- only the process can be replaced.
+# Deliberately far above the slowest legitimate cycle (an inventory walk of
+# one project over the NAS mount): a watchdog that fires on a slow cycle is a
+# restart loop on the page whose failure mode is "nobody can tell whether
+# their footage is syncing".
+WATCHDOG_WEDGED_SECONDS = 900.0
+RESTART_EXIT_CODE = 75
+
+
+def _watchdog_intervals(env=None) -> tuple[float, float]:
+    """(check interval, wedged threshold) in seconds, from the environment.
+
+    DASH_COLLECTOR_WATCHDOG_SECONDS=0 disables the watchdog entirely, which is
+    the hatch for a host that would rather keep a container it can attach to
+    than have one replace itself.
+    """
+    env = os.environ if env is None else env
+
+    def number(key: str, default: float) -> float:
+        raw = (env.get(key) or "").strip()
+        if not raw:
+            return default
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            log.warning("%s=%r is not a number; using %s", key, raw, default)
+            return default
+
+    return (number("DASH_COLLECTOR_WATCHDOG_SECONDS", WATCHDOG_INTERVAL_SECONDS),
+            number("DASH_COLLECTOR_WEDGED_SECONDS", WATCHDOG_WEDGED_SECONDS))
+
+
+class CollectorWatchdog:
+    """Watches ONE collector and acts when it stops running.
+
+    `check()` is the whole policy and is deliberately callable on its own, so
+    the decision can be tested without a thread and without a clock. `exit_fn`
+    is the same hatch: the default really does end the process.
+    """
+
+    def __init__(self, collector, *, interval: float, wedged_after: float,
+                 restart_limit: int = WATCHDOG_RESTART_LIMIT, exit_fn=None):
+        self.collector = collector
+        self.interval = interval
+        self.wedged_after = wedged_after
+        self.restart_limit = restart_limit
+        self._exit_fn = exit_fn or _exit_for_restart
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.restarts = 0
+
+    def start(self) -> None:
+        if self.interval <= 0:
+            log.info("collector watchdog disabled (DASH_COLLECTOR_WATCHDOG_SECONDS=0)")
+            return
+        self._thread = threading.Thread(target=self._loop, name="dash-watchdog",
+                                        daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.interval):
+            try:
+                self.check()
+            except Exception:  # noqa: BLE001 - a watchdog that dies is worse
+                log.exception("collector watchdog check failed; continuing")
+
+    def check(self) -> str:
+        """One of "ok" / "restarted" / "exiting".
+
+        Never raises for a collector that cannot answer: a state this cannot
+        read is not evidence of a fault, and killing the container over it
+        would be the worse mistake.
+        """
+        collector = self.collector
+        try:
+            died = bool(collector.thread_died())
+            stalled = 0.0 if died else float(collector.seconds_since_heartbeat())
+        except Exception:  # noqa: BLE001
+            log.exception("could not read the collector's state; assuming it is fine")
+            return "ok"
+        if died:
+            self.restarts += 1
+            if self.restarts > self.restart_limit:
+                log.error(
+                    "the collector thread has died %d times; exiting %d so the "
+                    "container is replaced (nothing else prunes the database or "
+                    "polls Syncthing)", self.restarts, RESTART_EXIT_CODE)
+                return self._exit()
+            log.error("the collector thread is DEAD; restarting it (%d of %d)",
+                      self.restarts, self.restart_limit)
+            try:
+                if not collector.restart():
+                    raise RuntimeError("restart() refused")
+            except Exception:  # noqa: BLE001
+                log.exception("could not restart the collector thread; exiting %d",
+                              RESTART_EXIT_CODE)
+                return self._exit()
+            return "restarted"
+        if self.wedged_after > 0 and stalled >= self.wedged_after:
+            # A live thread blocked inside one call cannot be taken back: a
+            # second loop thread would double every write and the first would
+            # still be holding the socket. The process is the unit of recovery.
+            log.error(
+                "the collector thread has not come round its loop for %.0fs "
+                "(wedged inside one call); exiting %d so it is restarted",
+                stalled, RESTART_EXIT_CODE)
+            return self._exit()
+        return "ok"
+
+    def _exit(self) -> str:
+        self._exit_fn(RESTART_EXIT_CODE)
+        return "exiting"
+
+
+def _exit_for_restart(code: int) -> None:
+    """Leave the process with `code`, from a daemon thread.
+
+    os._exit, not sys.exit: SystemExit raised in a watchdog thread only ends
+    that thread, which would leave exactly the container this exists to
+    replace. The streams are flushed by hand first because os._exit does not.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:  # noqa: BLE001
+            pass
+    os._exit(code)
+
+
 def _log_shared_token_migration(conn, settings: Settings) -> None:
     """Say at every boot how much of the fleet is still on the SHARED token.
 
@@ -192,10 +354,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Fills in any of the five secrets this deployment's environment does
         # not already carry, from <data>/secrets/ or freshly generated
         # (ZERO_TOUCH_PLAN.md WP D / secrets_boot.py, 2026-08-17) -- BEFORE
-        # Settings.from_env() reads them. Only reached on the real `run()`
-        # path: every test in this suite (and any caller with its own
-        # provisioning story) passes `settings` explicitly and never touches
-        # a filesystem here, which is what makes this a no-op for every
+        # Settings.from_env() reads them. Reached on the FACTORY path
+        # (deploy/run.sh's `uvicorn --factory`); `run()` below does the same
+        # thing for itself, because it builds its own Settings (dash-core-7,
+        # 2026-08-21). Every test in this suite (and any caller with its own
+        # provisioning story) passes `settings` explicitly and never touches a
+        # filesystem here, which is what makes this a no-op for every
         # deployment that already sets all five in its compose env (every
         # deployment today) -- see secrets_boot.ensure_secrets' docstring.
         secrets_boot.ensure_secrets()
@@ -304,6 +468,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         collector = Collector(settings)
         collector.start()
         app.state.collector = collector
+        # ...and the thing that notices when it stops (ops-efficiency-6,
+        # 2026-08-21). Started after the collector and stopped before it, so a
+        # shutdown is never read as a death.
+        interval, wedged_after = _watchdog_intervals()
+        watchdog = CollectorWatchdog(collector, interval=interval,
+                                     wedged_after=wedged_after)
+        watchdog.start()
+        app.state.collector_watchdog = watchdog
         # The vendor release feed's poller (ZERO_TOUCH_PLAN.md WP E,
         # 2026-08-17): gated on release_feed_url being set, so an
         # unconfigured feed adds no thread, no DNS lookup, no log line --
@@ -326,6 +498,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             yield
         finally:
+            # The watchdog first: stopping the collector is exactly what it
+            # would otherwise report as a dead thread.
+            watchdog.stop()
             if collector is not None:
                 collector.stop()
             if feed_poller is not None:
@@ -349,9 +524,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # a second deployment must not inherit branded as the first one
     # (2026-08-17, COMMERCIAL_READINESS.md item 10). A site that says who it
     # is gets "<org> - <product> Dashboard".
+    #
+    # From the resolved manifest, not the environment snapshot (product-
+    # surface-2 / CR-58, 2026-08-21): on an appliance compose sets no
+    # DASH_SITE_* at all, so the admin's answers lived only in site_settings
+    # and every other brand surface already reads them. `None` as the app
+    # because there is no app yet to cache on -- manifest_for_app falls back
+    # to the Settings-only shape rather than raising, so a database that is
+    # not migrated yet (a first boot) still gets a title.
+    app_manifest = site_store.manifest_for_app(None, settings)
     app_title = " - ".join(
-        p for p in (settings.site_org_name,
-                    f"{settings.site_product_name or 'CC Sync'} Dashboard") if p)
+        p for p in (app_manifest.get("org_name") or "",
+                    f"{app_manifest.get('product_name') or 'CC Sync'} Dashboard") if p)
     app = FastAPI(title=app_title, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
     app.state.settings = settings
@@ -633,6 +817,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             or (path.startswith("/api/v1/selection/") and _companion_token_ok(request))
             # companion downloads published upgrade packages the same way
             or (path.startswith("/api/v1/companion/package/") and _companion_token_ok(request))
+            # READING the fleet halt with a fleet credential (dash-core-5 /
+            # CR-55, 2026-08-21). api_fleet_halt has authenticated companions
+            # through resolve_companion_credential since CR-55, but this
+            # middleware 401s them before the route's own rule is ever
+            # reached, so an operator scripting the check with a per-editor
+            # token was told to log in. GET only and exact: POST /fleet/halt
+            # is the admin's SET, and it stays session-gated (the route
+            # additionally calls _require_admin, so this is belt and braces).
+            or (path == "/api/v1/fleet/halt" and request.method == "GET"
+                and _companion_token_ok(request))
             # the indexer pushing into the mounted b-roll app, token-gated
             or (path.startswith("/broll/api/ingest/") and _broll_ingest_token_ok(request))
             # a CLIENT FOLDER's public viewer (docs/CLIENT_FOLDERS.md,
@@ -815,8 +1009,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
 
 def run() -> None:
+    """The `ccsync-dashboard` console script (pyproject) and
+    `python -m ccsync_dashboard.app`.
+
+    dash-core-7, 2026-08-21: the secrets bootstrap has to run BEFORE
+    `Settings.from_env()` reads the variables it fills in. This entry point
+    used to skip it -- `create_app` only calls `ensure_secrets` when it is
+    handed no settings -- so an appliance-style start with no
+    DASH_SESSION_SECRET in the environment got an EMPTY one, and
+    auth.check_boot_secrets only validates a secret that is present: login
+    switched itself off, /api/v1/report accepted identity-less reports, and
+    the sidecar env files were never refreshed. Latent today only because the
+    shipped container starts through deploy/run.sh's `uvicorn --factory`,
+    which reaches the no-argument path instead.
+    """
     import uvicorn
 
+    secrets_boot.ensure_secrets()
     settings = Settings.from_env()
     uvicorn.run(create_app(settings), host="0.0.0.0", port=settings.port, workers=1)
 

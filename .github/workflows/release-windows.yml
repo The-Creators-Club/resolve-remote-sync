@@ -9,9 +9,16 @@
 #
 # IT DOES NOT PUBLISH. Nothing here talks to a dashboard, a NAS or the fleet: a
 # GitHub runner cannot reach the tailnet, and an upgrade channel that any push
-# could write to would be a supply-chain hole rather than a convenience. Download
-# the artifact and publish it with `installer\build_editor_package.ps1 -Publish
-# -MakeCurrent`, or run `tools\ship.cmd` as usual.
+# could write to would be a supply-chain hole rather than a convenience. The
+# release key never enters GitHub either (docs/RELEASE_FEED.md section 5).
+#
+# WHAT PUBLISHES THIS ARTEFACT: `python tools/publish_latest.py`, on the base
+# rig. It takes the newest green run of this workflow ON MAIN, re-verifies the
+# sha256, refuses a commit that is not an ancestor of origin/main or a version
+# older than the channel already carries, signs, and uploads to the vendor
+# feed (docs/RELEASE.md). For the studio's own dashboard only, the old path
+# still works: `installer\build_editor_package.ps1 -Publish -MakeCurrent`, or
+# `tools\ship.cmd` as usual.
 #
 # SIGNING. Unsigned unless the secrets are present, and it says so in the run
 # summary. The variable names are tools/release.ps1's own (item 4):
@@ -44,6 +51,17 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 45
+    # JOB-level, not step-level (installer-onboard-tools-2, 2026-08-21). A
+    # step's own `env:` block is applied AFTER its `if:` is evaluated, so the
+    # materialise step below guarded itself on a value that was always empty
+    # and was therefore ALWAYS skipped -- CCSYNC_SIGN_PFX never reached
+    # GITHUB_ENV, and the documented CI signing route (CCSYNC_SIGN_PFX_BASE64)
+    # was dead on arrival while the run reported success and the manifest
+    # honestly said signed_binary=false. The `secrets` context is not
+    # available in a step `if` either, which is what the old comment was
+    # working around; a job-level env is visible to both.
+    env:
+      PFX_B64: ${{ secrets.CCSYNC_SIGN_PFX_BASE64 }}
     steps:
       # Full history: release.ps1 stamps the manifest with the commit, and a
       # shallow checkout makes that describe the wrong thing.
@@ -123,21 +141,27 @@ jobs:
           if ($null -eq $exe) { throw "could not find rclone.exe inside the downloaded zip" }
           Copy-Item $exe.FullName "companion/.tools/rclone.exe" -Force
 
-      # The secret is lifted into `env` first and the condition reads THAT: the
-      # `secrets` context is not available in a step-level `if`, and a condition
-      # that silently evaluates to false would produce an unsigned build that
-      # nothing complained about.
+      # No `if:` at all any more: the emptiness test is INSIDE the body, where
+      # the value is certain to be visible (installer-onboard-tools-2,
+      # 2026-08-21). A step that skips itself on a condition it cannot read is
+      # indistinguishable in the run summary from one that had nothing to do,
+      # which is how a whole signing route stayed dead. Either way this prints
+      # what it decided into the run summary.
       - name: materialise the signing certificate
-        env:
-          PFX_B64: ${{ secrets.CCSYNC_SIGN_PFX_BASE64 }}
-        if: ${{ env.PFX_B64 != '' }}
         shell: pwsh
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:PFX_B64)) {
+            "signing: no CCSYNC_SIGN_PFX_BASE64 secret -- this build will be UNSIGNED unless CCSYNC_SIGN_THUMBPRINT resolves (it cannot on a hosted runner: no cert store, no token)" |
+              Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            exit 0
+          }
           # Written under RUNNER_TEMP, never into the workspace: the workspace
           # is what gets uploaded as an artifact.
           $pfx = Join-Path $env:RUNNER_TEMP "ccsync-sign.pfx"
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:PFX_B64))
           "CCSYNC_SIGN_PFX=$pfx" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "signing: certificate materialised from CCSYNC_SIGN_PFX_BASE64 -- signtool will be attempted" |
+            Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
       - name: build
         shell: pwsh
@@ -157,11 +181,21 @@ jobs:
       # venv. Same shape as release-macos.yml's wizard step (2026-08-17): a
       # failed wizard build must not throw away a companion build that
       # succeeded -- it is reported and the companion artefact still uploads.
-      # Publish both from the base rig with tools/publish_package.py
-      # (--kind onboard --platform windows --version <installer version>).
+      # It is SIGNED and it carries its OWN MANIFEST (installer-onboard-tools-1
+      # and release-pipeline-4, 2026-08-21). Before that: nothing in the repo
+      # ever ran signtool on this exe, so the artefact a fresh install
+      # double-clicks shipped unsigned even with a certificate configured; and
+      # with no ccsync-onboard.json beside it, tools/publish_latest.py could
+      # not publish the installer to the vendor feed at all, so a feed-only
+      # customer's [ INSTALLER ] page was empty and their admin was told to
+      # run a vendor-internal PowerShell script.
       - name: build the onboarding wizard (onboard.exe)
         if: ${{ !cancelled() }}
         shell: pwsh
+        env:
+          CCSYNC_SIGN_THUMBPRINT: ${{ secrets.CCSYNC_SIGN_THUMBPRINT }}
+          CCSYNC_SIGN_PFX_PASSWORD: ${{ secrets.CCSYNC_SIGN_PFX_PASSWORD }}
+          CCSYNC_SIGN_TIMESTAMP_URL: ${{ secrets.CCSYNC_SIGN_TIMESTAMP_URL }}
         run: |
           if (-not (Test-Path "companion/dist/ccsync-companion.exe")) {
             "no companion exe -- skipping onboard.exe" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
@@ -172,12 +206,59 @@ jobs:
             & ../companion/.venv/Scripts/python.exe -m PyInstaller build_onboard.spec --noconfirm 2>&1 | ForEach-Object { "    $_" }
             if ($LASTEXITCODE -ne 0) {
               "onboard.exe build FAILED (PyInstaller exit $LASTEXITCODE) -- companion artefact is still good" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
-            } else {
-              $v = Select-String -Path steps.py -Pattern '^INSTALLER_VERSION\s*=\s*"([^"]+)"' | ForEach-Object { $_.Matches[0].Groups[1].Value }
-              $h = (Get-FileHash dist/onboard.exe -Algorithm SHA256).Hash.ToLower()
-              "onboard.exe built: installer $v, sha256 $h, $((Get-Item dist/onboard.exe).Length) bytes" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+              exit 0
             }
           } finally { Pop-Location }
+          # The same shared signtool call site tools/release.ps1 and
+          # installer/build_editor_package.ps1 use. A no-op when no identity
+          # is configured; a hard failure only when signtool ran and failed,
+          # and even then the companion artefact still uploads.
+          pwsh -NoProfile -ExecutionPolicy Bypass -File tools/sign_windows_binary.ps1 -Path onboarding/dist/onboard.exe
+          if ($LASTEXITCODE -ne 0) {
+            "onboard.exe SIGNING FAILED -- the installer artefact is unsigned" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
+          $testsRun = $false
+          if ("${{ inputs.skip_tests }}" -ne "true") {
+            Push-Location onboarding
+            try {
+              & ../companion/.venv/Scripts/python.exe -m pytest tests -q
+              $testsRun = ($LASTEXITCODE -eq 0)
+            } finally { Pop-Location }
+            if (-not $testsRun) {
+              "onboarding suite FAILED -- the manifest will say tests_run=false, and publish_feed.py will refuse it without --allow-untested" |
+                Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            }
+          }
+          $v = (Select-String -Path onboarding/steps.py -Pattern '^INSTALLER_VERSION\s*=\s*"([^"]+)"' | ForEach-Object { $_.Matches[0].Groups[1].Value })
+          $exe = Get-Item onboarding/dist/onboard.exe
+          $h = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          $signed = ((Get-AuthenticodeSignature -LiteralPath $exe.FullName).Status -eq "Valid")
+          # tools/release.ps1's manifest shape, for the onboard artefact:
+          # publish_latest.py reads exactly these keys (version, platform,
+          # artifact, sha256, size_bytes, git_dirty, tests_run,
+          # signed_binary) and refuses a build whose bytes do not match.
+          # git_dirty is read from the checkout the same way release.ps1 does.
+          $dirty = [bool](git status --porcelain)
+          $manifest = [ordered]@{
+            version       = $v
+            platform      = "windows"
+            artifact      = "onboard.exe"
+            sha256        = $h
+            size_bytes    = $exe.Length
+            built_at      = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            git_commit    = "$(git rev-parse HEAD)".Trim()
+            git_dirty     = $dirty
+            # The ONBOARDING suite, run below against the tree this exe was
+            # built from. publish_feed.py refuses a manifest that says false
+            # (OPS-1), and it must never say true on trust.
+            tests_run     = $testsRun
+            signed_binary = $signed
+            built_by      = "github-actions/release-windows"
+            built_with    = ".github/workflows/release-windows.yml"
+          }
+          $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+          [IO.File]::WriteAllText((Join-Path (Get-Location) "onboarding/dist/ccsync-onboard.json"), ($manifest | ConvertTo-Json), $utf8NoBom)
+          "onboard.exe built: installer $v, sha256 $h, $($exe.Length) bytes, authenticode=$signed" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
       - name: report what was produced
         if: ${{ !cancelled() }}
@@ -199,4 +280,5 @@ jobs:
             companion/dist/ccsync-companion.exe
             companion/dist/ccsync-release.json
             onboarding/dist/onboard.exe
+            onboarding/dist/ccsync-onboard.json
           if-no-files-found: error

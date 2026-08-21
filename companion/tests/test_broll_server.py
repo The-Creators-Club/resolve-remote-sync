@@ -322,6 +322,40 @@ def test_a_blank_broll_entry_counts_as_unset(tmp_path):
     assert mounts["broll"] == str(tmp_path / "Assets" / "B-roll Archive")
 
 
+def test_a_blank_mount_is_absent_at_the_translator_too(tmp_path):
+    """comp-loopback-5, 2026-08-21: "a blank one counts as absent" was true of
+    resolve_mounts and FALSE of the translator, which only refused None. ''
+    passed the isinstance check and became the filesystem root, so 'broll' +
+    'Users/x/tax.pdf' translated to '\\Users\\x\\tax.pdf' and
+    contained_local_path's containment test (guarded by `if root:`) was
+    skipped for exactly the mount that needed it most.
+
+    Reachable with a leftover template ~/.broll-companion.json on a machine
+    with no local_root yet, since resolve_mounts fills a blank in only for its
+    OWN share and only when a default can be derived."""
+    for blank in ("", "   "):
+        with pytest.raises(broll_server.MountNotConfiguredError):
+            broll_server.translate_path_with_root(
+                "broll", "Users/x/private.mov", {"broll": blank}, platform="win32")
+        with pytest.raises(broll_server.MountNotConfiguredError):
+            broll_server.contained_local_path(
+                "broll", "Users/x/private.mov", {"broll": blank})
+
+
+def test_a_blank_mount_on_macos_falls_back_to_the_volumes_probe(monkeypatch):
+    """"Blank" must mean absent, not "the root of the disk" -- and absent on
+    macOS is the /Volumes probe, the same as a share with no entry at all
+    (comp-loopback-5, 2026-08-21)."""
+    monkeypatch.setattr(broll_server, "probe_darwin_mount",
+                        lambda share, isdir=None: "/Volumes/BRoll")
+
+    root, local = broll_server.translate_path_with_root(
+        "broll", "clip.mov", {"broll": ""}, platform="darwin")
+
+    assert root == "/Volumes/BRoll"
+    assert local == "/Volumes/BRoll/clip.mov"
+
+
 def test_other_shares_get_no_default(tmp_path):
     """Only the b-roll archive has a derivable root -- everything else still
     needs its own line in ~/.broll-companion.json, exactly as before."""
@@ -2094,6 +2128,9 @@ class FakeIngestor:
         self.control_result = (200, {"ok": True, "state": "paused"})
         self.thumb_result = (200, b"\xff\xd8jpegbytes")
         self.stopped = False
+        # What /pick recorded as the allow-list prepare measures a
+        # source='path' item against (comp-loopback-6, 2026-08-21).
+        self.picked: list = []
 
     # -- what broll_server calls ------------------------------------------
     def busy(self):
@@ -2106,6 +2143,9 @@ class FakeIngestor:
         dest = Path(self.staging_root) / staging_id / f"{local_id}.mp4"
         return 200, {"path": str(dest), "staging_root": self.staging_root,
                      "size": 10, **self.slot_extra}
+
+    def note_picked(self, files):
+        self.picked.extend(files)
 
     def note_upload(self, staging_id, local_id, written):
         self.uploads.append((staging_id, local_id, written))
@@ -2372,6 +2412,40 @@ def test_pick_runs_the_dialog_on_the_ui_thread(ingest_server, monkeypatch):
     data = json.loads(body)
     assert status == 200
     assert data["files"][0]["name"] == "A001.MP4"
+
+
+def test_pick_records_what_it_returned_as_the_allow_list(ingest_server, monkeypatch):
+    """comp-loopback-6, 2026-08-21: /pick is the only route that learns a local
+    path, so its answer is also what `prepare` measures a source='path' item
+    against. Recorded from the PICKER, never from the body of the prepare that
+    follows it."""
+    srv, client, ingestor, staging = ingest_server
+    from ccsync_companion import popup
+
+    monkeypatch.setattr(popup, "pick_media_sources", lambda kind, timeout=300: [
+        {"path": "D:/card/A001.MP4", "name": "A001.MP4", "size": 5, "rel_dir": ""}])
+
+    client.post_json("/broll/ingest/pick", {"kind": "files"})
+
+    assert [entry["path"] for entry in ingestor.picked] == ["D:/card/A001.MP4"]
+
+
+def test_pick_still_answers_when_the_allow_list_cannot_be_recorded(ingest_server,
+                                                                  monkeypatch):
+    """Bookkeeping is not a refusal: an orchestrator too old to have
+    `note_picked` (or one that raised) must still hand the editor their
+    files."""
+    srv, client, ingestor, staging = ingest_server
+    from ccsync_companion import popup
+
+    monkeypatch.setattr(popup, "pick_media_sources", lambda kind, timeout=300: [
+        {"path": "D:/card/A001.MP4", "name": "A001.MP4", "size": 5, "rel_dir": ""}])
+    monkeypatch.delattr(type(ingestor), "note_picked", raising=False)
+
+    status, _headers, body = client.post_json("/broll/ingest/pick", {"kind": "files"})
+
+    assert status == 200
+    assert json.loads(body)["files"][0]["name"] == "A001.MP4"
 
 
 def test_pick_says_cancelled_rather_than_erroring(ingest_server, monkeypatch):

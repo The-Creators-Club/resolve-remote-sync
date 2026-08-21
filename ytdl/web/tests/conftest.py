@@ -97,9 +97,15 @@ PROJECTS = [
 OTHER_PROJECT = ('2025-ff4-nuclear', '2025/FF4/Nuclear')
 
 # Verbatim from dashboard/src/ccsync_dashboard/schema.sql (projects) and
-# db.py's SCHEMA_V2 (selections). Copied rather than imported: this suite must
+# db.py's SCHEMA_V24 (selections). Copied rather than imported: this suite must
 # run with no dashboard checkout in reach, and a drift between the two is
 # exactly what the read-only query in projects.py would break on.
+#
+# `machine` joined selections in dashboard 0.7.0 (schema v24, 2026-08-19): a
+# sync plan belongs to a COMPUTER, so one editor with two machines has two rows
+# per project. This copy sat on the pre-v24 two-column key until 2026-08-21,
+# which is why the suite could not see the duplicated picker (ytdl-web-2) --
+# the drift YTDL-44 predicted, in the direction it predicted.
 _DASH_DDL = """
 CREATE TABLE IF NOT EXISTS projects (
   id INTEGER PRIMARY KEY,
@@ -112,13 +118,19 @@ CREATE TABLE IF NOT EXISTS projects (
 );
 CREATE TABLE IF NOT EXISTS selections (
   editor_username TEXT NOT NULL,
+  machine         TEXT NOT NULL DEFAULT '',
   project_slug    TEXT NOT NULL,
   position        INTEGER NOT NULL,
   created_at      TEXT NOT NULL,
   created_by      TEXT NOT NULL,
-  PRIMARY KEY (editor_username, project_slug)
+  PRIMARY KEY (editor_username, machine, project_slug)
 );
 """
+
+# The seed's machine name. One is enough for the fixtures every other test
+# reads; test_api's picker test adds a second machine for the same editor,
+# which is the shape that duplicated the list (ytdl-web-2).
+MACHINE = 'owen-desktop'
 
 
 def _seed_dashboard_db():
@@ -134,12 +146,12 @@ def _seed_dashboard_db():
     con.execute("INSERT OR IGNORE INTO projects(slug,label,path,first_seen,last_seen,active) "
                 "VALUES('2024-old','2024/Old','/projects/2024/Old','x','x',0)")
     for slug, _label, pos in PROJECTS:
-        con.execute('INSERT OR IGNORE INTO selections VALUES(?,?,?,?,?)',
-                    (USER, slug, pos, '2026-08-11', 'seed'))
-    con.execute('INSERT OR IGNORE INTO selections VALUES(?,?,?,?,?)',
-                (USER, '2024-old', 9, '2026-08-11', 'seed'))
-    con.execute('INSERT OR IGNORE INTO selections VALUES(?,?,?,?,?)',
-                (OTHER_USER, OTHER_PROJECT[0], 1, '2026-08-11', 'seed'))
+        con.execute('INSERT OR IGNORE INTO selections VALUES(?,?,?,?,?,?)',
+                    (USER, MACHINE, slug, pos, '2026-08-11', 'seed'))
+    con.execute('INSERT OR IGNORE INTO selections VALUES(?,?,?,?,?,?)',
+                (USER, MACHINE, '2024-old', 9, '2026-08-11', 'seed'))
+    con.execute('INSERT OR IGNORE INTO selections VALUES(?,?,?,?,?,?)',
+                (OTHER_USER, 'sam-laptop', OTHER_PROJECT[0], 1, '2026-08-11', 'seed'))
     con.commit()
     con.close()
 

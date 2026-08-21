@@ -141,7 +141,18 @@ library, and only the older one goes through this app's `/api/ingest`:
 | who tags | the base rig, and a drain bundle carries the rows back | **this container**, from the uploaded embedding, with the text tower it already loads for queries (`musicweb/rescore.py`) |
 | routes | `POST /music/api/ingest` | `/music/api/ingest-batches` (session) + `/music/api/fleet/ingest/…` (fleet) |
 | credential | the session, or `MUSIC_INGEST_TOKEN` standalone | `X-CCSync-Token` (`DASH_REPORT_TOKEN`) **plus** a signed `X-CCSync-Identity` |
-| still supported | **yes** — it is the documented fallback when a companion cannot embed (the item ends `queued_for_base_rig` and a `pending` journal row waits for the drain) | — |
+| still supported | **yes** — and it is the ONLY way a track a companion could not embed reaches the library (see below) | — |
+
+**The fallback does not queue anything** (music-6, 2026-08-21; `KNOWN_BUGS`
+MUSIC-ING-2). A companion that cannot embed ends the item
+`queued_for_base_rig`, and that is a note in the batch ledger and nothing more:
+the audio is still on the editor's machine and no `pending` journal row was
+written, because the library allocates a filename at `result` and that item
+never got one. There is no `queue_add` anywhere in the fleet routes. The page
+asks the editor to drop the track through the browser upload above, which does
+the whole safe dance (name allocation, both duplicate defences, the transcode,
+the queue row) — a drain run in the belief that the fallback queued something
+will correctly find nothing.
 
 **Nothing new to configure.** The fleet routes read `DASH_REPORT_TOKEN` and
 `DASH_SESSION_SECRET`, which this container already has, and they fail closed
@@ -297,6 +308,9 @@ ssh truenas_admin@192.168.0.10 `
   "sudo python3 -m musicweb.drain apply /tmp/drain.db --db /mnt/tank/apps/ccsync-dashboard/music-data/music.db"
 #     (run it from the shipped music-web tree so `musicweb` is importable; or
 #      `python -m musicweb.drain inspect drain.db` first to see what it holds)
+#     It reports failures too since 2026-08-21 (music-3): a row the base rig
+#     could not analyse is parked `failed` HERE as well, with the reason, so
+#     the editor's panel stops counting it as still waiting.
 
 # 4. the whole-file push. Still correct for a FIRST install or a rebuild, and
 #    still a lost-write window for anything else -- prefer 3a. Never `all`;
@@ -305,6 +319,18 @@ cd ..\..\server
 python publish_db.py --which music --apply       # preferred; see below
 # python install_dashboard_app.py --music-data db   # the deploy-time route
 ```
+
+**Does the running app pick any of this up?** Yes, since 2026-08-21 (music-2),
+and it did not before. `musicweb` caches one SQLite connection per worker
+thread and builds its search matrices once per process, so an index changed by
+another process — a `drain apply` writing to the file, or a publish renaming a
+new one into place — used to be invisible until somebody POSTed
+`/music/api/reload`, which no runbook mentioned. It now stats the database (and
+its `-wal`) on the way through, at most every couple of seconds: a replaced
+file drops every cached connection, and a changed one rebuilds the matrices on
+the next search. **An older deployment does not**, so after applying a bundle
+to a container running a musicweb from before that date, POST
+`/music/api/reload` as an admin or restart the container.
 
 **Prefer `publish_db.py --which music`** (added 2026-08-17,
 `docs/COMMERCIAL_READINESS.md` item 8). It is `--music-data db` plus the three

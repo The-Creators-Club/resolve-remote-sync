@@ -17,9 +17,11 @@
     reported so a stale one can't slip through unnoticed.
 
 .PARAMETER Destination
-    Where to assemble the package. Defaults to the canonical location on the
-    NAS, P:\Assets\Software\CC_Sync (the base rig's P: maps to
-    \\<nas>\<share>\<tree> since 2026-07-26) -- the single
+    Where to assemble the package. Defaults to <canonical_prefix>\Assets\
+    Software\CC_Sync -- P:\Assets\Software\CC_Sync on every machine in the
+    field today (the base rig's P: maps to \\<nas>\<share>\<tree> since
+    2026-07-26), but READ from this rig's canonical_prefix rather than
+    compiled in (installer-onboard-tools-5, 2026-08-21). It is the single
     source of truth for editor packages, so every update lands there and
     there is only ever one copy to reason about. An existing folder is
     overwritten file-by-file, not deleted.
@@ -99,12 +101,22 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Destination = "P:\Assets\Software\CC_Sync",
+    # EMPTY, not "P:\...": the tree root is site data, not code (2026-08-17,
+    # COMMERCIAL_READINESS.md item 11). Resolved below from this rig's own
+    # canonical_prefix -- installer-onboard-tools-5 (2026-08-21) found the
+    # last hardcoded P: on the release path, in the one script tools\ship.cmd
+    # calls with no -Destination.
+    [string]$Destination = "",
     [switch]$RebuildExe,
     [switch]$RebuildOnboard,
     [switch]$DryRun,
     [switch]$Publish,
     [switch]$MakeCurrent,
+    # -MakeCurrent hands onboard.exe to every FRESH INSTALL, so the same
+    # Authenticode refusal tools\ship.ps1 applies to the companion exe applies
+    # here (installer-onboard-tools-1, 2026-08-21). ship.ps1 passes this
+    # through when it was given -AllowUnsignedBinary.
+    [switch]$AllowUnsignedBinary,
     # Both REQUIRED for -Publish, and both without a default since 2026-08-17
     # (WP0): they used to name one deployment's dashboard and one person's
     # account. $env:CCSYNC_DASHBOARD_URL / $env:CCSYNC_ADMIN_USER are the
@@ -143,6 +155,49 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 $CompanionDir = Join-Path $RepoRoot "companion"
 $ExePath = Join-Path $CompanionDir "dist\ccsync-companion.exe"
 
+# --- where does the editor package go? (installer-onboard-tools-5) ---------
+# This used to be the literal P:\Assets\Software\CC_Sync in the param block,
+# so ship.cmd on an operator rig whose tree is mapped anywhere else (or has
+# no P: at all) died inside the copy loop under $ErrorActionPreference =
+# Stop, AFTER the dashboard deploy. Every other consumer of the tree root
+# reads canonical_prefix; so does this now. config.toml first (this rig's
+# own companion configuration), then the cached site manifest, then P:\ --
+# the same last-resort default windows_bootstrap.ps1 uses, because that is
+# what every machine in the field is mapped as.
+function Get-CanonicalPrefix {
+    foreach ($candidate in @(
+        @{ Path = "$env:USERPROFILE\.ccsync\config.toml"; Pattern = '^\s*canonical_prefix\s*=\s*"(.+?)"' },
+        @{ Path = "$env:USERPROFILE\.ccsync\site.json";   Pattern = '"canonical_prefix"\s*:\s*"(.+?)"' }
+    )) {
+        if (-not (Test-Path -LiteralPath $candidate.Path)) { continue }
+        $m = Select-String -Path $candidate.Path -Pattern $candidate.Pattern | Select-Object -First 1
+        if ($m) {
+            # TOML/JSON escaping: "P:\\" on disk is P:\ in fact.
+            $value = $m.Matches[0].Groups[1].Value -replace '\\\\', '\'
+            if ($value) { return $value }
+        }
+    }
+    return "P:\"
+}
+
+if (-not $Destination) {
+    $prefix = (Get-CanonicalPrefix).TrimEnd("\")
+    $Destination = Join-Path $prefix "Assets\Software\CC_Sync"
+    Write-Step "package destination (from canonical_prefix): $Destination"
+}
+# Named BEFORE anything is built or deployed, not discovered by New-Item
+# throwing three minutes in. A missing drive here is an operator-rig
+# configuration problem, and the message has to say which drive and where the
+# letter came from.
+$destQualifier = ""
+try { $destQualifier = [System.IO.Path]::GetPathRoot($Destination) } catch { $destQualifier = "" }
+if ($destQualifier -and $destQualifier -match '^[A-Za-z]:' -and -not (Test-Path -LiteralPath $destQualifier)) {
+    Write-Warn2 "the package destination $Destination is on $destQualifier, which does not exist on this machine."
+    Write-Warn2 "That letter comes from canonical_prefix in %USERPROFILE%\.ccsync\config.toml (or the cached site manifest)."
+    Write-Warn2 "Map the tree drive, fix canonical_prefix, or pass -Destination <path> explicitly."
+    exit 1
+}
+
 # The exit code this script finally reports. Everything below warns and carries
 # on -- an incomplete package is still worth assembling, and one locked
 # destination file must not abort the publish -- but "carried on" is NOT
@@ -180,8 +235,73 @@ function Test-FileHasCr {
     }
 }
 
+function Get-DottedVersionParts {
+    # A dotted-numeric version as an int array, @() for anything else. STRICT
+    # on purpose (the same rule as tools/sign_release.py's version_tuple and
+    # the dashboard's release_trust._version_tuple): a value we cannot fully
+    # rank must not be ranked. "0.9.44+dirty" is not a floor.
+    param([string]$Text)
+    $raw = "$Text".Trim()
+    if (-not $raw) { return @() }
+    if ($raw -notmatch '^[0-9]+(\.[0-9]+)*$') { return @() }
+    return @(($raw -split '\.') | ForEach-Object { [int]$_ })
+}
+
+function Test-MinVersionAboveVersion {
+    # CR-52 / CR-67 item 3 (2026-08-21). A record whose min_version is above
+    # its own version can only ever refuse itself: every companion raises its
+    # monotonic downgrade floor the moment it SEES the offer, so one stale
+    # CCSYNC_MIN_VERSION in this environment would put the whole fleet above
+    # the build being offered, refuse it, and refuse the corrected republish
+    # too -- recoverable only by hand on every editor's machine. The dashboard
+    # and the companion both refuse such a record now; the signing rig must
+    # not be able to MAKE one, because here it costs a retype.
+    param([string]$Version, [string]$MinVersion)
+    $floor = Get-DottedVersionParts $MinVersion
+    $own = Get-DottedVersionParts $Version
+    if ($floor.Count -eq 0 -or $own.Count -eq 0) { return $false }
+    for ($i = 0; $i -lt [Math]::Max($floor.Count, $own.Count); $i++) {
+        $x = if ($i -lt $floor.Count) { $floor[$i] } else { 0 }
+        $y = if ($i -lt $own.Count) { $own[$i] } else { 0 }
+        if ($x -gt $y) { return $true }
+        if ($x -lt $y) { return $false }
+    }
+    return $false
+}
+
+function Get-CompanionVersion {
+    # config.py's VERSION is the single source of truth; "" when it cannot be
+    # read, which the publish path below turns into its own refusal.
+    param([string]$CompanionRoot)
+    $configPy = Join-Path $CompanionRoot "src\ccsync_companion\config.py"
+    $found = Select-String -Path $configPy -Pattern '^VERSION\s*=\s*"([^"]+)"' -ErrorAction SilentlyContinue
+    if (-not $found) { return "" }
+    return $found.Matches[0].Groups[1].Value
+}
+
 Write-Step "repo root: $RepoRoot"
 Write-Step "destination: $Destination"
+
+# --- the downgrade floor is checked BEFORE anything is built (CR-52) -------
+# Not at the signing call: PyInstaller takes minutes, and a stale
+# CCSYNC_MIN_VERSION left over from an earlier release is exactly the thing
+# an operator wants told at second 1. Only when -Publish is set, because a
+# build that never signs a record cannot make a bad one.
+if ($Publish) {
+    $preflightMin = "$env:CCSYNC_MIN_VERSION".Trim()
+    $preflightVersion = Get-CompanionVersion $CompanionDir
+    if ($preflightMin -and $preflightVersion -and
+        (Test-MinVersionAboveVersion -Version $preflightVersion -MinVersion $preflightMin)) {
+        Write-Warn2 "CCSYNC_MIN_VERSION is $preflightMin but this build is $preflightVersion."
+        Write-Warn2 "That record would tell every machine 'do not install below $preflightMin'"
+        Write-Warn2 "while offering $preflightVersion, which is below it. Companions raise that"
+        Write-Warn2 "floor as soon as they SEE the offer and never lower it, so it would refuse"
+        Write-Warn2 "this build, every earlier build and the corrected republish too - one visit"
+        Write-Warn2 "per editor to undo (KNOWN_BUGS CR-52)."
+        Write-Warn2 "Set CCSYNC_MIN_VERSION to $preflightVersion or lower (or clear it) and re-run."
+        exit 1
+    }
+}
 
 # --- optionally rebuild the companion exe ---------------------------------
 # PyInstaller's exit code, kept for the restamp and the publish below (OPS-7).
@@ -321,6 +441,21 @@ if ($RebuildOnboard) {
         # different bytes, so undoing it costs another version bump.
         if ($script:OnboardPyInstallerExit -ne 0) {
             Set-Failed "PyInstaller exited $script:OnboardPyInstallerExit for onboard.exe -- dist\ still holds the PREVIOUS installer"
+        }
+        # --- Authenticode, on the artefact a FRESH INSTALL runs -------------
+        # installer-onboard-tools-1 (2026-08-21). tools/release.ps1 signed the
+        # companion exe and nothing else, so once a certificate existed
+        # onboard.exe -- the binary the dashboard's [ INSTALLER ] link serves
+        # and a brand-new editor double-clicks -- still met "Windows protected
+        # your PC", which is the exact outcome the certificate is bought to
+        # remove. Same shared signtool call site release.ps1 uses; a run with
+        # no signing identity configured is a no-op, exactly as before.
+        if ($script:OnboardPyInstallerExit -eq 0 -and (Test-Path -LiteralPath $OnboardExePath)) {
+            & powershell -NoProfile -ExecutionPolicy Bypass `
+                -File (Join-Path $RepoRoot "tools\sign_windows_binary.ps1") -Path $OnboardExePath
+            if ($LASTEXITCODE -ne 0) {
+                Set-Failed "signtool failed on onboard.exe -- the installer the fleet downloads would be unsigned"
+            }
         }
     }
 }
@@ -628,6 +763,16 @@ if ($Publish) {
     # reintroduce), and a wrong value is remembered by every editor for ever.
     $minVersion = "$env:CCSYNC_MIN_VERSION".Trim()
     if (-not $minVersion) { $minVersion = "0.0.0" }
+    # Second gate on the same fault (CR-52). The preflight at the top of this
+    # script catches it before PyInstaller runs; this one is what stands
+    # between a bad floor and a SIGNED record, and it also covers the onboard
+    # publish below, which reuses $minVersion.
+    if (Test-MinVersionAboveVersion -Version $version -MinVersion $minVersion) {
+        Write-Warn2 "min_version $minVersion is ABOVE the version being packaged ($version) -- NOT publishing"
+        Write-Warn2 "Every companion would raise its downgrade floor above this build on sight and refuse it."
+        Write-Warn2 "Set CCSYNC_MIN_VERSION to $version or lower (or clear it) and re-run - see KNOWN_BUGS CR-52."
+        exit 1
+    }
 
     $signArgs = @(
         (Join-Path $RepoRoot "tools\sign_release.py"),
@@ -688,6 +833,9 @@ if ($Publish) {
     $onboardSha = ""
     $onboardUri = ""
     $onboardSkipReason = ""
+    # Read out of the built exe further down; declared here so the gate below
+    # is meaningful even on the paths that never reach that read.
+    $onboardSignedBinary = $false
     $bootstrapPs1 = Join-Path $RepoRoot "installer\windows_bootstrap.ps1"
     $mIv = Select-String -Path $bootstrapPs1 -Pattern '^\$InstallerVersion\s*=\s*"([^"]+)"'
     $stepsPy = Join-Path $RepoRoot "onboarding\steps.py"
@@ -778,6 +926,21 @@ if ($Publish) {
     # only $LASTEXITCODE) is the same root cause as B23.
     if ($onboardSkipReason) {
         Set-Failed "the onboarding installer was NOT published: $onboardSkipReason"
+    }
+
+    # --- the Authenticode gate, for the OTHER artefact ---------------------
+    # installer-onboard-tools-1 (2026-08-21). tools\ship.ps1's gate inspects
+    # companion\dist\ccsync-companion.exe only, yet its own justification is
+    # "every fresh install" and "Windows protected your PC on first contact"
+    # -- and the binary a fresh install double-clicks is THIS one. Refused
+    # here, BEFORE the companion PUT, so an unsigned run leaves the channel
+    # exactly as it was rather than half-published.
+    if ($MakeCurrent -and -not $AllowUnsignedBinary -and -not $onboardSkipReason -and -not $onboardSignedBinary) {
+        Write-Warn2 "onboard.exe is NOT Authenticode-signed -- refusing to make it CURRENT for the fleet."
+        Write-Warn2 "Set CCSYNC_SIGN_THUMBPRINT (or CCSYNC_SIGN_PFX + CCSYNC_SIGN_PFX_PASSWORD) and re-run,"
+        Write-Warn2 "or re-run with -AllowUnsignedBinary for a deliberate internal build. See docs\RELEASE.md 'Code signing'."
+        Write-Warn2 "Nothing was published."
+        exit 1
     }
 
     if ($DryRun) {

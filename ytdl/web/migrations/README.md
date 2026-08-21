@@ -68,3 +68,13 @@ This database was created at v1. Since then (2026-08-11 bug hunt):
   (`tests/golden/`), so there is no backfill and no row's history is rewritten.
   It is not `download_mode` (007), which is about which machine fetches the
   clips.
+- `010_jobs_claimed_machine.sql` — v10 (2026-08-21), `jobs.claimed_machine`:
+  WHICH of the leaseholder's computers holds the download lease (data-model-7,
+  KNOWN_BUGS CR-66/CR-67). The lease was keyed on the editor NAME, and a name is
+  a person — so one editor's laptop and desktop both passed the
+  compare-and-set as "the same holder refreshing" and downloaded the same clips
+  into two trees. Additive and inert like 007: NULL is "the holder did not say",
+  which is every pre-existing row and every claim from a companion that predates
+  the field, and `db.claim_download` reads an unknown holding machine exactly as
+  it read every holder before this. There is deliberately no backfill — a
+  machine_id cannot be invented for a lease already taken.

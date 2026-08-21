@@ -238,10 +238,38 @@ def verify_password(conn: sqlite3.Connection, username: str, password: str) -> b
     return _check_password_hash(password, user["password_hash"])
 
 
-def disable_user(conn: sqlite3.Connection, username: str, disabled: bool = True) -> None:
+def disable_user(conn: sqlite3.Connection, username: str, disabled: bool = True, *,
+                 requested_by: str = "") -> None:
+    """Disable or re-enable one local account.
+
+    Refuses to disable the LAST enabled admin, and (when the caller names
+    itself in `requested_by`) the account the caller is signed in as -- the
+    same two refusals `delete_user` has always had, for the same reason:
+    `is_local_admin` returns False for a disabled row, so either one takes
+    admin away from the very session doing it (dash-admin-5, 2026-08-21).
+    `delete_user` below has always refused that, but disabling is the same
+    act with the same result -- `verify_password` returns False for a
+    disabled row and `_configured_admins` skips it -- so the softer button
+    was a way to lock every admin out of an appliance that has no shell to
+    undo it from. DASH_ADMIN_USERS is still the break-glass path, and on the
+    appliance shape it costs a redeploy, which is why this is a refusal and
+    not a warning.
+    """
     username = (username or "").strip().lower()
-    if get_user(conn, username) is None:
+    user = get_user(conn, username)
+    if user is None:
         raise LocalUserError(f"{username!r} is not a local account")
+    if disabled and username == (requested_by or "").strip().lower():
+        raise LocalUserError(
+            "you cannot disable the account you are signed in as - sign in as another "
+            "admin to disable this one"
+        )
+    if (disabled and user["role"] == "admin" and not user["disabled"]
+            and count_enabled_admins(conn) <= 1):
+        raise LocalUserError(
+            "this is the last enabled admin account - create another admin before "
+            "disabling it"
+        )
     conn.execute("UPDATE users SET disabled = ? WHERE username = ?",
                 (1 if disabled else 0, username))
 

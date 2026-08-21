@@ -137,6 +137,32 @@ foreach ($literal in @('"CCSync_P"', '"CCSync-SubstP"', '"CCSyncSubstP"')) {
   }
 }
 
+# --- the WIZARD builds the same names the same way -------------------------
+# installer-onboard-tools-3 (2026-08-21): this scan covered the bootstrap
+# only, and onboarding/steps.py was found still carrying "CCSync-SubstP",
+# "CCSyncSubstP" and \\localhost\CCSync_P as literals -- so on a non-P: site
+# the wizard cleaned up a task nobody had registered and left the real one
+# behind. The letter-derived helpers (subst_task_name / all_run_values /
+# loopback_share_unc) are the only place those strings may be BUILT; the
+# module-level P defaults are assignments from those helpers, which is why
+# this looks for the quoted literal rather than the substring.
+$StepsPath = Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "onboarding\steps.py"
+if (-not (Test-Path -LiteralPath $StepsPath)) {
+  $fail++
+  Write-Host "  FAIL  no onboarding\steps.py at $StepsPath" -ForegroundColor Red
+}
+else {
+  $stepsLines = @(Get-Content $StepsPath | Where-Object { $_ -notmatch '^\s*#' })
+  foreach ($literal in @('"CCSync-SubstP"', '"CCSyncSubstP"', 'CCSync_P')) {
+    $hits = @($stepsLines | Where-Object { $_ -match [Regex]::Escape($literal) })
+    if ($hits.Count -eq 0) { Write-Host "  PASS  no $literal literal in onboarding\steps.py" }
+    else {
+      $fail++
+      Write-Host "  FAIL  $literal is still a literal in onboarding\steps.py: $($hits[0].Trim())" -ForegroundColor Red
+    }
+  }
+}
+
 Write-Host ""
 if ($fail -gt 0) { Write-Host "$fail FAILED" -ForegroundColor Red; exit 1 }
 Write-Host "all ConvertFrom-CanonicalPrefix + ConvertFrom-DriveMapReport cases pass"

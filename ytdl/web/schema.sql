@@ -93,6 +93,15 @@ CREATE TABLE IF NOT EXISTS jobs (
     -- at a time, compare-and-set in ytdlweb.db.claim_download.
     download_mode    TEXT NOT NULL DEFAULT 'server',
     claimed_by       TEXT,                   -- the leaseholder's username
+    -- ...and WHICH OF THAT EDITOR'S COMPUTERS holds it (migrations/010,
+    -- data-model-7 / CR-66, 2026-08-21): the companion-minted machine_id, the
+    -- same one the fleet report and the dashboard's `machines` registry key
+    -- on. A name is a person, and a person can own two editing machines; both
+    -- used to pass the CAS as "the same holder refreshing". NULL is a holder
+    -- that did not say which machine it is (any companion older than this),
+    -- and reads as today's per-editor behaviour, never as "some other
+    -- machine".
+    claimed_machine  TEXT,
     -- ISO-8601 UTC (db.now()), compared as a STRING -- see migrations/007.
     -- Expiry is what makes a vanished laptop recoverable: the worker takes the
     -- job back and downloads only what is missing.

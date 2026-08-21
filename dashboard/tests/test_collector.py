@@ -169,10 +169,12 @@ def test_completion_one_bad_device_does_not_roll_back_the_cycle(conn, fake, coll
     fleet went red at once, uniformly, with no explanation."""
     real = collector.client.completion
 
-    def flaky(folder, device):
+    # `timeout` because the completion pass names one per call now
+    # (ops-efficiency-5 / CR-62's second half, 2026-08-21).
+    def flaky(folder, device, timeout=None):
         if device == EDITOR_ID:
             raise RuntimeError("simulated syncthing error")
-        return real(folder, device)
+        return real(folder, device, timeout=timeout)
 
     monkeypatch.setattr(collector.client, "completion", flaky)
     results = collector.run_cycle(conn, ALL)
@@ -469,3 +471,55 @@ def test_nudge_wakes_and_zeroes_intervals(conn, fake, collector):
     assert collector._wake.is_set()
     with collector._nudge_lock:
         assert "enforce" in collector._nudge_kinds
+
+
+def test_a_slow_syncthing_cannot_park_the_whole_collector(conn, fake, monkeypatch):
+    """ops-efficiency-5, 2026-08-21.
+
+    One thread runs every due kind in series, so a Syncthing that HANGS
+    rather than refuses turned one completion pass into ~120 sequential
+    10s-timeout calls: no tick enforced for up to 20 minutes, connections
+    never refreshed, and /api/v1/health saying ok=false while the dashboard
+    itself was fine. The pass now stops issuing new calls at its budget,
+    writes what it has, records `partial`, and the folders it did not reach
+    lead the next cycle."""
+    fake.state["folders"].append({
+        "id": "2026-ff5-energy", "label": "2026/FF5/Energy",
+        "path": "/data/Projects/2026/FF5/Energy",
+        "devices": [{"deviceID": SERVER_ID}, {"deviceID": EDITOR_ID}],
+    })
+    fake.state["db_status"]["2026-ff5-energy"] = {"globalFiles": 9, "globalBytes": 900}
+    fake.state["completion"][("2026-ff5-energy", EDITOR_ID)] = {
+        "completion": 50.0, "needItems": 4, "needBytes": 400, "needDeletes": 0}
+
+    settings = Settings(syncthing_url=fake.url, syncthing_api_key="test-key",
+                        completion_budget_seconds=0.05)
+    slow_collector = Collector(settings, client=SyncthingClient(fake.url, "test-key", timeout=5))
+    slow_collector.run_cycle(conn, ["config"])
+
+    real = slow_collector.client.db_status
+
+    # `timeout` because the completion pass names one per call now
+    # (ops-efficiency-5 / CR-62's second half, 2026-08-21).
+    def slow(slug, timeout=None):
+        time.sleep(0.08)
+        return real(slug, timeout=timeout)
+
+    monkeypatch.setattr(slow_collector.client, "db_status", slow)
+    assert slow_collector.run_cycle(conn, ["completion"])["completion"] is True
+
+    run = conn.execute(
+        "SELECT ok, error FROM poll_runs WHERE kind='completion' "
+        "ORDER BY id DESC LIMIT 1").fetchone()
+    assert run["ok"] == 1                       # a partial pass is not a failed one
+    assert "partial" in (run["error"] or "")
+    polled = {r["slug"] for r in conn.execute(
+        "SELECT p.slug FROM completion_current c JOIN projects p ON p.id=c.project_id")}
+    assert len(polled) == 1                     # one folder, not both
+
+    # ...and the next cycle starts with the one it did not reach.
+    assert slow_collector._completion_cursor == 1
+    slow_collector.run_cycle(conn, ["completion"])
+    polled = {r["slug"] for r in conn.execute(
+        "SELECT p.slug FROM completion_current c JOIN projects p ON p.id=c.project_id")}
+    assert len(polled) == 2

@@ -1303,6 +1303,16 @@ def test_env_keys_match_compose():
     env_block = text.split("environment:", 1)[1].split("\n    ports:", 1)[0]
     yaml_keys = set(re.findall(r"^\s{6}([A-Z][A-Z0-9_]*):", env_block, re.M))
     dict_keys = set(_dashboard_service()["environment"])
+    # The one documented, temporary exception (see COMPOSE_ENV_ONLY_IN_DICT).
+    # Everything else still has to match key for key.
+    pending = set(install_dashboard_app.COMPOSE_ENV_ONLY_IN_DICT)
+    assert pending <= dict_keys, (
+        "COMPOSE_ENV_ONLY_IN_DICT names a key compose_config() does not set -- "
+        "delete the entry rather than carrying a note about nothing")
+    assert not (pending & yaml_keys), (
+        f"{sorted(pending & yaml_keys)} is in compose.yaml now: drop it from "
+        f"COMPOSE_ENV_ONLY_IN_DICT so this test guards it again")
+    dict_keys -= pending
     assert yaml_keys == dict_keys, (
         f"compose.yaml and compose_config() env drifted: "
         f"only in yaml={sorted(yaml_keys - dict_keys)}, "

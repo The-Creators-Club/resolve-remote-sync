@@ -217,3 +217,52 @@ def test_failures_log_once_per_streak(tmp_path, caplog):
         manager.reconcile()
         manager.reconcile()
     assert sum("reconcile failed" in r.message for r in caplog.records) == 1
+
+
+# -- the halt owns these folders too (sync-safety-2, 2026-08-21) ------------
+
+
+def test_a_paused_shared_folder_is_not_released_while_syncing_is_halted(tmp_path):
+    """The halt pauses lane C folders through Syncthing's REST API, and this
+    reconcile runs once per sequencer pass -- so without the halt check the
+    B-roll archive, the music library and the LUTs came straight back online
+    while every tray said nothing was syncing."""
+    admin = FakeAdmin(
+        folder={"id": LUTS_FOLDER_ID, "paused": True,
+                "path": shared_folders.local_path_for(tmp_path, "Assets/Luts"),
+                "versioning": {"type": "staggered"}, "ignoreDelete": True},
+        ignores=list(ASSET_STIGNORE_LINES),
+    )
+    manager = shared_folders.SharedFolderManager(
+        admin, tmp_path, folders=ONLY_LUTS, halted=lambda: True)
+    manager.reconcile()
+    assert ("set_paused", LUTS_FOLDER_ID, False) not in admin.calls
+
+    manager._halted = lambda: False
+    manager.reconcile()
+    assert ("set_paused", LUTS_FOLDER_ID, False) in admin.calls
+
+
+def test_a_halt_check_that_throws_leaves_the_folder_paused(tmp_path):
+    admin = FakeAdmin(
+        folder={"id": LUTS_FOLDER_ID, "paused": True,
+                "path": shared_folders.local_path_for(tmp_path, "Assets/Luts"),
+                "versioning": {"type": "staggered"}, "ignoreDelete": True},
+        ignores=list(ASSET_STIGNORE_LINES),
+    )
+
+    def boom():
+        raise RuntimeError("no halt state")
+
+    manager = shared_folders.SharedFolderManager(
+        admin, tmp_path, folders=ONLY_LUTS, halted=boom)
+    manager.reconcile()
+    assert ("set_paused", LUTS_FOLDER_ID, False) not in admin.calls
+
+
+def test_the_manager_can_name_its_folders_for_the_halt(tmp_path):
+    manager = _manager(FakeAdmin(), tmp_path)
+    assert manager.folder_ids() == [LUTS_FOLDER_ID]
+    assert shared_folders.SharedFolderManager(
+        FakeAdmin(), tmp_path).folder_ids() == [
+            folder_id for folder_id, _rel, _label in shared_folders.SHARED_ASSET_FOLDERS]

@@ -122,7 +122,7 @@ from ccsync_companion import site as site_mod
 # this ONE computer reaches the footage. The stored values ("editor"/"base")
 # and every branch keyed on them are unchanged. Published as 1.0.34 or
 # earlier -- 1.0.35 was bumped but never built, so this copy rides it.
-INSTALLER_VERSION = "1.0.35"
+INSTALLER_VERSION = "1.0.36"
 
 # NO DEFAULT since 2026-08-17 (WP0, docs/SYNOLOGY_PORT_PLAN.md). These used
 # to be one deployment's tailnet and LAN addresses compiled into every
@@ -182,6 +182,69 @@ def site_tree_name(site: Optional[dict] = None) -> str:
     return name
 
 
+# THE TREE DRIVE LETTER IS SITE DATA HERE TOO (installer-onboard-tools-3,
+# 2026-08-21). windows_bootstrap.ps1 and windows_uninstall.ps1 have derived
+# the letter, the logon task name, the Run entry and the loopback share name
+# from the manifest's `canonical_prefix` since 2026-08-17 (item 11); the
+# wizard was the one place still saying "P" out loud, so on a site whose
+# prefix is Q:\ it guarded the wrong drive, cleaned up the wrong scheduled
+# task and left the real ones behind. Same fallback the bootstrap uses: "P"
+# is what every machine in the field is mapped as, so it is a default and not
+# a constant.
+DEFAULT_DRIVE_LETTER = "P"
+# `ConvertFrom-CanonicalPrefix`'s rule in Python: a drive-letter path and
+# nothing else. A UNC or POSIX prefix means something Windows cannot mount as
+# a letter -- the bootstrap REFUSES that outright, and the wizard falls back
+# to the default rather than inventing one (the bootstrap's refusal is the
+# one that matters; a wizard guess would only mask it).
+_CANONICAL_PREFIX_RE = re.compile(r"^([A-Za-z]):[\\/]*$")
+
+
+def site_drive_letter(site: Optional[dict] = None) -> str:
+    """The single letter this site mounts the tree as ("P" unless the site
+    manifest's canonical_prefix says otherwise).
+
+    `site` is explicit for the same reason site_tree_name's is: a caller that
+    has just fetched the manifest must use THAT, not whatever this machine
+    happens to have cached.
+    """
+    if site is None:
+        site = site_mod.cached_site()
+    prefix = ""
+    if isinstance(site, dict):
+        prefix = str(site.get("canonical_prefix") or "").strip()
+    m = _CANONICAL_PREFIX_RE.match(prefix)
+    return m.group(1).upper() if m else DEFAULT_DRIVE_LETTER
+
+
+def subst_task_name(drive_letter: Optional[str] = None) -> str:
+    """The logon scheduled task windows_bootstrap.ps1 registers ($TaskName)."""
+    return f"CCSync-Subst{(drive_letter or DEFAULT_DRIVE_LETTER).upper()}"
+
+
+def all_run_values(drive_letter: Optional[str] = None) -> list[str]:
+    """Every HKCU Run value any CCSync installer ever registered on THIS site.
+
+    The historical P-lettered name stays in the list even on another site: it
+    is our own name, a machine may have been provisioned before the letter
+    became site data, and "removes every trace" has to mean it.
+    """
+    letter = (drive_letter or DEFAULT_DRIVE_LETTER).upper()
+    values = ["CCSyncCompanion", "CCSyncSyncthing", f"CCSyncSubst{letter}",
+              f"CCSyncSubst{DEFAULT_DRIVE_LETTER}", "ccsync-companion"]
+    out: list[str] = []
+    for value in values:
+        if value not in out:
+            out.append(value)
+    return out
+
+
+def loopback_share_unc(drive_letter: Optional[str] = None) -> str:
+    """The loopback share windows_bootstrap.ps1 creates ($ShareName), as the
+    UNC a `net use` mapping of it reports."""
+    return rf"\\localhost\CCSync_{(drive_letter or DEFAULT_DRIVE_LETTER).upper()}"
+
+
 # A macOS base rig works directly off the NAS share, mounted over SMB. The
 # Windows base default is P:\ (the mapping of \\<nas>\<share>\<tree>); macOS
 # mounts the SHARE at /Volumes/<ShareName>, so the same tree sits one level
@@ -231,8 +294,16 @@ def default_local_root(platform: Optional[str] = None,
     return str(Path.home() / tree) if _is_mac(platform) else f"C:\\{tree}"
 
 
-def default_base_local_root(platform: Optional[str] = None) -> str:
-    return DEFAULT_BASE_LOCAL_ROOT_MACOS if _is_mac(platform) else DEFAULT_BASE_LOCAL_ROOT
+def default_base_local_root(platform: Optional[str] = None,
+                            site: Optional[dict] = None) -> str:
+    """Where a BASE rig's tree is when nobody says otherwise: the mapped tree
+    drive itself. Site-derived since installer-onboard-tools-3 (2026-08-21) --
+    on a site whose canonical_prefix is Q:\\ the base rig's local_root is
+    Q:\\, and seeding P:\\ there would point config.toml at a drive that does
+    not exist on that machine."""
+    if _is_mac(platform):
+        return DEFAULT_BASE_LOCAL_ROOT_MACOS
+    return f"{site_drive_letter(site)}:\\"
 
 
 def companion_bin_dir(platform: Optional[str] = None) -> Path:
@@ -277,12 +348,17 @@ def companion_exe_name(platform: Optional[str] = None) -> str:
 COMPANION_BIN_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "ccsync" / "bin"
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-SUBST_TASK_NAME = "CCSync-SubstP"
+# The DEFAULT-site names. Both are letter-derived on a site whose
+# canonical_prefix is not P:\ -- call subst_task_name()/all_run_values() with
+# that site's letter instead of reading these (installer-onboard-tools-3,
+# 2026-08-21). They stay as constants because a P: machine's names must not
+# change, and because they are what a caller with no manifest gets.
+SUBST_TASK_NAME = subst_task_name()
 COMPANION_RUN_VALUE = "CCSyncCompanion"
 # Every Run value any historical CCSync tool ever registered. The lowercase
 # "ccsync-companion" is the hand-made base-rig entry (cmd/vbs shim in
 # %USERPROFILE%\.ccsync\bin, created 2026-07-25).
-ALL_RUN_VALUES = ["CCSyncCompanion", "CCSyncSyncthing", "CCSyncSubstP", "ccsync-companion"]
+ALL_RUN_VALUES = all_run_values()
 # The companion exe plus the self-upgrade artifacts that can sit next to it
 # (see companion upgrade.py: <exe>.old and ccsync-companion.new.exe).
 COMPANION_FILE_NAMES = [
@@ -357,43 +433,49 @@ _LEGACY_CAPABILITY_PHRASES = (
 # (the Windows companion sets the mapping itself), so parsing is a no-op there.
 RESOLVE_MAPPING_MARKER = "RESOLVE-MAPPING-STATUS:"
 _RESOLVE_MAPPING_OK_STATUSES = {"ok", "dry-run", "skipped", "unset", ""}
+# {drive} is the site's tree drive letter, not a literal P
+# (installer-onboard-tools-3, 2026-08-21): a Mac editor at a Q:\ site was
+# being told to point Resolve's Mapped Mount at a drive nobody's clip paths
+# name.
 _RESOLVE_MAPPING_MESSAGES = {
     "running": (
-        "Resolve's P:\\ Mapped Mount was NOT set because DaVinci Resolve was "
+        "Resolve's {drive}:\\ Mapped Mount was NOT set because DaVinci Resolve was "
         "running. Quit Resolve completely, then re-run this installer (safe to "
         "re-run) -- clip paths will not resolve until the mapping is set."
     ),
     "never-launched": (
-        "Resolve's P:\\ Mapped Mount was NOT set because Resolve has never been "
+        "Resolve's {drive}:\\ Mapped Mount was NOT set because Resolve has never been "
         "launched on this Mac. Launch Resolve once, quit it, then re-run this "
         "installer (safe to re-run)."
     ),
     "format": (
         "Resolve's preference files are in a format this installer does not "
-        "recognise, so the P:\\ Mapped Mount was NOT set. Set it by hand: "
+        "recognise, so the {drive}:\\ Mapped Mount was NOT set. Set it by hand: "
         "Resolve > Preferences > Media Storage > add a Mapped Mount pointing "
-        "P:\\ at your local sync folder."
+        "{drive}:\\ at your local sync folder."
     ),
     "no-python": (
-        "python3 was not found, so Resolve's P:\\ Mapped Mount was NOT set. "
+        "python3 was not found, so Resolve's {drive}:\\ Mapped Mount was NOT set. "
         "Install the Command Line Tools (xcode-select --install) and re-run "
         "this installer, or set the mapping by hand in Resolve > Preferences > "
         "Media Storage."
     ),
     "error": (
-        "Resolve's P:\\ Mapped Mount could NOT be set (see the install log). "
+        "Resolve's {drive}:\\ Mapped Mount could NOT be set (see the install log). "
         "Set it by hand: Resolve > Preferences > Media Storage > add a Mapped "
-        "Mount pointing P:\\ at your local sync folder."
+        "Mount pointing {drive}:\\ at your local sync folder."
     ),
 }
 
 
-def resolve_mapping_warning(bootstrap_output: str) -> Optional[str]:
+def resolve_mapping_warning(bootstrap_output: str,
+                            site: Optional[dict] = None,
+                            drive_letter: Optional[str] = None) -> Optional[str]:
     """A Finish-page warning when the bootstrap could not set Resolve's
     Mapped Mount, else None. Keys on RESOLVE_MAPPING_MARKER; the last marker
     line wins (a re-run prints one per attempt). An unknown status is
-    reported rather than swallowed -- the mapping is what makes P:\\ clip
-    paths resolve at all on a Mac."""
+    reported rather than swallowed -- the mapping is what makes the tree
+    drive's clip paths resolve at all on a Mac."""
     if not bootstrap_output:
         return None
     status = None
@@ -402,11 +484,13 @@ def resolve_mapping_warning(bootstrap_output: str) -> Optional[str]:
             status = line.split(RESOLVE_MAPPING_MARKER, 1)[1].strip().lower()
     if status is None or status in _RESOLVE_MAPPING_OK_STATUSES:
         return None
-    return _RESOLVE_MAPPING_MESSAGES.get(
+    drive = (drive_letter or site_drive_letter(site)).upper()
+    template = _RESOLVE_MAPPING_MESSAGES.get(
         status,
-        f"Resolve's P:\\ Mapped Mount reported an unexpected status "
+        "Resolve's {drive}:\\ Mapped Mount reported an unexpected status "
         f"({status}) -- check it in Resolve > Preferences > Media Storage.",
     )
+    return template.format(drive=drive)
 
 
 # -- EULA acceptance (the wizard's first page) ---------------------------------
@@ -1254,12 +1338,17 @@ def validate_local_root(
     drive_exists: Optional[Callable[[str], bool]] = None,
     platform: Optional[str] = None,
     is_mount: Optional[Callable[[str], bool]] = None,
+    site: Optional[dict] = None,
+    drive_letter: Optional[str] = None,
 ) -> Optional[str]:
     """None when `value` is usable as local_root, else a one-line, plain
     English reason to show inline next to the field.
 
     `drive_exists` takes a drive letter ("D"); `is_mount` (darwin) takes a
-    /Volumes/<Name> path -- both injectable for tests.
+    /Volumes/<Name> path -- both injectable for tests. `site`/`drive_letter`
+    name THIS site's tree drive (installer-onboard-tools-3, 2026-08-21): the
+    editor-role refusal below has to guard the letter the bootstrap is about
+    to unmap and re-share, which is not always P.
     """
     if _is_mac(platform):
         return _validate_local_root_macos(value, role=role, is_mount=is_mount)
@@ -1289,18 +1378,19 @@ def validate_local_root(
                 f"C:\\{NEUTRAL_TREE_NAME}")
 
     drive = raw[0].upper()
+    tree_drive = (drive_letter or site_drive_letter(site)).upper()
     if role != "base" and _DRIVE_ROOT_RE.match(raw):
         return (
             f"{drive}:\\ on its own is the whole volume -- the install shares "
-            f"this folder over the network and maps P: at it, so pick a folder "
+            f"this folder over the network and maps {tree_drive}: at it, so pick a folder "
             f"inside the drive instead, e.g. {drive}:\\{NEUTRAL_TREE_NAME}"
         )
-    if role != "base" and drive == "P":
-        # The install unmounts P: and remaps it AT this folder; pointing the
-        # folder at P: means Ensure-Dir runs against a drive that no longer
-        # exists, mid-install.
+    if role != "base" and drive == tree_drive:
+        # The install unmounts the tree drive and remaps it AT this folder;
+        # pointing the folder at it means Ensure-Dir runs against a drive that
+        # no longer exists, mid-install.
         return (
-            "P: is the drive this installer creates for you -- pick the real "
+            f"{tree_drive}: is the drive this installer creates for you -- pick the real "
             f"folder it should point at (e.g. C:\\{NEUTRAL_TREE_NAME})"
         )
 
@@ -1417,6 +1507,11 @@ class CleanupPlan:
     exe_paths: list[Path] = field(default_factory=list)
     shim_paths: list[Path] = field(default_factory=list)
     unmount_p: bool = False
+    # WHICH drive `unmount_p` means (installer-onboard-tools-3, 2026-08-21).
+    # The tree letter is site data; a plan built for a Q:\ site that still
+    # said "P" would unmount a drive this installer never created and leave
+    # the real one mapped at the old local root.
+    drive_letter: str = DEFAULT_DRIVE_LETTER
     # Directories a syncthing.exe must be running from for us to kill it.
     # NEVER a blanket `taskkill /IM syncthing.exe`: editors in this
     # population commonly run their own Syncthing, and killing it (we never
@@ -1449,7 +1544,7 @@ class CleanupPlan:
 # `smb_unc` -- is somebody's real NAS mapping. "Cannot tell" counts as
 # foreign, deliberately: guessing "there is no P:" is how a real mapping gets
 # deleted.
-OUR_LOOPBACK_SHARE = r"\\localhost\CCSync_P"
+OUR_LOOPBACK_SHARE = loopback_share_unc()
 
 # `subst` prints `P:\: => C:\Creators_Club`; `net use P:` prints a localised
 # table whose one stable row is the UNC itself.
@@ -1457,25 +1552,28 @@ _SUBST_LINE_RE = re.compile(r"^\s*(?P<letter>[A-Za-z]):\\?:?\s*=>\s*(?P<target>.
 _UNC_RE = re.compile(r"\\\\[^\s]+")
 
 
-def default_read_p_mapping(run: "RunFn" = subprocess.run) -> dict[str, Any]:
-    """What P: is mapped to on this machine, as {mapped, kind, target, known}.
+def default_read_p_mapping(run: "RunFn" = subprocess.run,
+                           drive_letter: Optional[str] = None) -> dict[str, Any]:
+    """What the tree drive is mapped to on this machine, as
+    {mapped, kind, target, known}.
 
     `known` is False when the mappings could not be read at all -- see the
     module note above for why that is treated as foreign rather than absent.
     Never raises."""
+    letter = (drive_letter or DEFAULT_DRIVE_LETTER).upper()
     out: dict[str, Any] = {"mapped": False, "kind": "", "target": "", "known": False}
     try:
         subst = run(["cmd", "/c", "subst"], timeout=30, **CAPTURE_TEXT_KWARGS)
         out["known"] = True
         for line in str(getattr(subst, "stdout", "") or "").splitlines():
             m = _SUBST_LINE_RE.match(line)
-            if m and m.group("letter").upper() == "P":
+            if m and m.group("letter").upper() == letter:
                 out.update(mapped=True, kind="subst", target=m.group("target"))
                 return out
     except Exception:
         return out
     try:
-        net = run(["cmd", "/c", "net", "use", "P:"], timeout=30, **CAPTURE_TEXT_KWARGS)
+        net = run(["cmd", "/c", "net", "use", f"{letter}:"], timeout=30, **CAPTURE_TEXT_KWARGS)
         text = str(getattr(net, "stdout", "") or "")
         if int(getattr(net, "returncode", 0) or 0) == 0:
             found = _UNC_RE.search(text)
@@ -1486,23 +1584,25 @@ def default_read_p_mapping(run: "RunFn" = subprocess.run) -> dict[str, Any]:
     return out
 
 
-def p_mapping_is_ours(mapping: dict[str, Any], smb_unc: str = "") -> tuple[bool, str]:
+def p_mapping_is_ours(mapping: dict[str, Any], smb_unc: str = "",
+                      drive_letter: Optional[str] = None) -> tuple[bool, str]:
     """(safe to unmount?, why not). The bootstrap's $PIsForeign test, in Python."""
+    letter = (drive_letter or DEFAULT_DRIVE_LETTER).upper()
     if not mapping.get("known"):
-        return False, ("this logon session's drive mappings could not be read, so P: "
+        return False, (f"this logon session's drive mappings could not be read, so {letter}: "
                        "is being treated as somebody else's and left alone")
     if not mapping.get("mapped"):
         return True, ""
     target = str(mapping.get("target") or "")
     if mapping.get("kind") == "subst":
         return True, ""
-    if target.strip().lower() == OUR_LOOPBACK_SHARE.lower():
+    if target.strip().lower() == loopback_share_unc(letter).lower():
         return True, ""
     site_unc = str(smb_unc or "").strip()
     if site_unc and target.strip().lower().startswith(site_unc.lower().rstrip("\\")):
-        return False, (f"P: is mapped to {target}, which is this site's own NAS share "
+        return False, (f"{letter}: is mapped to {target}, which is this site's own NAS share "
                        f"({site_unc}) -- not a mapping this installer created")
-    return False, (f"P: is mapped to {target}, which is not a mapping this installer "
+    return False, (f"{letter}: is mapped to {target}, which is not a mapping this installer "
                    f"created")
 
 
@@ -1572,6 +1672,8 @@ def build_cleanup_plan(
     read_run_value: Callable[[str], Optional[str]] = default_read_run_value,
     read_local_root: Callable[[], Optional[str]] = read_config_local_root,
     exists: Callable[[Path], bool] = lambda p: Path(p).exists(),
+    site: Optional[dict] = None,
+    drive_letter: Optional[str] = None,
 ) -> CleanupPlan:
     """Enumerate every trace a previous install could have left. Pure given
     its injected readers.
@@ -1583,6 +1685,7 @@ def build_cleanup_plan(
     software, not the machine's identity.
     """
     role = str(role or "").strip().lower()
+    letter = (drive_letter or site_drive_letter(site)).upper()
 
     candidate_dirs: list[Path] = [COMPANION_BIN_DIR]
     # On the BASE rig, local_root (and the local_root read back out of an
@@ -1602,11 +1705,11 @@ def build_cleanup_plan(
     candidate_dirs.append(Path(default_local_root("win32")))
     candidate_dirs.append(Path(LEGACY_DEFAULT_LOCAL_ROOT))
     if role == "editor":
-        # Editors' P: is a subst/loopback share of their local root -- the
-        # bootstrap historically installed the exe there. On the BASE rig
-        # P: (and the legacy T:) are SMB mappings of the NAS itself: never
-        # reach into those.
-        candidate_dirs.append(Path("P:/"))
+        # An editor's tree drive is a subst/loopback share of their local root
+        # -- the bootstrap historically installed the exe there. On the BASE
+        # rig that letter (and the legacy T:) are SMB mappings of the NAS
+        # itself: never reach into those.
+        candidate_dirs.append(Path(f"{letter}:/"))
     run_dir = _exe_dir_from_run_value(read_run_value(COMPANION_RUN_VALUE))
     if run_dir is not None:
         candidate_dirs.append(run_dir)
@@ -1625,24 +1728,42 @@ def build_cleanup_plan(
             if exists(path):
                 exe_paths.append(path)
 
+    # Both letters' shims for the same reason all_run_values() keeps the
+    # historical P entry: a machine may have been provisioned before the
+    # letter became site data.
     shim_candidates = [
-        COMPANION_BIN_DIR / "CCSyncSubstP.cmd",
-        COMPANION_BIN_DIR / "CCSyncSubstP.vbs",
+        COMPANION_BIN_DIR / f"CCSyncSubst{letter}.cmd",
+        COMPANION_BIN_DIR / f"CCSyncSubst{letter}.vbs",
+        COMPANION_BIN_DIR / f"CCSyncSubst{DEFAULT_DRIVE_LETTER}.cmd",
+        COMPANION_BIN_DIR / f"CCSyncSubst{DEFAULT_DRIVE_LETTER}.vbs",
         COMPANION_BIN_DIR / "CCSyncSyncthing.cmd",
         COMPANION_BIN_DIR / "CCSyncSyncthing.vbs",
         home_bin / "ccsync-companion.cmd",
         home_bin / "ccsync-companion.vbs",
     ]
-    shim_paths = [p for p in shim_candidates if exists(p)]
+    seen_shims: set[str] = set()
+    shim_paths = []
+    for candidate in shim_candidates:
+        key = os.path.normcase(str(candidate))
+        if key in seen_shims:
+            continue
+        seen_shims.add(key)
+        if exists(candidate):
+            shim_paths.append(candidate)
+
+    tasks = [subst_task_name(letter)]
+    if subst_task_name(DEFAULT_DRIVE_LETTER) not in tasks:
+        tasks.append(subst_task_name(DEFAULT_DRIVE_LETTER))
 
     return CleanupPlan(
         kill_process_names=["ccsync-companion", "ccsync-companion.new"],
         kill_pythonw_launcher=True,
-        run_values=list(ALL_RUN_VALUES),
-        scheduled_tasks=[SUBST_TASK_NAME],
+        run_values=all_run_values(letter),
+        scheduled_tasks=tasks,
         exe_paths=exe_paths,
         shim_paths=shim_paths,
         unmount_p=(role == "editor"),
+        drive_letter=letter,
         syncthing_managed_dirs=managed_syncthing_dirs(),
     )
 
@@ -1701,7 +1822,7 @@ def execute_cleanup(
     delete_run_value: Callable[[str], bool] = default_delete_run_value,
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], float] = time.time,
-    p_drive_exists: Callable[[], bool] = lambda: Path("P:/").exists(),
+    p_drive_exists: Optional[Callable[[], bool]] = None,
     list_processes: Optional[Callable[[str], list[tuple[str, str]]]] = None,
     read_p_mapping: Optional[Callable[[], dict[str, Any]]] = None,
     smb_unc: str = "",
@@ -1838,33 +1959,37 @@ def execute_cleanup(
     # subst covers our own mapping, net use covers a hand-made SMB mapping
     # that subst can't even see.
     if plan.unmount_p:
+        # WHICH letter comes off the plan, not out of this function
+        # (installer-onboard-tools-3, 2026-08-21).
+        letter = (plan.drive_letter or DEFAULT_DRIVE_LETTER).upper()
+        drive_exists = p_drive_exists or (lambda: Path(f"{letter}:/").exists())
         # The "is it ours?" gate the bootstrap and the uninstaller already
         # have, and this did not (item 9, 2026-08-17 -- see p_mapping_is_ours).
         try:
-            reader = read_p_mapping or (lambda: default_read_p_mapping(run))
-            ours, why = p_mapping_is_ours(reader(), smb_unc)
+            reader = read_p_mapping or (lambda: default_read_p_mapping(run, letter))
+            ours, why = p_mapping_is_ours(reader(), smb_unc, letter)
         except Exception as exc:
-            ours, why = False, f"P: could not be checked ({exc})"
+            ours, why = False, f"{letter}: could not be checked ({exc})"
         if not ours:
             warnings.append(
                 f"{why}. Leaving it exactly as it is: replacing a real NAS mapping "
                 "with a loopback share of a local folder would make every "
-                "P:\\Projects\\... path in your Resolve database point at a nearly "
-                "empty local tree. If this machine really should get a local P:, "
+                f"{letter}:\\Projects\\... path in your Resolve database point at a nearly "
+                f"empty local tree. If this machine really should get a local {letter}:, "
                 "disconnect that mapping yourself (Explorer → This PC → right-click "
-                "P: → Disconnect) and run the wizard again."
+                f"{letter}: → Disconnect) and run the wizard again."
             )
-            log(f"P: left alone -- {why}")
+            log(f"{letter}: left alone -- {why}")
             return warnings
-        _quiet_run(["cmd", "/c", "subst", "P:", "/D"])
-        _quiet_run(["cmd", "/c", "net", "use", "P:", "/delete", "/y"])
-        if p_drive_exists():
+        _quiet_run(["cmd", "/c", "subst", f"{letter}:", "/D"])
+        _quiet_run(["cmd", "/c", "net", "use", f"{letter}:", "/delete", "/y"])
+        if drive_exists():
             warnings.append(
-                "P: is still mapped after unmounting -- something has files "
+                f"{letter}: is still mapped after unmounting -- something has files "
                 "open on it; close those apps and retry"
             )
         else:
-            log("P: drive unmounted (will be re-created by the install)")
+            log(f"{letter}: drive unmounted (will be re-created by the install)")
 
     return warnings
 
@@ -2432,13 +2557,20 @@ def launch_companion(
         return False
 
 
-def installer_on_forbidden_drive() -> bool:
-    """True when the running installer lives on P: or a UNC share -- running
-    it from there locks the file server-side for as long as the wizard is
-    open (seen live 2026-07-25: an editor ran onboard.exe off the NAS and
-    pinned the package folder all day), and the editor flow is about to
-    unmount P: out from under itself."""
+def installer_on_forbidden_drive(site: Optional[dict] = None,
+                                 drive_letter: Optional[str] = None) -> bool:
+    """True when the running installer lives on the tree drive or a UNC share
+    -- running it from there locks the file server-side for as long as the
+    wizard is open (seen live 2026-07-25: an editor ran onboard.exe off the
+    NAS and pinned the package folder all day), and the editor flow is about
+    to unmount that drive out from under itself.
+
+    The letter is site data (installer-onboard-tools-3, 2026-08-21); the
+    historical P is still refused on every site, because that is where the
+    package folder sat on every machine provisioned before it was."""
     if not getattr(sys, "frozen", False):
         return False
-    exe = str(sys.executable)
-    return exe.upper().startswith("P:") or exe.startswith("\\\\")
+    exe = str(sys.executable).upper()
+    letter = (drive_letter or site_drive_letter(site)).upper()
+    return (exe.startswith(f"{letter}:") or exe.startswith(f"{DEFAULT_DRIVE_LETTER}:")
+            or exe.startswith("\\\\"))

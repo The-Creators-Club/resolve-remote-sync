@@ -204,6 +204,55 @@ def test_thinking_can_be_turned_on_for_an_archive_that_wants_it(tmp_path):
     assert client.messages.calls[0]["thinking"] == {"type": "adaptive"}
 
 
+def test_a_model_whose_thinking_is_always_on_gets_no_thinking_key(tmp_path):
+    """broll-2, 2026-08-21: claude-fable-5 refuses an explicit
+    {"type": "disabled"} with a 400, and a 400 is per-video in the pipeline --
+    so `model: fable` plus the DEFAULT thinking marked every clip in the queue
+    'error'. Omitting the key is the accepted way to say it there."""
+    for name in ("fable", "claude-fable-5", "claude-mythos-5"):
+        client = FakeClient(_message(json.dumps(VALID_CONTRACT)))
+        invoke_claude("p", name, settings=_settings(), client=client)
+        assert "thinking" not in client.messages.calls[0], name
+    # Everywhere else the explicit instruction stands: omitting it means
+    # adaptive on some models and no thinking on others.
+    for name in ("haiku", "sonnet", "opus"):
+        client = FakeClient(_message(json.dumps(VALID_CONTRACT)))
+        invoke_claude("p", name, settings=_settings(), client=client)
+        assert client.messages.calls[0]["thinking"] == {"type": "disabled"}, name
+
+
+def test_thinking_adaptive_is_still_sent_to_an_always_on_model(tmp_path):
+    client = FakeClient(_message(json.dumps(VALID_CONTRACT)))
+    invoke_claude("p", "fable", settings=_settings(thinking="adaptive"), client=client)
+    assert client.messages.calls[0]["thinking"] == {"type": "adaptive"}
+
+
+def test_a_400_about_a_parameter_we_always_send_stops_the_run(monkeypatch):
+    """The other half of broll-2: a request THIS CONFIG cannot build correctly
+    fails every remaining clip identically, so it must abort the run with the
+    queue resumable rather than be filed on one clip's row."""
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    client = FakeClient(FakeApiError(
+        400, "invalid_request_error",
+        "thinking.type: Input should be 'adaptive'"))
+    with pytest.raises(ClaudeCallError) as exc:
+        invoke_claude("p", "fable", settings=_settings(), client=client)
+    assert len(client.messages.calls) == 1, "a 400 must not be retried"
+    assert is_fatal_api_error(str(exc.value)), exc.value
+
+
+def test_a_400_about_this_clip_is_still_that_clip_s_problem():
+    """The exception must stay narrow: an image or a prompt the API refuses is
+    about THIS footage, and marking the clip and carrying on is right."""
+    for message in (
+        "messages.0.content.0.image: image exceeds 5 MB maximum",
+        "prompt is too long: 250000 tokens > 200000",
+    ):
+        described = describe_api_error(
+            FakeApiError(400, "invalid_request_error", message))
+        assert not is_fatal_api_error(described), described
+
+
 # ---------------------------------------------------------------------------
 # the response: same envelope the pipeline has always parsed
 # ---------------------------------------------------------------------------

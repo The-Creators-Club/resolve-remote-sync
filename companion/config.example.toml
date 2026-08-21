@@ -273,8 +273,22 @@ media_tree_refresh_interval = 120
 # replicated as a whole. How often the sequencer re-fetches that selection:
 selection_poll_interval = 60
 # How long (seconds) the sequencer waits for a project's Lane C
-# (Syncthing) sync to settle before moving on to the next project anyway:
+# (Syncthing) sync to settle before moving on to the next project anyway.
+# LOAD-BEARING ONLY under lane_c_pause_scheme = "rotate", where the next
+# project's turn pauses this folder and the wait is what stops that happening
+# mid-transfer. Under the default scheme ("none") nothing is paused and
+# Syncthing paces every folder itself, so the full wait gates nothing and is
+# capped by lane_c_settle_seconds below (ops-efficiency-3, CR-62):
 project_rotation_seconds = 600
+# The lane C wait under the default pause scheme. A project's turn gives up
+# after this many seconds instead of parking the whole sequencer -- and lane B
+# proxies for every project behind it -- for the full project_rotation_seconds
+# on any folder with a large backlog or a permanently non-zero need (a
+# conflict, a deleted-but-still-ticked remote). It is kept above zero so the
+# dashboard's current_project reads sensibly rather than flickering through
+# the queue. 0 restores the old behaviour (wait the full rotation either way),
+# and this is ignored entirely under lane_c_pause_scheme = "rotate":
+lane_c_settle_seconds = 30
 # How long (seconds) the sequencer idles between full passes once every
 # selected project is caught up (small edits still trickle during this
 # window -- every selected folder is unpaused while idle):

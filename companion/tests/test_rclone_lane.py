@@ -939,12 +939,33 @@ def test_tally_captures_completed_file_names():
 
     tally = RcloneRunTally()
     tally.feed_record({"level": "info", "msg": "Copied (new)", "object": "B-roll/a.mov"})
-    tally.feed_record({"level": "info", "msg": "Moved (server-side)", "object": "B-roll/b.mov"})
     tally.feed_record({"level": "info", "msg": "Deleted", "object": "B-roll/old.mov"})
     tally.feed_record({"level": "error", "msg": "boom"})
     result = tally.result()
-    assert result.completed_files == ["B-roll/a.mov", "B-roll/b.mov"]
-    assert result.transferred == 3 and result.deleted == 1
+    assert result.completed_files == ["B-roll/a.mov"]
+    # A delete still counts as a per-file record ("transferred" is rclone's
+    # own per-file line count, not a byte claim); the completion list is what
+    # the dashboard's history reads, and that must hold arrivals only.
+    assert result.transferred == 2 and result.deleted == 1
+
+
+def test_a_backup_dir_move_is_one_deletion_and_no_completion():
+    """comp-lanes-ab-4 (2026-08-21): --backup-dir emits BOTH records for the
+    same object, and "Moved (server-side)" used to be read as a finished
+    download -- so every trashed proxy was counted twice in `transferred`
+    and shown in the dashboard's transfer history as a file that had just
+    arrived on the editor's machine."""
+    from ccsync_companion.sync.rclone_lane import RcloneRunTally
+
+    tally = RcloneRunTally()
+    tally.feed_record({"level": "info", "msg": "Moved (server-side)",
+                       "object": "Proxy/a.mov"})
+    tally.feed_record({"level": "info", "msg": "Moved into backup dir",
+                       "object": "Proxy/a.mov"})
+    result = tally.result()
+    assert result.completed_files == []
+    assert result.deleted == 1
+    assert result.transferred == 1
 
 
 def test_lane_records_and_drains_completions(tmp_path):

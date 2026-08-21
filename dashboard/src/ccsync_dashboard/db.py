@@ -1172,6 +1172,20 @@ def machine_modes(conn: sqlite3.Connection) -> dict[tuple[str, str], str]:
     return modes
 
 
+def base_machines(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+    """(editor, machine) pairs that are WIRED to the NAS (dash-admin-8 /
+    data-model-1, 2026-08-21).
+
+    The per-machine predicate CR-28 should have had. `machine_state.mode` has
+    been per machine since v22, but every gate consumed it through the
+    base_only_editors rollup, which is true only when EVERY one of a person's
+    machines is wired -- and a site can have more than one wired machine and
+    a person can own one of each (commit f27c181, MULTI_BASE_RIG_PLAN.md §5).
+    Absent from machine_modes still means "editor": an unknown machine must
+    not be silently excluded from the queue."""
+    return {pair for pair, mode in machine_modes(conn).items() if mode == "base"}
+
+
 def base_only_editors(conn: sqlite3.Connection) -> set[str]:
     """Usernames whose every known machine is a base rig.
 
@@ -1706,6 +1720,46 @@ def machine_by_device_id(conn: sqlite3.Connection, device_id: str) -> dict[str, 
     return dict(row) if row else None
 
 
+def release_device_id_elsewhere(
+    conn: sqlite3.Connection, editor: str, machine: str, device_id: str
+) -> list[str]:
+    """Take a Syncthing device id off every OTHER machine row that still
+    claims it; returns the rows it was taken from as "editor/machine".
+
+    One device is one computer. Two rows could hold one id -- a refused
+    rename adoption records the report under the new name and leaves the old
+    row with its plan AND its device id (ultrareview 2026-08-19), a restored
+    image carries another box's machine.json, a Mac's hostname gains a '-2'
+    on a Bonjour clash -- and three readers assume it sits on one:
+    machine_by_device_id fetchone()s, _run_enforce's machine_devices maps
+    both rows to the same device (so it is handed the UNION of two plans
+    while its own GET /selection returns one of them), and the lane C queue's
+    LEFT JOIN shows the same backlog twice under two hostnames
+    (data-model-5, 2026-08-21).
+
+    The report is the fresher evidence, so the reporting row keeps the id and
+    the others lose it. Nothing else on those rows is touched: their plans
+    stay put, which is the same "a hostname collision is an admin decision,
+    not a silent overwrite" rule adopt_renamed_machine follows."""
+    if not device_id:
+        return []
+    losers = [
+        f"{r['editor_username']}/{r['machine']}"
+        for r in conn.execute(
+            "SELECT editor_username, machine FROM machines "
+            "WHERE syncthing_device_id=? AND NOT (editor_username=? AND machine=?)",
+            (device_id, editor, machine),
+        )
+    ]
+    if losers:
+        conn.execute(
+            "UPDATE machines SET syncthing_device_id=NULL "
+            "WHERE syncthing_device_id=? AND NOT (editor_username=? AND machine=?)",
+            (device_id, editor, machine),
+        )
+    return losers
+
+
 def machine_by_machine_id(
     conn: sqlite3.Connection, editor: str, machine_id: str
 ) -> dict[str, Any] | None:
@@ -1839,8 +1893,18 @@ def copy_machine_plan(
         "DELETE FROM selections WHERE editor_username=? AND machine=?",
         (editor, target),
     )
-    for slug in slugs:
-        add_selection(conn, editor, slug, created_by=copied_by, now=now, machine=target)
+    # Inserted directly, NOT through add_selection: that materialises the
+    # unassigned bucket onto a machine whose first own row is being written
+    # (dash-core-1), and here the DELETE above has just made the target look
+    # like one. "Replacing whatever it had" must mean the source's plan and
+    # nothing else.
+    for position, slug in enumerate(slugs, start=1):
+        conn.execute(
+            """INSERT OR IGNORE INTO selections
+                 (editor_username, machine, project_slug, position, created_at, created_by)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (editor, target, slug, position, now, copied_by),
+        )
     return len(slugs)
 
 
@@ -1893,12 +1957,58 @@ def adopt_renamed_machine(
     return True
 
 
+def materialise_bucket(
+    conn: sqlite3.Connection, editor: str, machine: str
+) -> int:
+    """Give a machine that is INHERITING the unassigned bucket its own copy of
+    it, before its first own row eclipses the lot (dash-core-1, 2026-08-21).
+
+    selections_for_machine hands the bucket to a machine only while it has no
+    rows of its own, so the FIRST own row silently replaced the whole
+    inherited plan: an admin who ticked A and B for a new editor before their
+    companion had reported, then ticked C a day later, left that machine with
+    exactly [C] and the next enforce cycle unshared A and B from it. The
+    mirror image was an untick of an inherited project deleting 0 rows and
+    reporting changed=false while the project kept syncing.
+
+    Copies rather than moves: the bucket still applies to this person's OTHER
+    computers, and to the next one they register. created_at/created_by come
+    across unchanged, because who asked for this project and when is the same
+    fact it was before it was pinned to a machine."""
+    if not machine or machine == ANY_MACHINE:
+        return 0
+    own = conn.execute(
+        "SELECT 1 FROM selections WHERE editor_username=? AND machine=? LIMIT 1",
+        (editor, machine),
+    ).fetchone()
+    if own is not None:
+        return 0                      # has a plan of its own: nothing inherited
+    copied = 0
+    for row in conn.execute(
+        """SELECT project_slug, position, created_at, created_by FROM selections
+            WHERE editor_username=? AND machine=? ORDER BY position""",
+        (editor, ANY_MACHINE),
+    ).fetchall():
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO selections
+                 (editor_username, machine, project_slug, position, created_at, created_by)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (editor, machine, row["project_slug"], row["position"],
+             row["created_at"], row["created_by"]),
+        )
+        copied += cur.rowcount
+    return copied
+
+
 def add_selection(
     conn: sqlite3.Connection, editor: str, slug: str, created_by: str, now: str,
     machine: str = ANY_MACHINE,
 ) -> bool:
     """Tick, for ONE computer. Returns False if already ticked. Position =
     end of that machine's queue (the order its sequencer works through)."""
+    # dash-core-1: BEFORE the first own row, or this tick is the only project
+    # this machine is left with.
+    materialise_bucket(conn, editor, machine)
     next_pos = conn.execute(
         """SELECT COALESCE(MAX(position), 0) + 1 FROM selections
             WHERE editor_username=? AND machine=?""",
@@ -1923,8 +2033,18 @@ def add_selection_for_person(
     bucket instead would be silently ineffective for anyone whose machines
     already have plans of their own -- the bucket only applies where there is
     no plan. An editor with no computer on record yet DOES get the bucket,
-    which their first report adopts."""
-    targets = machines_of(conn, editor) or [ANY_MACHINE]
+    which their first report adopts.
+
+    A WIRED machine is skipped (dash-admin-8 / data-model-1, 2026-08-21): it
+    works directly off the NAS tree, so a row for it can never make progress
+    and never clears -- CR-28's permanent [ GETTING READY ] chip, one machine
+    over. CR-28's own refusal is per PERSON and cannot see this: an account
+    with a wired desktop AND a remote laptop is not base-only."""
+    known = machines_of(conn, editor)
+    wired = base_machines(conn)
+    targets = [m for m in known if (editor, m) not in wired]
+    if not known:
+        targets = [ANY_MACHINE]
     # A list, not a generator: any() short-circuits, and the second computer
     # would never get its row.
     return any([
@@ -1946,6 +2066,17 @@ def remove_selection(
             (editor, slug),
         )
     else:
+        # dash-core-1: unticking a project this machine only holds by
+        # INHERITANCE deleted nothing, answered changed=false, and left it
+        # syncing. Materialise the bucket first and the delete lands -- and
+        # only when the bucket really is where this tick came from, so a
+        # no-op removal does not quietly end the inheritance.
+        if machine != ANY_MACHINE and conn.execute(
+            """SELECT 1 FROM selections
+                WHERE editor_username=? AND machine=? AND project_slug=?""",
+            (editor, ANY_MACHINE, slug),
+        ).fetchone() is not None:
+            materialise_bucket(conn, editor, machine)
         cur = conn.execute(
             """DELETE FROM selections
                 WHERE editor_username=? AND machine=? AND project_slug=?""",
@@ -2363,6 +2494,24 @@ def fetch_sync_guard_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict
                FROM machine_state"""
         )
     }
+
+
+def machine_breaker_tripped(
+    conn: sqlite3.Connection, editor: str, machine: str
+) -> bool | None:
+    """Did this machine's LAST report say its lane B breaker was tripped?
+
+    None when there is no guard section on record at all (never reported, or
+    a companion too old to send one), which is not the same answer as False
+    and the caller must not treat it as one (comp-lanes-ab-2, 2026-08-21)."""
+    row = conn.execute(
+        "SELECT breaker_tripped, guard_at FROM machine_state "
+        "WHERE editor_username=? AND machine=?",
+        (editor, machine),
+    ).fetchone()
+    if row is None or not row["guard_at"]:
+        return None
+    return bool(row["breaker_tripped"])
 
 
 def fetch_broll_ingest_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:

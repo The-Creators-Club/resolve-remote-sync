@@ -28,6 +28,21 @@ TWO WAYS IN, and only two:
     file, which is the whole point of putting the secret on disk rather than
     trusting "no Origin header" as proof of local origin.
 
+WHAT THIS DOES NOT FIX, and is worth saying out loud (trust-model-9,
+2026-08-21). The allow-list makes the dashboard's origin trusted, and that
+origin serves three SPAs which render text nobody here wrote: clip
+transcripts, YouTube titles, music tags, client-folder captions typed by any
+editor. A stored XSS in any of them is not "a dashboard bug" -- it is a POST
+to 127.0.0.1:8899 on every editor who opens the page, i.e. /insert,
+/music/reveal, /ytdl/reveal (which spawn Explorer or `open`), /broll/ingest/run
+and on-demand rclone fetches. The answer is a strict Content-Security-Policy
+on the dashboard and its mounted SPAs -- server-side, and not something this
+module can impose. Note also that origins_for_url below trusts BOTH schemes
+for the one host, so a site that has moved to https keeps accepting an http
+origin no browser will legitimately present again; tightening that needs a
+signal about which scheme editors actually browse, which the manifest does not
+carry yet.
+
 Requests with NO Origin still get GETs (curl, a tab opened straight at
 /status -- a top-level navigation sends no Origin, and that self-test is what
 the web UIs tell editors to run when the button fails). State-changing POSTs

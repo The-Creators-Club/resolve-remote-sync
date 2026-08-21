@@ -588,6 +588,10 @@ class BrollIngestor:
         self._state = STATE_NOTHING_TO_DO
         self._batch: Optional[dict[str, Any]] = None
         self._staging: dict[str, dict[str, Any]] = {}
+        # The folders the native picker has handed back, newest last. The
+        # allow-list `prepare` measures a source='path' item against
+        # (comp-loopback-6, 2026-08-21); see `note_picked`.
+        self._picked_roots: list[str] = []
         self._warning = ""
         self._model_note = ""
         self._forced = False
@@ -644,6 +648,7 @@ class BrollIngestor:
                 "version": 1,
                 "batch": self._batch,
                 "staging": self._staging,
+                "picked_roots": list(self._picked_roots),
                 "paused": self._paused,
                 "forced": self._forced,
                 "upload_paused": self._upload_paused,
@@ -684,6 +689,11 @@ class BrollIngestor:
             return
         batch = saved.get("batch")
         self._staging = saved.get("staging") if isinstance(saved.get("staging"), dict) else {}
+        # The picker and the prepare are two requests; a tray restarted
+        # between them must not refuse the drop the editor is halfway through
+        # (comp-loopback-6, 2026-08-21).
+        picked = saved.get("picked_roots")
+        self._picked_roots = [str(p) for p in picked if p] if isinstance(picked, list) else []
         self._paused = bool(saved.get("paused"))
         self._forced = bool(saved.get("forced"))
         self._upload_paused = bool(saved.get("upload_paused"))
@@ -698,8 +708,9 @@ class BrollIngestor:
                 item["stage"] = ITEM_FAILED
                 item["error"] = ("the source file is no longer on this machine "
                                  "(the drive was unplugged, or it was moved)")
-        # `claimed`, not whatever it was: the lease is certainly stale after a
-        # restart, and the first tick re-issues the (idempotent) claim.
+        # The lease is certainly stale after a restart, so the first tick
+        # re-issues the (idempotent) claim -- see `_reclaim`, which is what
+        # finally READS this flag (comp-loopback-2, 2026-08-21).
         batch["needs_claim"] = True
         self._batch = batch
         self.log.info("resuming batch %s (%d clip(s), %d already live)",
@@ -1159,6 +1170,78 @@ class BrollIngestor:
                       exc_info=True)
 
     # -- staging (the loopback's prepare/upload/progress/thumb) ------------
+    # How many picked folders are remembered. Enough for an editor working
+    # through several cards in an evening, small enough that the state file
+    # stays a file you can read.
+    MAX_PICKED_ROOTS = 32
+
+    def note_picked(self, files: Any) -> None:
+        """Remember where the native picker just sent us.
+
+        `/pick` is THE only route that learns a local path from this machine
+        (plan §4, and `pick_ingest_sources`' docstring) -- but that was a
+        sentence, not a check: `prepare` took `path` straight off the JSON
+        body, so a page on the allowed origin could name any readable video on
+        the machine and have it hashed, proxied, described, POSTed to the
+        fleet and rclone'd into the customer's shared archive
+        (comp-loopback-6, 2026-08-21).
+
+        The FOLDERS are recorded rather than the file paths: a folder pick is
+        already "this folder", the picker's own walk is capped at 2,000 files,
+        and a state file with 2,000 absolute paths in it is rewritten at every
+        checkpoint. It is defence in depth either way - the origin allow-list
+        is what keeps a stranger's page off this port.
+        """
+        roots: list[str] = []
+        for entry in list(files or []):
+            if isinstance(entry, dict):
+                path, rel_dir = entry.get("path"), str(entry.get("rel_dir") or "")
+            else:
+                path, rel_dir = entry, ""
+            if not path:
+                continue
+            try:
+                folder = os.path.dirname(os.path.realpath(str(path)))
+                # A FOLDER pick walks sub-folders and reports each clip's
+                # `rel_dir` below the folder the editor chose. Climbing back
+                # up records the ONE root they picked, rather than forty leaf
+                # directories that would then push each other out of a
+                # bounded list.
+                for _ in [p for p in rel_dir.replace("\\", "/").split("/")
+                          if p and p != "."]:
+                    parent = os.path.dirname(folder)
+                    if not parent or parent == folder:
+                        break
+                    folder = parent
+            except Exception:  # noqa: BLE001 - a picker answer is never fatal
+                continue
+            if folder and folder not in roots:
+                roots.append(folder)
+        if not roots:
+            return
+        with self._lock:
+            kept = [r for r in self._picked_roots if r not in roots]
+            self._picked_roots = (kept + roots)[-self.MAX_PICKED_ROOTS:]
+        self._save()
+
+    def _picked_refusal(self, path: str) -> str:
+        """Why a source='path' item was not picked on this machine, or "".
+
+        Empty when the machine has never picked anything is deliberately NOT
+        the rule: an empty allow-list refuses, because "nothing was picked"
+        and "everything is allowed" must not be the same answer
+        (comp-loopback-6, 2026-08-21).
+        """
+        from . import loopback_guard
+
+        with self._lock:
+            roots = list(self._picked_roots)
+        for root in roots:
+            if loopback_guard.is_within(path, root):
+                return ""
+        return ("that file was not chosen on this machine: use the "
+                "\"choose from this computer\" picker and pick it again")
+
     def prepare(self, body: dict) -> tuple[int, dict]:
         """Make a staging directory and a slot for every item.
 
@@ -1533,8 +1616,101 @@ class BrollIngestor:
             self._wake.wait(TICK_SECONDS)
             self._wake.clear()
 
+    def _reclaim(self) -> None:
+        """Take a resumed batch back, then restart its heartbeat and uploads.
+
+        `_resume()` set `needs_claim` and NOTHING read it (comp-loopback-2,
+        2026-08-21): a tray restarted mid-batch never re-claimed and never
+        heartbeated, so the server's 300 s lease lapsed while this side went
+        on believing it held the batch -- the page showed it stuck, and every
+        new drop on the machine was refused with "this machine is already
+        indexing another batch" until somebody found the cancel. `claim()` is
+        idempotent for the same machine precisely so this can exist; a 403 /
+        409 / 410 means it is genuinely someone else's now, which is the one
+        answer `_lease_lost` was written for.
+
+        A transport failure is NOT an ending: the dashboard may simply be
+        unreachable this minute, and the next tick asks again.
+        """
+        with self._lock:
+            batch = self._batch
+            if not batch or not batch.get("needs_claim"):
+                return
+            uid = str(batch.get("uid") or "")
+        if not uid:
+            return
+        capabilities = broll_server.build_ingest_capabilities(
+            self.cfg, self, self.deps, kind=self.kind)
+        try:
+            status, parsed = self._client().claim(uid, self._tier(), capabilities)
+        except Exception as exc:  # noqa: BLE001 - an unreachable dashboard is not an ending
+            self.log.warning("could not re-claim batch %s after a restart (%s) "
+                             "-- trying again next tick", uid, exc)
+            return
+        if status in (403, 409, 410):
+            self._lease_lost(_detail_of(parsed)
+                             or f"the dashboard would not hand batch {uid} back")
+            return
+        if status != 200 or not isinstance(parsed, dict):
+            self.log.warning("the re-claim of %s was refused (HTTP %s) -- "
+                             "trying again next tick", uid, status)
+            return
+        with self._lock:
+            batch = self._batch
+            if not batch or batch.get("uid") != uid:
+                return
+            batch.pop("needs_claim", None)
+            # Only what this side cannot know is merged: the video ids, the
+            # archive names and the item states on disk are the checkpoints
+            # this restart exists to keep.
+            settings = dict(parsed.get("settings") or {})
+            if settings:
+                batch["settings"] = {**(batch.get("settings") or {}), **settings}
+            if parsed.get("taxonomy"):
+                batch["taxonomy"] = parsed.get("taxonomy")
+            batch["heartbeat_seconds"] = (parsed.get("heartbeat_seconds")
+                                          or batch.get("heartbeat_seconds")
+                                          or HEARTBEAT_SECONDS)
+            batch["archive_remote_rel"] = (self._remote_rel(parsed)
+                                           or batch.get("archive_remote_rel"))
+            self._upload_paused = bool((parsed.get("batch") or {}).get(
+                "upload_paused", self._upload_paused))
+        self._start_heartbeat()
+        self.log.info("re-claimed batch %s after a restart", uid)
+        try:
+            self._requeue_after_restart()
+        except LeaseLost as exc:
+            self._lease_lost(str(exc))
+            return
+        self._save()
+
+    def _requeue_after_restart(self) -> None:
+        """Put a resumed item's artifacts back on the new upload queue.
+
+        An item restored at `uploading` still carries its `uploads` rels, but
+        the queue they were handed to died with the old process: `_pump_uploads`
+        saw every rel as missing-and-not-broken and `continue`d for ever, and
+        `_next_item` skips `uploading`, so nothing on this machine would ever
+        have sent them (comp-loopback-2, 2026-08-21). `enqueue` is idempotent
+        per rel, so this cannot race a job already in flight.
+        """
+        with self._lock:
+            items = list((self._batch or {}).get("items") or [])
+        for item in items:
+            if item.get("stage") != ITEM_UPLOADING:
+                continue
+            try:
+                self._enqueue_uploads(item)
+            except LeaseLost:
+                raise
+            except Exception:
+                self.log.exception("could not re-queue the uploads for %s",
+                                   item.get("name"))
+
     def tick(self) -> str:
-        """One pass: gate, maybe fetch the model, maybe crunch, pump uploads."""
+        """One pass: re-claim a resumed batch, gate, maybe fetch the model,
+        maybe crunch, pump uploads."""
+        self._reclaim()
         state = self._gate()
         self._publish_state(state)
 
@@ -1763,7 +1939,13 @@ class BrollIngestor:
             if result is None:
                 return
             item["described"] = True
-            self._post_result(item, result)
+            if not self._post_result(item, result):
+                # No row on the server means nothing legitimate to upload:
+                # `_post_result` has already failed the item with the server's
+                # own words and cleared `described` so the retry re-describes
+                # (comp-loopback-4, 2026-08-21).
+                self._save()
+                return
             self._save()
 
         # 6. hand to the upload queue
@@ -1955,10 +2137,10 @@ class BrollIngestor:
             return None
         return storage.result
 
-    def _post_result(self, item: dict, result: dict) -> None:
+    def _post_result(self, item: dict, result: dict) -> bool:
         """Hand the description to the server, which writes the segments AND
         computes `search_norm` -- the thing that makes a CJK on-screen-text
-        term findable at all (PR-D, app/normalize.py)."""
+        term findable at all (PR-D, app/normalize.py). -> whether it landed."""
         with self._lock:
             uid = (self._batch or {}).get("uid")
         probe = item.get("probe") or {}
@@ -1987,18 +2169,77 @@ class BrollIngestor:
         }
         status, parsed = self._client().item_result(uid, item["uid"], body)
         if status != 200:
+            detail = _detail_of(parsed) or "no detail"
             self.log.warning("the server refused the result for %s "
-                        "(HTTP %s: %s)", item.get("name"), status,
-                        _detail_of(parsed) or "no detail")
+                        "(HTTP %s: %s)", item.get("name"), status, detail)
+            # A refusal used to be a log line and nothing else: the clip was
+            # uploaded anyway and `mark_uploaded` does not check that any
+            # segments exist, so the archive got a live clip with no
+            # description, no themes and no category -- unfindable, and never
+            # re-described because `described` was already True
+            # (comp-loopback-4, 2026-08-21). Clearing it is what makes the
+            # retry re-run the model, exactly as the music path does.
+            item["described"] = False
+            self._fail_item(
+                item, f"the archive would not take this clip's description: {detail}")
+            return False
         item["stage"] = ITEM_INDEXED
+        return True
 
     # -- uploads -----------------------------------------------------------
     def _queue(self) -> Any:
         if self._uploader is None:
-            self._uploader = broll_upload.UploadQueue(lambda: self.cfg)
+            self._uploader = self._new_queue()
             if self._upload_paused:
                 self._uploader.pause()
         return self._uploader
+
+    def _new_queue(self) -> Any:
+        """A queue for THIS batch.
+
+        Once per batch rather than once per process: `stop_all` latches an
+        UploadQueue closed for ever, so a cancel used to leave every later
+        batch of that tray session appending jobs to a list no thread would
+        drain -- 'uploading' at 90% until the companion was restarted
+        (comp-loopback-1, 2026-08-21). Building afresh also drops the previous
+        batch's done/failed ledger, which matters when the SAME batch is run
+        again after a cancel and its rels are the same strings.
+
+        The one hook a test replaces to watch a second batch get a second
+        queue; the constructor's `uploader` seeds only the FIRST one.
+        """
+        return broll_upload.UploadQueue(lambda: self.cfg)
+
+    def _upload_plan(self, item: dict) -> dict[str, tuple[str, str]]:
+        """{remote rel: (kind, local path)} for one clip.
+
+        Its own method because the RETRY path needs the same answer for one
+        named rel that the enqueue needs for all of them (comp-loopback-3,
+        2026-08-21) -- and because music, whose item owns exactly one file,
+        overrides this and inherits both paths.
+        """
+        outputs = item.get("outputs") or {}
+        video_id = item.get("video_id")
+        archive_dir = item.get("archive_dir") or ""
+        stem = item.get("archive_stem") or ""
+        plan: dict[str, tuple[str, str]] = {}
+
+        if outputs.get("poster") and video_id:
+            plan[f"posters/{video_id}.jpg"] = (broll_upload.KIND_POSTER,
+                                               str(outputs.get("poster") or ""))
+        if outputs.get("sprite") and video_id:
+            plan[f"sprites/{video_id}.jpg"] = (broll_upload.KIND_SPRITE,
+                                               str(outputs.get("sprite") or ""))
+        if outputs.get("proxy") and archive_dir and stem:
+            plan[f"{archive_dir}/Proxy/{stem}.mp4"] = (
+                broll_upload.KIND_PROXY, str(outputs.get("proxy") or ""))
+        with self._lock:
+            upload_originals = bool(
+                ((self._batch or {}).get("settings") or {}).get("upload_originals", True))
+        if upload_originals and archive_dir and item.get("final_name"):
+            plan[f"{archive_dir}/{item['final_name']}"] = (
+                broll_upload.KIND_ORIGINAL, str(item.get("local_path") or ""))
+        return plan
 
     def _enqueue_uploads(self, item: dict) -> None:
         """Stills, then proxy, then the original last (UploadQueue's order).
@@ -2008,34 +2249,10 @@ class BrollIngestor:
         SEE the clip -- which needs the poster, the sprite and the proxy, and
         not one byte of the camera file.
         """
-        outputs = item.get("outputs") or {}
-        video_id = item.get("video_id")
-        archive_dir = item.get("archive_dir") or ""
-        stem = item.get("archive_stem") or ""
-        rels: dict[str, str] = {}
+        plan = self._upload_plan(item)
         queue = self._queue()
-
-        if outputs.get("poster") and video_id:
-            rels[f"posters/{video_id}.jpg"] = broll_upload.KIND_POSTER
-        if outputs.get("sprite") and video_id:
-            rels[f"sprites/{video_id}.jpg"] = broll_upload.KIND_SPRITE
-        if outputs.get("proxy") and archive_dir and stem:
-            rels[f"{archive_dir}/Proxy/{stem}.mp4"] = broll_upload.KIND_PROXY
-        with self._lock:
-            upload_originals = bool(
-                ((self._batch or {}).get("settings") or {}).get("upload_originals", True))
-        if upload_originals and archive_dir and item.get("final_name"):
-            rels[f"{archive_dir}/{item['final_name']}"] = broll_upload.KIND_ORIGINAL
-
-        locals_for = {
-            broll_upload.KIND_POSTER: outputs.get("poster"),
-            broll_upload.KIND_SPRITE: outputs.get("sprite"),
-            broll_upload.KIND_PROXY: outputs.get("proxy"),
-            broll_upload.KIND_ORIGINAL: item.get("local_path"),
-        }
-        item["uploads"] = rels
-        for rel, kind in rels.items():
-            local = locals_for.get(kind)
+        item["uploads"] = {rel: kind for rel, (kind, _local) in plan.items()}
+        for rel, (kind, local) in plan.items():
             if not local or not os.path.isfile(local):
                 continue
             try:
@@ -2045,6 +2262,35 @@ class BrollIngestor:
                 self.log.exception("could not queue %s", rel)
         item["stage"] = ITEM_UPLOADING
         self._stage(item, ITEM_UPLOADING, 90)
+
+    def _resend_uploads(self, item: dict, rels: list) -> None:
+        """Send exactly these artifacts again, and forget their old verdict.
+
+        Not `_enqueue_uploads`: the 409 path re-declares everything because
+        the SERVER named what it could not stat, but an rclone that exited
+        non-zero named one file, and re-sending a 40 GB original because a
+        100 KB poster failed is an editor's evening (comp-loopback-3,
+        2026-08-21). `retry()` first, because `failures()` is a ledger -- a
+        rel left in it reads as still broken on the next tick.
+        """
+        queue = self._queue()
+        forget = getattr(queue, "retry", None)
+        if forget is not None:
+            try:
+                forget(list(rels))
+            except Exception:
+                self.log.debug("could not clear the upload failures",
+                               exc_info=True)
+        plan = self._upload_plan(item)
+        for rel in rels:
+            kind, local = plan.get(rel, ("", ""))
+            if not kind or not local or not os.path.isfile(local):
+                continue
+            try:
+                queue.enqueue(local, rel, kind, item_uid=item["uid"],
+                              size_bytes=os.path.getsize(local))
+            except Exception:
+                self.log.exception("could not re-queue %s", rel)
 
     def _upload_snapshot(self) -> dict[str, Any]:
         queue = self._uploader
@@ -2086,7 +2332,25 @@ class BrollIngestor:
             if missing:
                 broken = [rel for rel in missing if rel in failures]
                 if broken:
-                    item["error"] = failures[broken[0]].get("error") or "the upload failed"
+                    # An rclone that exited non-zero used to leave the item at
+                    # 'uploading' for ever: the error text was copied onto it
+                    # and nothing else happened, so the batch was never
+                    # released, the heartbeat held the lease and every new drop
+                    # on this machine got the 409 (comp-loopback-3,
+                    # 2026-08-21). A dropped link deserves a retry; the fourth
+                    # identical failure deserves an ending.
+                    error = failures[broken[0]].get("error") or "the upload failed"
+                    item["error"] = error
+                    tries = int(item.get("upload_attempts") or 0) + 1
+                    item["upload_attempts"] = tries
+                    self.log.warning("the upload of %d file(s) for %s failed "
+                                     "(%s) -- retry %d of %d", len(broken),
+                                     item.get("name"), error, tries,
+                                     MAX_UPLOAD_ATTEMPTS)
+                    if tries >= MAX_UPLOAD_ATTEMPTS:
+                        self._fail_item(item, error)
+                    else:
+                        self._resend_uploads(item, broken)
                 continue
             files = [{"rel": rel, "size": landed[rel].get("size")} for rel in rels]
             original_uploaded = any(
@@ -2172,6 +2436,16 @@ class BrollIngestor:
             self.log.debug("could not mirror %s locally", rel, exc_info=True)
 
     def _stop_uploads(self) -> None:
+        """Kill the uploads AND put the dead queue down.
+
+        `stop_all()` is a one-way latch (broll_upload.UploadQueue's docstring):
+        the worker returns and `_ensure_thread` refuses to start another. The
+        orchestrator outlives every batch, so keeping the object meant that
+        after the first cancel -- tray, page, dashboard command or an expired
+        lease -- every later batch parked at 'uploading' with no rclone ever
+        spawned, and the next drop was refused with the 409 until the tray was
+        restarted (comp-loopback-1, 2026-08-21).
+        """
         queue = self._uploader
         if queue is None:
             return
@@ -2179,6 +2453,8 @@ class BrollIngestor:
             queue.stop_all()
         except Exception:
             self.log.debug("could not stop the upload queue", exc_info=True)
+        with self._lock:
+            self._uploader = None
 
     # -- finishing ---------------------------------------------------------
     def _maybe_finish(self) -> None:
@@ -2357,7 +2633,13 @@ class BrollIngestor:
                 "and it will continue")
 
     def _path_refusal(self, path: str) -> str:
-        """Why this machine may not index a picked path in place, or ""."""
+        """Why this machine may not index a picked path in place, or "".
+
+        The docstring on `prepare` and docs/BROLL_INGEST_PLAN.md:177 have
+        always listed "a path outside the allowed roots" as a refusal here;
+        until 2026-08-21 the only checks were isfile and the extension, so the
+        allow-list existed on paper only (comp-loopback-6).
+        """
         if not path:
             return "no path was given for that clip"
         try:
@@ -2367,7 +2649,7 @@ class BrollIngestor:
             return "that file could not be read"
         if os.path.splitext(path)[1].lower() not in self.kind.exts:
             return f"that is not {self.kind.media_word}"
-        return ""
+        return self._picked_refusal(path)
 
     def _probe_and_hash(self, entry: dict) -> dict:
         """ffprobe + xxh64 for one staged file, recording the refusal rather

@@ -50,6 +50,9 @@ kind = "truenas"            # or "synology" (docs/SERVER-SYNOLOGY.md)
 host = "<nas>"
 admin_user = "truenas_admin"
 verify_ssl = "0"
+# ssh_port = "22"           # the OPERATOR channel (every server/ script).
+                            # Defaults to [net] sftp_port, then 22 -- set it
+                            # only where the two differ. $CCSYNC_SSH_PORT wins.
 
 [tree]
 pool_root = "/mnt/tank/<pool>"
@@ -73,6 +76,10 @@ shell_type = "unix"         # rclone's; "none" where editors are /sbin/nologin
 rclone_remote = "ccsync_sftp"          # the remote name in rclone.conf
 # sftp_host unset on purpose: dual-homed (LAN / tailnet); the wizard derives
 # it from the dashboard URL the editor used. Only set a name reachable from both.
+# trusted_proxies unset on purpose: the deploy computes loopback + the docker
+# bridge CIDR + bind_tailnet (see "Who the dashboard believes about the client
+# IP" below). Set it only to override that whole list.
+# docker_bridge_cidr = "172.16.0.0/12"
 
 [syncthing]
 gui_url = "http://<nas>:8384"
@@ -211,6 +218,123 @@ password and mitigates differently (`docs/SERVER-SYNOLOGY.md`).
 site keeps it apart from the SSH login password. Unset, it is the login
 password — which is what both platforms' out-of-the-box admin account wants,
 so this is a seam rather than a promise.
+
+### Editor lanes do NOT verify the NAS host key (open, trust-model-4)
+
+The base rig refuses an unpinned NAS host key (above). **Editors' lanes A and B
+do not check one at all**, and it is worth knowing that before debugging a key
+rotation:
+
+- both bootstraps write the rclone `sftp` stanza with host/user/port/key_file/
+  shell_type and **no `known_hosts_file`**; rclone's sftp backend accepts any
+  host key unless that option is set, and the companion adds no
+  `--sftp-known-hosts-file` flag either;
+- `GET /api/v1/site` publishes no host key, even though `[nas] ssh_hostkey`
+  exists and this package pins it for the base rig;
+- `dashboard/deploy/compose.appliance.yaml` used to carry a comment claiming
+  "a changed host key makes every editor's rclone refuse the NAS on its next
+  connection". **That is not what happens** -- nothing on an editor machine
+  will notice. Corrected in place 2026-08-21 (CR-67): the comment now states
+  the claim it retracts, why persisting the host keys still matters, and
+  points here.
+
+So lanes A and B authenticate the editor *to* the NAS (ed25519 key) and never
+the NAS to the editor. Inside the tailnet WireGuard already authenticates the
+peer, which is why this has not bitten. A site that sets `[net] sftp_host` to a
+LAN address, or a compromised tailnet node answering at the NAS's address, has
+no such cover: it receives uploads and can feed arbitrary files into lane B's
+download scope, which is the "the NAS stops looking like the tree" shape
+`lane_guard` exists to park.
+
+Closing it is a client-side change and is deliberately **not** done here: it
+needs the key published in `/api/v1/site`, both bootstraps writing a
+`~/.ccsync/known_hosts` plus `known_hosts_file =` into the stanza, and the
+companion refusing a lane start on a mismatch as a tray line rather than an
+rclone error. A wrong move on any of those stops every editor's lanes A and B,
+so it wants its own change, not a bug-hunt patch.
+
+### Who the dashboard believes about the client IP (`DASH_TRUSTED_PROXIES`)
+
+Added to the deploy 2026-08-21 (trust-model-3). The stack publishes its port
+with compose `ports:`, so a request that Tailscale Serve makes from the NAS
+host is NATed on the way in and reaches the container **from the docker bridge
+gateway**, not from the browser's address. The dashboard only reads
+`X-Forwarded-For` / `X-Forwarded-Proto` from a peer it was told to trust, and
+its own default is loopback only, which the container never sees. The result
+was one shared client IP for the entire fleet: the login throttle's per-IP
+budget (5 failures, then backoff doubling to an hour) was one bucket for
+everybody, so one editor holding caps lock could 429 `/login` **and**
+`/api/v1/verify` for every editor and every companion, and the admin sessions
+page showed the same address on every row.
+
+`install_dashboard_app.py` now sets it. Unset anywhere else, the value is:
+
+```
+127.0.0.1,::1,172.16.0.0/12,<[net] bind_tailnet>
+```
+
+`172.16.0.0/12` is docker's own default pool for bridge networks; which /16
+this stack lands on is the daemon's choice at `compose up`, so the CIDR is what
+can be stated in advance. `192.168.0.0/16` is in docker's pool too and is
+deliberately excluded -- on this fleet that is the studio LAN.
+
+Override with `[net] trusted_proxies` (a comma-separated list of IPs and
+CIDRs), or `[net] docker_bridge_cidr` to change just the bridge entry.
+`$DASH_TRUSTED_PROXIES` in the deploying shell beats both.
+
+Trusting the bridge means any container on the same host could claim an
+`X-Forwarded-For`. That is the accepted trade: a shared throttle bucket on the
+page that tells everyone whether their footage is syncing is the larger
+problem, and the stack already extends the same trust to its own sidecar.
+
+Both compose TEMPLATES carry the line since 2026-08-21 (CR-67), so the manual
+"Install via YAML" fallback and the Synology path render the same list the
+TrueNAS deploy POSTs. `install_dashboard_app.COMPOSE_ENV_ONLY_IN_DICT` -- the
+tuple that narrowed the file/dict drift test while only one half existed -- is
+empty again, which is the state it has to stay in.
+
+### Container log rotation
+
+Also added 2026-08-21 (ops-efficiency-7): every service in the deployed compose
+body carries `logging: json-file, max-size 20m, max-file 5`. uvicorn runs with
+its access log on, each companion posts `/api/v1/report` every 5 s while a lane
+syncs, and each open dashboard tab polls `/partials/transfers` every 2 s -- so
+container stdout grows by several lines a second forever, into a driver with no
+cap of its own, on a dataset that is also snapshotted hourly. Whether the
+host's `daemon.json` caps it is a per-vendor accident.
+
+Completed 2026-08-21 (CR-67): the same block is on every service in all three
+compose templates (`compose.yaml`, `compose.image.yaml`,
+`compose.appliance.yaml`), and `dashboard/deploy/run.sh` starts uvicorn with
+**`--no-access-log`**. That access log was the bulk of the volume and none of
+the value: one line per request on three polled paths, burying the tracebacks
+and collector warnings somebody eventually needs. Put it back for a debugging
+session with `DASH_ACCESS_LOG=1` in the container environment -- deliberately
+not a key in the templates, so it stays something an operator adds rather than
+a fourth thing to keep in step across two files and a dict.
+
+### One line this studio owes its `site.toml` (`product-surface-3`)
+
+`BROLL_CREATORS_SHARES` — which archive shares hold **our own** footage rather
+than downloads — was a literal customer project name, hardcoded as the default
+in `compose.yaml`, `compose.image.yaml`, `compose_config()` and `main()`. Since
+2026-08-21 it comes from the manifest, and **the product default is empty**: an
+unconfigured archive browses entirely as Downloads, because filing somebody's
+bought footage as theirs is the worse of the two errors.
+
+This fleet's `site.toml` predates the key, so it still gets the historical
+value through one transitional branch: **a manifest with no `[broll]` table at
+all** keeps it (`install_dashboard_app.broll_creators_shares_default`). Nothing
+changes on a redeploy today. To end the branch — and it should end — add:
+
+```toml
+[broll]
+creators_shares = "mofa-disaster"
+```
+
+Writing **any** `[broll]` key turns the fallback off, so add both lines
+together or the next deploy empties the own-footage collection. `site.toml` is
+site data and is not edited by this repo's tooling; this is an operator edit.
 
 ## Editor accounts: SFTP-only, and how to migrate
 

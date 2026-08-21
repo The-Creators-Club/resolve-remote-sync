@@ -323,3 +323,59 @@ def test_admin_settings_page_offers_the_tray_logo_field(env):
     assert 'name="brand_logo"' in resp.text
     assert "TRAY LOGO" in resp.text
     assert "cc_mark_white.png" in resp.text
+
+
+# ------------------------------------------ first-run window in local mode
+# dash-admin-4 (2026-08-21): under DASH_AUTH_METHOD=local with no accounts
+# nobody can sign in at all (verify_password needs a hash), so a shut window
+# made /setup and every /api/v1/setup/* route unreachable while
+# POST /api/v1/setup/admin -- the route the wizard's own step 2 calls -- sat
+# there working. The only way in was curl.
+
+
+@pytest.fixture
+def local_env(tmp_path):
+    db_path = tmp_path / "local-setup.db"
+    settings = Settings(
+        db_path=str(db_path),
+        session_secret=SECRET,
+        auth_method="local",
+    )
+    app = create_app(settings)
+    with TestClient(app) as client:
+        conn = dbmod.connect(db_path)
+        yield client, conn, settings
+        conn.close()
+
+
+def test_local_mode_with_no_accounts_opens_the_wizard_to_an_anonymous_browser(local_env):
+    client, conn, settings = local_env
+    assert client.get("/api/v1/setup/tasks").status_code == 200
+    assert client.get("/api/v1/setup/eula").status_code == 200
+    page = client.get("/setup", follow_redirects=False)
+    assert page.status_code == 200
+
+
+def test_the_window_shuts_the_moment_the_first_admin_exists(local_env):
+    client, conn, settings = local_env
+    r = client.post("/api/v1/setup/admin",
+                    json={"username": "owen", "password": "correct-horse-battery-staple"})
+    assert r.status_code == 200
+    clear_user(client)          # the wizard is signed in; a stranger is not
+    assert client.get("/api/v1/setup/tasks").status_code == 401
+    assert client.get("/setup", follow_redirects=False).status_code == 303
+
+
+def test_the_window_stays_shut_on_smb_and_oidc(tmp_path):
+    """A NAS or an IdP can already authenticate an admin there, so an
+    anonymous window would be a second way in."""
+    for method in ("smb", "oidc"):
+        settings = Settings(
+            db_path=str(tmp_path / f"{method}.db"),
+            session_secret=SECRET,
+            auth_method=method,
+            admin_users=frozenset({"owen"}),
+        )
+        app = create_app(settings)
+        with TestClient(app) as client:
+            assert client.get("/api/v1/setup/tasks").status_code == 401

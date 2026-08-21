@@ -14,9 +14,12 @@ Two access rules, not one:
   anonymous caller during the narrow "no local account exists yet" window.
   That window is reported by agent C's identity module (WP C), which does
   not exist in this worktree -- `setup_engine.probe_admin_status` returns
-  `None` here, and `require_setup_access` treats an unknown status as
-  CLOSED, so every one of these routes requires an admin session in THIS
-  build. See `setup_engine.py`'s module docstring for the handoff.
+  `None` here. An unknown status is treated as CLOSED, so on `smb` and
+  `oidc` deployments every one of these routes requires an admin session.
+  Under `DASH_AUTH_METHOD=local` the accounts table answers instead (see
+  `first_run_open`, dash-admin-4): with zero rows nobody can sign in at all,
+  so a shut window was a dead end rather than a guard. See `setup_engine.py`'s
+  module docstring for the handoff.
 """
 from __future__ import annotations
 
@@ -47,15 +50,36 @@ def first_run_open(request: Request, conn: sqlite3.Connection) -> bool:
     is_admin` refusal in page_login_submit; the wizard must not become a
     second, unauthenticated way in for an OIDC deployment).
 
-    Fails closed: `probe_admin_status` returning `None` (module absent, see
-    this module's docstring) means this is NEVER true here.
+    Fails closed everywhere the answer is unknown: `probe_admin_status`
+    returning `None` (module absent, see this module's docstring) means this
+    is NEVER true -- EXCEPT under `DASH_AUTH_METHOD=local`, where the
+    accounts table is the whole answer (dash-admin-4, 2026-08-21).
+
+    Under local login with no row, `auth.verify_credentials` needs a password
+    hash that does not exist, so nobody can sign in at all: `/setup` 303'd to
+    a `/login` no credential could pass and every `/api/v1/setup/*` route
+    401'd, while `POST /api/v1/setup/admin` -- the route the wizard's step 2
+    calls, already open in app.py -- sat there working. The window that was
+    "correctly shut" is a dead end on that method, not a safety, and it
+    closes again the instant the first account exists (setup_api.setup_admin
+    re-checks under BEGIN IMMEDIATE, so this is not the lock). smb and oidc
+    keep the old answer: there a NAS or an IdP can already authenticate an
+    admin, so an anonymous window would be a second way in.
     """
     settings = request.app.state.settings
-    if str(getattr(settings, "auth_method", "") or "").strip().lower() == "oidc":
+    method = str(getattr(settings, "auth_method", "") or "").strip().lower()
+    if method == "oidc":
         return False
     status = setup_engine.probe_admin_status(_ctx(request, conn))
     if status is None:
-        return False
+        if method != "local":
+            return False
+        from . import local_users
+
+        try:
+            return not local_users.any_users_exist(conn)
+        except sqlite3.Error:       # a pre-v17 database has no users table
+            return False
     return not bool(status.get("users_exist"))
 
 
@@ -207,6 +231,10 @@ def api_admin_site_put(
     except site_store.SiteValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     conn.commit()
+    # The brand ui._render paints comes from this table now (product-surface-2,
+    # 2026-08-21) and is cached per process, so every writer of site_settings
+    # drops that cache in the same breath as its commit.
+    site_store.invalidate(request.app)
     log.info("admin %r updated site settings: %s", admin, ", ".join(sorted(payload.values)))
     manifest = site_store.resolved_manifest(conn, request.app.state.settings)
     manifest["auto_derived"] = sorted(site_store.AUTO_DERIVED_KEYS)
@@ -239,6 +267,7 @@ def api_admin_site_import(
     except site_store.SiteValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     conn.commit()
+    site_store.invalidate(request.app)          # see api_admin_site_put
     log.info("admin %r imported site settings: %s", admin, ", ".join(sorted(parsed)))
     manifest = site_store.resolved_manifest(conn, request.app.state.settings)
     manifest["auto_derived"] = sorted(site_store.AUTO_DERIVED_KEYS)

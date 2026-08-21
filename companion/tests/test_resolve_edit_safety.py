@@ -269,3 +269,171 @@ class TestUndo:
             resolve_journal.latest_session("FF5"))["entries"]
         assert len(resolve_journal.sessions("FF5")) == before
         assert len(entries) == 1
+
+
+def _lock_is_held() -> bool:
+    """Is `_API_LOCK` held by anybody? Asked from ANOTHER thread on purpose.
+
+    _API_LOCK is reentrant, so the thread inside the call would be let
+    straight back in and would always answer "free"; a second thread's
+    non-blocking acquire is the only honest probe.
+    """
+    import threading
+
+    answers: list[bool] = []
+
+    def probe() -> None:
+        acquired = resolve_bridge._API_LOCK.acquire(blocking=False)
+        answers.append(acquired)
+        if acquired:
+            resolve_bridge._API_LOCK.release()
+
+    thread = threading.Thread(target=probe)
+    thread.start()
+    thread.join(10)
+    return bool(answers) and not answers[0]
+
+
+class LockWatchingItem(Item):
+    """Records every fusionscript-side call made with _API_LOCK NOT held.
+
+    The module's invariant (resolve_bridge.py's header): a call into
+    fusionscript.dll made concurrently with another one has faulted
+    0xc0000005 and taken the windowed companion down with no log at all.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.unlocked_calls: list[str] = []
+
+    def _note(self, name: str) -> None:
+        if not _lock_is_held():
+            self.unlocked_calls.append(name)
+
+    def GetName(self):
+        self._note("GetName")
+        return super().GetName()
+
+    def GetClipProperty(self):
+        self._note("GetClipProperty")
+        return super().GetClipProperty()
+
+    def ReplaceClip(self, new_path):
+        self._note("ReplaceClip")
+        return super().ReplaceClip(new_path)
+
+    def LinkProxyMedia(self, path):
+        self._note("LinkProxyMedia")
+        return super().LinkProxyMedia(path)
+
+    def UnlinkProxyMedia(self):
+        self._note("UnlinkProxyMedia")
+        return super().UnlinkProxyMedia()
+
+
+class TestEveryNativeCallIsSerialised:
+    """comp-resolve-3, 2026-08-21: the JOURNAL bookkeeping (GetName, and the
+    proxy path's GetClipProperty) used to run after the locked block closed,
+    on the FIX ALL worker, while the watcher polled under the lock."""
+
+    def test_a_journalled_relink_makes_no_call_outside_the_lock(self, monkeypatch):
+        _connect(monkeypatch, Manager(Project("FF5")))
+        item = LockWatchingItem(r"F:\a.mov")
+
+        assert resolve_bridge.replace_clip(item, r"P:\a.mov", tries=1,
+                                           source="fix-all")["ok"] is True
+        assert item.unlocked_calls == []
+        # ...and the name still reached the journal.
+        entry = resolve_journal.read_session(
+            resolve_journal.latest_session("FF5"))["entries"][0]
+        assert entry["clip"] == "A001"
+
+    def test_a_journalled_proxy_repoint_makes_no_call_outside_the_lock(self, monkeypatch):
+        _connect(monkeypatch, Manager(Project("FF5")))
+        item = LockWatchingItem(r"P:\x\A001.braw", proxy=r"G:\old\A001.mov")
+
+        assert resolve_bridge.link_proxy_media(
+            item, r"P:\x\Proxy\A001.mov", source="auto-proxy-relink")["ok"] is True
+        assert item.unlocked_calls == []
+        entry = resolve_journal.read_session(
+            resolve_journal.latest_session("FF5"))["entries"][0]
+        assert entry["clip"] == "A001"
+        assert entry["clip_path"] == r"P:\x\A001.braw"
+
+    def test_an_unjournalled_relink_makes_no_call_outside_the_lock(self, monkeypatch):
+        # The undo replay's path (journal=False).
+        _connect(monkeypatch, Manager(Project("FF5")))
+        item = LockWatchingItem(r"P:\a.mov")
+        assert resolve_bridge.replace_clip(item, r"F:\a.mov", tries=1,
+                                           journal=False)["ok"] is True
+        assert item.unlocked_calls == []
+
+
+class TestUndoBelongsToTheOpenProject:
+    """comp-resolve-2, 2026-08-21: undo replayed the newest journal of ANY
+    project against whatever was open, matching clips by file path alone --
+    and every project shares the paths under Assets."""
+
+    def _pool(self, monkeypatch, items, project):
+        monkeypatch.setattr(resolve_bridge, "get_media_pool_items", lambda: {
+            "ok": True, "message": "", "project_name": project,
+            "items": [{"file_path": i.path, "clip_name": i.name,
+                       "media_pool_item": i} for i in items],
+        })
+
+    def test_another_projects_journal_never_touches_the_open_project(self, monkeypatch):
+        manager = _connect(monkeypatch, Manager(Project("FF5")))
+        # FF5 canonicalises a shared music bed.
+        bed = Item(r"F:\Creators_Club\Assets\Music\bed.wav", name="bed")
+        resolve_bridge.replace_clip(bed, r"P:\Assets\Music\bed.wav", tries=1,
+                                    source="auto-canonical")
+
+        # The editor opens a DIFFERENT project that uses the same bed, and
+        # presses Undo meaning to revert something there.
+        manager._project = Project("Energy Transition")
+        same_bed = Item(r"P:\Assets\Music\bed.wav", name="bed")
+        self._pool(monkeypatch, [same_bed], project="Energy Transition")
+
+        result = resolve_bridge.undo_last_relink()
+
+        assert result["ok"] is False
+        assert result["undone"] == 0
+        assert same_bed.path == r"P:\Assets\Music\bed.wav"
+        assert "FF5" in result["message"]
+        assert "Energy Transition" in result["message"]
+
+    def test_a_journal_named_explicitly_is_refused_for_the_wrong_project(self, monkeypatch):
+        manager = _connect(monkeypatch, Manager(Project("FF5")))
+        item = Item(r"F:\a.mov")
+        resolve_bridge.replace_clip(item, r"P:\a.mov", tries=1)
+        session = resolve_journal.latest_session("FF5")
+
+        manager._project = Project("Doc 2")
+        shared = Item(r"P:\a.mov")
+        self._pool(monkeypatch, [shared], project="Doc 2")
+
+        result = resolve_bridge.undo_last_relink(session)
+
+        assert result["ok"] is False and result["skipped"] == 1
+        assert shared.path == r"P:\a.mov"
+
+    def test_the_open_projects_own_journal_still_replays(self, monkeypatch):
+        # The guard must not cost the case it exists to protect: two projects
+        # with journals, the open one's is the one that runs.
+        manager = _connect(monkeypatch, Manager(Project("FF5")))
+        resolve_bridge.replace_clip(Item(r"F:\ff5.mov"), r"P:\ff5.mov", tries=1)
+
+        manager._project = Project("Energy Transition")
+        # The bridge caches the project name for 20 s; the editor switching
+        # projects is a slower event than that, so age the cache out rather
+        # than journalling the next edit under the project they left.
+        monkeypatch.setattr(resolve_bridge, "_project_name_cache", None, raising=False)
+        resolve_journal.reset_for_tests()
+        mine = Item(r"F:\et.mov", name="ET1")
+        resolve_bridge.replace_clip(mine, r"P:\et.mov", tries=1)
+        self._pool(monkeypatch, [mine], project="Energy Transition")
+
+        result = resolve_bridge.undo_last_relink()
+
+        assert result["undone"] == 1
+        assert mine.path == r"F:\et.mov"

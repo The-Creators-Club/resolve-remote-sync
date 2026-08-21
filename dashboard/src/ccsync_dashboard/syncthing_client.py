@@ -108,12 +108,24 @@ class SyncthingClient:
         path: str,
         params: dict[str, Any] | None = None,
         json_body: Any = None,
+        timeout: float | None = None,
     ) -> Any:
+        """`timeout` overrides this client's default FOR ONE CALL
+        (ops-efficiency-5, 2026-08-21).
+
+        The collector is one thread issuing ~120 of these in series, so what
+        "unreachable" costs is decided per call, not per client: a Syncthing
+        that HANGS rather than refuses used to spend the default 10 s on every
+        one of them while enforce, connections and the health signal waited
+        behind it. A per-client default cannot express that, because the same
+        client also makes the config/status calls where 10 s is right.
+        """
         url = f"{self.gui_url}{path}"
         try:
             resp = self.session.request(
                 method, url, params=params, json=json_body,
-                headers={"X-API-Key": self.api_key}, timeout=self.timeout,
+                headers={"X-API-Key": self.api_key},
+                timeout=self.timeout if timeout is None else timeout,
             )
         except requests.RequestException as exc:
             raise SyncthingError(f"{method} {path}: {exc}") from exc
@@ -124,8 +136,9 @@ class SyncthingClient:
         except ValueError as exc:
             raise SyncthingError(f"{method} {path}: bad JSON") from exc
 
-    def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
-        return self._request("GET", path, params=params)
+    def _get(self, path: str, params: dict[str, Any] | None = None,
+             timeout: float | None = None) -> Any:
+        return self._request("GET", path, params=params, timeout=timeout)
 
     def ping(self) -> None:
         self._get("/rest/system/ping")
@@ -218,16 +231,20 @@ class SyncthingClient:
         })
         return out if isinstance(out, list) else []
 
-    def db_status(self, folder: str) -> dict[str, Any]:
-        return self._get("/rest/db/status", {"folder": folder})
+    def db_status(self, folder: str, timeout: float | None = None) -> dict[str, Any]:
+        return self._get("/rest/db/status", {"folder": folder}, timeout=timeout)
 
-    def completion(self, folder: str, device: str) -> dict[str, Any]:
-        return self._get("/rest/db/completion", {"folder": folder, "device": device})
+    def completion(self, folder: str, device: str,
+                   timeout: float | None = None) -> dict[str, Any]:
+        return self._get("/rest/db/completion",
+                         {"folder": folder, "device": device}, timeout=timeout)
 
-    def remoteneed(self, folder: str, device: str, page: int, perpage: int) -> dict[str, Any]:
+    def remoteneed(self, folder: str, device: str, page: int, perpage: int,
+                   timeout: float | None = None) -> dict[str, Any]:
         return self._get(
             "/rest/db/remoteneed",
             {"folder": folder, "device": device, "page": page, "perpage": perpage},
+            timeout=timeout,
         )
 
     def add_folder(self, folder_config: dict[str, Any]) -> None:

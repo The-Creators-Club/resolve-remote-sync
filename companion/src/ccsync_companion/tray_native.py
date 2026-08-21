@@ -55,7 +55,7 @@ import logging
 import struct
 import sys
 import threading
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 log = logging.getLogger("ccsync.tray.native")
 
@@ -1162,6 +1162,46 @@ def _darwin_helper_classes():
     return _DARWIN_HELPERS
 
 
+def _darwin_on_main_thread(fn: Callable[[], Any]) -> None:
+    """Run `fn` on the macOS main thread, without waiting for it.
+
+    comp-app-core-2 (2026-08-21). Every AppKit object below is main-thread
+    only, and tray.py drives them from worker threads: _refresh_loop assigns
+    icon.title every 2 s and icon.menu on every fingerprint change,
+    _pulse_loop assigns icon.icon up to 8x every 3 s. pystray's darwin
+    backend wrapped exactly these three in a mainthread decorator and this
+    rewrite dropped it, so the tray has been calling setImage_/setToolTip_/
+    setMenu_ off-thread on every Mac: Main Thread Checker territory, and in
+    practice intermittent menu-bar corruption or a crash inside AppKit with
+    no Python traceback. Rebinding the menu while the user has it open is the
+    worst of it -- the NSMenu they are tracking is replaced under them.
+
+    ASYNC, not ui_dispatch.dispatch(): dispatch blocks the caller until the
+    main thread pumps it, and that pump parks inside a modal dialog's tkwait
+    (MAC-11) -- a tray refresh thread must never be able to wait on an open
+    window. The main queue is drained by the same runloop Tk-Aqua is already
+    spinning, and it preserves order, so the pulse's frames still arrive in
+    the order they were produced.
+
+    Falls back to running `fn` inline if the hop itself is unavailable: a
+    tray that draws from the wrong thread is what we have today, and it beats
+    a tray that stops drawing.
+    """
+    try:
+        from Foundation import NSOperationQueue, NSThread
+
+        if NSThread.isMainThread():
+            fn()
+            return
+        NSOperationQueue.mainQueue().addOperationWithBlock_(fn)
+    except Exception:
+        log.debug("tray: could not marshal to the main thread", exc_info=True)
+        try:
+            fn()
+        except Exception:
+            log.debug("tray: the un-marshalled update failed too", exc_info=True)
+
+
 class _DarwinIcon:
     """The menu-bar item on macOS, via NSStatusBar/NSStatusItem/NSMenu.
 
@@ -1187,6 +1227,10 @@ class _DarwinIcon:
         self._delegate = None
         self._targets: list = []
         self._stopped = threading.Event()
+        # The main-thread hop, per instance so a test can hold it
+        # (comp-app-core-2, 2026-08-21). Assigned before anything can call
+        # __setattr__'s `menu` branch below.
+        self._to_main = _darwin_on_main_thread
 
     @property
     def icon(self):
@@ -1204,6 +1248,9 @@ class _DarwinIcon:
     @title.setter
     def title(self, value: str) -> None:
         self._title = value or ""
+        self._to_main(self._apply_title)
+
+    def _apply_title(self) -> None:
         try:
             button = self._status_item.button() if self._status_item else None
             if button is not None:
@@ -1282,6 +1329,9 @@ class _DarwinIcon:
         return image
 
     def _apply_image(self) -> None:
+        self._to_main(self._apply_image_now)
+
+    def _apply_image_now(self) -> None:
         try:
             if self._status_item is None:
                 return
@@ -1292,6 +1342,9 @@ class _DarwinIcon:
             log.debug("could not set the menu bar image", exc_info=True)
 
     def _apply_menu(self) -> None:
+        self._to_main(self._apply_menu_now)
+
+    def _apply_menu_now(self) -> None:
         try:
             if self._status_item is None:
                 return

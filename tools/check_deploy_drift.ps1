@@ -550,6 +550,24 @@ if ($AdminUser -and $DashboardUrl) {
                 else { Write-Drift "the current package's exe is NOT Authenticode-signed -- fresh installs meet SmartScreen (docs/RELEASE.md 'Code signing')" }
             }
 
+            # ...and the OTHER artefact, which is the one a FRESH INSTALL
+            # actually double-clicks (installer-onboard-tools-1, 2026-08-21).
+            # This doctor reported only the companion row, so an operator who
+            # had bought a certificate could see "Authenticode-signed" here
+            # while every new editor downloading [ INSTALLER ] still met
+            # "Windows protected your PC".
+            $curOnboard = $pkgs.packages | Where-Object {
+                $_.platform -eq "windows" -and $_.kind -eq "onboard" -and $_.is_current
+            } | Select-Object -First 1
+            if ($curOnboard) {
+                Write-Row "current windows installer" "v$($curOnboard.version) (kind=onboard)"
+                if ("$($curOnboard.signed_binary)" -eq "True") { Write-Ok "the current installer (onboard.exe) is Authenticode-signed" }
+                else { Write-Drift "the current installer (onboard.exe) is NOT Authenticode-signed -- this is the binary a FRESH INSTALL runs, so every new editor meets SmartScreen (docs/RELEASE.md 'Code signing')" }
+            }
+            else {
+                Write-Unknown "no current windows installer (kind=onboard) published -- the dashboard's [ INSTALLER ] download has nothing to serve"
+            }
+
             # macOS, same rows. The Mac binary is built by tools/release_macos.sh
             # ON A MAC (PyInstaller does not cross-compile), so nothing that runs
             # on this rig can keep this channel current -- which is exactly why it

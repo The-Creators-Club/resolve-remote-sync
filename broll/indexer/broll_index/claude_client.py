@@ -157,17 +157,42 @@ def is_rate_limited(message: str) -> bool:
     return any(p.search(lowered) for p in _RATE_LIMIT_PATTERNS)
 
 
+# A 400 invalid_request_error is USUALLY about this clip -- an image the API
+# will not take, a prompt over the context window -- and belongs on that
+# clip's row. These substrings are the exception: they name a request
+# parameter this module sends on EVERY call, identical every time, so the next
+# 2,000 clips fail identically and the queue is drained one 'error' at a time
+# over what is a line in config.yaml (broll-2, 2026-08-21: `model: fable` with
+# the default `thinking: disabled` did exactly that). Keep the list to
+# parameters we always send; anything clip-shaped must stay per-video.
+_BAD_CONFIG_400_MARKERS = (
+    "thinking",
+    "max_tokens",
+)
+
+
+def is_config_api_error(message: str) -> bool:
+    """True for a 400 that every remaining call will get too (see above)."""
+    lowered = message.lower()
+    if "invalid_request_error" not in lowered and "error 400" not in lowered:
+        return False
+    return any(marker in lowered for marker in _BAD_CONFIG_400_MARKERS)
+
+
 def is_fatal_api_error(message: str) -> bool:
     """True when continuing the run is pointless — stop rather than fail each video.
 
-    Covers both permanent problems (credit, auth) and account-wide temporary
-    ones (rate/session limits). The distinction that matters here is not
+    Covers permanent problems (credit, auth), account-wide temporary ones
+    (rate/session limits), and a request this config can only build wrong
+    (is_config_api_error). The distinction that matters here is not
     permanent-vs-temporary but per-video-vs-account-wide: anything account-wide
     will fail every remaining video identically, so the queue must be left
     untouched for a later resume.
     """
     lowered = message.lower()
-    return any(marker in lowered for marker in _FATAL_MARKERS) or is_rate_limited(message)
+    return (any(marker in lowered for marker in _FATAL_MARKERS)
+            or is_rate_limited(message)
+            or is_config_api_error(message))
 
 
 def extract_reset_hint(message: str) -> str | None:
@@ -510,12 +535,25 @@ def _call_with_retry(client: Any, kwargs: dict[str, Any], settings: Any,
         f"(gave up after {max_retries} retries)")
 
 
-def _thinking_param(settings: Any) -> dict[str, str] | None:
+# Models whose thinking is ALWAYS ON. They reject an explicit
+# {"type": "disabled"} with a 400 invalid_request_error; omitting the key is
+# the accepted way to ask for no budget of our own. Deliberately a per-model
+# exception rather than "never send disabled at all", because omitting it does
+# not mean the same thing everywhere: on Sonnet 5 and Opus 5 an absent
+# `thinking` runs adaptive (billed thinking tokens on every one of tens of
+# thousands of calls), while on the Opus 4.x family it means no thinking.
+# `anthropic.model: fable` with the default thinking used to 400 on every
+# call, and a 400 is classified per-video -- so one config line marked a whole
+# 2,000-clip queue 'error' (broll-2, 2026-08-21).
+THINKING_ALWAYS_ON = frozenset({"claude-fable-5", "claude-mythos-5"})
+
+
+def _thinking_param(settings: Any, model: str = "") -> dict[str, str] | None:
     mode = (getattr(settings, "thinking", "disabled") or "disabled").lower()
     if mode in ("adaptive", "on", "true"):
         return {"type": "adaptive"}
     if mode in ("disabled", "off", "false", "none"):
-        return {"type": "disabled"}
+        return None if resolve_model(model) in THINKING_ALWAYS_ON else {"type": "disabled"}
     raise ValueError(f"anthropic.thinking must be 'adaptive' or 'disabled', got {mode!r}")
 
 
@@ -600,7 +638,7 @@ def invoke_claude(
         "max_tokens": int(getattr(settings, "max_tokens", 8000)),
         "messages": [{"role": "user", "content": build_message_content(prompt, images)}],
     }
-    thinking = _thinking_param(settings)
+    thinking = _thinking_param(settings, resolved_model)
     if thinking is not None:
         kwargs["thinking"] = thinking
 

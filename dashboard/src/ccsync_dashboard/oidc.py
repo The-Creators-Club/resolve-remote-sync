@@ -272,6 +272,86 @@ def username_from_claims(settings: Settings, claims: dict[str, Any]) -> str:
     return username
 
 
+def in_allowed_group(settings: Settings, claims: dict[str, Any]) -> bool:
+    """Does this id_token carry one of DASH_OIDC_ALLOWED_GROUPS?
+
+    False when no allow-list is configured: an empty list is "not configured",
+    never "everybody" (trust-model-5, 2026-08-21)."""
+    if not settings.oidc_allowed_groups or not settings.oidc_groups_claim:
+        return False
+    value = claims.get(settings.oidc_groups_claim)
+    values = value if isinstance(value, (list, tuple, set)) else [value]
+    return any(str(v).strip().lower() in settings.oidc_allowed_groups for v in values if v)
+
+
+def require_fleet_member(settings: Settings, username: str, claims: dict[str, Any]) -> None:
+    """Refuse an IdP account that is not part of THIS fleet (trust-model-5,
+    2026-08-21).
+
+    The password path has done this since 2026-08-17 (api._require_fleet_member,
+    the `editors` group on the NAS); OIDC did not, and it maps the username
+    claim straight onto an editor identity -- so every account in a customer's
+    directory could sign in, and one whose preferred_username equals an
+    existing editor's name inherited that editor's selections, ticks, device
+    approvals and client-folder panel.
+
+    Four ways to be a member, any one is enough: DASH_ADMIN_USERS, the admin
+    claim mapping, DASH_OIDC_ALLOWED_GROUPS, or a username the dashboard has
+    a positive record of (db.known_editor_usernames -- ticked, reported,
+    known_editors, or a local account).
+
+    Degrades the way api._require_fleet_member does: a fleet the dashboard
+    knows NOTHING about yet (a first boot, or a database it cannot open) has
+    nothing to check against, so the check is skipped and logged rather than
+    locking the operator out of their own dashboard on day one."""
+    if auth.is_admin(settings, username) or is_admin_by_claims(settings, claims):
+        return
+    if in_allowed_group(settings, claims):
+        return
+    if settings.oidc_allowed_groups:
+        log.warning("OIDC: %r carries no %r value from DASH_OIDC_ALLOWED_GROUPS",
+                    username, settings.oidc_groups_claim)
+        raise HTTPException(
+            status_code=403,
+            detail="this account is not a member of the group allowed to use this "
+                   "dashboard - ask your admin",
+        )
+    known = _known_usernames(settings)
+    if known is None or not known:
+        log.warning(
+            "OIDC: letting %r in without a fleet-membership check -- this dashboard has "
+            "no editors on record yet. Set DASH_OIDC_ALLOWED_GROUPS to have the IdP "
+            "decide instead.", username)
+        return
+    if username not in known:
+        log.warning("OIDC: refusing %r -- not an editor this fleet knows", username)
+        raise HTTPException(
+            status_code=403,
+            detail="this account is not part of this fleet - ask your admin to add it",
+        )
+
+
+def _known_usernames(settings: Settings) -> set[str] | None:
+    """Every username this dashboard has a positive record of, or None when
+    the database cannot be opened at all. Its own short-lived connection: the
+    OIDC callback runs before any route has opened one, exactly as
+    auth._open_local_conn does for the local-accounts checks."""
+    from . import db
+
+    try:
+        conn = db.connect(settings.db_path)
+    except Exception:  # noqa: BLE001
+        log.exception("OIDC: could not open %s to check fleet membership", settings.db_path)
+        return None
+    try:
+        return {u.strip().lower() for u in db.known_editor_usernames(conn)}
+    except Exception:  # noqa: BLE001
+        log.exception("OIDC: fleet-membership lookup failed")
+        return None
+    finally:
+        conn.close()
+
+
 def is_admin_by_claims(settings: Settings, claims: dict[str, Any]) -> bool:
     """DASH_ADMIN_USERS always wins; the claim mapping is additive. That way
     losing the IdP's group mapping never silently demotes the operator."""
@@ -368,6 +448,11 @@ async def oidc_callback(request: Request):
         raise HTTPException(
             status_code=403, detail="the identity provider's answer could not be verified"
         ) from exc
+
+    # WHO the IdP says you are is settled; whether this fleet knows you is a
+    # separate question, and one the password path has always asked
+    # (trust-model-5, 2026-08-21). Raises 403 before any session exists.
+    await run_in_threadpool(require_fleet_member, settings, username, claims)
 
     response = RedirectResponse(_safe_next(str(flow.get("next") or "/")), status_code=303)
     auth.start_session(request, response, username)

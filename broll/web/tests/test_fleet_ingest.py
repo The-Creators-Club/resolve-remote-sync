@@ -590,6 +590,59 @@ def test_a_clip_goes_live_only_once_the_server_has_stat_ed_the_files(
     assert ingest_batches.get_batch(conn, uid)["n_live"] == 1
 
 
+def test_a_clip_with_no_description_cannot_go_live(client, conn, data_root):
+    """CR-54's server-side twin (comp-loopback-4, CR-67 item 10, 2026-08-21).
+
+    A `/result` this route refused used to be a log line on the companion and
+    nothing else: the clip was uploaded anyway and went LIVE with no segments,
+    no themes and no category -- unfindable by keyword or vector search, and
+    never re-described. The companion now fails such an item; this side owns
+    `videos.status`, so it refuses too, with the same 409 the missing-files
+    branch answers because it means the same thing: not finished yet.
+    """
+    uid = _queue(client)
+    manifest = _claim(client, uid).json()["items"][0]
+    proxy = "Creators_Club/E2E/Proxy/A000.mp4"
+    _stage(data_root, proxy, 100)
+    r = client.post(f"{BASE}/{uid}/items/{manifest['uid']}/uploaded",
+                    json={"files": [{"rel": proxy, "size": 100}]},
+                    headers=fleet_headers())
+    assert r.status_code == 409
+    assert r.json()["detail"]["reason"] == "no_result"
+    assert conn.execute("SELECT status FROM videos WHERE id = ?",
+                        (manifest["video_id"],)).fetchone()["status"] == "ingesting"
+    assert ingest_batches.get_item(conn, uid, manifest["uid"])["state"] != "live"
+
+    # ...and the same call, once the description exists, goes through: this is
+    # a gate on the missing result, never on the upload.
+    client.post(f"{BASE}/{uid}/items/{manifest['uid']}/result",
+                json=_result_body(), headers=fleet_headers())
+    r = client.post(f"{BASE}/{uid}/items/{manifest['uid']}/uploaded",
+                    json={"files": [{"rel": proxy, "size": 100}]},
+                    headers=fleet_headers())
+    assert r.status_code == 200, r.text
+    assert conn.execute("SELECT status FROM videos WHERE id = ?",
+                        (manifest["video_id"],)).fetchone()["status"] == "indexed"
+
+
+def test_an_empty_description_is_refused_the_same_way(client, conn, data_root):
+    """A result whose `segments` list is EMPTY is not a described clip. The
+    schema allows one (the model can come back with nothing), and before this
+    that answer put a permanently unfindable row in the archive."""
+    uid = _queue(client)
+    manifest = _claim(client, uid).json()["items"][0]
+    proxy = "Creators_Club/E2E/Proxy/A000.mp4"
+    _stage(data_root, proxy, 100)
+    ok = client.post(f"{BASE}/{uid}/items/{manifest['uid']}/result",
+                     json=_result_body(segments=[]), headers=fleet_headers())
+    assert ok.status_code == 200, ok.text
+    r = client.post(f"{BASE}/{uid}/items/{manifest['uid']}/uploaded",
+                    json={"files": [{"rel": proxy, "size": 100}]},
+                    headers=fleet_headers())
+    assert r.status_code == 409
+    assert r.json()["detail"]["reason"] == "no_result"
+
+
 def test_a_missing_file_is_409_with_the_list_to_send_again(client, conn, data_root):
     """Which is what lets an interrupted rclone resume instead of restarting
     the clip."""
@@ -701,8 +754,15 @@ def test_a_cancelled_release_deletes_the_rows_that_never_got_media(
     manifest = _claim(client, uid).json()["items"]
     proxy = "Creators_Club/E2E/Proxy/A.mp4"
     _stage(data_root, proxy, 7)
-    client.post(f"{BASE}/{uid}/items/{manifest[0]['uid']}/uploaded",
-                json={"files": [{"rel": proxy, "size": 7}]}, headers=fleet_headers())
+    # The result comes first because a clip with no segments can no longer go
+    # live (CR-54's server-side twin, 2026-08-21): what this test is about is
+    # what a CANCEL does to a row that made it, so it has to make it.
+    client.post(f"{BASE}/{uid}/items/{manifest[0]['uid']}/result",
+                json=_result_body(), headers=fleet_headers())
+    r0 = client.post(f"{BASE}/{uid}/items/{manifest[0]['uid']}/uploaded",
+                     json={"files": [{"rel": proxy, "size": 7}]},
+                     headers=fleet_headers())
+    assert r0.status_code == 200, r0.text
 
     ingest_batches.cancel(conn, uid, "root")
     r = client.post(f"{BASE}/{uid}/release", json={"state": "cancelled"},

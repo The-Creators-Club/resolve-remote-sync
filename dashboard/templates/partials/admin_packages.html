@@ -178,6 +178,21 @@
       <div class="muted">nothing new: the fleet's packages already cover everything the vendor feed offers</div>
     {% endif %}
 
+    {# Same version, different bytes (release-pipeline-6, 2026-08-21). Every
+       other surface in this product - drift tooling, the table above, a
+       companion's report - speaks only in version numbers, so a version that
+       stands for two different binaries is invisible unless it is said out
+       loud here. #}
+    {% for c in feed.sha_conflicts or [] %}
+      <div class="muted" style="margin-top:0.6rem">
+        <span class="chip red">[ SAME VERSION, DIFFERENT BYTES ]</span>
+        <span class="mono-sm">{{ c.kind }} {{ c.version }} {{ c.platform }}</span>:
+        published here as <span class="mono-sm">{{ c.published_sha256[:12] }}</span>,
+        the vendor feed now offers <span class="mono-sm">{{ c.feed_sha256[:12] }}</span>.
+        Nothing was replaced. Ask the vendor to publish it under a new version number.
+      </div>
+    {% endfor %}
+
     {% if feed.image.tag %}
       {% if nas_kind == "synology" %}
         {% set nas_hint = "Container Manager → Project ccsync → Build" %}

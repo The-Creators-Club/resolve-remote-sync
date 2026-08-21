@@ -1234,10 +1234,19 @@ def test_a_rollback_at_or_above_the_floor_is_still_offered(tmp_path):
 
 def test_the_floor_file_lives_beside_the_config_not_in_state(tmp_path, monkeypatch):
     """Documented location: ~/.ccsync/upgrade_floor.json. state/ is lane
-    scratch that anything may delete; the floor may not be."""
+    scratch that anything may delete; the floor may not be.
+
+    ...and it does not follow `log_path` (comp-app-core-5, 2026-08-21): it
+    used to, so on a machine whose log had been redirected to a second drive
+    the deletion docs/RELEASE.md prescribes removed nothing, and editing
+    log_path silently reset a floor that only ever goes up. Compared, never
+    written -- monkeypatch.undo() below drops conftest's CONFIG_DIR
+    redirection with the autouse floor_path patch."""
     monkeypatch.undo()   # drop the autouse floor_path patch for this one
     cfg = {"log_path": str(tmp_path / "logs" / "companion.log")}
-    assert upgrade_mod.floor_path(cfg) == tmp_path / "logs" / "upgrade_floor.json"
+    expected = config_mod.CONFIG_DIR / upgrade_mod.FLOOR_FILENAME
+    assert upgrade_mod.floor_path(cfg) == expected
+    assert upgrade_mod.floor_path({}) == expected
 
 
 # -- transport ----------------------------------------------------------

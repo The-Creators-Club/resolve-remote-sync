@@ -284,6 +284,15 @@ EXAMPLE_COMMENTED_OUT = {
 # not a setting (2026-08-17, COMMERCIAL_READINESS.md item 5).
 EXAMPLE_ESCAPE_HATCHES = {"loopback_extra_origins", "loopback_dev_origins"}
 
+# Documented in config.example.toml, read straight off cfg by a subsystem that
+# carries its own default, and NOT in config.py's DEFAULTS. Unlike the escape
+# hatches above these are ordinary settings -- they are simply owned by the
+# module that reads them (sequencer.py's coerce_count call and
+# DEFAULT_LANE_C_SETTLE_SECONDS), so DEFAULTS would be a second place for the
+# number to drift. Documenting them is still required: a key that only the
+# source mentions is not a setting (CR-62, CR-67 item 12, 2026-08-21).
+EXAMPLE_MODULE_OWNED_KEYS = {"lane_c_settle_seconds"}
+
 
 def _example_toml_text() -> str:
     from pathlib import Path
@@ -310,8 +319,30 @@ def test_config_example_invents_no_keys_the_code_does_not_read():
     a setting an editor can write, restart for, and watch do nothing."""
     text = _example_toml_text()
     assignments = set(re.findall(r"^#?\s*([a-z_][a-z0-9_]*) = ", text, re.MULTILINE))
-    unknown = sorted(assignments - set(config_mod.DEFAULTS) - EXAMPLE_ESCAPE_HATCHES)
+    unknown = sorted(assignments - set(config_mod.DEFAULTS) - EXAMPLE_ESCAPE_HATCHES
+                     - EXAMPLE_MODULE_OWNED_KEYS)
     assert unknown == [], f"config.example.toml documents keys nothing reads: {unknown}"
+
+
+def test_the_module_owned_keys_are_documented_and_actually_read():
+    """The deal for a key whose default lives in its own module: the example
+    file documents it (CR-62/CR-67 item 12 -- lane_c_settle_seconds shipped
+    undocumented, so the one knob that stops a project's turn parking the
+    sequencer for ten minutes was invisible to the operator), and something
+    in the tree really reads it."""
+    from pathlib import Path
+
+    text = _example_toml_text()
+    src = Path(config_mod.__file__).resolve().parent
+    for key in EXAMPLE_MODULE_OWNED_KEYS:
+        assert key not in config_mod.DEFAULTS, (
+            f"{key} is now a DEFAULTS key -- drop it from EXAMPLE_MODULE_OWNED_KEYS"
+        )
+        assert re.search(rf"^{re.escape(key)} = ", text, re.MULTILINE), \
+            f"config.example.toml never documents {key}"
+        readers = [p for p in src.rglob("*.py")
+                   if f'"{key}"' in p.read_text(encoding="utf-8")]
+        assert readers, f"nothing in ccsync_companion reads {key}"
 
 
 def test_the_loopback_escape_hatches_are_documented_but_never_defaults():
@@ -383,7 +414,7 @@ def test_config_example_parses_as_toml_and_loads():
 
     data = tomllib.loads(_example_toml_text())
     assert data["local_root"]
-    assert set(data) <= set(config_mod.DEFAULTS)
+    assert set(data) <= set(config_mod.DEFAULTS) | EXAMPLE_MODULE_OWNED_KEYS
 
 
 def _good_cfg(tmp_path, **overrides):

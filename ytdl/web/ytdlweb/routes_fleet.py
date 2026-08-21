@@ -44,7 +44,8 @@ import os
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
-from ytdlweb import attestation, config, db, identity, worker, ytdl_common
+from ytdlweb import (attestation, config, db, identity, projects, worker,
+                     ytdl_common)
 from ytdlweb.db import con
 from ytdlweb.vendor import ytsearch
 
@@ -70,8 +71,72 @@ def token_ok(configured, presented):
         return False
 
 
-def require_fleet_token(x_ccsync_token: str | None = Header(default=None)) -> None:
+# ------------------------------------------------- the mounted gate's verdict
+# TWO CREDENTIALS REACH THESE ROUTES, not one (ytdl-web-1, 2026-08-21). The
+# shared DASH_REPORT_TOKEN below is the one every companion holds today; the
+# other is a per-editor `cce1.<id>.<secret>` the dashboard mints on Admin >
+# Users, stored hashed and BOUND to one editor (COMMERCIAL_READINESS.md item
+# 15, KNOWN_BUGS CR-18). Only the dashboard can check the second -- its hash is
+# in the dashboard's database, which this app opens READ-ONLY and only for
+# selections -- so when we are mounted the dashboard's gate resolves the token
+# for us and STAMPS the answer into this header. An editor whose admin has
+# minted them a cce1 token sends it on every claim/heartbeat/status POST
+# (companion identity.py puts preferred_report_token into `dashboard_token`),
+# so without this every one of those calls 403'd here while sailing through the
+# dashboard's own gate: requester-first downloads stopped for that editor, with
+# nothing but a stand-down line to say so.
+#
+# THE STAMP IS ONLY EVER BELIEVED WHEN THE MOUNT INSTALLED IT. The gate strips
+# any inbound copy before appending its own (ccsync_dashboard/ytdl.py), so a
+# stamp that arrives while `trust_gate_stamp` has been called came from the
+# gate; standalone -- the dev server, this suite -- nothing calls it and the
+# header decides nothing, because there would be no gate stripping a forged
+# one.
+STAMP_HEADER = 'X-CCSync-Fleet-Auth'
+STAMP_SHARED = 'shared'
+STAMP_EDITOR_PREFIX = 'editor:'
+
+_trust_stamp = False
+
+
+def trust_gate_stamp(enabled=True):
+    """Believe `X-CCSync-Fleet-Auth` from here on. -> the new setting.
+
+    Called by ccsync_dashboard.ytdl.mount_ytdl, the way ai_backend's
+    set_provider_lookup is: a module global rather than app state, because the
+    thing that reads it is a request handler with no app object in hand, and
+    because an older dashboard that does not call it must keep working (it
+    simply goes on comparing the shared token, which is what it sends).
+    """
+    global _trust_stamp
+    _trust_stamp = bool(enabled)
+    return _trust_stamp
+
+
+def gate_stamp(value):
+    """-> (kind, editor): ('editor', name), ('shared', None) or (None, None).
+
+    Anything unparseable is (None, None) and falls through to the shared-token
+    comparison, so a stamp this build does not understand is never an opening.
+    """
+    if not _trust_stamp:
+        return None, None
+    raw = str(value or '').strip()
+    if raw == STAMP_SHARED:
+        return STAMP_SHARED, None
+    if raw.startswith(STAMP_EDITOR_PREFIX):
+        editor = raw[len(STAMP_EDITOR_PREFIX):].strip()
+        if editor:
+            return 'editor', editor
+    return None, None
+
+
+def require_fleet_token(x_ccsync_token: str | None = Header(default=None),
+                        x_ccsync_fleet_auth: str | None = Header(default=None)):
     """FAIL CLOSED. An unconfigured token means 403, never "open in dev".
+
+    -> the editor a per-editor token is BOUND to, or None for the shared one
+    (which identifies nobody, which is why X-CCSync-Identity exists beside it).
 
     The b-roll ingest gate allows an unset token as a dev mode; this one must
     not, and the difference is what the endpoints do: b-roll's ingest writes
@@ -79,9 +144,37 @@ def require_fleet_token(x_ccsync_token: str | None = Header(default=None)) -> No
     URLs to fetch and a folder in the canonical project tree to write them to.
     A deployment that lost its DASH_REPORT_TOKEN should lose local downloads --
     which costs nothing, because the server worker downloads everything anyway.
+    That refusal is unchanged: the stamp above is only reachable when the
+    dashboard's gate accepted a credential of its own.
     """
+    kind, editor = gate_stamp(x_ccsync_fleet_auth)
+    if kind == 'editor':
+        return editor
+    if kind == STAMP_SHARED:
+        return None
     if not token_ok(config.REPORT_TOKEN, x_ccsync_token or ''):
         raise HTTPException(403, 'missing or invalid X-CCSync-Token')
+    return None
+
+
+def require_fleet_caller(x_ccsync_token, x_ccsync_identity, x_ccsync_fleet_auth):
+    """Both gates, in the order they fail closed. -> the VERIFIED editor.
+
+    A per-editor token proves WHICH machine's editor is calling, and the signed
+    identity header proves whose name the call acts under. When both are
+    present they must agree: a cce1 token belonging to one editor may not carry
+    another editor's identity, or the migration to bound tokens would be a
+    weaker check than the one it replaced (ytdl-web-1, 2026-08-21).
+    """
+    bound = require_fleet_token(x_ccsync_token, x_ccsync_fleet_auth)
+    editor = require_identity(x_ccsync_identity)
+    if bound is not None and bound != editor:
+        log.warning('fleet call refused: the report token is bound to %r but '
+                    'the identity header says %r', bound, editor)
+        raise HTTPException(403, {
+            'detail': 'this report token belongs to a different editor',
+            'reason': 'identity_mismatch'})
+    return editor
 
 
 def _job_or_404(c, job_id):
@@ -186,6 +279,18 @@ class ClaimIn(BaseModel):
     # older companion's body still parses -- dropping the field would turn a
     # security fix into a 422 for every machine that has not upgraded.
     editor: str = ''
+    # WHICH COMPUTER is claiming (data-model-7, CR-66/CR-67, 2026-08-21). The
+    # companion-minted machine_id from `~/.ccsync/machine.json` -- the same id
+    # the fleet report sends and the dashboard's `machines` registry keys on,
+    # deliberately not the hostname, which an editor can change in ten seconds.
+    #
+    # NOT an identity claim and it does not have to be: the signed
+    # X-CCSync-Identity already decides WHOSE job this is, and this only
+    # separates one editor's two computers from each other. Empty is a
+    # companion older than this field, and the lease then behaves per-editor
+    # exactly as it did before (db.claim_download), which is what lets this
+    # ship before the companion half does.
+    machine_id: str = ''
     # yt-dlp's own YYYY.MM.DD, straight out of `yt-dlp --version`. Compared as
     # a string (config.MIN_YTDLP_VERSION says why that is exact).
     ytdlp_version: str = ''
@@ -244,10 +349,33 @@ def _version_at_least(reported, minimum):
     return floor is None or theirs >= floor
 
 
+def _already_downloading(job):
+    """The 409's sentence: who holds this lease, and on which computer.
+
+    Naming the machine is the point (data-model-7, CR-66, 2026-08-21): the
+    refused claim is now most often the SAME editor's second computer, and
+    "sam is already downloading this job" reads as a bug to the person whose
+    own name that is. The hostname comes from the dashboard's `machines`
+    registry rather than from any request body (projects.machine_label says
+    why), and when nothing can name it the id is still better than nothing --
+    it is what the companion log on the other machine prints.
+
+    No em dash: this string reaches an editor through the companion's log and
+    the SPA's toast (CLAUDE.md, 2026-08-18).
+    """
+    holder = str(job['claimed_by'] or 'another machine')
+    machine = db.claimed_machine_of(job)
+    if not machine:
+        return f'{holder} is already downloading this job'
+    where = projects.machine_label(holder, machine) or f'machine {machine}'
+    return f'{holder} is already downloading this job on {where}'
+
+
 @router.post('/api/jobs/{job_id}/claim')
 def claim(job_id: int, body: ClaimIn,
           x_ccsync_token: str | None = Header(default=None),
-          x_ccsync_identity: str | None = Header(default=None)):
+          x_ccsync_identity: str | None = Header(default=None),
+          x_ccsync_fleet_auth: str | None = Header(default=None)):
     """Take the lease on a job's downloads. The compare-and-set of plan §3.
 
     200 = it is yours, start downloading. Everything else is "do not", and the
@@ -258,8 +386,9 @@ def claim(job_id: int, body: ClaimIn,
       403  the caller's yt-dlp is older than the fleet minimum. The body
            carries the number so the companion can self-update and be right
            next time (§6).
-      409  somebody else holds a live lease -- two tabs, two editors, or one
-           editor on two machines.
+      409  somebody else holds a live lease -- two tabs, two editors, or (since
+           the lease learned about machine_id: data-model-7, CR-66,
+           2026-08-21) one editor's OTHER computer, which the body names.
       410  not claimable: the job is not in the download phase, the editor
            cancelled it, the editor (or a previous reclaim) pinned it to the
            server, the vendored naming/sidecar contract does not match this
@@ -267,12 +396,12 @@ def claim(job_id: int, body: ClaimIn,
            skew degrades to server-side execution, NEVER to divergent files
            (§5).
     """
-    require_fleet_token(x_ccsync_token)
     # THE VERIFIED name, not body.editor (H5, 2026-08-17). The body field is
     # still accepted so an older companion's request parses; it decides
     # nothing, because a lease holder that a signature does not vouch for is
     # the hole this route had.
-    editor = require_identity(x_ccsync_identity)
+    editor = require_fleet_caller(x_ccsync_token, x_ccsync_identity,
+                                  x_ccsync_fleet_auth)
 
     c = con()
     job = _job_or_404(c, job_id)
@@ -344,20 +473,32 @@ def claim(job_id: int, body: ClaimIn,
             'reason': 'ytdlp_version',
             'min_ytdlp_version': config.MIN_YTDLP_VERSION})
 
-    if not db.claim_download(c, job_id, editor, config.LEASE_SECONDS):
+    # The CLAIMANT'S OWN MACHINE, not an identity (data-model-7, CR-66,
+    # 2026-08-21). It narrows the refresh rule from the person to the computer;
+    # an empty one is an older companion and keeps the per-editor behaviour.
+    machine = str(body.machine_id or '').strip()
+    if not db.claim_download(c, job_id, editor, config.LEASE_SECONDS,
+                             machine=machine):
         # The CAS refused. Re-read rather than guess why: between the checks
         # above and the UPDATE, another companion's claim can land.
         fresh = db.get_job(c, job_id)
-        if db.lease_active(fresh) and fresh['claimed_by'] != editor:
+        if db.lease_active(fresh) and not db.lease_held_by(fresh, editor, machine):
+            # Two editors, two tabs -- or, since 2026-08-21, ONE editor's other
+            # computer, which used to sail through as a refresh and download
+            # the same clips into a second tree. The detail names the machine
+            # holding it, because "you already have this" is not actionable
+            # when the editor is sitting at the other one.
             raise HTTPException(409, {
-                'detail': f'{fresh["claimed_by"]} is already downloading this job',
+                'detail': _already_downloading(fresh),
                 'claimed_by': fresh['claimed_by'],
+                'claimed_machine': db.claimed_machine_of(fresh),
                 'lease_expires_at': fresh['lease_expires_at']})
         raise HTTPException(410, {
             'detail': 'this job is no longer claimable',
             'phase': fresh['phase'] if fresh else None, 'reason': 'race'})
 
-    log.info('job %s: claimed by %s (yt-dlp %s, %s free)', job_id, editor,
+    log.info('job %s: claimed by %s on %s (yt-dlp %s, %s free)', job_id, editor,
+             machine or 'a machine that does not say which',
              body.ytdlp_version, body.free_bytes)
     return {
         'ok': True,
@@ -374,15 +515,16 @@ class HeartbeatIn(BaseModel):
 @router.post('/api/jobs/{job_id}/heartbeat')
 def heartbeat(job_id: int, body: HeartbeatIn,
               x_ccsync_token: str | None = Header(default=None),
-              x_ccsync_identity: str | None = Header(default=None)):
+              x_ccsync_identity: str | None = Header(default=None),
+              x_ccsync_fleet_auth: str | None = Header(default=None)):
     """Keep the lease alive. Every YTDL_HEARTBEAT_SECONDS while downloading.
 
     410 means the lease is gone and the server has (or is about to have) the
     job back -- the companion stops there rather than finishing a download
     nobody will record (§3).
     """
-    require_fleet_token(x_ccsync_token)
-    editor = require_identity(x_ccsync_identity)
+    editor = require_fleet_caller(x_ccsync_token, x_ccsync_identity,
+                                  x_ccsync_fleet_auth)
     c = con()
     job = _leaseholder_or_410(c, job_id, editor)
     if not db.heartbeat_download(c, job_id, job['claimed_by'], config.LEASE_SECONDS):
@@ -400,7 +542,8 @@ def heartbeat(job_id: int, body: HeartbeatIn,
 @router.get('/api/jobs/{job_id}/download-manifest')
 def download_manifest(job_id: int,
                       x_ccsync_token: str | None = Header(default=None),
-                      x_ccsync_identity: str | None = Header(default=None)):
+                      x_ccsync_identity: str | None = Header(default=None),
+                      x_ccsync_fleet_auth: str | None = Header(default=None)):
     """The work order: what to download, where it goes, under which contract.
 
     Leaseholder only. Everything the local executor acts on is in here and
@@ -429,9 +572,9 @@ def download_manifest(job_id: int,
     shares a process with the fleet status page, and unlike the worker (whose
     clips are 3 s apart anyway) it has the whole list in hand at once.
     """
-    require_fleet_token(x_ccsync_token)
     c = con()
-    job = _leaseholder_or_410(c, job_id, require_identity(x_ccsync_identity))
+    job = _leaseholder_or_410(c, job_id, require_fleet_caller(
+        x_ccsync_token, x_ccsync_identity, x_ccsync_fleet_auth))
     rel_dir = '/'.join(p for p in (job['project_label'], db.YOUTUBE_DIR,
                                    job['term_dir']) if p)
     clips = _still_owed(c, job)
@@ -511,7 +654,8 @@ class ClipStatusIn(BaseModel):
 @router.post('/api/jobs/{job_id}/clips/{video_id}/status')
 def clip_status(job_id: int, video_id: str, body: ClipStatusIn,
                 x_ccsync_token: str | None = Header(default=None),
-                x_ccsync_identity: str | None = Header(default=None)):
+                x_ccsync_identity: str | None = Header(default=None),
+                x_ccsync_fleet_auth: str | None = Header(default=None)):
     """Mirror one clip's outcome into the job rows.
 
     THE POINT OF THIS ENDPOINT IS THAT THE SPA CANNOT TELL THE MODES APART
@@ -521,9 +665,9 @@ def clip_status(job_id: int, video_id: str, body: ClipStatusIn,
     same downgrade-note-in-dl_error convention -- plus `download_host`, which
     is the one thing that differs and the one thing the history should say.
     """
-    require_fleet_token(x_ccsync_token)
     c = con()
-    job = _leaseholder_or_410(c, job_id, require_identity(x_ccsync_identity))
+    job = _leaseholder_or_410(c, job_id, require_fleet_caller(
+        x_ccsync_token, x_ccsync_identity, x_ccsync_fleet_auth))
     row = db.get_video(c, job_id, video_id)
     if row is None:
         raise HTTPException(404, 'no such video on this job')
@@ -547,13 +691,16 @@ def clip_status(job_id: int, video_id: str, body: ClipStatusIn,
             state, body.error = 'failed', ('the downloader reported no output '
                                            'file')
         else:
-            _record_done(c, job, row, name, body, host)
+            if not _record_done(c, job, row, name, body, host):
+                return _already_terminal(row, 'done')
             return _after_terminal(c, job, video_id, 'done')
 
     if state == 'failed':
-        db.set_video(c, job_id, video_id, dl_state='failed',
-                     dl_error=str(body.error or 'the download failed')[:500],
-                     download_host=host)
+        if not db.finish_download(
+                c, job_id, video_id, 'failed',
+                dl_error=str(body.error or 'the download failed')[:500],
+                download_host=host):
+            return _already_terminal(row, 'failed')
         db.bump(c, job_id, 'dl_failed')
         return _after_terminal(c, job, video_id, 'failed')
 
@@ -561,9 +708,26 @@ def clip_status(job_id: int, video_id: str, body: ClipStatusIn,
                              'downloading, done or failed')
 
 
+def _already_terminal(row, reported):
+    """The answer to a terminal status post for a clip that is already
+    terminal. 200, never an error (ytdl-web-3, 2026-08-21).
+
+    The companion re-sends a call that raised, and a client timeout on a POST
+    the server has already committed is one of those; a 4xx here would put a
+    perfectly downloaded clip into the executor's failed list. `duplicate` is
+    for the log on the other end, and `state` is the row's own verdict rather
+    than the one just reported, because the row is what the SPA will show.
+    """
+    log.info('job %s: a %r status post for %s arrived after the row was '
+             'already %r -- counted once', row['job_id'], reported,
+             row['video_id'], row['dl_state'])
+    return {'ok': True, 'state': row['dl_state'], 'duplicate': True}
+
+
 def _record_done(c, job, row, name, body, host):
     """The `done` half of worker._phase_download, written for a clip that
-    landed on somebody else's disk.
+    landed on somebody else's disk. -> whether this call was the one that
+    recorded it (db.finish_download's compare-and-set, ytdl-web-3).
 
     `filepath` is the path the file will have ON THE NAS once lane A carries it
     up (on the base rig it is where it already is), composed through safe_join
@@ -580,11 +744,15 @@ def _record_done(c, job, row, name, body, host):
     # dl_error on a DONE row is the downgrade note, not a failure: the clip
     # landed, just not at the rung that was asked for, and this row is the only
     # place that would ever say so (SAQBbd1Rxmo, 2026-08-13).
-    db.set_video(c, job_id, vid, dl_state='done', filepath=str(path),
-                 dl_error=body.note or None,
-                 title=body.title or row['title'],
-                 thumbnail=body.thumbnail or row['thumbnail'],
-                 download_host=host)
+    #
+    # The CAS comes FIRST: a losing update must not leave a ledger row and a
+    # counter bump behind it (ytdl-web-3, 2026-08-21).
+    if not db.finish_download(c, job_id, vid, 'done', filepath=str(path),
+                              dl_error=body.note or None,
+                              title=body.title or row['title'],
+                              thumbnail=body.thumbnail or row['thumbnail'],
+                              download_host=host):
+        return False
     # `body.channel or row['channel']`, mirroring worker.py's
     # `res.get('channel') or v['channel']`: for a pasted-link job the row has no
     # channel and never will (YTDL-WEB-8), and for a search job the row's is the
@@ -594,6 +762,7 @@ def _record_done(c, job, row, name, body, host):
                   job['project_slug'], job['project_label'], job['term'], rel,
                   job_id, job['created_by'])
     db.bump(c, job_id, 'dl_done')
+    return True
 
 
 def _after_terminal(c, job, video_id, state):

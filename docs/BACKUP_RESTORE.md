@@ -28,7 +28,28 @@ what the NAS holds and where.
 | An editor's local copy | `P:\` on their machine | **Nothing.** It is a replica, not a backup. |
 
 Two datasets carry everything that matters: the **tree** dataset and the
-**apps** dataset. Both are snapshotted on the same schedule.
+**apps** dataset. Both are snapshotted on the same schedule — **provided each
+one really is a dataset.**
+
+> **Check this before believing the table above** (server-6, 2026-08-21). Every
+> row that says "NAS snapshots" assumes the path is inside a dataset a periodic
+> task can be created for. On this fleet's box `/mnt/tank/apps` is a plain
+> **directory in the pool root**, not a dataset: `setup_snapshots.py` therefore
+> refuses the `app` target ("that is a pool, not a dataset"), exits non-zero,
+> and `dashboard.db`, `music.db` and `ytdl.db` have **no scheduled snapshot at
+> all**. The `.zfs/snapshot` restore paths in §4b/§4c do not exist either — a
+> snapshot of `tank` is browsable at `/mnt/tank/.zfs/snapshot/<snap>/apps/...`,
+> not at `/mnt/tank/apps/.zfs/...`.
+>
+> The fix is one command on the NAS, then re-run §2:
+>
+> ```bash
+> sudo zfs create -p tank/apps/ccsync-dashboard   # the [apps] root, as a dataset
+> # move the existing contents in, or deploy into the fresh dataset
+> ```
+>
+> `python setup_snapshots.py --list --apply` is the check: it must name a dataset with
+> a slash in it for **both** targets.
 
 ### Cadence and retention
 
@@ -69,12 +90,14 @@ Idempotent: a second `--apply` prints `snapshot task already correct,
 skipping`. Verify at any time with:
 
 ```powershell
-python setup_snapshots.py --list
+python setup_snapshots.py --list --apply
 ```
 
-which prints, per dataset, how many snapshots exist and the newest one. **That
-listing is the check that backups are working — not the exit code of the
-configure run.**
+which prints, per dataset, how many snapshots exist and the newest one, and
+since 2026-08-21 (server-6) also names any target that **cannot be scheduled at
+all** and exits non-zero for it. **That listing is the check that backups are
+working — not the exit code of the configure run.** `--apply` is what makes it
+ask the NAS; without it the listing is a dry-run and reports nothing.
 
 ### TrueNAS
 
@@ -88,6 +111,18 @@ paths in `site.toml` are mostly *directories inside* a dataset:
 `/mnt/tank/TheCreatorsPool/Creators_Club` is a folder in `tank/TheCreatorsPool`
 on this fleet's box. The script prints which dataset it settled on. A bare pool
 (`/mnt/tank`) is refused: a recursive hourly task there is somebody's whole NAS.
+
+That refusal is also what a target with **no dataset of its own** looks like,
+and it is not cosmetic — nothing gets scheduled for it. The message names the
+path and the `zfs create -p ...` that fixes it. See the callout in §1: the
+`[apps]` root is the one that hits this on a box where `apps` was made as a
+folder rather than a dataset.
+
+The `df` probe runs **under `sudo`** (server-2, 2026-08-21). `statfs` needs
+search permission on every component of the path, and the admin account has no
+traverse on the 2770 tree — an unprivileged probe was refused for
+`<tree>/Projects` on every run, fell back to a dataset name that does not
+exist, and `setup_tree.py`'s pre-`chown -R` snapshot silently became a WARNING.
 
 ### Synology
 
@@ -206,7 +241,12 @@ to sync what.
 sudo docker stop ix-ccsync-dashboard-dashboard-1        # TrueNAS
 # (Synology: docker compose -p ccsync -f <root>/compose.yaml stop dashboard)
 
+# the .zfs directory belongs to the DATASET. If `apps` is a dataset:
 sudo cp -a /mnt/tank/apps/.zfs/snapshot/<snap>/ccsync-dashboard/data/dashboard.db \
+           /mnt/tank/apps/ccsync-dashboard/data/dashboard.db
+# If `apps` is only a folder in the pool root (see the callout in §1), the
+# snapshot is the POOL's and there is no /mnt/tank/apps/.zfs at all:
+sudo cp -a /mnt/tank/.zfs/snapshot/<snap>/apps/ccsync-dashboard/data/dashboard.db \
            /mnt/tank/apps/ccsync-dashboard/data/dashboard.db
 sudo chown 3000:3000 /mnt/tank/apps/ccsync-dashboard/data/dashboard.db
 sudo chmod 660 /mnt/tank/apps/ccsync-dashboard/data/dashboard.db
@@ -334,9 +374,42 @@ python publish_db.py --which broll --rollback --apply
 python publish_db.py --which broll --rollback --from-prev "<explicit .prev path>" --apply
 ```
 
+Finding the newest `.prev-<ts>` is a **privileged** listing (server-1,
+2026-08-21): both target directories are group-only (`2770` for the b-roll
+archive, `770` for `music-data`) and the admin account cannot traverse either,
+so the listing runs under `sudo` like every other filesystem probe in this
+package. A directory that could not be *read* is now reported as exactly that,
+and no longer as "there is nothing to roll back to". Without `--apply` the
+rollback prints the listing command and the rename it would do; it does not
+touch the NAS, so it cannot name the actual `.prev` yet.
+
 `.prev-<ts>` files are **never deleted automatically**: unlike code, a database
 that has been live may have rows the copy replacing it does not. Prune them by
 hand when a pool gets tight.
+
+### Does the running app notice? (`music-2`, 2026-08-21)
+
+A publish and a rollback are both a **rename**, and a rename replaces the file
+the *path* names while every already-open handle goes on reading the unlinked
+old inode. That matters differently for the two indexes:
+
+- **`music.db` — it notices by itself, on a current deployment.** `musicweb`
+  stats the file once per connection (`db._check_swapped`) and fingerprints it
+  plus its `-wal` for the derived search matrices (`db.file_state`), so a
+  swapped index is picked up within a request or two, with a `WARNING` line
+  naming the path. Before that, long-lived worker threads answered browse,
+  facets, audio lookups and search from the deleted inode **indefinitely** —
+  anyio reuses the most recently idle thread and the page polls every 2 s.
+- **An OLDER deployment does not**, and neither does a `music-web` tree that
+  was shipped before this landed. There the remedy is what the runbook used to
+  say and nothing told anyone to do: `POST /music/api/reload`, or restart the
+  dashboard container.
+- **`broll.db`** reopens per connection, so a rename is normally enough.
+  Restart the container if it does not pick it up.
+
+Publishing does not require a restart in either case. If you are unsure which
+deployment you are on, restarting the container is always correct and costs a
+few seconds of the dashboard.
 
 ### Before publishing `music.db`
 
@@ -353,6 +426,13 @@ ACL. The publish therefore emits neither there, and carries owner and ACL
 across from the file being replaced with `synoacltool -copy`. `music.db` is
 under the app root, so it keeps the deploy's `3000:3000 660`.
 
+Step 5 stages under **`<apps_root>/staging`**, not `/tmp` (server-5,
+2026-08-21). DSM chroots every SFTP account, the administrator included, to its
+share view, where `/tmp` does not exist — every `--apply` used to abort at the
+transfer with the live index untouched. The dashboard deploy has staged code
+there since the first DSM bring-up; the publish does now too, and creates the
+directory if the stack was installed by hand.
+
 ---
 
 ## 7. Verifying, on a schedule
@@ -361,7 +441,8 @@ Monthly, and after any change to storage:
 
 ```powershell
 cd server
-python setup_snapshots.py --list        # non-empty, newest within the hour
+python setup_snapshots.py --list --apply   # non-empty, newest within the hour,
+                                           # and every target schedulable
 python check_health.py                  # the fleet's own checks
 ```
 

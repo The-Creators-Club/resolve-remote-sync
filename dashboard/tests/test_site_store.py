@@ -320,3 +320,101 @@ def test_export_never_includes_a_secret(conn):
     text = site_store.export_toml(conn, settings)
     assert "super-secret" not in text
     assert "also-secret" not in text
+
+
+# ------------------------------------------------ nas_kind is a choice, not text
+# dash-admin-7 (2026-08-21): a typed "TrueNAS" reached every installer through
+# the manifest while nas.factory kept using DASH_NAS_KIND, so the two halves of
+# the product disagreed about which NAS this is, silently.
+
+
+def test_nas_kind_accepts_only_the_backends_the_factory_can_build():
+    from ccsync_dashboard.nas.factory import NAS_KINDS
+
+    for kind in NAS_KINDS:
+        assert site_store.validate("nas_kind", kind.upper()) == kind
+    for bad in ("qnap", "TrueNAS Scale", "", "truenass"):
+        with pytest.raises(site_store.SiteValidationError):
+            site_store.validate("nas_kind", bad)
+
+
+def test_importing_a_site_toml_with_an_unknown_nas_kind_is_refused(conn):
+    with pytest.raises(site_store.SiteValidationError):
+        site_store.set_many(conn, {"nas_kind": "Synology NAS"}, updated_by="test")
+
+
+# ------------------------------------------------------ the ONE feature gate
+# product-surface-1 (2026-08-21).
+
+
+def test_feature_enabled_prefers_the_row_over_the_environment(conn):
+    settings = Settings(site_feature_youtube_download=True)
+    assert site_store.feature_enabled(conn, settings, "youtube_download") is True
+    site_store.set_many(conn, {"features.youtube_download": "0"}, updated_by="test")
+    conn.commit()
+    assert site_store.feature_enabled(conn, settings, "youtube_download") is False
+    site_store.set_many(conn, {"features.youtube_download": "1"}, updated_by="test")
+    conn.commit()
+    assert site_store.feature_enabled(conn, Settings(), "youtube_download") is True
+
+
+def test_feature_enabled_fails_closed(conn):
+    assert site_store.feature_enabled(conn, Settings(), "youtube_download") is False
+    assert site_store.feature_enabled(conn, Settings(), "no_such_feature") is False
+
+
+def test_ai_cli_providers_reads_the_same_predicate(conn):
+    from ccsync_dashboard import ai_providers
+
+    assert ai_providers.cli_enabled(conn, Settings()) is False
+    site_store.set_many(conn, {"features.ai_cli_providers": "1"}, updated_by="test")
+    conn.commit()
+    assert ai_providers.cli_enabled(conn, Settings()) is True
+
+
+# --------------------------------------- the manifest without a connection
+# product-surface-2 (2026-08-21): ui._render has no conn and paints the brand.
+
+
+class _FakeApp:
+    class State:
+        pass
+
+    def __init__(self, settings):
+        self.state = _FakeApp.State()
+        self.state.settings = settings
+
+
+def test_manifest_for_app_reads_the_db_and_caches_until_invalidated(conn, tmp_path):
+    settings = Settings(db_path=str(tmp_path / "s.db"), site_org_short="CC")
+    app = _FakeApp(settings)
+    site_store.set_many(conn, {"org_short": "Northlight"}, updated_by="test")
+    conn.commit()
+
+    assert site_store.manifest_for_app(app, settings)["org_short"] == "Northlight"
+    site_store.set_many(conn, {"org_short": "Second Edit"}, updated_by="test")
+    conn.commit()
+    assert site_store.manifest_for_app(app, settings)["org_short"] == "Northlight"  # cached
+    site_store.invalidate(app)
+    assert site_store.manifest_for_app(app, settings)["org_short"] == "Second Edit"
+
+
+def test_manifest_for_app_falls_back_to_settings_when_the_db_is_unreadable(tmp_path):
+    settings = Settings(db_path=str(tmp_path / "nope" / "missing.db"),
+                        site_org_short="CC", site_product_name="CC Sync")
+    app = _FakeApp(settings)
+    manifest = site_store.manifest_for_app(app, settings)
+    assert manifest["org_short"] == "CC"
+    assert manifest["product_name"] == "CC Sync"
+
+
+def test_template_and_shared_asset_helpers_are_db_first(conn):
+    settings = Settings()
+    assert site_store.template_folders(conn, settings) == list(provision.TEMPLATE_FOLDERS)
+    site_store.set_many(conn, {"template_folders": "Footage, Audio, Graphics",
+                               "shared_asset_folders": "Assets/Luts, Assets/SFX"},
+                        updated_by="test")
+    conn.commit()
+    assert site_store.template_folders(conn, settings) == ["Footage", "Audio", "Graphics"]
+    rels = [rel for _fid, rel, _label in site_store.shared_asset_folders(conn, settings)]
+    assert rels == ["Assets/Luts", "Assets/SFX"]

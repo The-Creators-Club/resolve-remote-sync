@@ -338,12 +338,58 @@ def read_state(settings) -> dict[str, Any]:
     state.setdefault("version", "")
     state.setdefault("message", "")
     state.setdefault("error", "")
+    return _heal_orphaned_progress(settings, state)
+
+
+def _heal_orphaned_progress(settings, state: dict[str, Any]) -> dict[str, Any]:
+    """An `in_progress` flag whose worker THREAD no longer exists is a dead
+    latch, and this is where it dies (dash-release-ai-2, 2026-08-21).
+
+    The flag is written to disk on purpose (this module's docstring: "leave
+    no state in memory"), but the thread that owned it lives in ONE process.
+    A container stop, an OOM kill or a NAS reboot during the download step
+    (up to BUNDLE_FETCH_TIMEOUT seconds of window) left `in_progress: true`
+    in `update_state.json` with nobody to clear it: every later apply AND
+    every rollback answered 409 forever, and on the appliance shape the admin
+    has no shell to edit the file with. So the writer stamps `owner_pid`, and
+    a flag belonging to any other pid (or to a state file written before this
+    fix, which carries no pid at all) reads as "failed, interrupted".
+
+    `restart_requested` is the ONE in-progress state that legitimately
+    outlives its process: an update that reached request_restart WANTS the
+    next process to see it, and `consume_restart_request` is what clears it.
+    """
+    if not state.get("in_progress") or state.get("restart_requested"):
+        return state
+    owner = state.get("owner_pid")
+    if owner == os.getpid():
+        return state
+    step = str(state.get("step") or "?")
+    log.warning("clearing a stale dashboard-update in-progress flag left at step %s "
+                "by pid %s (this process is %s) -- the worker that owned it is gone",
+                step, owner, os.getpid())
+    state.update({
+        "step": "failed",
+        "in_progress": False,
+        "owner_pid": None,
+        "error": f"interrupted by a restart at step {step}",
+        "finished_at": db.utcnow_iso(),
+        "updated_at": db.utcnow_iso(),
+    })
+    _write_json(update_state_path(settings), state)
     return state
 
 
 def _set_state(settings, **fields: Any) -> dict[str, Any]:
     state = read_state(settings)
     state.update(fields)
+    # Who owns the flag, so a fresh process can tell "an update is running"
+    # from "an update was running when this container was killed" -- see
+    # _heal_orphaned_progress (dash-release-ai-2).
+    if fields.get("in_progress"):
+        state["owner_pid"] = os.getpid()
+    elif "in_progress" in fields:
+        state["owner_pid"] = None
     state["updated_at"] = db.utcnow_iso()
     _write_json(update_state_path(settings), state)
     return state

@@ -704,3 +704,86 @@ def test_an_older_bundle_than_the_running_code_is_a_rollback_candidate_not_an_up
     status = world["client"].get("/api/v1/admin/dashboard-update").json()
     assert [u["version"] for u in status["code_updates"]] == ["0.6.5", "0.6.4"]
     assert [u["version"] for u in status["rollback_candidates"]] == ["0.6.2"]
+
+
+# ------------------------------------------- the orphaned in-progress latch
+# dash-release-ai-2 (2026-08-21): the flag is written to disk on purpose, but
+# the worker THREAD that owned it lives in one process. A container stop or an
+# OOM kill mid-download left in_progress=true with nobody to clear it, and
+# every later apply AND rollback answered 409 for ever -- on the appliance
+# shape, with no shell to edit /data/code/update_state.json with.
+
+
+def _orphan_the_flag(settings, step="downloading", version=NEW_VERSION):
+    """Exactly what a killed container leaves behind: in_progress, no restart
+    requested, and an owner pid that is not this process."""
+    dashboard_update._write_json(dashboard_update.update_state_path(settings), {
+        "step": step, "in_progress": True, "version": version,
+        "message": "downloading the bundle", "error": "", "owner_pid": 999999,
+    })
+
+
+def test_an_interrupted_update_does_not_wedge_the_channel(world, monkeypatch):
+    check(world, [make_dashboard_record(b"x")], monkeypatch)
+    settings = world["settings"]
+    _orphan_the_flag(settings)
+
+    state = dashboard_update.read_state(settings)
+    assert state["in_progress"] is False
+    assert state["step"] == "failed"
+    assert "interrupted by a restart at step downloading" in state["error"]
+    # ...and it is written down, not just returned: the next reader sees it.
+    on_disk = json.loads(
+        dashboard_update.update_state_path(settings).read_text(encoding="utf-8"))
+    assert on_disk["in_progress"] is False
+
+    r = world["client"].post("/api/v1/admin/dashboard-update/apply",
+                             json={"version": NEW_VERSION})
+    assert r.status_code != 409
+
+
+def test_a_state_file_with_no_owner_pid_is_treated_as_interrupted(world, monkeypatch):
+    """The shape written by a build from before this fix."""
+    settings = world["settings"]
+    dashboard_update._write_json(dashboard_update.update_state_path(settings), {
+        "step": "extracting", "in_progress": True, "version": NEW_VERSION,
+    })
+    assert dashboard_update.read_state(settings)["in_progress"] is False
+
+
+def test_an_update_running_in_THIS_process_still_refuses_a_second_one(world, monkeypatch):
+    """The latch has to keep working for the case it was written for."""
+    check(world, [make_dashboard_record(b"x")], monkeypatch)
+    settings = world["settings"]
+    dashboard_update._set_state(settings, in_progress=True, step="downloading",
+                                version=NEW_VERSION)
+    assert dashboard_update.read_state(settings)["in_progress"] is True
+    r = world["client"].post("/api/v1/admin/dashboard-update/apply",
+                             json={"version": NEW_VERSION})
+    assert r.status_code == 409
+
+
+def test_a_restart_this_update_asked_for_survives_the_process(world):
+    """The ONE in-progress state that legitimately outlives its process:
+    request_restart wants the NEXT process to see it, and
+    consume_restart_request is what clears it."""
+    settings = world["settings"]
+    dashboard_update.request_restart(settings)
+    raw = json.loads(dashboard_update.update_state_path(settings).read_text(encoding="utf-8"))
+    raw["owner_pid"] = 999999          # as if a new process were reading it
+    dashboard_update._write_json(dashboard_update.update_state_path(settings), raw)
+
+    state = dashboard_update.read_state(settings)
+    assert state["in_progress"] is True
+    assert state["restart_requested"] is True
+    assert dashboard_update.consume_restart_request(settings) is True
+    assert dashboard_update.read_state(settings)["in_progress"] is False
+
+
+def test_rollback_is_possible_again_after_an_interrupted_apply(real_bundle_world):
+    settings = real_bundle_world["settings"]
+    dashboard_update.apply(settings, real_bundle_world["app"].state, version=NEW_VERSION)
+    finish_the_restart(real_bundle_world)
+    _orphan_the_flag(settings, version="9.9.10")
+    result = dashboard_update.rollback(settings)
+    assert result["rolled_back_from"] == NEW_VERSION

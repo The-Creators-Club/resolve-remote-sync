@@ -93,6 +93,25 @@ def store_verified_package(
         "sha256": sha256, "size_bytes": size_bytes, "min_version": min_version,
         "published_at": published_at, "signed_binary": bool(signed_binary),
     }
+    # BEFORE the signature check, because a validly signed typo is exactly the
+    # case this refuses (dash-release-ai-3, 2026-08-21): a record whose
+    # min_version is above its own version raises every companion's permanent
+    # downgrade floor past the build being offered, on nothing more than a
+    # heavy report tick, and then refuses that build and every rollback to an
+    # older one. Here rather than in the two routes so the human PUT and the
+    # feed's auto-publish cannot disagree about it.
+    if release_trust.min_version_exceeds_version(version, min_version):
+        part_path.unlink(missing_ok=True)
+        log.warning("REFUSED a self-refusing publish of %s %s %s by %s: min_version %s "
+                    "is higher than the version itself",
+                    kind, platform, version, published_by, min_version)
+        raise PackageStoreError(
+            400,
+            f"min_version {min_version} is higher than the version being published "
+            f"({version}), so every companion that saw this offer would raise its "
+            f"downgrade floor above it and then refuse it. Nothing was published: "
+            f"re-sign with a min_version at or below {version}.",
+        )
     ok, detail = release_trust.verify_record(record, signature, settings.release_pubkeys)
     if not ok:
         part_path.unlink(missing_ok=True)

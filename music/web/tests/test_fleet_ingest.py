@@ -137,6 +137,47 @@ def test_a_wrong_token_is_refused(fleet):
     assert r.status_code == 403
 
 
+def test_a_per_editor_token_the_mount_verified_is_accepted(fleet, monkeypatch):
+    """music-1, 2026-08-21. The companion PREFERS the per-editor `cce1.` token
+    an admin minted for that editor (identity.preferred_report_token,
+    2026-08-17), and this app cannot verify one -- that needs the dashboard's
+    database. Mounted, the gate resolves it and says so; without accepting that
+    stamp, every migrated editor's dropped album sat in `queued` forever."""
+    monkeypatch.setattr(config, '_LOGIN_GATED', True, raising=False)
+    uid = make_batch(fleet)
+    cce1 = dict(headers(token='cce1.0123456789abcdef.' + 's' * 43),
+                **{'X-CCSync-Fleet-Auth': 'editor:jsmith'})
+    r = fleet.post(f'/api/fleet/ingest/batches/{uid}/claim',
+                   json={'machine': MACHINE, 'companion_version': '0.9.0'},
+                   headers=cce1)
+    assert r.status_code == 200, r.text
+
+
+def test_a_fleet_auth_stamp_is_worthless_standalone(fleet, monkeypatch):
+    """Standalone there is no gate stripping inbound copies of it, so the
+    header on the wire proves nothing and the shared secret is the only
+    credential (music-1, 2026-08-21)."""
+    monkeypatch.setattr(config, '_LOGIN_GATED', False, raising=False)
+    uid = make_batch(fleet)
+    forged = dict(headers(token='cce1.0123456789abcdef.' + 's' * 43),
+                  **{'X-CCSync-Fleet-Auth': 'editor:jsmith'})
+    r = fleet.post(f'/api/fleet/ingest/batches/{uid}/claim',
+                   json={'machine': MACHINE}, headers=forged)
+    assert r.status_code == 403
+
+
+@pytest.mark.parametrize('stamp', ['', 'editor:', 'admin', 'shared please',
+                                   'editor:' + 'x' * 80])
+def test_a_stamp_of_the_wrong_shape_is_not_a_credential(fleet, monkeypatch, stamp):
+    monkeypatch.setattr(config, '_LOGIN_GATED', True, raising=False)
+    uid = make_batch(fleet)
+    bad = dict(headers(token='cce1.0123456789abcdef.' + 's' * 43),
+               **{'X-CCSync-Fleet-Auth': stamp})
+    r = fleet.post(f'/api/fleet/ingest/batches/{uid}/claim',
+                   json={'machine': MACHINE}, headers=bad)
+    assert r.status_code == 403
+
+
 def test_the_token_alone_is_not_an_identity(fleet):
     """H5: every companion in the fleet holds the same token, so it proves
     "a fleet machine" and nothing about which editor."""
@@ -492,3 +533,76 @@ def test_a_release_of_someone_elses_batch_is_refused(fleet):
     r = fleet.post(f'/api/fleet/ingest/batches/{uid}/release',
                    json={'state': 'cancelled'}, headers=headers(editor='rlee'))
     assert r.status_code == 410
+
+
+def test_a_track_created_at_a_reused_id_does_not_inherit_a_proxy(fleet, fake_encoder):
+    """music-4, 2026-08-21. `tracks.id` is INTEGER PRIMARY KEY without
+    AUTOINCREMENT, so a created row takes max(rowid)+1 -- the id of the highest
+    track ever deleted -- and the 128k preview proxy is chosen on existence
+    alone. Since 2026-08-18 rows are created HERE, on the host that holds the
+    proxies, so every editor previewing the new cue heard the deleted one while
+    the waveform, the tags, `?original=1` and Resolve were all correct."""
+    conn = db.con()
+    next_id = (conn.execute('SELECT MAX(id) m FROM tracks').fetchone()['m'] or 0) + 1
+    config.ensure_proxies_dir()
+    stale = config.proxy_path(next_id)
+    stale.write_bytes(b'ID3\x03\x00\x00\x00' + b'the deleted cue')
+
+    uid = make_batch(fleet, names=('Reused Id.wav',))
+    item = claim(fleet, uid).json()['items'][0]['uid']
+    r = fleet.post(f'/api/fleet/ingest/batches/{uid}/items/{item}/result',
+                   json=result_body(), headers=headers())
+    assert r.status_code == 200, r.text
+    assert r.json()['track_id'] == next_id, 'the test did not exercise a reused id'
+
+    try:
+        assert not stale.exists(), "the new track inherited another one's audio"
+        audio = fleet.get(f'/api/audio/{next_id}')
+        # No proxy and no file on the share yet (`uploaded` is what lands it),
+        # so the only honest answer is the 404 -- never other audio at 200.
+        assert audio.status_code == 404
+    finally:
+        stale.unlink(missing_ok=True)
+        conn.execute('DELETE FROM tracks WHERE id=?', (next_id,))
+        conn.commit()
+
+
+@pytest.mark.parametrize('n_bytes', [1, 5, 2049])
+def test_an_embedding_that_is_not_float32_is_refused_not_a_500(fleet, n_bytes):
+    """music-5, 2026-08-21. np.frombuffer raises ValueError on a byte count
+    that is not a multiple of 4, and nothing mapped it to a refusal: the route
+    answered 500 with a traceback and the companion, reading that as transient,
+    retried the same body until its attempt budget ran out."""
+    uid = make_batch(fleet, names=('Truncated.wav',))
+    item = claim(fleet, uid).json()['items'][0]['uid']
+    body = result_body(embedding=base64.b64encode(b'\x01' * n_bytes).decode())
+    r = fleet.post(f'/api/fleet/ingest/batches/{uid}/items/{item}/result',
+                   json=body, headers=headers())
+    assert r.status_code == 422, r.text
+    assert r.json()['detail']['reason'] == 'embedding'
+    # and nothing was written: the refusal happens before the transaction
+    assert db.con().execute('SELECT COUNT(*) c FROM tracks WHERE rel_path=?',
+                            ('Truncated.wav',)).fetchone()['c'] == 0
+
+
+def test_a_truncated_window_vector_drops_the_window_not_the_track(fleet, fake_encoder):
+    """Windows are optional by design, and this one runs inside the item
+    transaction -- where the uncaught ValueError aborted the block after the
+    track INSERT and the companion saw a 500 (music-5, 2026-08-21)."""
+    conn = db.con()
+    uid = make_batch(fleet, names=('Half A Window.wav',))
+    item = claim(fleet, uid).json()['items'][0]['uid']
+    body = result_body(windows=[{'idx': 0, 't0': 0.0, 't1': 10.0,
+                                 'vector': base64.b64encode(b'\x01' * 13).decode()}])
+    r = fleet.post(f'/api/fleet/ingest/batches/{uid}/items/{item}/result',
+                   json=body, headers=headers())
+    assert r.status_code == 200, r.text
+    track_id = r.json()['track_id']
+    try:
+        assert conn.execute('SELECT COUNT(*) c FROM windows WHERE track_id=?',
+                            (track_id,)).fetchone()['c'] == 0
+        assert conn.execute('SELECT dim FROM tracks WHERE id=?',
+                            (track_id,)).fetchone()['dim'] == DIM
+    finally:
+        conn.execute('DELETE FROM tracks WHERE id=?', (track_id,))
+        conn.commit()

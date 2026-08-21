@@ -275,6 +275,10 @@ def test_cannot_delete_the_last_enabled_admin(env):
 def test_a_disabled_admin_is_not_the_last_enabled_admin(env):
     as_user(env, "owen")
     _make(env, "boss", role="admin")
+    # A second admin first: since dash-admin-5 (2026-08-21) DISABLE refuses
+    # the last enabled admin exactly as DELETE does, so making `boss` the
+    # only one would test the guard rather than the rule below it.
+    _make(env, "boss2", role="admin")
     assert env.post("/api/v1/admin/users/boss/disable", json={"disabled": True}).status_code == 200
     assert env.delete("/api/v1/admin/users/boss").status_code == 200
 

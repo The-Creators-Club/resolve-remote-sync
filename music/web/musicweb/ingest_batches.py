@@ -84,9 +84,19 @@ _ITEM_ORDER = {name: i for i, name in enumerate(ITEM_PROGRESS)}
 #
 # `queued_for_base_rig` is music's own, and it is the fallback the plan keeps
 # (§1, rejected option (a)): a companion with no CLAP sidecar -- too old, or a
-# model download that will not complete -- uploads the file to the NAS and
-# leaves an `ingest_queue` row for the base rig to drain. The item is finished
-# as far as THIS ledger is concerned; the work is not, and the queue says so.
+# model download that will not complete -- ends its items here rather than
+# failing them.
+#
+# WHAT IT DOES NOT DO, despite the name and despite the plan's wording
+# (music-6, 2026-08-21, and KNOWN_BUGS MUSIC-ING-2): it does not upload the
+# audio and it does not leave an `ingest_queue` row -- there is no `queue_add`
+# on this side at all. It cannot upload: the library allocates a filename at
+# `result`, which never happened for that item. So the audio stays staged on
+# the EDITOR'S machine and the page asks them to drop it through the browser
+# upload, which does the whole safe dance. Nothing waits for the drain, and a
+# drain run in the belief that something does will find nothing. The route that
+# would make the name good (`POST .../items/{iuid}/queue`) is MUSIC-ING-2's
+# open half.
 ITEM_ENDINGS = ('duplicate', 'failed', 'cancelled', 'skipped',
                 'queued_for_base_rig')
 ITEM_STATES = ITEM_PROGRESS + ITEM_ENDINGS
@@ -665,6 +675,20 @@ def set_item_state(conn, batch, item, *, state, stage_percent=None, error=None,
 
 # --- the result: a real track row ---------------------------------------------
 
+def _float32(raw):
+    """`raw` as a float32 vector, or None if those bytes are not one.
+
+    numpy raises ValueError for a buffer whose length is not a multiple of the
+    element size, and an uncaught one on a fleet route is a 500 with a
+    traceback (music-5, 2026-08-21). The length check is the whole difference
+    between a refusal the companion can act on and a retry loop.
+    """
+    raw = raw or b''
+    if len(raw) % 4:
+        return None
+    return np.frombuffer(raw, dtype='<f4')
+
+
 def _embedding_blob(body):
     """The companion's float32 embedding, as the BLOB `tracks.embedding` holds.
 
@@ -676,8 +700,16 @@ def _embedding_blob(body):
     already holds, because an embedding of another width is an embedding from
     another model and cannot be compared with these at all.
     """
-    raw = body.embedding_bytes()
-    vec = np.frombuffer(raw, dtype='<f4')
+    vec = _float32(body.embedding_bytes())
+    if vec is None:
+        # music-5, 2026-08-21: np.frombuffer raises ValueError on a byte count
+        # that is not a multiple of 4, nothing here mapped that to a refusal,
+        # and the companion treated the resulting 500 as transient and retried
+        # the same truncated body until its budget ran out. Attacker-shaped
+        # input on a token-reachable route is a refusal, never a traceback.
+        raise HTTPException(422, {
+            'detail': 'the embedding is not a float32 vector',
+            'reason': 'embedding'})
     if vec.size == 0:
         raise HTTPException(422, {'detail': 'the embedding is empty',
                                   'reason': 'embedding'})
@@ -743,6 +775,12 @@ def write_item_result(conn, batch, item, body):
 
     now = now_iso()
     probe = body.probe or {}
+    # Whether this is a NEW row decides one thing outside the database
+    # (music-4, 2026-08-21): a created row takes max(rowid)+1, which is the id
+    # of the highest row ever deleted, and the preview proxy is keyed by id
+    # alone. Read before the INSERT, acted on after it commits.
+    created = conn.execute('SELECT id FROM tracks WHERE rel_path = ?',
+                           (dest_name,)).fetchone() is None
     try:
         with conn:
             cur = conn.execute(
@@ -798,6 +836,13 @@ def write_item_result(conn, batch, item, body):
             'detail': 'another batch claimed that filename first; retry',
             'reason': 'name_race'}) from exc
 
+    if created:
+        # Any mp3 already sitting at this id belonged to a track that was
+        # deleted; serving it would give this cue another one's audio
+        # (music-4). Cheap, and there is nothing to roll back: existence on
+        # disk is the whole record a proxy has.
+        config.drop_proxy(track_id)
+
     # OUTSIDE the transaction above, and after the counters: re-scoring reads
     # every embedding and writes every tag row, and holding the item's write
     # open across it would keep a lock on the database the fleet grid also
@@ -828,7 +873,17 @@ def _write_windows(conn, track_id, body):
     conn.execute('DELETE FROM windows WHERE track_id = ?', (track_id,))
     rows = []
     for w in body.windows or []:
-        vec = np.frombuffer(w.vector_bytes(), dtype='<f4')
+        vec = _float32(w.vector_bytes())
+        if vec is None:
+            # A window whose byte count is not a float32 vector at all. Dropped
+            # like every other unusable window rather than 422'd (music-5,
+            # 2026-08-21): windows are optional here by design, and this runs
+            # INSIDE the item transaction, where a raised ValueError aborted
+            # the block after the track INSERT and the companion saw a 500.
+            log.warning('music ingest: window %s of track %s is %d bytes, not a '
+                        'float32 vector; dropped', w.idx, track_id,
+                        len(w.vector_bytes() or b''))
+            continue
         norm = float(np.linalg.norm(vec))
         if vec.size == 0 or not np.isfinite(norm) or norm <= 0:
             continue

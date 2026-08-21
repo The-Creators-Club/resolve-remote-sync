@@ -20,6 +20,7 @@ Index written 2026-08-17 (`COMMERCIAL_READINESS.md` item 13).
 | [`SERVER-SYNOLOGY.md`](SERVER-SYNOLOGY.md) | The Synology DSM runbook, including Tailscale Serve as the publish path |
 | [`SYNOLOGY_EASY_INSTALL.md`](SYNOLOGY_EASY_INSTALL.md) | Design for a packaged (SPK) install a non-technical studio owner can run |
 | [`ZERO_TOUCH_PLAN.md`](ZERO_TOUCH_PLAN.md) | The appliance plan: customer installs Tailscale + one container, browser wizard does the rest, only the vendor builds (item 16) |
+| [`APPLIANCE_INSTALL.md`](APPLIANCE_INSTALL.md) | The paste-and-click install written as customer-facing steps. **A draft**: it marks every place a later work package changes the story, so read the NOT YET TRUE flags before handing it to anyone |
 | [`EDITOR_SETUP.md`](EDITOR_SETUP.md) | Onboarding one editor, from the operator's side |
 | [`../installer/START_HERE.md`](../installer/START_HERE.md) | The same thing written *for* the editor |
 
@@ -32,6 +33,7 @@ Index written 2026-08-17 (`COMMERCIAL_READINESS.md` item 13).
 | [`LOOPBACK_API.md`](LOOPBACK_API.md) | The companion's 127.0.0.1:8899 listener: every route group, and who is allowed to call them |
 | [`GOTCHAS.md`](GOTCHAS.md) | The accumulated "why is it doing that" list. Read it before debugging anything |
 | [`INDEXERS.md`](INDEXERS.md) | The GPU indexers: what runs where, and what a customer without a GPU gets |
+| [`BACKCATALOGUE_INGEST.md`](BACKCATALOGUE_INGEST.md) | Adding older projects to the b-roll archive as `source: proxies` shares: what it cost, and what it taught about the pipeline |
 | [`YTDL_LOCAL_DOWNLOAD.md`](YTDL_LOCAL_DOWNLOAD.md) | The YouTube downloader's fleet job model and the local-download path |
 | [`CLIENT_FOLDERS.md`](CLIENT_FOLDERS.md) | Curated b-roll folders with a link a prospective licensee can open: how to use them, what the client sees, and publishing the one path prefix with Tailscale Funnel |
 | [`DOCKER.md`](DOCKER.md) | The two ways the dashboard container gets its code and its dependencies |
@@ -77,6 +79,7 @@ Index written 2026-08-17 (`COMMERCIAL_READINESS.md` item 13).
 | [`BROLL_INGEST_PLAN.md`](BROLL_INGEST_PLAN.md) | Drag-and-drop b-roll ingest: the design, the contracts and what was deviated from |
 | [`MUSIC_INGEST_PLAN.md`](MUSIC_INGEST_PLAN.md) | The same for music, reusing the b-roll machinery, plus what it deliberately does not compute |
 | [`MULTI_MACHINE_PLAN.md`](MULTI_MACHINE_PLAN.md) | One person, several computers: the sync plan belongs to a machine (schema v22-v25), the base rig holds no tick, and how an update reaches a machine without its editor clicking |
+| [`MULTI_BASE_RIG_PLAN.md`](MULTI_BASE_RIG_PLAN.md) | Wired or remote is a property of the COMPUTER, not the person: an office with several machines cabled to the NAS, and what changes in the wizard, the manifest and the companion |
 | [`TREE_LAYOUT_PLAN.md`](TREE_LAYOUT_PLAN.md) | The plan that executes that audit: one layout object published in the manifest (`projects_dir`, `proxy_dir_name`, the `Assets/*` roles, `Youtube`, fixer targets, extensions), plus the Setup step that learns a customer's template from their own sample projects |
 | [`TREE_LAYOUT_AGNOSTICISM.md`](TREE_LAYOUT_AGNOSTICISM.md) | The 2026-08-19 audit of what a customer can change about the tree by config (root, depth, template folders) versus what is code (`Projects`, `Assets/*`, the `Proxy/` sibling rule that defines the lanes, the archive taxonomy), with sales qualification questions and a costed work list |
 | `../SPEC.md` | The internal architecture document — history, rationale, known flaws |
@@ -94,7 +97,7 @@ and are deliberately left as they were; do not copy commands out of them.
 | [`bug-hunt-2026-08.md`](bug-hunt-2026-08.md) | The original August bug-hunt worklist, archived when the fix fleet completed |
 | [`bug-hunt-2026-08-11.md`](bug-hunt-2026-08-11.md) | The 127-finding hunt |
 | [`bug-hunt-2026-08-14.md`](bug-hunt-2026-08-14.md) | The 94-finding hunt |
-| [`bug-hunt-2026-08-21.md`](bug-hunt-2026-08-21.md) | The 78-finding hunt plus the 53-issue design review; unfixed as of writing |
+| [`bug-hunt-2026-08-21.md`](bug-hunt-2026-08-21.md) | The 78-finding hunt plus the 53-issue design review. Fixed in the repo on 2026-08-21 and **unshipped**: `KNOWN_BUGS.md` CR-46 to CR-67 is what landed, what was deliberately deferred, and which seams were still open |
 | [`synology-spikes-2026-08-17.md`](synology-spikes-2026-08-17.md) | The eight day-1 spikes run against real Synology hardware |
 | [`macos-first-run-2026-08-04.md`](macos-first-run-2026-08-04.md) | The first macOS bring-up session |
 | [`macos-first-run-2026-08-05.md`](macos-first-run-2026-08-05.md) | The follow-up session |

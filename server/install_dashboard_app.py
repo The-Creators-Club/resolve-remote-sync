@@ -234,9 +234,10 @@ from common import (  # noqa: F401 - truenas_api/run_ssh/wait_for_job/ok are als
     # offline suite patches them HERE (see common.ScriptCalls).
     DEFAULT_APPS_ROOT, DEFAULT_BROLL_ARCHIVE_ROOT, DEFAULT_CC_ROOT, DEFAULT_DATASET_OWNER,
     DEFAULT_HOMES_PARENT, DEFAULT_TRUENAS_HOST, DEFAULT_TRUENAS_USER, EDITORS_GROUP, EnvError,
-    DEFAULT_PROJECTS_ROOT, PROJECTS_DIRNAME, ScriptCalls, add_host_key_arg, add_nas_kind_arg,
+    DEFAULT_PROJECTS_ROOT, PROJECTS_DIRNAME, SHARED_ASSETS_REL, SHARED_ASSET_FOLDERS,
+    ScriptCalls, add_host_key_arg, add_nas_kind_arg,
     add_site_arg, cli, editor_shell_is_sftp_only, editor_shell_mode, get_backend,
-    nas_admin_password, ok, require_env, require_site_value,
+    load_site, nas_admin_password, ok, require_env, require_site_value,
     run_ssh, set_host_key_pin, sftp_put_text, shell_quote, site_bool, site_int, site_list,
     site_value,
     snapshot_before, ssh_client, truenas_api_key,
@@ -611,6 +612,14 @@ def healthcheck_config(port: int) -> dict:
 # deploy has to template these from the live values (plan spike 7).
 APP_UID = site_int("stack", "uid", 3000)
 APP_GID = site_int("stack", "gid", 3001)
+# The group on the container's PRIVATE dirs (data/, venv/, music-data/,
+# ytdl-data/). Emphatically NOT APP_GID: with group `editors` and mode 770
+# every editor could write into /data and swap the interpreter run.sh execs
+# (AUDIT C-2). It is the service account's OWN group, which on this fleet is
+# gid 3000 (`broll`) -- i.e. the uid, which is what the deploy has emitted
+# since 2026-08-11. A site whose service account has a different private
+# group names it here (server-4, 2026-08-21).
+APP_PRIVATE_GID = site_int("stack", "private_gid", APP_UID)
 
 
 def deploy_nas_kind() -> str:
@@ -988,6 +997,24 @@ def pull_container_image(image: str, dry_run: bool) -> bool:
     return True
 
 
+# A CAP on the container's stdout (ops-efficiency-7, 2026-08-21). uvicorn runs
+# with its access log ON, every companion posts /api/v1/report every 5 s while
+# a lane syncs, and every open dashboard tab polls /partials/transfers every
+# 2 s -- several lines a second, per site, forever, into docker's json-file
+# driver with no cap of its own. Over months on an appliance nobody logs into,
+# that eats the apps dataset (which is also snapshotted hourly) and makes
+# `docker logs` useless for the one time someone needs it. Whether the host's
+# daemon.json caps it depends on the NAS vendor, which is exactly the thing
+# this product no longer assumes.
+#
+# 100 MB total, five files, so a rotation still leaves the last few hours of
+# an incident to read.
+LOG_ROTATION = {
+    "driver": "json-file",
+    "options": {"max-size": "20m", "max-file": "5"},
+}
+
+
 def cookie_secure_for(dashboard_url: str) -> str:
     """DASH_COOKIE_SECURE for a site published at `dashboard_url`.
 
@@ -997,6 +1024,91 @@ def cookie_secure_for(dashboard_url: str) -> str:
     the manifest is an explicit statement, and pins it (WP4).
     """
     return "1" if str(dashboard_url or "").strip().lower().startswith("https://") else "auto"
+
+
+# Docker's own default address pool for bridge networks. Every compose project
+# gets a /16 out of 172.16.0.0/12 (172.17 is the default `docker0`, 172.18+ the
+# per-project ones), and which one this stack lands on is decided by the daemon
+# at `docker compose up`, not by anything here -- so the CIDR is what can be
+# stated in advance, not an address. 192.168.0.0/16 is in Docker's pool too and
+# is deliberately NOT here: on this fleet that is the studio LAN.
+DEFAULT_DOCKER_BRIDGE_CIDR = "172.16.0.0/12"
+
+
+def trusted_proxies_for(bind_tailnet: str = "") -> str:
+    """DASH_TRUSTED_PROXIES: whose X-Forwarded-* headers this dashboard believes.
+
+    trust-model-3 (2026-08-21). Nothing in this script ever set it, so every
+    deployment ran on the dashboard's own default of `127.0.0.1,::1` -- and
+    the container does not see loopback. The stack publishes its port with
+    compose `ports:`, so a connection Tailscale Serve makes from the NAS host
+    is NATed and arrives at the container FROM THE BRIDGE GATEWAY. With that
+    peer untrusted, auth.client_ip returns the gateway for everybody: the login
+    throttle's per-IP budget (5 failures, then exponential backoff to an hour)
+    became ONE bucket for the whole fleet, so one editor with caps lock on
+    could 429 /login and /api/v1/verify for every editor and every companion,
+    and the admin sessions page showed the same address on every row.
+
+    Trusting the bridge means any container on this host could claim an
+    X-Forwarded-For. That is a smaller exposure than a shared throttle bucket
+    on the one page that says whether anyone's footage is syncing, and it is
+    the same trust the stack already extends to its own sidecar. A site that
+    disagrees names its own list in [net] trusted_proxies; the deploying
+    shell's $DASH_TRUSTED_PROXIES wins over both, like the other secrets and
+    knobs passed through from the environment.
+    """
+    override = (os.environ.get("DASH_TRUSTED_PROXIES", "").strip()
+                or site_value("net", "trusted_proxies"))
+    if override:
+        return override
+    bridge = site_value("net", "docker_bridge_cidr") or DEFAULT_DOCKER_BRIDGE_CIDR
+    entries = ["127.0.0.1", "::1", bridge]
+    tailnet = str(bind_tailnet or "").strip()
+    # The tailnet node address the stack publishes on: on a host-network
+    # deployment (and on DSM, where `tailscale serve` runs beside the stack)
+    # that is the peer, not the bridge gateway.
+    if tailnet and tailnet not in entries:
+        entries.append(tailnet)
+    return ",".join(entries)
+
+
+# One customer's project name, and it was the DEFAULT in four places at once
+# until 2026-08-21 (product-surface-3): compose_config's parameter, both
+# compose templates and main()'s os.environ.get fallback. CLAUDE.md's "no
+# customer's name in code" rule, broken four times over by one string.
+#
+# It survives HERE, once, as a named expiry rather than a default: this
+# studio's site.toml predates the key, and a redeploy that silently emptied
+# its own-footage collection would read as "the archive lost 7,000 clips".
+# See broll_creators_shares_default() for when it still applies.
+LEGACY_BROLL_CREATORS_SHARES = "mofa-disaster"
+
+
+def broll_creators_shares_default() -> str:
+    """BROLL_CREATORS_SHARES: which archive shares hold OUR OWN footage.
+
+    site.toml `[broll] creators_shares`, and the product default is EMPTY --
+    an unconfigured site shows the whole archive under Downloads, which is
+    what broll/web/app/config.get_creators_shares already does with a blank
+    value. Filing somebody's bought/downloaded footage as theirs is the worse
+    error of the two, so the blank is deliberate, not an oversight.
+
+    THE ONE TRANSITIONAL EXCEPTION (product-surface-3, 2026-08-21): a manifest
+    with NO [broll] TABLE AT ALL has never been asked the question, so it
+    keeps the historical value. ANY [broll] key turns the fallback off -- a
+    site that wrote the table has answered, including by answering "none".
+    An operator ends it for good by adding to site.toml:
+
+        [broll]
+        creators_shares = "mofa-disaster"
+
+    ...after which this whole branch can go (docs/CONFIG.md records it).
+    """
+    configured = site_value("broll", "creators_shares")
+    if configured:
+        return configured
+    table = load_site().get("broll")
+    return "" if isinstance(table, dict) else LEGACY_BROLL_CREATORS_SHARES
 
 
 def site_env(port: int = 8480, tree_root: str = "", nas_host: str = "",
@@ -1084,6 +1196,16 @@ def site_env(port: int = 8480, tree_root: str = "", nas_host: str = "",
         # site that has not asked for its own name.
         "BROLL_DEFAULT_COLLECTION": site_value("broll", "default_collection"),
         "BROLL_DEFAULT_COLLECTION_LABEL": site_value("broll", "default_collection_label"),
+        # The top-level folder INGEST files own-footage shoots under, inside
+        # the archive tree (product-surface-3, 2026-08-21). Same reasoning as
+        # the two above and the same shape: blank leaves broll/web's own
+        # historical default ("Creators_Club"), which cannot change on its own
+        # because ~7,000 already-published files sit under that name. A second
+        # customer sets [broll] archive_creators_dir and their NEW shoots file
+        # under theirs. Read here rather than left to the app's environment
+        # because nothing else was setting it, which is how the two b-roll
+        # keys above came to be blank on every deployment before 2026-08-17.
+        "BROLL_ARCHIVE_CREATORS_DIR": site_value("broll", "archive_creators_dir"),
         # The editor drive letter is hardcoded by decision (2026-07-26); it is
         # served anyway so a client never has to assume it.
         "DASH_SITE_CANONICAL_PREFIX": site_value("site", "canonical_prefix") or "P:\\",
@@ -1121,7 +1243,9 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                    bind_lan: str = LAN_BIND_IP, bind_tailnet: str = TAILNET_BIND_IP,
                    image: str = DEFAULT_IMAGE,
                    broll_enabled: str = "1", broll_ingest_token: str = "",
-                   broll_creators_shares: str = "mofa-disaster",
+                   # "" means "ask site.toml" (product-surface-3, 2026-08-21).
+                   # It used to default to one customer's project name.
+                   broll_creators_shares: str = "",
                    tree_root: str = "", app_uid: int = 0, app_gid: int = 0,
                    binds=None, nas_kind: str = "truenas", ssh_port: str = "22",
                    ssh_hostkey: str = "", ssh_key_probe: str = "1",
@@ -1243,6 +1367,15 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # "auto" honours X-Forwarded-Proto, which both `tailscale
                     # serve` and DSM's reverse proxy set; an https site pins it.
                     "DASH_COOKIE_SECURE": cookie_secure_for(dashboard_url),
+                    # Whose X-Forwarded-* this dashboard believes, and with it
+                    # what auth.client_ip calls "the client" (trust-model-3,
+                    # 2026-08-21). See trusted_proxies_for: unset, the whole
+                    # fleet shared one login-throttle IP bucket, because a
+                    # published compose port makes every proxied request
+                    # arrive from the docker bridge gateway.
+                    "DASH_TRUSTED_PROXIES": trusted_proxies_for(
+                        next((addr for env_name, addr in binds
+                              if env_name == "DASH_BIND_TAILNET"), "")),
                     "DASH_DB_PATH": "/data/dashboard.db",
                     # Where crash JSON lands (COMMERCIAL_READINESS.md item 13).
                     # It is the default the code computes anyway
@@ -1262,7 +1395,12 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     "DASH_BROLL_ENABLED": broll_enabled,
                     "BROLL_DATA_ROOT": "/broll-data",
                     "BROLL_SHARES": "broll:Main b-roll archive",
-                    "BROLL_CREATORS_SHARES": broll_creators_shares,
+                    # site.toml [broll] creators_shares, with the caller's
+                    # explicit value winning (product-surface-3, 2026-08-21 --
+                    # this line used to be one customer's project name, as a
+                    # parameter default). See broll_creators_shares_default().
+                    "BROLL_CREATORS_SHARES":
+                        broll_creators_shares or broll_creators_shares_default(),
                     # Mandatory when the mount is on, and enforced twice: this
                     # script refuses to deploy without a strong one, and the
                     # dashboard refuses to start. Blank used to mean the b-roll
@@ -1514,6 +1652,7 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                 ] if not (image_mode and mount_target(v) in IMAGE_MODE_CODE_MOUNTS)],
                 "restart": "unless-stopped",
                 "healthcheck": healthcheck_config(port),
+                "logging": LOG_ROTATION,
             },
             # yt-dlp's PO-token provider, the ONE piece that makes YouTube
             # extraction work from this NAS at all (2026-08-11). Measured
@@ -1554,6 +1693,7 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
             **({POT_PROVIDER_SERVICE: {
                 "image": POT_PROVIDER_IMAGE,
                 "restart": "unless-stopped",
+                "logging": LOG_ROTATION,
             }} if unblock_on else {}),
         }
     }
@@ -1573,6 +1713,20 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
 # substitution at run time (DASH_BIND_LAN, SYNCTHING_API_KEY, DASH_PG_PORT),
 # and those must survive rendering untouched.
 COMPOSE_TEMPLATE = LOCAL_DASHBOARD_DIR / "deploy" / "compose.yaml"
+# Environment keys compose_config() sets that the compose TEMPLATE does not
+# carry yet. Normally this list is empty and must stay empty: the file and the
+# dict describe the same container, and drift between them is only ever
+# discovered in production (server/tests/test_safety.test_env_keys_match_compose
+# is what holds them together).
+#
+# EMPTY, and the intended state. It held DASH_TRUSTED_PROXIES for exactly one
+# release (trust-model-3, 2026-08-21): the TrueNAS deploy POSTs the DICT, so
+# the fix reached the deployment that had the problem while the two compose
+# FILES -- the manual "Install via YAML" fallback and the Synology path --
+# still lacked the line. Both carry it now (CR-67 seam 5, 2026-08-21), so the
+# drift guarantee is whole again. Anything added here needs the same shape: a
+# dated reason and the edit that ends it.
+COMPOSE_ENV_ONLY_IN_DICT = ()
 # The same grammar, the same variables, one difference: the vendor image and
 # no code mounts (2026-08-18). Rendered by the Synology deploy path, which
 # uploads a compose FILE; the TrueNAS path POSTs compose_config()'s dict, and
@@ -1607,6 +1761,7 @@ def compose_variables(port: int = 8480, host_root: str = "", tree_root: str = ""
                       nas_user: str = "", admin_users: str = "",
                       homes_parent: str = "", nas_kind: str = "",
                       dashboard_url: str = "", broll_enabled: str = "1",
+                      broll_creators_shares: str = "",
                       ccsync_image: str = "") -> dict:
     """Every {{NAME}} the compose template takes, defaulted from site.toml."""
     host_root = require_site_value(host_root or DEFAULT_HOST_ROOT, "[apps] root",
@@ -1638,6 +1793,29 @@ def compose_variables(port: int = 8480, host_root: str = "", tree_root: str = ""
         # it (the same rule NAS_ADMIN_USERS follows below). main() passes the
         # real one when it renders for a deploy.
         "DASH_BROLL_ENABLED": broll_enabled or "1",
+        # Own-footage shares, from site.toml (product-surface-3, 2026-08-21).
+        # Both compose templates carried the literal "mofa-disaster" until
+        # then, so every operator who pasted the manual-YAML fallback got one
+        # customer's project name. A PARAMETER for the same reason
+        # DASH_BROLL_ENABLED is: main() passes what compose_config was given,
+        # so the pasted FILE and the POSTed DICT cannot disagree.
+        "BROLL_CREATORS_SHARES":
+            broll_creators_shares or broll_creators_shares_default(),
+        # Whose X-Forwarded-* the container believes (trust-model-3, CR-67
+        # seam 5, 2026-08-21). The DICT has carried this since the fix landed;
+        # the two compose FILES -- the manual "Install via YAML" fallback and
+        # the Synology deploy -- did not, which is the debt
+        # COMPOSE_ENV_ONLY_IN_DICT recorded and this line pays off.
+        #
+        # Unlike NAS_ADMIN_USERS this DOES honour the rendering shell's
+        # $DASH_TRUSTED_PROXIES (inside trusted_proxies_for), deliberately: it
+        # is a knob rather than an identity, and compose_config reads the same
+        # environment, so the file and the dict would otherwise describe
+        # different trust. server/tests/conftest.py clears it so the goldens
+        # render this site's value rather than the base rig's shell.
+        "DASH_TRUSTED_PROXIES": trusted_proxies_for(
+            next((addr for env_name, addr in binds
+                  if env_name == "DASH_BIND_TAILNET"), "")),
         # IMAGE MODE's one extra variable (compose.image.yaml renders it as
         # `${CCSYNC_IMAGE:-<this>}`, so the file keeps compose's own escape
         # hatch the way the bind addresses do). Provided unconditionally --
@@ -1916,7 +2094,7 @@ def human_bytes(n: int) -> str:
 def build_db_swap_script(data_root: str, staging: str, target: str,
                          old: str, expected_bytes: int,
                          filename: str = MUSIC_DB_FILENAME,
-                         owner: str = "3000:3000", mode: str = "660",
+                         owner: str | None = None, mode: str = "660",
                          extra_verify: str = "") -> str:
     """Install one shipped music.db, with install_tree's guarantees for a file.
 
@@ -1948,6 +2126,12 @@ def build_db_swap_script(data_root: str, staging: str, target: str,
     # so they are the one pair here that is not shell-quoted -- hence a check
     # rather than an escape. They can come from site.toml's [stack] owner/group
     # via publish_db.py, i.e. from a customer's file (2026-08-17).
+    # owner=None means "the account the container runs as" (server-4,
+    # 2026-08-21); it was the literal "3000:3000" in the signature, which is
+    # right only on a site that left [stack] uid alone. owner="" is a
+    # DIFFERENT answer and stays one: it means "emit no chown at all", which
+    # is the DSM tree-share case below.
+    owner = f"{APP_UID}:{APP_PRIVATE_GID}" if owner is None else owner
     for what, value in (("owner", owner), ("mode", mode)):
         if value and not re.fullmatch(r"[A-Za-z0-9_.:-]+", str(value)):
             raise EnvError(f"refusing to build a swap script with {what}={value!r}: "
@@ -3829,6 +4013,15 @@ def main():
     # DSM takes the same posture by a different route (build_synology_host_dirs):
     # 0700 owned by the service uid rather than 0770 group-3000, because every
     # DSM local user is in the only group a local account can have.
+    #
+    # Every id below is RENDERED from app_uid/app_gid, not a literal (server-4,
+    # 2026-08-21). They were `3000:3000` / `3000:3001` in the shell while the
+    # container has run as site.toml's `[stack] uid/gid` since 2026-08-17 and
+    # the DSM branch already took the live values -- so a TrueNAS site that set
+    # those keys to anything else got a green "host dirs ready" and a container
+    # that could not create its venv or open /data.
+    private_owner = f"{app_uid}:{APP_PRIVATE_GID}"
+    tree_owner = f"{app_uid}:{app_gid}"
     rc, _, err = run_ssh(
         backend().root_cmd(build_synology_host_dirs(
             root, app_uid, truenas_user)) if synology else
@@ -3838,9 +4031,9 @@ def main():
             f"{shell_quote(root + '/venv')} {shell_quote(root + '/broll-web')} && "
             f"chown root:root {shell_quote(root)} {shell_quote(root + '/app')} && "
             f"chmod 755 {shell_quote(root)} {shell_quote(root + '/app')} && "
-            f"chown -R 3000:3000 {shell_quote(root + '/data')} && "
+            f"chown -R {private_owner} {shell_quote(root + '/data')} && "
             f"chmod 770 {shell_quote(root + '/data')} && "
-            f"chown -R 3000:3000 {shell_quote(root + '/venv')} && "
+            f"chown -R {private_owner} {shell_quote(root + '/venv')} && "
             f"chmod 700 {shell_quote(root + '/venv')} && "
             # b-roll CODE: root-owned and world-readable, mounted :ro -- same
             # posture as app/, so the process running it cannot rewrite it.
@@ -3872,7 +4065,7 @@ def main():
             # same C-2 reason. Create-only: an existing one is left alone, and
             # in particular the live music.db is never touched from here.
             f"mkdir -p {shell_quote(root + '/music-data')} && "
-            f"chown 3000:3000 {shell_quote(root + '/music-data')} && "
+            f"chown {private_owner} {shell_quote(root + '/music-data')} && "
             f"chmod 770 {shell_quote(root + '/music-data')} && "
             # ytdl CODE and the deno dir: the /app posture again -- root-owned,
             # world-readable, mounted :ro. A binary here is EXECUTED by the
@@ -3893,7 +4086,7 @@ def main():
             # for the same C-2 reason. Create-only; an existing one (with a
             # live job ledger in it) is left alone.
             f"mkdir -p {shell_quote(root + '/ytdl-data')} && "
-            f"chown 3000:3000 {shell_quote(root + '/ytdl-data')} && "
+            f"chown {private_owner} {shell_quote(root + '/ytdl-data')} && "
             f"chmod 770 {shell_quote(root + '/ytdl-data')}"
         ),
         dry_run=args.dry_run,
@@ -3948,6 +4141,56 @@ def main():
     # music data: the debris is there either way.
     prune_orphaned_staging(args.dry_run, ("/tmp", f"{root}/staging"))
 
+    # The SHARED ASSETS parent, <tree>/Assets, and the libraries under it.
+    #
+    # server-3 (2026-08-21): nothing in this repo ever created or owned it.
+    # setup_tree.py touches Projects/ only, and the two blocks below `mkdir -p`
+    # their own leaves -- so on a FRESH site Assets/ was created as a
+    # by-product of `mkdir -p <tree>/Assets/B-roll Archive` running as root,
+    # i.e. root:root 0755 with root's umask, and then left that way. The
+    # consequences are silent and downstream: the dashboard collector provisions
+    # Syncthing folders at <tree>/Assets/Luts and <tree>/Assets/Stills and
+    # relies on the Syncthing container (the service uid) to mkdir the leaf,
+    # which it cannot do under a root-owned 0755 parent -- both folders sit in
+    # "folder path missing" on every cycle, the LUT library never reaches an
+    # editor, and an editor browsing P:\Assets over SMB cannot create anything
+    # beside the two pre-made leaves.
+    #
+    # Same posture as Projects/ and the archive: <uid>:<gid> 2770 setgid, so a
+    # file any editor creates in there stays group-writable. The leaves come
+    # from SHARED_ASSET_FOLDERS, which is the same list the collector
+    # provisions, so a site that added a third library gets its directory here
+    # too rather than depending on Syncthing's mkdir.
+    #
+    # NON-FATAL, deliberately: on DSM the tree share's inheritable ACE does
+    # this job and a chmod there would DELETE it (spike 1), and on an existing
+    # TrueNAS site Assets/ is already right. A deploy must not fail over the
+    # posture of a directory it does not mount.
+    asset_dirs = [] if not DEFAULT_CC_ROOT else (
+        [f"{DEFAULT_CC_ROOT}/{SHARED_ASSETS_REL}"]
+        + [f"{DEFAULT_CC_ROOT}/{rel}" for _fid, rel, _label in SHARED_ASSET_FOLDERS])
+    assets_q = " ".join(shell_quote(d) for d in asset_dirs)
+    rc_assets, _, assets_err = (0, "", "") if not asset_dirs else run_ssh(
+        backend().root_cmd(build_synology_tree_dirs(asset_dirs)) if synology else
+        'echo "$SUDO_PW" | sudo -S sh -c '
+        + shell_quote(
+            f"mkdir -p {assets_q} && chown {tree_owner} {assets_q} && "
+            f"{{ chmod 2770 {assets_q} || "
+            f'echo "NOTE: chmod blocked on this dataset (likely ZFS '
+            f'aclmode=restricted) -- ownership above still applied"; }}'
+        ),
+        dry_run=args.dry_run,
+    )
+    if asset_dirs and rc_assets != 0:
+        print(f"NOTE: could not prepare the shared asset folders under "
+              f"{DEFAULT_CC_ROOT}/{SHARED_ASSETS_REL} ({assets_err.strip()[:200]}). "
+              f"Syncthing may not be able to create the LUT and Stills folders; "
+              f"check the owner of that directory on the NAS.", file=sys.stderr)
+    elif asset_dirs:
+        print(f"shared asset folders ready: "
+              + ", ".join(posixpath.basename(d) for d in asset_dirs[1:])
+              + f" under {DEFAULT_CC_ROOT}/{SHARED_ASSETS_REL}")
+
     # The b-roll DATA root: the one the compose file actually bind-mounts at
     # /broll-data. It is NOT under <host-root> -- it is the shared archive
     # itself, beside Projects/ under Creators_Club, which is what makes it
@@ -3989,7 +4232,7 @@ def main():
             backend().root_cmd(build_synology_tree_dirs(archive_dirs)) if synology else
             'echo "$SUDO_PW" | sudo -S sh -c '
             + shell_quote(
-                f"mkdir -p {quoted} && chown 3000:3001 {quoted} && "
+                f"mkdir -p {quoted} && chown {tree_owner} {quoted} && "
                 f"{{ chmod 2770 {quoted} || "
                 f'echo "NOTE: chmod blocked on this dataset (likely ZFS '
                 f'aclmode=restricted) -- ownership above still applied"; }}'
@@ -4025,7 +4268,7 @@ def main():
                 build_synology_tree_dirs([DEFAULT_MUSIC_LIBRARY_ROOT])) if synology else
             'echo "$SUDO_PW" | sudo -S sh -c '
             + shell_quote(
-                f"mkdir -p {lib_q} && chown 3000:3001 {lib_q} && "
+                f"mkdir -p {lib_q} && chown {tree_owner} {lib_q} && "
                 f"{{ chmod 2770 {lib_q} || "
                 f'echo "NOTE: chmod blocked on this dataset (likely ZFS '
                 f'aclmode=restricted) -- ownership above still applied"; }}'
@@ -4254,8 +4497,11 @@ def main():
         # dashboard refuses to START with a blank, placeholder or short
         # one, because this guards a write path no session protects.
         broll_ingest_token=broll_ingest_token,
-        broll_creators_shares=os.environ.get(
-            "BROLL_CREATORS_SHARES", "mofa-disaster"),
+        # Blank default, NOT one customer's project name
+        # (product-surface-3, 2026-08-21): unset, compose_config asks
+        # site.toml, and only a manifest with no [broll] table at all still
+        # gets the historical value.
+        broll_creators_shares=os.environ.get("BROLL_CREATORS_SHARES", "").strip(),
         binds=binds,
         nas_kind=backend().kind,
         ssh_hostkey=site_value("nas", "ssh_hostkey"),
@@ -4283,6 +4529,11 @@ def main():
                 nas_user=truenas_user, admin_users=admin_users,
                 homes_parent=DEFAULT_HOMES_PARENT, nas_kind=backend().kind,
                 broll_enabled=broll_enabled, ccsync_image=ccsync_image,
+                # The same value compose_config was given above: the FILE this
+                # renders and the DICT the TrueNAS path POSTs describe one
+                # container (product-surface-3, 2026-08-21).
+                broll_creators_shares=os.environ.get(
+                    "BROLL_CREATORS_SHARES", "").strip(),
             ), template=compose_template_for(mode)),
             STACK_ENV_SECRETS)
         env_file = {

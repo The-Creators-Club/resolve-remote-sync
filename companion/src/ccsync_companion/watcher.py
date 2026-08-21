@@ -6,7 +6,7 @@ item's "File Path" clip property and classifies it (see paths.py):
 
   OK          -> ignored
   OUT_OF_TREE -> queued for the popup fixer (debounced per session)
-  BAD_PREFIX  -> mapping-health tray notification (debounced per session)
+  BAD_PREFIX  -> mapping-health tray notification (once per broken episode)
   MISSING     -> logged at debug level ONCE per path, plus a per-poll
                  count; no user-facing action
 
@@ -43,9 +43,11 @@ class TimelineWatcher:
     OUT_OF_TREE items whenever there's at least one — the fixer/popup layer
     decides how to batch/present them.
 
-    `on_mapping_warning(item)` is called once per newly seen BAD_PREFIX path
-    (i.e. debounced the same way OUT_OF_TREE items are) — the tray layer
-    turns this into a notification.
+    `on_mapping_warning(item)` is called ONCE per broken-mapping episode,
+    with the first BAD_PREFIX item of it — the tray layer turns this into a
+    notification, and the notification names the mapping, not the clip
+    (comp-resolve-5, 2026-08-21). Every further BAD_PREFIX path in the same
+    episode gets a log line here instead. Re-armed when the mapping recovers.
 
     `on_non_canonical(items)` is called with newly seen NON_CANONICAL items —
     in-tree clips stored under the local spelling. Offered ONCE per path per
@@ -119,6 +121,17 @@ class TimelineWatcher:
         # through the uncached entry points.
         self._get_timeline_items = get_timeline_items or resolve_bridge.poll_timeline_items
         self._warned_mapping: set[str] = set()
+        # ONE mapping-health warning per broken EPISODE, not per clip path
+        # (comp-resolve-5, 2026-08-21). _warned_mapping dedupes per path, so a
+        # 300-clip timeline opened before P: was mapped fired 300 identical
+        # toasts on the first full poll -- and on macOS tray_native.notify is
+        # a synchronous `osascript` spawn on THIS thread, so the watcher (and
+        # with it the project name the dashboard reports) parked for the
+        # duration while Notification Center filled with 300 copies of one
+        # message. The toast never named the clip anyway: the thing an editor
+        # can act on is the mapping. Cleared with _warned_mapping on recovery,
+        # so a break -> fix -> break cycle still warns again.
+        self._mapping_warning_sent = False
         # Once-per-process latches for the two 2026-08-12 classes. Offered
         # (not warned) is the right word for _offered_non_canonical: a
         # successful auto-relink changes the clip's File Path so the key
@@ -263,6 +276,16 @@ class TimelineWatcher:
                     continue
                 self._warned_mapping.add(key)
                 new_mapping_warnings += 1
+                if self._mapping_warning_sent:
+                    # The episode has already been reported. The PATH is still
+                    # worth a log line -- it is the diagnostic half of the old
+                    # per-clip warning (comp-resolve-5, 2026-08-21).
+                    log.warning(
+                        "clip on the canonical prefix does not resolve under "
+                        "local_root either: %s", path,
+                    )
+                    continue
+                self._mapping_warning_sent = True
                 if self._on_mapping_warning is not None:
                     try:
                         self._on_mapping_warning(item)
@@ -309,6 +332,9 @@ class TimelineWatcher:
                 self.canonical_prefix,
             )
             self._warned_mapping.clear()
+            # Re-arms the once-per-episode toast as well as the per-path keys
+            # (comp-resolve-5, 2026-08-21).
+            self._mapping_warning_sent = False
 
         if new_out_of_tree and self._on_out_of_tree is not None:
             try:

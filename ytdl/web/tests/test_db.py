@@ -579,6 +579,82 @@ def test_the_manifest_on_disk_names_the_mode(con, job):
     assert manifest['mode'] == claude_cli.MODE_VISUALS
 
 
+# ------------------------------------------ the lease's machine (010)
+# data-model-7 (CR-66/CR-67, 2026-08-21). The download lease was keyed on the
+# editor NAME, so one editor's two computers both read as "the same holder
+# refreshing" -- see docs/YTDL_LOCAL_DOWNLOAD.md 3.
+
+
+def _at_v9(tmp_path, name='v9.db'):
+    """A database in the shape the fleet's ytdl.db is in BEFORE 010.
+
+    Migrated up from v5 rather than pasted, for the reason _at_v8 gives: the
+    intermediate steps are the app's own files, so this cannot drift.
+    """
+    con = db.connect(tmp_path / name)
+    con.executescript(_V5_DDL)
+    for version in (6, 7, 8, 9):
+        db._apply_migration(con, db._MIGRATIONS[version][0])
+    con.execute('PRAGMA user_version = 9')
+    con.commit()
+    return con
+
+
+def test_a_v9_database_gains_claimed_machine_and_its_live_lease_survives(tmp_path):
+    """010, and the property that let it ship before the companion half: a
+    lease taken by a machine that could not say which it is stays claimable by
+    its holder, because a NULL there is "unknown", never "somebody else"."""
+    con = _at_v9(tmp_path)
+    con.execute("INSERT INTO jobs(created_by,term,term_dir,project_slug,"
+                "project_label,phase,download_mode,claimed_by,created_at,"
+                "updated_at) VALUES(?,'reef','reef','s','2026/FF5/Energy',"
+                "'downloading','local',?,'x','x')", (USER, USER))
+    con.commit()
+    job_id = con.execute('SELECT id FROM jobs').fetchone()['id']
+    assert 'claimed_machine' not in db._columns(con, 'jobs')
+
+    db.ensure_schema(con)
+
+    assert con.execute('PRAGMA user_version').fetchone()[0] == db.CURRENT_SCHEMA_VERSION
+    assert 'claimed_machine' in db._columns(con, 'jobs')
+    old = db.get_job(con, job_id)
+    assert old['claimed_machine'] is None
+    assert db.claimed_machine_of(old) is None
+    # the holder is still the holder, whichever machine now speaks for them
+    assert db.lease_held_by(old, USER)
+    assert db.lease_held_by(old, USER, 'a-machine-id')
+    assert not db.lease_held_by(old, OTHER_USER, 'a-machine-id')
+    # ...and nothing the earlier migrations wrote is disturbed by this one
+    assert db.mode_of(old) == claude_cli.MODE_VISUALS
+    assert db.shot_types_of(old) == db.DEFAULT_SHOT_TYPES
+    con.close()
+
+
+def test_the_010_migration_is_registered_in_order_and_runs_once(tmp_path):
+    """The runner is driven by the PREDICATE, not by user_version
+    (migrations/README.md), so the file has to be safe to reach twice -- a
+    second ALTER of the same column is an error that would take the app down
+    on boot."""
+    assert db._MIGRATIONS[10][0] == '010_jobs_claimed_machine.sql'
+    assert max(db._MIGRATIONS) == db.CURRENT_SCHEMA_VERSION
+    assert sorted(db._MIGRATIONS) == list(range(2, db.CURRENT_SCHEMA_VERSION + 1))
+
+    con = _at_v9(tmp_path, 'v9-twice.db')
+    db.ensure_schema(con)
+    db.ensure_schema(con)
+    assert 'claimed_machine' in db._columns(con, 'jobs')
+    con.close()
+
+
+def test_a_row_with_no_claimed_machine_column_at_all_reads_as_unknown(con, job):
+    """A partial SELECT, or a database the migration has not reached. Both mean
+    "nobody said which machine", which is the pre-2026-08-21 behaviour."""
+    partial = con.execute('SELECT id, term FROM jobs WHERE id=?',
+                          (job['id'],)).fetchone()
+    assert db.claimed_machine_of(partial) is None
+    assert db.claimed_machine_of(None) is None
+
+
 def test_con_is_per_thread(con):
     """A sqlite3 connection may only be used on the thread that created it, and
     this app has two kinds of caller: the request threadpool and the worker."""

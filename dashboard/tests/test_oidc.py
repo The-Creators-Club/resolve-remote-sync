@@ -264,3 +264,68 @@ def test_the_flow_cookie_is_signed_and_short_lived():
     assert oidc.unpack_flow(STRONG, "not-a-cookie") is None
     expired = oidc.pack_flow(STRONG, {"state": "s", "exp": 1_000})
     assert oidc.unpack_flow(STRONG, expired) is None
+
+
+# ------------------------------------------- who may sign in (trust-model-5)
+
+
+def _known_editor(settings, username):
+    """A username this fleet has a positive record of, the same predicate
+    api._require_fleet_member enforces on the password path."""
+    from ccsync_dashboard import db as dbmod
+
+    conn = dbmod.connect(settings.db_path)
+    dbmod.migrate(conn)
+    dbmod.record_known_editor(conn, username, "admin", dbmod.utcnow_iso())
+    conn.commit()
+    conn.close()
+
+
+def test_an_account_this_fleet_does_not_know_is_refused(tmp_path, idp):
+    """Pointing DASH_OIDC_ISSUER at a company directory used to let every
+    account in it sign in as an editor, and one whose preferred_username
+    equalled a real editor's name inherited that editor's plans, ticks and
+    device approvals (trust-model-5, 2026-08-21)."""
+    settings = _settings(tmp_path, idp, "member.db")
+    _known_editor(settings, "someone-else")
+    idp.claims = {"preferred_username": "accounts.payable"}
+    with TestClient(_app(settings)) as c:
+        resp, _ = _sign_in(c, idp)
+        assert resp.status_code == 403
+        assert "not part of this fleet" in resp.text
+        assert c.get("/api/v1/me").json()["user"] is None
+
+
+def test_an_editor_this_fleet_knows_signs_in(tmp_path, idp):
+    settings = _settings(tmp_path, idp, "member2.db")
+    _known_editor(settings, "jsmith")
+    with TestClient(_app(settings)) as c:
+        resp, _ = _sign_in(c, idp)
+        assert resp.status_code == 303
+        assert c.get("/api/v1/me").json()["user"] == "jsmith"
+
+
+def test_a_group_claim_can_be_the_authority_instead(tmp_path, idp):
+    """The customer whose IdP owns the answer: DASH_OIDC_ALLOWED_GROUPS makes
+    membership of a directory group the check, and nothing else passes."""
+    settings = _settings(tmp_path, idp, "group.db",
+                         oidc_allowed_groups=frozenset({"editors"}))
+    _known_editor(settings, "someone-else")
+    with TestClient(_app(settings)) as c:              # idp publishes groups=["editors"]
+        resp, _ = _sign_in(c, idp)
+        assert resp.status_code == 303
+        assert c.get("/api/v1/me").json()["user"] == "jsmith"
+
+    idp.claims = {"preferred_username": "intern", "groups": ["everyone"]}
+    with TestClient(_app(settings)) as c:
+        resp, _ = _sign_in(c, idp)
+        assert resp.status_code == 403
+        assert "not a member of the group" in resp.text
+
+
+def test_the_operator_is_never_locked_out_of_a_fleet_with_no_editors_yet(tmp_path, idp):
+    """Degrades the way api._require_fleet_member does: with nothing to check
+    against, the check is skipped and logged rather than refusing day one."""
+    with TestClient(_app(_settings(tmp_path, idp, "empty.db"))) as c:
+        resp, _ = _sign_in(c, idp)
+        assert resp.status_code == 303

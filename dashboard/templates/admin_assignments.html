@@ -33,15 +33,22 @@
           <tr>
             <th class="assign-project-head">PROJECT</th>
             {% for c in assignments.columns %}
+            {# A WIRED COLUMN, not a wired account (dash-admin-8 / CR-49,
+               2026-08-21): base_editors is true only when EVERY one of a
+               person's machines is wired, so a mixed account (wired desktop +
+               remote laptop, a shape f27c181 made supported) had a clickable
+               column for its wired half that every write endpoint then 409'd.
+               base_machine_cells is the per-computer answer. #}
+            {% set wired = (c.editor, c.machine) in assignments.base_machine_cells %}
             <th>
               <div class="assign-editor-head">
                 <span class="name">{{ c.label }}</span>
                 <span class="dot {{ assignments.presence.get(c.editor, '') }}"
                       title="companion presence for {{ c.editor }}">&#9679;</span>
                 <span class="muted mono-sm" title="this computer">{{ c.sub }}</span>
-                {% if c.editor in assignments.base_editors %}
+                {% if wired %}
                 <span class="muted mono-sm"
-                      title="this account works directly off the NAS tree, so it syncs nothing">base rig</span>
+                      title="this computer works directly off the NAS tree, so it syncs nothing">wired</span>
                 {% else %}
                 <span class="assign-colbtns">
                   <button type="button" class="btn"
@@ -72,13 +79,14 @@
           <tr data-project-label="{{ p.label | lower }}">
             <td class="assign-project" title="{{ p.label }}">{{ p.label }}</td>
             {% for c in assignments.columns %}
+            {% set wired = (c.editor, c.machine) in assignments.base_machine_cells %}
             <td class="assign-cell">
               <input type="checkbox" class="proj-check matrix-check"
                      data-slug="{{ p.slug }}" data-editor="{{ c.editor }}"
                      data-machine="{{ c.machine }}"
                      {{ 'checked' if (p.slug, c.editor, c.machine) in assignments.ticked_cells }}
-                     {% if c.editor in assignments.base_editors %}disabled
-                     title="{{ c.editor }} is a base rig: it works directly off the NAS and syncs nothing"
+                     {% if wired %}disabled
+                     title="{{ c.sub or c.editor }} is wired to the NAS: it works directly off the tree and syncs nothing"
                      {% else %}
                      title="sync &quot;{{ p.label }}&quot; to {{ c.sub }}"
                      {% endif %}

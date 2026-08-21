@@ -200,7 +200,7 @@ def print_queue(con):
 
 
 def drain_queue(con, clap, retry_failed=False, limit=0):
-    """Analyse every queued upload. -> (done, failed, uids).
+    """Analyse every queued upload. -> (done, failed, uids, parked).
 
     Each row is finished one way or the other before the next is started, so an
     interrupted drain leaves the rest pending rather than half-applied -- the
@@ -211,6 +211,13 @@ def drain_queue(con, clap, retry_failed=False, limit=0):
     effect on the LIVE index is that set of ids and nothing else, which is what
     makes an upload queued while this ran survive (musicweb/drain.py, 2026-08-17,
     COMMERCIAL_READINESS.md item 14).
+
+    `parked` is the same fact for the rows that FAILED: (uid, error) pairs, so
+    the bundle can close them on the live index too (music-3, 2026-08-21).
+    Until it did, the failure lived only in this pulled copy and the live row
+    stayed `pending` forever -- counted as waiting in the editor's panel, held
+    by the duplicate defences so a fixed re-export was refused, and decoded
+    again by every subsequent drain.
     """
     closed = db.queue_reconcile(con)
     if closed:
@@ -219,10 +226,10 @@ def drain_queue(con, clap, retry_failed=False, limit=0):
     rows = db.queue_pending(con, limit=limit, include_failed=retry_failed)
     if not rows:
         print('ingest queue: nothing to analyse')
-        return 0, 0, []
+        return 0, 0, [], []
 
     print(f'draining {len(rows)} queued upload(s)...')
-    drained = []
+    drained, parked = [], []
     done = failed = 0
     for i, r in enumerate(rows, 1):
         rel, qid = r['rel_path'], r['id']
@@ -232,13 +239,11 @@ def drain_queue(con, clap, retry_failed=False, limit=0):
             # pair is translated here and never joined by hand.
             path = config.resolve_path(r['share'] or config.SHARE, rel)
         except Exception as e:                                  # noqa: BLE001
-            db.queue_mark_failed(con, qid, f'unusable (share, rel_path): {e}')
-            failed += 1
+            failed += _park(con, r, qid, f'unusable (share, rel_path): {e}', parked)
             print(f'  [{i}/{len(rows)}] FAIL {rel}: {e}', flush=True)
             continue
         if not path.is_file():
-            db.queue_mark_failed(con, qid, f'file is not at {path}')
-            failed += 1
+            failed += _park(con, r, qid, f'file is not at {path}', parked)
             print(f'  [{i}/{len(rows)}] FAIL {rel}: file is not at {path}', flush=True)
             continue
         try:
@@ -261,11 +266,25 @@ def drain_queue(con, clap, retry_failed=False, limit=0):
                   f'{str(fields.get("music_key") or "-"):>8s}  -> track {tid}',
                   flush=True)
         except Exception as e:                                  # noqa: BLE001
-            db.queue_mark_failed(con, qid, f'{type(e).__name__}: {e}')
-            failed += 1
+            failed += _park(con, r, qid, f'{type(e).__name__}: {e}', parked)
             print(f'  [{i}/{len(rows)}] FAIL {rel}: {type(e).__name__}: {e}',
                   flush=True)
-    return done, failed, drained
+    return done, failed, drained, parked
+
+
+def _park(con, row, qid, error, parked):
+    """Fail one journal row here, and remember it for the bundle. -> 1.
+
+    music-3, 2026-08-21: parking a row in the PULLED copy is invisible to the
+    live index, where the same row goes on counting as pending. `uid` is absent
+    only on a database that skipped migration 003, and such a row cannot travel
+    in a bundle at all -- the same limit the drained side has.
+    """
+    db.queue_mark_failed(con, qid, error)
+    uid = row['uid'] if 'uid' in row.keys() else None
+    if uid:
+        parked.append((uid, error))
+    return 1
 
 
 def backfill_peaks(con, root: Path):
@@ -442,9 +461,9 @@ def main():
         return
 
     if args.queue:
-        done, failed, drained = drain_queue(con, clap,
-                                            retry_failed=args.retry_failed,
-                                            limit=args.limit)
+        done, failed, drained, parked = drain_queue(con, clap,
+                                                    retry_failed=args.retry_failed,
+                                                    limit=args.limit)
         if done:
             # percentiles are library-relative, so the whole library is
             # re-scored once anything new lands -- seconds, from the stored
@@ -458,10 +477,11 @@ def main():
             # while the drain ran (musicweb/drain.py, 2026-08-17, item 14).
             try:
                 r = drain.export_bundle(con, drained, args.export_drain,
-                                        source=str(db_path))
+                                        source=str(db_path), failures=parked)
             except drain.BundleError as exc:
                 sys.exit(f'--export-drain: {exc}')
-            print(f'drain bundle: {r["tracks"]} track(s) -> {r["path"]}')
+            print(f'drain bundle: {r["tracks"]} track(s), '
+                  f'{len(r["failures"])} failure(s) -> {r["path"]}')
             for uid, why in r['skipped']:
                 print(f'  not exported {uid}: {why}')
             print('  apply it where the LIVE index is:\n'

@@ -651,3 +651,188 @@ def test_a_same_named_file_at_a_different_size_is_not_a_move(tmp_path):
     ))
     lane.run_once()
     assert breaker.tripped
+
+
+# -- the 2026-08-21 hunt ----------------------------------------------------
+
+
+def test_resume_drops_the_remembered_remote_listing(tmp_path):
+    """comp-lanes-ab-1: a trigger-1 trip re-tripped on the identical listing
+    the moment the lane ran again, because resume() cleared the deletion
+    counters and left the remote baseline on disk. The [ RESUME ] button was
+    dead for any deliberate consolidation on the NAS."""
+    breaker = _breaker(tmp_path)
+    assert breaker.check_remote("Projects/X", [f"f{i}" for i in range(10)]) is None
+    assert breaker.check_remote("Projects/X", ["f0", "f1"]) is not None
+    assert breaker.tripped
+
+    assert breaker.resume("tray") is True
+    # The same listing the operator has just approved must now be the
+    # baseline, not the evidence for another trip.
+    assert breaker.check_remote("Projects/X", ["f0", "f1"]) is None
+    assert not breaker.tripped
+    assert breaker.check_remote("Projects/X", ["f0", "f1"]) is None
+
+
+def test_resume_drops_the_baseline_for_the_empty_listing_trigger_too(tmp_path):
+    breaker = _breaker(tmp_path)
+    breaker.check_remote("Projects/X", ["a", "b", "c"])
+    assert breaker.check_remote("Projects/X", []) is not None
+    breaker.resume("tray")
+    assert breaker.check_remote("Projects/X", []) is None
+    assert not breaker.tripped
+
+
+def test_a_resume_request_is_applied_exactly_once(tmp_path):
+    """comp-lanes-ab-2: the dashboard's [ RESUME ] rides every report reply
+    until an admin clears it, so the same request must not clear a LATER
+    trip."""
+    breaker = _breaker(tmp_path, lane_b_max_deletes_per_pass=1)
+    breaker.note_pass("Projects/X", 9, 0)
+    assert breaker.resume("dashboard", request_id="2026-08-21T10:00:00Z") is True
+    assert not breaker.tripped
+    # Same standing request, next report: no-op.
+    assert breaker.resume("dashboard", request_id="2026-08-21T10:00:00Z") is False
+    breaker.note_pass("Projects/X", 9, 0)
+    assert breaker.tripped
+    assert breaker.resume("dashboard", request_id="2026-08-21T10:00:00Z") is False
+    assert breaker.tripped, "an old request must not clear a new trip"
+    assert breaker.resume("dashboard", request_id="2026-08-21T11:00:00Z") is True
+
+
+def test_an_applied_resume_request_survives_a_restart(tmp_path):
+    breaker = _breaker(tmp_path, lane_b_max_deletes_per_pass=1)
+    breaker.note_pass("Projects/X", 9, 0)
+    assert breaker.resume("dashboard", request_id="req-1") is True
+    revived = _breaker(tmp_path, lane_b_max_deletes_per_pass=1)
+    revived.note_pass("Projects/X", 9, 0)
+    assert revived.tripped
+    assert revived.resume("dashboard", request_id="req-1") is False
+
+
+def test_moves_are_discounted_before_they_fill_the_cumulative_counter(tmp_path):
+    """comp-lanes-ab-5: five passes of 40 moved files never trip the per-pass
+    rule, so the probe never ran and all 200 stayed on the cumulative
+    counter -- and the next handful of REAL deletions tripped a 'slow leak'
+    made almost entirely of files still on the NAS."""
+    breaker = _breaker(tmp_path, lane_b_max_deletes_per_pass=50,
+                       lane_b_max_deletes_cumulative=200)
+    for _ in range(5):
+        assert breaker.note_pass("Projects/X", 40, 0,
+                                 relocation_probe=lambda: 40) is None
+    assert breaker.report()["deletes"] == 0
+    assert breaker.note_pass("Projects/X", 8, 0, relocation_probe=lambda: 0) is None
+    assert not breaker.tripped
+
+
+def test_a_small_tidy_pass_still_costs_no_probe(tmp_path):
+    # The probe is a recursive remote listing; it must not be spent on the
+    # handful of proxies an ordinary re-render supersedes.
+    calls = []
+    breaker = _breaker(tmp_path, lane_b_max_deletes_per_pass=50)
+    breaker.note_pass("Projects/X", 3, 0,
+                      relocation_probe=lambda: calls.append(1) or 0)
+    assert calls == []
+
+
+def test_a_torn_write_cannot_lose_a_tripped_breaker(tmp_path, monkeypatch):
+    """sync-safety-8: the state file was written in place, so a power loss
+    or a self-upgrade kill mid-write left an empty/partial file -- which
+    reads as NOT TRIPPED and takes the remote baseline with it."""
+    breaker = _breaker(tmp_path, lane_b_max_deletes_per_pass=1)
+    breaker.check_remote("Projects/X", ["a", "b", "c", "d"])
+    breaker.note_pass("Projects/X", 9, 0)
+    assert breaker.tripped
+
+    real_write = Path.write_text
+
+    def torn(self, data, *args, **kwargs):
+        real_write(self, data[: max(1, len(data) // 2)], *args, **kwargs)
+        raise OSError("the power went out")
+
+    monkeypatch.setattr(Path, "write_text", torn)
+    breaker.note_pass("Projects/X", 1, 0)
+    monkeypatch.undo()
+
+    revived = _breaker(tmp_path)
+    assert revived.tripped
+    assert revived.check_remote("Projects/X", []) is not None, (
+        "the remote baseline must survive too -- trigger 1 has nothing to "
+        "compare against without it"
+    )
+
+
+def test_a_successful_write_leaves_no_temp_file_behind(tmp_path):
+    breaker = _breaker(tmp_path)
+    breaker.trip("because")
+    assert (tmp_path / "breaker.json").is_file()
+    assert not (tmp_path / "breaker.json.tmp").exists()
+
+
+def test_a_proxy_rewritten_on_the_nas_at_the_same_path_is_not_a_deletion(tmp_path):
+    """comp-lanes-ab-3: lane B's --min-age hides a proxy the NAS rewrote in
+    the last 120 s from the SOURCE listing while the editor's older local
+    copy stays on the destination side, so rclone moves it into the trash
+    without replacing it. A bulk re-render then trips the breaker on files
+    that are all on the server, and the basename+size probe cannot excuse
+    them because a re-encode changes the size."""
+    breaker = _breaker(tmp_path, lane_b_max_deletes_per_pass=2)
+    lane = _lane_b_with_trash(tmp_path, breaker, "".join(
+        # Same relative path as the trashed copies, brand new sizes.
+        f"999;Proxy/{name}\n" for name in ("a.mov", "b.mov", "c.mov")
+    ))
+    status = lane.run_once()
+    assert not breaker.tripped, "the files are all still on the NAS, at that path"
+    assert status.state == STATE_IDLE
+
+
+def test_the_remote_root_marker_probe_runs_in_managed_mode(tmp_path):
+    """sync-safety-5: every managed pass names a project subpath, so the
+    breaker's marker rule (`if not key`) never ran -- the one pre-flight that
+    catches a remote_root pointing at the wrong dataset was dark on the whole
+    fleet."""
+    calls = []
+
+    def remote_list(cmd, timeout):
+        calls.append(cmd)
+        return "Documents\nDownloads\n"
+
+    breaker = _breaker(tmp_path)
+    (tmp_path / "local").mkdir(parents=True, exist_ok=True)
+    lane = RcloneLane(
+        direction=DIRECTION_DOWN,
+        local_root=str(tmp_path / "local"),
+        remote="nas",
+        remote_root="home",
+        state_dir=tmp_path / "state",
+        breaker=breaker,
+        remote_list_fn=remote_list,
+    )
+    assert lane.check_remote_root() is False
+    assert breaker.tripped
+    assert "remote_root" in breaker.reason
+    assert len(calls) == 1
+
+
+def test_the_remote_root_probe_is_paid_for_once(tmp_path):
+    calls = []
+
+    def remote_list(cmd, timeout):
+        calls.append(cmd)
+        return "Projects\nAssets\n"
+
+    breaker = _breaker(tmp_path)
+    (tmp_path / "local").mkdir(parents=True, exist_ok=True)
+    lane = RcloneLane(
+        direction=DIRECTION_DOWN,
+        local_root=str(tmp_path / "local"),
+        remote="nas",
+        remote_root="Creators_Club",
+        state_dir=tmp_path / "state",
+        breaker=breaker,
+        remote_list_fn=remote_list,
+    )
+    assert lane.check_remote_root() is True
+    assert lane.check_remote_root() is True
+    assert len(calls) == 1
+    assert not breaker.tripped

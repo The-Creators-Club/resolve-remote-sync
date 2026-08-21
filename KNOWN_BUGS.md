@@ -1470,6 +1470,1258 @@ inverse gap here: the dashboard half is inert until a companion that knows
 `resume_lane_b` is on the machine, so this does NOT help any machine still on
 0.9.42 or earlier. Ruskin's current trip needs the tray click regardless.
 
+## The 2026-08-21 full-repo hunt and fix pass (CR-46..CR-67)
+
+The fifth fleet hunt (`docs/bug-hunt-2026-08-21.md`: 14 module hunters, each
+batch adversarially verified, plus 6 macro design reviewers looking at the
+approach rather than the lines) confirmed **78 findings** and **53 design
+issues** against a clean tree at `f27c181` (companion 0.9.43, dashboard
+0.7.4). Eleven fixers took disjoint file territories the same day.
+
+Entries below group the findings by THEME, because that is how they were
+fixed and how they will have to be shipped: one entry per mechanism, naming
+every finding id it covers. All of it is **in repo, unshipped**. After wave
+2 the orchestrator bumped **companion 0.9.44, dashboard 0.7.5, installer
+1.0.36** (remember 0.9.9 is followed by 0.10.0, never 1.0), and the ship that
+carries this pass must **deploy the dashboard before the companions** as
+ever. CR-66 is the list of what was deliberately NOT done and why; CR-67
+is the residue of half-fixes whose other half sat in a file nobody held.
+
+Suites on the merged tree after wave 2 and the bumps (`tools/run_all_tests.ps1`,
+orchestrator): **13 of 13 green**. companion 4425 passed / 2 skipped (4381 / 46
+under run_all_tests, whose launcher skips the live-Resolve and macOS cases); dashboard 1570 / 5 skipped; server 572 / 2
+skipped; onboarding 321; bench 175; broll/web 512; broll/indexer 788;
+music/web 478; music/indexer 46; ytdl/web 657; tools 185; both installer table
+suites; `check_licenses.py` OK. Three tests were reconciled on the merged
+tree, none a product defect (see the hunt document's RESOLUTION block).
+
+### CR-46 - [ RESUME ] did not resume, and one click could keep trashing (comp-lanes-ab-1, comp-lanes-ab-2) - FIXED in repo 2026-08-21, unshipped
+CR-45 shipped the button; this pass found that neither end of it was safe.
+`LaneBBreaker.resume()` cleared the latch and the deletion counters but left
+`self._remote_counts`, and `check_remote()` writes a new baseline only on the
+NON-trip path, so a trigger-1 trip ("shrank from 10 to 3", "listed EMPTY")
+re-tripped on the IDENTICAL listing, for ever, with the identical sentence.
+Reproduced. The operator's only exit was deleting `lane_b_breaker.json` with
+the companion stopped, which is exactly what `resume()`'s own docstring said
+the button existed to avoid.
+
+Underneath it, the dashboard's request was a STANDING order, cleared only by
+a report showing the breaker clear, while the companion posts no report on
+resume and the reporter's next tick was chosen 60 s before the reply. A pass
+that re-trips inside that window is resumed again on the next reply, and
+again: up to `--max-delete 100` proxies into `.ccsync-trash` per cycle from
+ONE admin click. That is the unbounded sequence the breaker was built to
+stop, reinstated through its own recovery path.
+
+FIXED on both sides. Companion (`sync/lane_guard.py`, `sync/rclone_lane.py`,
+`app.py`): `resume()` drops the remembered remote listing with the latch, so
+the next listing re-seeds the baseline (the operator has just asserted the
+server is in the state it should be synced from); it takes an optional
+`request_id`, records it in `lane_b_breaker.json` as `applied_resume_request`
+BEFORE clearing the latch (a crash in between can lose a request, never
+repeat one), and returns False for an id already applied even when the
+breaker is not currently tripped, so an old standing request cannot clear a
+LATER trip. `app.py` passes the dashboard command's `requested_at` as that
+id, probes `resume_after_trip`'s signature with `inspect` rather than
+catching TypeError, and posts one LIGHT report on its own thread immediately
+after any resume so the dashboard learns at once. Dashboard (`api.py`,
+`db.py`): the request is cleared when the reply that carries it goes out, not
+when a later report says clear; the command still carries `requested_at` for
+the companion's dedupe; and `POST .../resume-lane-b` now 409s unless that
+machine's last report shows the breaker tripped, so a request can no longer
+be pre-armed against a trip nobody has reviewed (`db.machine_breaker_tripped`
+returns None for "no guard on record", which is not False).
+
+The button is one-shot now. An admin whose reply is lost clicks again; a
+second trip needs a second click, by design.
+
+### CR-47 - three things lane B called a deletion that were not one (comp-lanes-ab-3, comp-lanes-ab-4, comp-lanes-ab-5) - FIXED in repo 2026-08-21, unshipped
+CR-44 taught the breaker that a MOVE is not a deletion. Three more shapes
+were still being counted as one.
+
+* **A proxy rewritten on the NAS inside the `--min-age 120s` window.** rclone
+  applies age filters per side, so a NAS file rewritten seconds ago is
+  excluded from the SOURCE listing while the editor's older local copy is
+  still on the DESTINATION side: `sync` moves it into `--backup-dir` and does
+  not replace it. Verified against the bundled rclone 1.74.4. A bulk
+  re-render at the same names trips the breaker on files that never left the
+  server, and CR-44's basename+size probe cannot rescue it, because a
+  re-encode changes the size.
+* **Every trashed file counted twice.** A `--backup-dir` move writes two JSON
+  records, `Moved (server-side)` then `Moved into backup dir`, and
+  `RcloneRunTally` read the first as a completed download, so the dashboard's
+  transfer history showed each trashed proxy as a file that had just arrived.
+* **Relocations were discounted only on a pass that was about to trip**, so a
+  reorganisation already judged benign kept feeding the cumulative "slow
+  leak" counter until a handful of real deletions later tripped it and blamed
+  the move.
+
+FIXED in `sync/rclone_lane.py` and `sync/lane_guard.py`:
+`_trashed_this_pass` returns each file's path RELATIVE to the backup dir
+(which mirrors the destination root), `list_remote_files` fills an optional
+`paths_out` set from the same walk, and `_count_relocations` treats a trashed
+file as not-deleted when the remote holds that same relative path at ANY
+size, falling back to CR-44's basename+size rule. `feed_record` returns early
+on `Moved (server-side)`, so the twin is no longer a completion. And
+`note_pass` runs the probe whenever a pass trashed at least half the ABSOLUTE
+per-pass cap (25 at the default), not only when it would trip, so moves come
+off the cumulative counter as they happen. That threshold deliberately
+ignores the fraction-narrowed limit: on a 12-proxy project it would otherwise
+spend a recursive listing on a two-file cleanup, and CR-44's laziness for the
+~99% case is the property worth keeping.
+
+Residue, reported rather than redesigned: the min-age proxy still disappears
+from the editor's folder for one rotation and is re-downloaded next pass.
+There is no filter expression that excludes a young file from the source AND
+protects its old destination twin without giving up the truncated-download
+guard `LANE_B_MIN_AGE_SECONDS` exists for. `sync-safety-7` (adopt
+`--track-renames` so a NAS-side move becomes a local rename instead of a
+trash-and-re-download) is DEFERRED: it is an empirical change against a
+bundled rclone, and a wrong answer costs deletions on editor machines. CR-66.
+
+### CR-48 - the safety latches: torn writes, a probe that never ran, and a halt that missed the asset libraries (sync-safety-8, sync-safety-5, sync-safety-2, sync-safety-4, sync-safety-6) - FIXED in repo 2026-08-21 (the halt's app.py half landed in wave 2), unshipped
+Four defects in the latches themselves, plus the one deletion surface that
+has no latch at all.
+
+* **Non-atomic state files.** `lane_guard._write_json` wrote in place, and the
+  old comment argued that a torn write degrades to "not tripped". It does
+  not: the same file carries `remote_counts`, so a torn write also removes
+  trigger 1's only baseline, and the same helper writes `sync_halt.json`,
+  where a torn write releases a fleet halt on one machine. FIXED:
+  `<path>.tmp` + `os.replace()`, tmp removed on failure. Never make a safety
+  latch in-memory-only, and never write one non-atomically.
+* **The remote_root marker probe never ran in managed mode**, though
+  SYNC_SAFETY.md credits it with catching a wrong `remote_root`. FIXED:
+  `RcloneLane.check_remote_root()` lists `remote_root` itself once per
+  process (one `lsf` through the existing injected lister) and hands it to
+  `breaker.check_remote('')`, where the marker-dir rule lives; the sequencer
+  calls it once per pass before `_run_pass`, only when lane B is enabled,
+  fault-isolated. A failed listing is never a trip.
+* **The halt did not cover the shared asset libraries** (LUTs, B-roll
+  archive, music), though the doc and its test say "every lane C folder", and
+  the once-per-pass shared-folder reconcile would release a folder the halt
+  had just paused. **Halt release** then unpaused every selected folder
+  directly, bypassing the sequencer's "the `.stignore` never landed, stay
+  paused" latch. FIXED: `SharedFolderManager` gained `folder_ids()` and an
+  optional `halted` predicate and refuses to release a paused folder while a
+  halt is active (a halt check that throws also leaves it paused);
+  `Sequencer` gained `halt_folder_ids()` (selection slugs plus the shared
+  folder ids, deliberately NOT folded into `expected_folder_slugs`, which is
+  lane C's "am I behind" input) and `release_for_halt()`, which releases
+  through `_unpause_all`'s existing ignores-confirmed filter. `app.py` now
+  calls all three (wave 2, 2026-08-21): the Sequencer is built with
+  `halted=lambda: self.halt.active` (constructed after `self.halt`, so the
+  closure has something to read on the first pass), `_pause_lane_c_folders`
+  takes its list from `sequencer.halt_folder_ids()` when that exists, and a
+  new `_release_lane_c_folders()` routes BOTH release paths, the tray/admin
+  `release_halt` and `_apply_fleet_halt`'s dashboard release, through
+  `release_for_halt()`. A `release_for_halt()` that throws is logged and
+  leaves lane C paused, because staying paused is the safe side; the direct
+  unpause survives only as the no-sequencer legacy fallback.
+* **The unguarded surface: a human deleting on the NAS.** Documented rather
+  than fixed, in a new `docs/SYNC_SAFETY.md` section 7. Lane B mirrors up to
+  50 proxies per pass into a 14-day trash before the breaker trips, lane C
+  keeps `.stversions`, video originals have no version at all, the actual
+  latch is a NAS snapshot, and CR-10 still says `setup_snapshots.py --apply`
+  has never been run on either NAS. Nothing in the product reports a missing
+  schedule. The `maxAge` disagreement is written down with its three call
+  sites (companion 2592000 = 30 d against server and dashboard 31536000 =
+  365 d, ledger R5); reconciling it is the companion's move to make, since
+  lowering the server's would REDUCE protection, and R5 marks it as wanting
+  an owner decision. A fleet-page banner for a MISSING snapshot task was
+  attempted in wave 2 and declined as out of reach: the TrueNAS listing
+  exists and the Setup wizard already consults it, but raising the banner
+  needs the fleet template plus a cached background poll, and `health.py` is
+  deliberately I/O-free so that a NAS timeout never sits in front of the
+  container healthcheck. CR-67.
+
+### CR-49 - a tick belongs to a computer, and now it does on the wire too (comp-lane-c-2, sync-safety-3, data-model-3, dash-core-1, dash-admin-8, data-model-1) - FIXED in repo 2026-08-21, unshipped
+The per-machine plan work (CR-27, CR-28, dashboard 0.7.0) left three holes
+where the ROW is per machine but the ACTION was not.
+
+* **"Remove `<project>` from this machine" removed it from every machine the
+  editor owns.** `SelectionClient.untick` issued a person-wide DELETE while
+  the tray label said otherwise; on a two-machine editor that silently
+  stopped lane A UPLOADS from the other computer. FIXED
+  (`companion/selection.py`): the DELETE names this hostname, and the
+  post-delete view (machine-scoped) is read back; only if the slug is still
+  listed, which means this machine rides the unassigned bucket that a
+  machine-scoped DELETE cannot touch, is the person-wide DELETE issued and
+  logged. A dashboard too old to understand `?machine=` behaves exactly as
+  today.
+* **A machine's FIRST own row eclipsed everything it was inheriting.**
+  `selections` resolves the `machine = ''` bucket only for machines with no
+  plan, so the first tick on a bucket machine silently dropped every
+  inherited project and the enforce cycle unshared them. Reproduced on a
+  scratch DB. FIXED (`dashboard/db.py`): new `materialise_bucket(conn,
+  editor, machine)` copies the bucket's rows onto a machine that is still
+  inheriting them, keeping position and provenance; `add_selection` calls it
+  before writing the first own row, and `remove_selection(machine=M)` calls
+  it when the slug being unticked is inherited, so an inherited untick
+  deletes a real row and answers `changed=true`. The bucket itself stays, for
+  the person's other computers and their next machine. `copy_machine_plan`
+  now INSERTs directly, because after its DELETE the target looks like a
+  machine writing its first own row and materialising there would add the
+  bucket's projects on top of the copied plan.
+* **A wired machine could still be handed a tick.** CR-28's guards are per
+  PERSON (`base_only_editors`), so an editor who owns BOTH a wired and a
+  remote machine got a selection row written onto the wired one and the
+  permanent [ GETTING READY ] chip came back. FIXED (`db.py`, `api.py`,
+  `assignments.py`): `db.base_machines(conn)` from `machine_modes` is the
+  predicate; `add_selection_for_person` skips a person's wired machines,
+  `api_tick` 409s a `?machine=` naming one, copy-plan 409s a wired target,
+  and both queue blocks test `(editor, machine)`. `base_only_editors` stays
+  as the person-level rollup for rows whose machine cannot be resolved.
+  `_assignments_view` publishes `base_machine_cells` so the grid can grey the
+  COLUMN instead of the account; **`ui.py` and `admin_assignments.html` do
+  not use it yet** (CR-67), which is cosmetic only, since every write
+  endpoint refuses.
+
+### CR-50 - who a Syncthing device belongs to, and who may start Syncthing (comp-lane-c-1, dash-admin-6, comp-lane-c-3, comp-lane-c-4, comp-lane-c-5, data-model-4, data-model-5) - FIXED in repo 2026-08-21, unshipped
+The registry (`machines`) and Syncthing's own device labels are two
+authorities for one fact, and the code added through one and removed through
+the other.
+
+* **The enforce cycle shared with devices the server has not approved.** A
+  machine's reported device id went into the folder's device list whether or
+  not the server's Syncthing had that device, so the PUT never converged: a
+  re-PUT and a config.xml rewrite every 60 s, and a `+[id]` log line for a
+  device Syncthing silently discards. FIXED (`collector.py`): a reported id
+  is added only when it is in that pass's device list, with one warning per
+  device naming the admin action (approve the pending device). No PUT is
+  issued for a folder whose only change was the unapprovable id.
+* **Removals went through the wrong authority.** `_run_enforce`'s "keep an
+  unmapped device exactly as it is" rule now excludes devices the REGISTRY
+  maps to a machine, so the unshare half of a hostname-labelled machine's
+  plan is alive again; the lane C queue's join and the GETTING READY
+  completion probe both resolve the owner as
+  `COALESCE(machines.editor_username, devices.editor_username)`, so a device
+  approved in the Syncthing GUI under its hostname no longer has its whole
+  backlog dropped.
+* **One device id could sit on two registry rows** while three joins assumed
+  it sat on one. FIXED: `db.release_device_id_elsewhere` NULLs the id on
+  every other row still claiming it when a report registers it, logging the
+  move at WARNING. The report is the fresher evidence, and the loser's plan
+  and identity are untouched, which is `adopt_renamed_machine`'s own rule.
+  DEFERRED with it: the partial UNIQUE index (creating it during `migrate()`
+  on a live database that already holds a duplicate pair fails, and the
+  dashboard must boot) and WP1's re-key onto `machine_id`.
+* **The companion cached its own device id for the process lifetime**, so a
+  regenerated Syncthing identity was reported as the old one until the tray
+  restarted, which is the shape of this ledger's "stuck lane C" memory. FIXED
+  (`reporter.py`, `sync/syncthing_lane.py`): both caches re-read on a 300 s
+  cadence; a refresh that comes back empty or throws KEEPS the last known id,
+  because a briefly dead Syncthing is not evidence of a new identity, and a
+  CHANGED id is logged at WARNING on both sides.
+* **Lane C's "no API key" branch never told the supervisor**, so a Syncthing
+  whose `config.xml` had vanished was never restarted and an incident opened
+  before it vanished could never close. FIXED: that branch calls
+  `_note_supervisor(False)` before returning. The launcher is key-independent
+  and can regenerate the home.
+* **The supervisor could launch twice.** FIXED with a test-and-set claim
+  under the existing lock, released in a `finally`. The other half of that
+  finding, the tray diagnostics builder calling `check_once()` and parking a
+  worker for up to 20 s, is `app.py`'s (CR-67); the verifier had already
+  half-refuted the UI-freeze claim, since `tray._spawn` runs it off the UI
+  thread, so it is latency and not correctness.
+
+### CR-51 - every Resolve edit, and every AppKit call, on the thread that owns it (comp-resolve-1, comp-resolve-2, comp-resolve-3, comp-resolve-4, comp-resolve-5, comp-app-core-2) - FIXED in repo 2026-08-21, unshipped
+Five defects in the Resolve layer, plus its exact twin in the macOS tray.
+
+* **Undo replayed the newest journal of ANY project against whatever project
+  was open**, matched by file path only. Every project shares the paths under
+  `Assets`, so undoing a canonicalisation done in one project could
+  re-address a music bed the OPEN project legitimately uses. FIXED
+  (`resolve_bridge.py`): `undo_last_relink` reads the open project first and
+  asks for THAT project's journal; a mismatch is a refusal naming both
+  projects, checked again after the media-pool walk, which also covers an
+  explicitly passed `session_path`. A journal that names no project at all,
+  the pre-fix shape, stays replayable, because refusing it would leave that
+  editor with no rollback at all.
+* **Journal bookkeeping called into fusionscript outside `_API_LOCK`** after a
+  successful `ReplaceClip` or `LinkProxyMedia`. FIXED: the `GetName` and
+  `GetClipProperty` reads moved inside the locked block and strings are
+  passed out. The test double records every native call made while the lock
+  is free, probed from a SECOND thread, because the reentrant lock would let
+  the calling thread straight back in.
+* **The exported `.drp` rollback copies were never swept**, contrary to
+  RESOLVE_EDIT_SAFETY.md's 60-day claim, so they accreted in the editor's
+  home. FIXED: `SWEPT_SUFFIXES = ('*.json', '*.drp')` under the same cutoff,
+  which makes the doc true rather than aspirational.
+* **Rate-limited non-canonical relinks were queued and nothing drained the
+  queue**, though the refusal itself promises "Tray -> Advanced -> Scan whole
+  project runs it now". FIXED (`app.py`): `_handle_non_canonical` takes
+  `user_initiated` (a tray click IS the consent the limiter waits for) and
+  starts the drain even with an empty incoming batch; `scan_whole_project`
+  drains before its verdict. Deliberately NOT changed: the scan does not
+  re-classify in-tree clips it finds, because an in-tree clip is in the tree
+  whatever its spelling, which is what the scan's own message says.
+* **A broken drive mapping cost one toast per clip** (on macOS, one blocking
+  osascript spawn each, on the watcher thread). FIXED in `watcher.py` with a
+  per-episode latch: one callback for the first BAD_PREFIX path, a logged
+  warning naming each of the rest, re-armed when the mapping recovers. The
+  per-poll count still counts every newly seen path, and `app.py` needs no
+  change.
+* **The macOS tray mutated AppKit from worker threads** (icon image, tooltip,
+  menu rebuild) from the refresh and pulse threads. FIXED
+  (`tray_native.py`): a per-instance hop through
+  `NSOperationQueue.mainQueue().addOperationWithBlock_`, deliberately NOT
+  `ui_dispatch.dispatch`, which BLOCKS the caller on a pump that parks inside
+  a modal dialog's `tkwait` (MAC-11): a pulse thread must never be able to
+  wait on an open window. Any failure to marshal falls back to calling
+  inline, i.e. today's behaviour, because a tray that stops drawing is worse
+  than one that draws from the wrong thread. `stop()`'s `removeStatusItem_`
+  is still on the caller's thread and is worth a follow-up.
+
+### CR-52 - the upgrade channel could brick itself, and an interrupted OTA had no exit (comp-app-core-1, comp-app-core-3, comp-app-core-4, comp-app-core-5, dash-core-6, dash-release-ai-2, dash-release-ai-3) - FIXED in repo 2026-08-21, unshipped
+Found from both ends independently: **a signed record whose `min_version` is
+above its own `version`** ("you may not install below 0.9.50" while offering
+0.9.44) raised every machine's monotonic downgrade floor on RECEIPT, before
+the offer was checked against it, refusing that build and every later build
+below the floor. One stale `CCSYNC_MIN_VERSION` in a build environment would
+have reached the whole fleet and been recoverable only by hand, per machine.
+FIXED in three places: `upgrade._min_version_above_own` refuses such a record
+BEFORE `note_floor`, so the corrected republish is still installable;
+`release_trust.min_version_exceeds_version` plus `package_store` refuse it
+with a 400 before the signature check, which covers the human PUT and the
+feed's auto-publish from one place; and `release_feed._valid_records` drops
+it, so it is never offered to an admin. Raising the floor on receipt is
+deliberately unchanged: it is what makes a replayed old signed record useless
+before a download starts. The signing rig should not be able to MAKE one
+either, which is still owed (CR-67).
+
+Beside it:
+
+* **The Windows upgrade hand-off gave up after 20 s** while a shutdown can
+  legitimately take longer, which is R11's shape with a different timer.
+  FIXED: `PREDECESSOR_WAIT_SECONDS` 20 -> 90, with a documented
+  `SHUTDOWN_WORST_CASE_SECONDS = 55.0` enumerating the bounded joins the
+  teardown performs in series. The wait costs nothing when the predecessor
+  exits early, and applies only to a hand-off keyed on
+  `CCSYNC_REPLACES_PID`, never to an editor double-clicking the exe.
+* **`auto_update` was one-shot per offer.** A stand-down ("popup",
+  "consolidate") or a failed download was never retried, so the CR-27 machine
+  class, the exact reason unattended updates exist, never got one. FIXED:
+  `_on_upgrade_available` ARMS the update and `_maybe_auto_update()` is also
+  called from every report reply, re-checking the site flag (fails closed),
+  refusing a withdrawn or replaced offer, and reusing CR-41's retry constants
+  (90 s after a stand-down, 600 s after a failure).
+* **The downgrade floor file followed `log_path`**, so the documented "delete
+  `~/.ccsync/upgrade_floor.json`" recovery did nothing on a machine whose log
+  was redirected, and a log_path edit could silently reset a monotonic floor.
+  FIXED: the floor lives beside `identity.json`, with a one-time adoption of
+  a floor written beside a redirected log so it is carried FORWARD, never
+  lowered.
+* **A pushed update whose version the machine overtook was re-sent for
+  ever.** FIXED (dashboard): the request retires when the reported version is
+  at or PAST the one asked for, compared per dotted part so 0.10.0 outranks
+  0.9.43, falling back to exact equality when either side is unparsable, so a
+  `+dirty` build never reads as "past it" and silently retires a request the
+  machine never honoured.
+* **An interrupted dashboard self-update wedged the channel.** A process kill
+  mid-apply left `in_progress=true`, and every later apply AND rollback 409'd
+  with no way to clear it but a shell. FIXED: `_set_state` stamps
+  `owner_pid`, and a state claiming in-progress under a pid that is not this
+  process is healed to `failed` with "interrupted by a restart at step
+  <step>", written back so the next reader sees it too. `restart_requested`,
+  the one in-progress state that legitimately outlives its process, is
+  exempt; a second apply inside a live process still 409s.
+
+### CR-53 - the YouTube stack, both ends (comp-ytdl-1, comp-ytdl-2, comp-ytdl-3, comp-ytdl-4, comp-ytdl-5, ytdl-web-2, ytdl-web-3, ytdl-web-4) - FIXED in repo 2026-08-21, unshipped
+* **The managed ffmpeg pair had no caller on a vendor build.** The 2026-08-18
+  refactor left `ensure_ffmpeg_pair` reachable only from
+  `sidecar_tools.ensure()`, which sits behind the `youtube_download` gate,
+  and `YtDlpManager.start()` was a permanent no-op when that flag was off or
+  the manifest cache was absent at tray launch. On the documented vendor
+  default, therefore, **no machine ever got the ffmpeg that b-roll ingest and
+  proxy generation depend on**, and turning the feature on later needed a
+  tray restart on every machine in the fleet. FIXED: the thread always
+  starts and the gate moved INTO `_loop`, which re-reads the flag every pass
+  (`DISABLED_RECHECK_SECONDS` = 900 s); with YouTube off the loop still
+  installs the ffmpeg pair and skips deno, because a JS runtime is a YouTube
+  entitlement and a codec is not. `ensure()` also now distinguishes the two
+  gates, since the old wording sent an admin to config.toml for a
+  site-manifest decision. **Behaviour change for the release notes:** every
+  editor machine on a vendor build will fetch the pinned ffmpeg-static build
+  about 30 s after tray start, unless the editor has their own ffmpeg on PATH
+  or one is already installed. That is what BROLL_INGEST_PLAN 3.3 and this
+  ledger's posture note already describe.
+* **The local executor ignored the root guard.** With the tree unmounted it
+  would create the destination on a Mac's boot volume and download there.
+  FIXED: `Deps` gained `root_present_fn` (a zero-I/O read of the guard's
+  cached verdict, all the 1 s capability budget allows) and `root_probe_fn`,
+  re-checked immediately before the mkdir, which is the line that would
+  otherwise create a fake `/Volumes/<Name>` two round trips after the probe.
+  A refused job is not failed: nothing is posted, the lease expires and the
+  server downloads it, like every other refusal on that path. Note the
+  implied change: a machine whose `local_root` does not exist now refuses
+  local downloads, which is the same answer its lanes already give.
+* **The base-rig label check stat'd a casefolded path**, so on a
+  case-sensitive volume a wired Mac refused every label with a capital in it
+  and let the lease expire. FIXED: the probe uses the label's own spelling;
+  `normalize_label` stays what it is for the selection-set comparison.
+* **Clip status posts were not idempotent**, so CR-31's transport retry
+  double-counted `dl_done` and `dl_failed`, and a stranded counter is what
+  CR-30 turns into "one job per editor blocks SEARCH". FIXED SERVER-SIDE,
+  which is the right end: `db.finish_download` is `begin_download`'s twin, a
+  compare-and-set from ('pending','downloading') to a terminal state; a loser
+  gets `200 {duplicate: true}` and no counter bump, never a 4xx, because a
+  4xx would put a perfectly downloaded clip into the executor's failed list.
+  The companion needed no idempotency key at all, so none was added.
+* **The project picker listed each project once per machine** since the
+  dashboard's v24 selections key. FIXED: the no-machine query is the person's
+  UNION, per CLAUDE.md's rule. The suite was blind to it because its
+  hand-copied dashboard DDL predated v24; that copy is now the v24 shape,
+  which is the drift its own comment predicted.
+* **AI health was probed once at worker boot and never again**, so a
+  transient boot failure pinned the red pip until a job happened to succeed.
+  FIXED: `recheck_health()` from the worker's idle branch when the cached
+  state is not ok and older than 300 s, non-forced so the provider's own
+  probe floor still applies, every failure logged and swallowed so a probe
+  can never kill the worker.
+
+`ytdl-web-5` (resolving the provider per call probes every enabled CLI with a
+live billed call even when an API provider is pinned) is DEFERRED to
+`ai_providers.py`; the 300 s gate above exists partly so the health path does
+not multiply its cost. See CR-66.
+
+### CR-54 - drag-and-drop ingest could not survive anything going wrong (comp-loopback-1, comp-loopback-2, comp-loopback-3, comp-loopback-4, comp-loopback-5, comp-loopback-6, trust-model-9) - FIXED in repo 2026-08-21, unshipped
+A feature three days old, every failure path of which ended in "already
+indexing another batch" for every later drop.
+
+* **A cancelled or 410'd batch killed the upload queue for the session.**
+  `UploadQueue.stop_all()` latches, and the ingestor kept one queue for the
+  whole tray process. FIXED: the queue is DROPPED after `stop_all()` and
+  rebuilt per batch through a `_new_queue()` hook (overridden in
+  `MusicIngestor`, so the new queue reads THIS batch's library path rather
+  than the cancelled batch's); `stop_all` now reports what it cancelled.
+  Rebuilding also drops the stale done/failed ledger, which matters when the
+  same batch is re-run and its rels are the same strings.
+* **A tray restart mid-batch stranded it.** `needs_claim` was written by the
+  resume path and read by nobody, so there was no re-claim and no heartbeat.
+  FIXED: `_reclaim()` at the top of `tick()` re-issues the idempotent claim,
+  merges only what this side cannot know (never the item states, which are
+  the checkpoints the restart exists to keep), restarts the heartbeat and
+  re-enqueues every item still at `ITEM_UPLOADING`. 403/409/410 frees the
+  machine; a transport failure is not an ending, and the next tick asks
+  again.
+* **An upload rclone failed parked the item for ever**: never retried, never
+  failed, batch never finished. FIXED: attempts are counted, retried below
+  the cap and failed at it; `UploadQueue.retry(rels)` drops those rels from
+  the failed ledger (without it the item burns one attempt per tick with no
+  new rclone), and only the rels that failed are re-sent, deliberately
+  narrower than the 409 branch's whole-item re-declare, because re-sending a
+  40 GB original after a 100 KB poster failed is an editor's evening.
+* **A refused `/result` was ignored**: the clip was uploaded and went live
+  with no segments, and was never re-described. FIXED: `_post_result` clears
+  `described` so a retry re-runs the model, fails the item with the server's
+  own words, and enqueues nothing.
+* **A blank mount entry was treated as the filesystem root**, and
+  `contained_local_path`'s containment check was guarded on the mount being
+  truthy, i.e. skipped exactly when it mattered most. FIXED
+  (`broll_server.py`): blank is absent (falling through to the darwin
+  /Volumes probe, and refused if that answers blank too), and the containment
+  test is unconditional.
+* **`POST /broll/ingest/prepare` accepted any local path.** The allowed-roots
+  refusal the plan and the docstring describe did not exist. FIXED: only
+  `/pick` teaches the companion a local path. `pick_ingest_sources` records
+  the PICKER's answer, never the body of the prepare that follows, through
+  `note_picked`, which stores the picked FOLDERS (climbing back up each
+  clip's rel_dir so a 400-clip card is one root, last 32, persisted so a tray
+  restarted between the pick and the prepare does not refuse the drop);
+  `_path_refusal` ends with a realpath containment test, and an EMPTY
+  allow-list REFUSES, because "nothing was picked" and "everything is
+  allowed" must not be the same answer.
+* `trust-model-9`, the observation that the loopback allow-list makes any XSS
+  in the dashboard-hosted SPAs equal to code execution on every editor's
+  desk, is recorded in `loopback_guard.py`'s docstring naming the reachable
+  routes (`/insert`, `/music/reveal`, `/ytdl/reveal`, `/broll/ingest/run`).
+  Both code halves are deferred: the CSP is server-side and spans four apps
+  (CR-67), and dropping the plain-http twin from `origins_for_url` is small
+  but NOT safe, because both schemes are a documented fix for a live failure
+  and the manifest carries no signal for which one editors browse.
+
+### CR-55 - a per-editor token switched three fleet surfaces off (music-1, ytdl-web-1, dash-core-2, dash-core-5) - FIXED in repo 2026-08-21 (b-roll mirrored in wave 2), unshipped
+CR-18 gave every editor a `cce1.` token that BINDS to an identity, and the
+dashboard's own boot warning tells the operator to retire the shared one.
+Three companion-facing surfaces only ever compared against the shared secret,
+so minting an editor their own token silently disabled their fleet music
+ingest and their requester-first YouTube downloads, while `/api/v1/verify`
+still handed out the retired shared token for a freshly signed-in companion
+to adopt and have refused on every report. `/fleet/halt` had the inverse bug:
+it took the retired shared token and refused per-editor ones. Note the ytdl
+half is live TODAY for any editor already holding a cce1 token, without
+waiting for the shared one to be turned off, because the companion already
+prefers the per-editor token.
+
+FIXED with ONE verifier, the way `ai_backend.set_provider_lookup` already
+works. `api.resolve_companion_credential(settings, conn|None, token) ->
+(kind, editor)` already existed in the shape needed; the mounts now use it.
+`MusicGate` and `YtdlGate` STRIP any inbound `X-CCSync-Fleet-Auth` on every
+request and append their own verdict, `shared` or `editor:<name>`; the
+sub-apps believe that stamp only when the mount installed the trust
+(`trust_gate_stamp`), and otherwise fall back to the unchanged fail-closed
+shared-secret compare, so standalone `musicweb` is unaffected and an older
+deployed tree keeps working. The stamp is NEVER an identity: ytdl's
+`require_fleet_caller` 403s `identity_mismatch` when a bound token's editor
+is not the verified `X-CCSync-Identity`. `/verify` returns the shared token
+only while `shared_report_token_enabled` and adds `report_token_kind` so the
+tray can say which credential this fleet expects (CR-18's rule that /verify
+never mints a `cce1` is unchanged), and `/fleet/halt` now authenticates
+through `companion_token_ok` like every other companion route.
+
+**b-roll now mirrors it** (wave 2, 2026-08-21). `broll/web/app/fleet_auth.py`
+gained the same stamp header, the same `trust_gate_stamp(True)` installed
+from `mount_broll` (b-roll has no `config.login_gated()` the way musicweb
+does, so the trust is installed the ytdl way), and a single
+`require_fleet_caller` that runs the machine credential first and the signed
+identity second and 403s `identity_mismatch` when a bound token's editor is
+not the verified `X-CCSync-Identity`. All six fleet routes moved from two
+separate dependencies to that one, because nothing had both answers in one
+place. `dashboard/broll.py`'s `BrollGate` strips `X-CCSync-Fleet-Auth` on
+every request and appends its own verdict through
+`api.resolve_companion_credential`, opening a connection only for a token
+with the per-editor SHAPE and treating any failure as "no stamp" rather than
+"stamped anyway". `api`/`db` are imported INSIDE `_fleet_stamp` on purpose:
+`auth.py` imports `broll.py`, so a module-level import would close the
+auth -> broll -> api -> auth cycle at boot. `/fleet/halt` also needed its
+path in `login_gate` (GET only, exact path, verified companion credential);
+that landed in wave 2 too, so a companion can now actually read it.
+
+### CR-56 - the accounts, the sessions and the login throttle (dash-core-3, trust-model-2, dash-admin-5, dash-core-4, trust-model-3, trust-model-5, trust-model-7) - FIXED in repo 2026-08-21, unshipped
+* **Disabling an account revoked nothing.** Its open tabs and its companion's
+  per-editor report token kept working until expiry, or never. FIXED:
+  `api_admin_disable_user` runs DELETE's own `_purge_user_credentials` (with
+  a `why`, so the revocation reads "account disabled") AFTER the commit,
+  which is the ordering that keeps the session store's own connection out of
+  a deadlock. Re-enabling resurrects nothing: a new token is one click.
+  Chosen over teaching `_resolve_session` and `verify_editor_report_token` to
+  consult `users.disabled`, because those two run on every request and in
+  SMB/OIDC modes where there is no `users` row at all.
+* **An admin could disable themselves, or the last enabled admin**, and lock
+  an appliance out of admin entirely. FIXED at both doors and in the library
+  beneath them: `api_admin_disable_user` gained DELETE's two guards as 409s,
+  `local_users.disable_user` refuses the same two, and
+  `ui.partial_admin_disable_user` (the htmx twin, softer on both counts)
+  passes `requested_by` and purges credentials too. `DASH_ADMIN_USERS` is
+  deliberately not counted as an admin: on an appliance it needs a redeploy.
+* **A successful login cleared the per-IP budget**, so owning one valid
+  account reset the spray protection for every other username. FIXED: a
+  successful sign-in clears only the per-username row; the IP row ages out
+  through its own window.
+* **One Tailscale Serve gateway was one throttle bucket for the whole
+  fleet**: five wrong passwords by anybody locked everybody out of /login and
+  /verify for up to an hour. FIXED in two places: `LOGIN_FAILURE_LIMIT_IP =
+  40` against the per-username 5 (one address behind Serve is one GATEWAY,
+  not one person, while 40 wrong passwords an hour from one address still
+  trips), and `auth.client_ip` logs a WARNING once per peer when an
+  `X-Forwarded-For` arrives from a peer NOT in `DASH_TRUSTED_PROXIES`, which
+  is the exact signature of the misconfiguration. The list itself is now
+  emitted by the installer (CR-61). Deliberately NOT done: exempting a "known
+  shared gateway" from the budget, because the only evidence available is the
+  spoofable header itself, so an attacker could opt out of the budget by
+  adding it.
+* **OIDC skipped the fleet-membership check password sign-in enforces**, and
+  mapped the IdP username claim straight onto an editor identity. FIXED:
+  `require_fleet_member` runs between id_token verification and
+  `start_session`, in a threadpool with its own short-lived connection. Four
+  ways to pass: `DASH_ADMIN_USERS`, the admin claim mapping, the new
+  `DASH_OIDC_ALLOWED_GROUPS` (with `DASH_OIDC_GROUPS_CLAIM`), or a username
+  this fleet already knows. An empty allow-list means "not configured", never
+  "everybody"; a dashboard with no editors on record at all skips the check
+  and logs why, so an operator cannot be locked out on day one.
+* **The AI CLI SET UP wizard installed Codex with no publisher checksum**
+  while the docs and CLAUDE.md call the fetch checksum-verified. FIXED:
+  `_install_codex` refuses, before any download, when the release publishes
+  no `SHA256SUMS` entry for the asset, pointing at the "type its full path"
+  fallback the page already has. `checksum_source` can no longer be
+  `downloaded_bytes` for a wizard install, so the claim is enforced rather
+  than aspirational.
+
+### CR-57 - the setup wizard and the appliance's first boot (dash-admin-1, dash-admin-2, dash-admin-4, dash-admin-7) - FIXED in repo 2026-08-21, unshipped
+Four ways the zero-touch appliance could not actually be set up.
+
+* **The Storage check task created the shared asset folders inside the
+  container's root filesystem** and could never go green on any real
+  deployment: it derived the tree root as `Path(projects_dir).parent`, which
+  for the deployed `/projects` mount is `/`. FIXED: `_tree_root(ctx)` is
+  `DASH_TREE_DIR` when the whole tree is mounted, else the parent only when
+  it is not a filesystem root; when the root is not visible the task probes
+  what it CAN answer (is `projects_dir` writable) and reports ok with "the
+  shared asset folders live beside Projects on the NAS, which this container
+  does not mount", so the required task goes and STAYS green. A failed mkdir
+  now warns naming the folder and the path, instead of reporting ok with
+  "created 0".
+* **The appliance minted three different internal tokens.** secrets-init, the
+  dashboard's bootstrap and the sftp sidecar each held their own, and the
+  Syncthing API key flipped on first boot, so the sidecar's
+  `AuthorizedKeysCommand` was refused 401 for ever. FIXED: one file per
+  secret, agreed by every party. `secrets_boot.SIDECAR_ENV_FILES` ADOPTS
+  whatever secrets-init already wrote (provenance `sidecar-file`) and mirrors
+  it into the canonical secrets file, and it writes `internal.env`, the file
+  the compose sftp service actually reads, instead of the `sftp.env` nothing
+  ever read (a stale one is deleted on boot: say so in the release notes in
+  case an operator built tooling around it).
+* **First-admin bootstrap was unreachable from a browser.** In
+  `DASH_AUTH_METHOD=local` with zero accounts, `/setup` redirected to /login
+  and every `/api/v1/setup/*` 401'd. FIXED: `first_run_open` answers from
+  `local_users.any_users_exist` when the admin probe is inconclusive AND the
+  method is local; smb and oidc keep the fail-closed answer, because a NAS or
+  an IdP can already authenticate an admin there, and a pre-v17 database
+  still reads as closed. The window shuts the moment the first account
+  exists, and `setup_admin`'s own BEGIN IMMEDIATE remains the lock.
+* **`nas_kind` was unvalidated free text** on Settings and in the site.toml
+  import, was published to installers, and was never what `nas.factory`
+  actually reads. FIXED: `site_store.validate` normalises the case and
+  refuses a kind no factory can build (422 from the PUT and from the import),
+  and the Settings field is a select of `NAS_KINDS`, so an admin never meets
+  the refusal. The factory still reads `DASH_NAS_KIND`, deliberately: what is
+  fixed is that the two can no longer disagree by SPELLING.
+
+`dash-core-7` (the `ccsync-dashboard` console entry point skips
+`secrets_boot.ensure_secrets`, unlike the run.sh `--factory` path) is a
+two-line change in `dashboard/app.py`, which was nobody's territory: CR-67.
+
+### CR-58 - the Settings page wrote one truth and the dashboard read another (dash-release-ai-1, product-surface-1, product-surface-2, dash-admin-3, product-surface-5) - FIXED in repo 2026-08-21 (the three env readers landed in wave 2), unshipped
+The wizard and Settings write the DB and publish it to companions; the
+dashboard's own code read only the environment. On an appliance, where
+compose sets no `DASH_SITE_*` at all, the admin's answers reached every
+companion and not the dashboard itself.
+
+* **Ticking "YouTube downloader" published the feature to the fleet and never
+  mounted `/ytdl`.** FIXED: the flag resolves DB-row-first through the new
+  `site_store.feature_enabled`, which fails closed on an unknown flag or an
+  unreadable table (with `FEATURE_SETTINGS_ATTRS` as the one place a new flag
+  is registered, the same discipline CR-40's `FEATURE_KEYS` whitelist
+  imposes on the companion) and falls back to the env on any error, because a
+  legal switch must never be flipped on a customer's behalf by a sqlite
+  error. `ai_providers.cli_enabled` delegates to it, so there is one
+  implementation of the precedence rather than two. The mount is now always
+  present and gated PER REQUEST with a 5 s TTL: 404 for everything under
+  `/ytdl` while the site says no, importing nothing, and on the first request
+  after an admin ticks the box it loads the sub-app inline and serves it. No
+  restart, which is what WP D promised, and the reverse works too. `ABSENT`
+  (the tree is not deployed) deliberately stays unmounted rather than
+  retrying an import, and walking sys.path, on every poll.
+* **Brand, create-project template and shared-asset list.** FIXED:
+  `site_store` gained `manifest_for_app` (a per-process cache on `app.state`
+  that never raises, falling back to the Settings-only shape rather than
+  breaking a render) with `invalidate()` on every writer, so `ui._render`
+  paints the topbar brand from the DB and an admin who saves a new
+  `org_name` sees it immediately; `/project-setup`'s preview and the Setup
+  storage task read the manifest's template and shared-asset lists. Wave 2 closed the last three readers, so
+  the preview and the create can no longer disagree: `api.create_tree_project`
+  iterates `site_store.template_folders`, the collector re-reads
+  `site_store.shared_asset_folders` once per cycle into
+  `_shared_folders`/`_shared_folder_ids` (seeded from `provision` at
+  `__init__`, so a Collector never handed a connection behaves as before, and
+  a failed or EMPTY read keeps the previous list on purpose, because an empty
+  shared-folder set in `_run_enforce` is the B16 unshare shape), and the ASGI
+  title comes from `site_store.manifest_for_app`. One cosmetic consequence:
+  on a database that has not been migrated yet, a genuine first boot,
+  `create_app` logs one "could not read the site manifest" warning and falls
+  back to the deploy-time values.
+* **Only two of the four feature flags were on the Settings page.** FIXED:
+  `auto_update` has a checkbox with its one-line consequence, and
+  `ai_cli_providers` shows as a disabled, deliberately NAME-less checkbox
+  linking to the AI providers section that owns it (name-less because the
+  page collects by element name, and a nameless control cannot submit a `0`
+  that would switch the CLI feature off).
+
+### CR-59 - the release pipeline could overwrite the vendor channel, and nothing signed the installer (release-pipeline-1, release-pipeline-2, release-pipeline-3, release-pipeline-4, release-pipeline-5, release-pipeline-6, release-pipeline-7, release-pipeline-10, release-pipeline-11, installer-onboard-tools-1, installer-onboard-tools-2, installer-onboard-tools-6) - FIXED in repo 2026-08-21, unshipped
+The critical one first. **`publish_feed.py` rebuilt `channel.json` from the
+gitignored local `feed/` dir and uploaded it with `--clobber`**, so running it
+from any machine but the one that happened to hold the history would replace
+the live vendor channel with a one-record document. FIXED: with
+`--github-upload` the tool downloads the PUBLISHED channel and its signature
+first, verifies it against the baked release keys, and merges the local
+overlay ON TOP of it. The failure modes are separated on purpose: "no such
+release or asset" is a legitimate first publish, while any other `gh` failure,
+or a channel that does not verify, refuses the upload entirely, because "I
+could not ask" is never "nothing is published". A `shrink_report()` backstop
+refuses any upload that removes published records unless `--allow-shrink`. The
+local feed dir is still written and signed before that refusal, keeping the
+old promise that a failed upload leaves a whole verifiable feed behind, and
+`publish_latest.py` now reads the live channel instead of that directory.
+
+The rest, in `tools/`, `installer/`, `onboarding/` and `.github/workflows/`:
+
+* **A `current` pointer and a retraction** (release-pipeline-5): an optional
+  top-level `{"<kind>/<platform>": "<version>"}` object INSIDE the signed
+  document, written by `--make-current` and cleared by the new
+  `--retract KIND/PLATFORM/VERSION`. The dashboard's `_apply_policy`
+  publishes only the record the pointer names, falling back to the HIGHEST
+  version (compared numerically, so 0.10.0 beats 0.9.41) rather than append
+  order, so a fresh dashboard stops replaying the whole history. Under
+  `current`, a pointer naming a build the dashboard already HOLDS makes it
+  current, which is the retraction and rollback path the feed lacked; the
+  retracted ASSET stays on the release on purpose, so a dashboard holding
+  that record can still fetch the bytes it verified.
+* **Same version, different bytes** (release-pipeline-6): the dashboard's
+  "already published" 409 now compares the sha256 and NAMES the mismatch,
+  logs it loudly on every check, and renders a [ SAME VERSION, DIFFERENT
+  BYTES ] line on the Packages page. Nothing is ever replaced in place.
+  `publish_feed`'s `--allow-replace` half is still owed (CR-67).
+* **`publish_latest.py` signed whatever CI run was newest**, with no tie to
+  main, to HEAD, or to version monotonicity (release-pipeline-7). FIXED: the
+  run list is filtered to main AND independently verified with `git
+  merge-base --is-ancestor` against origin/main, because a branch label is a
+  claim a force-push can make untrue and an unknown answer counts as NOT
+  verified; a version lower than the channel already carries is refused
+  unless `--allow-older`. Both checks run before anything is signed. It is
+  also DOCUMENTED at last (release-pipeline-10), in `docs/RELEASE.md` under
+  "the command actually used since 2026-08-19", together with the policy line
+  it implements: CI builds, this rig signs, `ship.cmd` is for the studio's
+  own dashboard.
+* **`ship.cmd` was unaware of image mode** (release-pipeline-3): it restarted
+  the live dashboard for nothing and could not pass its health gate once the
+  repo's dashboard VERSION was bumped. FIXED: it reads `[stack] mode`, skips
+  the deploy script entirely in image mode, and the gate becomes live >= repo
+  with a numeric per-component compare (a string compare would fail a good
+  ship the day 0.10.0 exists). A repo ahead of the container stops the ship
+  BEFORE anything is built and prints the over-the-air recipe. `-Recreate`
+  still runs the deploy, because that flag is an explicit request about the
+  CONTAINER.
+* **`onboard.exe` was never Authenticode-signed** (installer-onboard-tools-1),
+  which is the fresh-install SmartScreen case the signing gate exists for,
+  and **the CI signing route could never fire** (installer-onboard-tools-2: a
+  step-level `env` is not visible in that step's own `if`). FIXED: one shared
+  `tools/sign_windows_binary.ps1` call site for the companion, the wizard and
+  the CI build; `-MakeCurrent` with an unsigned onboard.exe refuses BEFORE
+  the companion PUT, so a refusal leaves the channel untouched rather than
+  half-published; the secret moved to job-level env with the emptiness test
+  inside the body, and either branch writes a line into the run summary, so a
+  skipped signing attempt can no longer be invisible.
+  `check_deploy_drift.ps1` reports the installer row's `signed_binary`.
+* **The installer channel was never published through the feed**
+  (release-pipeline-4), so feed-only customers had no installer at all.
+  FIXED: both workflows emit an `onboard` manifest (the companion's key set,
+  with `tests_run` set by the onboarding suite actually run in that step
+  against that tree, so it can never claim true on trust, since publish_feed
+  refuses a `tests_run=false` manifest) and `publish_latest.py` accepts
+  `--kind onboard` for both platforms.
+* **`ship.cmd`'s "already published" probe downloaded the whole exe with no
+  timeout** (installer-onboard-tools-6). FIXED: `-r 0-0 --max-time 20`, and
+  206 counts as published, matching the installer probe directly below it,
+  whose comment already explained why.
+* **The Authenticode key's home is a contradiction** (release-pipeline-11:
+  designed for GitHub secrets while the release-key policy is "CI builds,
+  this rig signs"). Both resolutions are written up in `docs/RELEASE.md` for
+  the owner to choose BEFORE a certificate is bought; the CI route was
+  deliberately not deleted, since removing the only working CI signing path
+  would be a unilateral answer.
+* **Two publish paths with no reconciliation** (release-pipeline-2): PARTIAL.
+  `ship.ps1` gained `-PublishFeed`, off by default because "CI builds, this
+  rig signs" is standing policy and flipping it would send studio-built
+  binaries to every customer, and by default it prints at the end of every
+  ship that the vendor feed does NOT have this build, with the exact command
+  to mirror it. Making the feed the single channel is a release-policy
+  redesign: CR-66.
+
+**Behaviour change worth an operator's attention:** on this studio, whose
+site.toml says `[stack] mode = "image"`, `ship.cmd` will no longer deploy or
+restart the dashboard during a companion ship, and will STOP if the repo's
+dashboard VERSION is ahead of the live one. The failure message spells out
+the three over-the-air commands.
+
+### CR-60 - the wizard and the package builder still assumed `P:` (installer-onboard-tools-3, installer-onboard-tools-4, installer-onboard-tools-5) - FIXED in repo 2026-08-21, unshipped
+Item 11 of the commercial-readiness pass made the tree root site data, and
+both bootstraps, both uninstallers and the companion honour it. The
+onboarding wizard did not: `SUBST_TASK_NAME`, the Run values, the loopback
+share name, the local-root validation, the cleanup plan and every page's copy
+were built around the letter `P`. `build_editor_package.ps1` had the tree
+path hardcoded in its parameter default, and the wizard computed its default
+local root BEFORE fetching the site manifest, so a first run ignored the
+site's `tree_name` entirely.
+
+FIXED: `onboarding/steps.py` derives all of it from `canonical_prefix`
+(refusing to guess from a UNC or POSIX prefix, so the bootstrap's own refusal
+is not masked), and the cleanup plan covers the site's letter AND the
+historical `P` one, since a machine may predate the change. `_on_verify`
+re-derives the prefill unconditionally once the manifest is in hand, and the
+neutral first-run value is in the clobberable set so the recompute actually
+replaces it (a hand-edited path is still never clobbered).
+`build_editor_package.ps1` resolves its destination from `canonical_prefix`
+at runtime (config.toml, then the cached site.json, then `P:\` as the last
+resort the bootstrap already uses) and refuses a destination whose drive is
+absent BEFORE PyInstaller runs, rather than throwing three minutes in.
+`Test-DriveMapParser.ps1`'s "no `CCSyncSubstP` literal" scan now covers
+`onboarding/steps.py` too. Verified on this rig to resolve to exactly the
+previous literal.
+
+### CR-61 - the server scripts (server-1, server-2, server-3, server-4, server-5, server-6, server-7, trust-model-3, ops-efficiency-7) - FIXED in repo 2026-08-21, unshipped
+* **`publish_db --rollback` could not find the `.prev` it had just made.**
+  `newest_prev` listed the directory unprivileged through a pipeline whose
+  exit code was `tail`'s, so "could not read" and "nothing there" were the
+  same answer and the operator was told there was nothing to roll back to.
+  FIXED: a privileged `find` (sudo, like every other filesystem probe here),
+  sorting in Python, and THREE answers instead of two, so a refused listing
+  says so and names `--from-prev`. A dry run now describes what it would do
+  and exits 0, rather than printing a FAILED line it cannot substantiate.
+* **`setup_tree`'s pre-chown snapshot was never taken on TrueNAS.** The `df`
+  probe that resolves the dataset ran unprivileged on a path the admin cannot
+  stat, so `snapshot_before` had nothing to snapshot before a `chown -R`.
+  FIXED: the probe runs under sudo, and the docstring's claim that it "needs
+  no privilege" is replaced by why it does. Deliberately NOT done, because it
+  is a policy change for the owner and not a bug fix: making a setup_tree
+  snapshot failure louder than a WARNING, and defaulting `--require-snapshot`
+  when `[tree] pool_root` is set. A NAS that cannot be snapshotted must not
+  be a NAS where projects cannot be created.
+* **A fresh TrueNAS install left `<tree>/Assets` root-owned**, so Syncthing
+  could not create the LUT and Stills folders and editors could not write
+  under Assets. FIXED: the deploy creates and owns the shared-assets parent
+  and its leaves (from `common.SHARED_ASSET_FOLDERS`, the same list the
+  collector provisions) with the posture Projects and the archive already
+  have. The whole step is NON-FATAL on purpose: nothing MOUNTS
+  `<tree>/Assets`, and a deploy must not die over the posture of a directory
+  it does not mount.
+* **Ownership was hardcoded 3000:3000 and 3000:3001** while the container
+  runs as `[stack] uid/gid`. FIXED: every chown in the chain renders the
+  configured ids, with a new `APP_PRIVATE_GID` (default = uid) so the private
+  dirs stay off the editors group (AUDIT C-2) and the emitted script is byte
+  identical on this fleet. `owner=""` still means "emit no chown at all",
+  which is the DSM tree-share case, so the two answers stay distinct.
+* **`publish_db` on a Synology staged in `/tmp`**, which its chrooted SFTP
+  channel cannot reach, so every `--apply` failed at the transfer. FIXED:
+  `staging_parent()` is `/tmp` on TrueNAS and `<apps root>/staging` on DSM,
+  created as the SSH user at 700 (non-fatal preparation; the mktemp is what
+  decides). Noted for a follow-up: three other `sftp.put` calls in
+  `install_dashboard_app.py` pass a raw NAS path instead of going through
+  `backend().sftp_path(...)`, which is the same bug in three more places.
+* **`setup_snapshots.py` cannot schedule the apps target on this fleet** (the
+  apps root is a directory in the pool root, not a dataset) while
+  BACKUP_RESTORE.md claimed it was snapshotted and gave a restore path that
+  does not exist. FIXED by naming the real remedy rather than widening
+  `DATASET_RE`, whose refusal is a deliberate guard (a recursive hourly task
+  on a pool is somebody's whole NAS): the refusal names the path, says it has
+  no snapshot floor of its own and gives `zfs create -p`; `--list --apply`
+  now reports a target that cannot be scheduled at all and exits 1; and the
+  doc carries the conditional plus BOTH restore paths.
+* **Every script SSH'd to port 22.** FIXED: `common.nas_ssh_port()`
+  (`$CCSYNC_SSH_PORT`, then `[nas] ssh_port`, then `[net] sftp_port`, then
+  22) and `host_key_id(host, port)` keyed the way OpenSSH and paramiko spell
+  it, so a pinned or first-use key on a moved sshd is found and recorded.
+  Every caller picks it up unchanged, and the "pin it" hint prints
+  `ssh-keyscan -p <port>`.
+* **`DASH_TRUSTED_PROXIES` is now emitted by the deploy** (trust-model-3's
+  installer half; the dashboard half is CR-56). The compose TEMPLATE files
+  are another territory, so the manual "Install via YAML" and Synology paths
+  do not carry the line yet; the debt is recorded as
+  `install_dashboard_app.COMPOSE_ENV_ONLY_IN_DICT`, and
+  `test_safety.test_env_keys_match_compose` subtracts exactly that tuple and
+  FAILS if it names a key compose_config does not set, or one compose.yaml
+  has since gained. That is the one place a drift guarantee was narrowed, and
+  it is self-expiring by construction.
+* **Container stdout was unbounded** (ops-efficiency-7). PARTIAL: the compose
+  BODY the TrueNAS deploy POSTs now caps json-file logging at 20m x 5 on the
+  dashboard and the PO-token sidecar. `--no-access-log` and the same block in
+  the three compose templates are `dashboard/deploy/`'s: CR-67.
+
+`trust-model-4` (editor rclone lanes verify no NAS host key while the
+operator scripts refuse an unpinned one, and a compose comment claims the
+opposite) is DEFERRED but no longer undocumented: `docs/SERVER.md` now states
+the three facts, the exposure, and the four-part shape of the real fix. CR-66.
+
+### CR-62 - what the fleet costs when nothing is happening (ops-efficiency-1, ops-efficiency-2, ops-efficiency-3, ops-efficiency-4, ops-efficiency-5) - PARTLY FIXED in repo 2026-08-21, unshipped (still open: the per-project change signal, the NAS-reachability pre-probe, completion on its own thread)
+* **Every machine re-sent its full manifest and media tree every 60 s** and
+  the server rewrote thousands of rows per machine per minute. FIXED
+  (`reporter.py`): the heavy sections are omitted when their sha1 equals the
+  last one the dashboard ACCEPTED and that acceptance is younger than 600 s.
+  The bookkeeping runs only after a successful POST and records the digest of
+  the FITTED content, so a failed report resends, a section `_fit_payload`
+  shed is remembered as not sent, a section the server says it TRUNCATED
+  clears the whole record, signing in as a different editor clears it too,
+  and the first report after a start always carries both. The server contract
+  was confirmed and is now PINNED by a test: an absent section leaves the
+  table untouched, it never clears rows. Consequence for the dashboard's own
+  views: `editor_media_project` and `media_tree` row timestamps will lag by
+  up to ten minutes even though the data is current, so anything rendering
+  them as freshness should say "last CHANGED", not "last received".
+* **A steady-state pass cost three rclone processes, two recursive SFTP
+  listings and three local walks per project every minute with nothing to
+  move.** PARTIAL: the between-passes wait now backs off 1x, 2x, 5x
+  `sequencer_idle_seconds` while consecutive passes move nothing, reset by
+  anything that is evidence something changed (a lane that moved a file, a
+  watcher notify, a tray trigger, a resume, a changed selection set). Capped
+  at 5x rather than the suggested 600 s because lane B has no NAS-side change
+  signal, so the backoff IS the worst-case proxy latency. The real fix, a
+  per-project proxy-tree signature published in the selection response so a
+  pass can be skipped entirely, needs the collector and api.py: CR-67.
+* **A lane C turn blocked the sequencer for up to 600 s per project** though
+  the pause scheme that justified the wait is off by default. FIXED: under
+  `PAUSE_SCHEME_ROTATE` the wait stays the full rotation, where it is
+  load-bearing (the next turn pauses this folder); under the default scheme
+  it is capped at `lane_c_settle_seconds` (30, and 0 restores the old
+  behaviour), because nothing is paused and Syncthing paces lane C itself.
+* **No NAS-reachability short-circuit**: an offline editor spent each pass
+  spawning rclone processes into `contimeout x retries`, per project.
+  PARTIAL, with no new probe: a pass where lanes A and B BOTH returned error
+  for the same project ends with one WARNING instead of asking every
+  remaining project (consulted only when lane B is enabled, since on a wired
+  machine lane A is alone and its failures prove nothing). Deferred: a TCP
+  pre-probe and a distinct "offline" lane state, because the companion does
+  not hold the SFTP host at all (it is in rclone.conf, addressed by remote
+  name) and a new lane state changes what the tray classifier and the fleet
+  grid render.
+* **The collector is one thread with sequential Syncthing calls and no
+  deadline**, so a slow Syncthing parked enforce, connections and the health
+  signal. PARTIAL: `_run_completion` has a wall-clock budget
+  (`DASH_COMPLETION_BUDGET_SECONDS`, 30 s, 0 disables) that stops at a FOLDER
+  boundary, never mid-folder (which would write some of a folder's pairs and
+  drop the rest), writes what it gathered, records `partial: N folder(s) left
+  for the next cycle` in `poll_runs` as a SUCCESSFUL run so the health panel
+  can say why, and rotates a cursor so the next cycle starts where this one
+  stopped; pairs whose folder was not reached keep their last known need
+  count instead of being pruned as "no longer shared". The per-pair timeout
+  landed in wave 2 (2026-08-21): `SyncthingClient._request`/`_get` take an
+  optional `timeout` that overrides the client default for ONE call, and
+  `db_status`/`completion`/`remoteneed` pass
+  `Collector._completion_call_timeout()` (`min(client.timeout, 3.0)`, so a
+  deliberately tighter client is never stretched) through its ~120 per-folder
+  and per-pair reads, which is what stops one hung pair eating the whole
+  30 s cycle budget. Every other call keeps the 10 s default. Still deferred:
+  moving completion onto its own thread and connection.
+
+**Operator-visible:** idle machines will report fewer pass cycles (60 -> 120
+-> 300 s at the defaults), `current_project` moves through the queue faster,
+and heavy reports may omit the media sections for up to ten minutes. All
+three are the intended saving, not a stall.
+
+### CR-63 - the b-roll platform (broll-1, broll-2, broll-3, broll-4, broll-5) - FIXED in repo 2026-08-21, unshipped
+* **`--model fable` sent `{"type": "disabled"}`**, which that model rejects
+  with a 400, and the 400 was classified per-video, so an archive run marked
+  every clip `error`. FIXED: models whose thinking is always on get the key
+  OMITTED, deliberately per-model rather than the simpler "never send
+  disabled", because an absent `thinking` runs ADAPTIVE on the bigger models
+  and would quietly buy billed thinking tokens on every one of tens of
+  thousands of calls, which is the opposite of what `thinking: disabled`
+  exists to do. Plus `is_config_api_error`: a 400 naming a parameter this
+  module sends on EVERY call aborts the run with the queue resumable, instead
+  of burning the archive one clip at a time. The marker list is deliberately
+  narrow, so a clip-shaped 400 (image too large, prompt too long) stays that
+  clip's problem.
+* **The public share routes trusted a stale `item.video_id`** without the
+  `(share, rel_path)` identity check `resolve_items` applies, so after a
+  renumbering rebuild a client link could serve a DIFFERENT clip. FIXED:
+  `member_video_id` re-checks the identity under that id before answering,
+  keeping the direct-membership fast path (one indexed SELECT) rather than
+  re-resolving every item in the folder on every media request. The same
+  class of bug two lines below, where the curator note matched only the
+  stored id and vanished after a rebuild, is fixed with it.
+* **`/share/assets` published the ENTIRE editor static tree past the
+  tailnet** (app.js, ingest.js, clientfolders.js, index.html), on the one
+  prefix the operator publishes with Funnel. FIXED: an allow-listed
+  `StaticFiles` subclass carrying the viewer's own files and nothing else,
+  chosen over a second copied directory so nothing drifts; the refusal is the
+  same 404 a missing file gets, so the mount reveals nothing about what the
+  directory holds.
+* **The card popover's "already in folder" tick compared the raw stored id**,
+  so after a rebuild it was wrong and a second add made a duplicate. FIXED at
+  all three sites: `add_items` reports an already-filed identity as `already`
+  instead of inserting, the popover computes `contains` on id OR
+  `(share, rel_path)`, and `resolve_items` dedupes by CURRENT index id, so a
+  folder that already holds a legacy duplicate row draws the clip once.
+* **Over the HTTP ingest backend, `set_error` and every field outside
+  `VideoIn` was silently dropped**, so a failed clip's status became `error`
+  with no message. FIXED by adding the columns the indexer actually forwards
+  (error, full_hash, duplicate_of, archive_path, original_*), written on
+  insert and COALESCEd on conflict so a later plain scan cannot blank them,
+  plus `extra='allow'` and a WARNING naming the fields, deliberately NOT
+  `extra='forbid'`: a 422 there would arrive while the indexer is already
+  handling a failure and would lose the row as well as the message.
+
+### CR-64 - the music platform (music-2, music-3, music-4, music-5, music-6) - FIXED in repo 2026-08-21, unshipped
+(music-1, the per-editor token, is CR-55.)
+
+* **A published or drained index was never picked up.** `musicweb` caches a
+  connection per worker thread and holds the search matrices in memory, so a
+  rename-publish left every thread serving the old, unlinked inode until an
+  admin POSTed `/music/api/reload` or the container restarted, and no runbook
+  said so. FIXED by self-healing: `con()` stats the path and drops the cached
+  connections when the SAME path names a different (dev, ino); the search
+  Index records the file state it was built from and rebuilds when it moves,
+  rate-limited to one check every 2 s so a burst of fleet ingest cannot cost
+  a matrix rebuild per search. Keyed by PATH on purpose, so repointing
+  `MUSIC_DB_PATH` is a different database and not a swap. Deliberately NOT
+  `PRAGMA data_version`, which is per connection and would make two threads
+  ping-pong one shared Index. DEPLOY.md, `docs/INDEXERS.md` and the drain CLI
+  all now say that a container running an OLDER musicweb still needs the
+  reload.
+* **Drain failures never reached the live index**: a queued upload that could
+  not be analysed stayed `pending` on the NAS for ever and was re-decoded by
+  every drain. FIXED: the bundle carries a `bundle_failures` table and the
+  apply marks the matching LIVE row failed under the same agreement checks
+  the successes use (uid exists, rel_path agrees, content_hash unchanged, and
+  a row already `done` is never forced back). `BUNDLE_VERSION` stays 1 and
+  the table is read inside a `try`, so the change is additive in BOTH
+  directions: an older base rig's bundle still applies here, and a new bundle
+  still applies on an older NAS.
+* **A preview proxy was chosen by track id alone**, so a reused rowid served
+  a different track's audio. PARTIAL: `config.drop_proxy(track_id)` is called
+  from every path that FREES an id or creates a row at one (prune, the
+  fleet-ingest insert, the drain apply), best-effort and after the commit.
+  Renaming proxies to `<id>-<hash8>.mp3`, which would also survive shipping a
+  base rig's whole `proxies/` directory over the NAS's after the two indexes
+  diverged, invalidates every proxy in the field and needs a regenerate; that
+  residual case is documented in `docs/INDEXERS.md` instead. An
+  mtime-against-`analyzed_at` check was considered and rejected: a base-rig
+  re-index bumps `analyzed_at` on every row without touching a proxy, so it
+  would silently disable previews fleet-wide.
+* **A vector whose byte count is not a multiple of 4 was a 500**, aborting
+  the transaction after the track INSERT so the companion saw a server error.
+  FIXED: a 422 naming the reason before the transaction opens; a truncated
+  WINDOW vector drops that window with a log line instead, matching what the
+  route already does for an empty or non-finite one.
+* **DEPLOY.md and the ledger docstring promised a base-rig fallback that does
+  not exist** (MUSIC-ING-2's open half: there is no `queue_add` anywhere in
+  the fleet routes, the audio stays on the editor's machine, and a drain run
+  in that belief correctly finds nothing). FIXED as documentation on both
+  sides, naming the missing `POST .../items/{iuid}/queue` route.
+
+### CR-65 - docs that were wrong, tests that skipped the gate they guard (product-surface-4, product-surface-6, product-surface-7, product-surface-8) - PARTLY FIXED in repo 2026-08-21, unshipped (the docs all landed in wave 2; the CLAP gate and the duplicate-module convention remain)
+* **Doc statements that had gone false** (product-surface-6). Corrected where
+  the fixer owned the file: `docs/RELEASE.md` no longer says the Authenticode
+  signing is "wired and tested", it says plainly that none of it has ever run
+  against a real certificate and that "wired" is not "tested"; `docs/CI.md`
+  records that the .pfx route was dead until today. Four more corrections are
+  written out ready to apply but live in files nobody owned this pass:
+  `docs/CONFIG.md`'s "hardcoded by decision" row for `canonical_prefix`,
+  `docs/LOOPBACK_API.md`'s missing `POST /ytdl/fetch` row, SPEC.md's two
+  stale "current state" paragraphs, and CLAUDE.md's missing `publish_latest`
+  line. All four landed in wave 2 (2026-08-21), each written from the code
+  rather than from the recommendation: the `canonical_prefix` row now reads
+  "site data since 2026-08-17" and says the old text had been wrong for four
+  days, the `/ytdl/fetch` row was verified against `broll_server.py`'s
+  dispatch before it was written, SPEC.md's "Current state (verified)"
+  heading is now marked HISTORICAL with the three claims that stopped being
+  true in week one, and CLAUDE.md states the CI-builds/this-rig-signs policy
+  and `publish_latest.py`'s four refusals in one place.
+* **`docs/APPLIANCE_INSTALL.md` tells the customer the first-run wizard does
+  not exist** (product-surface-4), which was wrong the day it was written and
+  is wronger now that `/setup` opens anonymously on a fresh local-mode
+  appliance and the storage task behaves differently (CR-57). FIXED in wave 2
+  (2026-08-21), rewritten from `setup_routes.py` and `setup_engine.py`: step 2
+  now says why the three bind-mount SOURCES must still be created by hand
+  (Docker invents a missing one root-owned, which uid 3000 cannot write),
+  step 3 documents the wizard as it is (the seven-step ordered table, the five
+  optional steps, `setup_tasks` persistence and resume, checks that never dial
+  out speculatively, `require_setup_access`'s fail-closed local-only anonymous
+  window), step 5 records that the editors/software/snapshots CHECKS have been
+  real since 2026-08-18 and only the DOING is owed, and the doc header no
+  longer claims WP D never landed. One genuine NOT YET TRUE survives, and is
+  accurate: step 4's tailnet sign-in, because WP B is not built and an
+  operator still signs `tailscaled` in over `docker compose exec`.
+* **Skips that hide an un-run gate** (product-surface-7). PARTIAL:
+  `run_all_tests.ps1` now parses each suite's skip count into the summary
+  table and prints a footer whenever anything skipped, saying that a skip is
+  not a pass and naming `-rs`. The CLAP artefact gate itself still runs on
+  exactly one machine in the world, because checking in a fixture is a
+  decision about what binary data enters the repo.
+* **Same-named modules with different contents** (product-surface-8:
+  `crash_report.py` in two components differs from line 1 and is under no
+  parity test, sitting beside byte-identical vendored copies that are).
+  DEFERRED: the header convention and the enforcing test span three files in
+  two other territories.
+
+### CR-66 - deliberately deferred, with reasons
+Nothing here was missed. Each was looked at and declined for cause, and each
+needs an owner decision, a live spike, a measurement, or a two-sided change
+that has to land atomically.
+
+**The design items this pass deliberately did not attempt:**
+
+* **`sync-safety-1` - lane A has no upload ledger.** `copy --ignore-existing`
+  with no memory of what this machine has already sent re-uploads anything
+  MOVED on the NAS, from every editor who still holds it at the old path.
+  CR-44 taught lane B to tolerate a reorganisation; nothing stops lane A from
+  undoing it. That is a design decision (what the ledger is, where it lives,
+  what a rebuild costs), not a patch, and it is the largest open sync-safety
+  item in this ledger.
+* **`data-model-2` - the machine's ROLE is still minted from the PERSON.**
+  `DASH_ADMIN_USERS` decides wired against remote and both the companion and
+  the wizard obey it, while `machine_state.mode` is the per-machine fact
+  everything else now keys on. CR-49 made the GATES per machine; the
+  AUTHORITY is still per account. Making the registry the authority is
+  `docs/MULTI_BASE_RIG_PLAN.md` work.
+* **`trust-model-1` - identity tokens are unrevocable 30-day bearers** with
+  no refresh: too long to revoke, too short to live with. A revocable
+  identity needs a token store, a refresh path and a companion that
+  understands both. A security-model change, not a fix.
+* **`release-pipeline-9` - dashboard OTA hinges on a mutable `:1` image tag**
+  that the vendor has tagged exactly once, and a lock change silently
+  disables OTA for every customer. Needs a tagging policy decision before any
+  code.
+* **`data-model-8` - `canonical_prefix` and `tree_name` are live-editable on
+  the dashboard but install-time constants** in every companion and in the
+  music service. Editing them today is a fleet-wide breakage with no
+  migration: either the dashboard refuses the edit once machines exist, or
+  the edit needs a rollout path.
+* **`data-model-6` - the per-machine `editor_prefs` migration (v24 WP7)
+  re-keyed a table nothing reads or writes.** Dead weight rather than a
+  defect, and removing a shipped migration is its own risk.
+
+**Deferred within a theme, reason recorded in the entry that names it:**
+`sync-safety-7` (track-renames, needs measurement against the bundled rclone;
+CR-47); `trust-model-4` (editor lanes verify no NAS host key: the fix spans
+the dashboard, both installers and the companion and must land as one change;
+now documented in `docs/SERVER.md`, and the compose comment that claimed the
+opposite was retracted in wave 2, CR-61); `trust-model-6` (one secret
+underwrites six trust relationships: HKDF-per-purpose changes a wire format
+verified in four apps, and the `_PREVIOUS` overlap touches a dozen call sites
+in other territories, so it wants one dedicated change across
+dashboard+broll+music+ytdl with docs/SECRETS.md in the same pass);
+`trust-model-8` (dashboard-to-TrueNAS REST disables TLS verification: needs a
+`[nas] tls_fingerprint` and a fail-closed rule in another territory);
+`trust-model-9`'s CSP (four apps, CR-54); `release-pipeline-8` (the downgrade
+floor is never RAISED: wave 2 taught `publish_feed.py` to refuse a floor
+DROP, but every record still carries 0.0.0 unless an operator types one, and
+the real fix is a tracked MIN_VERSION constant read by three signers);
+`product-surface-8` (the duplicate-module header convention); and
+`release-pipeline-2`'s reconciliation of the two publish paths, which is a
+release-policy redesign.
+
+**Eight items this list used to carry were closed after all**, by the wave 2
+pass on 2026-08-21, and are described in the entries that own them:
+`ytdl-web-5` (the pin is read before anything is probed, CR-53),
+`dash-core-7` (`secrets_boot` on the console entry point, CR-57),
+`data-model-7` (the ytdl download lease is keyed on `(editor, machine_id)`,
+CR-49), `ops-efficiency-6` (the lifespan watchdog and the corrected `ok`,
+CR-62), `ops-efficiency-8` and `ops-efficiency-9` (the media-tree stat cache
+and the log window, CR-62), `product-surface-3` (first-customer data out of
+the vendor deploy defaults, CR-61) and `product-surface-4` (the appliance
+install doc, CR-65). Deferring for cause is not declining forever.
+
+### CR-67 - the seams still open after wave 2
+Wave 1's eleven fixers on disjoint territories left thirteen seams: a fix
+whose other half sat in a file nobody held. Wave 2, six engineers on
+2026-08-21, closed all but a residue. What CLOSED, one line each:
+
+1. `companion/app.py` owes the halt three calls (CR-48) - closed in wave 2
+   (2026-08-21): the `halted` predicate, `halt_folder_ids()` and
+   `release_for_halt()` on BOTH release paths, with seven regression tests.
+2. b-roll fleet ingest 403s a `cce1` holder (CR-55) - closed in wave 2
+   (2026-08-21): `fleet_auth`'s stamp plus one `require_fleet_caller`, and
+   `BrollGate` stripping and re-stamping the header.
+3. `tools/sign_release.py` and `installer/build_editor_package.ps1` can
+   PRODUCE a `min_version > version` record (CR-52) - closed in wave 2
+   (2026-08-21): a refusal in `sign_release.main()` before the release key is
+   read, and two gates in the package builder, the first before PyInstaller
+   runs so a stale env var costs seconds and not minutes.
+4. `dashboard/app.py`'s `secrets_boot.ensure_secrets()` on the console entry
+   point, and `/fleet/halt` in `login_gate` (CR-57, CR-55) - closed in wave 2
+   (2026-08-21), both stale docstrings corrected with it; the carve-out is
+   exact-path AND method GET AND a verified companion credential, so the
+   admin's POST still needs a session.
+5. `DASH_TRUSTED_PROXIES` and the json-file `logging:` cap in the compose
+   templates, plus `run.sh --no-access-log` (CR-61) - closed in wave 2
+   (2026-08-21), with the golden fixture regenerated in the same change and
+   `COMPOSE_ENV_ONLY_IN_DICT` emptied.
+6. `dashboard/api.py` and `collector.py` still lay down the ENV template
+   folders and shared-asset list (CR-58) - closed in wave 2 (2026-08-21),
+   along with the ASGI title; an empty read deliberately keeps the previous
+   list, because an empty shared-folder set is the B16 unshare shape.
+7. `ui.py` and `admin_assignments.html` grey a wired ACCOUNT, and the
+   `/download/<platform>` 404 names a vendor-internal script (CR-49, CR-59) -
+   closed in wave 2 (2026-08-21): the column is greyed per `(editor,
+   machine)`, `partial_toggle` took the same `?machine=` refusals its JSON
+   sibling already had, and the 404 speaks to the editor first and then names
+   `publish_latest.py --kind onboard`.
+8. `tools/publish_feed.py` owes `--allow-replace` and the min_version floor
+   refusal (CR-59) - closed in wave 2 (2026-08-21); identical bytes are
+   deliberately not a replacement, so a re-run after a failed upload works.
+9. `companion/app.py`, the smaller ones (CR-51, CR-50, CR-66) - closed in
+   wave 2 (2026-08-21): the open project reaches `describe_latest()`, the
+   diagnostics builder reads lane C's cached status instead of `check_once()`
+   and labels it "[last poll, not a fresh sweep]", the media-tree stat cache
+   landed with a 900 s TTL on the PRESENT side (a tree that never notices a
+   deletion would be worse than a slow one), and the log window went from
+   20 MB to 55 MB with a rotation note written at the head of each new file.
+10. `broll/web/app/ingest_batches.py` should refuse to flip a video off
+    `ingesting` with no segments row (CR-54) - closed in wave 2 (2026-08-21):
+    a 409 `no_result`, placed AFTER the outside-root 400 and the size checks
+    so those keep their meanings and their priority.
+11. The docs still owed (CR-65 and the entries that name them) - closed in
+    wave 2 (2026-08-21): SYNC_SAFETY, RESOLVE_EDIT_SAFETY, CLIENT_FOLDERS,
+    CONFIG, BACKUP_RESTORE with `server/publish_db.py`'s advice text,
+    LOOPBACK_API, SPEC.md, APPLIANCE_INSTALL, `site.example.toml` and
+    CLAUDE.md, plus three docs that had no `docs/README.md` row at all.
+12. `companion/config.example.toml` should document `lane_c_settle_seconds`
+    (CR-62) - closed in wave 2 (2026-08-21), with the
+    `project_rotation_seconds` text amended to say the full 600 s is
+    load-bearing ONLY under the `rotate` scheme. The key is owned by
+    `sequencer.py`, not `config.py` DEFAULTS, and a new test in
+    `test_config.py` pins that deal rather than letting the parity tests
+    force it into DEFAULTS.
+13. `syncthing_client.py` wants a per-call timeout (CR-62) - closed in wave 2
+    (2026-08-21). Its `maxAge` half is NOT closed: see below.
+
+**Still open after wave 2.** Shorter, and every item now wants a decision, a
+measurement or a template owner rather than a mechanical mirror.
+
+* **`companion/sync/syncthing_admin.py`'s `maxAge` (30 d) still disagrees
+  with the server and the dashboard (365 d)** (CR-48, ledger R5). It is the
+  one wave-1 seam no wave-2 engineer could take, because taking it means
+  choosing a number: reconciling is the companion's move, since lowering the
+  server's would REDUCE protection.
+* **CR-62's real idle fix is still owed**: the per-project proxy-tree
+  signature published in the selection response so a pass can be SKIPPED
+  entirely (the collector plus `api.py`), the NAS-reachability pre-probe with
+  a distinct "offline" lane state (which changes what the tray classifier and
+  the fleet grid render), and moving the completion pass onto its own thread
+  and connection. The idle backoff and the per-call timeout bought headroom;
+  they did not remove the work.
+* **Nothing in the product says a NAS snapshot schedule is MISSING**
+  (sync-safety-6, CR-48). Attempted in wave 2 and declined for reach, not on
+  the merits: `TrueNASClient.list_snapshot_tasks` exists and the Setup
+  wizard already consults it, so the data is surfaced somewhere, but a fleet
+  banner needs `base.html` or the fleet template plus a cached background
+  poll, and `health.py` is deliberately pure rollup logic with no I/O so a
+  TrueNAS timeout never sits in front of the container healthcheck. Wants its
+  own change, with the template owner.
+* **Two new dashboard knobs are undocumented, and one is deliberately not a
+  first-class key.** `DASH_COLLECTOR_WATCHDOG_SECONDS` (0 disables) and
+  `DASH_COLLECTOR_WEDGED_SECONDS` are read straight from `os.environ` in
+  `dashboard/app.py` rather than through `settings.py`, because `settings.py`
+  and `docs/CONFIG.md` were other territories at the time; they belong in
+  both. `DASH_ACCESS_LOG` is a `run.sh`-only knob by choice: making it
+  first-class means a row in both compose templates AND in
+  `compose_config()`, or `test_safety`'s env-key parity fails.
+* **This studio's own `site.toml` owes a `[broll]` block.**
+  `creators_shares` now has an EMPTY product default and the studio's
+  historical `mofa-disaster` survives only through one transitional branch, a
+  manifest with no `[broll]` TABLE AT ALL. Writing ANY `[broll]` key ends
+  that fallback, so `creators_shares` and `archive_creators_dir` go in
+  together or the b-roll creators share empties itself. `docs/SERVER.md`
+  spells out both lines. The same trap runs in reverse:
+  `site.example.toml` carries an UNCOMMENTED `[broll]` header, so copying it
+  yields the empty product default, which is right for a new site and wrong
+  for this one.
+* **`docs/APPLIANCE_INSTALL.md` keeps one genuine NOT YET TRUE**: step 4's
+  tailnet sign-in. WP B is not built, the tailscale service runs a bare
+  `tailscaled`, and an operator still signs it in over `docker compose exec`.
+  That is an accurate doc of an unbuilt thing rather than a doc defect, and
+  it goes when WP B lands.
+* **Two test results disagree across the wave and must be reconciled before
+  anything is built.** `server/tests/test_cross_component.py::test_the_done_video_row_falls_back_field_by_field_on_both_sides`
+  raises StopIteration because it can no longer find its `db.set_video(...
+  dl_state='done' ...)` call in `ytdl/web/ytdlweb/routes_fleet.py`, which
+  wave 2 rewrote for the per-machine lease. It was already failing before
+  that engineer started, so it is a cross-component grep gone stale rather
+  than a regression, but it is RED and nobody owns it. Separately, one
+  engineer's mid-wave dashboard run saw two `test_collector.py` tests and
+  `test_packages.py::test_installer_download_route` fail; all three are in
+  files another engineer was editing at that moment, and all three were green
+  on that engineer's final run. Re-run the server and dashboard suites on the
+  merged tree.
+
+**Ordering, unchanged and now with a second reason:** deploy the dashboard
+before the companions. ytdl migration 010 (`jobs.claimed_machine`, schema
+v10) runs on the live `ytdl.db` at the next dashboard boot, is one idempotent
+ALTER, and stays inert until a companion sends `machine_id` on its claim, so
+the dashboard can go out first exactly as the per-machine plans required.
+Everything the pass declined on the merits, rather than left as a seam, is in
+CR-66 with its reason.
+
 ## Open — residuals from the 2026-08-14 fix pass
 
 ### R16 — eight 08-14 findings deliberately not fixed

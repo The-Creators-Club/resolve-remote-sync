@@ -111,6 +111,11 @@ services:
       DASH_ADMIN_USERS: "{{NAS_ADMIN_USERS}}"
       DASH_SMB_HOST: "{{SMB_HOST}}"
       DASH_COOKIE_SECURE: "{{DASH_COOKIE_SECURE}}"
+      # Whose X-Forwarded-* this dashboard believes (trust-model-3,
+      # 2026-08-21). Unset, auth.client_ip returns the docker bridge gateway
+      # for the whole fleet and the login throttle becomes one shared bucket.
+      # compose.yaml carries the long version of this comment.
+      DASH_TRUSTED_PROXIES: "{{DASH_TRUSTED_PROXIES}}"
       DASH_DB_PATH: "/data/dashboard.db"
       DASH_PORT: "{{DASH_PORT}}"
       DASH_PROJECTS_DIR: "/projects"
@@ -122,7 +127,12 @@ services:
       DASH_BROLL_ENABLED: "{{DASH_BROLL_ENABLED}}"
       BROLL_DATA_ROOT: "/broll-data"
       BROLL_SHARES: "broll:Main b-roll archive"
-      BROLL_CREATORS_SHARES: "mofa-disaster"
+      # site.toml [broll] creators_shares / archive_creators_dir. Both were
+      # a literal here -- one customer's project name in the vendor's own
+      # template -- until 2026-08-21 (product-surface-3); compose.yaml carries
+      # the long version of this comment.
+      BROLL_CREATORS_SHARES: "{{BROLL_CREATORS_SHARES}}"
+      BROLL_ARCHIVE_CREATORS_DIR: "{{BROLL_ARCHIVE_CREATORS_DIR}}"
       BROLL_DEFAULT_COLLECTION: "{{BROLL_DEFAULT_COLLECTION}}"
       BROLL_DEFAULT_COLLECTION_LABEL: "{{BROLL_DEFAULT_COLLECTION_LABEL}}"
       # MANDATORY while DASH_BROLL_ENABLED=1: the container REFUSES TO START on
@@ -244,6 +254,16 @@ services:
       timeout: 10s
       retries: 3
       start_period: 120s
+    # A CAP ON THIS CONTAINER'S STDOUT (ops-efficiency-7, 2026-08-21):
+    # json-file has no default limit, and this stack may run for years on an
+    # appliance nobody logs into. compose.yaml carries the long version, and
+    # install_dashboard_app.LOG_ROTATION is the same block for the TrueNAS
+    # path. run.sh drops uvicorn's access log for the same reason.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   # THE PO-TOKEN SIDECAR IS NOT HERE, and that is the point. It was, until the
   # 2026-08-17 integration pass: compose.yaml had already dropped it for
@@ -280,6 +300,12 @@ services:
       - "22000:22000/udp"
       - "21027:21027/udp"
     restart: unless-stopped
+    # The 100 MB stdout cap again (ops-efficiency-7, 2026-08-21).
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   # --- OPTIONAL: the Resolve Project Server (profile "project-server") -------
   # postgres:13 is what DaVinci Resolve's project server expects -- do not
@@ -295,3 +321,9 @@ services:
     ports:
       - "${DASH_PG_PORT:-5432}:5432"
     restart: unless-stopped
+    # The 100 MB stdout cap again (ops-efficiency-7, 2026-08-21).
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"

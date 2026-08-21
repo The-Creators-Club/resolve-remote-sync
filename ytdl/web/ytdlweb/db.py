@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 
 # Highest schema version this codebase knows how to run against. Bump it, add
 # the file to _MIGRATIONS, and give it a predicate.
-CURRENT_SCHEMA_VERSION = 9
+CURRENT_SCHEMA_VERSION = 10
 
 # "the version this migration produces" -> (filename, already-applied predicate).
 # The predicate must answer "is this migration's effect already in the database?"
@@ -68,6 +68,12 @@ _MIGRATIONS = {
     # predicate is the same shape 005's and 006's are.
     9: ('009_jobs_mode.sql',
         lambda con: 'mode' in _columns(con, 'jobs')),
+    # WHICH of the leaseholder's computers holds the download lease
+    # (data-model-7, CR-66/CR-67, 2026-08-21). One column, so the predicate is
+    # the same shape 005's, 006's and 009's are, and it is inert until a
+    # companion sends a machine_id.
+    10: ('010_jobs_claimed_machine.sql',
+         lambda con: 'claimed_machine' in _columns(con, 'jobs')),
 }
 
 # What made a job. 'search' is a topic Claude expands and the editor reviews;
@@ -654,6 +660,42 @@ def lease_active(job, at=None):
     return bool(expires and str(expires) > (at or now()))
 
 
+def claimed_machine_of(job):
+    """The machine_id the leaseholder announced itself with, or None.
+
+    None is "the holder did not say" (data-model-7, CR-66, 2026-08-21): a row
+    written before migration 010, or a claim from a companion that predates the
+    field. It is deliberately NOT "some other machine" -- see lease_held_by.
+    """
+    value = str(_column(job, 'claimed_machine') or '').strip()
+    return value or None
+
+
+def lease_held_by(job, editor, machine=None):
+    """Is (editor, machine) the holder recorded on this row? Ignores expiry.
+
+    THE (editor, machine_id) KEY (data-model-7, CR-66, 2026-08-21). The lease
+    used to be keyed on the editor's NAME, and a name is a person: CLAUDE.md's
+    rule that a sync plan belongs to a COMPUTER applies here too, because one
+    editor's laptop and desktop are two executors, and both used to read as
+    "the same holder refreshing" -- so both downloaded the same clips into two
+    trees and each posted terminal statuses for the other's work.
+
+    Two Nones, and they mean different things on purpose:
+      - `machine` None is a CALLER that does not say which machine it is (any
+        companion older than this change). It keeps the old per-editor answer,
+        which is the whole reason this can ship before the companion half.
+      - a NULL `claimed_machine` is a HOLDER that did not say. Same reasoning
+        in the other direction: refusing it would strand a live lease taken by
+        an older build the moment its own companion upgraded mid-job.
+    """
+    name = str(editor or '').strip()
+    if not name or str(_column(job, 'claimed_by') or '') != name:
+        return False
+    held = claimed_machine_of(job)
+    return machine is None or held is None or held == str(machine).strip()
+
+
 def is_leaseholder(job, editor, at=None):
     """Is `editor` the live leaseholder of this job?
 
@@ -664,16 +706,16 @@ def is_leaseholder(job, editor, at=None):
     routes_fleet now verifies a signed identity token before it calls this, so
     a blank name here is a caller bug, and answering True to it would hand any
     token-holding machine somebody else's job.
+
+    Per-EDITOR on purpose, unlike a claim (data-model-7, CR-66, 2026-08-21):
+    the manifest and the per-clip status posts carry no machine_id, and the
+    machine that could not claim never gets a job id to post about, so the
+    (editor, machine) key is enforced at the one door that hands the lease out.
     """
-    if not lease_active(job, at):
-        return False
-    name = str(editor or '').strip()
-    if not name:
-        return False
-    return str(_column(job, 'claimed_by') or '') == name
+    return lease_active(job, at) and lease_held_by(job, editor)
 
 
-def claim_download(c, job_id, editor, lease_seconds, at=None):
+def claim_download(c, job_id, editor, lease_seconds, at=None, machine=None):
     """Take (or refresh) the lease. -> did it happen.
 
     THE compare-and-set. Everything that decides the answer is in the WHERE
@@ -688,20 +730,43 @@ def claim_download(c, job_id, editor, lease_seconds, at=None):
         worker cannot reach while a companion holds the lease, so a job handed
         out with a cancel already on it downloads to completion and is
         cancelled afterwards;
-      - and it must be free: not local at all, or leased to THIS editor (a
-        refresh -- the companion re-announcing itself after a restart is not a
-        second holder), or leased to somebody whose lease has run out.
+      - and it must be free: not local at all, or leased to THIS (editor,
+        machine) -- a refresh, because the companion re-announcing itself after
+        a restart is not a second holder -- or leased to somebody whose lease
+        has run out.
+
+    `machine` is the companion-minted machine_id (data-model-7, CR-66,
+    2026-08-21). Passing it narrows the refresh from the editor to the
+    COMPUTER, which is what stops one person's laptop and desktop both reading
+    as the same holder and downloading the same clips into two trees. Omitting
+    it is the pre-2026-08-21 behaviour exactly, so an older companion is not
+    refused, and lease_held_by says why an unknown holder is treated the same
+    way.
+
+    A won claim WRITES `machine` as given, NULL included: the column records
+    what the current holder said it is, and a claim that cannot say leaves
+    "unknown" behind rather than a stale id belonging to somebody else's run.
     """
     at = at or now()
+    machine = str(machine or '').strip() or None
+    # Built here rather than as one SQL string with an `IS NULL` test on a
+    # bound parameter: the two cases are different RULES (per-computer against
+    # per-person), and reading which one a call gets should not require
+    # evaluating three-valued logic in your head.
+    if machine is None:
+        refresh, refresh_args = 'claimed_by=?', [editor]
+    else:
+        refresh = '(claimed_by=? AND (claimed_machine IS NULL OR claimed_machine=?))'
+        refresh_args = [editor, machine]
     cur = c.execute(
         f"UPDATE jobs SET download_mode='{MODE_LOCAL}', claimed_by=?, "
-        'lease_expires_at=?, updated_at=? '
+        'claimed_machine=?, lease_expires_at=?, updated_at=? '
         "WHERE id=? AND phase='downloading' "
         f"AND (mode_lock IS NULL OR mode_lock<>'{MODE_SERVER}') "
         'AND COALESCE(cancel_requested,0)=0 '
-        f"AND (download_mode<>'{MODE_LOCAL}' OR claimed_by=? "
+        f"AND (download_mode<>'{MODE_LOCAL}' OR {refresh} "
         '     OR lease_expires_at IS NULL OR lease_expires_at<=?)',
-        (editor, _future(lease_seconds), at, job_id, editor, at))
+        [editor, machine, _future(lease_seconds), at, job_id, *refresh_args, at])
     c.commit()
     return bool(cur.rowcount)
 
@@ -790,8 +855,12 @@ def reclaim_download(c, job_id, at=None):
     queue, and the badge flips to "downloading on the server" because a silent
     executor swap is how editors conclude features are broken (§9).
     """
+    # claimed_machine goes with claimed_by (data-model-7, CR-66, 2026-08-21):
+    # the two are one fact, and a machine id left behind on a job the server
+    # has taken back would name a holder that no longer exists.
     cur = c.execute(
         f"UPDATE jobs SET download_mode='{MODE_SERVER}', claimed_by=NULL, "
+        'claimed_machine=NULL, '
         f"lease_expires_at=NULL, mode_lock='{MODE_SERVER}', updated_at=? "
         'WHERE id=?', (at or now(), job_id))
     c.commit()
@@ -861,7 +930,7 @@ def clear_mode_lock(c, job_id):
     reclaim is one-way WITHIN a run). The editor's machine then had its claim
     refused on every retry, for good.
 
-    Resetting all four columns is safe for the same reason clearing the pin is:
+    Resetting all of them is safe for the same reason clearing the pin is:
     the accepted phases mean the previous run is OVER, so there is no lease to
     preserve and nothing in flight to credit. The reclaim's accounting is not
     lost either -- that run's clips are already `done` or `failed` on their
@@ -869,8 +938,12 @@ def clear_mode_lock(c, job_id):
     the ones that failed or were never fetched, which is the same set the
     reclaim would have produced.
     """
+    # ...five columns since 2026-08-21: claimed_machine is half of "who held
+    # the last run" (data-model-7, CR-66) and clearing one without the other
+    # would leave the next claim comparing against a dead run's machine id.
     c.execute("UPDATE jobs SET mode_lock=NULL, download_mode=?, claimed_by=NULL, "
-              'lease_expires_at=NULL, updated_at=? WHERE id=?',
+              'claimed_machine=NULL, lease_expires_at=NULL, updated_at=? '
+              'WHERE id=?',
               (MODE_SERVER, now(), job_id))
     c.commit()
 
@@ -1101,6 +1174,35 @@ def unfinished_downloads(c, job_id):
     return c.execute(f'SELECT COUNT(*) n FROM job_videos WHERE job_id=? AND '
                      f'dl_state IN ({ph})',
                      (job_id, *UNFINISHED_STATES)).fetchone()['n']
+
+
+def finish_download(c, job_id, video_id, state, **cols):
+    """CAS one clip to a TERMINAL dl_state. -> did THIS call move the row.
+
+    begin_download's twin, at the other end of a clip (ytdl-web-3,
+    2026-08-21). The worker's own terminal writes are reached once per clip by
+    construction; the companion's are an HTTP POST, and since CR-31 its
+    FleetClient re-sends any call that RAISED -- a client-side timeout on a
+    request the server already committed included. Without the compare-and-set
+    the retry bumped dl_done a second time ("23 of 22" in the SPA) and, worse,
+    dl_failed twice for one clip: the hand-back's requeue_failed counts ROWS,
+    so its `bump(dl_failed, -n)` left the counter permanently one above zero
+    and a job whose server-side retry succeeded still reported a failure in
+    Recent searches.
+
+    False is not an error and the caller answers 200: the row already holds
+    somebody's terminal verdict (the same POST a moment ago, or the server
+    worker's own), and the second report has nothing to add.
+    """
+    if state in UNFINISHED_STATES:
+        raise ValueError(f'{state!r} is not a terminal download state')
+    ph = ','.join('?' * len(UNFINISHED_STATES))
+    n = _update(c, 'job_videos',
+                f'job_id=? AND video_id=? AND dl_state IN ({ph})',
+                (job_id, video_id, *UNFINISHED_STATES),
+                _VIDEO_COLS, {'dl_state': state, **cols})
+    c.commit()
+    return bool(n)
 
 
 def failed_videos(c, job_id):

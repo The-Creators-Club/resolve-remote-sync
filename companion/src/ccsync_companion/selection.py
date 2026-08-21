@@ -332,22 +332,72 @@ class SelectionClient:
         while the tick stands, the server keeps the Syncthing folder shared
         and deleting the local copy just errors the folder. Returns
         (ok, message); never raises. On success the in-memory selection TTL
-        is zeroed so the sequencer drops the project on its next poll."""
+        is zeroed so the sequencer drops the project on its next poll.
+
+        MACHINE-SCOPED FIRST (comp-lane-c-2 / data-model-3, 2026-08-21).
+        This used to send no `?machine=` at all, so the dashboard deleted
+        EVERY row for the person -- including the other computer's own plan
+        row. An editor freeing disk on her laptop silently stopped her
+        desktop syncing that project: the enforce cycle unshared its device
+        within 60 s and its sequencer dropped the project on the next poll,
+        with nothing on that machine or the dashboard saying why, which is
+        precisely the "editor who quietly cannot open a project" outcome
+        MULTI_MACHINE_PLAN.md §5 forbids. The old justification only ever
+        covered the unassigned bucket (machine=''), where this machine's tick
+        is not a row of its own -- so that case, and only that case, still
+        falls back to the person-wide DELETE, detected from the answer the
+        dashboard sends back rather than assumed. A dashboard too old to know
+        `?machine=` ignores it and removes the tick everywhere, exactly as
+        before."""
         if not self.enabled:
             return False, "dashboard_url is not configured"
         editor = str(self._editor_name_fn() or "").strip().lower()
         if not editor:
             return False, "no editor identity yet -- sign in first"
-        # NO ?machine= here, deliberately: "Remove this project from this
-        # machine" has to make the SERVER stop sharing it, and an untick that
-        # named only this computer would leave the tick standing on the
-        # person's other machine -- with the folder still shared to this one
-        # if it is in the unassigned bucket. Removals go wide (the dashboard
-        # applies the same rule for the same reason).
-        url = (
+        base = (
             f"{self.dashboard_url.rstrip('/')}/api/v1/selection/"
             f"{quote(editor, safe='')}/{quote(str(slug), safe='')}"
         )
+        machine = _machine_name()
+        ok, message, view, status = self._delete_selection(
+            f"{base}?machine={quote(machine, safe='')}" if machine else base
+        )
+        if not ok and machine and status == 404:
+            # A dashboard that does not know this hostname (a rename it has
+            # not seen report yet) cannot honour a machine-scoped removal.
+            # The person-wide DELETE is what such a companion has always
+            # sent, so fall back to it rather than leaving the tray's action
+            # refused.
+            log.info("untick %s: the dashboard does not know this machine -- "
+                     "removing the tick for every machine", slug)
+            ok, message, view, status = self._delete_selection(base)
+        elif ok and machine and self._still_selected(view, slug):
+            # The tick this machine syncs by is not a row of its own: it is
+            # the unassigned bucket, which a machine-scoped DELETE cannot
+            # touch. Removing it everywhere is what "remove it from this
+            # machine" has always meant there, and leaving it would make the
+            # tray's own action a no-op the project came straight back from.
+            log.info(
+                "untick %s: this machine has no plan row of its own (unassigned "
+                "bucket) -- removing the tick for every machine, as before", slug)
+            ok, message, _view, _status = self._delete_selection(base)
+        if not ok:
+            return False, message
+        self._last_response_at = 0.0
+        # ...and the failure throttle with it, so an untick that lands right
+        # after a failed poll is still reflected on the very next get()
+        # (COMP-CORE-3, 2026-08-14).
+        self._last_failure_at = 0.0
+        return True, "unticked"
+
+    def _delete_selection(self, url: str) -> tuple[bool, str, Any, int]:
+        """One DELETE. Returns (ok, message, parsed_body, http_status).
+        Never raises.
+
+        The body is the dashboard's post-delete selection view for whatever
+        scope the URL named, which is how untick() tells "this machine has
+        its own plan row" from "this machine is on the unassigned bucket"
+        without a second round trip."""
         headers = {}
         token = self.report_token()
         if token:
@@ -364,17 +414,36 @@ class SelectionClient:
             # No redirects -- same rule as default_http_get above.
             with upgrade_mod.build_no_redirect_opener().open(
                     req, timeout=self.timeout) as resp:
-                resp.read()
+                body = resp.read()
         except urllib.error.HTTPError as exc:
-            return False, f"dashboard refused the untick (HTTP {exc.code})"
+            return False, f"dashboard refused the untick (HTTP {exc.code})", None, int(exc.code)
         except Exception as exc:
-            return False, f"dashboard unreachable: {exc}"
-        self._last_response_at = 0.0
-        # ...and the failure throttle with it, so an untick that lands right
-        # after a failed poll is still reflected on the very next get()
-        # (COMP-CORE-3, 2026-08-14).
-        self._last_failure_at = 0.0
-        return True, "unticked"
+            return False, f"dashboard unreachable: {exc}", None, 0
+        try:
+            return True, "unticked", (json.loads(body.decode("utf-8")) if body else None), 200
+        except Exception:
+            # An answer we cannot read is not a failed untick -- the DELETE
+            # returned 2xx. The caller then treats the scope as unknown,
+            # which for untick() means leaving the machine-scoped removal to
+            # stand rather than widening it on a guess.
+            log.debug("untick: could not parse the dashboard's answer", exc_info=True)
+            return True, "unticked", None, 200
+
+    @staticmethod
+    def _still_selected(view: Any, slug: str) -> bool:
+        """Does the dashboard's post-delete view still list `slug`?
+
+        Only True on a view we could actually read: an unparsable/absent body
+        must not widen a removal (see untick)."""
+        if not isinstance(view, dict):
+            return False
+        rows = view.get("selection")
+        if not isinstance(rows, list):
+            return False
+        return any(
+            isinstance(row, dict) and str(row.get("slug") or "") == str(slug)
+            for row in rows
+        )
 
     def get(self) -> tuple[Optional[list[dict]], str]:
         """Fetch live, falling back to the cache, falling back to nothing.

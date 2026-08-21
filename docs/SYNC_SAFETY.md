@@ -37,6 +37,27 @@ editor will absolutely try first. Three triggers:
 A **failed** listing is deliberately not a trip: rclone fails the run on its
 own, and a flapping tailnet must not need an operator.
 
+**The marker-directory half of trigger 1 needs its own probe, and until
+2026-08-21 it never ran on a managed fleet** (sync-safety-5). The breaker
+applies the marker rule only to the whole-tree scope, and in managed mode
+every pass names a project subpath, so the one check that catches a
+`remote_root` pointing at the wrong dataset was never reached. The sequencer
+now asks lane B for `check_remote_root()` once per process, before the first
+pass: one `rclone lsf` of `remote_root` itself, cached once it passes (a root
+that holds `Projects/` does not stop holding it mid-run). A failed listing is
+still not a trip, and the probe never blocks a pass - if it trips, the
+breaker parks lane B the same way it always does. This is what makes the
+"stale copy of the tree" case (a backup dataset, a snapshot clone mounted for
+a restore drill) fail at the probe rather than after it has trashed every
+proxy newer than the copy.
+
+**The breaker file and the halt file are written atomically** (sync-safety-8):
+`lane_guard._write_json` writes a `.tmp` beside the target and `os.replace`s
+it into place, so a machine that loses power mid-write comes back to the old
+state rather than to a truncated file. A safety latch that a torn write can
+erase is not a latch, and both of these files exist precisely to survive the
+restart an editor tries first.
+
 When it trips:
 
 * lane B parks in `paused` with `STOPPED (safety): <reason>` — never `error`,
@@ -129,6 +150,29 @@ The reason is mandatory when halting and is shown in every editor's tray.
 A reply with **no** `commands.halt` key (an older dashboard) leaves a live halt
 alone — absence of the field is absence of information, not a release.
 
+**What "every lane C folder" covers** (sync-safety-2, sync-safety-4,
+2026-08-21). **This is a property of the companion build, not of the
+dashboard**: it needs the companion carrying the 2026-08-21 fix pass (the
+build after 0.9.43, unshipped at the time of writing), and every machine in
+the fleet still on an older one keeps the old behaviour - a fleet halt leaves
+its asset libraries syncing. Check the version in the tray before you rely on
+this.
+
+* The halt pauses the **shared asset libraries** too - the b-roll archive, the
+  music library and the LUT library - not just the editor's selected projects.
+  It used to walk the project selection alone, so a halt pressed *because* a
+  bad ingest or a mass rename in `Assets/B-roll Archive` was spreading left
+  exactly that folder syncing on every machine in the fleet while every tray
+  said nothing was. The list comes from `sequencer.halt_folder_ids()`.
+* The shared-folder reconcile, which runs every pass and exists to put those
+  libraries back online after a crash or a hand-pause, **will not release them
+  while a halt is live**. Otherwise the halt undid itself within one rotation.
+* Releasing a halt goes back through the same filter the leak-recovery sweep
+  uses (`sequencer.release_for_halt()`), so a folder deliberately left paused
+  because its `.stignore` never landed stays paused. The old release PATCHed
+  `paused: false` onto everything it had paused, which could put an unfiltered
+  `sendreceive` folder online offering every original and every `Proxy/` file.
+
 ## 5. Lane A: "skipped, exists"
 
 Lane A is `copy --ignore-existing`: the first version of a name to reach the
@@ -209,6 +253,49 @@ braces.
 **Kill switch.** `supervise_syncthing = false` in `~/.ccsync/config.toml`
 (default `true`; a `[sync]` table with the same key is honoured too). With it
 off nothing is ever started, and lane C still reports the error.
+
+## 7. The one deletion surface with no latch: a human on the NAS
+
+Everything above guards the *fleet* against the NAS. Nothing guards the NAS
+against a person standing in front of it, and that asymmetry is deliberate: the
+NAS copy is authoritative, so an admin deleting a Proxy folder or a shoot there
+is, as far as every mechanism in this document is concerned, a legitimate
+instruction. What happens next (sync-safety-6, 2026-08-21):
+
+* **Lane B mirrors it down.** Up to 50 proxies per pass per editor go into that
+  editor's `.ccsync-trash`, which is pruned at **14 days**, before the breaker
+  trips on the 51st.
+* **Lane C keeps a version, for a while.** Syncthing's staggered versioning on
+  the NAS keeps deleted project metadata under `.stversions/`. The retention
+  numbers do not currently agree: the NAS-side folders are provisioned with
+  `maxAge` **365 days** (`server/setup_syncthing_folder.py`,
+  `dashboard/.../provision.py`) while an editor's own folders are configured
+  with **30** (`companion/.../syncthing_admin.py`). That was left alone
+  deliberately (`KNOWN_BUGS.md` R5) and is worth reconciling to one number.
+* **Video originals have no version at all.** They travel on the rclone lanes,
+  not lane C, and the NAS side has no `--backup-dir`.
+
+So the actual latch for a NAS-side deletion is a **NAS snapshot**, and that
+lives outside this document: `server/setup_snapshots.py --apply` and
+`docs/BACKUP_RESTORE.md`. Two things to check before relying on it:
+
+1. **Has it been run on this box?** `KNOWN_BUGS.md` CR-10 is explicit that
+   until it is, "this entry is code, not protection". `python
+   server/setup_snapshots.py --list --apply` is the check; it must name a dataset with
+   a slash in it for **both** targets (see BACKUP_RESTORE §1 -- an `apps` root
+   that is a folder in the pool root schedules nothing).
+2. **Nothing in the product says when it is missing.** The dashboard holds the
+   NAS credential and renders every other safety chip, but there is no banner
+   for "this NAS has no snapshot schedule". Until there is, it is a runbook
+   item, not a system property.
+
+Recovery order for "an admin deleted footage on the NAS", best first:
+
+1. the NAS snapshot (BACKUP_RESTORE §4a/§4b);
+2. `.stversions/` inside the folder on the NAS, for lane C files;
+3. the editors' `.ccsync-trash/<timestamp>/`, within 14 days, for proxies;
+4. whichever editor still has the originals locally -- which is not a backup,
+   it is a replica that has not caught up yet.
 
 ## Config knobs
 

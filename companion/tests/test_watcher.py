@@ -1047,3 +1047,53 @@ def test_a_healthy_timeline_says_nothing_about_missing_clips(tmp_path, downloade
     assert (summary["missing"], summary["missing_new"]) == (0, 0)
     assert _missing_summaries(caplog) == []
     assert _missing_paths(caplog) == []
+
+
+def test_a_broken_mapping_costs_one_warning_not_one_per_clip(tmp_path, monkeypatch):
+    """comp-resolve-5, 2026-08-21: _warned_mapping dedupes per PATH, so a
+    300-clip timeline opened before the mapping existed fired 300 identical
+    toasts -- and on macOS each one is a synchronous osascript spawn on this
+    very thread. The toast names the mapping, never the clip, so one per
+    broken episode says everything the editor can act on."""
+    local_root = str(tmp_path / "tree")
+    _subst(monkeypatch, "P:\\", "", local_root)  # the mapping never happened
+    items = [make_timeline_item(rf"P:\Projects\clip{i}.mov") for i in range(20)]
+
+    warnings = []
+    watcher = TimelineWatcher(
+        local_root=local_root,
+        canonical_prefix="P:\\",
+        on_mapping_warning=lambda i: warnings.append(i["file_path"]),
+        get_timeline_items=lambda: _ok_result(*items),
+    )
+    summary = watcher.poll_once()
+    watcher.poll_once()
+
+    assert len(warnings) == 1
+    # Every path is still counted (and logged) -- only the toast is coalesced.
+    assert summary["mapping_warnings"] == 20
+
+
+def test_the_coalesced_warning_re_arms_when_the_mapping_recovers(tmp_path, monkeypatch):
+    """The episode latch must not outlive the episode (comp-resolve-5)."""
+    local_root = str(tmp_path / "tree")
+    items = [make_timeline_item(rf"P:\Projects\clip{i}.mov") for i in range(3)]
+    warnings = []
+    watcher = TimelineWatcher(
+        local_root=local_root,
+        canonical_prefix="P:\\",
+        on_mapping_warning=lambda i: warnings.append(i["file_path"]),
+        get_timeline_items=lambda: _ok_result(*items),
+    )
+
+    _subst(monkeypatch, "P:\\", "", local_root)              # broken
+    watcher.poll_once()
+    assert len(warnings) == 1
+
+    _subst(monkeypatch, "P:\\", local_root + "\\", local_root)   # fixed
+    watcher.poll_once()
+    assert watcher._mapping_warning_sent is False
+
+    _subst(monkeypatch, "P:\\", "", local_root)              # and broken again
+    watcher.poll_once()
+    assert len(warnings) == 2

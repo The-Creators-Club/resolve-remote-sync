@@ -997,6 +997,114 @@ def test_refresh_media_tree_once_keeps_non_ignored_project(tmp_path, monkeypatch
     assert "Real Project" in app.get_media_tree()
 
 
+# -- ops-efficiency-8 (CR-66 / CR-67 item 9): the media-tree stat cache -----
+
+
+def _presence_app(tmp_path, seen: list[str], present: set[str]):
+    """exists_fn spy. `seen` records only the ORIGINAL paths: the same
+    callable serves _relink_proxies_once's candidate Proxy/ spellings, which
+    are a different question and not what this cache is about."""
+    def spy(path):
+        if "Proxy" not in str(path):
+            seen.append(path)
+        return path in present
+
+    return CompanionApp(_cfg(tmp_path), exists_fn=spy)
+
+
+def test_a_clip_that_was_there_is_not_re_statted_every_cycle(tmp_path, monkeypatch):
+    """A wired rig's media pool is on the SMB share and this walk stat()ed
+    every clip in it every 120 s -- a thousand round trips a minute to answer
+    a question whose answer had not changed."""
+    seen: list[str] = []
+    app = _presence_app(tmp_path, seen, {"P:/a.mov", "P:/b.mov"})
+    monkeypatch.setattr(
+        resolve_bridge, "get_media_pool_items",
+        lambda: _mp_result(_item("P:/a.mov"), _item("P:/b.mov"),
+                           project_name="Real Project"),
+    )
+
+    app._refresh_media_tree_once()
+    assert sorted(seen) == ["P:/a.mov", "P:/b.mov"]
+    seen.clear()
+
+    app._refresh_media_tree_once()
+    assert seen == [], "a present clip must not be re-statted the next cycle"
+    assert [c["present"] for c in app.get_media_tree()["Real Project"]] == [True, True]
+
+
+def test_an_absent_clip_is_probed_every_cycle(tmp_path, monkeypatch):
+    """"Absent" is the answer that CHANGES -- it is what a lane B download
+    flips -- so it is the one worth paying for every pass."""
+    seen: list[str] = []
+    arrived: set[str] = set()
+    app = _presence_app(tmp_path, seen, arrived)
+    monkeypatch.setattr(
+        resolve_bridge, "get_media_pool_items",
+        lambda: _mp_result(_item("P:/late.mov"), project_name="Real Project"),
+    )
+
+    app._refresh_media_tree_once()
+    assert app.get_media_tree()["Real Project"][0]["present"] is False
+    seen.clear()
+
+    arrived.add("P:/late.mov")
+    app._refresh_media_tree_once()
+    assert seen == ["P:/late.mov"]
+    assert app.get_media_tree()["Real Project"][0]["present"] is True
+
+
+def test_a_present_clip_is_re_checked_once_the_cache_entry_ages_out(tmp_path, monkeypatch):
+    """Trusted, not believed forever: a file really can go away, and a media
+    tree that never notices is worse than a slow one."""
+    seen: list[str] = []
+    present = {"P:/a.mov"}
+    app = _presence_app(tmp_path, seen, present)
+    monkeypatch.setattr(
+        resolve_bridge, "get_media_pool_items",
+        lambda: _mp_result(_item("P:/a.mov"), project_name="Real Project"),
+    )
+    app._refresh_media_tree_once()
+    seen.clear()
+
+    aged = time.monotonic() - (app.MEDIA_PRESENCE_TTL_SECONDS + 1)
+    app._media_presence_cache = {"P:/a.mov": (True, aged)}
+    present.clear()
+    app._refresh_media_tree_once()
+
+    assert seen == ["P:/a.mov"]
+    assert app.get_media_tree()["Real Project"][0]["present"] is False
+
+
+def test_the_presence_cache_is_pruned_to_the_open_project(tmp_path, monkeypatch):
+    """Closing a project must not leave its clips in the cache for the life
+    of the process."""
+    seen: list[str] = []
+    app = _presence_app(tmp_path, seen, {"P:/a.mov", "P:/b.mov"})
+    monkeypatch.setattr(
+        resolve_bridge, "get_media_pool_items",
+        lambda: _mp_result(_item("P:/a.mov"), project_name="Real Project"),
+    )
+    app._media_presence_cache = {"P:/gone.mov": (True, time.monotonic())}
+
+    app._refresh_media_tree_once()
+
+    assert set(app._media_presence_cache) == {"P:/a.mov"}
+
+
+def test_a_stat_that_throws_is_still_absent(tmp_path, monkeypatch):
+    def boom(_path):
+        raise OSError("the share is not mapped")
+
+    app = CompanionApp(_cfg(tmp_path), exists_fn=boom)
+    monkeypatch.setattr(
+        resolve_bridge, "get_media_pool_items",
+        lambda: _mp_result(_item("P:/a.mov"), project_name="Real Project"),
+    )
+    app._refresh_media_tree_once()
+    assert app.get_media_tree()["Real Project"][0]["present"] is False
+
+
 # -- proxy relink rides along on the media-tree walk (see proxy_relink.py) ---
 
 
@@ -2030,6 +2138,32 @@ def test_build_diagnostics_covers_the_audits_checklist(tmp_path):
         assert expected in text, f"diagnostics missing {expected!r}"
 
 
+def test_build_diagnostics_reads_lane_cs_cache_not_a_fresh_sweep(tmp_path):
+    """comp-lane-c-5 (CR-50 / CR-67 item 9): check_once() walks every shared
+    folder through Syncthing's REST API, which is up to 20 s of a worker
+    thread -- on the slow or half-dead Syncthing that is the exact condition
+    a diagnostics bundle gets collected under."""
+    from ccsync_companion.sync.base import LaneStatus
+
+    app = _make_app(tmp_path)
+    calls: list[str] = []
+
+    def no(*_a, **_k):
+        calls.append("check_once")
+        raise AssertionError("build_diagnostics must not sweep lane C")
+
+    app._lane_c.check_once = no
+    app._lane_c.status = lambda: LaneStatus(name="lane_c", state="idle",
+                                            detail="from the last poll")
+    app._lane_c.api_reachable = lambda: True
+
+    text = app.build_diagnostics()
+
+    assert calls == []
+    assert "from the last poll" in text
+    assert "api answers right now: True" in text
+
+
 def test_build_diagnostics_never_raises_on_a_broken_subsystem(tmp_path):
     """A diagnostics gather that dies on the one broken subsystem is worse
     than useless."""
@@ -2042,8 +2176,112 @@ def test_build_diagnostics_never_raises_on_a_broken_subsystem(tmp_path):
     app.effective_mode = boom
     app.editor_identity = boom
     app._lane_c.check_once = boom
+    app._lane_c.status = boom
+    app._lane_c.api_reachable = boom
     text = app.build_diagnostics()
     assert "failed" in text
+
+
+# -- CR-51 / CR-67 item 9: the undo summary names the journal it replayed ---
+
+
+def test_the_undo_summary_describes_the_open_projects_journal(tmp_path, monkeypatch):
+    """comp-resolve-2. describe_latest() with no project reads the newest
+    journal of ANY project, so an editor undoing in one project was told the
+    clip count of a pass made in another -- while the bridge, since CR-51,
+    replays the OPEN project's journal and refuses a mismatch."""
+    from ccsync_companion import resolve_journal
+
+    app = _make_app(tmp_path)
+    asked: list[Any] = []
+    monkeypatch.setattr(resolve_bridge, "current_project_name", lambda *a, **k: "FF4")
+    monkeypatch.setattr(
+        resolve_journal, "describe_latest",
+        lambda project=None: (asked.append(project), "12 clip path(s)")[1],
+    )
+    monkeypatch.setattr(
+        resolve_bridge, "undo_last_relink",
+        lambda *a, **k: {"ok": True, "undone": 12, "skipped": 0, "message": "Put back."},
+    )
+    said: list[str] = []
+    app._notify_tray = lambda message, title="": said.append(message)
+
+    app.undo_last_relink()
+
+    assert asked == ["FF4"]
+    assert "12 clip path(s)" in said[0]
+
+
+def test_the_undo_summary_falls_back_when_this_project_has_no_journal(tmp_path, monkeypatch):
+    """The bridge's own fallback, mirrored: a journal that names no project
+    (the pre-2026-08-21 shape) stays replayable, so it stays describable."""
+    from ccsync_companion import resolve_journal
+
+    app = _make_app(tmp_path)
+    asked: list[Any] = []
+
+    def describe(project=None):
+        asked.append(project)
+        return "" if project else "3 clip path(s)"
+
+    monkeypatch.setattr(resolve_bridge, "current_project_name", lambda *a, **k: "FF4")
+    monkeypatch.setattr(resolve_journal, "describe_latest", describe)
+    monkeypatch.setattr(
+        resolve_bridge, "undo_last_relink",
+        lambda *a, **k: {"ok": True, "undone": 3, "skipped": 0, "message": "Put back."},
+    )
+    said: list[str] = []
+    app._notify_tray = lambda message, title="": said.append(message)
+
+    app.undo_last_relink()
+
+    assert asked == ["FF4", None]
+    assert "3 clip path(s)" in said[0]
+
+
+# -- ops-efficiency-9 (CR-66 / CR-67 item 9): the log window ----------------
+
+
+def test_the_log_keeps_ten_files_and_says_when_it_drops_one(tmp_path):
+    """5 MB x 3 was 20 MB, and a machine turned up to DEBUG for an incident
+    rotates through the whole of it in about half an hour -- so by the time
+    the editor is asked for the log, the event that prompted the ask is gone,
+    with nothing in the file to say so."""
+    import logging as _logging
+
+    from ccsync_companion import app as app_module
+
+    assert app_module.LOG_BACKUP_COUNT == 10
+
+    log_path = tmp_path / "companion.log"
+    handler = app_module.RotatingLogHandler(
+        log_path, maxBytes=200, backupCount=2, encoding="utf-8")
+    handler.setFormatter(_logging.Formatter("%(message)s"))
+    try:
+        for i in range(40):
+            handler.emit(_logging.LogRecord(
+                "ccsync.test", _logging.INFO, __file__, 0,
+                "filler line %d that is long enough to roll the file over", (i,), None))
+    finally:
+        handler.close()
+
+    assert "log rotated" in log_path.read_text(encoding="utf-8"), \
+        "a rotation nobody records reads as an event that never happened"
+
+
+def test_a_rotation_note_that_fails_never_breaks_logging(tmp_path):
+    import logging as _logging
+
+    from ccsync_companion import app as app_module
+
+    handler = app_module.RotatingLogHandler(
+        tmp_path / "companion.log", maxBytes=200, backupCount=1, encoding="utf-8")
+    handler.setFormatter(_logging.Formatter("%(message)s"))
+    handler.emit = lambda record: (_ for _ in ()).throw(RuntimeError("no"))
+    try:
+        handler.doRollover()   # must not raise
+    finally:
+        handler.close()
 
 
 # ===========================================================================

@@ -392,6 +392,10 @@ class SyncthingSupervisor:
         # a FAILURE in the next process, or a machine that restarts the
         # companion often never reaches three strikes and never warns anyone.
         self._pending_confirm = bool(state.get("pending_confirm"))
+        # A launch is running on SOME thread right now. In memory on purpose:
+        # it guards one process's threads against each other, and a companion
+        # that died mid-launch left no launch running (comp-lane-c-5).
+        self._launching = False
 
     # -- persistence ----------------------------------------------------
     def _read_state(self) -> dict:
@@ -589,7 +593,33 @@ class SyncthingSupervisor:
             return
         if last_attempt and now - last_attempt < backoff_seconds(attempts):
             return
-        self._attempt_start(now)
+        # The backoff test above is read under the lock and acted on outside
+        # it, so two threads calling check_once at once -- the lane C poll and
+        # the tray's "Copy diagnostics" worker, which builds its report by
+        # calling the lane synchronously -- could both pass it and both spawn
+        # the shim. The second `syncthing serve` on the same home dies on the
+        # DB/port lock, leaving a pair of "start attempt N" lines and an
+        # attempts counter advanced by two for one outage (comp-lane-c-5,
+        # 2026-08-21). A launch already in flight is the whole answer: the
+        # other caller's evidence is the same outage, and _wait_for_api will
+        # report on it.
+        if not self._claim_launch():
+            log.debug("supervisor: a start attempt is already running -- not spawning a second")
+            return
+        try:
+            self._attempt_start(now)
+        finally:
+            with self._lock:
+                self._launching = False
+
+    def _claim_launch(self) -> bool:
+        """Test-and-set the "a launch is in flight" flag. See
+        _note_unreachable (comp-lane-c-5)."""
+        with self._lock:
+            if self._launching:
+                return False
+            self._launching = True
+            return True
 
     def _suppression_reason(self) -> str:
         if self._suppressed is None:

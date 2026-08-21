@@ -143,7 +143,13 @@ class FakeMedia:
 
 class FakeQueue:
     """broll_upload.UploadQueue's surface: everything "lands" at once unless a
-    test says otherwise."""
+    test says otherwise.
+
+    Two things it models rather than simplifies away, because the orchestrator
+    has to answer to both (2026-08-21): `stop_all` is a ONE-WAY latch, so a job
+    enqueued after it is never drained; and `failures()` is a ledger a caller
+    has to clear with `retry()` before re-sending the same rel.
+    """
 
     def __init__(self):
         self.jobs: list = []
@@ -151,16 +157,43 @@ class FakeQueue:
         self._paused = False
         self.stopped = False
         self.land = True
+        # Every rel ever handed over, including the ones that went nowhere:
+        # what a retry assertion counts.
+        self.enqueued: list = []
+        # Rels this machine's rclone cannot send. They land in `failed`
+        # instead of `jobs`, and they do it again after a retry -- a NAS that
+        # is gone is gone for more than one attempt.
+        self.fail_rels: set = set()
+        # Jobs handed to a STOPPED queue: appended, never drained, exactly as
+        # the real one leaves them.
+        self.dead: list = []
 
     def enqueue(self, local_path, remote_rel, kind, item_uid="", size_bytes=None):
-        self.jobs.append({"rel": remote_rel, "kind": kind, "item_uid": item_uid,
-                          "size": size_bytes, "local": str(local_path)})
+        job = {"rel": remote_rel, "kind": kind, "item_uid": item_uid,
+               "size": size_bytes, "local": str(local_path)}
+        self.enqueued.append(remote_rel)
+        if self.stopped:
+            self.dead.append(job)
+            return
+        if remote_rel in self.fail_rels:
+            self.failed.append({"rel": remote_rel, "kind": kind,
+                                "item_uid": item_uid,
+                                "error": "rclone exited with code 1"})
+            return
+        self.jobs.append(job)
 
     def uploaded(self):
         return list(self.jobs) if self.land else []
 
     def failures(self):
         return list(self.failed)
+
+    def retry(self, rels):
+        wanted = {str(rel) for rel in rels}
+        keep = [job for job in self.failed if job["rel"] not in wanted]
+        dropped = len(self.failed) - len(keep)
+        self.failed = keep
+        return dropped
 
     def progress(self):
         return {"queued": 0 if self.land else len(self.jobs), "active": None,
@@ -186,6 +219,10 @@ class FakeServer:
         self.claim_status = 200
         self.claim_body: dict = {}
         self.status_codes: dict = {}
+        # What /items/<uid>/result answers. A refusal there is the whole of
+        # comp-loopback-4 (2026-08-21).
+        self.result_status = 200
+        self.result_body: dict = {"ok": True}
         self.uploaded_status = 200
         self.uploaded_body: dict = {"ok": True, "live": True}
         self.heartbeat_body: dict = {"ok": True, "cancel_requested": False,
@@ -227,7 +264,7 @@ class FakeServer:
         if url.endswith("/release"):
             return 200, {"ok": True}
         if url.endswith("/result"):
-            return 200, {"ok": True}
+            return self.result_status, self.result_body
         if url.endswith("/status"):
             state = (body or {}).get("state")
             return self.status_codes.get(state, 200), {"ok": True}
@@ -941,6 +978,10 @@ def test_a_picked_path_is_indexed_where_it_is(tmp_path):
     clip = card / "A001.MP4"
     clip.write_bytes(b"data")
     ing = make_ingestor(tmp_path)
+    # What /pick would have recorded before the page posted these paths
+    # (comp-loopback-6): prepare accepts a local path only where the editor
+    # sent the picker.
+    ing.note_picked([{"path": str(clip), "name": "A001.MP4", "rel_dir": ""}])
 
     _status, body = ing.prepare({"items": [
         {"local_id": "a", "name": "A001.MP4", "size": 4, "source": "path",
@@ -1260,3 +1301,217 @@ def test_the_window_says_estimating_before_it_says_a_number():
     assert popup.ProgressModel(total=40).eta_line() == "estimating…"
     assert popup.ProgressModel(total=40, eta_seconds=720).eta_line() == "~12 min left"
     assert popup.ProgressModel(total=40, finished=True).eta_line() == ""
+
+
+# ---------------------------------------------------------------------------
+# the loopback set (comp-loopback-1..4, 2026-08-21): after a cancel, a restart
+# mid-batch, a failed rclone or a refused /result, THIS MACHINE MUST STILL BE
+# ABLE TO TAKE THE NEXT DROP. All four ended with the batch held, the
+# heartbeat keeping the lease alive and every later drop answered 409.
+# ---------------------------------------------------------------------------
+
+def test_a_cancelled_batch_does_not_park_every_later_one(tmp_path):
+    """comp-loopback-1: `stop_all` latches an UploadQueue shut for ever and
+    the orchestrator outlives the batch, so keeping the object meant the FIRST
+    cancel of a tray session (tray, page, dashboard command, expired lease)
+    left every later drop at 'uploading' 90% with no rclone ever spawned."""
+    server = FakeServer()
+    queues = [FakeQueue()]
+    ing = make_ingestor(tmp_path, server=server, queue=queues[0])
+
+    def _fresh():
+        queues.append(FakeQueue())
+        return queues[-1]
+
+    ing._new_queue = _fresh
+    first = stage_one_clip(ing, tmp_path)
+    ing.run("b" * 32, first, "foreground")
+    ing.cancel("cancelled from the tray")
+
+    second = stage_one_clip(ing, tmp_path)
+    status, _body = ing.run("b" * 32, second, "foreground")
+    ing.tick()
+
+    assert status == 202, "the machine has to be free for the next batch"
+    assert len(queues) == 2, "the cancelled queue is dead; the next batch needs a new one"
+    assert queues[1].dead == [], "and nothing may be handed to a stopped queue"
+    assert server.released()[-1]["state"] == "done"
+    assert ing.status()["batch_uid"] == "", "the second batch finishes and is let go"
+
+
+def test_a_restarted_companion_re_claims_and_re_queues_its_uploads(tmp_path):
+    """comp-loopback-2: `_resume` set `needs_claim` and nothing read it. A tray
+    restarted mid-upload never re-claimed, never heartbeated (so the server's
+    300 s lease lapsed under it) and never put the item's artifacts back on
+    the new, empty queue -- the batch was stuck for ever and every new drop
+    got the 409."""
+    server = FakeServer()
+    queue = FakeQueue()
+    queue.land = False  # the upload is still in flight when the tray dies
+    ing = make_ingestor(tmp_path, server=server, queue=queue)
+    staging = stage_one_clip(ing, tmp_path)
+    ing.run("b" * 32, staging, "foreground")
+    ing.tick()
+    assert ing._batch["items"][0]["stage"] == "uploading"
+
+    # The tray restarts over the same state dir.
+    revived_server = FakeServer()
+    revived_queue = FakeQueue()
+    revived_queue.land = False
+    revived = make_ingestor(tmp_path, server=revived_server, queue=revived_queue)
+    revived.tick()
+
+    claims = [c for c in revived_server.calls if c["url"].endswith("/claim")]
+    assert claims, "the lease has to be taken back, or it lapses under us"
+    assert claims[0]["body"]["machine"] == "EDIT-1"
+    assert revived._batch.get("needs_claim") is None
+    assert (revived._heartbeat_thread is not None
+            and revived._heartbeat_thread.is_alive()), "and heartbeated after it"
+    assert "posters/4127.jpg" in revived_queue.enqueued, (
+        "the artifacts went back on the queue that actually exists now")
+
+
+def test_a_restart_the_server_will_not_hand_the_batch_back_frees_the_machine(tmp_path):
+    """The other half of comp-loopback-2: the tray was down for longer than
+    the 300 s lease, so the batch really is gone. Nothing on an item parked at
+    'uploading' ever calls the server, so without the re-claim the 410 was
+    never even asked for and the machine held the batch (and the 409) for
+    ever. A 410 to the re-claim is an ordinary answer, and the ordinary answer
+    is to let go."""
+    server = FakeServer()
+    queue = FakeQueue()
+    queue.land = False
+    ing = make_ingestor(tmp_path, server=server, queue=queue)
+    staging = stage_one_clip(ing, tmp_path)
+    ing.run("b" * 32, staging, "foreground")
+    ing.tick()
+    assert ing._batch["items"][0]["stage"] == "uploading"
+
+    revived_server = FakeServer()
+    revived_server.claim_status = 410
+    revived_server.lease_lost = True
+    revived = make_ingestor(tmp_path, server=revived_server,
+                            queue=FakeQueue())
+    revived.tick()
+
+    assert revived.status()["batch_uid"] == ""
+    assert revived.run("c" * 32, "", "foreground")[0] != 409
+
+
+def test_an_upload_rclone_could_not_send_is_retried_then_failed(tmp_path):
+    """comp-loopback-3: a non-zero rclone put the rel in `failures()`, the pump
+    copied the text onto the item and `continue`d -- for ever. The item never
+    left 'uploading', so the batch was never released and the machine never
+    took another drop."""
+    server = FakeServer()
+    queue = FakeQueue()
+    queue.fail_rels = {"posters/4127.jpg"}
+    ing = make_ingestor(tmp_path, server=server, queue=queue)
+    staging = stage_one_clip(ing, tmp_path)
+    ing.run("b" * 32, staging, "foreground")
+
+    for _ in range(broll_ingest.MAX_UPLOAD_ATTEMPTS + 2):
+        ing.tick()
+
+    assert server.released(), "the batch has to end, one way or the other"
+    assert server.released()[0]["summary"]["failed"] == 1
+    poster = queue.enqueued.count("posters/4127.jpg")
+    original = queue.enqueued.count("creators/2026-08-18 ingest/A001.MP4")
+    assert poster > 1, "the dropped link deserved a retry"
+    assert poster > original, (
+        "and the retry is of the FILE that failed - re-sending a 40 GB "
+        "original because a 100 KB poster did not land is an editor's evening")
+    assert ing.status()["batch_uid"] == ""
+
+
+def test_a_result_the_archive_refuses_is_never_uploaded(tmp_path):
+    """comp-loopback-4: the refusal used to be a log line. The clip was
+    uploaded anyway and `mark_uploaded` does not check that any segments
+    exist, so the archive got a live clip with no description that no search
+    could find -- and `described` was already True, so it was never
+    re-described either."""
+    server = FakeServer()
+    server.result_status = 400
+    server.result_body = {"detail": "segments must not be empty"}
+    queue = FakeQueue()
+    ing = make_ingestor(tmp_path, server=server, queue=queue)
+    staging = stage_one_clip(ing, tmp_path)
+    ing.run("b" * 32, staging, "foreground")
+    # The batch is released and forgotten inside the tick, so the item dict
+    # (mutated in place) is what there is left to read.
+    item = ing._batch["items"][0]
+
+    ing.tick()
+
+    assert queue.enqueued == [], "an undescribed clip must not reach the archive"
+    assert item["described"] is False, "so a retry re-runs the model"
+    assert item["stage"] == "failed"
+    assert "segments must not be empty" in item["error"]
+    assert item["attempts"] == broll_ingest.MAX_ITEM_ATTEMPTS, (
+        "the clip is retried as a clip, not carried on with as an indexed one")
+    assert server.released()[0]["summary"]["failed"] == 1, (
+        "and the batch ends, so this machine can take the next drop")
+
+
+# ---------------------------------------------------------------------------
+# the picked-paths allow-list (comp-loopback-6, 2026-08-21)
+# ---------------------------------------------------------------------------
+
+def test_a_path_the_editor_never_picked_is_refused(tmp_path):
+    """/pick is THE only route that learns a local path (plan 4). That was a
+    docstring and not a check: prepare took `path` off the JSON body, so a bug
+    in the page could have had this machine index, describe and rclone any
+    readable video into the customer's shared archive."""
+    private = tmp_path / "private"
+    private.mkdir()
+    clip = private / "family.mp4"
+    clip.write_bytes(b"data")
+    ing = make_ingestor(tmp_path)
+
+    _status, body = ing.prepare({"items": [
+        {"local_id": "a", "name": "family.mp4", "size": 4, "source": "path",
+         "path": str(clip)}]})
+
+    assert body["items"][0]["accepted"] is False
+    assert "not chosen on this machine" in body["items"][0]["reason"]
+
+
+def test_a_folder_pick_allows_the_whole_folder_that_was_picked(tmp_path):
+    """The picker walks sub-folders and reports each clip's `rel_dir` below
+    the folder the editor chose; the allow-list climbs back up to that one
+    root, so a 400-clip card is one entry and not forty."""
+    card = tmp_path / "card"
+    (card / "DCIM" / "100MEDIA").mkdir(parents=True)
+    first = card / "DCIM" / "100MEDIA" / "A001.MP4"
+    second = card / "DCIM" / "100MEDIA" / "A002.MP4"
+    first.write_bytes(b"data")
+    second.write_bytes(b"data")
+    ing = make_ingestor(tmp_path)
+    ing.note_picked([{"path": str(first), "name": "A001.MP4",
+                      "rel_dir": "DCIM/100MEDIA"}])
+
+    _status, body = ing.prepare({"items": [
+        {"local_id": "a", "name": "A001.MP4", "size": 4, "source": "path",
+         "path": str(first)},
+        {"local_id": "b", "name": "A002.MP4", "size": 4, "source": "path",
+         "path": str(second)}]})
+
+    assert [entry["accepted"] for entry in body["items"]] == [True, True]
+
+
+def test_the_picked_folders_survive_a_tray_restart(tmp_path):
+    """The pick and the prepare are two requests: a tray that restarted
+    between them must not refuse the drop the editor is halfway through."""
+    card = tmp_path / "card"
+    card.mkdir()
+    clip = card / "A001.MP4"
+    clip.write_bytes(b"data")
+    ing = make_ingestor(tmp_path)
+    ing.note_picked([{"path": str(clip), "name": "A001.MP4", "rel_dir": ""}])
+
+    revived = make_ingestor(tmp_path)
+    _status, body = revived.prepare({"items": [
+        {"local_id": "a", "name": "A001.MP4", "size": 4, "source": "path",
+         "path": str(clip)}]})
+
+    assert body["items"][0]["accepted"] is True

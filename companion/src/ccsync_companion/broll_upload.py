@@ -318,7 +318,14 @@ class UploadQueue:
 
     def stop_all(self) -> None:
         """Kill what is in flight and stop the worker. For shutdown and for a
-        cancelled batch; never raises."""
+        cancelled batch; never raises.
+
+        ONE WAY ONLY: `_stopped` is a latch and `_ensure_thread` refuses to
+        start a worker while it is set, so a stopped queue can never run
+        again. That is deliberate here (the caller is shutting down or has
+        just cancelled) and it is why the orchestrator DROPS the object
+        afterwards rather than reusing it (comp-loopback-1, 2026-08-21).
+        """
         with self._lock:
             self._stopped = True
             active = self._active
@@ -327,9 +334,33 @@ class UploadQueue:
         for job in queued:
             job.state = STATE_FAILED
             job.error = "cancelled"
+        with self._lock:
+            # What was cancelled is what did NOT go up, so `failures()` has to
+            # say so: a reader that only ever saw `done` would report a batch
+            # whose uploads were killed as one with nothing outstanding
+            # (comp-loopback-1, 2026-08-21).
+            self._failed.extend(queued)
         if active is not None:
             active.cancel()
         self._wake.set()
+
+    def retry(self, rels: Any) -> int:
+        """Forget these remote paths' failures so they can be sent again.
+
+        `failures()` is a LEDGER, not a queue: a rel that stays in it reads as
+        "still broken" on every later tick, so a caller re-sending a failed
+        upload has to clear the old verdict first or the item burns a retry
+        per tick without one new rclone ever running (comp-loopback-3,
+        2026-08-21). -> how many entries were dropped.
+        """
+        wanted = {str(rel) for rel in (rels or [])}
+        if not wanted:
+            return 0
+        with self._lock:
+            keep = [job for job in self._failed if job.remote_rel not in wanted]
+            dropped = len(self._failed) - len(keep)
+            self._failed = keep
+        return dropped
 
     # -- reporting ----------------------------------------------------------
 

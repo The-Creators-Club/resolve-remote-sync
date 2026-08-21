@@ -101,7 +101,11 @@ run alongside the tray app — it would hold port 8899.
   2026-08-18 `cli_tools.py`'s **SET UP wizard** can fetch one at the admin's
   click, from the publisher's own distribution, checksum-verified, into
   `<data>/tools/<tool>/`, and drive the browser sign-in through a pty (URL
-  out, code back, five-minute timeout). Its `$HOME` is
+  out, code back, five-minute timeout). **That checksum is a CONDITION**
+  (trust-model-7, 2026-08-21): a release that publishes no checksum for the
+  asset is REFUSED, never installed unverified behind a note in a state file
+  nobody reads, and the admin is sent to the "type its full path" fallback
+  for a copy they installed and vouch for themselves. Its `$HOME` is
   `<data>/tools/<tool>/home` for the probe, the Test button AND the real
   ytdl call — one helper, `cli_tools.cli_env`; never the container's HOME,
   which an image update takes with it. Accepting the wizard's notice is what
@@ -247,6 +251,19 @@ overlap release (`release_key.py bake --add`, ship, then drop the old key).
 the macOS runner is the answer to "PyInstaller needs a Mac"; publishing still
 happens from the base rig. Secrets for the ship come from
 `tools/load_secrets.ps1` (DPAPI, session-scoped), not `setx` — `docs/SECRETS.md`.
+
+**CI builds, this rig signs, and `ship.cmd` is the studio's own dashboard**
+(release-pipeline-7/-10, 2026-08-19): the vendor feed every customer reads is
+published by `tools\publish_latest.py`, which takes the newest GREEN CI run on
+`main` (verified with `git merge-base --is-ancestor`, because a branch label is
+a claim a force-push can make untrue), signs it here with the offline key and
+uploads it through `publish_feed.py`; `-Publish -MakeCurrent` from `ship.cmd`
+puts a build into THIS studio's dashboard only. Refusals worth knowing before
+you hit one: a version below what the channel carries (`--allow-older`), the
+same version with different bytes (`--allow-replace`, and the answer is
+normally a version bump), a `min_version` below the highest already published
+for that kind/platform (`--allow-floor-drop`), and a `min_version` above the
+build it describes, which nothing anywhere will sign (CR-52).
 
 Full runbook, including what each version number means and how to roll back:
 `docs/RELEASE.md`.

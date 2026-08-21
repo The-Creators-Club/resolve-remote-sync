@@ -129,6 +129,14 @@ MIN_FREE_BYTES_MARGIN = upgrade_mod.MIN_FREE_BYTES_MARGIN
 # ask for a local download before the b-roll page is even open.
 INITIAL_DELAY_SECONDS = 30.0
 CHECK_INTERVAL_SECONDS = 24 * 3600.0
+# How often the loop re-asks when the downloader is OFF for this machine
+# (comp-ytdl-3, 2026-08-21). Not the daily cadence: this pass installs
+# nothing YouTube-related, it keeps the ffmpeg pair (which b-roll ingest and
+# the proxy generator need whatever the site says) current and notices the day
+# an operator turns `youtube_download` on. Before this the thread was never
+# created at all when the flag was off, so flipping it needed every editor to
+# restart their tray -- and nothing said so.
+DISABLED_RECHECK_SECONDS = 900.0
 
 # ensure()'s `action`, i.e. what it DID. Small and closed on purpose: the
 # capability endpoint (later wave) and the tray log both read this.
@@ -798,6 +806,18 @@ class YtDlpManager:
         exactly what the capability handshake will answer with. Never raises.
         """
         if not self.enabled:
+            # WHICH gate (comp-ytdl-3, 2026-08-21): "switched off in config"
+            # sent an admin looking at config.toml for a site-manifest
+            # decision. site.feature_enabled is also what fails closed when
+            # the manifest cache has not been written yet, which reads the
+            # same from here and is worth being able to tell apart.
+            from . import site as site_mod
+
+            if not site_mod.feature_enabled("youtube_download"):
+                return self._publish(
+                    False, None, ACTION_DISABLED,
+                    "the YouTube downloader is off for this site",
+                )
             return self._publish(
                 False, None, ACTION_DISABLED,
                 "local YouTube downloads are switched off in config "
@@ -876,12 +896,26 @@ class YtDlpManager:
         thread whose loop swallows everything, exactly like the LUT link
         thread (app._lut_link_loop) it sits next to. A machine that never
         manages to get a yt-dlp simply keeps the behaviour it has always had:
-        the server downloads."""
+        the server downloads.
+
+        STARTED WHATEVER THE FLAG SAYS (comp-ytdl-2 / comp-ytdl-3,
+        2026-08-21). It used to return here when `enabled` was False, and
+        app.py calls start() exactly once, at tray launch: an operator who
+        turned `youtube_download` on for a site got trays that showed the
+        YouTube items and answered every capability probe with "not checked
+        yet" until each machine's tray was restarted -- and a machine whose
+        first start ran before the site cache existed (feature_enabled fails
+        closed) was in the same state on a fresh install. The gate now lives
+        in the loop, which re-reads it every pass, and the loop is also the
+        only thing that fetches the managed ffmpeg -- which is not a YouTube
+        entitlement (BROLL_INGEST_PLAN.md §3.3) but was reachable only
+        through this thread."""
         if self._thread is not None:
             return
         if not self.enabled:
-            log.info("ytdlp: local YouTube downloads are disabled by config")
-            return
+            log.info("ytdlp: local YouTube downloads are off for this machine "
+                     "-- the sidecar thread still runs for ffmpeg, and will "
+                     "notice if the site turns them on")
         self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._loop, name="ccsync-ytdlp", daemon=True
@@ -905,12 +939,19 @@ class YtDlpManager:
         if self._stop_event.wait(INITIAL_DELAY_SECONDS):
             return
         while not self._stop_event.is_set():
+            # Re-read per pass, never cached: this is what lets an operator
+            # turn the feature on for a fleet without touching a machine
+            # (comp-ytdl-3, 2026-08-21).
+            enabled = self.enabled
             try:
                 status = self.ensure()
                 # INFO, once a day, and never a dialog: a machine without the
                 # capability is not broken, it is a machine that downloads on
-                # the server like every machine did before this existed.
-                log.info("ytdlp: %s", status.get("message"))
+                # the server like every machine did before this existed. DEBUG
+                # while the feature is off -- that pass says the same thing
+                # every 15 minutes and it is not news.
+                log.log(logging.INFO if enabled else logging.DEBUG,
+                        "ytdlp: %s", status.get("message"))
             except Exception:
                 log.exception("ytdlp: the daily check failed")
             try:
@@ -919,14 +960,29 @@ class YtDlpManager:
                 # fleet uses, and without a JS runtime it refuses every
                 # signed-in request -- and no editor machine had either. Its
                 # own try: a failed sidecar install must not be mistaken for
-                # a yt-dlp failure, and vice versa. Same opt-out, checked
-                # inside.
+                # a yt-dlp failure, and vice versa.
+                #
+                # With the downloader OFF, the ffmpeg pair alone (comp-ytdl-2,
+                # 2026-08-21): ensure() returns ACTION_DISABLED before it
+                # reaches ensure_ffmpeg_pair, and this thread is the pair's
+                # only caller anywhere in the companion -- so on a vendor
+                # build (youtube_download absent, the documented default) no
+                # machine ever fetched the pinned ffmpeg, and b-roll ingest
+                # and proxy generation sat in "no ffmpeg" forever. deno stays
+                # gated: a JS runtime IS a YouTube entitlement, a codec is not.
                 from . import sidecar_tools
-                status = sidecar_tools.ensure(self.cfg, github_open=self._github_open)
-                log.info("sidecar: %s", status.get("message"))
+                if enabled:
+                    status = sidecar_tools.ensure(
+                        self.cfg, github_open=self._github_open)
+                else:
+                    status = sidecar_tools.ensure_ffmpeg_pair(
+                        self.cfg, github_open=self._github_open)
+                log.log(logging.INFO if enabled else logging.DEBUG,
+                        "sidecar: %s", status.get("message"))
             except Exception:
                 log.exception("sidecar: the daily check failed")
-            if self._stop_event.wait(CHECK_INTERVAL_SECONDS):
+            wait = CHECK_INTERVAL_SECONDS if enabled else DISABLED_RECHECK_SECONDS
+            if self._stop_event.wait(wait):
                 return
 
 

@@ -37,6 +37,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "companion" / "src"))
@@ -86,6 +87,55 @@ def package_filename(kind: str, platform: str, version: str, head: bytes = b"") 
             return f"ccsync-onboard-{version}.exe"
         return f"ccsync-onboard-{version}" + (".zip" if head[:2] == b"PK" else ".sh")
     return f"ccsync-companion-{version}" + (".exe" if platform == "windows" else "")
+
+
+# The floor comparison, byte for byte the rule the dashboard enforces in
+# release_trust.min_version_exceeds_version and the companion in
+# upgrade._min_version_above_own. THREE copies on purpose: the signing rig
+# imports neither the container's code nor (from a Mac) anything but the
+# companion package, and the whole point of CR-52 is that no side may be the
+# only one holding the rule. Kept deliberately literal so a diff against
+# release_trust.py reads as identical logic rather than a clever variant.
+_VERSION_CHARS = "0123456789."
+
+
+def version_tuple(text: Any) -> tuple[int, ...]:
+    """A dotted-numeric version as a tuple of ints, () for anything else.
+
+    Strict on purpose (same as release_trust._version_tuple): a value we
+    cannot fully rank must not be ranked, because ranking it wrong is what
+    CR-52 was about.
+    """
+    raw = str(text or "").strip()
+    if not raw or any(ch not in _VERSION_CHARS for ch in raw):
+        return ()
+    try:
+        return tuple(int(part) for part in raw.split(".") if part != "")
+    except ValueError:
+        return ()
+
+
+def min_version_exceeds_version(version: Any, min_version: Any) -> bool:
+    """Whether a record's downgrade floor is ABOVE the build it describes.
+
+    CR-52 / CR-67 item 3 (2026-08-21). One typo on the release rig
+    (`--min-version 0.9.54` for a 0.9.44 build) produced a perfectly valid
+    signature over a record that can only ever refuse itself: every companion
+    raises its monotonic floor on RECEIPT, so merely seeing that offer put
+    the whole fleet above the build being offered, and the corrected
+    republish was below the floor too. The dashboard and the companion both
+    refuse such a record now; this is the cheapest place of all to catch it,
+    because here the operator can just retype the flag.
+
+    Unparseable input is NOT reported as exceeding: the dotted-numeric check
+    in main() owns "is this a version at all", and two refusals for one fault
+    would name the wrong one.
+    """
+    left = version_tuple(min_version)
+    right = version_tuple(version)
+    if not left or not right:
+        return False
+    return left > right
 
 
 def utcnow_iso() -> str:
@@ -179,6 +229,17 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"no artifact at {artifact}")
     if not args.min_version.replace(".", "").isdigit() or not args.min_version:
         raise SystemExit(f"--min-version must be dotted-numeric, got {args.min_version!r}")
+    # CR-52 / CR-67 item 3: never MAKE a record that refuses itself. Checked
+    # before the key is read, so a typo costs a retype and not a signature.
+    if min_version_exceeds_version(args.version, args.min_version):
+        raise SystemExit(
+            f"--min-version {args.min_version} is ABOVE --version {args.version}: this "
+            "record would tell every machine \"you may not install below "
+            f"{args.min_version}\" while offering {args.version}, which is below it.\n"
+            "Companions raise that floor the moment they SEE the offer and never lower "
+            "it, so publishing this refuses the build, every earlier build, and the "
+            "corrected republish too -- recoverable only by hand on each machine "
+            "(KNOWN_BUGS CR-52). Pass --min-version at or below --version.")
     if args.kind in RUNTIME_ID_KINDS and not args.runtime_id.strip():
         # Refused rather than defaulted to "": a dashboard record with a blank
         # runtime_id verifies fine and is then refused by every customer as a

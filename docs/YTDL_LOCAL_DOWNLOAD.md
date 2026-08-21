@@ -239,8 +239,34 @@ Happy path, in order:
 
 ## 3. Claim, lease, reclaim
 
-- One holder per job. `claim` is compare-and-set on `(download_mode,
-  claimed_by, lease_expires_at)`; a second claim while leased gets 409.
+- One holder per job, and a holder is a COMPUTER (data-model-7, CR-66,
+  2026-08-21). `claim` is compare-and-set on `(download_mode, claimed_by,
+  claimed_machine, lease_expires_at)`; a second claim while leased gets 409.
+  `claimed_machine` is the companion-minted `machine_id` (`~/.ccsync/machine.json`,
+  the id that survives a rename, the same one the fleet report and the
+  dashboard's `machines` registry key on), sent in the claim body as
+  `machine_id`. Three cases and only three:
+  - **same `(editor, machine_id)`** = the documented refresh. One companion
+    restarting is not a second holder, and a 409 there would strand the job
+    until the lease expired for no reason.
+  - **same editor, DIFFERENT `machine_id`** = 409, with a detail that names the
+    holding computer (`projects.machine_label` resolves the hostname out of the
+    dashboard's registry; failing that the id itself). This is the case the
+    old per-editor key got wrong: an editor's laptop and desktop both read as
+    "the same holder refreshing", so both downloaded the same clips into two
+    trees and each posted terminal statuses for the other's work. It matters
+    because a sync plan already belongs to a computer (`docs/MULTI_MACHINE_PLAN.md`)
+    and requester-first downloads are the one fleet operation that was still
+    keyed on the person.
+  - **no `machine_id` in the body** = a companion older than this, and the
+    lease behaves per-editor exactly as it did before. That is what let the
+    server half ship first; `claimed_machine` NULL on a row means the same
+    thing from the other side (a holder that did not say), and is read as
+    "unknown", never as "some other machine".
+  The manifest and the per-clip status posts stay per-EDITOR
+  (`db.is_leaseholder`): they carry no machine_id, and the computer that was
+  refused the claim never gets a job to post about, so the key is enforced at
+  the one door that hands the lease out.
 - Heartbeat every 30s extends the lease to now+3m. The numbers are config
   (`YTDL_LEASE_SECONDS`, `YTDL_HEARTBEAT_SECONDS`) but ship as 180/30.
 - Lease expiry (laptop closed, companion killed, tray upgraded mid-job) →
@@ -261,6 +287,11 @@ Schema (one migration, all additive):
 
 - `jobs.download_mode` TEXT DEFAULT 'server' ('server' | 'local')
 - `jobs.claimed_by` TEXT NULL, `jobs.lease_expires_at` TEXT NULL
+- `jobs.claimed_machine` TEXT NULL — the leaseholder's `machine_id`
+  (migration `010_jobs_claimed_machine.sql`, 2026-08-21). Additive and inert:
+  NULL is every pre-existing row and every claim from a companion that predates
+  the field, and there is no backfill because an id cannot be invented for a
+  lease already taken.
 - `clip_downloads.download_host` TEXT NULL ('server' | editor name) — for
   the history row and for debugging "whose IP fetched this"
 
@@ -268,9 +299,41 @@ Endpoints, all under `/ytdl/api`, all requiring `X-CCSync-Token` (the fleet
 report token the companion already holds — NOT the browser session; these
 are machine-to-machine and must work when no browser is open):
 
-- `POST /jobs/{id}/claim` {editor, ytdlp_version, free_bytes} → 200 lease |
-  403 stale yt-dlp | 409 leased | 410 job not claimable (already done, or
-  mode locked server-side)
+> **Two tokens satisfy that header, not one** (ytdl-web-1, 2026-08-21). The
+> shared `DASH_REPORT_TOKEN` is what the fleet holds today; a per-editor
+> `cce1.<id>.<secret>` minted on Admin → Users is what replaces it
+> (COMMERCIAL_READINESS item 15, KNOWN_BUGS CR-18), and the companion sends
+> whichever one it has — `IdentityManager` writes `preferred_report_token()`
+> into `dashboard_token`, and the bound token outranks the shared one. Only the
+> dashboard can verify the bound one (its hash is in the dashboard database,
+> which ytdl opens read-only and only for selections), so **the mount resolves
+> the credential and stamps its verdict into `X-CCSync-Fleet-Auth`**
+> (`shared` | `editor:<name>`); `ccsync_dashboard/ytdl.py` strips any inbound
+> copy before appending its own, exactly as it does for `X-CCSync-User`, and
+> `routes_fleet.trust_gate_stamp()` is what turns believing it on — standalone,
+> nothing calls it and the shared-token comparison is the whole gate. For an
+> `editor:` stamp the bound name must equal the verified `X-CCSync-Identity`,
+> or the call is 403 `identity_mismatch`.
+>
+> Until this landed, an editor who had been given a bound token got 403 from
+> every claim/heartbeat/status POST while the dashboard's own gate waved the
+> same request through, so their requester-first downloads silently stopped —
+> and since 2026-08-16 lane B does not carry YouTube originals down, so that is
+> the only way those clips reach them.
+
+**Terminal clip statuses are idempotent** (ytdl-web-3, 2026-08-21): `done` and
+`failed` are a compare-and-set on the row's `dl_state` (`db.finish_download`,
+begin_download's twin), and the counters move only when the CAS wins. The
+companion re-sends any call that raised (CR-31, up to 60 s), and a client
+timeout on a POST the server already committed is one of those — which used to
+double-count `dl_done` ("23 of 22") and strand `dl_failed` one above zero for
+the life of the job. A duplicate answers `200 {ok, state, duplicate:true}`.
+
+- `POST /jobs/{id}/claim` {editor, machine_id, ytdlp_version, free_bytes} →
+  200 lease | 403 stale yt-dlp | 409 leased (by another editor, or by another
+  of this editor's machines: the body carries `claimed_by`, `claimed_machine`
+  and `lease_expires_at`) | 410 job not claimable (already done, or mode locked
+  server-side)
 - `POST /jobs/{id}/heartbeat` → 200 | 410 reclaimed
 - `GET  /jobs/{id}/download-manifest` → clip list + template/sidecar spec
   versions (§5) — leaseholder only

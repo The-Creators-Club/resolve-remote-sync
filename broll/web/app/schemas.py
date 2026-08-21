@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 QUALITY_FLAGS = {
     "shaky",
@@ -19,7 +19,16 @@ QUALITY_FLAGS = {
 
 
 class VideoIn(BaseModel):
-    """POST /api/ingest/video body. Upserted by (share, rel_path)."""
+    """POST /api/ingest/video body. Upserted by (share, rel_path).
+
+    `extra="allow"` so a key this contract does not carry is VISIBLE to the
+    route (which logs it) instead of being dropped by pydantic's default
+    without a word (broll-5, 2026-08-21). Not "forbid": the indexer reaches
+    this endpoint from set_error, i.e. while already handling a failure, and
+    turning that into a 422 would replace a lost message with a lost row.
+    """
+
+    model_config = ConfigDict(extra="allow")
 
     share: str
     rel_path: str
@@ -35,6 +44,21 @@ class VideoIn(BaseModel):
     category_hint: str | None = None
     in_inbox: bool = False
     status: str | None = None
+    # Why a clip's status is what it is. The indexer's set_error sends it with
+    # every 'error' (and stage_probe with a 'skipped'), and until 2026-08-21
+    # this model had no field for it: the row went to 'error' with a NULL
+    # reason and the only copy of the diagnosis stayed in the indexing
+    # machine's local shadow DB (broll-5). COALESCEd on the upsert, like
+    # category and the sprite geometry.
+    error: str | None = None
+    # Written by `broll-index duplicates --apply` and `origins`, which reach
+    # the web DB through this one endpoint too. Same silent drop, same fix.
+    full_hash: str | None = None
+    duplicate_of: int | None = None
+    archive_path: str | None = None
+    original_path: str | None = None
+    original_size_bytes: int | None = None
+    original_verified_at: str | None = None
     # The sprite sheet's real geometry, measured by the indexer's build_sprite
     # and forwarded here by HttpBackend.update_video (BROLL-1/BROLL-2,
     # 2026-08-11). Absent on every other ingest call, and COALESCEd on the

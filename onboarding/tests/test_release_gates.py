@@ -84,7 +84,12 @@ class TestTheMacBootstrapIsCrScannedOnEveryRun:
 
     def test_the_scan_is_not_inside_the_publish_block(self):
         scan = BUILD_PKG.index("Test-FileHasCr -Path $bootstrapSh")
-        publish_block = BUILD_PKG.index("if ($Publish) {")
+        # The publish block that matters is the upload one AFTER the copy loop.
+        # Since CR-52 (2026-08-21) an earlier `if ($Publish) {` runs the
+        # min_version preflight at second 1, before anything is built; the
+        # scan legitimately sits after THAT one.
+        copy_loop = BUILD_PKG.index("foreach ($f in $Files)")
+        publish_block = BUILD_PKG.index("if ($Publish) {", copy_loop)
         assert scan < publish_block
 
     def test_a_dirty_script_fails_the_run(self):

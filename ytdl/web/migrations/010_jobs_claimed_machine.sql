@@ -1,0 +1,21 @@
+-- v10: jobs.claimed_machine -- WHICH COMPUTER of the leaseholder's holds the
+-- download lease (data-model-7, KNOWN_BUGS CR-66/CR-67, 2026-08-21).
+--
+-- The lease was keyed on the editor NAME alone, and a name is a PERSON. One
+-- editor with a laptop and a desktop (CLAUDE.md: "a sync plan belongs to a
+-- COMPUTER, not to a person") therefore had both machines pass the same
+-- compare-and-set: the second claim read as the documented refresh -- one
+-- companion restarting, which must not 409 -- and the two executors then
+-- downloaded the same clips to two trees, each posting terminal statuses for
+-- the other's work. The column is the companion-minted machine_id from
+-- `~/.ccsync/machine.json` (it survives a rename, which a hostname does not),
+-- the same id the fleet report and the dashboard's `machines` registry key on.
+--
+-- ADDITIVE AND INERT. NULL means "the holder did not say", which is every row
+-- written before this and every claim from a companion that predates the
+-- field, and db.claim_download treats an unknown holding machine exactly as it
+-- treated every holder before today: same editor = refresh. So a fleet with no
+-- machine-aware companion in it behaves byte for byte as it does now, and
+-- there is no backfill -- an id cannot be invented for a lease that has
+-- already been taken.
+ALTER TABLE jobs ADD COLUMN claimed_machine TEXT;

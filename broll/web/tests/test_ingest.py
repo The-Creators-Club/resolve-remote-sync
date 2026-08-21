@@ -277,3 +277,64 @@ def test_ingest_shares_rejects_an_unknown_source(client):
     r = client.post("/api/ingest/shares",
                     json=[{"share": "s", "root": "Z:/x", "source": "nonsense"}])
     assert r.status_code == 422, "a bad source is a validation error, not a DB crash"
+
+
+def test_a_failed_clip_arrives_with_the_reason_it_failed(client, conn):
+    """broll-5, 2026-08-21. The indexer's set_error POSTs {status, error} here.
+    VideoIn had no `error` field and pydantic drops unknown keys without a
+    word, so the canonical DB said 'error' and would not say why -- the only
+    copy of the diagnosis stayed in the indexing machine's local shadow."""
+    ident = {"share": "broll", "rel_path": "military/naval/clip_9100.mov"}
+    vid = client.post("/api/ingest/video", json=ident).json()["id"]
+
+    r = client.post("/api/ingest/video",
+                    json={**ident, "status": "error",
+                          "error": "probe failed: ffprobe returned 1"})
+    assert r.status_code == 200
+    row = conn.execute("SELECT status, error FROM videos WHERE id = ?", (vid,)).fetchone()
+    assert row["status"] == "error"
+    assert row["error"] == "probe failed: ffprobe returned 1"
+
+
+def test_the_facts_other_indexer_passes_push_are_not_dropped_either(client, conn):
+    """duplicates --apply and origins reach the web DB through this one
+    endpoint too, and a later scan/probe upsert (which sends none of these)
+    must not blank what they recorded (broll-5, 2026-08-21)."""
+    ident = {"share": "broll", "rel_path": "military/naval/clip_9101.mov"}
+    canonical = client.post(
+        "/api/ingest/video",
+        json={"share": "broll", "rel_path": "military/naval/canonical.mov"},
+    ).json()["id"]
+    vid = client.post("/api/ingest/video", json=ident).json()["id"]
+
+    client.post("/api/ingest/video", json={
+        **ident, "full_hash": "ffff", "duplicate_of": canonical,
+        "archive_path": "b-roll/naval/clip_9101.mov",
+        "original_path": "Z:/FF3/day1/clip_9101.mov",
+        "original_size_bytes": 4096, "original_verified_at": "2026-08-21T00:00:00+00:00",
+    })
+    # A plain re-scan: same identity, none of the above.
+    client.post("/api/ingest/video", json={**ident, "hash": "abc", "size_bytes": 10})
+
+    row = conn.execute("SELECT * FROM videos WHERE id = ?", (vid,)).fetchone()
+    assert row["full_hash"] == "ffff"
+    assert row["duplicate_of"] == canonical
+    assert row["archive_path"] == "b-roll/naval/clip_9101.mov"
+    assert row["original_path"] == "Z:/FF3/day1/clip_9101.mov"
+    assert row["original_size_bytes"] == 4096
+    assert row["original_verified_at"] == "2026-08-21T00:00:00+00:00"
+    assert row["hash"] == "abc", "the re-scan's own fields still land"
+
+
+def test_a_field_the_ingest_contract_does_not_carry_is_logged_not_swallowed(client, caplog):
+    """Loud, not fatal: set_error reaches this endpoint while the indexer is
+    already handling a failure, so a 422 would replace a lost message with a
+    lost row -- but a silent drop is how broll-5 went unnoticed."""
+    with caplog.at_level("WARNING", logger="broll.ingest"):
+        r = client.post("/api/ingest/video", json={
+            "share": "broll", "rel_path": "military/naval/clip_9102.mov",
+            "invented_by_a_future_indexer": "hello",
+        })
+    assert r.status_code == 200
+    assert any("invented_by_a_future_indexer" in rec.getMessage()
+               for rec in caplog.records)

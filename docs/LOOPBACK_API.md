@@ -10,7 +10,7 @@ it, because a second process holding that port breaks the tray (CLAUDE.md):
 |---|---|
 | `GET /status`, `POST /insert` | the b-roll library's "Send to Resolve" |
 | `GET /music/status`, `POST /music/send`, `POST /music/reveal` | the music library's |
-| `POST /ytdl/reveal`, `GET /ytdl/capabilities`, `POST /ytdl/download`, `GET /ytdl/progress` | the YouTube downloader page's |
+| `POST /ytdl/reveal`, `POST /ytdl/fetch`, `GET /ytdl/capabilities`, `POST /ytdl/download`, `GET /ytdl/progress` | the YouTube downloader page's |
 | `GET /broll/ingest/capabilities`, `POST /broll/ingest/{pick,prepare,run,control}`, `PUT /broll/ingest/upload/{staging_id}/{local_id}`, `GET /broll/ingest/{progress,thumb}` | b-roll ingest — drag clips onto the b-roll page and **this machine** indexes them (2026-08-18, `BROLL_INGEST_PLAN.md` §4.1) |
 | the same eight under `/music/ingest/…` | music ingest: the same routes, one kind parameter apart (2026-08-18, `MUSIC_INGEST_PLAN.md` step 3) |
 
@@ -89,6 +89,13 @@ On top of those:
   unmounted `/Volumes/<Name>` does not fail, it fills the boot disk. At most
   **two** fetches run at once; a third gets a clear "already downloading as much
   as it will at once" answer, which the UI's own 1.5 s re-poll turns into a retry.
+  Two routes fetch: `POST /insert` for an archive clip, and **`POST /ytdl/fetch`**
+  (CR-32, 2026-08-19) for one YouTube original the server downloaded to the NAS
+  on the editor's behalf — lane B has not carried `/Youtube/**` down since the
+  2026-08-16 policy reversal, so without this route those clips reached nobody.
+  It takes the same body as `/ytdl/reveal` (a `rel_path` under the projects root
+  and nothing else — the caller never names a destination) and answers the same
+  three states the b-roll insert does: `done`, `downloading`, `failed`.
 - **The ingest upload route is the one PUT, and it has its own two rules**
   (2026-08-18). Every other route on this listener caps a body at 256 KiB and
   insists on `application/json`; a camera original is 40 GB and is not JSON, so

@@ -277,6 +277,32 @@ Names are the ones `tools/release.ps1` already reads (item 4):
 | `CCSYNC_SIGN_TIMESTAMP_URL` | windows | optional RFC3161 override. A timestamp is not optional in substance: without one, every signature the build ever made goes invalid the day the certificate expires. |
 | `CCSYNC_APPLE_DEV_ID` | macos | Reserved. `release_macos.sh` ad-hoc signs today (which is why a macOS upgrade resets TCC permissions); the variable is already exported so the workflow needs no edit when the script learns to use it. |
 
+**The `.pfx` route was dead until 2026-08-21** (installer-onboard-tools-2).
+The step that materialised the certificate defined `PFX_B64` in its own
+step-level `env:` and then guarded itself with `if: ${{ env.PFX_B64 != '' }}`
+— but a step's `env:` block is applied *after* its condition is evaluated, so
+the value was always empty and the step was **always skipped**. The secret
+never reached `CCSYNC_SIGN_PFX`, only the (unusable-on-a-runner) thumbprint
+route remained, and the run reported success with an honestly-unsigned
+manifest. The secret now lives in the **job-level** `env:`, the emptiness test
+is inside the step body, and the step writes what it decided into the run
+summary either way — a skipped signing step must never be invisible.
+
+**Whether a `.pfx` should be in CI at all is an open decision.** The release
+key deliberately never enters GitHub (`tools/publish_latest.py`: "CI builds,
+this rig signs"), and a CI-held Authenticode certificate contradicts that.
+See `docs/RELEASE.md`, "Where the Authenticode key should live", and decide
+before buying one (release-pipeline-11).
+
+**Both wizard artefacts now carry a manifest.** `release-windows.yml` writes
+`onboarding/dist/ccsync-onboard.json` beside `onboard.exe` and
+`release-macos.yml` writes one beside the zipped `.app`, in the same shape as
+`companion/dist/ccsync-release.json`, so `tools/publish_latest.py` can verify
+and publish the **installer** channel to the vendor feed (release-pipeline-4).
+`tests_run` in those manifests is the **onboarding** suite, run in the same
+step against the same tree: `publish_feed.py` refuses a manifest that says
+`false` (OPS-1), so it must never say `true` on trust.
+
 ---
 
 ## Known test-side failures on the first hosted run, not fixed here

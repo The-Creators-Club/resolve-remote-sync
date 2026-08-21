@@ -57,6 +57,16 @@ TOUCH_INTERVAL_SECONDS = 60.0
 # is exhausted first blocks. Backoff doubles per failure past the limit so a
 # patient attacker gets minutes, not seconds, between guesses.
 LOGIN_FAILURE_LIMIT = 5
+# ...but the IP budget is deliberately MUCH larger than the username one
+# (trust-model-3, 2026-08-21). One address here is very often one GATEWAY:
+# the shipped TrueNAS shape publishes the dashboard through Tailscale Serve
+# on the docker host, so every editor and every companion arrives from the
+# bridge gateway (172.17.0.1) unless DASH_TRUSTED_PROXIES names it. At five,
+# one editor with caps lock on put the WHOLE FLEET into exponential backoff:
+# /login and /api/v1/verify 429 for everybody. The bucket still bounds a
+# spray -- 40 wrong passwords from one address in an hour is not a fleet
+# fat-fingering, and the per-username budget of 5 is untouched.
+LOGIN_FAILURE_LIMIT_IP = 40
 LOGIN_BACKOFF_BASE_SECONDS = 60.0
 LOGIN_BACKOFF_MAX_SECONDS = 3600.0
 # A failure older than this stops counting at all, so an editor who fat-fingers
@@ -371,9 +381,10 @@ class SessionStore:
                         failures = int(row["failures"]) + 1
                         first = row["first_failure"]
                 blocked_until = None
-                if failures >= LOGIN_FAILURE_LIMIT:
+                limit = LOGIN_FAILURE_LIMIT_IP if scope == SCOPE_IP else LOGIN_FAILURE_LIMIT
+                if failures >= limit:
                     delay = min(
-                        LOGIN_BACKOFF_BASE_SECONDS * (2 ** (failures - LOGIN_FAILURE_LIMIT)),
+                        LOGIN_BACKOFF_BASE_SECONDS * (2 ** (failures - limit)),
                         LOGIN_BACKOFF_MAX_SECONDS,
                     )
                     blocked_until = _shift(now, delay)

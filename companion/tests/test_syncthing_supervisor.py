@@ -611,3 +611,56 @@ def test_a_clock_that_steps_backwards_does_not_stop_supervision(tmp_path):
     clock.advance(31)
     s.tick(reachable=False)
     assert launcher.launches == 1
+
+
+# -- comp-lane-c-5 (2026-08-21): one launch per outage, not one per caller --
+
+
+def test_two_callers_at_once_start_syncthing_only_once(tmp_path):
+    """check_once runs on the lane C poll thread AND, synchronously, on the
+    tray's diagnostics worker. The launch decision was read under the lock
+    and acted on outside it, so both could pass the backoff test and both
+    spawn the shim -- the second dies on the DB/port lock, leaving a pair of
+    "start attempt N" lines and an attempts counter off by one for a single
+    outage."""
+    clock = FakeClock()
+    launcher = FakeLauncher()
+    s = _supervisor(tmp_path, clock, launcher, probe=lambda: True)
+    original = s._attempt_start
+    entries = {"n": 0}
+
+    def racing_attempt(now):
+        entries["n"] += 1
+        if entries["n"] == 1:
+            # The other thread's poll lands here: past the grace window, and
+            # before this attempt has moved attempts/last_attempt.
+            s.tick(reachable=False)
+        return original(now)
+
+    s._attempt_start = racing_attempt
+
+    s.tick(reachable=False)
+    clock.advance(31)
+    s.tick(reachable=False)
+
+    assert launcher.launches == 1
+    assert entries["n"] == 1
+
+
+def test_the_launch_guard_is_released_for_the_next_outage(tmp_path):
+    clock = FakeClock()
+    launcher = FakeLauncher()
+    answers = [False, True]
+    s = _supervisor(tmp_path, clock, launcher,
+                    probe=lambda: answers.pop(0) if answers else True)
+
+    s.tick(reachable=False)
+    clock.advance(31)
+    s.tick(reachable=False)
+    assert launcher.launches == 1
+
+    s.tick(reachable=True)
+    s.tick(reachable=False)
+    clock.advance(31)
+    s.tick(reachable=False)
+    assert launcher.launches == 2

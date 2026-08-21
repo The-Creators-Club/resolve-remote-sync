@@ -12,7 +12,10 @@ learned the hard way there:
   - **THE TOKEN IS NOT AN IDENTITY.** Every companion holds the same one, so
     the editor's name arrives as the dashboard's signed identity token and is
     verified before the batch's `editor` column is compared against it (H5,
-    COMMERCIAL_READINESS.md item 7).
+    COMMERCIAL_READINESS.md item 7). Since CR-55 (2026-08-21) that token may
+    also be a per-editor `cce1.` one, resolved for us by the dashboard's mount;
+    when it is, the editor it is BOUND to must equal the signed identity, which
+    is why both gates are now one dependency (fleet_auth.require_fleet_caller).
   - **THE BROWSER CONTRIBUTES A BATCH UID AND NOTHING ELSE.** Archive paths,
     names, the taxonomy, the settings -- all of it comes back from `claim`
     under the token. The page never learns a path and never dictates one; that
@@ -46,7 +49,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 
 from app import ingest_batches
 from app.db import get_db
-from app.fleet_auth import require_fleet_token, require_identity
+from app.fleet_auth import require_fleet_caller
 from app.schemas import (ClaimIn, HeartbeatIn, ItemResultIn, ItemStatusIn,
                          ItemUploadedIn, ReleaseIn)
 
@@ -114,9 +117,9 @@ def _item_or_404(conn: sqlite3.Connection, batch_uid: str, item_uid: str) -> sql
     return item
 
 
-@router.post("/batches/{uid}/claim", dependencies=[Depends(require_fleet_token)])
+@router.post("/batches/{uid}/claim")
 def claim(uid: str, body: ClaimIn,
-          editor: str = Depends(require_identity),
+          editor: str = Depends(require_fleet_caller),
           conn: sqlite3.Connection = Depends(get_db)) -> dict:
     """Take the batch and receive the whole work order.
 
@@ -132,9 +135,9 @@ def claim(uid: str, body: ClaimIn,
         capabilities=body.capabilities)
 
 
-@router.post("/batches/{uid}/heartbeat", dependencies=[Depends(require_fleet_token)])
+@router.post("/batches/{uid}/heartbeat")
 def heartbeat(uid: str, body: HeartbeatIn,
-              editor: str = Depends(require_identity),
+              editor: str = Depends(require_fleet_caller),
               x_ccsync_machine: str | None = Header(default=None),
               conn: sqlite3.Connection = Depends(get_db)) -> dict:
     """Keep the lease alive, and learn whether to stop.
@@ -148,10 +151,9 @@ def heartbeat(uid: str, body: HeartbeatIn,
     return ingest_batches.heartbeat(conn, batch)
 
 
-@router.post("/batches/{uid}/items/{item_uid}/status",
-             dependencies=[Depends(require_fleet_token)])
+@router.post("/batches/{uid}/items/{item_uid}/status")
 def item_status(uid: str, item_uid: str, body: ItemStatusIn,
-                editor: str = Depends(require_identity),
+                editor: str = Depends(require_fleet_caller),
                 x_ccsync_machine: str | None = Header(default=None),
                 conn: sqlite3.Connection = Depends(get_db)) -> dict:
     """One checkpoint. 400 on an illegal transition, 410 on a lost lease.
@@ -166,10 +168,9 @@ def item_status(uid: str, item_uid: str, body: ItemStatusIn,
         error=body.error, attempts=body.attempts, hash=body.hash, probe=body.probe)
 
 
-@router.post("/batches/{uid}/items/{item_uid}/result",
-             dependencies=[Depends(require_fleet_token)])
+@router.post("/batches/{uid}/items/{item_uid}/result")
 def item_result(uid: str, item_uid: str, body: ItemResultIn,
-                editor: str = Depends(require_identity),
+                editor: str = Depends(require_fleet_caller),
                 x_ccsync_machine: str | None = Header(default=None),
                 conn: sqlite3.Connection = Depends(get_db)) -> dict:
     """What the local model saw. The server writes it AND computes search_norm.
@@ -185,10 +186,9 @@ def item_result(uid: str, item_uid: str, body: ItemResultIn,
     return ingest_batches.write_item_result(conn, batch, item, body)
 
 
-@router.post("/batches/{uid}/items/{item_uid}/uploaded",
-             dependencies=[Depends(require_fleet_token)])
+@router.post("/batches/{uid}/items/{item_uid}/uploaded")
 def item_uploaded(uid: str, item_uid: str, body: ItemUploadedIn,
-                  editor: str = Depends(require_identity),
+                  editor: str = Depends(require_fleet_caller),
                   x_ccsync_machine: str | None = Header(default=None),
                   conn: sqlite3.Connection = Depends(get_db)) -> dict:
     """Go live -- once the server has stat'ed the files itself.
@@ -202,9 +202,9 @@ def item_uploaded(uid: str, item_uid: str, body: ItemUploadedIn,
         conn, batch, item, files=body.files, original_uploaded=body.original_uploaded)
 
 
-@router.post("/batches/{uid}/release", dependencies=[Depends(require_fleet_token)])
+@router.post("/batches/{uid}/release")
 def release(uid: str, body: ReleaseIn,
-            editor: str = Depends(require_identity),
+            editor: str = Depends(require_fleet_caller),
             x_ccsync_machine: str | None = Header(default=None),
             conn: sqlite3.Connection = Depends(get_db)) -> dict:
     """Finish the batch and drop the lease.

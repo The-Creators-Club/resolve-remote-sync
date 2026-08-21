@@ -48,11 +48,19 @@ and it took the OTHER half of the b-roll treatment rather than a token here:
   * `/music/api/fleet/ingest/...` is machine-to-machine -- an editor's
     companion, embedding a dropped album with the CLAP audio tower while
     nobody is at the browser -- so it is carved out of login_gate by
-    `_music_fleet_re` in app.py, per suffix, and authenticates itself with the
-    shared fleet token PLUS a signed identity (musicweb/fleet_auth.py). There
-    is nothing for this module to re-check: unlike broll's ingest token, the
+    `_music_fleet_re` in app.py, per suffix, and authenticates itself with a
+    fleet token PLUS a signed identity (musicweb/fleet_auth.py). There is
+    nothing for this module to make SAFER: unlike broll's ingest token, the
     music fleet routes have no "unconfigured = open" branch to reach -- they
-    fail closed on their own.
+    fail closed on their own. There is something only this module can make
+    WORK, though (music-1, 2026-08-21): the fleet token a companion presents
+    is not necessarily the shared DASH_REPORT_TOKEN. Since 2026-08-17 an
+    editor's companion PREFERS the per-editor `cce1.<id>.<secret>` token an
+    admin minted for them, and verifying one of those needs the dashboard's
+    database -- which the music tree cannot see. So MusicGate resolves
+    `X-CCSync-Token` here and stamps the answer as `X-CCSync-Fleet-Auth:
+    shared|editor:<name>`, stripping any inbound copy first, and musicweb
+    accepts that stamp only when it knows a login gate is wrapped around it.
   * `/music/api/ingest-batches*` is the SPA's half, and it makes per-user
     decisions with real consequences (whose batches these are, who may cancel
     another machine's work). So MusicGate now STAMPS the identity, exactly as
@@ -75,7 +83,7 @@ from typing import Any, Callable
 
 from fastapi import FastAPI
 
-from . import auth
+from . import api, auth, db
 from .broll import _header_value, _session_cookie
 from .settings import Settings
 
@@ -89,10 +97,18 @@ MOUNT_PATH = "/music"
 # the first of them -- so the create and list calls would reach the sub-app
 # with no identity and be answered 401 for every editor.
 BATCHES_PREFIX = "/api/ingest-batches"
-# The two headers the sub-app trusts, lowercase bytes because that is how they
+# The headers the sub-app trusts, lowercase bytes because that is how they
 # appear in an ASGI scope.
 IDENTITY_HEADER = b"x-ccsync-user"
 ADMIN_HEADER = b"x-ccsync-admin"
+# What the FLEET routes trust about `X-CCSync-Token` (music-1, 2026-08-21).
+# musicweb cannot verify a per-editor `cce1.<id>.<secret>` token -- that needs
+# the dashboard's database, which the music tree cannot see -- so the mount
+# resolves the credential and says so in one header the sub-app believes only
+# when it knows a login gate is wrapped around it. Values: `shared`, or
+# `editor:<name>`.
+FLEET_AUTH_HEADER = b"x-ccsync-fleet-auth"
+TOKEN_HEADER = b"x-ccsync-token"
 
 # mount_music's tri-state. "absent" and "degraded" are both "do not advertise
 # it in the nav" (ui.py), but they are different operator problems: absent =
@@ -109,7 +125,7 @@ BLOCKED_PATHS = frozenset({"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi
 
 
 class MusicGate:
-    """ASGI wrapper around the music sub-app. Two jobs, both fail-closed.
+    """ASGI wrapper around the music sub-app. Three jobs, all fail-closed.
 
     1. The sub-app's default interactive docs are 404'd.
     2. Every request is re-stamped with the session's identity: any inbound
@@ -126,10 +142,18 @@ class MusicGate:
        would mean a route added upstream tomorrow inherits a forgeable
        identity, and the cost is two list comprehensions over ~8 headers.
 
-    There is deliberately no token check here, unlike BrollGate: the music
+    3. `X-CCSync-Fleet-Auth` gets the same strip-then-append treatment, for
+       the companion's `X-CCSync-Token` (music-1, 2026-08-21). See
+       `_fleet_stamp`: musicweb cannot verify a per-editor token, so the mount
+       resolves it and the sub-app trusts the answer only when it knows it is
+       login-gated -- i.e. only when this gate, which strips every inbound
+       copy, is what put the header there.
+
+    There is deliberately no token REFUSAL here, unlike BrollGate: the music
     FLEET routes fail closed on their own (musicweb/fleet_auth.py has no
     "unconfigured = open" branch to reach), and the panel routes are
-    session-authorised.
+    session-authorised. A token this gate could not resolve is simply not
+    stamped, and the sub-app compares it against the shared secret as before.
 
     A plain ASGI wrapper rather than BaseHTTPMiddleware or add_middleware:
     nothing is re-wrapped or buffered on the way through, so /api/audio's
@@ -146,6 +170,53 @@ class MusicGate:
         self._settings = settings
         self._secret = getattr(settings, "session_secret", "") or ""
 
+    def _fleet_stamp(self, headers: list[tuple[bytes, bytes]]) -> bytes | None:
+        """What `X-CCSync-Token` on this request really is, or None.
+
+        music-1, 2026-08-21. musicweb compared the header against the shared
+        DASH_REPORT_TOKEN and nothing else, so the moment an admin minted an
+        editor a per-editor `cce1.` token -- which the companion PREFERS over
+        the shared one (identity.preferred_report_token, 2026-08-17) -- every
+        one of that editor's music fleet calls was answered 403 and their
+        dropped albums sat in `queued` forever. Only this side can tell: the
+        per-editor token is verified against the dashboard's own database.
+
+        Costs nothing on a browser request (no such header) and one regex on a
+        shared-token one; a database connection is opened only for a token that
+        already has the per-editor SHAPE, exactly as app.py's pre-body gate
+        does. Any failure here is "no stamp", never "stamped anyway".
+        """
+        raw = _header_value_of(headers, TOKEN_HEADER)
+        if not raw or self._settings is None:
+            return None
+        try:
+            if db.looks_like_editor_report_token(raw):
+                conn = db.connect(self._settings.db_path)
+                try:
+                    kind, editor = api.resolve_companion_credential(
+                        self._settings, conn, raw)
+                finally:
+                    conn.close()
+            else:
+                kind, editor = api.resolve_companion_credential(
+                    self._settings, None, raw)
+        except Exception as e:  # noqa: BLE001 - an unopenable DB is not an auth pass
+            log.warning("music fleet credential not resolved (%s: %s); the sub-app "
+                        "falls back to its own shared-token comparison",
+                        type(e).__name__, e)
+            return None
+        if kind == api.AUTH_SHARED:
+            return b"shared"
+        if kind == api.AUTH_EDITOR and editor:
+            encoded = _header_value(f"editor:{editor}")
+            if encoded is None:
+                # Same fail-closed rule as the identity header: a name that
+                # cannot survive a latin-1 round trip is withheld, not mangled.
+                log.warning("music fleet stamp not minted for %r: the name cannot "
+                            "survive a latin-1 header round trip", editor)
+            return encoded
+        return None
+
     def _identified_scope(self, scope: dict) -> dict:
         """A copy of `scope` whose headers carry our identity pair and no other.
 
@@ -153,7 +224,11 @@ class MusicGate:
         is not the only thing that ever reads it.
         """
         headers = [(k, v) for k, v in scope.get("headers", ())
-                   if k.lower() not in (IDENTITY_HEADER, ADMIN_HEADER)]
+                   if k.lower() not in (IDENTITY_HEADER, ADMIN_HEADER,
+                                        FLEET_AUTH_HEADER)]
+        stamp = self._fleet_stamp(headers)
+        if stamp is not None:
+            headers.append((FLEET_AUTH_HEADER, stamp))
         username = (auth.read_session_cookie(self._secret, _session_cookie(headers))
                     if self._secret else None)
         if username:
@@ -197,6 +272,14 @@ def sub_paths(scope: dict) -> tuple[str, ...]:
     if path.startswith(MOUNT_PATH):
         candidates.append(path[len(MOUNT_PATH):] or "/")
     return tuple(dict.fromkeys(candidates))
+
+
+def _header_value_of(headers: list[tuple[bytes, bytes]], name: bytes) -> str:
+    """One raw ASGI header as a string, latin-1 the way Starlette decodes."""
+    for k, v in headers:
+        if k.lower() == name:
+            return v.decode("latin-1", "replace").strip()
+    return ""
 
 
 async def _json_response(send: Callable, status: int, body: dict) -> None:

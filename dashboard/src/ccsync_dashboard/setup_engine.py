@@ -469,34 +469,91 @@ def _human_bytes(n: float | None) -> str:
     return "?"
 
 
+def _shared_asset_rels(ctx: SetupContext) -> list[str]:
+    """This site's shared asset libraries, DB-first (dash-admin-3,
+    2026-08-21). `provision.SHARED_ASSET_FOLDERS` is the import-time env copy
+    and stays the fallback; a site that added `Assets/SFX` on Settings gets
+    the folder it asked for, not the one the container booted with."""
+    from . import site_store
+
+    try:
+        return [rel for _fid, rel, _label
+                in site_store.shared_asset_folders(ctx.conn, ctx.settings)]
+    except sqlite3.Error:                       # a pre-v18 database has no table
+        from . import provision
+
+        return [rel for _fid, rel, _label in provision.SHARED_ASSET_FOLDERS]
+
+
+def _tree_root(ctx: SetupContext) -> Path | None:
+    """The TREE ROOT as this container can see it, or None when it cannot.
+
+    dash-admin-1 (2026-08-21): this used to be `Path(projects_dir).parent`,
+    unconditionally. Every compose file in the repo mounts ONLY <tree>/Projects
+    at /projects (compose.yaml, compose.image.yaml, compose.appliance.yaml),
+    and `Path('/projects').parent` is `/` -- so the storage task was creating
+    `/Assets/Luts` in the container's own root filesystem, and its check then
+    looked for those same folders on the NAS tree, found nothing, and flipped
+    the task back to `todo` forever. `DASH_TREE_DIR` is the explicit answer
+    (a deployment that mounts the whole tree says so); absent that, the parent
+    is believed only when it is not a filesystem root, which is exactly the
+    case that was wrong.
+    """
+    explicit = (os.environ.get("DASH_TREE_DIR") or "").strip()
+    if explicit:
+        path = Path(explicit)
+        return path if path.is_dir() else None
+    projects_dir = str(getattr(ctx.settings, "projects_dir", "") or "")
+    if not projects_dir:
+        return None
+    parent = Path(projects_dir).resolve().parent
+    if parent == parent.parent:     # "/" (or a bare drive root on Windows)
+        return None
+    return parent if parent.is_dir() else None
+
+
+# What the check and the run both say when only Projects/ is mounted. The
+# asset libraries still exist on the NAS -- the collector provisions and
+# shares them from the Syncthing side (DASH_SYNCTHING_ASSETS_PREFIX, a path on
+# the NAS host, not a mount of this container) -- so this is a "not our job
+# here", not a failure to report to the admin as one.
+_ASSETS_NOT_VISIBLE = ("writable. The shared asset folders live beside Projects "
+                       "on the NAS, which this container does not mount")
+
+
 def _check_storage(ctx: SetupContext) -> TaskState:
     """Evidence is the SHARED ASSET FOLDERS `_run_storage` creates, not the
     probe file -- the probe is written, read back and deleted in one motion
     (leaving litter on a customer's tree defeats the point of a probe), so
     checking for ITS existence would report 'todo' immediately after a
     successful 'Do it' ran. The asset folders are the durable evidence a
-    previous run succeeded."""
+    previous run succeeded.
+
+    Where the tree root is not visible from inside this container (the shape
+    every compose file in the repo actually deploys -- see `_tree_root`),
+    there is no such evidence to look for and the question this task really
+    asks is "is the Projects mount writable": dash-admin-1, 2026-08-21.
+    """
     projects_dir = str(getattr(ctx.settings, "projects_dir", "") or "")
     if not projects_dir or not Path(projects_dir).is_dir():
         return TaskState(status="todo", detail="DASH_PROJECTS_DIR is not mounted")
-    from . import provision
-
-    tree_root = Path(projects_dir).parent
-    missing = [rel for _fid, rel, _label in provision.SHARED_ASSET_FOLDERS
-               if not (tree_root / rel).is_dir()]
-    if missing:
-        return TaskState(status="todo", detail="not yet probed -- click Do it")
     try:
         free = shutil.disk_usage(projects_dir).free
-        detail = f"writable; {_human_bytes(free)} free"
+        free_str = f"; {_human_bytes(free)} free"
     except OSError:
-        detail = "writable"
-    return TaskState(status="ok", detail=detail)
+        free_str = ""
+    tree_root = _tree_root(ctx)
+    if tree_root is None:
+        if not os.access(projects_dir, os.W_OK):
+            return TaskState(status="todo", detail="not yet probed -- click Do it")
+        return TaskState(status="ok", detail=f"{_ASSETS_NOT_VISIBLE}{free_str}")
+    missing = [rel for rel in _shared_asset_rels(ctx) if not (tree_root / rel).is_dir()]
+    if missing:
+        return TaskState(status="todo", detail="not yet probed -- click Do it")
+    return TaskState(status="ok", detail=f"writable{free_str}")
 
 
 def _run_storage(ctx: SetupContext) -> TaskState:
-    from . import provision
-
     projects_dir = str(getattr(ctx.settings, "projects_dir", "") or "")
     if not projects_dir or not Path(projects_dir).is_dir():
         return TaskState(
@@ -524,15 +581,33 @@ def _run_storage(ctx: SetupContext) -> TaskState:
     # chowns either (the container's own uid is what should own these, and
     # ownership repair is a SEPARATE root-in-container helper per
     # ZERO_TOUCH_PLAN.md §3.2, not this task).
-    created = []
-    for _fid, rel, _label in provision.SHARED_ASSET_FOLDERS:
-        target = root.parent / rel
+    free_str = _human_bytes(free)
+    tree_root = _tree_root(ctx)
+    if tree_root is None:
+        # dash-admin-1: creating them under `/` (the container's rootfs) is
+        # what this branch used to do. Reporting the probe result honestly and
+        # stopping is the whole fix -- the folders are the NAS installer's and
+        # the collector's job on this deployment shape.
+        return TaskState(status="ok", detail=f"{_ASSETS_NOT_VISIBLE}; {free_str} free")
+    created: list[str] = []
+    failed: list[str] = []
+    for rel in _shared_asset_rels(ctx):
+        target = tree_root / rel
         try:
             target.mkdir(parents=True, exist_ok=True)
             created.append(rel)
         except OSError as exc:
+            failed.append(rel)
             log.warning("setup: could not create shared asset folder %s: %s", target, exc)
-    free_str = _human_bytes(free)
+    if failed:
+        # warn, not ok (dash-admin-1, 2026-08-21): this used to report ok with
+        # "created 0 shared asset folder(s)" and the very next check flipped
+        # the chip back to todo with no reason an admin could read.
+        return TaskState(
+            status="warn",
+            detail=f"writable, but could not create {', '.join(failed)} under "
+                   f"{tree_root} - check the mount's ownership",
+        )
     return TaskState(
         status="ok",
         detail=f"writable; {free_str} free; created {len(created)} shared asset folder(s)",
@@ -648,6 +723,10 @@ def _run_syncthing(ctx: SetupContext) -> TaskState:
         # written" rule site_store.py's module docstring states for every
         # other field.
         site_store.set_many(ctx.conn, {"nas_syncthing_id": my_id}, updated_by="setup:syncthing")
+        ctx.conn.commit()
+        # Every writer of site_settings drops the per-process manifest cache
+        # ui._render reads (product-surface-2, 2026-08-21).
+        site_store.invalidate(ctx.app)
     return TaskState(status="ok", detail=f"device id {my_id[:7]}...")
 
 

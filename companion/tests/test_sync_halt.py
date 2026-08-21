@@ -74,6 +74,22 @@ class _FakeSequencer:
         self.triggered += 1
 
 
+class _HaltAwareSequencer(_FakeSequencer):
+    """A sequencer of the shape CR-48 landed: it can name the shared asset
+    libraries as well as the selection, and it owns the filtered release."""
+
+    def __init__(self, slugs, shared):
+        super().__init__(slugs)
+        self._shared = list(shared)
+        self.released_for_halt = 0
+
+    def halt_folder_ids(self):
+        return list(self._slugs) + list(self._shared)
+
+    def release_for_halt(self):
+        self.released_for_halt += 1
+
+
 # -- the halt ---------------------------------------------------------------
 
 
@@ -178,6 +194,130 @@ def test_resuming_the_breaker_from_the_tray_clears_it(tmp_path):
     assert not app.lane_b_breaker.tripped
     assert app.sequencer.triggered == 1
     assert app.resume_lane_b()[0] is False
+
+
+# -- CR-48 / CR-67 item 1: the halt reaches the shared asset libraries ------
+
+
+def test_the_halt_pauses_the_shared_asset_libraries_too(tmp_path):
+    """sync-safety-2. The halt walked the project SELECTION, which names no
+    shared folder -- so a halt pressed because a bad ingest or a mass rename
+    in the B-roll archive was spreading left the archive, the music library
+    and the LUTs syncing on every machine in the fleet, while every tray said
+    "Nothing is uploading, downloading or sharing"."""
+    app = _app(tmp_path)
+    app.syncthing_admin = _FakeAdmin()
+    app.sequencer = _HaltAwareSequencer(
+        ["proj-a"], ["ccsync-luts", "ccsync-broll-archive", "ccsync-music"])
+
+    app.halt_all_sync("a bad ingest is spreading through the archive")
+
+    assert app.syncthing_admin.paused == [
+        ("proj-a", True), ("ccsync-luts", True),
+        ("ccsync-broll-archive", True), ("ccsync-music", True),
+    ]
+
+
+def test_a_sequencer_that_cannot_name_them_still_pauses_the_selection(tmp_path):
+    """Every seam CR-48 left is behind a getattr on purpose: a companion
+    whose sequencer predates halt_folder_ids must halt exactly as it does
+    today rather than not at all."""
+    app = _app(tmp_path)
+    app.syncthing_admin = _FakeAdmin()
+    app.sequencer = _FakeSequencer(["proj-a", "proj-b"])
+
+    app.halt_all_sync("x")
+
+    assert app.syncthing_admin.paused == [("proj-a", True), ("proj-b", True)]
+
+
+def test_release_goes_through_the_sequencers_filtered_unpause(tmp_path):
+    """sync-safety-4. The release PATCHed `paused: false` onto every folder
+    the halt had touched, which includes a folder deliberately left paused
+    because its .stignore never landed -- putting an unfiltered `sendreceive`
+    folder online to offer every original and every Proxy/ file."""
+    app = _app(tmp_path)
+    app.syncthing_admin = _FakeAdmin()
+    app.sequencer = _HaltAwareSequencer(["proj-a"], ["ccsync-luts"])
+    app.halt_all_sync("x")
+    app.syncthing_admin.paused.clear()
+
+    ok, _msg = app.release_halt(by="tray")
+
+    assert ok
+    assert app.sequencer.released_for_halt == 1
+    assert app.syncthing_admin.paused == [], \
+        "the release must not unpause a folder behind the sequencer's back"
+
+
+def test_the_fleet_release_takes_the_same_filtered_path(tmp_path):
+    """An admin's release must not be the one path that can put a folder
+    with no .stignore online (sync-safety-4)."""
+    app = _app(tmp_path)
+    app.syncthing_admin = _FakeAdmin()
+    app.sequencer = _HaltAwareSequencer(["proj-a"], ["ccsync-luts"])
+
+    app._on_report_response({"ok": True, "commands": {
+        "halt": {"active": True, "reason": "restoring the pool"}}})
+    assert ("ccsync-luts", True) in app.syncthing_admin.paused
+    app.syncthing_admin.paused.clear()
+
+    app._on_report_response({"ok": True, "commands": {"halt": {"active": False}}})
+
+    assert not app.halt.active
+    assert app.sequencer.released_for_halt == 1
+    assert app.syncthing_admin.paused == []
+
+
+def test_a_release_the_sequencer_cannot_do_leaves_lane_c_paused(tmp_path):
+    """Staying paused is the safe side of this one: a folder nobody released
+    syncs nothing, and the next pass sweeps it up."""
+    app = _app(tmp_path)
+    app.syncthing_admin = _FakeAdmin()
+    app.sequencer = _HaltAwareSequencer(["proj-a"], [])
+
+    def boom():
+        raise RuntimeError("syncthing is not answering")
+
+    app.sequencer.release_for_halt = boom
+    app.halt_all_sync("x")
+    app.syncthing_admin.paused.clear()
+
+    ok, _msg = app.release_halt(by="tray")
+
+    assert ok, "the halt latch itself must still clear"
+    assert app.syncthing_admin.paused == []
+
+
+def test_a_legacy_companion_with_no_sequencer_still_unpauses(tmp_path):
+    """The old direct call survives as the no-sequencer fallback, where
+    nothing else would ever release the folders at all."""
+    app = _app(tmp_path)
+    app.syncthing_admin = _FakeAdmin()
+    app.sequencer = None
+
+    app.halt_all_sync("x")
+    ok, _msg = app.release_halt(by="tray")
+
+    assert ok
+    # Nothing to name, so nothing to write -- but the path taken is the
+    # direct one, not a crash on a missing release_for_halt.
+    assert app.syncthing_admin.paused == []
+
+
+def test_the_sequencer_is_built_knowing_whether_this_machine_is_halted(tmp_path):
+    """The other half of sync-safety-2: the once-per-pass shared-folder
+    reconcile RELEASES a paused asset library, so without this predicate the
+    halt held the libraries down for exactly one sequencer pass."""
+    app = _app(tmp_path, dashboard_url="http://dash.example:8480",
+               dashboard_token="tok")
+    assert app.sequencer is not None
+    assert app.sequencer.shared_folders.halted() is False
+
+    app.syncthing_admin = _FakeAdmin()
+    app.halt_all_sync("stop touching the files")
+
+    assert app.sequencer.shared_folders.halted() is True
 
 
 # -- the caught-up gate on "Remove from this machine" -----------------------

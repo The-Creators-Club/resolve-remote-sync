@@ -189,6 +189,35 @@ def _validate_csv(key: str, raw: str) -> str:
     return ",".join(items)
 
 
+def _validate_nas_kind(raw: str) -> str:
+    """One of the backends `nas.factory` can actually build, lower-cased.
+
+    dash-admin-7, 2026-08-21: this was the generic "str" validator, so
+    Settings and a pasted site.toml both accepted "TrueNAS" or "qnap" and
+    published it verbatim to every installer in `GET /api/v1/site` -- and
+    "TrueNAS" is not equal to "truenas" for any client comparing exactly --
+    while the dashboard's own client kept using `DASH_NAS_KIND`. Case is
+    normalised (the factory lower-cases too, so "TrueNAS" is an admin naming
+    the right backend); a kind no factory can build is refused outright,
+    because that is a manifest that lies about which NAS this is.
+    """
+    value = str(raw or "").strip().lower()
+    if not value:
+        raise SiteValidationError("nas_kind", "must not be blank")
+    try:
+        from .nas.factory import NAS_KINDS
+
+        kinds = tuple(NAS_KINDS)
+    except Exception:                                              # noqa: BLE001
+        # A build without the factory (or one mid-refactor) must not make the
+        # Settings page unusable -- fall back to accepting the trimmed value.
+        return value
+    if value not in kinds:
+        raise SiteValidationError(
+            "nas_kind", f"must be one of {', '.join(sorted(kinds))} (got {raw!r})")
+    return value
+
+
 def validate(key: str, raw: str) -> str:
     """Normalise+validate one field. Raises SiteValidationError; never
     guesses a corrected value silently (an admin who fat-fingers a port
@@ -198,6 +227,8 @@ def validate(key: str, raw: str) -> str:
         raise SiteValidationError(key, "not a recognised site setting")
     if key == "canonical_prefix":
         return _validate_canonical_prefix(raw)
+    if key == "nas_kind":
+        return _validate_nas_kind(raw)
     if key == "indexer_model_tier":
         return _validate_model_tier(raw)
     if kind == "int":
@@ -311,9 +342,18 @@ def resolved_manifest(conn: sqlite3.Connection, settings: Any) -> dict[str, Any]
     string -- callers (api.api_site, ui.page_admin_settings) should never
     have to know this is backed by a text-value table.
     """
-    from . import provision
+    return _shape(get_all(conn), settings)
 
-    db_values = get_all(conn)
+
+def _shape(db_values: Mapping[str, str], settings: Any) -> dict[str, Any]:
+    """`resolved_manifest`'s body, given the rows already read.
+
+    Split out 2026-08-21 (product-surface-2) so a caller that cannot open a
+    connection -- `manifest_for_app` when the database is momentarily
+    unreadable -- can still produce the same shape from `settings` alone
+    instead of raising through a page render.
+    """
+    from . import provision
 
     def pick(key: str) -> str:
         if key in db_values:
@@ -391,6 +431,120 @@ def resolved_manifest(conn: sqlite3.Connection, settings: Any) -> dict[str, Any]
         # vs. which are still falling through to Settings/defaults.
         "_from_db": sorted(k for k in KEYS if k in db_values),
     }
+
+
+# ------------------------------------------------------- the ONE feature gate
+
+# Every `[features]` flag, and the `Settings` attribute that answers for it
+# when no row exists. One mapping so a new flag is one line here rather than
+# a new `if` in whichever module happens to gate on it (2026-08-21,
+# product-surface-1: `youtube_download` had TWO readers -- this table, which
+# the manifest and every companion read, and `settings.site_feature_*`, which
+# the /ytdl mount read -- and an admin ticking the box on Settings moved only
+# one of them).
+FEATURE_SETTINGS_ATTRS = {
+    "youtube_download": "site_feature_youtube_download",
+    "youtube_unblock": "site_feature_youtube_unblock",
+    "ai_cli_providers": "site_feature_ai_cli_providers",
+    "auto_update": "site_feature_auto_update",
+}
+
+
+def feature_enabled(conn: sqlite3.Connection, settings: Any, name: str) -> bool:
+    """Whether this site turned `[features] <name>` on.
+
+    THE predicate. Same DB-row-then-environment precedence every other
+    manifest key gets (see this module's docstring): a row of "0" is an admin
+    who switched the feature OFF and beats a `DASH_SITE_*=1` left in the
+    container's environment. FAILS CLOSED -- an unknown flag name, an
+    unreadable table or a settings object that does not carry the attribute
+    all read as off, because off is the vendor build's shape (CLAUDE.md,
+    "Optional features are off in the vendor build").
+    """
+    attr = FEATURE_SETTINGS_ATTRS.get(str(name or "").strip())
+    if attr is None:
+        return False
+    try:
+        row = conn.execute(
+            f"SELECT value FROM {TABLE} WHERE key = ?", (f"features.{name}",)
+        ).fetchone()
+    except sqlite3.Error:
+        row = None
+    if row is not None:
+        return str(row["value"]).strip() == "1"
+    return bool(getattr(settings, attr, False))
+
+
+# ------------------------------------------- the manifest, without a connection
+# `ui._render` runs on every page and has no `conn` in hand, and the brand it
+# paints is a manifest field (product-surface-2, 2026-08-21). Opening a
+# connection per render for three strings would be a new query on the hot
+# path, so the resolved manifest is cached on `app.state` and dropped whenever
+# a site write lands (setup_routes' PUT/import call `invalidate`). The cache
+# is process-local and rebuilt on demand, so a second worker or a restart
+# simply re-reads the table -- it is never the authority, only a copy.
+_CACHE_ATTR = "site_manifest_cache"
+
+
+def invalidate(app: Any) -> None:
+    """Drop the cached manifest. Called by every writer of `site_settings`;
+    a missed call would leave a page rendering the previous brand until the
+    next restart, which is why the writers live next to each other in
+    setup_routes.py."""
+    state = getattr(app, "state", None)
+    if state is not None and hasattr(state, _CACHE_ATTR):
+        try:
+            delattr(state, _CACHE_ATTR)
+        except AttributeError:
+            pass
+
+
+def manifest_for_app(app: Any, settings: Any = None) -> dict[str, Any]:
+    """`resolved_manifest` for a caller holding only the app (a template
+    render). Cached; never raises -- a database that cannot be opened falls
+    back to the `Settings`-only shape, because a page that cannot paint its
+    own header is worse than a page painting the deploy-time default."""
+    state = getattr(app, "state", None)
+    if settings is None:
+        settings = getattr(state, "settings", None)
+    cached = getattr(state, _CACHE_ATTR, None) if state is not None else None
+    if cached is not None:
+        return cached
+    manifest: dict[str, Any]
+    try:
+        from . import db as dbmod
+
+        conn = dbmod.connect(settings.db_path)
+        try:
+            manifest = resolved_manifest(conn, settings)
+        finally:
+            conn.close()
+    except Exception as exc:                                       # noqa: BLE001
+        log.warning("could not read the site manifest for this render (%s); "
+                    "falling back to the deploy-time values", exc)
+        manifest = _shape({}, settings)
+    if state is not None:
+        setattr(state, _CACHE_ATTR, manifest)
+    return manifest
+
+
+def template_folders(conn: sqlite3.Connection, settings: Any) -> list[str]:
+    """The project template THIS site uses, DB-first (dash-admin-3,
+    2026-08-21). `provision.TEMPLATE_FOLDERS` is the import-time env/default
+    copy and is only the fallback now: the wizard makes `template_folders` a
+    REQUIRED answer, so the folder list a create actually lays down has to be
+    the answer, not the value the container booted with."""
+    return list(resolved_manifest(conn, settings)["template_folders"])
+
+
+def shared_asset_folders(conn: sqlite3.Connection, settings: Any) -> list[tuple[str, str, str]]:
+    """(id, rel, label) triples for this site's shared asset libraries,
+    DB-first, in `provision.SHARED_ASSET_FOLDERS`' own shape so a caller can
+    swap one for the other (dash-admin-3, 2026-08-21)."""
+    return [
+        (str(item["id"]), str(item["rel"]), str(item["label"]))
+        for item in resolved_manifest(conn, settings)["shared_asset_folders"]
+    ]
 
 
 def _settings_fallback(key: str, settings: Any) -> str:

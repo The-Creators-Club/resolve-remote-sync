@@ -165,3 +165,27 @@ def test_old_journals_are_swept():
     remaining = resolve_journal.sessions("FF5")
     assert stale not in remaining
     assert len(remaining) == 1
+
+
+def test_old_rollback_exports_are_swept_too():
+    """comp-resolve-4, 2026-08-21: only `*.json` was ever swept, so the `.drp`
+    save_project() exports beside them grew in the editor's home forever --
+    while RESOLVE_EDIT_SAFETY.md's Housekeeping told the admin they did not."""
+    import os
+    import time
+
+    old_clock = time.time() - (resolve_journal.RETENTION_DAYS + 1) * 86400
+    resolve_journal.record(resolve_journal.KIND_REPLACE_CLIP, "FF5",
+                           new_path="P:/a.mov", clock=lambda: old_clock)
+    stale_export = resolve_journal.journal_root() / "FF5" / "20260101-000000.drp"
+    stale_export.write_bytes(b"drp")
+    os.utime(stale_export, (old_clock, old_clock))
+    fresh_export = resolve_journal.journal_root() / "FF5" / "20260820-000000.drp"
+    fresh_export.write_bytes(b"drp")
+    resolve_journal.reset_for_tests()
+
+    # A new burst is what runs the sweep.
+    resolve_journal.record(resolve_journal.KIND_REPLACE_CLIP, "FF5", new_path="P:/b.mov")
+
+    assert not stale_export.exists()
+    assert fresh_export.exists()

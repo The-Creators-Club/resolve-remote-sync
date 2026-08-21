@@ -125,9 +125,11 @@ foreach ($s in $Suites) {
     }
     # 9999, never 0: a command that fails to start leaves $LASTEXITCODE alone,
     # and the value it would inherit is the previous suite's success (SHIP-5).
+    $suiteOut = @()
     if ($s.Bash -and $bashExe) {
         $global:LASTEXITCODE = 9999
-        & $bashExe -lc "cd '$(ConvertTo-BashPath $s.Dir)' && '$(ConvertTo-BashPath $py)' -m pytest tests -q"
+        & $bashExe -lc "cd '$(ConvertTo-BashPath $s.Dir)' && '$(ConvertTo-BashPath $py)' -m pytest tests -q" 2>&1 |
+            Tee-Object -Variable suiteOut
         $outcome = $(if ($LASTEXITCODE -eq 0) { "PASS" } else { "FAIL (exit $LASTEXITCODE)" })
     }
     else {
@@ -136,12 +138,23 @@ foreach ($s in $Suites) {
         }
         Push-Location $s.Dir
         $global:LASTEXITCODE = 9999
-        & $py -m pytest tests -q
+        & $py -m pytest tests -q 2>&1 | Tee-Object -Variable suiteOut
         $outcome = $(if ($LASTEXITCODE -ne 0) { "FAIL (exit $LASTEXITCODE)" }
                      elseif ($s.Bash) { "PASS* (no Git bash: the remote-script tests SKIPPED, not passed)" }
                      else { "PASS" })
         Pop-Location
     }
+    # A SKIP IS NOT A PASS, and pytest reports one the same quiet way whether
+    # it means "not applicable on this OS" or "the numeric gate on the
+    # exported CLAP artefact only ever runs on one machine in the world"
+    # (product-surface-7, 2026-08-21: companion/tests/test_music_clap_sidecar.py
+    # is skipif'd on a hardcoded E:\ venv and P:\Assets\Music). Surfacing the
+    # count in the summary is what makes "this suite is quietly smaller here
+    # than on the base rig" visible at all.
+    $skipped = 0
+    $m = [regex]::Match(($suiteOut -join "`n"), '(\d+)\s+skipped')
+    if ($m.Success) { $skipped = [int]$m.Groups[1].Value }
+    if ($skipped -gt 0 -and $outcome -like "PASS*") { $outcome = "$outcome  [$skipped skipped]" }
     $results += @{ Name = $s.Name; Outcome = $outcome }
 }
 
@@ -183,4 +196,11 @@ foreach ($r in $results) { Write-Host ("{0,-16} {1}" -f $r.Name, $r.Outcome) }
 $failed = @($results | Where-Object { $_.Outcome -notlike "PASS*" }).Count
 Write-Host ("-" * 46)
 Write-Host ("{0} of {1} suites failed" -f $failed, $results.Count)
+$anySkips = @($results | Where-Object { $_.Outcome -like "*skipped*" }).Count
+if ($anySkips -gt 0) {
+    # Named, not just counted: some of those skips are gates pinned to one
+    # machine's filesystem (product-surface-7). `-rs` on the suite in question
+    # says which.
+    Write-Host "NOTE: some suites SKIPPED tests -- a skip is not a pass. Re-run that suite with -rs to see which, and why." -ForegroundColor Yellow
+}
 exit $failed

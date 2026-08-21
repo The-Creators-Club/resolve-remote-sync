@@ -379,8 +379,17 @@ def add_items(conn: sqlite3.Connection, index_conn: sqlite3.Connection, folder_i
     """
     if get_folder(conn, folder_id) is None:
         raise ClientFolderError("no such folder")
-    present = {r["video_id"] for r in conn.execute(
-        "SELECT video_id FROM client_folder_items WHERE folder_id = ?", (folder_id,))}
+    # By id AND by (share, rel_path): after an index rebuild renumbers
+    # videos.id the folder's row for this clip carries the OLD id, so an
+    # id-only test says "not in the folder", UNIQUE (folder_id, video_id) does
+    # not catch the second insert, and resolve_items then draws the clip twice
+    # on the client's page (broll-4, 2026-08-21).
+    present, present_names = set(), set()
+    for r in conn.execute(
+            "SELECT video_id, share, rel_path FROM client_folder_items "
+            "WHERE folder_id = ?", (folder_id,)):
+        present.add(r["video_id"])
+        present_names.add((r["share"], r["rel_path"]))
     ord_row = conn.execute(
         "SELECT COALESCE(MAX(ord), -1) FROM client_folder_items WHERE folder_id = ?",
         (folder_id,)).fetchone()
@@ -392,15 +401,19 @@ def add_items(conn: sqlite3.Connection, index_conn: sqlite3.Connection, folder_i
         if vid in present:
             already.append(vid)
             continue
+        share, rel_path = _video_identity(index_conn, vid)
+        if (share, rel_path) in present_names:
+            already.append(vid)
+            continue
         if len(present) >= MAX_ITEMS:
             raise ClientFolderError(f"a client folder holds at most {MAX_ITEMS} clips")
-        share, rel_path = _video_identity(index_conn, vid)
         conn.execute(
             "INSERT INTO client_folder_items (folder_id, video_id, share, rel_path, ord, "
             "added_by, added_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (folder_id, vid, share, rel_path, next_ord, added_by, now),
         )
         present.add(vid)
+        present_names.add((share, rel_path))
         added.append(vid)
         next_ord += 1
     conn.execute("UPDATE client_folders SET updated_at = ? WHERE id = ?", (now, folder_id))
@@ -453,10 +466,30 @@ def list_items(conn: sqlite3.Connection, folder_id: int) -> list[sqlite3.Row]:
         (folder_id,)).fetchall()
 
 
-def member_video_id(conn: sqlite3.Connection, folder_id: int, video_id: int) -> bool:
-    return conn.execute(
-        "SELECT 1 FROM client_folder_items WHERE folder_id = ? AND video_id = ?",
-        (folder_id, video_id)).fetchone() is not None
+def member_video_id(conn: sqlite3.Connection, index_conn: sqlite3.Connection,
+                    folder_id: int, video_id: int) -> bool:
+    """True when the folder holds this id AND the index row still IS the clip
+    that was curated under it.
+
+    The (share, rel_path) re-check is not belt-and-braces. broll.db is
+    REPLACED wholesale by an index build (server/publish_db.py), which
+    renumbers videos.id, so a stored item id can come to name a completely
+    different clip -- which is the whole reason items carry their name as well
+    as their id and resolve_items re-resolves on it. This used to answer on
+    the bare id, so the public media/detail routes served whatever clip had
+    inherited the number to anyone holding the link, a clip nobody curated
+    into that folder (broll-1, 2026-08-21).
+    """
+    item = conn.execute(
+        "SELECT share, rel_path FROM client_folder_items "
+        "WHERE folder_id = ? AND video_id = ?",
+        (folder_id, video_id)).fetchone()
+    if item is None:
+        return False
+    video = index_conn.execute(
+        "SELECT share, rel_path FROM videos WHERE id = ?", (video_id,)).fetchone()
+    return video is not None and \
+        (video["share"], video["rel_path"]) == (item["share"], item["rel_path"])
 
 
 # The columns of `videos` that leave the building. Deliberately a list, not
@@ -486,6 +519,13 @@ def resolve_items(conn: sqlite3.Connection, index_conn: sqlite3.Connection,
     sees it).
     """
     out = []
+    # Two items can resolve to ONE clip: a folder written before 2026-08-21
+    # could take a second row for a clip whose id a rebuild had changed
+    # (broll-4), and the client's page then showed the card twice. add_items
+    # cannot make one any more; this is what the folders that already have one
+    # look like. The first item wins, so the curator's order and note are the
+    # ones they set; removing it from the panel reveals the other.
+    seen: set[int] = set()
     for item in list_items(conn, folder_id):
         video = index_conn.execute(
             "SELECT * FROM videos WHERE id = ?", (item["video_id"],)).fetchone()
@@ -501,6 +541,9 @@ def resolve_items(conn: sqlite3.Connection, index_conn: sqlite3.Connection,
                             "rel_path": item["rel_path"], "note": item["note"],
                             "missing": True})
             continue
+        if video["id"] in seen:
+            continue
+        seen.add(video["id"])
         v = dict(video)
         entry = {k: v.get(k) for k in PUBLIC_VIDEO_COLUMNS}
         # The card's id and media URLs follow the CURRENT index row -- which

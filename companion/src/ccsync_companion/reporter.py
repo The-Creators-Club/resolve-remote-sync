@@ -11,6 +11,7 @@ lanes or propagate out of the reporter thread.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import platform
@@ -116,6 +117,46 @@ PAYLOAD_BUDGET_BYTES = 7 * 1024 * 1024
 # media_tree / queue. The server truncates past this; sending fewer keeps the
 # choice of WHICH projects survive on this side, where the selection is known.
 MAX_REPORT_PROJECTS = 64
+
+# How stale an UNCHANGED local_manifest/media_tree may get before it is sent
+# again anyway (ops-efficiency-1, 2026-08-21). The two sections are rebuilt
+# on their own schedules (manifest 300 s, media tree 120 s) but the report
+# goes out every 60 s, so 4 of every 5 manifest sends were byte-identical to
+# the one before -- and the dashboard answers each with a DELETE + INSERT of
+# up to 2000 rows per ticked project plus 4000 media-tree rows, on the NAS,
+# retained by every hourly snapshot. An absent key already means "leave that
+# table alone" on the server (api.py's report handler says so), so the
+# unchanged send buys nothing.
+#
+# The periodic full resend is what makes this safe rather than clever: a
+# dashboard restored from backup, a row pruned by MEDIA_REPORT_MAX_AGE_DAYS,
+# or a report the server truncated all converge within one window, without
+# this side having to know any of it happened.
+SECTION_RESEND_SECONDS = 600.0
+# Sections that may be omitted when unchanged. Nothing else is ever skipped:
+# the lane/status core, the guard block and the ingest sections are either
+# tiny or load-bearing by their ABSENCE (an absent broll_ingest means "the
+# batch finished").
+OMITTABLE_SECTIONS = ("local_manifest", "media_tree")
+
+# How often the reporter re-reads this machine's own Syncthing device id
+# (comp-lane-c-3, 2026-08-21). One loopback GET; the id only changes when
+# Syncthing's home is regenerated under a running companion.
+DEVICE_ID_REFRESH_SECONDS = 300.0
+
+
+def _section_digest(value: Any) -> str:
+    """A stable digest of one report section, or "" when it cannot be taken.
+
+    "" never compares equal to a stored digest, so a section that will not
+    serialize here is simply always sent -- the same direction every other
+    guard in this file fails."""
+    try:
+        return hashlib.sha1(
+            json.dumps(value, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+    except (TypeError, ValueError):
+        return ""
 
 
 class _MeasuredPayload(dict):
@@ -247,6 +288,19 @@ class DashboardReporter:
         self._get_syncthing_device_id = get_syncthing_device_id
         self._machine_id_cache: Optional[str] = None
         self._syncthing_device_id_cache: Optional[str] = None
+        # Monotonic stamp of the last successful myID read -- see
+        # _syncthing_device_id (comp-lane-c-3).
+        self._syncthing_device_id_at = 0.0
+        # Digest + monotonic stamp of the last local_manifest / media_tree
+        # section this reporter actually got ACCEPTED by the dashboard, so an
+        # unchanged one is not re-sent every minute (ops-efficiency-1).
+        self._section_state: dict[str, tuple[str, float]] = {}
+        # Which sections THIS build left out as unchanged (see
+        # _note_sections_sent -- omitted and shed have to be told apart).
+        self._omitted_sections: set[str] = set()
+        # Who the last report went out as, so a sign-in as a different editor
+        # invalidates the section bookkeeping above.
+        self._last_reported_editor: Optional[str] = None
         self._get_editor_name = get_editor_name
         self._get_identity_token = get_identity_token
         self._on_report_response = on_report_response
@@ -339,19 +393,38 @@ class DashboardReporter:
         """This machine's own Syncthing device ID, or None while Syncthing is
         not answering. NOT cached negatively for the process lifetime: lane C
         supervision restarts Syncthing, and the first few reports of a run can
-        legitimately land before it is up."""
-        if self._syncthing_device_id_cache:
-            return self._syncthing_device_id_cache
+        legitimately land before it is up.
+
+        Nor cached POSITIVELY for the process lifetime any more
+        (comp-lane-c-3, 2026-08-21): `syncthing serve` on a home whose
+        key/cert are gone mints a NEW identity, and the supervisor restarting
+        a wiped home is the one event that changes myID mid-run -- an event
+        this companion causes itself. Reporting the dead id kept the
+        dashboard sharing folders with a device that no longer exists (the
+        upsert COALESCEs, so a non-null stale value is never replaced) until
+        the next tray restart. Re-read on a slow cadence instead: one
+        loopback GET every DEVICE_ID_REFRESH_SECONDS. A refresh that comes
+        back empty KEEPS the known id -- Syncthing being briefly down is not
+        evidence that the id changed."""
+        cached = self._syncthing_device_id_cache
+        if cached and (time.monotonic() - self._syncthing_device_id_at) < DEVICE_ID_REFRESH_SECONDS:
+            return cached
         if self._get_syncthing_device_id is None:
             return None
         try:
             value = str(self._get_syncthing_device_id() or "")
         except Exception:
             log.debug("get_syncthing_device_id() failed", exc_info=True)
-            return None
+            return cached or None
         if value:
+            if cached and value != cached:
+                log.warning(
+                    "this machine's Syncthing device id changed (%s -> %s) -- its "
+                    "config must have been regenerated; reporting the new one",
+                    cached, value)
             self._syncthing_device_id_cache = value
-        return value or None
+            self._syncthing_device_id_at = time.monotonic()
+        return value or cached or None
 
     # -- payload -----------------------------------------------------
     def _build_payload(self, light: bool = False, editor_name: Optional[str] = None) -> dict[str, Any]:
@@ -509,7 +582,57 @@ class DashboardReporter:
                     payload["media_tree"] = self._get_media_tree()
                 except Exception:
                     log.exception("get_media_tree() failed")
+            self._drop_unchanged_sections(payload)
         return payload
+
+    # -- unchanged-section suppression (ops-efficiency-1, 2026-08-21) -----
+    def _drop_unchanged_sections(self, payload: dict[str, Any]) -> None:
+        """Omit local_manifest/media_tree when they are byte-identical to
+        the last one the dashboard ACCEPTED and that was less than
+        SECTION_RESEND_SECONDS ago.
+
+        The server contract this leans on is "an absent field leaves that
+        table untouched", which is what the report handler already does and
+        says. Accepted, not merely built: _note_sections_sent is called after
+        a successful POST only, so a failed/timed-out report resends, and a
+        section _fit_payload shed is remembered as NOT sent."""
+        now = time.monotonic()
+        omitted: set[str] = set()
+        for key in OMITTABLE_SECTIONS:
+            if key not in payload:
+                continue
+            digest = _section_digest(payload[key])
+            if not digest:
+                continue
+            sent = self._section_state.get(key)
+            if sent is None or sent[0] != digest or (now - sent[1]) >= SECTION_RESEND_SECONDS:
+                continue
+            payload.pop(key)
+            omitted.add(key)
+            log.debug("report: %s is unchanged since the last accepted report -- omitted", key)
+        self._omitted_sections = omitted
+
+    def _note_sections_sent(self, payload: dict[str, Any]) -> None:
+        """Remember what the dashboard just accepted, per section.
+
+        Three shapes, and only the first two keep a stamp: the section rode
+        this report (record the digest of what actually went, which is the
+        FITTED content -- a trimmed manifest must not be mistaken for the
+        full one next cycle); it was omitted as unchanged (its existing stamp
+        stands, so the forced resend still lands on time); or _fit_payload
+        shed it to make the body fit, in which case the dashboard never got
+        it and the stamp has to go or the section would be suppressed on the
+        strength of a report that dropped it."""
+        now = time.monotonic()
+        for key in OMITTABLE_SECTIONS:
+            if key in payload:
+                digest = _section_digest(payload[key])
+                if digest:
+                    self._section_state[key] = (digest, now)
+                else:
+                    self._section_state.pop(key, None)
+            elif key not in self._omitted_sections:
+                self._section_state.pop(key, None)
 
     def _fit_payload(
         self, payload: dict[str, Any], budget: int = PAYLOAD_BUDGET_BYTES
@@ -647,6 +770,15 @@ class DashboardReporter:
                 log.debug("dashboard report skipped: no verified editor identity")
                 return
 
+        if editor_name != self._last_reported_editor:
+            # A tray sign-in as somebody else reports the same machine under
+            # a new identity, and the dashboard keys media rows on (editor,
+            # machine) -- so the new identity's tables are empty and nothing
+            # this reporter sent before counts as delivered to them
+            # (ops-efficiency-1).
+            self._section_state.clear()
+            self._last_reported_editor = editor_name
+
         url = f"{self.dashboard_url.rstrip('/')}/api/v1/report"
         headers = {"Content-Type": "application/json"}
         # Read from cfg per post, not from the value cached at construction:
@@ -681,6 +813,11 @@ class DashboardReporter:
         # which is what makes live transfer progress feel responsive.
         timeout = self.timeout if light else self.full_report_timeout
         resp = self._http_post(url, payload, headers, timeout)
+        if not light:
+            # AFTER the post: a report that raised never reached the
+            # dashboard, so nothing about it may suppress the next one
+            # (ops-efficiency-1).
+            self._note_sections_sent(payload)
         # The dashboard truncates rather than rejecting an oversized section
         # (B6) and says so in the reply. Log it: "the dashboard is not showing
         # everything this machine has" must be discoverable from this log, not
@@ -691,6 +828,10 @@ class DashboardReporter:
             dropped = None
         if dropped:
             log.warning("the dashboard truncated this report: %s", dropped)
+            # What the server truncated it does NOT hold, so this report must
+            # not be the one that suppresses the next send of it
+            # (ops-efficiency-1).
+            self._section_state.clear()
         if self._on_report_response is not None:
             try:
                 self._on_report_response(resp)

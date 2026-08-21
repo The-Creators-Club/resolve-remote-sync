@@ -420,15 +420,30 @@ def build_transfers_view(
     # under a [ GETTING READY ] chip that could never clear -- it works
     # directly off the NAS tree, so it never gets a completion row, so
     # "ticked and nothing known yet" stayed true for as long as the tick did.
+    # ...and PER MACHINE since 2026-08-21 (dash-admin-8): base_only_editors
+    # is true only when EVERY one of a person's machines is wired, so an
+    # account with a wired desktop and a remote laptop showed the desktop's
+    # rows again -- the same permanent chip, one machine over. The person-level
+    # set stays for the rows whose machine cannot be resolved.
     base_editors = db.base_only_editors(conn)
+    base_pairs = db.base_machines(conn)
     queues = db.fetch_sync_backlog(conn, editor=editor)
     # WHOSE COMPUTER is this Syncthing device? (WP2/WP4.) The share is made
     # with a device, and only the machine registry can say which of an
     # editor's computers that device is -- without it, one person's laptop
     # showed the desktop's backlog and vice versa.
     machine_plans = db.fetch_machine_selections(conn)
+    # WHOSE device it is comes from the REGISTRY first and the device's label
+    # second (data-model-4, 2026-08-21). Two authorities bound a device to an
+    # editor: `devices.editor_username`, resolved from the label an admin
+    # typed at approve time, and `machines.syncthing_device_id`, reported by
+    # an authenticated companion. A device approved straight in the Syncthing
+    # GUI carries a HOSTNAME as its label, which resolves to no editor, so
+    # this join dropped that machine's whole lane C backlog even though the
+    # registry knew exactly whose computer it was.
     lane_c_q = """SELECT c.project_id, c.device_id AS device_row, c.need_items,
-                         c.need_bytes, p.slug, p.label, d.editor_username,
+                         c.need_bytes, p.slug, p.label,
+                         COALESCE(m.editor_username, d.editor_username) AS editor_username,
                          m.machine
                   FROM completion_current c
                   JOIN projects p ON p.id = c.project_id
@@ -442,6 +457,8 @@ def build_transfers_view(
         if who in base_editors:
             continue
         machine = r["machine"] or ""
+        if machine and (who, machine) in base_pairs:
+            continue
         planned = machine_plans.get(r["slug"], [])
         if machine:
             if (who, machine) not in planned:
@@ -519,6 +536,8 @@ def build_transfers_view(
             # "Getting ready" is a promise that syncing starts in a minute or
             # two. For a base rig it never does (CR-28).
             continue
+        if (r["editor"] or "", r["machine"] or "") in base_pairs:
+            continue        # ...and the same for ONE wired machine of a mixed account
         # Completion for THIS computer where the device is resolvable, and
         # for any of the person's devices where it is not (a device that has
         # never reported a machine_id is all we had before WP1).
@@ -527,7 +546,7 @@ def build_transfers_view(
                JOIN devices d ON d.id = c.device_id
                JOIN projects p ON p.id = c.project_id
                LEFT JOIN machines m ON m.syncthing_device_id = d.device_id
-               WHERE p.slug = ? AND d.editor_username = ?
+               WHERE p.slug = ? AND COALESCE(m.editor_username, d.editor_username) = ?
                  AND (m.machine IS NULL OR m.machine = ?)""",
             (r["slug"], r["editor"], r["machine"]),
         ).fetchone()
@@ -863,6 +882,22 @@ def api_health(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -
     healthcheck reads `ok` out of the body instead (DASH-2, 2026-08-14)."""
     settings = request.app.state.settings
     collector = db.fetch_collector_status(conn)
+    # A DEAD collector thread is not a healthy dashboard, whatever the last
+    # poll said (ops-efficiency-6, 2026-08-21). db.fetch_collector_status only
+    # sees poll_runs, so a thread that died between two cycles reads as
+    # reachable until COLLECTOR_STALE_SECONDS has passed -- and one that died
+    # before it ever ran a Syncthing-backed cycle (a Syncthing-less
+    # deployment) never reads as anything else at all. Absent state (a test
+    # that built the app without entering the lifespan) is not evidence of a
+    # fault, and a collector that was STOPPED on purpose is not either: see
+    # Collector.thread_died.
+    runner = getattr(request.app.state, "collector", None)
+    try:
+        collector_down = bool(runner is not None and runner.thread_died())
+    except Exception:  # noqa: BLE001
+        collector_down = False
+    ok = (bool(collector["syncthing_reachable"]) or not settings.syncthing_url) \
+        and not collector_down
     if not (
         auth.get_session_user(request) is not None
         or companion_token_ok(settings, conn,
@@ -871,11 +906,11 @@ def api_health(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -
         # Enough for a probe to distinguish "process up" from "process up but
         # blind", and nothing an outsider can inventory the fleet from.
         return {
-            "ok": bool(collector["syncthing_reachable"]) or not settings.syncthing_url,
+            "ok": ok,
             "version": VERSION,
         }
     return {
-        "ok": bool(collector["syncthing_reachable"]) or not settings.syncthing_url,
+        "ok": ok,
         "version": VERSION,
         # WHICH CODE IS LIVE (ZERO_TOUCH_PLAN.md WP K, 2026-08-18). `ok` and
         # `version` above are untouched -- ship.ps1, the onboarding wizard and
@@ -892,6 +927,10 @@ def api_health(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -
         # syncthing_reachable, hence `ok` above -- which is what Docker's
         # healthcheck (see deploy/compose.yaml) parses out of this body.
         "collector_stale": collector["collector_stale"],
+        # ...and the direct answer, which does not wait for a poll to go
+        # stale: the loop thread is gone and app.CollectorWatchdog has not
+        # (yet) put one back (ops-efficiency-6, 2026-08-21).
+        "collector_alive": not collector_down,
         "folder_errors": collector["folder_errors"],
         "last_polls": {
             kind: {"finished_at": run["finished_at"], "ok": bool(run["ok"]), "error": run["error"]}
@@ -1018,12 +1057,16 @@ def api_site(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> 
         "rclone_remote": site["rclone_remote"],
         "nas_syncthing_id": _nas_syncthing_id(request, conn),
         "dashboard_url": site["dashboard_url"],
-        # Shipped from provision.py (env-derived) UNLESS a site_settings row
-        # overrides it (site_store.resolved_manifest); either way the tree an
-        # installer expects and the tree /project-setup creates cannot drift
-        # apart. server/common.py holds the same two lists and
-        # server/tests/test_cross_component.py pins them byte-identical for
-        # the env-only shape.
+        # A site_settings row when there is one, else provision.py's
+        # env-derived copy (site_store.resolved_manifest). The claim that the
+        # tree an installer expects and the tree /project-setup creates cannot
+        # drift apart was FALSE for the DB-override case until 2026-08-21
+        # (dash-admin-3): this route served the row while create_tree_project,
+        # the /project-setup preview and the collector's shared-folder
+        # provisioning all read the import-time env value. All three go
+        # through site_store now, so the claim holds again. server/common.py
+        # holds the same two lists and server/tests/test_cross_component.py
+        # pins them byte-identical for the env-only shape.
         "template_folders": site["template_folders"],
         "shared_asset_folders": site["shared_asset_folders"],
         # READ-ONLY, and deliberately not configurable: which extensions are
@@ -1367,8 +1410,21 @@ def api_verify(
         "token": auth.make_identity_token(settings.session_secret, username),
         # The report token is a shared secret every editor's companion uses;
         # hand it to a just-verified editor so onboarding needs no extra
-        # copy-paste of secrets. Empty when the server has none configured.
-        "report_token": settings.report_token,
+        # copy-paste of secrets. Empty when the server has none configured
+        # -- and empty once the operator has RETIRED it with
+        # DASH_SHARED_REPORT_TOKEN_ENABLED=0 (dash-core-2, 2026-08-21).
+        # Handing out a token every route now refuses made a freshly signed-in
+        # companion adopt a credential its very next report would 401 on, with
+        # nothing on the dashboard pointing at why: the machine never gets far
+        # enough to write a report_auth row.
+        "report_token": (settings.report_token
+                         if settings.shared_report_token_enabled else ""),
+        # Which credential this fleet expects, so the tray can say "ask your
+        # admin for a per-editor token" rather than "report failed". CR-18
+        # stands: /verify never mints a cce1 token.
+        "report_token_kind": ("shared" if (settings.report_token
+                                           and settings.shared_report_token_enabled)
+                              else "editor"),
         # "base" (direct-NAS-access machine, e.g. the admin's own rig) vs
         # "editor" (normal remote sync lanes) -- same DASH_ADMIN_USERS list
         # that gates dashboard admin actions, reused here by design (see
@@ -1590,6 +1646,17 @@ def api_tick(
         raise HTTPException(
             status_code=404,
             detail=f"{editor!r} has no computer named {target!r}",
+        )
+    if target is not None and (editor, target) in db.base_machines(conn):
+        # CR-28 per MACHINE (dash-admin-8, 2026-08-21). The refusal above is
+        # per person and so cannot see a mixed account: one wired desktop and
+        # one remote laptop under one name is a shape a site can have (commit
+        # f27c181), and a tick on the wired half is the same stuck
+        # [ GETTING READY ] chip CR-28 was raised for.
+        raise HTTPException(
+            status_code=409,
+            detail=f"{target!r} is a wired machine: it works directly off the NAS "
+                   "and syncs nothing, so projects cannot be ticked for it",
         )
     now = db.utcnow_iso()
     if target is None:
@@ -1867,7 +1934,7 @@ def create_tree_project(
     and it does not touch the folder's contents. use_existing=True means
     "adopt it AND add the standard template subfolders"; every mkdir is
     exist_ok so a pre-populated folder is left alone."""
-    from . import provision
+    from . import provision, site_store
 
     parent_path, parent_norm = _safe_rel(settings, parent_rel)
     if not parent_path.is_dir():
@@ -1929,7 +1996,13 @@ def create_tree_project(
 
     try:
         target.mkdir(parents=True, exist_ok=True)
-        for sub in provision.TEMPLATE_FOLDERS:
+        # The site's OWN template, DB-first (dash-admin-3 / CR-58,
+        # 2026-08-21). This used to iterate provision.TEMPLATE_FOLDERS -- the
+        # value the container booted with -- so on an appliance, where compose
+        # sets no DASH_SITE_*, an admin whose wizard answer said
+        # "Footage, Audio, Graphics" was PREVIEWED that list by /project-setup
+        # and then given the documentary defaults by this create.
+        for sub in site_store.template_folders(conn, settings):
             (target / sub).mkdir(parents=True, exist_ok=True)
         provision.write_marker(target, slug, created_by=user)
     except OSError as exc:
@@ -2378,21 +2451,71 @@ def api_admin_disable_user(
 ) -> dict[str, Any]:
     """Disable (or re-enable) a LOCAL account -- there is no NAS twin of this
     action in scope here (docs/ZERO_TOUCH_PLAN.md §5's TrueNAS/DSM `locked`
-    field has no toggle on the NasBackend Protocol)."""
-    _require_admin(request)
+    field has no toggle on the NasBackend Protocol).
+
+    Disabling REVOKES, it does not just flag (dash-core-3 / trust-model-2,
+    2026-08-21). `users.disabled` is read at login and by is_local_admin, and
+    by nothing else: a session cookie is a bearer token whose server-side row
+    decides (sessions.py) and a cce1 report token authenticates a MACHINE, so
+    the contractor whose account an admin disabled kept their open tab for up
+    to 7 days and their companion kept reporting and pulling selections for
+    ever. DELETE has purged both since it was written; DISABLE is the
+    non-destructive button an admin actually reaches for, so it must mean the
+    same thing. Re-enabling gives the account back its password, not its old
+    sessions or its old machine token: a new token is one click on the Users
+    page.
+
+    The two refusals are delete's (dash-admin-5, 2026-08-21), for the same
+    reason and with the same 409: is_local_admin returns False for a disabled
+    row and auth.is_admin consults it on every request, so disabling yourself
+    or the last enabled admin takes admin away from the very session that did
+    it, and only DASH_ADMIN_USERS (a redeploy on the appliance shape) or
+    sqlite surgery gets it back."""
+    admin = _require_admin(request)
     _require_local_mode(request)
     settings = request.app.state.settings
     username = username.strip().lower()
+    user = local_users.get_user(conn, username)
+    if user is None:
+        raise HTTPException(status_code=404, detail=f"{username!r} is not a local account")
+    if payload.disabled:
+        if username == admin.strip().lower():
+            raise HTTPException(
+                status_code=409,
+                detail="you cannot disable the account you are signed in as - sign in as "
+                       "another admin to disable this one",
+            )
+        if (user["role"] == "admin" and not user["disabled"]
+                and local_users.count_enabled_admins(conn) <= 1):
+            raise HTTPException(
+                status_code=409,
+                detail="this is the last enabled admin account - create another admin "
+                       "before disabling it",
+            )
     try:
         local_users.disable_user(conn, username, payload.disabled)
     except local_users.LocalUserError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        # 409 for a guard refusal, 404 only for "no such account": the request
+        # is well-formed and would be fine against a different one, which is
+        # the same split api_admin_delete_user documents.
+        status = 404 if "not a local account" in str(exc) else 409
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
     conn.commit()
-    return {"ok": True, "view": build_admin_users_view(settings, conn)}
+    purged = {"sessions_revoked": 0, "report_tokens_revoked": 0}
+    if payload.disabled:
+        # AFTER the commit: _purge_user_credentials revokes sessions through
+        # the store's own connection to the same SQLite file, and calling it
+        # with a write transaction open on `conn` deadlocks the two.
+        purged = _purge_user_credentials(request, conn, username, by=admin,
+                                         why="account disabled")
+        log.warning("admin %r disabled local account %r (%d session(s), %d report "
+                    "token(s) revoked)", admin, username,
+                    purged["sessions_revoked"], purged["report_tokens_revoked"])
+    return {"ok": True, "purged": purged, "view": build_admin_users_view(settings, conn)}
 
 
 def _purge_user_credentials(request: Request, conn: sqlite3.Connection, username: str, *,
-                            by: str) -> dict[str, int]:
+                            by: str, why: str = "account deleted") -> dict[str, int]:
     """Everything that can still ACT as `username` once the account row is
     gone. Deleting the row alone is not enough: a session cookie is a bearer
     token whose server-side record decides (sessions.py), and a per-editor
@@ -2403,16 +2526,21 @@ def _purge_user_credentials(request: Request, conn: sqlite3.Connection, username
     session revocation is NOT, because the session store opens its own
     short-lived connection to the same SQLite file -- call this while an
     uncommitted write transaction is open on `conn` and the two deadlock.
-    Hence the ordering contract: commit the delete, then call this."""
+    Hence the ordering contract: commit the delete, then call this.
+
+    `why` is what the revocation records say happened -- "account deleted" or
+    "account disabled" (dash-core-3, 2026-08-21): both take every credential
+    away, and an admin reading a revoked token's reason should see which one
+    it was."""
     revoked_tokens = 0
     for row in db.fetch_editor_report_tokens(conn, editor=username):
         if db.revoke_editor_report_token(conn, row["token_id"],
-                                         revoked_by=f"admin:{by} (account deleted)"):
+                                         revoked_by=f"admin:{by} ({why})"):
             revoked_tokens += 1
     conn.commit()
     store = auth.session_store(request)
     revoked_sessions = (
-        store.revoke_user(username, by=f"admin:{by} (account deleted)")
+        store.revoke_user(username, by=f"admin:{by} ({why})")
         if store is not None else 0
     )
     return {"sessions_revoked": revoked_sessions, "report_tokens_revoked": revoked_tokens}
@@ -2614,9 +2742,14 @@ def api_fleet_halt(
     stopped syncing" must be able to confirm that from the dashboard --
     while setting it is admin-only below."""
     settings = request.app.state.settings
+    # Both companion credentials, through the one resolver every other
+    # companion-facing route has used since 2026-08-17 (dash-core-5,
+    # 2026-08-21): this route was missed, so it still honoured a shared token
+    # that DASH_SHARED_REPORT_TOKEN_ENABLED=0 had retired and still 401'd a
+    # companion holding only its per-editor cce1 token.
     if not (
         auth.get_session_user(request) is not None
-        or token_ok(settings.report_token, request.headers.get("x-ccsync-token", ""))
+        or companion_token_ok(settings, conn, request.headers.get("x-ccsync-token", ""))
     ):
         raise HTTPException(status_code=401, detail="log in first")
     return {"halt": db.get_fleet_halt(conn)}
@@ -2720,12 +2853,27 @@ def api_resume_machine_lane_b(
     reach the decision -- the admin who just checked the NAS, rather than
     only the editor sitting in front of the machine.
 
-    Deliberately allowed against a machine whose last report showed no trip:
-    the admin may be getting in front of one, and the request simply expires
-    unused when the machine reports clear.
+    Refused for a machine whose last report does NOT show a trip
+    (comp-lanes-ab-2, 2026-08-21). It used to be allowed, to "get in front of
+    one" -- but a request armed before the trip is a decision taken about a
+    trip nobody has seen: the machine's first report after it delivers an
+    automatic resume of whatever tripped, which for an offline machine can be
+    days later and a completely different cause. There is nothing to get in
+    front of anyway, because the request is delivered on the machine's next
+    report either way. A companion too old to send a guard section (< 0.9.43)
+    reports nothing here and is refused for the same reason: it has no
+    breaker to clear.
     """
     admin = _require_admin(request)
     editor, machine = editor.strip().lower(), machine.strip()
+    if machine not in db.machines_of(conn, editor):
+        raise HTTPException(status_code=404, detail=f"no machine {machine!r} for {editor!r}")
+    if not db.machine_breaker_tripped(conn, editor, machine):
+        raise HTTPException(
+            status_code=409,
+            detail="that computer's last report does not show proxy download parked, "
+                   "so there is nothing to resume. Wait for its next report and try again.",
+        )
     if not db.request_lane_b_resume(conn, editor, machine, admin, db.utcnow_iso()):
         raise HTTPException(status_code=404, detail=f"no machine {machine!r} for {editor!r}")
     conn.commit()
@@ -2769,6 +2917,14 @@ def api_copy_machine_plan(
             status_code=409,
             detail="this is a base rig account: it works directly off the NAS "
                    "and syncs nothing, so projects cannot be ticked for it",
+        )
+    if (editor, machine) in db.base_machines(conn):
+        # Per MACHINE (dash-admin-8, 2026-08-21): copying a plan onto a wired
+        # computer is a tick on it by another route.
+        raise HTTPException(
+            status_code=409,
+            detail=f"{machine!r} is a wired machine: it works directly off the NAS "
+                   "and syncs nothing, so a plan cannot be copied onto it",
         )
     count = db.copy_machine_plan(conn, editor, source, machine, admin, db.utcnow_iso())
     conn.commit()
@@ -2881,6 +3037,33 @@ def _sweep_stale_parts(dest_dir: Path, now: float | None = None) -> list[str]:
         log.warning("removed %d abandoned package staging file(s): %s",
                     len(swept), ", ".join(sorted(swept)))
     return swept
+
+
+def _version_tuple(text: str) -> tuple[int, ...]:
+    """Dotted-numeric to a comparable tuple; () for anything a companion
+    might report that is not one (a "+dirty" dev build, an empty string),
+    which compares lower than every real version. Numeric per part on
+    purpose: after 0.9.9 comes 0.10.0, never 1.0 (owner's rule 2026-08-18),
+    and a string compare puts 0.10.0 BELOW 0.9.9."""
+    raw = str(text or "").strip()
+    if not raw or any(ch not in "0123456789." for ch in raw):
+        return ()
+    try:
+        return tuple(int(p) for p in raw.split(".") if p != "")
+    except ValueError:
+        return ()
+
+
+def _version_at_least(running: str, wanted: str) -> bool:
+    """Is `running` the version that was asked for, or a later one?
+
+    Falls back to an exact string match when either side is not
+    dotted-numeric: an unparsable version must never read as "past it" and
+    silently retire a request the machine has not honoured (dash-core-6)."""
+    if running == wanted:
+        return True
+    a, b = _version_tuple(running), _version_tuple(wanted)
+    return bool(a and b and a >= b)
 
 
 def _upgrade_info(
@@ -3544,6 +3727,18 @@ def _register_machine(
         platform=(payload.platform or "").strip().lower() or None,
         syncthing_device_id=device_id,
     )
+    if device_id:
+        # ONE device is ONE computer (data-model-5, 2026-08-21). A refused
+        # rename adoption leaves the old row holding this device id along
+        # with its plan, and then the enforce cycle hands the live machine
+        # the UNION of both rows' plans while GET /selection returns only its
+        # own -- Syncthing offers folders the companion never configures.
+        # This report is the fresher evidence, so the id moves here.
+        for lost in db.release_device_id_elsewhere(conn, editor, machine, device_id):
+            log.warning(
+                "%s/%s reports Syncthing device %s, which was still recorded on %s "
+                "-- taking it off that row (one device is one computer). Its sync "
+                "plan is untouched.", editor, machine, device_id, lost)
 
 
 def flatten_transport_health(
@@ -4457,14 +4652,20 @@ def api_report(
     update_request = db.machine_update_request(conn, editor, machine)
     if update_request:
         running = (payload.companion_version or "").strip()
-        if running and running == update_request["version"]:
+        # AT OR PAST the version asked for, not just exactly it (dash-core-6,
+        # 2026-08-21). A machine that was off when the push was made and then
+        # took a NEWER build -- its editor clicked Update, or auto_update did
+        # -- never reports the requested string again, so the request rode
+        # every 30 s report for ever, the companion logged "IGNORED" once,
+        # and the packages page showed a push that could never complete.
+        if running and _version_at_least(running, update_request["version"]):
             db.clear_machine_update_request(conn, editor, machine)
             # Committed HERE: the report's own commit is above us, and an
             # uncommitted clear would re-offer the same update on the next
             # report forever (and re-apply it after every restart).
             conn.commit()
-            log.info("%s/%s is now on v%s -- the pushed update is done",
-                     editor, machine, running)
+            log.info("%s/%s is on v%s (asked for v%s) -- the pushed update is done",
+                     editor, machine, running, update_request["version"])
         else:
             result["commands"]["upgrade"] = {
                 "apply": True,
@@ -4477,24 +4678,31 @@ def api_report(
     # the editor's own tray could and a remote machine therefore stayed
     # parked until its owner was next at the keyboard.
     #
-    # Cleared the moment the machine reports the breaker is no longer
-    # tripped -- which is both "the request is done" and the thing that
-    # stops it from clearing some later, unrelated trip. A companion that
-    # has already resumed ignores a command it sees again, so the overlap
-    # between resuming and the next report costs nothing.
+    # ONE SHOT: cleared as soon as the reply that carries it goes out, not
+    # when the machine later reports itself clear (comp-lanes-ab-2,
+    # 2026-08-21). A standing request re-armed the breaker on EVERY report:
+    # a pass that re-trips inside the report interval (seconds -- a deleting
+    # pass is bounded only by rclone's --max-delete 100) reported tripped,
+    # the request was still there, the next reply resumed it again, and one
+    # admin click became 100 more proxies into .ccsync-trash per cycle for
+    # ever. That unbounded sequence is precisely what the breaker exists to
+    # stop (lane_guard.py's module docstring); a second trip is a second
+    # decision, so it needs a second click.
+    #
+    # `requested_at` rides the command so the companion can refuse to apply
+    # the same stamp twice: a lost reply costs one more click, which is the
+    # safe direction, but a REDELIVERED one must not resume a later trip.
     resume_request = db.lane_b_resume_request(conn, editor, machine)
     if resume_request:
         guard = payload.sync_guard
         breaker = guard.lane_b_breaker if guard is not None else None
-        # Only a report that CARRIED a guard section can retire the request:
-        # a companion too old to send one would otherwise look like "not
-        # tripped" forever and the admin's click would never be delivered.
+        # A report that CARRIED a guard section saying "not tripped" retires
+        # the request without sending it: there is nothing to resume, and the
+        # machine has answered the question. A companion too old to send one
+        # is not "not tripped" -- it gets the command (once), or the admin's
+        # click would never reach it at all.
         if breaker is not None and not breaker.tripped:
-            db.clear_lane_b_resume_request(conn, editor, machine)
-            # Committed HERE for the same reason the pushed update's clear
-            # is: the report's own commit is above us.
-            conn.commit()
-            log.info("%s/%s has resumed proxy download -- the request is done",
+            log.info("%s/%s is not parked after all -- dropping the resume request",
                      editor, machine)
         else:
             result["commands"]["resume_lane_b"] = {
@@ -4502,6 +4710,12 @@ def api_report(
                 "requested_by": resume_request["by_user"],
                 "requested_at": resume_request["at"],
             }
+            log.info("%s/%s: delivering %s's resume-proxy-download request (%s)",
+                     editor, machine, resume_request["by_user"], resume_request["at"])
+        db.clear_lane_b_resume_request(conn, editor, machine)
+        # Committed HERE for the same reason the pushed update's clear is:
+        # the report's own commit is above us.
+        conn.commit()
     # B-roll ingest cancels (BROLL_INGEST_PLAN.md §4.2). Present ONLY when
     # there is something to cancel -- unlike `halt`, an empty list is not an
     # instruction and this rides every tick of every machine. The companion's

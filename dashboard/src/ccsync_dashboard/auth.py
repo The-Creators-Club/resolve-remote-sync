@@ -184,14 +184,35 @@ def _open_local_conn(settings: Settings) -> sqlite3.Connection | None:
 # Request because the IP budget needs the peer and the store lives on
 # app.state.
 
+# Peers we have already complained about for sending X-Forwarded-For without
+# being in DASH_TRUSTED_PROXIES. Warn-once per process, like the collector's
+# unknown-device warning: every request forever would be noise, and silence is
+# what let the misconfiguration hide (trust-model-3, 2026-08-21).
+_warned_forwarding_peers: set[str] = set()
+
+
 def client_ip(request: Request | None) -> str:
     """The peer address, and deliberately NOT anything X-Forwarded-For says
     unless the peer is a proxy we configured. A spoofable IP budget is worse
     than none: it lets an attacker exhaust an innocent editor's budget."""
     if request is None:
         return ""
+    settings = _settings_of(request)
     peer = getattr(getattr(request, "client", None), "host", "") or ""
-    if not peer or not trusted_proxy(_settings_of(request), peer):
+    if not peer or not trusted_proxy(settings, peer):
+        if peer and peer not in _warned_forwarding_peers and (
+                request.headers.get("x-forwarded-for") or "").strip():
+            # THE signature of the shipped TrueNAS shape: Tailscale Serve on
+            # the docker host arrives from the bridge gateway (172.17.0.1),
+            # which is not in the default trusted list, so every editor and
+            # every companion shares one login-throttle bucket and the
+            # sessions page shows one address for the whole fleet.
+            _warned_forwarding_peers.add(peer)
+            log.warning(
+                "X-Forwarded-For from %s, which is not in DASH_TRUSTED_PROXIES (%s): "
+                "the header is IGNORED, so every request through that proxy counts as "
+                "one client. Add the proxy's address to DASH_TRUSTED_PROXIES.",
+                peer, getattr(settings, "trusted_proxies", "?"))
         return peer
     forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
     return forwarded or peer
@@ -219,9 +240,16 @@ def record_login_failure(request: Request | None, username: str,
 
 
 def clear_login_failures(request: Request | None, username: str) -> None:
+    """Only the USERNAME budget is cleared by a successful sign-in.
+
+    Clearing the IP row too let anyone who owns one valid account reset the
+    spray budget at will: four failures against four usernames, log in as
+    yourself, repeat (dash-core-4, 2026-08-21). The IP row is the second of
+    the two budgets item 15 relies on, and it ages out on its own through
+    LOGIN_FAILURE_WINDOW_SECONDS."""
     store = session_store(request)
     if store is not None:
-        store.clear_failures(username, client_ip(request))
+        store.clear_failures(username)
 
 
 # ------------------------------------------------------------ sessions

@@ -424,22 +424,38 @@ class MusicIngestor(broll_ingest.BrollIngestor):
         return True
 
     # -- uploads -----------------------------------------------------------
-    def _queue(self) -> Any:
+    def _new_queue(self) -> Any:
         """The shared upload queue, pointed at the MUSIC library.
 
         `archive_rel` is what makes one queue implementation serve both kinds:
         b-roll's files hang off `Assets/B-roll Archive`, music's off
         `Assets/Music`, and both are relative to the rclone remote's root
         because only this machine knows what that is mounted at.
+
+        Per BATCH, not per process (comp-loopback-1, 2026-08-21): a cancel
+        drops the queue, and the library path is read here so the batch after
+        one is pointed at ITS `archive_remote_rel` rather than the cancelled
+        batch's.
         """
-        if self._uploader is None:
-            with self._lock:
-                remote_rel = (self._batch or {}).get("archive_remote_rel")
-            self._uploader = broll_upload.UploadQueue(
-                lambda: self.cfg, archive_rel=remote_rel or LIBRARY_REMOTE_REL)
-            if self._upload_paused:
-                self._uploader.pause()
-        return self._uploader
+        with self._lock:
+            remote_rel = (self._batch or {}).get("archive_remote_rel")
+        return broll_upload.UploadQueue(
+            lambda: self.cfg, archive_rel=remote_rel or LIBRARY_REMOTE_REL)
+
+    def _upload_plan(self, item: dict) -> dict[str, tuple[str, str]]:
+        """The one file this track owns, under the name the SERVER allocated.
+
+        b-roll's four artefacts and music's one share the retry path
+        (comp-loopback-3, 2026-08-21), so both kinds have to be able to answer
+        "which local file is behind this remote rel". An item with no
+        `dest_name` has nothing to answer with, and that is the same case
+        `_enqueue_uploads` fails it for.
+        """
+        dest = str(item.get("dest_name") or "")
+        if not dest:
+            return {}
+        local = (item.get("outputs") or {}).get("audio") or item.get("local_path")
+        return {PurePosixPath(dest).name: (KIND_AUDIO, str(local or ""))}
 
     def _enqueue_uploads(self, item: dict, final_state: str = "") -> None:
         """One file, under the name the SERVER allocated.

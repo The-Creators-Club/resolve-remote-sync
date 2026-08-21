@@ -358,17 +358,30 @@ def describe_latest(project_name: Any = None) -> str:
             f"{data.get('started') or 'unknown time'}")
 
 
+# What the sweep is allowed to delete. `.drp` as well as `.json`
+# (comp-resolve-4, 2026-08-21): save_project() writes its exported rollback
+# copy into this same directory, up to once per project per 15 minutes of
+# editing, and only the journals were ever swept -- so a machine that
+# auto-relinks regularly accreted a copy of the whole project DATABASE (tens
+# of MB each) in the editor's home forever, while
+# docs/RESOLVE_EDIT_SAFETY.md's Housekeeping section told their admin that
+# "journals and exports older than 60 days are swept on the next write".
+SWEPT_SUFFIXES = ("*.json", "*.drp")
+
+
 def _sweep(slug: str, now: float) -> None:
-    """Delete journals past RETENTION_DAYS for this project. Best effort:
-    the sweep runs on the write path, so a failure must cost nothing."""
+    """Delete journals and rollback exports past RETENTION_DAYS for this
+    project. Best effort: the sweep runs on the write path, so a failure must
+    cost nothing."""
     cutoff = now - (RETENTION_DAYS * 86400.0)
     try:
         directory = journal_root() / slug
-        for path in directory.glob("*.json"):
-            try:
-                if path.stat().st_mtime < cutoff:
-                    path.unlink()
-            except OSError:
-                continue
+        for pattern in SWEPT_SUFFIXES:
+            for path in directory.glob(pattern):
+                try:
+                    if path.stat().st_mtime < cutoff:
+                        path.unlink()
+                except OSError:
+                    continue
     except Exception:
         return

@@ -87,6 +87,13 @@ BATCHES_PREFIX = "/api/ingest-batches"
 # appear in an ASGI scope.
 IDENTITY_HEADER = b"x-ccsync-user"
 ADMIN_HEADER = b"x-ccsync-admin"
+# What the FLEET routes trust about `X-CCSync-Token` (CR-55, 2026-08-21). The
+# b-roll tree cannot verify a per-editor `cce1.<id>.<secret>` token -- that
+# needs this database, which it never sees -- so the mount resolves the
+# credential and says so in one header the sub-app believes only when a mount
+# installed the trust. Values: `shared`, or `editor:<name>`.
+TOKEN_HEADER = b"x-ccsync-token"
+FLEET_AUTH_HEADER = b"x-ccsync-fleet-auth"
 # Mounting a second FastAPI() brings its default interactive docs along, and
 # they would be reachable by every editor with a session. The dashboard does
 # not publish an API explorer; neither does its mount.
@@ -127,7 +134,7 @@ def check_ingest_token(token: str) -> str | None:
 
 
 class BrollGate:
-    """ASGI wrapper around the b-roll sub-app. Three jobs, all fail-closed.
+    """ASGI wrapper around the b-roll sub-app. Four jobs, all fail-closed.
 
     1. `/api/ingest/*` demands a matching X-Ingest-Token, ALWAYS. The b-roll
        app's own verify_ingest_token opens ingest to everyone when no token is
@@ -157,6 +164,13 @@ class BrollGate:
        the paths that read the headers today would mean a route added upstream
        tomorrow inherits a forgeable identity, and the cost is two list
        comprehensions over ~8 headers.
+    4. The MACHINE credential is resolved here and stamped into
+       `X-CCSync-Fleet-Auth` (CR-55, 2026-08-21), stripped inbound first for
+       the reason above. The sub-app cannot check a per-editor `cce1.` token
+       itself -- the hash is in this database, which it never sees -- so before
+       this it 403'd every claim/heartbeat/result/uploaded from an editor whose
+       admin had minted them one, while login_gate's fleet carve-out waved the
+       same request through. See `_fleet_stamp`.
 
     A plain ASGI wrapper rather than BaseHTTPMiddleware or add_middleware:
     nothing is re-wrapped or buffered on the way through, so the media routes'
@@ -181,7 +195,11 @@ class BrollGate:
         is not the only thing that ever reads it.
         """
         headers = [(k, v) for k, v in scope.get("headers", ())
-                   if k.lower() not in (IDENTITY_HEADER, ADMIN_HEADER)]
+                   if k.lower() not in (IDENTITY_HEADER, ADMIN_HEADER,
+                                        FLEET_AUTH_HEADER)]
+        stamp = self._fleet_stamp(headers)
+        if stamp is not None:
+            headers.append((FLEET_AUTH_HEADER, stamp))
         username = (auth.read_session_cookie(self._secret, _session_cookie(headers))
                     if self._secret else None)
         if username:
@@ -198,6 +216,66 @@ class BrollGate:
         new_scope = dict(scope)
         new_scope["headers"] = headers
         return new_scope
+
+    def _fleet_stamp(self, headers: list[tuple[bytes, bytes]]) -> bytes | None:
+        """Our verdict on this request's `X-CCSync-Token`, or None.
+
+        CR-55, 2026-08-21, the exact mirror of MusicGate._fleet_stamp and
+        YtdlGate's. `app/fleet_auth.py` compared that header against the shared
+        DASH_REPORT_TOKEN and nothing else, so the moment an admin minted an
+        editor a per-editor `cce1.` token -- which the companion PREFERS over
+        the shared one (identity.preferred_report_token, 2026-08-17) -- every
+        claim, heartbeat, result and uploaded from that editor's machine was
+        answered 403 one layer below a gate that had just waved it through, and
+        their dropped clips never reached the archive. Only this side can tell:
+        the per-editor token is verified against this database.
+
+        Costs nothing on a browser request (no such header) and one regex on a
+        shared-token one; a connection is opened only for a token that already
+        has the per-editor SHAPE, exactly as app.py's pre-body gate does. Any
+        failure here is "no stamp", never "stamped anyway" -- the sub-app then
+        falls back to its own fail-closed shared-secret compare.
+        """
+        if self._settings is None:
+            return None
+        raw = ""
+        for key, value in headers:
+            if key.lower() == TOKEN_HEADER:
+                raw = value.decode("latin-1", "replace").strip()
+                break
+        if not raw:
+            return None
+        # Imported here, not at module scope: auth.py imports THIS module for
+        # check_ingest_token, and api imports auth, so a module-level
+        # `from . import api` would close that loop at boot.
+        from . import api, db
+        try:
+            if db.looks_like_editor_report_token(raw):
+                conn = db.connect(self._settings.db_path)
+                try:
+                    kind, editor = api.resolve_companion_credential(
+                        self._settings, conn, raw)
+                finally:
+                    conn.close()
+            else:
+                kind, editor = api.resolve_companion_credential(
+                    self._settings, None, raw)
+        except Exception as e:  # noqa: BLE001 - an unopenable DB is not an auth pass
+            log.warning("b-roll fleet credential not resolved (%s: %s); the sub-app "
+                        "falls back to its own shared-token comparison",
+                        type(e).__name__, e)
+            return None
+        if kind == api.AUTH_SHARED:
+            return b"shared"
+        if kind == api.AUTH_EDITOR and editor:
+            encoded = _header_value(f"editor:{editor}")
+            if encoded is None:
+                # Same fail-closed rule as the identity header: a name that
+                # cannot survive a latin-1 round trip is withheld, not mangled.
+                log.warning("b-roll fleet stamp not minted for %r: the name cannot "
+                            "survive a latin-1 header round trip", editor)
+            return encoded
+        return None
 
     def _token_ok(self, scope: dict) -> bool:
         if not self._token:
@@ -361,6 +439,7 @@ def mount_broll(app: FastAPI, ingest_token: str,
         return ABSENT
 
     gated = BrollGate(broll_app, ingest_token, settings)
+    _install_fleet_stamp_trust()
 
     try:
         _init_broll_storage()
@@ -379,6 +458,28 @@ def mount_broll(app: FastAPI, ingest_token: str,
     app.mount(MOUNT_PATH, gated)
     log.info("b-roll UI mounted at %s", MOUNT_PATH)
     return MOUNTED
+
+
+def _install_fleet_stamp_trust() -> bool:
+    """Tell the sub-app it may believe X-CCSync-Fleet-Auth. -> whether it took.
+
+    CR-55 (2026-08-21), the same shape ytdl's mount uses: a module-level switch,
+    because what reads it is a request handler with no app object in hand, and
+    best-effort, because an older b-roll tree that does not know the header must
+    keep mounting -- it goes on comparing the shared DASH_REPORT_TOKEN, which
+    every companion still sends alongside its own.
+    """
+    try:
+        from app import fleet_auth  # type: ignore[import-not-found]
+
+        fleet_auth.trust_gate_stamp(True)
+        return True
+    except Exception as e:  # noqa: BLE001 - see the module docstring
+        log.info("this b-roll tree does not take a fleet-auth stamp (%s: %s); its "
+                 "fleet ingest routes will accept the shared DASH_REPORT_TOKEN "
+                 "only, so an editor holding a per-editor cce1 token cannot run "
+                 "a drop until it is redeployed", type(e).__name__, e)
+        return False
 
 
 def _init_broll_storage() -> None:

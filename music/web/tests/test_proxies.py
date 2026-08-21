@@ -426,3 +426,34 @@ def test_a_row_with_an_unknown_share_is_skipped_not_fatal(capsys):
     out = capsys.readouterr().out
     for name in ('null-share.wav', 'foreign.wav', 'escape.wav'):
         assert name in out, f'{name} was skipped silently'
+
+
+# --------------------------------------- music-4: the id a deleted track left
+
+def test_pruning_a_track_takes_its_proxy_with_it(tmp_path, monkeypatch):
+    """`tracks.id` is INTEGER PRIMARY KEY with no AUTOINCREMENT, so the next
+    insert takes max(rowid)+1 -- the id of the highest row just deleted. The
+    proxy is chosen on existence alone, so leaving it behind gives the NEXT
+    track a deleted cue's audio (music-4, 2026-08-21). Deletion frees the id,
+    so deletion removes the file."""
+    from musicweb import db
+
+    monkeypatch.setattr(config, 'PROXIES_DIR', tmp_path / 'proxies')
+    con = db.connect(tmp_path / 'prune.db')
+    db.init(con)
+    try:
+        for i, rel in enumerate(('a.wav', 'gone.wav'), start=1):
+            con.execute('INSERT INTO tracks(id,rel_path,filename,embedding,dim) '
+                        'VALUES(?,?,?,?,4)', (i, rel, rel, db.to_blob([0.5] * 4)))
+        con.commit()
+        config.ensure_proxies_dir()
+        kept, doomed = config.proxy_path(1), config.proxy_path(2)
+        kept.write_bytes(PROXY_BYTES)
+        doomed.write_bytes(PROXY_BYTES)
+
+        assert db.prune_missing(con, ['a.wav']) == ['gone.wav']
+
+        assert not doomed.exists(), 'the freed id kept a proxy of other audio'
+        assert kept.exists(), 'a surviving track lost its preview'
+    finally:
+        con.close()

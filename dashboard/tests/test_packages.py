@@ -678,14 +678,18 @@ def test_installer_download_route(env):
     assert resp.headers["X-CCSync-Version"] == "1.0.4"
 
     # Mac UA routes to the macos package, which is not published yet: a
-    # plain 404 with the publish command, not a broken download.
+    # plain 404 that says so, not a broken download.
     resp = client.get("/download", follow_redirects=False, headers={
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"})
     assert resp.headers["location"] == "/download/macos"
     resp = client.get("/download/macos")
     assert resp.status_code == 404
-    # ...and the 404's hint names the Mac-side build, not the Windows one.
-    assert "build_onboard_macos.sh" in resp.text
+    # ...and the 404 is written for whoever clicked it, naming THIS platform
+    # and an admin step that does not need a repo checkout on a base rig
+    # (release-pipeline-11 / CR-59, 2026-08-21).
+    assert "No macos installer has been published" in resp.text
+    assert "publish_latest.py --kind onboard --platform macos" in resp.text
+    assert "build_editor_package.ps1" not in resp.text
     assert client.get("/download/amiga").status_code == 404
 
 
@@ -898,6 +902,23 @@ def test_min_version_must_be_rankable(env):
     r = publish_platform(client, "windows", "9.9.9", min_version="nightly")
     assert r.status_code == 422
     assert "dotted-numeric" in r.json()["detail"]
+
+
+def test_a_min_version_above_the_version_is_refused(env):
+    """dash-release-ai-3, 2026-08-21: `--min-version 0.9.54` on a 0.9.44 build
+    is a validly signed record that raises every companion's PERMANENT
+    downgrade floor above the build it offers, and then refuses that build,
+    the corrected republish and the rollback. One typo, fleet-wide."""
+    client, conn, _settings = env
+    as_user(client, "owen")
+    r = publish_platform(client, "windows", "0.9.44", min_version="0.9.54")
+    assert r.status_code == 400
+    assert "higher than the version being published" in r.json()["detail"]
+    assert dbmod.get_package(conn, "windows", "0.9.44") is None
+
+    # ...and the same build with a sane floor publishes normally.
+    assert publish_platform(client, "windows", "0.9.44",
+                            min_version="0.9.34").status_code == 200
 
 
 def test_a_signed_publish_stores_and_serves_every_field(env):

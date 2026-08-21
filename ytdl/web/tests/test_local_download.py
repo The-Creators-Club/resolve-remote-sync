@@ -194,6 +194,179 @@ def test_a_second_editor_may_claim_once_the_lease_has_run_out(fleet, con):
     assert db.get_job(con, job['id'])['claimed_by'] == OTHER
 
 
+# ------------------------------------- one editor, two computers (data-model-7)
+# CR-66/CR-67, 2026-08-21. The lease was keyed on the editor NAME and a name is
+# a PERSON, so the desktop's claim and the laptop's claim both passed the CAS
+# as the documented refresh: two executors on one job, two trees, and each
+# posting terminal statuses for the other's clips. The key is now
+# (editor, machine_id), and that id is the one the companion mints in
+# ~/.ccsync/machine.json.
+
+DESKTOP = 'a1b2c3d4e5f60718293a4b5c6d7e8f90'
+LAPTOP = '0f1e2d3c4b5a69788796a5b4c3d2e1f0'
+
+# The dashboard's registry (its schema v23), verbatim enough for
+# projects.machine_label. Deliberately NOT in conftest's fixture dashboard
+# database: an older dashboard has no such table, and the 409 has to be a
+# sentence either way.
+_MACHINES_DDL = """
+CREATE TABLE machines (
+  editor_username     TEXT NOT NULL,
+  machine             TEXT NOT NULL,
+  machine_id          TEXT,
+  platform            TEXT,
+  syncthing_device_id TEXT,
+  first_seen          TEXT NOT NULL,
+  last_seen           TEXT NOT NULL,
+  PRIMARY KEY (editor_username, machine)
+);
+"""
+
+
+@pytest.fixture()
+def dash_machines():
+    """USER's two computers, registered the way the dashboard registers them.
+
+    Dropped again at the end: the table's ABSENCE is what the test below this
+    one asserts against, and a fixture that left it behind would decide that
+    test on collection order.
+    """
+    import sqlite3
+
+    from ytdlweb import config as cfg
+
+    con = sqlite3.connect(cfg.DASH_DB)
+    con.executescript(_MACHINES_DDL)
+    for name, mid in (('owen-desktop', DESKTOP), ('owen-laptop', LAPTOP)):
+        con.execute('INSERT INTO machines(editor_username,machine,machine_id,'
+                    'first_seen,last_seen) VALUES(?,?,?,?,?)',
+                    (USER, name, mid, '2026-08-21', '2026-08-21'))
+    con.commit()
+    try:
+        yield con
+    finally:
+        con.execute('DROP TABLE machines')
+        con.commit()
+        con.close()
+
+
+def test_the_same_machine_claiming_again_refreshes_and_is_recorded(fleet, con):
+    """The documented refresh, now per COMPUTER: one companion restarting is
+    not a second holder, and a 409 there would strand the job until the lease
+    expired for no reason."""
+    job = _job(con)
+    assert fleet.post(f'/api/jobs/{job["id"]}/claim',
+                      json=_claim_body(machine_id=DESKTOP)).status_code == 200
+    assert db.claimed_machine_of(db.get_job(con, job['id'])) == DESKTOP
+
+    _expire_lease(con, job['id'])
+    assert fleet.post(f'/api/jobs/{job["id"]}/claim',
+                      json=_claim_body(machine_id=DESKTOP)).status_code == 200
+    fresh = db.get_job(con, job['id'])
+    assert db.lease_active(fresh)
+    assert db.claimed_machine_of(fresh) == DESKTOP
+
+
+def test_the_same_editors_other_computer_gets_409_not_the_lease(fleet, con):
+    """THE defect (data-model-7). Same person, same identity token, a different
+    computer: before this it read as a refresh and both machines downloaded the
+    same clips."""
+    job = _job(con)
+    fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body(machine_id=DESKTOP))
+
+    r = fleet.post(f'/api/jobs/{job["id"]}/claim',
+                   json=_claim_body(machine_id=LAPTOP))
+    assert r.status_code == 409
+    detail = r.json()['detail']
+    assert detail['claimed_by'] == USER
+    assert detail['claimed_machine'] == DESKTOP
+    # the holder is untouched: a refused claim never moves a live lease
+    fresh = db.get_job(con, job['id'])
+    assert db.claimed_machine_of(fresh) == DESKTOP
+    assert db.lease_active(fresh)
+
+
+def test_the_409_names_the_computer_the_dashboard_knows(fleet, con, dash_machines):
+    """"owen is already downloading this job" reads as a bug to the person
+    whose own name that is, so the detail names the machine. Resolved from the
+    dashboard's registry, never echoed back out of a request body."""
+    job = _job(con)
+    fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body(machine_id=DESKTOP))
+    r = fleet.post(f'/api/jobs/{job["id"]}/claim',
+                   json=_claim_body(machine_id=LAPTOP))
+    assert r.status_code == 409
+    assert r.json()['detail']['detail'] == (
+        f'{USER} is already downloading this job on owen-desktop')
+
+
+def test_an_unnameable_machine_still_makes_a_sentence(fleet, con):
+    """No `machines` table (an older dashboard), no row for the id, no
+    dashboard database at all: the id is worse than a hostname and better than
+    nothing, because it is what the other machine's companion log prints."""
+    job = _job(con)
+    fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body(machine_id=DESKTOP))
+    r = fleet.post(f'/api/jobs/{job["id"]}/claim',
+                   json=_claim_body(machine_id=LAPTOP))
+    assert r.status_code == 409
+    assert r.json()['detail']['detail'] == (
+        f'{USER} is already downloading this job on machine {DESKTOP}')
+
+
+def test_a_companion_that_sends_no_machine_id_behaves_exactly_as_before(fleet, con):
+    """What lets the server half ship before the companion half: a body with no
+    machine_id is answered per EDITOR, which is the pre-2026-08-21 rule."""
+    job = _job(con)
+    assert fleet.post(f'/api/jobs/{job["id"]}/claim',
+                      json=_claim_body()).status_code == 200
+    assert db.claimed_machine_of(db.get_job(con, job['id'])) is None
+    # the same editor, still not saying which machine: a refresh, as before
+    assert fleet.post(f'/api/jobs/{job["id"]}/claim',
+                      json=_claim_body()).status_code == 200
+    # ...and another editor is still refused, machine ids or no machine ids
+    assert fleet.post(f'/api/jobs/{job["id"]}/claim',
+                      json=_claim_body(editor=OTHER),
+                      headers=_identity_header(OTHER)).status_code == 409
+
+
+def test_an_upgraded_companion_may_still_refresh_a_lease_it_took_before(fleet, con):
+    """A NULL claimed_machine is "the holder did not say", not "another
+    machine". Refusing it would strand a job the moment the companion holding
+    it upgraded mid-download, which is a lease this feature exists to survive
+    (plan 11)."""
+    job = _job(con)
+    fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body())
+    assert db.claimed_machine_of(db.get_job(con, job['id'])) is None
+    assert fleet.post(f'/api/jobs/{job["id"]}/claim',
+                      json=_claim_body(machine_id=DESKTOP)).status_code == 200
+    assert db.claimed_machine_of(db.get_job(con, job['id'])) == DESKTOP
+
+
+def test_a_reclaim_forgets_which_computer_held_it(fleet, con):
+    """claimed_by and claimed_machine are one fact: an id left behind on a job
+    the server has taken back would name a holder that no longer exists, and
+    the next claim would compare itself against it."""
+    job = _job(con)
+    fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body(machine_id=DESKTOP))
+    db.reclaim_download(con, job['id'])
+    fresh = db.get_job(con, job['id'])
+    assert fresh['claimed_by'] is None
+    assert db.claimed_machine_of(fresh) is None
+
+
+def test_the_hand_back_keeps_the_record_of_which_computer_fetched_them(fleet, con):
+    """end_lease is the ORDERLY close-out, and there `claimed_by` deliberately
+    stays as the record of who fetched the clips. Which computer fetched them
+    is the same kind of record, and worth as much when the question is "whose
+    disk are these on"."""
+    job = _job(con)
+    fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body(machine_id=DESKTOP))
+    db.end_lease(con, job['id'], USER)
+    fresh = db.get_job(con, job['id'])
+    assert fresh['claimed_by'] == USER
+    assert db.claimed_machine_of(fresh) == DESKTOP
+    assert not db.lease_active(fresh)
+
+
 @pytest.mark.parametrize('version', ['2026.01.01', '', '2025.12.31'])
 def test_a_stale_yt_dlp_is_refused_with_the_number_it_needs(fleet, con, version):
     """yt-dlp rots (plan §6). A companion whose binary is older than the fleet
@@ -740,6 +913,68 @@ def test_a_done_report_with_no_file_is_recorded_as_a_failure(fleet, con):
     assert db.get_video(con, job['id'], 'aaaaaaaaaaa')['dl_state'] == 'failed'
     assert db.ledger_get(con, 'aaaaaaaaaaa') is None
     assert db.get_job(con, job['id'])['dl_failed'] == 1
+
+
+def test_a_repeated_done_post_is_counted_once(fleet, con):
+    """ytdl-web-3 (2026-08-21). Since CR-31 the companion's FleetClient
+    re-sends any call that RAISED for up to 60 s, and a client-side timeout on
+    a POST the server already committed is exactly such a failure. The second
+    copy used to bump dl_done again, so a 22-clip job showed "23 of 22"."""
+    job = _job(con)
+    fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body())
+    url = f'/api/jobs/{job["id"]}/clips/aaaaaaaaaaa/status'
+    body = {'state': 'done', 'filepath_rel': 'X [aaaaaaaaaaa].mp4'}
+
+    assert fleet.post(url, json=body).status_code == 200
+    again = fleet.post(url, json=body)
+
+    assert again.status_code == 200, 'a duplicate is not an error: the clip landed'
+    assert again.json()['duplicate'] is True
+    assert again.json()['state'] == 'done'
+    assert db.get_job(con, job['id'])['dl_done'] == 1
+    assert db.get_video(con, job['id'], 'aaaaaaaaaaa')['dl_state'] == 'done'
+
+
+def test_a_repeated_failed_post_does_not_strand_the_failure_counter(fleet, con):
+    """The same retry, on the worse half (ytdl-web-3).
+
+    dl_failed counts clips that are failed RIGHT NOW, and the hand-back
+    subtracts what requeue_failed put back -- a ROW count. Two bumps for one
+    row therefore left the counter permanently at 1, so a job whose server-side
+    retry succeeded still reported a failed clip in the SPA and in Recent
+    searches, for ever."""
+    job = _job(con)
+    fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body())
+    url = f'/api/jobs/{job["id"]}/clips/aaaaaaaaaaa/status'
+
+    assert fleet.post(url, json={'state': 'failed', 'error': 'wifi'}).status_code == 200
+    again = fleet.post(url, json={'state': 'failed', 'error': 'wifi'})
+    assert again.status_code == 200 and again.json()['duplicate'] is True
+    assert db.get_job(con, job['id'])['dl_failed'] == 1
+
+    # ...and the hand-back's -n then lands on zero, as it does for a single post
+    fleet.post(f'/api/jobs/{job["id"]}/clips/bbbbbbbbbbb/status',
+               json={'state': 'done', 'filepath_rel': 'Y [bbbbbbbbbbb].mp4'})
+    fresh = db.get_job(con, job['id'])
+    assert fresh['dl_failed'] == 0
+    assert db.get_video(con, job['id'], 'aaaaaaaaaaa')['dl_state'] == 'pending'
+
+
+def test_a_clip_the_server_already_downloaded_is_not_recounted(fleet, con):
+    """The other way a terminal row can be there first: the worker downloaded
+    the clip while the companion was still posting about it. Same compare-and-
+    set, same answer -- the row keeps the verdict it has."""
+    job = _job(con)
+    fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body())
+    db.finish_download(con, job['id'], 'aaaaaaaaaaa', 'done',
+                       filepath='/somewhere/on/the/nas.mp4')
+    db.bump(con, job['id'], 'dl_done')
+
+    r = fleet.post(f'/api/jobs/{job["id"]}/clips/aaaaaaaaaaa/status',
+                   json={'state': 'done', 'filepath_rel': 'X [aaaaaaaaaaa].mp4'})
+    assert r.status_code == 200 and r.json()['duplicate'] is True
+    assert db.get_job(con, job['id'])['dl_done'] == 1
+    assert db.ledger_get(con, 'aaaaaaaaaaa') is None
 
 
 def test_a_status_post_is_leaseholder_only_and_410s_after_a_reclaim(fleet, con):

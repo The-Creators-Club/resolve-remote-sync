@@ -67,6 +67,7 @@ def _summary(folder, n_items: int | None = None) -> dict:
 def list_folders(
     video_id: int | None = Query(default=None),
     conn: sqlite3.Connection = Depends(cf.get_shares_db),
+    index: sqlite3.Connection = Depends(get_db),
     user: str = Depends(require_user),
     admin: bool = Depends(is_admin),
 ) -> dict:
@@ -74,8 +75,17 @@ def list_folders(
     given, which folders already hold that clip (the card popover's ticks)."""
     folders = [_summary(f) for f in cf.list_folders(conn)]
     if video_id is not None:
+        # The clip's NAME as well as its id: an index rebuild renumbers
+        # videos.id, and an id-only test then leaves the tick off a clip the
+        # folder does hold, so the next "+" files it a second time (broll-4,
+        # 2026-08-21). add_items matches the same two ways.
+        ident = index.execute(
+            "SELECT share, rel_path FROM videos WHERE id = ?", (video_id,)).fetchone()
+        share, rel_path = (ident["share"], ident["rel_path"]) if ident else ("", "")
         holding = {r["folder_id"] for r in conn.execute(
-            "SELECT folder_id FROM client_folder_items WHERE video_id = ?", (video_id,))}
+            "SELECT folder_id FROM client_folder_items "
+            "WHERE video_id = ? OR (share = ? AND rel_path = ?)",
+            (video_id, share, rel_path))}
         for f in folders:
             f["contains"] = f["id"] in holding
     return {

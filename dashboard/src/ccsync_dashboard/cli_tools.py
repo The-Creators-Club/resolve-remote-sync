@@ -16,7 +16,11 @@ in an installer, in a package record or in a release. What this module does is
 fetch, at the customer's click, from the PUBLISHER'S OWN distribution
 (`downloads.claude.ai` for Claude Code, `github.com/openai/codex` releases for
 Codex), verified against the PUBLISHER'S OWN checksum, into the customer's own
-data volume, for the customer's own account. That is the same act as the
+data volume, for the customer's own account. That checksum is a CONDITION, not
+a nice-to-have (trust-model-7, 2026-08-21): a release with no published
+checksum for the asset is refused rather than installed unverified, and the
+admin is pointed at the "type its full path" fallback for a copy they
+installed and vouch for themselves. That is the same act as the
 customer typing the publisher's install command on their host, which the
 previous design required of them; it is not us shipping a copy. The
 subscription question is unchanged and still theirs: the whole CLI half stays
@@ -803,12 +807,23 @@ def _install_codex(settings: Any) -> None:
             _fetch_bytes(sums_url, JSON_MAX_BYTES).decode("utf-8", "replace"), asset_name)
         if expected:
             checksum_source = "publisher_checksums"
+    if not expected:
+        # trust-model-7 (2026-08-21): this used to fall through with
+        # `expected_sha=""`, install, and record `checksum_verified: False` in
+        # a state file nobody reads - while this module's docstring, the page
+        # and CLAUDE.md all describe the fetch as verified against the
+        # publisher's own checksum. A binary this dashboard will then EXECUTE
+        # with fleet ytdl prompts either gets that check or does not get
+        # installed by us; the admin still has the "type its path" fallback
+        # for a copy they installed themselves and vouch for.
+        raise ToolError(
+            f"the publisher published no checksum for {asset_name} in Codex "
+            f"{version}, so this install cannot be verified and was not done. "
+            f"Install Codex on the dashboard host yourself and type its full "
+            f"path below, or try again when the publisher ships "
+            f"{CODEX_SUMS_ASSET} with the release.")
     _set_status(name, step=f"downloading {version} ({target_triple})",
-                checksum_source=checksum_source, bytes=0, total=0,
-                detail="" if expected else
-                "the publisher published no checksum for this asset. The sha256 "
-                "of what arrived is recorded, but it was not checked against a "
-                "publisher manifest.")
+                checksum_source=checksum_source, bytes=0, total=0, detail="")
     staging = tool_root(settings, name) / ".staging"
     staging.mkdir(parents=True, exist_ok=True)
     part = staging / f"{version}.tar.gz"

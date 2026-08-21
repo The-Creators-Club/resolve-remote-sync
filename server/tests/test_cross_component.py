@@ -966,9 +966,13 @@ def test_the_done_video_row_falls_back_field_by_field_on_both_sides():
     worker_done = next(_normalise_fallbacks(c)
                        for c in _paren_calls(worker, "db.set_video(")
                        if "dl_state='done'" in c and "res.get(" in c)
+    # The fleet route's terminal write is a compare-and-set since ytdl-web-3
+    # (2026-08-21): `db.finish_download(c, job_id, vid, 'done', ...)` rather
+    # than `db.set_video(..., dl_state='done', ...)`. The per-field fallbacks
+    # are the same keyword arguments either way, which is what is compared.
     routes_done = next(_normalise_fallbacks(c)
-                       for c in _paren_calls(routes, "db.set_video(")
-                       if "dl_state='done'" in c and "body." in c)
+                       for c in _paren_calls(routes, "db.finish_download(")
+                       if "'done'" in c and "body." in c)
     for field in ("title", "thumbnail"):
         assert _kwarg(worker_done, field) == _kwarg(routes_done, field), field
     assert "download_host=host" in routes_done

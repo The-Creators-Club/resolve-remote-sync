@@ -53,6 +53,33 @@ which docs/RELEASE_FEED.md documents in full.
 
     python tools/publish_feed.py --verify .\feed
 
+    python tools/publish_feed.py --retract companion/windows/0.6.1 \
+        --feed-dir .\feed --github-repo ccsync/ccsync-releases --github-upload
+
+THE PUBLISHED CHANNEL IS THE BASE (2026-08-21, release-pipeline-1). With
+--github-upload this tool first DOWNLOADS the live channel.json + .sig,
+verifies it against the release public keys baked into this checkout, and
+merges the new record into THAT -- because the upload is `--clobber` over one
+long-lived release asset, and rebuilding from a local feed/ dir that a fresh
+clone does not have replaced the whole published history with a single
+correctly-signed record. An upload that would remove anything published
+refuses unless --allow-shrink; --retract is the deliberate way to withdraw a
+bad build.
+
+A RECORD ALREADY ON THE FEED IS PROTECTED TWICE (2026-08-21, CR-59 item 8).
+Publishing the same (kind, platform, version) with different bytes refuses
+unless --allow-replace, because a dashboard that already installed that
+version never fetches it again and the fleet would split in two under one
+version number; the answer is a version bump. And a --min-version below the
+highest floor already published for that kind/platform refuses unless
+--allow-floor-drop, because the usual cause is a forgotten
+CCSYNC_MIN_VERSION rather than a decision to drop the floor.
+
+--make-current maintains a top-level `current` map, {"<kind>/<platform>":
+"<version>"} (release-pipeline-5): without it a customer dashboard on the
+"current" policy replayed the whole channel in APPEND order and the LAST
+record won, so republishing an older build offered the fleet a rollback.
+
 Exit codes: 2 usage, 3 the manifest condemned the build (dirty/untested,
 unless overridden), 4 the freshly-written feed failed its own offline
 verification (should never happen -- see main()), 5 the feed was signed and
@@ -68,6 +95,7 @@ import json
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Callable
 
@@ -208,6 +236,102 @@ def load_channel(feed_dir: Path, channel_name: str) -> dict[str, Any]:
     data.setdefault("packages", [])
     data.setdefault("dashboard_image", {"tag": "", "digest": ""})
     return data
+
+
+def package_keys(channel: dict[str, Any]) -> set[tuple[str, str, str]]:
+    """(kind, platform, version) for every package record."""
+    return {(str(p.get("kind") or ""), str(p.get("platform") or ""), str(p.get("version") or ""))
+            for p in channel.get("packages", [])}
+
+
+def artefact_keys(channel: dict[str, Any]) -> set[tuple[str, str]]:
+    """(kind, filename) for every non-package artefact (see ARTEFACT_KINDS)."""
+    return {(str(a.get("kind") or ""), str(a.get("filename") or ""))
+            for a in channel.get("artefacts", [])}
+
+
+def merge_into_published(published: dict[str, Any], local: dict[str, Any]) -> dict[str, Any]:
+    """The PUBLISHED channel with the local one merged on top.
+
+    release-pipeline-1 (2026-08-21): this file used to rebuild the channel
+    from <feed-dir>/channel.json alone -- a gitignored directory that exists
+    on exactly one machine -- and then `gh release upload --clobber` replaced
+    the live document with it. Running a publish from a fresh clone, a Mac, a
+    new base rig or after a --feed-dir typo therefore replaced 18 package
+    records and 2 CLAP artefacts with ONE, correctly signed, so nothing
+    logged an error and the loss was discovered by a customer (RELEASE_FEED
+    and RELEASE.md: "a feed with no copy of the version the shipped companion
+    pins means no editor can ingest music at all").
+
+    The published document is now the BASE and the local one is an overlay:
+    anything this rig has that the feed does not is added, anything both have
+    is taken from the local copy (that is what a --force republish means), and
+    nothing published is ever dropped by omission. dashboard_image and
+    `current` are per-key overlays for the same reason.
+    """
+    merged = json.loads(json.dumps(published))  # deep copy; plain JSON throughout
+    for record in local.get("packages", []):
+        upsert_record(merged, record)
+    for artefact in local.get("artefacts", []):
+        upsert_artefact(merged, artefact)
+    image = local.get("dashboard_image") or {}
+    if image.get("tag") or image.get("digest"):
+        merged["dashboard_image"] = image
+    current = dict(merged.get("current") or {})
+    current.update({k: v for k, v in (local.get("current") or {}).items() if v})
+    if current:
+        merged["current"] = current
+    return merged
+
+
+def shrink_report(published: dict[str, Any], candidate: dict[str, Any],
+                  allowed_removals: set[tuple[str, str, str]] | None = None) -> list[str]:
+    """What the candidate channel would REMOVE from the published one.
+
+    A non-empty list is a refusal (release-pipeline-1): the feed is a mutable
+    pointer republished in full every ship, so an upload that drops records is
+    indistinguishable, to every customer, from those builds never having
+    existed. `allowed_removals` is what --retract deliberately took out.
+    """
+    allowed = allowed_removals or set()
+    lost_packages = sorted(package_keys(published) - package_keys(candidate) - allowed)
+    lost_artefacts = sorted(artefact_keys(published) - artefact_keys(candidate))
+    report = [f"package {kind}/{platform} {version}" for kind, platform, version in lost_packages]
+    report += [f"artefact {kind} {filename}" for kind, filename in lost_artefacts]
+    return report
+
+
+def existing_package(channel: dict[str, Any], kind: str, platform: str,
+                     version: str) -> dict[str, Any] | None:
+    """The record this channel already carries for that exact key, if any."""
+    for record in channel.get("packages", []):
+        if (str(record.get("kind") or ""), str(record.get("platform") or ""),
+                str(record.get("version") or "")) == (kind, platform, version):
+            return record
+    return None
+
+
+def published_floor(channel: dict[str, Any], kind: str, platform: str) -> str:
+    """The HIGHEST min_version this channel already publishes for (kind, platform).
+
+    Highest rather than newest on purpose (CR-59 item 8, 2026-08-21): a
+    companion's floor is monotonic and persistent -- once it has SEEN a
+    record demanding 0.9.44 it will never install below 0.9.44 again -- so
+    the fleet's real floor is the maximum ever published, whatever order the
+    records went out in. A record published under it is not dangerous the way
+    CR-52's inverted record was; it is a policy decision quietly undone, and
+    the operator who forgot to pass --min-version this time should be told
+    rather than left to find out when a rollback they thought was blocked
+    goes through on a fresh dashboard.
+    """
+    best = ""
+    for record in channel.get("packages", []):
+        if (str(record.get("kind") or ""), str(record.get("platform") or "")) != (kind, platform):
+            continue
+        candidate = str(record.get("min_version") or "")
+        if sign_release.version_tuple(candidate) > sign_release.version_tuple(best):
+            best = candidate
+    return best
 
 
 def upsert_record(channel: dict[str, Any], record: dict[str, Any]) -> None:
@@ -440,18 +564,11 @@ def github_asset_plan(feed_dir: Path, channel: dict[str, Any], *, base_url: str)
     return files
 
 
-def github_upload(feed_dir: Path, channel: dict[str, Any], *, repo: str, tag: str,
-                  base_url: str, runner: Runner, out) -> None:
-    """Sign-then-upload, idempotently. Re-running a ship re-uploads the same
-    asset names with --clobber on purpose: the feed is republished every
-    release and the tag is stable."""
-    files = github_asset_plan(feed_dir, channel, base_url=base_url)
-    for record in channel.get("packages", []):
-        local = feed_dir / str(record.get("platform") or "") / str(record.get("filename") or "")
-        if not local.is_file():
-            print(f"[publish-feed] NOTE: {local.name} is not in this feed dir -- assuming the "
-                  "release already carries it from an earlier run", file=out)
+def require_gh_auth(repo: str, runner: Runner) -> None:
+    """`gh auth status`, once per run, before anything touches the release.
 
+    Moved out of github_upload on 2026-08-21: the credential is needed by the
+    DOWNLOAD of the published channel too, which now happens first."""
     rc, _stdout, stderr = runner(["gh", "auth", "status"])
     if rc == GH_NOT_FOUND:
         raise PublishFeedError(
@@ -464,6 +581,110 @@ def github_upload(feed_dir: Path, channel: dict[str, Any], *, repo: str, tag: st
             f"{repo}). The feed directory is already written and signed; nothing was uploaded."
             + (f"\n{stderr.strip()}" if stderr.strip() else ""), EXIT_UPLOAD_FAILED)
 
+
+def fetch_published_channel(repo: str, tag: str, *, runner: Runner, dest: Path,
+                            out) -> tuple[dict[str, Any] | None, str, str]:
+    """Download the LIVE channel.json + .sig from the release, or say why not.
+
+    Returns (channel, signature, status) where status is one of:
+        "ok"      -- both files came down and are parseable
+        "absent"  -- the release (or the asset) does not exist yet, i.e. this
+                     is a legitimate first publish
+        anything else -- an error string; the caller must NOT publish, because
+                     it cannot tell "nothing is published" from "I could not
+                     ask", and `gh release upload --clobber` replaces whatever
+                     is there (release-pipeline-1, 2026-08-21).
+
+    Not urllib: the same `gh` credential and the same injected runner as every
+    other call here, so the tests exercise this path with a fake and no
+    network. The signature is NOT verified here -- main() does that against
+    the baked pubkeys, so the refusal message can name the key.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    rc, stdout, stderr = runner([
+        "gh", "release", "download", tag, "-R", repo,
+        "--pattern", CHANNEL_FILENAME, "--pattern", SIG_FILENAME,
+        "--dir", str(dest), "--clobber",
+    ])
+    if rc == GH_NOT_FOUND:
+        return None, "", "gh (the GitHub CLI) is not on PATH"
+    channel_path = dest / CHANNEL_FILENAME
+    sig_path = dest / SIG_FILENAME
+    if not channel_path.is_file():
+        text = f"{stdout}\n{stderr}".lower()
+        # `gh` says one of these when the release or the asset is not there.
+        # Any OTHER non-zero exit is a network/auth problem and must not be
+        # mistaken for "the feed is empty".
+        if rc == 0 or "no assets match" in text or "release not found" in text or "not found" in text:
+            print(f"[publish-feed] no published {CHANNEL_FILENAME} in {repo} release {tag} "
+                  "-- treating this as the first publish", file=out)
+            return None, "", "absent"
+        return None, "", f"`gh release download` exited {rc}: {(stderr or stdout).strip()}"
+    try:
+        channel = json.loads(channel_path.read_text(encoding="utf-8"))
+    except ValueError as exc:
+        return None, "", f"the published {CHANNEL_FILENAME} is not valid JSON ({exc})"
+    if not isinstance(channel, dict):
+        return None, "", f"the published {CHANNEL_FILENAME} is not an object"
+    signature = sig_path.read_text(encoding="utf-8").strip() if sig_path.is_file() else ""
+    channel.setdefault("packages", [])
+    return channel, signature, "ok"
+
+
+def set_current(channel: dict[str, Any], kind: str, platform: str, version: str) -> None:
+    """Point `current` at one record (release-pipeline-5, 2026-08-21).
+
+    The channel had no current pointer at all, so a dashboard on the "current"
+    policy replayed the WHOLE history in append order and whichever record
+    happened to be last won -- append order, not version order, so a --force
+    republish of an older build offered the entire fleet a rollback. One
+    pointer per (kind, platform), maintained here and honoured by
+    dashboard/src/ccsync_dashboard/release_feed.py.
+    """
+    current = dict(channel.get("current") or {})
+    current[f"{kind}/{platform}"] = version
+    channel["current"] = current
+
+
+def retract_record(channel: dict[str, Any], kind: str, platform: str,
+                   version: str) -> bool:
+    """Remove one package record and any `current` pointer at it.
+
+    The other half of release-pipeline-5: a bad build (the 0.6.1
+    proxy-generator shape) could not be withdrawn from feed customers at all,
+    because upsert_record only ever appended or replaced in place. The ASSET
+    is deliberately left on the release: an older dashboard that already holds
+    the record must keep being able to fetch the bytes it verified.
+    """
+    packages = channel.setdefault("packages", [])
+    before = len(packages)
+    channel["packages"] = [
+        p for p in packages
+        if (p.get("kind"), p.get("platform"), p.get("version")) != (kind, platform, version)
+    ]
+    current = dict(channel.get("current") or {})
+    if current.get(f"{kind}/{platform}") == version:
+        current.pop(f"{kind}/{platform}")
+        channel["current"] = current
+    return len(channel["packages"]) != before
+
+
+def github_upload(feed_dir: Path, channel: dict[str, Any], *, repo: str, tag: str,
+                  base_url: str, runner: Runner, out) -> None:
+    """Sign-then-upload, idempotently. Re-running a ship re-uploads the same
+    asset names with --clobber on purpose: the feed is republished every
+    release and the tag is stable."""
+    files = github_asset_plan(feed_dir, channel, base_url=base_url)
+    for record in channel.get("packages", []):
+        local = feed_dir / str(record.get("platform") or "") / str(record.get("filename") or "")
+        if not local.is_file():
+            print(f"[publish-feed] NOTE: {local.name} is not in this feed dir -- assuming the "
+                  "release already carries it from an earlier run", file=out)
+
+    # `gh auth status` ran HERE until 2026-08-21. It now runs once, up front
+    # in main() (require_gh_auth), because the very first thing an upload run
+    # does is DOWNLOAD the published channel to merge into -- and that needs
+    # the same credential (release-pipeline-1).
     rc, _stdout, _stderr = runner(["gh", "release", "view", tag, "-R", repo])
     if rc != 0:
         print(f"[publish-feed] release {tag} not found in {repo} -- creating it", file=out)
@@ -551,6 +772,31 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                     help="which artefact these files belong to")
     ap.add_argument("--asset-version", default="",
                     help="the artefact version (music_models.MODELS[...]['version'])")
+    ap.add_argument("--make-current", action="store_true",
+                    help="point the channel's `current` at the record published by this run "
+                         "(release-pipeline-5). Without it the record is STAGED: a customer "
+                         "dashboard on the 'current' policy keeps offering what it offers now.")
+    ap.add_argument("--retract", default="",
+                    help="KIND/PLATFORM/VERSION to REMOVE from the channel (a bad build). "
+                         "The asset stays on the release; only the record and any `current` "
+                         "pointer at it go. Combine with nothing else and it is a pure "
+                         "withdrawal.")
+    ap.add_argument("--allow-shrink", action="store_true",
+                    help="permit an upload whose package/artefact set is a strict subset of "
+                         "the published one. Needed only when you MEAN to drop records; "
+                         "without it a feed dir missing history refuses rather than "
+                         "clobbering the live channel with it.")
+    # CR-59 item 8 (2026-08-21): the two refusals that protect a record which
+    # is ALREADY on the feed. Both are per-run overrides, never config.
+    ap.add_argument("--allow-replace", action="store_true",
+                    help="replace an already-published (kind, platform, version) whose bytes "
+                         "differ. Almost always the wrong answer: every dashboard that already "
+                         "holds that version keeps the old bytes, so the fleet splits in two "
+                         "under one version number. Bump the version instead.")
+    ap.add_argument("--allow-floor-drop", action="store_true",
+                    help="publish a min_version BELOW the highest floor already published for "
+                         "this kind/platform. Needed only when the earlier floor was itself the "
+                         "mistake.")
     ap.add_argument("--set-image", default="", help="tag@digest for dashboard_image")
     ap.add_argument("--verify", default="", help="offline-verify an existing feed dir and exit")
     ap.add_argument("--key", default="", help="release key file (default ~/.ccsync-release/release.key)")
@@ -563,6 +809,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
     args = parse_args(argv)
     out = sys.stdout
+    tmpdir: tempfile.TemporaryDirectory | None = None
     try:
         if args.verify:
             ok, report = verify_feed_dir(Path(args.verify).expanduser())
@@ -596,7 +843,67 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
             _apply_manifest(args, manifest, mpath.parent)
 
         channel = load_channel(feed_dir, args.channel)
+
+        # --- the LIVE channel is the base, not this rig's feed/ dir --------
+        # release-pipeline-1 (2026-08-21). Fetched whenever this run could
+        # upload, because that upload is `--clobber` over the live document.
+        published: dict[str, Any] | None = None
+        # A refusal raised only AFTER the local feed dir is written and
+        # signed. That order is deliberate and predates this change: "the feed
+        # directory is already written and signed; nothing was uploaded" is
+        # the promise every gh failure here makes.
+        upload_refusal: PublishFeedError | None = None
+        if args.github_upload:
+            tmpdir = tempfile.TemporaryDirectory(prefix="ccsync-feed-")
+            try:
+                require_gh_auth(args.github_repo, runner)
+                published, published_sig, status = fetch_published_channel(
+                    args.github_repo, args.github_tag, runner=runner,
+                    dest=Path(tmpdir.name), out=out)
+                if status not in ("ok", "absent"):
+                    raise PublishFeedError(
+                        f"could not read the channel already published at {args.github_repo} "
+                        f"({args.github_tag}): {status}.\nRefusing to upload: `gh release upload "
+                        "--clobber` REPLACES the live channel, and a run that cannot see what is "
+                        "there cannot tell an empty feed from an unreachable one. The feed "
+                        "directory is written and signed; nothing was uploaded.",
+                        EXIT_UPLOAD_FAILED)
+                if published is not None:
+                    ok, detail = verify_channel_signature(
+                        published, published_sig, release_pubkey.RELEASE_PUBKEYS)
+                    if not ok:
+                        raise PublishFeedError(
+                            f"the channel published at {args.github_repo} does not verify against "
+                            f"this build's release public keys: {detail}.\nEither the feed was "
+                            "tampered with, or it was signed by a key this checkout does not know "
+                            "(rotate with tools/release_key.py bake --add and rebuild). Nothing "
+                            "was uploaded.", EXIT_UPLOAD_FAILED)
+                    print(f"[publish-feed] published channel read and verified: "
+                          f"{len(published.get('packages', []))} package record(s), "
+                          f"{len(published.get('artefacts', []))} artefact(s)", file=out)
+                    channel = merge_into_published(published, channel)
+            except PublishFeedError as exc:
+                upload_refusal = exc
+                published = None
+
         published_something = False
+        retracted: set[tuple[str, str, str]] = set()
+
+        if args.retract:
+            parts = [p for p in args.retract.split("/") if p]
+            if len(parts) != 3:
+                raise PublishFeedError(
+                    f"--retract wants KIND/PLATFORM/VERSION, got {args.retract!r}", EXIT_USAGE)
+            r_kind, r_platform, r_version = parts
+            if retract_record(channel, r_kind, r_platform, r_version):
+                print(f"[publish-feed] RETRACTED {r_kind}/{r_platform} {r_version} -- it is no "
+                      "longer offered. Dashboards that already installed it keep running it; "
+                      "publish a newer build to move them.", file=out)
+            else:
+                print(f"[publish-feed] NOTE: {args.retract} was not in the channel -- nothing "
+                      "to retract", file=out)
+            retracted.add((r_kind, r_platform, r_version))
+            published_something = True
 
         if args.artifact:
             missing = [n for n, v in (("--platform", args.platform), ("--version", args.version),
@@ -645,7 +952,49 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
             record["notes"] = args.notes
             print(f"[publish-feed] signed {args.kind}/{args.platform} v{args.version} "
                   f"(pubkey_id {signed['pubkey_id']}, min_version {signed['min_version']})", file=out)
+
+            # --- what this record would do to one ALREADY on the feed ------
+            # CR-59 item 8 (2026-08-21). `channel` here is the published
+            # document with this rig's overlay merged on top (or, without
+            # --github-upload, the local feed dir), so both checks see the
+            # same records a customer's dashboard would. A --retract earlier
+            # in this same run has already removed the record, which is the
+            # deliberate withdraw-then-republish path and stays open.
+            prior = existing_package(channel, args.kind, args.platform, args.version)
+            if (prior is not None and str(prior.get("sha256") or "") != record["sha256"]
+                    and not args.allow_replace):
+                raise PublishFeedError(
+                    f"{args.kind}/{args.platform} {args.version} is already published with "
+                    f"DIFFERENT bytes:\n  published sha256 {prior.get('sha256')}\n  this build  "
+                    f"     {record['sha256']}\n"
+                    "A dashboard that already installed that version never fetches it again, so "
+                    "replacing it in place gives you two different builds wearing one version "
+                    "number and no way to tell them apart in the field (the dashboard's own "
+                    "publish refuses this too, and the Packages page renders SAME VERSION, "
+                    "DIFFERENT BYTES).\n"
+                    "Bump VERSION in companion/src/ccsync_companion/config.py AND "
+                    "companion/pyproject.toml, rebuild, and publish that. Use --allow-replace "
+                    "only to correct a record nothing has downloaded yet. Nothing was uploaded.",
+                    EXIT_USAGE)
+            floor = published_floor(channel, args.kind, args.platform)
+            if (sign_release.version_tuple(record["min_version"])
+                    < sign_release.version_tuple(floor) and not args.allow_floor_drop):
+                raise PublishFeedError(
+                    f"--min-version {record['min_version']} is BELOW the highest floor already "
+                    f"published for {args.kind}/{args.platform} ({floor}).\n"
+                    "Every companion that has seen the earlier record remembers that floor for "
+                    "ever, so this record does not lower anything in the field; what it does is "
+                    "quietly drop the policy for any dashboard reading the feed fresh, and the "
+                    "usual cause is simply forgetting CCSYNC_MIN_VERSION on this build.\n"
+                    f"Re-run with --min-version {floor} (or higher), or --allow-floor-drop if "
+                    "the earlier floor was the mistake. Nothing was uploaded.",
+                    EXIT_USAGE)
+
             upsert_record(channel, record)
+            if args.make_current:
+                set_current(channel, args.kind, args.platform, args.version)
+                print(f"[publish-feed] current[{args.kind}/{args.platform}] = {args.version}",
+                      file=out)
             published_something = True
             if not args.dry_run:
                 dest_dir = feed_dir / args.platform
@@ -704,6 +1053,22 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
             print(json.dumps(channel, indent=2, sort_keys=True), file=out)
             return EXIT_OK
 
+        # NOTHING published may vanish by omission (release-pipeline-1). The
+        # merge above makes this impossible in the ordinary case; it is
+        # checked anyway because the failure is silent, signed and only
+        # noticed by a customer.
+        if published is not None and not args.allow_shrink:
+            lost = shrink_report(published, channel, retracted)
+            if lost:
+                raise PublishFeedError(
+                    "this upload would REMOVE from the live channel:\n  "
+                    + "\n  ".join(lost)
+                    + "\nA customer dashboard reads only the current channel.json, so a record "
+                      "that disappears is a build that never existed for them. Re-run with "
+                      "--retract for a deliberate withdrawal, or --allow-shrink if you really "
+                      "mean to drop all of the above. Nothing was uploaded.",
+                    EXIT_USAGE)
+
         channel["schema"] = SCHEMA
         channel["channel"] = args.channel
         channel["generated_at"] = sign_release.utcnow_iso()
@@ -714,6 +1079,8 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
         # Signed and self-verified on disk BEFORE a single byte moves -- the
         # record urls are inside the signed document, so signing can never be
         # the step that follows an upload.
+        if upload_refusal is not None:
+            raise upload_refusal
         if args.github_upload:
             github_upload(feed_dir, channel, repo=args.github_repo, tag=args.github_tag,
                           base_url=args.base_url, runner=runner, out=out)
@@ -730,6 +1097,9 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
     except PublishFeedError as exc:
         print(f"[publish-feed] FAILED: {exc}", file=sys.stderr)
         return exc.code
+    finally:
+        if tmpdir is not None:
+            tmpdir.cleanup()
 
 
 if __name__ == "__main__":

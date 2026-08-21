@@ -332,7 +332,7 @@ class OnboardWizard:
                 "editing: it removes every trace of older CCSync versions,\n"
                 "installs the sync tools and the current companion app (which\n"
                 "updates itself from the dashboard from now on), signs it in,\n"
-                "and points DaVinci Resolve's P:\\ mapping at your local copy\n"
+                f"and points DaVinci Resolve's {self._drive_letter()}:\\ mapping at your local copy\n"
                 "of the project tree.\n\n"
                 "You'll need the TrueNAS username and password your admin set\n"
                 "up for you -- nothing else. Safe to re-run any time."
@@ -390,7 +390,7 @@ class OnboardWizard:
         if IS_MACOS:
             _radio(frame, "I'M A REMOTE EDITOR", "editor",
                    "You edit from elsewhere. Installs the sync tools and points\n"
-                   "Resolve's P:\\ mapping at your local copy of the project tree.")
+                   f"Resolve's {self._drive_letter()}:\\ mapping at your local copy of the project tree.")
             _radio(frame, "I'M PHYSICALLY CONNECTED TO THE SERVER/NAS", "base",
                    "This machine is on the studio network and works directly off\n"
                    "the NAS share mounted under /Volumes. Installs only the\n"
@@ -399,11 +399,11 @@ class OnboardWizard:
         else:
             _radio(frame, "I'M A REMOTE EDITOR", "editor",
                    "You edit from elsewhere. Installs Tailscale, the sync tools,\n"
-                   "and maps the P: project drive (re-created fresh).")
+                   f"and maps the {self._drive_letter()}: project drive (re-created fresh).")
             _radio(frame, "I'M PHYSICALLY CONNECTED TO THE SERVER/NAS", "base",
                    "This machine is on the studio network and works directly off\n"
                    "the NAS. Installs only the companion app - no sync tools, and\n"
-                   "your P:/T: drive mappings are NOT touched.")
+                   f"your {self._drive_letter()}: drive mappings are NOT touched.")
 
         adv = tk.Frame(frame, bg=theme.BG)
         adv.pack(anchor="w", pady=(8, 8))
@@ -418,6 +418,34 @@ class OnboardWizard:
 
         self._nav_bar(frame, back=self.show_welcome, next_=self._on_role_next, next_label="NEXT")
 
+    def _site(self) -> Optional[dict]:
+        """The fetched manifest, or None so steps falls back to the cached one.
+        {} would mean "this site publishes nothing", which is not the same
+        thing on a second run (installer-onboard-tools-3/4, 2026-08-21)."""
+        return self.site or None
+
+    def _drive_letter(self) -> str:
+        """This site's tree drive letter. Before the manifest is fetched this
+        is the cached one (a second run) or the P default (a first run) -- the
+        pages that render before sign-in cannot know better."""
+        return steps.site_drive_letter(self._site())
+
+    def _root_defaults(self) -> set:
+        """Every value the local-root field could hold WITHOUT having been
+        hand-edited: the two role defaults on this site, the neutral prefill a
+        first run seeds before any manifest is known (installer-onboard-tools-4),
+        and the pre-2026-08-17 legacy default."""
+        return {
+            steps.LEGACY_DEFAULT_LOCAL_ROOT,
+            steps.DEFAULT_BASE_LOCAL_ROOT,
+            steps.default_local_root(),
+            steps.default_base_local_root(),
+            steps.default_local_root(site=self._site()),
+            steps.default_base_local_root(site=self._site()),
+            # The neutral prefill: site_tree_name() with no manifest at all.
+            steps.default_local_root(site={}),
+        }
+
     def _on_role_changed(self) -> None:
         """Swap the role-default dashboard URL / local root in, but only when
         the current value is still one of the defaults (a hand-edited value
@@ -430,12 +458,10 @@ class OnboardWizard:
         # LEGACY_DEFAULT_LOCAL_ROOT is in the set on purpose: a machine whose
         # field still holds the pre-2026-08-17 default has not been
         # hand-edited either, and clobbering it is the intended behaviour.
-        root_defaults = {steps.LEGACY_DEFAULT_LOCAL_ROOT, steps.DEFAULT_BASE_LOCAL_ROOT,
-                         steps.default_local_root(), steps.default_base_local_root()}
-        if self.local_root_var.get().strip() in root_defaults:
+        if self.local_root_var.get().strip() in self._root_defaults():
             self.local_root_var.set(
-                steps.default_base_local_root() if role == "base"
-                else steps.default_local_root())
+                steps.default_base_local_root(site=self._site()) if role == "base"
+                else steps.default_local_root(site=self._site()))
 
     def _on_role_next(self) -> None:
         self._on_role_changed()  # ensure defaults match the final choice
@@ -605,9 +631,16 @@ class OnboardWizard:
                 if effective != picked:
                     self.picked_role = picked
                     self.role_var.set(effective)
-                    self._on_role_changed()
                 else:
                     self.picked_role = None
+                # UNCONDITIONALLY, not only when the role changed
+                # (installer-onboard-tools-4, 2026-08-21). The prefill was
+                # computed in __init__, before this machine had ever seen a
+                # site manifest, so on a FIRST run it says C:\CCSync while a
+                # hand-run windows_bootstrap.ps1 on the next machine would use
+                # C:\<tree_name>. _on_role_changed only replaces a value that
+                # is still one of the defaults, so a hand-edited path is safe.
+                self._on_role_changed()
                 self.show_install()
 
             self._safe_after(_ui)
@@ -634,17 +667,17 @@ class OnboardWizard:
                    wraplength=560).pack(anchor="w", pady=(0, 10))
         elif role == "base":
             _label(frame, "This removes every trace of older CCSync versions, installs\n"
-                           "the current companion app, and signs it in. Your P:/T: drive\n"
+                           f"the current companion app, and signs it in. Your {self._drive_letter()}: drive\n"
                            "mappings are NOT touched. Safe to re-run.",
                    wraplength=560).pack(anchor="w", pady=(0, 10))
         elif IS_MACOS:
             _label(frame, "This removes every trace of older CCSync versions, installs\n"
                            "rclone/Syncthing (if needed) and the companion app, and points\n"
-                           "Resolve's P:\\ mapping at your sync folder. Safe to re-run.",
+                           f"Resolve's {self._drive_letter()}:\\ mapping at your sync folder. Safe to re-run.",
                    wraplength=560).pack(anchor="w", pady=(0, 10))
         else:
             _label(frame, "This removes every trace of older CCSync versions, remounts\n"
-                           "your P: project drive fresh, installs Tailscale/rclone/\n"
+                           f"your {self._drive_letter()}: project drive fresh, installs Tailscale/rclone/\n"
                            "Syncthing (if needed) and the companion app. Safe to re-run.",
                    wraplength=560).pack(anchor="w", pady=(0, 10))
 
@@ -652,7 +685,7 @@ class OnboardWizard:
             _label(frame, f"note: you picked '{self.picked_role}', but the dashboard says this "
                            f"account is '{role}' -- so this is a '{role}' install. That is the "
                            f"account's role, which the companion obeys anyway, and only the "
-                           f"'editor' install unmaps and re-creates the P: drive.",
+                           f"'editor' install unmaps and re-creates the {self._drive_letter()}: drive.",
                    fg=theme.AMBER, font=theme.mono(9), wraplength=560).pack(anchor="w", pady=(0, 8))
 
         form = tk.Frame(frame, bg=theme.BG)
@@ -665,7 +698,7 @@ class OnboardWizard:
             # COMMERCIAL_READINESS.md item 11) -- the wizard cannot know it
             # here, and the seeded value in the box already shows it.
             _label(frame, "The project-tree folder on the NAS share this machine edits\n"
-                           f"from (e.g. {steps.default_base_local_root()}) --\n"
+                           f"from (e.g. {steps.default_base_local_root(site=self._site())}) --\n"
                            "mount the share first if it isn't under /Volumes yet.",
                    fg=theme.MUTED, font=theme.mono(9), wraplength=560).pack(anchor="w", pady=(2, 10))
         elif role == "base":
@@ -728,7 +761,8 @@ class OnboardWizard:
         self._safe_after(_ui)
 
     def _local_root_problem(self) -> Optional[str]:
-        return steps.validate_local_root(self.local_root_var.get(), self._effective_role())
+        return steps.validate_local_root(self.local_root_var.get(), self._effective_role(),
+                                         site=self._site())
 
     def _revalidate_local_root(self) -> None:
         """Enable/disable BEGIN INSTALL from the local_root field's validity,
@@ -778,7 +812,8 @@ class OnboardWizard:
             plan = steps.build_cleanup_plan_macos()
             warnings = steps.execute_cleanup_macos(plan, self._append_log)
         else:
-            plan = steps.build_cleanup_plan(role, self.local_root_var.get().strip() or None)
+            plan = steps.build_cleanup_plan(role, self.local_root_var.get().strip() or None,
+                                           site=self._site())
             # smb_unc so the unmount gate can recognise THIS site's NAS share
             # as somebody else's mapping, not just any non-loopback UNC
             # (COMMERCIAL_READINESS.md item 9, 2026-08-17).
@@ -812,9 +847,9 @@ class OnboardWizard:
 
     def _worker_editor(self) -> None:
         try:
-            if steps.installer_on_forbidden_drive():
+            if steps.installer_on_forbidden_drive(self._site()):
                 self._append_log(
-                    "this installer is running from P: or a network share -- the "
+                    f"this installer is running from {self._drive_letter()}: or a network share -- the "
                     "install is about to unmount that drive out from under itself "
                     "(and running it off the NAS locks the file for everyone). "
                     "Copy onboard.exe to your Desktop and run it from there."
@@ -892,7 +927,7 @@ class OnboardWizard:
             # macOS only in practice (the marker never appears in the .ps1's
             # output): "quit Resolve and re-run" and friends belong on the
             # Finish page, not buried mid-log.
-            mapping_problem = steps.resolve_mapping_warning(output)
+            mapping_problem = steps.resolve_mapping_warning(output, self._site())
             if mapping_problem:
                 self.install_warnings.append(mapping_problem)
             if steps.bootstrap_hard_failure(exit_code, capability_problems):

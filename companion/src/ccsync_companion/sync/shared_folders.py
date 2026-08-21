@@ -10,7 +10,10 @@ comes round. A shared asset folder is the opposite shape:
     per-project machinery never sees it;
   * it must be online even for an editor with zero projects ticked, which is
     exactly the state in which the sequencer does nothing at all;
-  * it must never be paused by the rotation, because it is not part of it.
+  * it must never be paused by the rotation, because it is not part of it --
+    but it IS paused by a halt, which is not pacing but a stop, and this
+    reconcile must not release what the halt paused (sync-safety-2,
+    2026-08-21: see `halted`).
 
 So it gets this: one idempotent reconcile that runs at startup and once per
 sequencer pass, doing the smallest set of writes that makes the folder
@@ -27,7 +30,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from .syncthing_admin import (
     ASSET_STIGNORE_LINES,
@@ -70,15 +73,47 @@ class SharedFolderManager:
         admin: Any,
         local_root: Path | str,
         folders: Optional[list[tuple[str, str, str]]] = None,
+        halted: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.admin = admin
         self.local_root = Path(local_root).expanduser()
         self.folders = list(SHARED_ASSET_FOLDERS if folders is None else folders)
+        # "Is syncing halted on this machine?" (sync-safety-2, 2026-08-21).
+        # The halt pauses folders through Syncthing's REST API and this
+        # reconcile RELEASES a paused shared folder every time it runs, so
+        # without this the halt could not hold the asset libraries down for
+        # longer than one sequencer pass. Optional and duck-typed like every
+        # other collaborator here: absent means "nothing is halted", which is
+        # how this module behaved before.
+        self._halted = halted
         # Ids whose reconcile has already logged a failure this run, so a
         # server that never offers the folder (an older dashboard) costs one
         # log line rather than one per pass forever. Mirrors reporter.py's
         # once-per-streak convention.
         self._error_logged: set[str] = set()
+
+    def folder_ids(self) -> list[str]:
+        """The Syncthing folder ids this manager owns.
+
+        What the halt needs in order to pause the asset libraries too: they
+        are in no selection, so `sequencer.expected_folder_slugs()` -- the
+        list the halt used to walk -- does not name them, and every editor's
+        tray said "Nothing is uploading, downloading or sharing" while the
+        B-roll archive, the music library and the LUTs kept syncing every
+        addition and modification (sync-safety-2, 2026-08-21)."""
+        return [str(folder_id) for folder_id, _rel, _label in self.folders]
+
+    def halted(self) -> bool:
+        """Is syncing halted on this machine? Never raises: a check that
+        cannot answer must not stop the reconcile, and the only thing it
+        gates is an UNPAUSE, which staying paused is the safe side of."""
+        if self._halted is None:
+            return False
+        try:
+            return bool(self._halted())
+        except Exception:
+            log.debug("shared folders: the halt check failed", exc_info=True)
+            return True
 
     def reconcile(self) -> dict[str, str]:
         """Reconcile every shared folder. Returns {folder_id: outcome} where
@@ -153,7 +188,14 @@ class SharedFolderManager:
         # never pauses this folder (it is not in any selection), but a
         # previous companion's crash, a hand-pause in the GUI, or the
         # accept path below can leave it paused.
-        if folder.get("paused") and ignores_ok != "unconfirmed":
+        if folder.get("paused") and self.halted():
+            # A halt is a deliberate stop, and this reconcile is the one
+            # thing that would undo it for these folders -- including a
+            # shared folder an admin paused by hand (sync-safety-2).
+            log.info(
+                "shared folder %s stays paused: syncing is stopped on this machine",
+                folder_id)
+        elif folder.get("paused") and ignores_ok != "unconfirmed":
             log.info("shared folder %s was paused -- releasing it", folder_id)
             self.admin.set_folder_paused(folder_id, False)
             outcome = "repaired"

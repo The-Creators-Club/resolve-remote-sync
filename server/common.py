@@ -991,6 +991,43 @@ def known_hosts_path() -> Path:
     return Path(override) if override else Path.home() / ".ccsync" / "known_hosts"
 
 
+def nas_ssh_port() -> int:
+    """The TCP port every script in this package reaches the NAS's sshd on.
+
+    server-7 (2026-08-21): until today there was none. `[net] sftp_port` was
+    threaded into the CONTAINER (DASH_NAS_SSH_PORT) and into each editor's
+    rclone stanza, but ssh_client() used paramiko's default 22 -- so a site
+    that moved sshd (DSM often does) had a dashboard and a fleet that worked
+    and an operator toolchain with no way at all to reach the box short of
+    editing this file.
+
+    `[nas] ssh_port` is the key for the operator channel; it falls back to
+    `[net] sftp_port`, which is the same sshd on every site this repo has
+    met, and then to 22. $CCSYNC_SSH_PORT wins over both, like every other
+    env override here.
+    """
+    raw = (os.environ.get("CCSYNC_SSH_PORT", "").strip()
+           or site_value("nas", "ssh_port")
+           or site_value("net", "sftp_port"))
+    try:
+        port = int(raw)
+    except (TypeError, ValueError):
+        return 22
+    return port if 1 <= port <= 65535 else 22
+
+
+def host_key_id(host: str, port: int = 22) -> str:
+    """How `host` is spelled in a known_hosts file at `port`.
+
+    OpenSSH (and paramiko's HostKeys, which parses the same format) keys a
+    non-default port as `[host]:port`; a bare `host` entry does NOT match it.
+    Recording and looking up under the wrong name is how a pinned key
+    silently degrades to "unknown host" on a site that moved sshd (server-7,
+    2026-08-21).
+    """
+    return host if int(port or 22) == 22 else f"[{host}]:{int(port)}"
+
+
 def add_host_key_arg(ap) -> None:
     """Add the shared --host-key / --trust-host-key-on-first-use pair."""
     ap.add_argument("--host-key", default="",
@@ -1048,7 +1085,7 @@ def _parse_host_key(pin: str):
     return keytype, key
 
 
-def _known_host_key(host: str):
+def _known_host_key(host: str, port: int = 22):
     """The key recorded for `host` in ~/.ccsync/known_hosts, or None.
 
     paramiko's own HostKeys parser is used rather than a hand-rolled one so
@@ -1067,18 +1104,18 @@ def _known_host_key(host: str):
             f"{path} could not be read as a known_hosts file ({type(exc).__name__}: {exc}). "
             f"Fix or delete it, or pin the key with [nas] ssh_hostkey instead."
         ) from exc
-    entry = keys.lookup(host) or {}
+    entry = keys.lookup(host_key_id(host, port)) or {}
     for keytype in entry.keys():
         return keytype, entry[keytype]
     return None
 
 
-def _record_host_key(host: str, key) -> Path:
+def _record_host_key(host: str, key, port: int = 22) -> Path:
     """Append `key` to ~/.ccsync/known_hosts (0600) and return the path."""
     path = known_hosts_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
-        fh.write(f"{host} {key.get_name()} {key.get_base64()}\n")
+        fh.write(f"{host_key_id(host, port)} {key.get_name()} {key.get_base64()}\n")
     try:
         os.chmod(path, 0o600)
     except OSError:
@@ -1096,28 +1133,34 @@ def _fingerprint(key) -> str:
     return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
 
 
-def ssh_client(host: str, user: str, pw: str, timeout: int = 20):
+def ssh_client(host: str, user: str, pw: str, timeout: int = 20, port: int = 0):
     """Connected paramiko.SSHClient with the shared host-key policy applied.
 
     Every SSH/SFTP entry point in this package goes through here so the trust
     decision is made in exactly one place -- see the _HOST_KEY_PIN block above
     for the three states and why an unknown host is now a refusal.
+
+    `port` defaults to nas_ssh_port() rather than to 22 (server-7,
+    2026-08-21): a site whose sshd is not on 22 used to be unreachable by
+    every script in this package, with a paramiko error that named no port.
     """
     import paramiko
 
+    port = int(port or nas_ssh_port())
+    key_id = host_key_id(host, port)
     client = paramiko.SSHClient()
     pin = host_key_pin()
     recorded = None
     tofu = None
     if pin:
         keytype, key = _parse_host_key(pin)
-        client.get_host_keys().add(host, keytype, key)
+        client.get_host_keys().add(key_id, keytype, key)
         client.set_missing_host_key_policy(paramiko.RejectPolicy())
     else:
-        recorded = _known_host_key(host)
+        recorded = _known_host_key(host, port)
         if recorded:
             keytype, key = recorded
-            client.get_host_keys().add(host, keytype, key)
+            client.get_host_keys().add(key_id, keytype, key)
             client.set_missing_host_key_policy(paramiko.RejectPolicy())
         elif trust_on_first_use():
             class _RecordOnFirstUse(paramiko.MissingHostKeyPolicy):
@@ -1134,11 +1177,13 @@ def ssh_client(host: str, user: str, pw: str, timeout: int = 20):
             client.set_missing_host_key_policy(tofu)
         else:
             raise EnvError(
-                f"refusing to SSH to {host}: its host key is neither pinned nor known.\n"
+                f"refusing to SSH to {host} (port {port}): its host key is neither "
+                f"pinned nor known.\n"
                 f"  This channel carries the NAS admin password and runs `sudo -S` with "
                 f"it, so an unverified key means anything on the network can have it "
                 f"(COMMERCIAL_READINESS.md item 6).\n"
-                f"  Pin it (preferred):  ssh-keyscan -t ed25519 {host}\n"
+                f"  Pin it (preferred):  ssh-keyscan -t ed25519"
+                + (f" -p {port}" if port != 22 else "") + f" {host}\n"
                 f"    then put the '<type> <base64>' half in site.toml as "
                 f"[nas] ssh_hostkey, or export CCSYNC_SSH_HOSTKEY.\n"
                 f"  Or, standing in front of the box, accept it once with "
@@ -1146,12 +1191,12 @@ def ssh_client(host: str, user: str, pw: str, timeout: int = 20):
                 f"{known_hosts_path()} and every later run is checked against it."
             )
     try:
-        client.connect(host, username=user, password=pw,
+        client.connect(host, port=port, username=user, password=pw,
                        look_for_keys=False, allow_agent=False, timeout=timeout)
     except paramiko.BadHostKeyException as exc:
         source = "[nas] ssh_hostkey / CCSYNC_SSH_HOSTKEY" if pin else str(known_hosts_path())
         raise EnvError(
-            f"REFUSING to talk to {host}: its SSH host key CHANGED.\n"
+            f"REFUSING to talk to {host} (port {port}): its SSH host key CHANGED.\n"
             f"  expected {_fingerprint(exc.expected_key)} (from {source})\n"
             f"  offered  {_fingerprint(exc.key)}\n"
             f"  Either the NAS was reinstalled/re-keyed -- in which case update the pin "
@@ -1160,7 +1205,7 @@ def ssh_client(host: str, user: str, pw: str, timeout: int = 20):
         ) from exc
 
     if tofu is not None and tofu.key is not None:
-        path = _record_host_key(host, tofu.key)
+        path = _record_host_key(host, tofu.key, port)
         print(f"TRUSTED ON FIRST USE: {host} host key {_fingerprint(tofu.key)} "
               f"({tofu.key.get_name()}), recorded in {path}. Later runs are checked "
               f"against it and a change is a refusal.\n"
@@ -1192,7 +1237,9 @@ def run_ssh(cmd: str, dry_run: bool = False, timeout: int = 120):
     """
     host, user, pw = truenas_conn_params(dry_run=dry_run)
     if dry_run:
-        print(f"[dry-run] ssh {user}@{host}: {cmd}")
+        port = nas_ssh_port()
+        where = f"{user}@{host}" + (f" -p {port}" if port != 22 else "")
+        print(f"[dry-run] ssh {where}: {cmd}")
         return 0, "", ""
 
     client = ssh_client(host, user, pw)

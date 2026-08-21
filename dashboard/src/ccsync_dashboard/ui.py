@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Red
 from fastapi.templating import Jinja2Templates
 
 from . import (auth, dashboard_update, db, local_users, oidc, package_store, provision,
-               release_feed)
+               release_feed, site_store)
 from .api import (
     build_admin_users_view, build_editors_view, build_packages_view, build_presence_view,
     build_project_view, build_projects_view, build_queue_view, build_report_tokens_view,
@@ -116,10 +116,20 @@ def _render(request: Request, name: str, context: dict) -> HTMLResponse:
     # SPAs' fallback headers. It is site data now, and the fallback chain is
     # org_short -> org_name -> product_name: an unbranded install shows the
     # PRODUCT's name, never the first customer's.
-    context.setdefault("brand_org", (settings.site_org_short
-                                     or settings.site_org_name
-                                     or settings.site_product_name))
-    context.setdefault("brand_product", settings.site_product_name)
+    #
+    # From the RESOLVED manifest since 2026-08-21 (product-surface-2), not
+    # `settings.site_*`: on an appliance the wizard's "Your studio" answers
+    # are the only place org_name ever exists (no DASH_SITE_* in
+    # compose.appliance.yaml), so reading the env snapshot here left an admin
+    # looking at "CC SYNC" on a page whose Settings form showed the name they
+    # had just saved. Cached on app.state and dropped by site_store.invalidate
+    # on every write, so this stays one dict lookup per render.
+    manifest = site_store.manifest_for_app(request.app, settings)
+    context.setdefault("brand_org", (manifest.get("org_short")
+                                     or manifest.get("org_name")
+                                     or manifest.get("product_name")))
+    context.setdefault("brand_product", manifest.get("product_name")
+                       or settings.site_product_name)
     # Which nav entry to mark (2026-08-18). The drawer in partials/topbar.html
     # and the Settings strip in partials/settings_nav.html read the same one
     # variable, so a page names where it is ONCE. Defaulted here because both
@@ -597,7 +607,12 @@ def _setup_context(
         "mapping": mapping,
         "is_admin": auth.is_admin(settings, user),
         "projects_dir_ok": projects_dir_ok,
-        "template_folders": provision.TEMPLATE_FOLDERS,
+        # The template the create actually lays down, from the resolved
+        # manifest (dash-admin-3, 2026-08-21): this preview used to render
+        # provision.TEMPLATE_FOLDERS, the import-time env/default list, so a
+        # site whose wizard answer said "Footage, Audio, Graphics" was shown
+        # -- and given -- the documentary defaults instead.
+        "template_folders": site_store.template_folders(conn, settings),
         "error": error,
         # rel of an existing folder the failed action should have used --
         # rendered next to the banner as a one-click [ USE THIS FOLDER ]
@@ -750,16 +765,30 @@ def _render_setup_panel(request: Request, conn, name: str, error, created, brows
 
 @router.post("/partials/selection/{editor}/{slug}/toggle")
 def partial_toggle(
-    editor: str, slug: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+    editor: str, slug: str, request: Request, machine: str | None = None,
+    conn: sqlite3.Connection = Depends(get_conn)
 ):
+    """The htmx checkbox. No `?machine=` means the PERSON, exactly like
+    `PUT /api/v1/selection/{editor}/{slug}` with none.
+
+    `machine` exists so this fragment endpoint cannot become the way around a
+    refusal its JSON sibling makes (dash-admin-8 / CR-49, 2026-08-21): the
+    same 404 for a computer this account has never reported and the same 409
+    for a WIRED one, which works directly off the NAS tree and would sit under
+    a permanent [ GETTING READY ] chip against a tick that can never clear.
+    """
     settings = request.app.state.settings
     editor = editor.strip().lower()
     user = auth.get_session_user(request)
     if not auth.can_manage(settings, user, editor):
         raise HTTPException(status_code=403 if user else 401, detail="not allowed")
-    ticked = {s["slug"] for s in db.fetch_selections(conn, editor)}
+    target = (machine or "").strip() or None
+    if target is not None and target not in db.machines_of(conn, editor):
+        raise HTTPException(status_code=404,
+                            detail=f"{editor} has no computer named {target!r}")
+    ticked = {s["slug"] for s in db.fetch_selections(conn, editor, machine=target)}
     if slug in ticked:
-        db.remove_selection(conn, editor, slug)
+        db.remove_selection(conn, editor, slug, machine=target)
     else:
         project = conn.execute(
             "SELECT slug FROM projects WHERE slug=? AND active=1", (slug,)
@@ -775,11 +804,27 @@ def partial_toggle(
                 detail="this is a base rig account: it works directly off the "
                        "NAS and syncs nothing, so projects cannot be ticked for it",
             )
-        # The sidebar checkbox is the PERSON: every computer they use. Its
-        # title says so, and the assignments grid is where one machine at a
-        # time lives (MULTI_MACHINE_PLAN.md WP5).
-        db.add_selection_for_person(conn, editor, slug, created_by=user,
-                                    now=db.utcnow_iso())
+        if target is not None and (editor, target) in db.base_machines(conn):
+            # CR-28 per MACHINE (dash-admin-8, 2026-08-21). The refusal above
+            # is per PERSON and so cannot see a mixed account: one wired
+            # desktop and one remote laptop under one name is a shape a site
+            # can have (commit f27c181). The person-level path below needs no
+            # such check -- db.add_selection_for_person skips a person's wired
+            # machines itself.
+            raise HTTPException(
+                status_code=409,
+                detail=f"{target} is a wired machine: it works directly off the "
+                       "NAS and syncs nothing, so projects cannot be ticked for it",
+            )
+        if target is None:
+            # The sidebar checkbox is the PERSON: every computer they use. Its
+            # title says so, and the assignments grid is where one machine at a
+            # time lives (MULTI_MACHINE_PLAN.md WP5).
+            db.add_selection_for_person(conn, editor, slug, created_by=user,
+                                        now=db.utcnow_iso())
+        else:
+            db.add_selection(conn, editor, slug, created_by=user,
+                             now=db.utcnow_iso(), machine=target)
     conn.commit()
     # Reconcile Syncthing sharing promptly -- ticking used to wait out
     # interval_enforce (up to 60s) before anything started (2026-07-26).
@@ -806,7 +851,7 @@ def partial_toggle(
                         "tick_editor": editor,
                         "as_qs": _as_qs(request, editor)})
     return _render(request, "partials/my_queue.html", {
-        "queue": build_queue_view(conn, editor),
+        "queue": build_queue_view(conn, editor, machine=target),
     })
 
 
@@ -1258,8 +1303,15 @@ async def partial_admin_approve_device(
 @router.post("/partials/admin/users/disable")
 async def partial_admin_disable_user(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     """Disable (or re-enable) a LOCAL account -- there is no NAS twin of this
-    in scope here, same carve-out as api.api_admin_disable_user."""
-    _require_admin_page(request)
+    in scope here, same carve-out as api.api_admin_disable_user.
+
+    Same guards and the same credential purge as that route (dash-admin-5,
+    2026-08-21): this button called `local_users.disable_user` bare, so the
+    Users page could disable the last enabled admin -- or the admin's own
+    account -- that the JSON route refuses, and left the disabled account's
+    sessions and report token live. "The button on the Users page must not be
+    a softer door than the JSON route" (partial_admin_delete_user)."""
+    admin = _require_admin_page(request)
     settings = request.app.state.settings
     form = await _form(request)
     username = form.get("username", "").strip().lower()
@@ -1270,11 +1322,18 @@ async def partial_admin_disable_user(request: Request, conn: sqlite3.Connection 
         error = "this action is only available with DASH_AUTH_METHOD=local"
     else:
         try:
-            local_users.disable_user(conn, username, disabled)
+            local_users.disable_user(conn, username, disabled, requested_by=admin)
         except local_users.LocalUserError as exc:
             error = str(exc)
         else:
             conn.commit()
+            if disabled:
+                # AFTER the commit, for the deadlock reason api's own route
+                # documents: the purge writes through the session store's own
+                # connection to this same SQLite file.
+                api_purge_user_credentials(request, conn, username, by=admin,
+                                           why="account disabled")
+                conn.commit()   # the token half of the purge writes on `conn`
 
     return _render(request, "partials/admin_users.html", {
         "admin_users": build_admin_users_view(settings, conn),
@@ -1549,14 +1608,21 @@ def page_download_platform(
     settings = request.app.state.settings
     row = db.get_current_package(conn, platform, kind="onboard")
     if row is None:
-        if platform == "macos":
-            hint = ("on the Mac:\n"
-                    "  ./tools/build_onboard_macos.sh --publish --make-current")
-        else:
-            hint = ("from the base rig:\n"
-                    "  .\\installer\\build_editor_package.ps1 -Publish -MakeCurrent")
+        # An EDITOR reads this, not the vendor's release engineer
+        # (release-pipeline-11 / CR-59, 2026-08-21). It used to tell whoever
+        # clicked [ INSTALLER ] to run `build_editor_package.ps1 -Publish`
+        # from "the base rig" -- a repo checkout a customer's admin does not
+        # have and should not need, since publish_latest.py can publish a
+        # `kind=onboard` build straight from a green CI run. Two audiences,
+        # two sentences: what to do now, then what an admin can do about it.
+        fix = ("tools/publish_latest.py --kind onboard --platform "
+               f"{platform}")
         return PlainTextResponse(
-            f"no {platform} installer is published yet. Publish one {hint}",
+            f"No {platform} installer has been published for this fleet yet, so "
+            "there is nothing to download. Ask whoever set this dashboard up "
+            "for the installer.\n\n"
+            f"Admins: publish one with `{fix}` (or upload it on "
+            "Settings > Packages).\n",
             status_code=404,
         )
     path = settings.packages_path() / row["platform"] / row["filename"]
@@ -1798,6 +1864,13 @@ def page_admin_settings(request: Request, conn: sqlite3.Connection = Depends(get
         "manifest": manifest,
         "auto_derived": sorted(site_store.AUTO_DERIVED_KEYS),
         "from_db": set(manifest.get("_from_db", ())),
+        # A CHOICE, not free text (dash-admin-7, 2026-08-21): the field used
+        # to be a plain input, so "TrueNAS" or a trailing space reached every
+        # installer through the manifest while nas.factory kept using
+        # DASH_NAS_KIND. site_store.validate refuses anything not in this
+        # list; offering exactly the list is how an admin never meets that
+        # refusal.
+        "nas_kinds": list(nas_factory.NAS_KINDS),
         "nav_current": "site",
     })
 

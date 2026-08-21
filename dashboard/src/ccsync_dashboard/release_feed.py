@@ -371,13 +371,95 @@ def _valid_records(channel: dict[str, Any], pubkeys: tuple[str, ...]) -> list[di
             dropped += 1
             continue
         ok, _detail = release_trust.verify_record(rec, str(rec.get("signature", "")), pubkeys)
-        if ok:
-            out.append(rec)
-        else:
+        if not ok:
             dropped += 1
+            continue
+        # A validly signed record can still be a typo that would brick the
+        # channel: min_version above the version it describes raises every
+        # companion's permanent downgrade floor past the build on offer
+        # (dash-release-ai-3, 2026-08-21). Dropped here as well as refused in
+        # package_store, so it is never even shown to an admin as available.
+        if release_trust.min_version_exceeds_version(
+                rec.get("version"), rec.get("min_version")):
+            log.warning("release feed: ignoring %s/%s %s -- its min_version %s is higher "
+                        "than its own version, which would raise every companion's "
+                        "downgrade floor above it",
+                        rec.get("kind"), rec.get("platform"), rec.get("version"),
+                        rec.get("min_version"))
+            continue
+        out.append(rec)
     if dropped:
         log.warning("release feed: %d package record(s) failed verification and were ignored", dropped)
     return out
+
+
+def channel_current(channel: Any) -> dict[tuple[str, str], str]:
+    """The channel's `current` pointer: {(kind, platform): version}.
+
+    release-pipeline-5 (2026-08-21). The feed used to be a pure APPEND log
+    with no statement of what the vendor currently ships, so `_apply_policy`
+    replayed all 18 historical records in list order and made each one
+    current in turn -- a fresh customer downloaded ~1 GB on its first check,
+    and whichever record happened to be LAST won, which is append order and
+    not version order (a --force republish of an older build, or a late macOS
+    CI upload, offered the whole fleet a rollback). This object is part of
+    the SIGNED channel document (canonical_channel_bytes covers the whole
+    dict), so the feed host cannot steer it. Absent or malformed reads as
+    "no pointer", and the caller falls back to the highest version.
+    """
+    out: dict[tuple[str, str], str] = {}
+    raw = channel.get("current") if isinstance(channel, dict) else None
+    if not isinstance(raw, dict):
+        return out
+    for key, value in raw.items():
+        kind, sep, platform = str(key).partition("/")
+        version = str(value or "").strip()
+        if sep and kind.strip() and platform.strip() and version:
+            out[(kind.strip(), platform.strip())] = version
+    return out
+
+
+def _version_sort_key(version: str) -> tuple[int, ...]:
+    """Dotted-numeric to a comparable tuple; () for anything else, which sorts
+    below every real version. Same rule as dashboard_update.version_tuple --
+    and the reason "0.10.0 comes after 0.9.9" holds here too (CLAUDE.md:
+    the companion never reaches 1.0)."""
+    raw = str(version or "").strip()
+    if not raw or any(ch not in "0123456789." for ch in raw):
+        return ()
+    try:
+        return tuple(int(p) for p in raw.split(".") if p != "")
+    except ValueError:
+        return ()
+
+
+def select_offered_records(
+    records: list[dict[str, Any]], channel: Any
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """ONE record per (kind, platform) -- what an auto-publish policy acts on.
+
+    The channel's `current` pointer names it; without one, the highest
+    version wins. A pointer naming a version this feed does not carry selects
+    NOTHING for that pair, deliberately: publishing some other build because
+    the named one is missing is exactly the accidental rollback
+    release-pipeline-5 is about.
+    """
+    pointer = channel_current(channel)
+    chosen: dict[tuple[str, str], dict[str, Any]] = {}
+    for record in records:
+        kind, platform, version = _record_key(record)
+        if not (kind and platform and version):
+            continue
+        key = (kind, platform)
+        named = pointer.get(key)
+        if named is not None:
+            if version == named:
+                chosen[key] = record
+            continue
+        best = chosen.get(key)
+        if best is None or _version_sort_key(version) > _version_sort_key(_record_key(best)[2]):
+            chosen[key] = record
+    return chosen
 
 
 def package_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -467,11 +549,21 @@ def check_now(conn, settings, app_state) -> dict[str, Any]:
 
 def _apply_policy(conn, settings, app_state, valid_records: list[dict[str, Any]], now: str) -> list[str]:
     """manual: do nothing (the admin page's [ PUBLISH ] buttons are the only
-    writer). stage/current: auto-publish every verified record this
-    dashboard does not already have, current also flipping it live. Returns
-    the "kind/platform/version" strings actually published, for the log
-    line and the /check response -- an admin watching a fresh install should
-    see this happen, not infer it from the packages table changing."""
+    writer). stage/current: auto-publish the ONE record the channel currently
+    offers per (kind, platform), current also flipping it live. Returns the
+    "kind/platform/version" strings actually published, for the log line and
+    the /check response -- an admin watching a fresh install should see this
+    happen, not infer it from the packages table changing.
+
+    "The one record" since 2026-08-21 (release-pipeline-5): this used to walk
+    every verified record in list order, publishing all of them and, under
+    `current`, making each current in turn -- so the LAST entry in the file
+    won rather than the newest build, and a fresh dashboard downloaded the
+    whole history to get there. `select_offered_records` picks by the
+    channel's signed `current` pointer, falling back to the highest version;
+    everything else in the feed stays available behind the page's own
+    [ PUBLISH ] buttons, which is where a deliberate rollback belongs.
+    """
     policy = effective_policy(conn, settings)
     if policy == "manual":
         return []
@@ -480,11 +572,23 @@ def _apply_policy(conn, settings, app_state, valid_records: list[dict[str, Any]]
     # auto-apply a DASHBOARD code update. Replacing the code the container is
     # running is a ten-second outage and an admin's decision, not a
     # consequence of a policy about editor packages (ZERO_TOUCH_PLAN.md WP K).
-    for record in package_records(valid_records):
-        kind, platform, version = _record_key(record)
-        if not (kind and platform and version):
-            continue
-        if db.get_package(conn, platform, version, kind) is not None:
+    channel = _cache(app_state).get("channel") or {}
+    offered = select_offered_records(package_records(valid_records), channel)
+    for (kind, platform), record in sorted(offered.items()):
+        version = _record_key(record)[2]
+        existing = db.get_package(conn, platform, version, kind)
+        if existing is not None:
+            _warn_on_sha_conflict(existing, record)
+            # The pointer can move BACKWARDS -- that is how a bad build is
+            # withdrawn from feed customers (release-pipeline-5). A version
+            # this dashboard already holds still has to become current when
+            # the channel says it is current.
+            if policy == "current" and not existing["is_current"]:
+                if db.set_current_package(conn, platform, version, kind):
+                    conn.commit()
+                    log.info("release feed (current policy) made %s/%s %s current again",
+                             kind, platform, version)
+                    applied.append(f"{kind}/{platform} {version}")
             continue
         try:
             publish_from_feed(
@@ -499,6 +603,36 @@ def _apply_policy(conn, settings, app_state, valid_records: list[dict[str, Any]]
     if applied:
         log.info("release feed (%s policy) auto-published: %s", policy, ", ".join(applied))
     return applied
+
+
+def sha_conflict(existing: Any, record: dict[str, Any]) -> bool:
+    """Whether a published row and a feed record share a version but not their
+    bytes (release-pipeline-6, 2026-08-21). `tools/publish_feed.py` replaces a
+    record in place, so a CI re-run published with --force gives new customers
+    one binary and everyone who already holds that version another -- under
+    the same version number, which is the only thing drift tooling, the
+    Packages page and every companion report speak in."""
+    if existing is None:
+        return False
+    try:
+        held = str(existing["sha256"] or "").lower()
+    except (KeyError, IndexError, TypeError):
+        held = ""
+    offered = str(record.get("sha256") or "").lower()
+    return bool(held and offered and held != offered)
+
+
+def _warn_on_sha_conflict(existing: Any, record: dict[str, Any]) -> bool:
+    if not sha_conflict(existing, record):
+        return False
+    kind, platform, version = _record_key(record)
+    log.warning(
+        "release feed: %s/%s %s is published here with sha256 %s but the feed now "
+        "offers sha256 %s for the SAME version -- same version, different bytes. "
+        "Nothing was replaced; ask the vendor to publish a new version number",
+        kind, platform, version,
+        str(existing["sha256"] or "")[:12], str(record.get("sha256") or "")[:12])
+    return True
 
 
 def publish_from_feed(
@@ -522,7 +656,22 @@ def publish_from_feed(
     if record is None:
         raise package_store.PackageStoreError(
             404, f"no verified feed record for {kind}/{platform}/{version} -- run Check now first")
-    if db.get_package(conn, platform, version, kind) is not None:
+    existing = db.get_package(conn, platform, version, kind)
+    if existing is not None:
+        # Name the DISAGREEMENT when there is one (release-pipeline-6,
+        # 2026-08-21): "already published" is a fine answer when the bytes
+        # match and a misleading one when they do not, and a version number
+        # standing for two different binaries is invisible to everything else
+        # in this product.
+        if _warn_on_sha_conflict(existing, record):
+            raise package_store.PackageStoreError(
+                409,
+                f"{kind} {platform} {version} is already published on this dashboard, but "
+                f"the feed offers DIFFERENT bytes for that same version "
+                f"(published sha256 {str(existing['sha256'] or '')[:12]}, feed "
+                f"{str(record.get('sha256') or '')[:12]}). Nothing was replaced. The "
+                f"vendor has to publish this build under a new version number.",
+            )
         raise package_store.PackageStoreError(
             409, f"{kind} {platform} {version} is already published on this dashboard")
 
@@ -581,6 +730,7 @@ def build_feed_view(conn, settings, app_state) -> dict[str, Any]:
     configured = bool(settings.release_feed_url)
     cache = _cache(app_state)
     available: list[dict[str, Any]] = []
+    conflicts: list[dict[str, str]] = []
     if configured:
         # package_records only: the `dashboard` half of the channel is served
         # by dashboard_update.status(), which knows about runtime ids and the
@@ -588,8 +738,21 @@ def build_feed_view(conn, settings, app_state) -> dict[str, Any]:
         # next to something that must never enter companion_packages.
         for record in package_records(cache.get("valid_records") or []):
             kind, platform, version = _record_key(record)
-            if kind and platform and version and db.get_package(conn, platform, version, kind) is None:
+            if not (kind and platform and version):
+                continue
+            existing = db.get_package(conn, platform, version, kind)
+            if existing is None:
                 available.append(record)
+            elif sha_conflict(existing, record):
+                # Surfaced, not hidden (release-pipeline-6, 2026-08-21): this
+                # version is not "available" (publishing it would 409) but an
+                # admin has to be able to see that their copy and the vendor's
+                # differ, since every other surface speaks only in versions.
+                conflicts.append({
+                    "kind": kind, "platform": platform, "version": version,
+                    "published_sha256": str(existing["sha256"] or ""),
+                    "feed_sha256": str(record.get("sha256") or ""),
+                })
     channel = cache.get("channel") or {}
     image = channel.get("dashboard_image") if isinstance(channel.get("dashboard_image"), dict) else {}
     return {
@@ -600,6 +763,7 @@ def build_feed_view(conn, settings, app_state) -> dict[str, Any]:
         "last_error": state.get("last_error"),
         "last_channel_generated_at": state.get("last_channel_generated_at"),
         "available": available,
+        "sha_conflicts": conflicts,
         "image": {
             "tag": str(image.get("tag") or ""),
             "digest": str(image.get("digest") or ""),
@@ -687,7 +851,12 @@ def api_admin_feed_check(request: FastAPIRequest, conn=Depends(get_conn)) -> dic
     if not settings.release_feed_url:
         raise HTTPException(status_code=503, detail="DASH_RELEASE_FEED_URL is not configured")
     result = check_now(conn, settings, request.app.state)
+    # `applied` is what a stage/current policy just did (check_now's docstring
+    # has always said this belongs in the response; 2026-08-21): an admin
+    # watching a fresh install should see it, not infer it from the packages
+    # table changing under them.
     return {"ok": result["ok"], "error": result.get("error"),
+            "applied": result.get("applied") or [],
             "view": build_feed_view(conn, settings, request.app.state)}
 
 

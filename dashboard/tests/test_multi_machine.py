@@ -239,7 +239,11 @@ def test_unticking_one_computer_leaves_the_other_alone(env):
 
 def test_the_unassigned_bucket_applies_only_where_there_is_no_plan(env):
     """A machine that has been given a plan of its own is never ALSO handed
-    the bucket -- that would make "untick this on the laptop" impossible."""
+    the bucket -- that would make "untick this on the laptop" impossible.
+
+    Its first own row COPIES the bucket across first, though (dash-core-1),
+    so what it inherited is kept and can then be unticked one project at a
+    time."""
     client, conn, now = env
     report(client, "ruskin", "DESKTOP-1")
     report(client, "ruskin", "LAPTOP-1")
@@ -248,7 +252,50 @@ def test_the_unassigned_bucket_applies_only_where_there_is_no_plan(env):
     conn.commit()
 
     assert [s["slug"] for s in dbmod.selections_for_machine(conn, "ruskin", "DESKTOP-1")] == ["p1"]
+    laptop = [s["slug"] for s in dbmod.selections_for_machine(conn, "ruskin", "LAPTOP-1")]
+    assert sorted(laptop) == ["p1", "p2"]
+    # ...and the bucket itself is untouched, so the OTHER computer keeps it.
+    assert dbmod.remove_selection(conn, "ruskin", "p1", machine="LAPTOP-1") is True
     assert [s["slug"] for s in dbmod.selections_for_machine(conn, "ruskin", "LAPTOP-1")] == ["p2"]
+    assert [s["slug"] for s in dbmod.selections_for_machine(conn, "ruskin", "DESKTOP-1")] == ["p1"]
+
+
+# -- dash-core-1: a tick must not eclipse what the machine was inheriting ----
+
+
+def test_a_tick_keeps_the_projects_the_machine_was_inheriting(env):
+    """The bucket is the normal onboarding state: an admin ticks projects for
+    a new editor before their companion has ever reported. Ticking one more a
+    day later used to leave that machine's plan as exactly that one project,
+    and the next enforce cycle unshared the rest."""
+    client, conn, now = env
+    dbmod.add_selection_for_person(conn, "newbie", "p1", "owen", now)   # no machine yet
+    conn.commit()
+    assert dbmod.selections_for_machine(conn, "newbie", "") != []
+
+    report(client, "newbie", "LAPTOP")                                  # first report
+    assert [s["slug"] for s in dbmod.selections_for_machine(conn, "newbie", "LAPTOP")] == ["p1"]
+
+    r = client.put("/api/v1/selection/newbie/p2")                       # person-level tick
+    assert r.status_code == 200, r.text
+    plan = [s["slug"] for s in dbmod.selections_for_machine(conn, "newbie", "LAPTOP")]
+    assert sorted(plan) == ["p1", "p2"]
+    # ...and the enforce cycle's view agrees: the share is still made.
+    assert ("newbie", "LAPTOP") in dbmod.fetch_machine_selections(conn)["p1"]
+
+
+def test_unticking_an_inherited_project_on_one_machine_takes(env):
+    """DELETE ...?machine=X used to delete 0 rows and answer changed=false
+    while the project kept syncing (dash-core-1)."""
+    client, conn, now = env
+    dbmod.add_selection_for_person(conn, "newbie", "p1", "owen", now)
+    dbmod.add_selection_for_person(conn, "newbie", "p2", "owen", now)
+    conn.commit()
+    report(client, "newbie", "LAPTOP")
+
+    r = client.delete("/api/v1/selection/newbie/p1?machine=LAPTOP")
+    assert r.status_code == 200 and r.json()["changed"] is True
+    assert [s["slug"] for s in dbmod.selections_for_machine(conn, "newbie", "LAPTOP")] == ["p2"]
 
 
 def test_the_backlog_is_per_computer(env):
@@ -442,9 +489,40 @@ def test_an_admin_can_ask_one_machine_to_resume_proxy_download(env):
     assert command["requested_by"] == "owen"
 
 
-def test_the_request_clears_itself_once_the_machine_reports_it_resumed(env):
-    """A standing request would sit on the machine and silently clear the
-    NEXT trip -- which could be the real one the breaker exists for."""
+def test_the_request_is_delivered_exactly_once(env):
+    """ONE CLICK, ONE RESUME (comp-lanes-ab-2, 2026-08-21).
+
+    A standing request re-armed the breaker on every report, so a pass that
+    re-tripped inside the report interval was resumed again, and again: one
+    admin click became an unbounded sequence of deleting passes, which is
+    the exact failure the breaker exists to stop."""
+    client, conn, _now = env
+    report(client, "ruskin", "DESKTOP-1", sync_guard=_guard(True))
+    client.post("/api/v1/admin/machines/ruskin/DESKTOP-1/resume-lane-b")
+
+    reply = report(client, "ruskin", "DESKTOP-1", sync_guard=_guard(True))
+    assert reply["commands"]["resume_lane_b"]["apply"] is True
+    assert dbmod.lane_b_resume_request(conn, "ruskin", "DESKTOP-1") is None
+
+    # The machine re-trips seconds later, before any report: NOT resumed again.
+    reply = report(client, "ruskin", "DESKTOP-1", sync_guard=_guard(True))
+    assert "resume_lane_b" not in reply["commands"]
+
+
+def test_the_command_carries_the_stamp_the_companion_dedupes_on(env):
+    """The companion refuses to apply the same requested_at twice, so a
+    redelivered reply cannot clear a later trip."""
+    client, conn, _now = env
+    report(client, "ruskin", "DESKTOP-1", sync_guard=_guard(True))
+    client.post("/api/v1/admin/machines/ruskin/DESKTOP-1/resume-lane-b")
+
+    command = report(client, "ruskin", "DESKTOP-1",
+                     sync_guard=_guard(True))["commands"]["resume_lane_b"]
+    assert command["requested_by"] == "owen"
+    assert command["requested_at"]
+
+
+def test_the_request_is_dropped_when_the_machine_reports_it_already_resumed(env):
     client, conn, _now = env
     report(client, "ruskin", "DESKTOP-1", sync_guard=_guard(True))
     client.post("/api/v1/admin/machines/ruskin/DESKTOP-1/resume-lane-b")
@@ -453,12 +531,8 @@ def test_the_request_clears_itself_once_the_machine_reports_it_resumed(env):
     assert "resume_lane_b" not in reply["commands"]
     assert dbmod.lane_b_resume_request(conn, "ruskin", "DESKTOP-1") is None
 
-    # ...and a LATER trip is not cleared by the request that is now gone.
-    reply = report(client, "ruskin", "DESKTOP-1", sync_guard=_guard(True))
-    assert "resume_lane_b" not in reply["commands"]
 
-
-def test_a_companion_too_old_to_send_a_guard_section_keeps_the_request(env):
+def test_a_companion_too_old_to_send_a_guard_section_still_gets_it_once(env):
     """Otherwise "no guard" reads as "not tripped" and the admin's click is
     thrown away without ever reaching the machine."""
     client, conn, _now = env
@@ -467,7 +541,26 @@ def test_a_companion_too_old_to_send_a_guard_section_keeps_the_request(env):
 
     reply = report(client, "ruskin", "DESKTOP-1")           # no sync_guard at all
     assert reply["commands"]["resume_lane_b"]["apply"] is True
-    assert dbmod.lane_b_resume_request(conn, "ruskin", "DESKTOP-1") is not None
+    assert dbmod.lane_b_resume_request(conn, "ruskin", "DESKTOP-1") is None
+
+
+def test_a_machine_that_is_not_parked_cannot_be_pre_armed(env):
+    """A request armed before the trip is a decision about a trip nobody has
+    seen: an offline machine's first report would auto-resume whatever it
+    tripped on, days later (comp-lanes-ab-2)."""
+    client, conn, _now = env
+    report(client, "ruskin", "DESKTOP-1", sync_guard=_guard(False))
+
+    r = client.post("/api/v1/admin/machines/ruskin/DESKTOP-1/resume-lane-b")
+    assert r.status_code == 409, r.text
+    assert "nothing to resume" in r.json()["detail"]
+    assert dbmod.lane_b_resume_request(conn, "ruskin", "DESKTOP-1") is None
+
+    # ...and a machine that has never sent a guard section at all is the same
+    # answer: it has no breaker to clear.
+    report(client, "leso", "MacBook")
+    assert client.post(
+        "/api/v1/admin/machines/leso/MacBook/resume-lane-b").status_code == 409
 
 
 def test_resuming_an_unknown_machine_is_a_404(env):

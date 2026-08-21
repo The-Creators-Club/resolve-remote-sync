@@ -1147,6 +1147,7 @@ def replace_clip(media_pool_item, new_path: str, tries: int = 3, *,
     raised = 0
     for attempt in range(max(1, tries)):
         ui_state.wait_while_menu_open()
+        clip_name = ""
         with _bridge_call("replace_clip"):
             try:
                 media_pool_item.ReplaceClip(new_path)
@@ -1154,11 +1155,22 @@ def replace_clip(media_pool_item, new_path: str, tries: int = 3, *,
                 raised += 1
                 log.warning("resolve: ReplaceClip(%s) raised: %s", new_path, exc, exc_info=True)
             after = _file_path_locked()
-        if after is not None and _norm_path(after) == norm_new:
+            took = after is not None and _norm_path(after) == norm_new
+            # GetName() UNDER THE LOCK, not at the record() call below
+            # (comp-resolve-3, 2026-08-21). It is a call into
+            # fusionscript.dll like any other, and the journal line
+            # used to read it after the `with` had closed: the FIX ALL worker
+            # calling GetName() while the watcher was mid-GetClipProperty() is
+            # exactly the concurrent-native-call shape this module's header
+            # says faults 0xc0000005 and takes the windowed tray down with no
+            # log. The journal takes a STRING, so read it here and pass it.
+            if took and journal:
+                clip_name = _safe_clip_name(media_pool_item)
+        if took:
             if journal:
                 resolve_journal.record(
                     resolve_journal.KIND_REPLACE_CLIP, project_name,
-                    clip_name=_safe_clip_name(media_pool_item),
+                    clip_name=clip_name,
                     old_path=before or "", new_path=new_path, source=source,
                 )
             return {"ok": True, "message": f"Relinked to {new_path}"}
@@ -1229,10 +1241,21 @@ def link_proxy_media(media_pool_item, proxy_path: str, *,
         return {"ok": False, "message": "no proxy path given"}
     ui_state.wait_while_menu_open()  # same GIL courtesy as the enumerators
     project_name = _before_mutation(source) if journal else ""
+    clip_name = ""
+    clip_path = ""
     with _bridge_call("link_proxy_media"):
         try:
             old_proxy = _safe_clip_property(media_pool_item, "Proxy Media Path")
             result = media_pool_item.LinkProxyMedia(proxy_path)
+            # The journal's clip name and original path are read HERE, inside
+            # the lock, for the reason written at replace_clip's own read
+            # (comp-resolve-3, 2026-08-21): GetName/GetClipProperty are calls
+            # into fusionscript.dll, and this bookkeeping used to make them
+            # after the `with` closed, on the proxy-relink thread, while the
+            # watcher was inside its own call.
+            if result and journal:
+                clip_name = _safe_clip_name(media_pool_item)
+                clip_path = _safe_clip_property(media_pool_item, "File Path")
         except Exception as exc:
             log.warning("resolve: LinkProxyMedia(%s) raised: %s", proxy_path, exc, exc_info=True)
             return {"ok": False, "message": _SCRIPTING_ERROR_MESSAGE}
@@ -1244,8 +1267,8 @@ def link_proxy_media(media_pool_item, proxy_path: str, *,
     if journal:
         resolve_journal.record(
             resolve_journal.KIND_LINK_PROXY, project_name,
-            clip_name=_safe_clip_name(media_pool_item),
-            clip_path=_safe_clip_property(media_pool_item, "File Path"),
+            clip_name=clip_name,
+            clip_path=clip_path,
             old_path=old_proxy, new_path=proxy_path, source=source,
         )
     return {"ok": True, "message": f"Proxy relinked to {proxy_path}"}
@@ -1299,11 +1322,39 @@ def undo_last_relink(session_path: Any = None) -> dict[str, Any]:
     replays the journal in REVERSE, so a clip touched twice in one burst ends
     up at the path it had before the burst started.
 
-    Entries whose clip is no longer in the media pool (removed since, or the
-    editor has a different project open) are counted as `skipped`, never
-    guessed at. Never raises.
+    Entries whose clip is no longer in the media pool (removed since) are
+    counted as `skipped`, never guessed at. Never raises.
+
+    THE JOURNAL AND THE OPEN PROJECT MUST MATCH (comp-resolve-2, 2026-08-21).
+    This used to replay the newest journal of ANY project against whatever
+    project happened to be open, matching clips by file path alone -- and
+    every project shares the paths under Assets (music beds, archive b-roll),
+    so project A's journal could rewrite project B's music clip to A's
+    machine-private `F:\\...` spelling, unjournalled and therefore not itself
+    undoable. The journal is now chosen for the OPEN project, and a journal
+    that names a different one is refused rather than replayed.
     """
-    path = Path(session_path) if session_path is not None else resolve_journal.latest_session()
+    # max_age=0: the cached name is up to 20 s old, and an editor who just
+    # switched projects is exactly the person pressing this menu item.
+    open_project = current_project_name(max_age=0.0)
+    if session_path is not None:
+        path: Optional[Path] = Path(session_path)
+    else:
+        path = resolve_journal.latest_session(open_project) if open_project else None
+        if path is None:
+            elsewhere = resolve_journal.latest_session()
+            other = (str(resolve_journal.read_session(elsewhere).get("project") or "")
+                     if elsewhere is not None else "")
+            # A journal that names no project at all (the bridge could not
+            # read the name when the edit was made) stays replayable: it is
+            # the pre-2026-08-21 shape, and refusing it would leave an editor
+            # with no rollback at all.
+            if elsewhere is not None and open_project and other:
+                return {"ok": False, "undone": 0, "skipped": 0, "message": (
+                    f"CCSync has not changed any clip paths in \u201c{open_project}\u201d. "
+                    f"The last change it made was in \u201c{other}\u201d: open that "
+                    "project and undo there.")}
+            path = elsewhere
     if path is None:
         return {"ok": False, "undone": 0, "skipped": 0,
                 "message": "CCSync has not changed any clip paths on this machine."}
@@ -1317,6 +1368,19 @@ def undo_last_relink(session_path: Any = None) -> dict[str, Any]:
     if not pool.get("ok"):
         return {"ok": False, "undone": 0, "skipped": len(entries),
                 "message": pool.get("message") or NOT_RUNNING_MESSAGE}
+    # The pool walk names the project it walked, which is the authority here:
+    # an explicit session_path, or a project name the bridge could not read a
+    # moment ago, both land in this check (comp-resolve-2, 2026-08-21).
+    open_name = str(pool.get("project_name") or "") or open_project
+    journal_project = str(data.get("project") or "")
+    if (journal_project and open_name
+            and resolve_journal.project_slug(journal_project)
+            != resolve_journal.project_slug(open_name)):
+        return {"ok": False, "undone": 0, "skipped": len(entries), "message": (
+            f"That change was made in \u201c{journal_project}\u201d but "
+            f"\u201c{open_name}\u201d is open. Open "
+            f"\u201c{journal_project}\u201d and undo there: replaying it here would "
+            "re-address clips the two projects share.")}
     by_path: dict[str, Any] = {}
     for item in pool.get("items") or []:
         mpi = item.get("media_pool_item")

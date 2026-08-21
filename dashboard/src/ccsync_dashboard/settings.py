@@ -119,6 +119,16 @@ class Settings:
     # DASH_ADMIN_USERS alone, which is the safe default.
     oidc_admin_claim: str = ""
     oidc_admin_values: frozenset[str] = frozenset()
+    # WHO may sign in at all (trust-model-5, 2026-08-21). Password sign-in
+    # runs _require_fleet_member (the `editors` group on the NAS); OIDC had
+    # no equivalent, so pointing the issuer at a company directory let every
+    # account in it -- accounting, interns, a contractor tenant -- in as an
+    # editor, and one whose preferred_username happens to equal a real
+    # editor's inherits that editor's plans and devices. Default: the
+    # username must be one the fleet already knows. A group claim is the
+    # alternative for a customer who wants the IdP to be the authority.
+    oidc_groups_claim: str = "groups"
+    oidc_allowed_groups: frozenset[str] = frozenset()
     # Absolute redirect URI registered with the IdP. Blank = derived from the
     # request, which is right behind a single known front-end and wrong behind
     # anything that rewrites Host -- so it is settable.
@@ -402,6 +412,13 @@ class Settings:
     interval_completion: float = 60.0
     interval_remoteneed: float = 60.0
     interval_prune: float = 3600.0
+    # Wall-clock budget for ONE completion pass (ops-efficiency-5,
+    # 2026-08-21). The collector is one thread running every due kind in
+    # series, so a Syncthing that hangs rather than refuses parks enforce,
+    # connections, provision and the health signal behind ~120 sequential
+    # 10 s-timeout calls. Past this the pass writes what it has and the rest
+    # of the folders lead the next cycle. 0 disables the budget.
+    completion_budget_seconds: float = 30.0
     backoff_max: float = 300.0
     # Blast-radius brake on the enforce cycle: an enforce pass that would
     # unshare MORE than this many devices is refused (additions still apply)
@@ -553,6 +570,11 @@ class Settings:
                 v.strip().lower() for v in env.get("DASH_OIDC_ADMIN_VALUES", "").split(",")
                 if v.strip()
             ),
+            oidc_groups_claim=(env.get("DASH_OIDC_GROUPS_CLAIM", "").strip() or "groups"),
+            oidc_allowed_groups=frozenset(
+                v.strip().lower() for v in env.get("DASH_OIDC_ALLOWED_GROUPS", "").split(",")
+                if v.strip()
+            ),
             oidc_redirect_url=env.get("DASH_OIDC_REDIRECT_URL", "").strip(),
             internal_token=env.get("CCSYNC_INTERNAL_TOKEN", "").strip(),
             nas_kind=(env.get("DASH_NAS_KIND", "").strip().lower() or "truenas"),
@@ -620,6 +642,7 @@ class Settings:
             interval_completion=num("DASH_INTERVAL_COMPLETION", 60.0),
             interval_remoteneed=num("DASH_INTERVAL_REMOTENEED", 60.0),
             interval_prune=num("DASH_INTERVAL_PRUNE", 3600.0),
+            completion_budget_seconds=num("DASH_COMPLETION_BUDGET_SECONDS", 30.0),
             backoff_max=num("DASH_BACKOFF_MAX", 300.0),
             enforce_max_share_removals=int(num("DASH_ENFORCE_MAX_REMOVALS", 3)),
         )

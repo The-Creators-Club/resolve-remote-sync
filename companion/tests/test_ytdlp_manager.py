@@ -838,16 +838,71 @@ def test_the_thread_survives_an_ensure_that_raises(monkeypatch, caplog):
             mgr.join(timeout=5)
 
 
-def test_start_with_the_feature_off_starts_no_thread(caplog):
-    before = {t.name for t in threading.enumerate()}
+def test_start_with_the_feature_off_still_runs_the_thread(caplog, monkeypatch):
+    """comp-ytdl-2 / comp-ytdl-3 (2026-08-21). The thread used to be refused
+    here, and app.py calls start() exactly once at tray launch: turning
+    `youtube_download` on for a site then did nothing until every editor
+    restarted their tray, and the pinned ffmpeg -- which b-roll ingest and the
+    proxy generator need whatever the site says about YouTube -- was reachable
+    only through this thread and so never fetched on a vendor build. It runs;
+    the GATE moved into the loop, which re-reads it every pass."""
+    monkeypatch.setattr(ytdlp_mod, "INITIAL_DELAY_SECONDS", 5.0)
     mgr = ytdlp_mod.YtDlpManager({"ytdl_local_downloads": False})
     with caplog.at_level(logging.INFO, logger="ccsync.ytdlp"):
         mgr.start()
     try:
-        assert "ccsync-ytdlp" not in {t.name for t in threading.enumerate()} - before
-        assert any("disabled" in r.getMessage() for r in caplog.records)
+        assert mgr._thread is not None and mgr._thread.is_alive()
+        assert any("ffmpeg" in r.getMessage() for r in caplog.records)
     finally:
         mgr.stop()
+        mgr.join(timeout=5)
+
+
+def test_the_loop_installs_ffmpeg_but_no_deno_while_youtube_is_off(monkeypatch):
+    """A codec is not an entitlement; a JS runtime is (BROLL_INGEST_PLAN.md
+    §3.3). ensure() returns ACTION_DISABLED before it reaches the pair, so
+    with the flag off this loop has to call the pair itself."""
+    monkeypatch.setattr(ytdlp_mod, "INITIAL_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(ytdlp_mod, "DISABLED_RECHECK_SECONDS", 0.05)
+    called = []
+    done = threading.Event()
+
+    def fake_pair(cfg=None, github_open=None, available_fn=None):
+        called.append("pair")
+        done.set()
+        return {"ok": True, "action": "none", "message": "ffmpeg is installed"}
+
+    def fake_ensure(cfg=None, github_open=None, available_fn=None):
+        called.append("ensure")
+        done.set()
+        return {"ok": False, "action": "disabled", "message": "off"}
+
+    monkeypatch.setattr(sidecar_tools, "ensure_ffmpeg_pair", fake_pair)
+    monkeypatch.setattr(sidecar_tools, "ensure", fake_ensure)
+
+    mgr = ytdlp_mod.YtDlpManager({"ytdl_local_downloads": False})
+    mgr.start()
+    try:
+        assert done.wait(5.0)
+    finally:
+        mgr.stop()
+        mgr.join(timeout=5)
+    assert "pair" in called
+    assert "ensure" not in called
+
+
+def test_the_status_says_which_gate_is_closed(monkeypatch):
+    """"switched off in config" sent an admin looking in config.toml for a
+    site-manifest decision (comp-ytdl-3)."""
+    from ccsync_companion import site as site_mod
+
+    monkeypatch.setattr(site_mod, "feature_enabled", lambda name, site=None: False)
+    mgr = ytdlp_mod.YtDlpManager({})
+    assert "off for this site" in mgr.ensure()["message"]
+
+    monkeypatch.setattr(site_mod, "feature_enabled", lambda name, site=None: True)
+    mgr = ytdlp_mod.YtDlpManager({"ytdl_local_downloads": False})
+    assert "ytdl_local_downloads" in mgr.ensure()["message"]
 
 
 def test_start_is_idempotent(monkeypatch):
@@ -917,14 +972,17 @@ def test_app_start_brings_the_sidecar_up_and_shutdown_takes_it_down(
     assert app.ytdlp._stop_event.is_set()
 
 
-def test_app_start_with_local_downloads_off_starts_no_sidecar_thread(
-    tmp_path, inert_resolve
+def test_app_start_runs_the_sidecar_thread_with_local_downloads_off(
+    tmp_path, inert_resolve, monkeypatch
 ):
-    before = {t.name for t in threading.enumerate()}
+    """comp-ytdl-2/3 (2026-08-21): the thread is the only path to the managed
+    ffmpeg, and the only thing that would notice the site turning the
+    downloader on. Its YouTube work is gated inside the loop."""
+    monkeypatch.setattr(ytdlp_mod, "INITIAL_DELAY_SECONDS", 30.0)   # never fires here
     app = _app({"ytdl_local_downloads": False}, tmp_path)
     app.start()
     try:
-        assert "ccsync-ytdlp" not in {t.name for t in threading.enumerate()} - before
+        assert app.ytdlp._thread is not None and app.ytdlp._thread.is_alive()
     finally:
         app.shutdown()
 

@@ -65,13 +65,19 @@ def make_record(*, kind="companion", platform="windows", version="0.9.0",
     return signed, body
 
 
-def make_channel(records: list[dict], *, seed=TEST_SEED, image=None) -> tuple[dict, str]:
+def make_channel(records: list[dict], *, seed=TEST_SEED, image=None,
+                 current=None) -> tuple[dict, str]:
     channel = {
         "schema": 1, "generated_at": PUBLISHED_AT, "channel": "stable",
         "pubkey_id": release_trust.pubkey_id(base64.b64encode(ed25519.public_key(seed)).decode("ascii")),
         "dashboard_image": image or {"tag": "", "digest": ""},
         "packages": records,
     }
+    # The channel's own "current" pointer (release-pipeline-5, 2026-08-21):
+    # {"<kind>/<platform>": "<version>"}. Part of the signed document, which is
+    # what stops the feed HOST from steering it.
+    if current is not None:
+        channel["current"] = current
     sig = base64.b64encode(ed25519.sign(seed, release_feed.canonical_channel_bytes(channel))).decode("ascii")
     return channel, sig
 
@@ -632,7 +638,9 @@ def test_manual_policy_never_auto_publishes(env, monkeypatch):
         CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode(), record["url"]: body,
     })
     r = client.post("/api/v1/admin/feed/check")
-    assert r.json()["applied"] if "applied" in r.json() else True  # top-level 'applied' not required
+    # `applied` is part of the response since 2026-08-21 and is empty under
+    # manual: nothing is published without an admin pressing PUBLISH.
+    assert r.json()["applied"] == []
     assert dbmod.get_package(conn, "windows", "0.9.0") is None
 
 
@@ -739,3 +747,148 @@ def test_the_put_path_is_unaffected_by_the_refactor(tmp_path):
                        content=body, headers={"Content-Type": "application/octet-stream"})
         assert r.status_code == 200
         assert dbmod.get_package(dbmod.connect(settings.db_path), "windows", "0.2.0") is not None
+
+
+# ------------------------------------------- the channel's `current` pointer
+# release-pipeline-5 / release-pipeline-6 / dash-release-ai-3 (2026-08-21).
+
+
+def test_current_policy_publishes_only_the_named_record(env, monkeypatch):
+    """A fresh dashboard on `current` must not replay the whole history: it
+    takes the ONE build the channel says is current, per (kind, platform)."""
+    client, conn, settings = env
+    assert client.post("/api/v1/admin/feed/policy", json={"policy": "current"}).status_code == 200
+    old_rec, old_body = make_record(version="0.9.0", body=b"old-bytes")
+    new_rec, new_body = make_record(version="0.9.41", body=b"new-bytes")
+    channel, sig = make_channel([old_rec, new_rec],
+                                current={"companion/windows": "0.9.41"})
+    patch_opener(monkeypatch, {
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode(),
+        old_rec["url"]: old_body, new_rec["url"]: new_body,
+    })
+    r = client.post("/api/v1/admin/feed/check")
+    assert r.status_code == 200
+    assert r.json()["applied"] == ["companion/windows 0.9.41"]
+    assert dbmod.get_package(conn, "windows", "0.9.0") is None
+    row = dbmod.get_package(conn, "windows", "0.9.41")
+    assert row is not None and row["is_current"]
+
+
+def test_with_no_pointer_the_highest_version_wins_not_the_last_in_the_list(env, monkeypatch):
+    """Append order is not version order: a --force republish of an older
+    build lands AFTER a newer one in the file and used to become current."""
+    client, conn, settings = env
+    assert client.post("/api/v1/admin/feed/policy", json={"policy": "current"}).status_code == 200
+    newer, newer_body = make_record(version="0.10.0", body=b"newer-bytes")
+    older, older_body = make_record(version="0.9.41", body=b"older-bytes")
+    channel, sig = make_channel([newer, older])          # older appended last
+    patch_opener(monkeypatch, {
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode(),
+        newer["url"]: newer_body, older["url"]: older_body,
+    })
+    assert client.post("/api/v1/admin/feed/check").status_code == 200
+    row = dbmod.get_package(conn, "windows", "0.10.0")
+    assert row is not None and row["is_current"]
+    assert dbmod.get_package(conn, "windows", "0.9.41") is None
+
+
+def test_the_pointer_can_withdraw_a_build_by_naming_an_older_one(env, monkeypatch):
+    """The retraction path: a bad build is withdrawn by moving `current` back
+    to a version this dashboard already holds."""
+    client, conn, settings = env
+    assert client.post("/api/v1/admin/feed/policy", json={"policy": "current"}).status_code == 200
+    good, good_body = make_record(version="0.9.41", body=b"good-bytes")
+    bad, bad_body = make_record(version="0.9.42", body=b"bad-bytes")
+    table = {good["url"]: good_body, bad["url"]: bad_body}
+
+    channel, sig = make_channel([good, bad], current={"companion/windows": "0.9.42"})
+    patch_opener(monkeypatch, dict(table, **{
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode()}))
+    assert client.post("/api/v1/admin/feed/check").status_code == 200
+    # 0.9.41 is not published at all yet -- publish it so the withdrawal has
+    # something to fall back to, the way a fleet already running it would.
+    assert client.post("/api/v1/admin/feed/publish",
+                       json={"platform": "windows", "version": "0.9.41"}).status_code == 200
+    assert dbmod.get_package(conn, "windows", "0.9.42")["is_current"]
+
+    channel, sig = make_channel([good, bad], current={"companion/windows": "0.9.41"})
+    patch_opener(monkeypatch, dict(table, **{
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode()}))
+    assert client.post("/api/v1/admin/feed/check").status_code == 200
+    assert dbmod.get_package(conn, "windows", "0.9.41")["is_current"]
+    assert not dbmod.get_package(conn, "windows", "0.9.42")["is_current"]
+
+
+def test_a_pointer_naming_a_version_the_feed_lacks_publishes_nothing(env, monkeypatch):
+    client, conn, settings = env
+    assert client.post("/api/v1/admin/feed/policy", json={"policy": "current"}).status_code == 200
+    record, body = make_record(version="0.9.41")
+    channel, sig = make_channel([record], current={"companion/windows": "0.9.99"})
+    patch_opener(monkeypatch, {
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode(), record["url"]: body,
+    })
+    assert client.post("/api/v1/admin/feed/check").json()["applied"] == []
+    assert dbmod.get_package(conn, "windows", "0.9.41") is None
+
+
+def test_same_version_different_bytes_is_reported_not_silently_409ed(env, monkeypatch):
+    client, conn, settings = env
+    first, first_body = make_record(version="0.9.41", body=b"ci-run-one")
+    channel, sig = make_channel([first])
+    patch_opener(monkeypatch, {
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode(), first["url"]: first_body,
+    })
+    assert client.post("/api/v1/admin/feed/check").status_code == 200
+    assert client.post("/api/v1/admin/feed/publish",
+                       json={"platform": "windows", "version": "0.9.41"}).status_code == 200
+
+    # The vendor re-ran CI and replaced the record in place (publish_feed's
+    # upsert / publish_latest --force): same version, different bytes.
+    second, second_body = make_record(version="0.9.41", body=b"ci-run-two")
+    channel, sig = make_channel([second])
+    patch_opener(monkeypatch, {
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode(), second["url"]: second_body,
+    })
+    assert client.post("/api/v1/admin/feed/check").status_code == 200
+    view = client.get("/api/v1/admin/feed").json()
+    assert view["sha_conflicts"], "the split must be visible to an admin"
+    conflict = view["sha_conflicts"][0]
+    assert conflict["version"] == "0.9.41"
+    assert conflict["published_sha256"] != conflict["feed_sha256"]
+
+    r = client.post("/api/v1/admin/feed/publish",
+                    json={"platform": "windows", "version": "0.9.41"})
+    assert r.status_code == 409
+    assert "DIFFERENT bytes" in r.json()["detail"]
+
+
+def test_a_record_whose_min_version_exceeds_its_version_is_never_offered(env, monkeypatch):
+    """One typo on the release rig (`--min-version 0.9.54` for a 0.9.44
+    build) would raise every companion's permanent downgrade floor above the
+    build being offered (dash-release-ai-3)."""
+    client, conn, settings = env
+    bad, bad_body = make_record(version="0.9.44", min_version="0.9.54")
+    channel, sig = make_channel([bad])
+    patch_opener(monkeypatch, {
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode(), bad["url"]: bad_body,
+    })
+    assert client.post("/api/v1/admin/feed/check").json()["ok"] is True
+    assert client.get("/api/v1/admin/feed").json()["available"] == []
+    r = client.post("/api/v1/admin/feed/publish",
+                    json={"platform": "windows", "version": "0.9.44"})
+    assert r.status_code == 404          # not a verified record any more
+    assert dbmod.get_package(conn, "windows", "0.9.44") is None
+
+
+def test_min_version_equal_to_the_version_is_fine(env, monkeypatch):
+    client, conn, settings = env
+    ok_rec, body = make_record(version="0.9.44", min_version="0.9.44")
+    channel, sig = make_channel([ok_rec])
+    patch_opener(monkeypatch, {
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode(), ok_rec["url"]: body,
+    })
+    assert client.post("/api/v1/admin/feed/check").json()["ok"] is True
+    r = client.post("/api/v1/admin/feed/publish",
+                    json={"platform": "windows", "version": "0.9.44"})
+    assert r.status_code == 200
+    assert dbmod.get_package(conn, "windows", "0.9.44") is not None

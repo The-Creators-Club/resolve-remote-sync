@@ -308,7 +308,7 @@ other). `publish_db.py` does not touch it and must not learn to.
 | `broll/web/app/client_folders.py` | the ledger: `client_shares.db` schema, tokens, CRUD, membership, `resolve_items`, settings |
 | `broll/web/app/routes_client_folders.py` | the editor's API, `/api/client-folders` (session identity via the gate's `X-CCSync-User`; public base admin-only) |
 | `broll/web/app/routes_share.py` | the public door, `/share/{token}/…` (page, `api/folder`, `api/videos/{id}`, `media/{proxy,sprite,poster}`), all read-only, token-checked per request |
-| `broll/web/app/main.py` | includes both routers; mounts the static tree a second time at `/share/assets` so the viewer needs nothing outside `/broll/share` |
+| `broll/web/app/main.py` | includes both routers; mounts a VIEWER-ONLY copy of the static tree at `/share/assets` so the viewer needs nothing outside `/broll/share`. `ShareAssets` serves the `SHARE_ASSETS` allow-list (`style.css`, `share.css`, `share.js`, `sprite.js`, the two favicons, `brand_mark.png`) and 404s everything else exactly as a missing file would, because that directory also holds the editors' SPA -- `app.js`, `ingest.js`, `clientfolders.js`, `index.html` -- and `/broll/share` is the one prefix an operator publishes past the tailnet with a Funnel (broll-3, 2026-08-21). Adding a file to the viewer means adding it to that list |
 | `broll/web/static/clientfolders.js` | the panel, the card **+** and its popover (a third classic script; `cf*` names only) |
 | `broll/web/static/sprite.js` | the sprite-sheet geometry, extracted from `app.js` so the viewer scrubs with the same arithmetic |
 | `broll/web/static/share.html`, `share.js`, `share.css`, `share_gone.html` | the viewer, and the "not available" page |

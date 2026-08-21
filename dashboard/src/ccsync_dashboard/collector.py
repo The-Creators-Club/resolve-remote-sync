@@ -87,6 +87,10 @@ def folder_tuning_drift(folder: dict) -> dict:
 # propagate that to every editor (see the retarget sanity-check finding).
 RETARGET_MIN_MEDIA_RATIO = 0.5
 
+# Per-call timeout for the completion pass's db_status/completion reads
+# (ops-efficiency-5, 2026-08-21). See Collector._completion_call_timeout.
+COMPLETION_CALL_TIMEOUT_SECONDS = 3.0
+
 
 class Collector:
     def __init__(
@@ -118,12 +122,66 @@ class Collector:
         # name, no matching editor account -- see B16). Warn-once, not every
         # cycle forever.
         self._warned_unknown_editor: set[str] = set()
+        # ...and the same warn-once for a machine whose reported Syncthing
+        # device this server has not approved (dash-admin-6, 2026-08-21).
+        self._warned_unapproved_device: set[str] = set()
+        # Where the last completion cycle ran out of its wall-clock budget, so
+        # the next one starts there instead of re-polling the same head of the
+        # list for ever (ops-efficiency-5, 2026-08-21).
+        self._completion_cursor = 0
+        # THIS SITE's shared asset libraries, refreshed once per cycle from
+        # site_settings (dash-admin-3 / CR-58, 2026-08-21). Seeded from
+        # provision.py's import-time env/default copy so a Collector that is
+        # never handed a connection behaves exactly as it did before.
+        self._shared_folders: list[tuple[str, str, str]] = list(
+            provision.SHARED_ASSET_FOLDERS)
+        self._shared_folder_ids: frozenset[str] = frozenset(
+            provision.SHARED_ASSET_FOLDER_IDS)
+        # Loop liveness for app.CollectorWatchdog (ops-efficiency-6,
+        # 2026-08-21): monotonic, stamped at the top of every iteration. A
+        # thread that is alive but has not stamped this in minutes is wedged
+        # inside one call, which is a different fault from a thread that died.
+        self._heartbeat = time.monotonic()
 
     # ------------------------------------------------------------ lifecycle
 
     def start(self) -> None:
+        self._heartbeat = time.monotonic()
         self._thread = threading.Thread(target=self._loop, name="dash-collector", daemon=True)
         self._thread.start()
+
+    def thread_died(self) -> bool:
+        """start() ran, stop() did not, and the loop thread is gone.
+
+        Deliberately False for a collector that was STOPPED (ops-efficiency-6,
+        2026-08-21): shutdown, and the suite's own `collector.stop()`, must
+        never read as the fault the watchdog exists to recover from.
+        """
+        if self._stop.is_set():
+            return False
+        thread = self._thread
+        return thread is not None and not thread.is_alive()
+
+    def seconds_since_heartbeat(self) -> float:
+        """How long the loop has been inside one iteration. 0.0 whenever the
+        question does not apply (never started, stopped, already dead), so a
+        caller can treat any positive number as real."""
+        thread = self._thread
+        if self._stop.is_set() or thread is None or not thread.is_alive():
+            return 0.0
+        return max(0.0, time.monotonic() - self._heartbeat)
+
+    def restart(self) -> bool:
+        """Start a replacement loop thread after the old one died. False when
+        that is not what happened (stopped on purpose, or still running) --
+        two loop threads sharing one collector would double every write."""
+        if self._stop.is_set():
+            return False
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            return False
+        self.start()
+        return True
 
     def nudge(self, kinds: tuple[str, ...] = ("config", "enforce", "connections", "completion")) -> None:
         """Run these kinds promptly (thread-safe, callable from request
@@ -160,6 +218,9 @@ class Collector:
         backoff = {k: 0.0 for k in KINDS}
         try:
             while not self._stop.is_set():
+                # Before anything that can block: this is the loop saying it
+                # is still going round (ops-efficiency-6).
+                self._heartbeat = time.monotonic()
                 if conn is None:
                     # INSIDE the try, and retried: connect+migrate used to sit
                     # above it, so a "database is locked" against the app's own
@@ -219,6 +280,7 @@ class Collector:
     def run_cycle(self, conn, kinds: list[str]) -> dict[str, bool]:
         """Run the given kinds in canonical order; returns kind -> ok."""
         kinds = list(kinds)
+        self._refresh_shared_folders(conn)
         # Completion/remoteneed need the config caches; hydrate first if empty.
         if not self._project_ids and any(k in kinds for k in ("completion", "remoteneed")):
             if "config" not in kinds:
@@ -258,10 +320,43 @@ class Collector:
             results[kind] = self._timed(conn, kind, runners[kind])
         return results
 
+    def _refresh_shared_folders(self, conn) -> None:
+        """Re-read this site's shared asset libraries, once per cycle.
+
+        dash-admin-3 / CR-58, 2026-08-21: an admin who adds `Assets/SFX` on
+        Settings got a manifest that advertised folder id `assets-sfx` to
+        every installer while this collector -- which is what actually creates
+        and shares the folder -- went on reading `provision.SHARED_ASSET_
+        FOLDERS`, the value the container BOOTED with. Per cycle rather than
+        per process for the same reason the /ytdl gate is per request: the
+        admin ticks a box and the fleet follows, without a redeploy.
+
+        Failure keeps the previous list. An unreadable site_settings must not
+        empty the shared-folder set: `_run_enforce` reads that set to decide
+        which folders have no tick to consult, and an empty one there is the
+        B16 shape (every editor unshared from the LUT library on one bad
+        read).
+        """
+        try:
+            from . import site_store
+
+            resolved = site_store.shared_asset_folders(conn, self.settings)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not read the site's shared asset folders (%s); "
+                        "keeping the previous list", exc)
+            return
+        if not resolved:
+            return
+        self._shared_folders = list(resolved)
+        self._shared_folder_ids = frozenset(fid for fid, _rel, _label in resolved)
+
     def _timed(self, conn, kind: str, fn) -> bool:
         started = self.now_fn()
         try:
-            fn(conn)
+            # A runner may return a note (completion's "partial: ...",
+            # ops-efficiency-5): it succeeded, and the health panel gets to
+            # say what it did not finish. None for every other cycle.
+            note = fn(conn)
         except Exception as exc:  # fault isolation: a bad cycle must never kill the loop
             conn.rollback()
             level = logging.WARNING if isinstance(exc, SyncthingError) else logging.ERROR
@@ -269,7 +364,8 @@ class Collector:
             db.record_poll_run(conn, kind, started, self.now_fn(), False, str(exc))
             conn.commit()
             return False
-        db.record_poll_run(conn, kind, started, self.now_fn(), True, None)
+        db.record_poll_run(conn, kind, started, self.now_fn(), True,
+                           note if isinstance(note, str) else None)
         conn.commit()
         return True
 
@@ -404,7 +500,7 @@ class Collector:
         prefix = (self.settings.syncthing_assets_prefix or "").rstrip("/")
         if not prefix:
             return
-        for folder_id, rel, label in provision.SHARED_ASSET_FOLDERS:
+        for folder_id, rel, label in self._shared_folders:
             # rel is "Assets/<name>"; the prefix already points AT Assets.
             leaf = rel.split("/", 1)[1] if "/" in rel else rel
             path = f"{prefix}/{leaf}"
@@ -596,7 +692,7 @@ class Collector:
         the file forever, rewriting it every cycle."""
         want = (
             provision.build_asset_stignore_lines()
-            if slug in provision.SHARED_ASSET_FOLDER_IDS
+            if slug in self._shared_folder_ids
             else provision.build_stignore_lines()
         )
         try:
@@ -712,7 +808,7 @@ class Collector:
         self._folder_devices = {}
         for folder in cfg.get("folders", []):
             slug = folder["id"]
-            if slug in provision.SHARED_ASSET_FOLDER_IDS:
+            if slug in self._shared_folder_ids:
                 # A shared asset library is a Syncthing folder but NOT a
                 # project: no row, so it never shows up in the project list,
                 # the tick UI, the per-project pages or the inventory walk
@@ -770,7 +866,7 @@ class Collector:
             now = self.now_fn()
             seeded = 0
             for folder in sorted(folders, key=lambda f: f.get("label") or f["id"]):
-                if folder["id"] in provision.SHARED_ASSET_FOLDER_IDS:
+                if folder["id"] in self._shared_folder_ids:
                     # Seeding a tick for a shared asset library would put a
                     # non-project slug into every editor's selection list --
                     # visible in the tick UI and handed to their sequencer as
@@ -861,8 +957,19 @@ class Collector:
             slug = folder["id"]
             actual = {d["deviceID"] for d in folder.get("devices", [])}
             desired = {my_id}
-            desired |= {d for d in actual if d in id_to_editor and id_to_editor[d] is None}
-            if slug in provision.SHARED_ASSET_FOLDER_IDS:
+            # An UNMAPPED device is left exactly as it is -- but the REGISTRY
+            # decides what unmapped means now, not the label (data-model-4,
+            # 2026-08-21). A device approved straight in the Syncthing GUI
+            # carries a hostname (DESKTOP-LQQ41TC) that resolves to no
+            # editor, so it was frozen here: every tick added a share to it
+            # (through machine_devices) and no untick ever removed one, i.e.
+            # half of that machine's plan was dead. A device a companion has
+            # reported IS a known computer with a known plan, whatever its
+            # label says. Removals stay under the blast-radius brake below.
+            desired |= {d for d in actual
+                        if d in id_to_editor and id_to_editor[d] is None
+                        and d not in mapped_device_ids}
+            if slug in self._shared_folder_ids:
                 # A shared asset library has no tick to consult: every editor
                 # the dashboard knows about gets it, always. Reading
                 # `selections` for one of these would find no rows and unshare
@@ -877,6 +984,27 @@ class Collector:
             else:
                 for editor, machine in selections.get(slug, []):
                     device_id = machine_devices.get((editor, machine))
+                    if device_id and device_id not in id_to_editor:
+                        # NOT APPROVED YET (dash-admin-6 / comp-lane-c-1,
+                        # 2026-08-21). machines.syncthing_device_id is
+                        # self-reported by the companion the moment it has a
+                        # local Syncthing, which is typically before an admin
+                        # approves the pending device on the NAS. Syncthing's
+                        # own config prepare (ensureExistingDevices) silently
+                        # drops a folder-device entry naming a device it does
+                        # not have, so the PUT returned 200, `actual` never
+                        # gained the id, and this cycle recomputed the same
+                        # diff and rewrote config.xml every 60 s while the log
+                        # claimed "+[<id>]" -- an admin reading it believes
+                        # the share exists.
+                        if device_id not in self._warned_unapproved_device:
+                            self._warned_unapproved_device.add(device_id)
+                            log.warning(
+                                "%s/%s reports Syncthing device %s, which this server has "
+                                "not approved -- its shares CANNOT be made yet. Approve the "
+                                "pending device (Admin > Devices) and the next cycle will "
+                                "share its projects.", editor, machine, device_id)
+                        continue
                     if device_id:
                         desired.add(device_id)
                 # ...plus every device of a ticked editor that no machine
@@ -1049,7 +1177,7 @@ class Collector:
         }
         db.set_connections(conn, connected, self.now_fn())
 
-    def _run_completion(self, conn) -> None:
+    def _run_completion(self, conn) -> str | None:
         """Poll every (folder, device) pair, THEN write.
 
         Two structural rules here, both from live incidents:
@@ -1065,16 +1193,53 @@ class Collector:
         deleted editor device, a removed folder -- is pruned rather than
         lingering and making _run_remoteneed hit Syncthing with an unknown
         pair forever.
+
+        A WALL-CLOCK BUDGET bounds the cycle (ops-efficiency-5, 2026-08-21).
+        This is one thread running every due kind in series, so a Syncthing
+        that HANGS rather than refuses (a pool import, a stuck scan, a GUI
+        under load) turned ~120 sequential 10 s-timeout calls into up to 20
+        minutes during which no tick was enforced, connections never
+        refreshed (editors flip to offline after 15 minutes) and
+        /api/v1/health said ok=false. Past the budget the pass stops issuing
+        NEW calls, writes what it has, and a rotating cursor makes the next
+        cycle start where this one stopped -- so a slow fleet converges more
+        slowly instead of starving enforce. Recorded as `partial` in
+        poll_runs, because a health panel that cannot say why is the harder
+        failure to diagnose.
         """
         fresh: dict[tuple[str, str], int] = {}
         folder_status: list[tuple[int, str | None, str | None]] = []
         rows: list[tuple[int, int, dict, Any, Any]] = []
-        for slug, shared in self._folder_devices.items():
+        budget = float(getattr(self.settings, "completion_budget_seconds", 0.0) or 0.0)
+        deadline = (time.monotonic() + budget) if budget > 0 else None
+        call_timeout = self._completion_call_timeout()
+        pairs = list(self._folder_devices.items())
+        total = len(pairs)
+        start = (self._completion_cursor % total) if total else 0
+        polled: set[str] = set()
+        left = 0
+        # Rotated, so the folders the budget cut off last time are polled
+        # FIRST this time. Without it the head of the list is refreshed for
+        # ever and the tail never is.
+        for offset, (slug, shared) in enumerate(
+                [pairs[(start + i) % total] for i in range(total)]):
+            # Only at a folder boundary: a half-polled folder would write a
+            # `fresh` entry for some of its devices and drop the rest, which
+            # reads as "that pair is fully synced".
+            if deadline is not None and offset and time.monotonic() >= deadline:
+                left = total - offset
+                self._completion_cursor = (start + offset) % total
+                log.warning(
+                    "completion: %.0fs budget spent after %d of %d folder(s); the rest "
+                    "run next cycle (DASH_COMPLETION_BUDGET_SECONDS)",
+                    budget, offset, total)
+                break
+            polled.add(slug)
             project_id = self._project_ids.get(slug)
             if project_id is None:
                 continue
             try:
-                status = self.client.db_status(slug)
+                status = self.client.db_status(slug, timeout=call_timeout)
             except Exception as exc:
                 log.warning("db_status failed for %s: %s", slug, exc)
                 continue
@@ -1098,7 +1263,8 @@ class Collector:
                 if device_row is None:
                     continue
                 try:
-                    comp = self.client.completion(slug, device_id)
+                    comp = self.client.completion(slug, device_id,
+                                                  timeout=call_timeout)
                 except Exception as exc:
                     log.warning("completion failed for %s/%s: %s", slug, device_id, exc)
                     continue
@@ -1114,6 +1280,11 @@ class Collector:
                 need_items = int(comp.get("needItems", 0))
                 if not (completion >= 100 and need_items == 0):
                     fresh[(slug, device_id)] = need_items
+        else:
+            # for-else: reached only when the loop was NOT cut short by the
+            # budget, i.e. every folder was polled, so the next pass starts
+            # from the top again.
+            self._completion_cursor = 0
 
         now = self.now_fn()
         for project_id, state, error, f_need_items, f_need_bytes in folder_status:
@@ -1155,8 +1326,30 @@ class Collector:
             if pruned_pairs:
                 log.info("completion: dropped %d stale (project, device) pair(s) "
                          "no longer shared", pruned_pairs)
-        self._incomplete = fresh
+        # Pairs whose folder this pass never reached keep their last known
+        # need count: `fresh` prunes what is no longer shared, and a folder
+        # left for the next cycle is not that (ops-efficiency-5).
+        self._incomplete = {
+            **{pair: n for pair, n in self._incomplete.items()
+               if pair[0] not in polled and pair[0] in self._folder_devices},
+            **fresh,
+        }
         self._ingest_item_finished(conn, now)
+        return f"partial: {left} folder(s) left for the next cycle" if left else None
+
+    def _completion_call_timeout(self) -> float:
+        """The per-call timeout for the completion pass (ops-efficiency-5,
+        2026-08-21).
+
+        These are the SMALLEST reads Syncthing serves and there are ~120 of
+        them in a row on one thread. At the client default of 10 s a single
+        hung pair eats a third of the whole cycle budget; three of them eat
+        it all and enforce, connections and the health signal queue behind
+        them. Never LONGER than the client is configured for, so a deployment
+        that deliberately runs a tight client is not stretched by this.
+        """
+        return min(float(getattr(self.client, "timeout", 10.0) or 10.0),
+                   COMPLETION_CALL_TIMEOUT_SECONDS)
 
     def _ingest_item_finished(self, conn, now: str) -> None:
         """Record files the SERVER finished receiving (Syncthing ItemFinished

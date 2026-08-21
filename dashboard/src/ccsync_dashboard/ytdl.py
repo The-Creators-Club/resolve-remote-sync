@@ -44,12 +44,14 @@ import json
 import logging
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import FastAPI
 
-from . import auth
+from . import api, auth, db, site_store
 from .settings import Settings
 
 log = logging.getLogger(__name__)
@@ -65,11 +67,14 @@ MOUNT_PATH = "/ytdl"
 MOUNTED = "mounted"
 ABSENT = "absent"
 DEGRADED = "degraded"
-# The site said no (site.toml [features] youtube_download, 2026-08-17 --
-# COMMERCIAL_READINESS.md item 2). Nothing is imported, nothing is mounted, so
-# /ytdl and every fleet download route under it answer the dashboard's own 404:
-# the customer, not the vendor, decides whether downloading third-party YouTube
-# material is lawful for them. See docs/legal/YOUTUBE_FEATURE_NOTICE.md.
+# The site said no (site.toml [features] youtube_download / the Settings tick,
+# 2026-08-17 -- COMMERCIAL_READINESS.md item 2). Nothing is imported and
+# nothing is served, so /ytdl and every fleet download route under it answer a
+# 404: the customer, not the vendor, decides whether downloading third-party
+# YouTube material is lawful for them. See docs/legal/YOUTUBE_FEATURE_NOTICE.md.
+# Since dash-release-ai-1 (2026-08-21) the 404 comes from YtdlFeatureGate
+# rather than from there being no mount, which is what lets a tick take effect
+# without a restart; nothing is loaded until one does.
 DISABLED = "disabled"
 
 # Mounting a third FastAPI() brings its default interactive docs along, and
@@ -83,9 +88,34 @@ BLOCKED_PATHS = frozenset({"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi
 # comparison is done on our own lowercased copy either way.
 IDENTITY_HEADER = b"x-ccsync-user"
 
+# The MACHINE credential's verdict, minted here for the same reason
+# IDENTITY_HEADER is (ytdl-web-1, 2026-08-21). Two credentials reach the fleet
+# routes -- the shared DASH_REPORT_TOKEN and a per-editor `cce1.` token whose
+# hash only this database holds -- and only the dashboard can tell either from
+# a forgery. The sub-app therefore gets our answer rather than a second
+# implementation of it, and (like the identity header) any inbound copy is
+# STRIPPED first: minted here or not present at all.
+FLEET_TOKEN_HEADER = b"x-ccsync-token"
+FLEET_AUTH_HEADER = b"x-ccsync-fleet-auth"
+
+# The site switch this mount obeys, resolved DB-row-first the way
+# `GET /api/v1/site` resolves it (dash-release-ai-1, 2026-08-21).
+FEATURE_KEY = "youtube_download"
+
+# How long the answer to "has this site enabled the downloader" is reused for.
+# Seconds, because the point of reading it per request is that an admin's tick
+# on Settings takes effect without a container restart -- and the SPA polls a
+# running job every 1.5 s, so the read cannot be a database open per poll.
+FEATURE_TTL_SECONDS = 5.0
+
+# ...and how long a failed lazy import is left alone before it is retried. An
+# absent ytdl tree fails the same way every time and the retry is expensive
+# (it walks sys.path and, in the worst case, imports yt-dlp).
+LOAD_RETRY_SECONDS = 60.0
+
 
 class YtdlGate:
-    """ASGI wrapper around the ytdl sub-app. Two jobs, both fail-closed.
+    """ASGI wrapper around the ytdl sub-app. Three jobs, all fail-closed.
 
     1. The sub-app's default interactive docs are 404'd (as for /broll, /music).
     2. Every request is re-stamped with the session's identity: any inbound
@@ -102,6 +132,15 @@ class YtdlGate:
        would be the whole authorisation story for "which projects may I
        download into".
 
+    3. The MACHINE credential is resolved here and stamped into
+       X-CCSync-Fleet-Auth (ytdl-web-1, 2026-08-21), stripped inbound first
+       for the same reason the identity header is. The sub-app cannot check a
+       per-editor `cce1.` token itself -- the hash is in this database, which
+       it opens read-only and only for selections -- so before this it 403'd
+       every claim/heartbeat/status POST from an editor whose admin had minted
+       them one, while the dashboard's own gate waved the same request
+       through.
+
     A plain ASGI wrapper rather than BaseHTTPMiddleware or add_middleware:
     nothing is re-wrapped or buffered on the way through (the manifest
     endpoints are ordinary JSON, but the poll endpoint is called every 1.5s
@@ -109,16 +148,26 @@ class YtdlGate:
     global is mutated by importing us.
     """
 
-    def __init__(self, app: Any, session_secret: str) -> None:
+    def __init__(self, app: Any, session_secret: str,
+                 settings: Settings | None = None) -> None:
         self.app = app
         self._secret = session_secret or ""
+        # Optional so the identity half can still be exercised on its own (the
+        # mount tests build one with two arguments). Without settings there is
+        # no database to check a per-editor token against, so no stamp is
+        # minted and the sub-app falls back to its own shared-token compare --
+        # which is exactly what a standalone ytdl deployment does.
+        self._settings = settings
 
     def _identified_scope(self, scope: dict) -> dict:
         """A copy of `scope` whose headers carry our identity header and no
         other. The original is left alone: it belongs to the server, and a
         mounted app is not the only thing that ever reads it."""
         headers = [(k, v) for k, v in scope.get("headers", ())
-                   if k.lower() != IDENTITY_HEADER]
+                   if k.lower() not in (IDENTITY_HEADER, FLEET_AUTH_HEADER)]
+        stamp = self._fleet_stamp(headers)
+        if stamp is not None:
+            headers.append((FLEET_AUTH_HEADER, stamp))
         username = auth.read_session_cookie(self._secret, _session_cookie(headers))
         if username:
             encoded = _header_value(username)
@@ -133,6 +182,69 @@ class YtdlGate:
         new_scope = dict(scope)
         new_scope["headers"] = headers
         return new_scope
+
+    def _fleet_stamp(self, headers: list[tuple[bytes, bytes]]) -> bytes | None:
+        """Our verdict on this request's X-CCSync-Token, or None.
+
+        `editor:<name>` for a per-editor `cce1.` token (the sub-app then
+        requires that name to match the signed identity header), `shared` for
+        the DASH_REPORT_TOKEN every companion holds today, and None for a
+        request that presented nothing or presented rubbish -- for which the
+        sub-app's own fail-closed 403 is the right answer, unchanged.
+
+        Only a request that actually carries a token pays for this, so the
+        browser's 1.5 s poll costs one list comprehension; a per-editor token
+        costs one short-lived database connection, exactly as app.py's
+        pre-body gate does, and for the same reason (the hash lives in the
+        database and nowhere else).
+        """
+        if self._settings is None:
+            return None
+        raw = b""
+        for key, value in headers:
+            if key.lower() == FLEET_TOKEN_HEADER:
+                raw = value
+                break
+        if not raw:
+            return None
+        try:
+            token = raw.decode("latin-1")
+        except Exception:  # noqa: BLE001 - a header we cannot read is not a credential
+            return None
+        try:
+            kind, editor = self._credential(token)
+        except Exception:  # noqa: BLE001 - never let auth plumbing 500 the mount
+            log.exception("could not resolve a companion credential for /ytdl")
+            return None
+        if kind == api.AUTH_SHARED:
+            return b"shared"
+        if kind == api.AUTH_EDITOR and editor:
+            encoded = _header_value(f"editor:{editor}")
+            if encoded is None:
+                # Same fail-closed rule as the identity header: a name that
+                # cannot survive the trip is withheld rather than mangled.
+                log.warning("ytdl fleet stamp not minted for %r: the name "
+                            "cannot survive a latin-1 header round trip", editor)
+                return None
+            return encoded
+        return None
+
+    def _credential(self, token: str) -> tuple[str, str | None]:
+        """(AUTH_*, editor) for a token, opening a connection only when the
+        token has the per-editor SHAPE. Lifted from app.py's
+        _companion_credential, which does this same dance in the middleware
+        for the same reason: a shared token costs no database work at all."""
+        settings = self._settings
+        if not db.looks_like_editor_report_token(token):
+            return api.resolve_companion_credential(settings, None, token)
+        try:
+            conn = db.connect(settings.db_path)
+        except Exception:  # noqa: BLE001 - an unopenable DB is not an auth pass
+            return api.AUTH_NONE, None
+        try:
+            return api.resolve_companion_credential(settings, conn, token)
+        finally:
+            conn.close()
 
     async def __call__(self, scope, receive, send) -> None:
         if scope.get("type") == "http":
@@ -232,11 +344,222 @@ def _add_in_repo_ytdl_web() -> bool:
     return True
 
 
+def feature_enabled(settings: Settings) -> bool:
+    """Has THIS SITE enabled the YouTube downloader? DB row first, env after.
+
+    dash-release-ai-1 (2026-08-21). The flag has two homes and this mount used
+    to read only one of them: `DASH_SITE_YOUTUBE_DOWNLOAD` in the container's
+    environment. The other is a `site_settings` row, which is what the Settings
+    page writes and what `GET /api/v1/site` resolves the manifest from -- so on
+    a vendor build (no env var) an admin ticking "YouTube downloader" turned
+    the feature on for every companion in the fleet, which then called
+    /ytdl/api/... and got a 404 from a dashboard that had decided the answer at
+    boot and never looked again. The reverse was as wrong: env=1 with the box
+    unticked left the dashboard serving downloads the site says it does not do.
+
+    Same row-then-environment precedence as ai_providers.cli_enabled, and the
+    same fail-safe: anything that goes wrong reading the row falls back to the
+    environment rather than flipping a legal switch on a customer's behalf.
+    """
+    fallback = bool(getattr(settings, "site_feature_youtube_download", False))
+    try:
+        conn = db.connect(settings.db_path)
+    except Exception:  # noqa: BLE001 - an unopenable DB decides nothing here
+        return fallback
+    try:
+        resolver = getattr(site_store, "feature_enabled", None)
+        if resolver is not None:
+            return bool(resolver(conn, settings, FEATURE_KEY))
+        manifest = site_store.resolved_manifest(conn, settings)
+        return bool(manifest.get("features", {}).get(FEATURE_KEY, fallback))
+    except Exception as e:  # noqa: BLE001
+        log.warning("could not read the site's youtube_download flag (%s: %s); "
+                    "falling back to DASH_SITE_YOUTUBE_DOWNLOAD",
+                    type(e).__name__, e)
+        return fallback
+    finally:
+        conn.close()
+
+
+class YtdlFeatureGate:
+    """The site switch, re-read per request rather than decided at boot.
+
+    dash-release-ai-1 (2026-08-21). Two things live here and they are the same
+    thing seen from either end of the tick:
+
+      - while the site says NO, every path under /ytdl answers 404 and NOTHING
+        is imported. That is the property the switch was written for: the
+        customer, not the vendor, decides whether downloading third-party
+        YouTube material is lawful for them (docs/legal/YOUTUBE_FEATURE_NOTICE.md),
+        and an off site pays no yt-dlp import and runs no pipeline thread.
+      - the moment it says YES, the next request loads the sub-app and serves
+        it. No `--recreate`, no restart -- which matters because the SAME tick
+        publishes the feature to every companion through /api/v1/site, and they
+        start calling the fleet routes at once.
+
+    The load happens inline on the request that needs it (one import, one
+    schema apply, one worker start, once) rather than on a background thread:
+    a companion whose claim is the first call in deserves the answer, not a
+    503 while something warms up.
+    """
+
+    def __init__(self, app: FastAPI, settings: Settings, status: str,
+                 sub_app: Any | None) -> None:
+        self._dash = app
+        self._settings = settings
+        self._sub = sub_app
+        self.status = status
+        # What the loaded sub-app's state is, remembered separately from
+        # `status`: an off-then-on again site has to be put back to the state
+        # its mount actually has (a DEGRADED one must not come back as
+        # MOUNTED and be advertised in the nav).
+        self._loaded_status = status if sub_app is not None else ABSENT
+        self._enabled = sub_app is not None
+        self._checked_at = time.monotonic() if sub_app is not None else 0.0
+        self._failed_at = 0.0
+        self._lock = threading.Lock()
+
+    def _feature_on(self) -> bool:
+        now = time.monotonic()
+        if now - self._checked_at < FEATURE_TTL_SECONDS:
+            return self._enabled
+        self._enabled = feature_enabled(self._settings)
+        self._checked_at = now
+        return self._enabled
+
+    def _record(self, status: str) -> None:
+        """Keep app.state in step, so the nav stops advertising a feature that
+        has just been turned off (and starts advertising one that has just been
+        turned on, from the first request that reaches here)."""
+        if status == self.status:
+            return
+        self.status = status
+        try:
+            self._dash.state.ytdl_status = status
+            self._dash.state.ytdl_mounted = status == MOUNTED
+        except Exception:  # noqa: BLE001 - a mount is not worth a 500
+            pass
+
+    def _current(self) -> Any | None:
+        if not self._feature_on():
+            self._record(DISABLED)
+            return None
+        if self._sub is not None:
+            self._record(self._loaded_status)
+            return self._sub
+        with self._lock:
+            if self._sub is not None:
+                return self._sub
+            now = time.monotonic()
+            if self._failed_at and (now - self._failed_at) < LOAD_RETRY_SECONDS:
+                return None
+            status, gated = load_ytdl_app(self._settings)
+            if gated is None:
+                self._failed_at = now
+                self._record(status)
+                return None
+            self._sub = gated
+            self._loaded_status = status
+            self._record(status)
+            log.info("ytdl UI loaded on demand: this site enabled the YouTube "
+                     "downloader while the dashboard was running")
+            return gated
+
+    async def __call__(self, scope, receive, send) -> None:
+        sub = self._current()
+        if sub is None:
+            if scope.get("type") == "websocket":
+                await send({"type": "websocket.close", "code": 1000})
+                return
+            await _json_response(send, 404, {"detail": "Not Found"})
+            return
+        await sub(scope, receive, send)
+
+
+def load_ytdl_app(settings: Settings) -> tuple[str, Any | None]:
+    """Import the sub-app and wrap it in its gate. -> (status, gated or None).
+
+    Everything about the import is best-effort (see the module docstring): a
+    deployment whose ytdl tree is missing, stale or mid-upgrade -- or whose
+    dashboard venv simply has no yt-dlp -- carries on with the feature ABSENT.
+    """
+    try:
+        try:
+            from ytdlweb.main import app as ytdl_app  # type: ignore[import-not-found]
+        except ImportError:
+            # A `ytdlweb` already in sys.modules is somebody's deliberate
+            # choice (the tests' fake, most of all) and its failure is theirs
+            # to own.
+            if "ytdlweb" in sys.modules or not _add_in_repo_ytdl_web():
+                raise
+            from ytdlweb.main import app as ytdl_app  # type: ignore[import-not-found]
+    except Exception as e:  # noqa: BLE001 - see module docstring
+        log.warning("ytdl UI not mounted (%s: %s); dashboard continues without it",
+                    type(e).__name__, e)
+        return ABSENT, None
+
+    gated = YtdlGate(ytdl_app, settings.session_secret, settings)
+
+    # WHICH AI answers the sub-app's two calls (2026-08-18). Env at mount time
+    # is not enough any more: keys are typed on Settings and can change while
+    # the container runs, so what is installed is a CALLBACK the sub-app
+    # invokes per call (ai_providers.make_lookup -> ai_backend's
+    # set_provider_lookup). Best-effort in both directions -- an older ytdl
+    # tree with no ai_backend keeps working off its own environment, and a
+    # failure to install the hook must not un-mount the feature.
+    _install_ai_provider_lookup(ytdl_app, settings)
+    _install_fleet_stamp_trust()
+
+    try:
+        _init_ytdl_storage()
+    except Exception as e:  # noqa: BLE001
+        # Mounted, but NOT advertised: /ytdl is reachable for anyone who types
+        # it (and logs the real error) while the nav stays quiet. Overwhelmingly
+        # this is YTDL_DATA_ROOT -- a read-only bind mount, or a directory the
+        # container's uid cannot write, so sqlite answers "unable to open
+        # database file" on every request.
+        log.error("ytdl data root could not be prepared (%s: %s); mounting it "
+                  "DEGRADED -- every /ytdl request will fail until YTDL_DATA_ROOT "
+                  "is writable by this container's uid, and the nav link is hidden",
+                  type(e).__name__, e)
+        return DEGRADED, gated
+
+    return MOUNTED, gated
+
+
+def _install_fleet_stamp_trust() -> bool:
+    """Tell the sub-app it may believe X-CCSync-Fleet-Auth. -> whether it took.
+
+    ytdl-web-1 (2026-08-21). The same shape as the AI-provider lookup and for
+    the same reason: a module-level switch, because what reads it is a request
+    handler with no app object in hand, and best-effort, because an older ytdl
+    tree that does not know the header must keep mounting (it goes on comparing
+    the shared token, which every companion still sends).
+    """
+    try:
+        from ytdlweb import routes_fleet  # type: ignore[import-not-found]
+
+        routes_fleet.trust_gate_stamp(True)
+        return True
+    except Exception as e:  # noqa: BLE001 - see the module docstring
+        log.info("this ytdl tree does not take a fleet-auth stamp (%s: %s); its "
+                 "fleet routes will accept the shared DASH_REPORT_TOKEN only, "
+                 "so an editor holding a per-editor cce1 token cannot download "
+                 "locally until it is redeployed", type(e).__name__, e)
+        return False
+
+
 def mount_ytdl(app: FastAPI, settings: Settings) -> str:
     """Mount the ytdl app at /ytdl. Returns MOUNTED / DISABLED / ABSENT / DEGRADED.
 
-    DISABLED comes first and short-circuits everything else: the feature is
-    OFF unless this site turned it on (2026-08-17).
+    The site switch comes first and short-circuits everything else: the feature
+    is OFF unless this site turned it on (2026-08-17). Since 2026-08-21 that
+    question is asked of the SITE SETTINGS ROW first and the environment second
+    (feature_enabled), and it is asked again per request rather than once at
+    boot (YtdlFeatureGate) -- because the Settings tick that turns it on is the
+    same tick that publishes it to every companion through /api/v1/site, and a
+    dashboard that answered at boot 404'd every one of the fleet calls that
+    followed (dash-release-ai-1).
 
     The import is guarded and the failure is logged rather than raised, so a
     deployment whose ytdl tree is missing, stale or mid-upgrade -- or one whose
@@ -254,60 +577,31 @@ def mount_ytdl(app: FastAPI, settings: Settings) -> str:
     dashboard already cannot log anyone in without one, so every request would
     arrive with no session at all and the sub-app would 401 by itself.
     """
-    if not settings.site_feature_youtube_download:
-        # BEFORE the import, deliberately: an off site must not even load the
-        # downloader's code, so there is nothing to reach, nothing listening on
-        # the fleet claim/manifest/status routes, and no yt-dlp import cost.
-        log.info("ytdl UI not mounted: this site has not enabled the YouTube "
-                 "downloader ([features] youtube_download in site.toml / "
-                 "DASH_SITE_YOUTUBE_DOWNLOAD=1). See "
+    if not feature_enabled(settings):
+        # NOTHING IS IMPORTED HERE, deliberately: an off site must not load the
+        # downloader's code, so there is no yt-dlp import cost and no pipeline
+        # thread. What IS mounted is the feature gate, which answers 404 to
+        # every path under /ytdl for exactly as long as the site says no, and
+        # loads the sub-app on the first request after an admin says yes.
+        log.info("ytdl UI not serving: this site has not enabled the YouTube "
+                 "downloader ([features] youtube_download in site.toml / on "
+                 "Settings / DASH_SITE_YOUTUBE_DOWNLOAD=1). See "
                  "docs/legal/YOUTUBE_FEATURE_NOTICE.md")
+        app.mount(MOUNT_PATH, YtdlFeatureGate(app, settings, DISABLED, None))
         return DISABLED
 
-    try:
-        try:
-            from ytdlweb.main import app as ytdl_app  # type: ignore[import-not-found]
-        except ImportError:
-            # A `ytdlweb` already in sys.modules is somebody's deliberate
-            # choice (the tests' fake, most of all) and its failure is theirs
-            # to own.
-            if "ytdlweb" in sys.modules or not _add_in_repo_ytdl_web():
-                raise
-            from ytdlweb.main import app as ytdl_app  # type: ignore[import-not-found]
-    except Exception as e:  # noqa: BLE001 - see module docstring
-        log.warning("ytdl UI not mounted (%s: %s); dashboard continues without it",
-                    type(e).__name__, e)
-        return ABSENT
+    status, gated = load_ytdl_app(settings)
+    if gated is None:
+        # ABSENT: there is nothing to serve and a per-request retry would walk
+        # sys.path (and import yt-dlp) on every poll. Left unmounted, as it has
+        # always been -- deploying the tree is a deployment, and a deployment
+        # restarts the container.
+        return status
 
-    gated = YtdlGate(ytdl_app, settings.session_secret)
-
-    # WHICH AI answers the sub-app's two calls (2026-08-18). Env at mount time
-    # is not enough any more: keys are typed on Settings and can change while
-    # the container runs, so what is installed is a CALLBACK the sub-app
-    # invokes per call (ai_providers.make_lookup -> ai_backend's
-    # set_provider_lookup). Best-effort in both directions -- an older ytdl
-    # tree with no ai_backend keeps working off its own environment, and a
-    # failure to install the hook must not un-mount the feature.
-    _install_ai_provider_lookup(ytdl_app, settings)
-
-    try:
-        _init_ytdl_storage()
-    except Exception as e:  # noqa: BLE001
-        # Mounted, but NOT advertised: /ytdl is reachable for anyone who types
-        # it (and logs the real error) while the nav stays quiet. Overwhelmingly
-        # this is YTDL_DATA_ROOT -- a read-only bind mount, or a directory the
-        # container's uid cannot write, so sqlite answers "unable to open
-        # database file" on every request.
-        log.error("ytdl data root could not be prepared (%s: %s); mounting it "
-                  "DEGRADED -- every /ytdl request will fail until YTDL_DATA_ROOT "
-                  "is writable by this container's uid, and the nav link is hidden",
-                  type(e).__name__, e)
-        app.mount(MOUNT_PATH, gated)
-        return DEGRADED
-
-    app.mount(MOUNT_PATH, gated)
-    log.info("ytdl UI mounted at %s", MOUNT_PATH)
-    return MOUNTED
+    app.mount(MOUNT_PATH, YtdlFeatureGate(app, settings, status, gated))
+    if status == MOUNTED:
+        log.info("ytdl UI mounted at %s", MOUNT_PATH)
+    return status
 
 
 def _install_ai_provider_lookup(ytdl_app: Any, settings: Settings) -> bool:

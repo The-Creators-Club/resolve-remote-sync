@@ -115,14 +115,52 @@ jobs:
       # The wizard is a separate artefact with its own script (installer >=
       # 1.0.17) and it has never been built on a Mac either. Best-effort: a
       # missing script must not fail a companion build that succeeded.
+      #
+      # It now writes its OWN MANIFEST beside the zip (release-pipeline-4,
+      # 2026-08-21). Without one, tools/publish_latest.py had nothing to
+      # verify or sign, so the macos kind=onboard channel could only ever move
+      # when somebody sat at a Mac -- and a feed-only customer's Mac editors
+      # had no wizard to download at all. Same key set as
+      # companion/dist/ccsync-release.json, which is what publish_latest reads.
       - name: build the onboarding wizard
         if: ${{ !cancelled() }}
         run: |
-          if [ -x ./tools/build_onboard_macos.sh ]; then
-            ./tools/build_onboard_macos.sh || echo "onboarding wizard build failed -- companion artefact is still good"
-          else
+          if [ ! -x ./tools/build_onboard_macos.sh ]; then
             echo "tools/build_onboard_macos.sh not present or not executable -- skipped"
+            exit 0
           fi
+          if ! ./tools/build_onboard_macos.sh; then
+            echo "onboarding wizard build failed -- companion artefact is still good"
+            exit 0
+          fi
+          version="$(sed -n 's/^INSTALLER_VERSION="\([^"]*\)".*/\1/p' installer/macos_bootstrap.sh | head -n 1)"
+          zip="onboarding/dist/ccsync-onboard-macos-$version.zip"
+          if [ ! -f "$zip" ]; then
+            echo "no $zip -- not writing a manifest for something that is not there"
+            exit 0
+          fi
+          sha="$(shasum -a 256 "$zip" | awk '{print $1}' | tr 'A-Z' 'a-z')"
+          size="$(wc -c < "$zip" | tr -d ' ')"
+          dirty=false
+          if [ -n "$(git status --porcelain)" ]; then dirty=true; fi
+          # tests_run is the ONBOARDING suite, run here, against the tree this
+          # wizard was built from -- publish_feed.py refuses a manifest that
+          # says false (OPS-1), and it must never say true on trust.
+          tests=false
+          if [ "${{ inputs.skip_tests }}" != "true" ]; then
+            if (cd onboarding && ../companion/.venv/bin/python -m pytest tests -q); then
+              tests=true
+            else
+              echo "onboarding suite FAILED -- the wizard manifest will say tests_run=false, and publish_feed.py will refuse it without --allow-untested"
+            fi
+          fi
+          # printf, not a heredoc: a heredoc terminator cannot be indented
+          # inside a YAML block scalar.
+          printf '{"version":"%s","platform":"macos","artifact":"%s","sha256":"%s","size_bytes":%s,"built_at":"%s","git_commit":"%s","git_dirty":%s,"tests_run":%s,"signed_binary":false,"built_by":"github-actions/release-macos","built_with":".github/workflows/release-macos.yml"}\n' \
+            "$version" "$(basename "$zip")" "$sha" "$size" \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(git rev-parse HEAD)" "$dirty" "$tests" \
+            > onboarding/dist/ccsync-onboard.json
+          echo "wizard manifest written: $version, sha256 $sha, tests_run=$tests"
 
       - name: upload the build
         if: ${{ !cancelled() }}

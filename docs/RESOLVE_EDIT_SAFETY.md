@@ -45,11 +45,28 @@ runs the pass immediately.
 
 **Tray → Advanced → "Undo the last clip-path change CCSync made…"**
 
-It reads the newest journal file and replays it **in reverse**, so a clip
-touched twice in one burst ends up at the path it had before the burst
-started. A clip that is no longer in the media pool is reported as skipped,
-never guessed at. The undo itself is not journalled, so pressing it twice
-does not redo the change.
+It reads the newest journal **for the project that is open in Resolve right
+now** and replays it **in reverse**, so a clip touched twice in one burst ends
+up at the path it had before the burst started. A clip that is no longer in
+the media pool is reported as skipped, never guessed at. The undo itself is
+not journalled, so pressing it twice does not redo the change.
+
+**The journal and the open project must match** (comp-resolve-2, 2026-08-21).
+This used to replay the newest journal of *any* project against whatever
+project happened to be open, matching clips by file path alone - and every
+project shares the paths under `Assets` (music beds, archive b-roll), so one
+project's journal could rewrite another project's music clip to a
+machine-private `F:\…` spelling, unjournalled and therefore not itself
+undoable. Now, when the last change CCSync made was in a different project,
+the undo is **refused and says which project it was**:
+
+> CCSync has not changed any clip paths in "FF4". The last change it made was
+> in "Season 1 EP3": open that project and undo there.
+
+Open that project and press it there. A journal that names no project at all
+(the pre-2026-08-21 shape, or a build that could not read the name) is still
+replayable, because refusing it would leave that editor with no rollback at
+all.
 
 Then the tray reports, e.g.:
 

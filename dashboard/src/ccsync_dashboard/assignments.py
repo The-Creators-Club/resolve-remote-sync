@@ -94,6 +94,12 @@ def _assignments_view(conn: sqlite3.Connection) -> dict[str, Any]:
         # nothing and could never clear. The write endpoint refuses it; the
         # grid says so before anyone clicks.
         "base_editors": db.base_only_editors(conn),
+        # ...and the per-COLUMN answer (dash-admin-8, 2026-08-21). base_editors
+        # is true only when EVERY one of a person's machines is wired, so a
+        # mixed account (wired desktop + remote laptop, which f27c181 made a
+        # supported shape) had a clickable column for the wired half. The
+        # write endpoints refuse it; this is what lets the grid say so first.
+        "base_machine_cells": db.base_machines(conn),
     }
 
 

@@ -39,7 +39,6 @@
         ("sftp_shell_type", "SFTP SHELL TYPE"),
         ("rclone_remote", "RCLONE REMOTE"),
         ("nas_syncthing_id", "NAS SYNCTHING ID"),
-        ("nas_kind", "NAS KIND"),
       ] %}
         {% set is_auto = key in auto_derived and manifest[key] %}
         {% set hint = FIELD_HINTS.get(key, "") %}
@@ -49,6 +48,17 @@
                  {{ "readonly" if is_auto }}>
         </label>
       {% endfor %}
+      {# NAS KIND is a choice, not free text (dash-admin-7, 2026-08-21): a
+         typed "TrueNAS" was published to every installer while this
+         dashboard's own NAS client kept using DASH_NAS_KIND, and the two
+         halves of the product then disagreed about which NAS this is. #}
+      <label title="Which NAS this dashboard drives. Published to installers in the site manifest.">NAS KIND<br>
+        <select name="nas_kind">
+          {% for kind in nas_kinds %}
+            <option value="{{ kind }}" {% if manifest.nas_kind == kind %}selected{% endif %}>{{ kind }}</option>
+          {% endfor %}
+        </select>
+      </label>
       <label>TEMPLATE FOLDERS (comma-separated)<br>
         <input type="text" name="template_folders" value="{{ manifest.template_folders | join(', ') }}">
       </label>
@@ -60,6 +70,16 @@
                     {{ "checked" if manifest.features.youtube_download }}> YouTube downloader</label>
       <label><input type="checkbox" name="features.youtube_unblock"
                     {{ "checked" if manifest.features.youtube_unblock }}> YouTube anti-automation bypass</label>
+      {# product-surface-5 (2026-08-21): auto_update is a manifest feature with
+         a real consequence for every editor's machine, and pasting a site.toml
+         into the migration box below was the only way to set it. Every flag
+         the manifest carries is now on this page. #}
+      <label><input type="checkbox" name="features.auto_update"
+                    {{ "checked" if manifest.features.auto_update }}> Automatic companion updates
+        <span class="muted">editors' machines take a newer published build without anyone clicking</span></label>
+      <label><input type="checkbox" disabled
+                    {{ "checked" if manifest.features.ai_cli_providers }}> AI CLI providers
+        <span class="muted">set on <a href="#ai-providers">AI providers</a> below, where accepting the notice turns it on</span></label>
 
       <div class="side-head" style="margin-top:1.2rem">[ B-ROLL INDEXING MODEL ]
         <span class="muted">The indexer on your base rig reads this choice from the dashboard;

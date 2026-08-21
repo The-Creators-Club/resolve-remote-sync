@@ -5,8 +5,10 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from starlette.responses import FileResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.responses import FileResponse, Response
 from starlette.staticfiles import StaticFiles
+from starlette.types import Scope
 
 from app import client_folders, config
 from app.db import ensure_schema
@@ -63,7 +65,35 @@ app.include_router(client_folders_router)
 # Declared BEFORE share_router so `/share/assets/...` is never read as a
 # token (client_folders.TOKEN_RE would refuse "assets" anyway; this is the
 # belt to that brace).
-app.mount("/share/assets", StaticFiles(directory=config.STATIC_DIR), name="share-assets")
+#
+# Exactly the files share.html asks for, and no others (broll-3, 2026-08-21).
+# The mount points at the WHOLE static tree, which is also where app.js,
+# ingest.js, clientfolders.js and index.html live -- the editors' SPA, whose
+# own header calls itself a thing to keep hidden. `/broll/share` is the one
+# prefix an operator publishes past the tailnet with a Funnel, so serving the
+# rest of the directory under it handed the internal API surface to anonymous
+# clients. A list, not a directory split, so a file stays in one place and
+# adding one to the viewer is a visible decision here.
+SHARE_ASSETS = frozenset({
+    "style.css", "share.css", "share.js", "sprite.js",
+    "favicon.svg", "favicon.png", "brand_mark.png",
+})
+
+
+class ShareAssets(StaticFiles):
+    """StaticFiles narrowed to SHARE_ASSETS. Anything else is the same 404
+    StaticFiles gives a file that is not there, so the mount tells a caller
+    nothing about what the directory holds."""
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        # `path` is already normalised by Starlette, so a nested or
+        # traversal-shaped request cannot match a bare filename here.
+        if path not in SHARE_ASSETS:
+            raise StarletteHTTPException(status_code=404)
+        return await super().get_response(path, scope)
+
+
+app.mount("/share/assets", ShareAssets(directory=config.STATIC_DIR), name="share-assets")
 app.include_router(share_router)
 
 

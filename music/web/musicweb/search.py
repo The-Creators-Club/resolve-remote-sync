@@ -3,6 +3,7 @@
 index structure here.
 """
 import threading
+import time
 
 import numpy as np
 
@@ -38,6 +39,13 @@ class Index:
         self.sim_mat = (projection.apply(self.track_mat, self.dirs)
                         if self.dirs.size else self.track_mat)
         self.pos = {tid: i for i, tid in enumerate(self.track_ids)}
+        # What the library looked like when these matrices were built, so a
+        # change made by ANOTHER process can be noticed without a restart
+        # (music-2, 2026-08-21) -- see `index()`. Recorded from the live
+        # database rather than from `con`, because the module-level index is
+        # always the live one; an Index built over a copy (eval --sweep) is
+        # never installed here and nothing reads this on it.
+        self.built_from = (db.generation(), db.file_state())
         # Injection slots, not caches: both models live at module scope (see
         # shared_encoder/shared_clap). Left here because the tests assign a fake
         # embedder to an Index without loading anything.
@@ -195,14 +203,55 @@ def shared_clap():
         return _clap
 
 
+# How often the shared index is allowed to ask whether the database has moved
+# under it. A stat of two files, so the check itself is nothing -- the interval
+# is about the REBUILD it can trigger: during a burst of fleet ingest every
+# write would otherwise re-read every embedding once per search.
+STALE_CHECK_SECONDS = 2.0
+_last_stale_check = 0.0
+
+
+def _looks_stale(idx):
+    """Has the database changed since `idx` was built, by anyone at all?
+
+    music-2, 2026-08-21. The matrices were built once per process and only
+    refresh() replaced them, and the only callers of refresh are this app's own
+    write paths and /api/reload. So a `python -m musicweb.drain apply` on the
+    NAS (DEPLOY.md 3a) landed tracks that browse and audio could see and text
+    search and /api/similar could not, and a publish that renamed a new
+    music.db into place was served entirely from the unlinked old inode -- both
+    until someone POSTed a route no runbook mentioned. Rate-limited, and every
+    failure to stat is "not stale" (the file is mid-swap; the next check gets
+    it).
+    """
+    global _last_stale_check
+    now = time.monotonic()
+    with _index_lock:
+        if now - _last_stale_check < STALE_CHECK_SECONDS:
+            return False
+        _last_stale_check = now
+    state = db.file_state()
+    return state is not None and idx.built_from != (db.generation(), state)
+
+
 def index():
     """Shared search index. Holds numpy matrices, not a DB connection, so it is
-    safe across threads; only its construction needs guarding."""
+    safe across threads; only its construction needs guarding.
+
+    Rebuilt in place when the database it was built from has been changed by
+    another process (music-2). db.con() inside refresh() is what reopens a
+    REPLACED file, so the two halves of a publish -- new inode, new rows -- are
+    both picked up by this one call.
+    """
     global _index
     with _index_lock:
         if _index is None:
             _index = Index(db.con())
-        return _index
+            return _index
+        current = _index
+    if _looks_stale(current):
+        return refresh(db.con())
+    return current
 
 
 def refresh(con):

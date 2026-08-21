@@ -219,3 +219,87 @@ def test_the_cli_runs_as_a_script(key, artifact):
     )
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout)["filename"] == "ccsync-companion-0.7.12.exe"
+
+
+class TestTheFloorMayNotExceedTheBuild:
+    """CR-52 / CR-67 item 3 (2026-08-21). `--min-version 0.9.54` for a 0.9.44
+    build signs perfectly and is then refused by every machine that sees it:
+    the companion raises its monotonic floor on RECEIPT, so the offer, every
+    earlier build and the corrected republish all fall below it. The dashboard
+    (release_trust.min_version_exceeds_version) and the companion
+    (upgrade._min_version_above_own) both refuse such a record now. The
+    signing rig is the cheapest place of the three, because here it is a
+    retype rather than a visit to every editor's machine."""
+
+    def test_a_floor_above_the_version_is_refused(self, key, artifact):
+        with pytest.raises(SystemExit) as excinfo:
+            sign_release.main([
+                "--artifact", str(artifact), "--kind", "companion",
+                "--platform", "windows", "--version", "0.9.44",
+                "--min-version", "0.9.54"])
+        message = str(excinfo.value)
+        assert "0.9.54" in message and "0.9.44" in message
+        assert "CR-52" in message
+
+    def test_the_refusal_happens_before_the_key_is_touched(self, tmp_path, artifact, monkeypatch):
+        """No key file at all: the check must still fire, which is what makes
+        it usable on a rig where the key lives somewhere else."""
+        monkeypatch.setenv("CCSYNC_RELEASE_KEY", str(tmp_path / "absent.key"))
+        with pytest.raises(SystemExit) as excinfo:
+            sign_release.main([
+                "--artifact", str(artifact), "--kind", "companion",
+                "--platform", "windows", "--version", "0.9.44",
+                "--min-version", "0.9.54"])
+        assert "ABOVE" in str(excinfo.value)
+
+    def test_a_floor_equal_to_the_version_is_the_normal_case(self, key, artifact):
+        record = _run(["--artifact", str(artifact), "--kind", "companion",
+                       "--platform", "windows", "--version", "0.9.44",
+                       "--min-version", "0.9.44"])
+        assert record["min_version"] == "0.9.44"
+
+    def test_two_digit_minors_compare_as_numbers(self, key, artifact):
+        """After 0.9.9 comes 0.10.0 (owner's rule 2026-08-18). A string
+        compare would refuse this good record and accept the bad one below."""
+        record = _run(["--artifact", str(artifact), "--kind", "companion",
+                       "--platform", "windows", "--version", "0.10.0",
+                       "--min-version", "0.9.44"])
+        assert record["version"] == "0.10.0"
+        with pytest.raises(SystemExit):
+            sign_release.main(["--artifact", str(artifact), "--kind", "companion",
+                               "--platform", "windows", "--version", "0.9.9",
+                               "--min-version", "0.10.0"])
+
+    def test_an_unrankable_version_is_left_to_the_other_checks(self, key, artifact):
+        """A `+dirty` version cannot be ranked, so this check says nothing
+        about it: `valid_min_version` on the dashboard owns "is this a version
+        at all", and two refusals for one fault would name the wrong one."""
+        assert sign_release.min_version_exceeds_version("0.9.44+dirty", "0.9.54") is False
+        assert sign_release.min_version_exceeds_version("0.9.44", "") is False
+
+    def test_the_comparison_matches_the_dashboards(self):
+        """The rule is written out in three places that cannot import each
+        other (tools, the container, the frozen companion). Pin them together
+        on the cases that matter, so a change in one shows up as a failure
+        rather than as a record one side accepts and another refuses."""
+        cases = [
+            ("0.9.44", "0.9.54", True),
+            ("0.9.44", "0.9.44", False),
+            ("0.9.44", "0.9.40", False),
+            ("0.10.0", "0.9.99", False),
+            ("0.9.9", "0.10.0", True),
+            ("0.9.44+dirty", "0.9.54", False),
+            ("0.9.44", "nightly", False),
+            ("", "0.9.1", False),
+        ]
+        for version, min_version, expected in cases:
+            assert sign_release.min_version_exceeds_version(version, min_version) is expected, (
+                version, min_version)
+        try:
+            sys.path.insert(0, str(REPO / "dashboard" / "src"))
+            from ccsync_dashboard import release_trust  # noqa: PLC0415
+        except Exception:  # pragma: no cover - the dashboard tree may be absent
+            pytest.skip("dashboard source not importable from here")
+        for version, min_version, expected in cases:
+            assert release_trust.min_version_exceeds_version(version, min_version) is expected, (
+                version, min_version)

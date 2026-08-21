@@ -230,6 +230,31 @@ IMAGE_PYTHONPATH="$PYTHONPATH"
 # does not change behaviour mid-upgrade; it can go once no deployment has one.
 export PATH="/opt/ffmpeg:/opt/claude:/opt/deno:$PATH"
 
+# UVICORN'S ACCESS LOG, OFF BY DEFAULT (ops-efficiency-7, 2026-08-21).
+#
+# It logged one line per request, and the request rate here is set by polling
+# rather than by people: every companion POSTs /api/v1/report every 5 s while
+# a lane syncs, every open dashboard tab GETs /partials/* every 2 s, and the
+# compose healthcheck hits /api/v1/health every 60 s. On a ten-machine fleet
+# that is several lines a second, forever, and it says nothing -- 200s on
+# three paths. It buried the lines that DO matter (tracebacks, the collector's
+# warnings, "site identity not fully configured") and, with docker's json-file
+# driver, it ate the disk; the compose files now cap that at 100 MB, which
+# this keeps from rotating an incident away inside an hour.
+#
+# DASH_ACCESS_LOG=1 in the container environment puts it back for a debugging
+# session. Deliberately NOT a key in the compose templates: an operator who
+# needs it adds it, and a key in the file would have to be carried by
+# compose_config() too (server/tests/test_safety.test_env_keys_match_compose).
+#
+# Referenced UNQUOTED below, on purpose: empty has to mean "pass no flag", and
+# "$ACCESS_LOG_FLAG" would become an empty argv entry uvicorn rejects.
+ACCESS_LOG_FLAG="--no-access-log"
+if [ "${DASH_ACCESS_LOG:-0}" = "1" ]; then
+    ACCESS_LOG_FLAG=""
+    echo "run.sh: DASH_ACCESS_LOG=1 -- uvicorn's per-request access log is ON."
+fi
+
 # OVER-THE-AIR CODE UPDATES (ZERO_TOUCH_PLAN.md WP K, 2026-08-18), IMAGE MODE
 # ONLY. The dashboard can install a newer, signed copy of its own CODE into
 # /data/code/<version>/ and ask to be re-exec'd; the IMAGE stays the runtime.
@@ -263,7 +288,8 @@ if [ -f "$VENV/.image-baked" ]; then
         export PYTHONPATH
         echo "run.sh: PYTHONPATH=$PYTHONPATH"
         "$VENV/bin/python" -m uvicorn --factory ccsync_dashboard.app:create_app \
-            --host 0.0.0.0 --port "${DASH_PORT:-8480}" --workers 1 &
+            --host 0.0.0.0 --port "${DASH_PORT:-8480}" --workers 1 \
+            $ACCESS_LOG_FLAG &
         app_pid=$!
         trap 'kill -TERM "$app_pid" 2>/dev/null' TERM INT
         rc=0
@@ -277,4 +303,4 @@ if [ -f "$VENV/.image-baked" ]; then
 fi
 
 exec "$VENV/bin/python" -m uvicorn --factory ccsync_dashboard.app:create_app \
-    --host 0.0.0.0 --port "${DASH_PORT:-8480}" --workers 1
+    --host 0.0.0.0 --port "${DASH_PORT:-8480}" --workers 1 $ACCESS_LOG_FLAG

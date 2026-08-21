@@ -963,6 +963,9 @@ def mark_uploaded(conn: sqlite3.Connection, batch: sqlite3.Row, item: sqlite3.Ro
 
     Only here does `videos.status` leave `ingesting`: before this the row
     reserves a name and holds segments, and browse/tree/search all skip it.
+    Which is why it also refuses a clip that holds NO segments (CR-54): going
+    live is the one-way door, and an undescribed clip through it is invisible
+    to search for ever.
     """
     if item["video_id"] is None or not item["archive_dir"] or not item["archive_stem"]:
         raise HTTPException(409, {"detail": "this item has no archive slot yet; re-claim",
@@ -1008,6 +1011,27 @@ def mark_uploaded(conn: sqlite3.Connection, batch: sqlite3.Row, item: sqlite3.Ro
             "detail": "the archive does not hold these files yet",
             "reason": "not_uploaded",
             "missing": missing, "size_mismatch": size_mismatch})
+
+    # DEFENCE IN DEPTH for comp-loopback-4 (CR-54, CR-67 item 10, 2026-08-21).
+    # A `/result` this route refused used to be a log line on the companion and
+    # nothing else: the clip was uploaded anyway and went LIVE with no
+    # segments, no themes and no category -- unfindable by either search, and
+    # never re-described. The companion now fails such an item instead of
+    # uploading it, but this side is the one that owns `videos.status`, and it
+    # is the only writer that can be sure. An empty description is not a clip
+    # in the archive; it is a clip nobody will ever find again.
+    #
+    # Same 409 as the missing-files branch on purpose: a 409 here means "this
+    # is not finished yet", which is exactly what it is, and the companion's
+    # existing handling counts it against the item's attempts and fails it with
+    # the server's own words rather than looping.
+    if conn.execute("SELECT 1 FROM segments WHERE video_id = ? LIMIT 1",
+                    (item["video_id"],)).fetchone() is None:
+        log.warning("b-roll ingest: item %s cannot go live -- no segments were "
+                    "ever recorded for video %s", item["uid"], item["video_id"])
+        raise HTTPException(409, {
+            "detail": "this clip has no description yet; post its result first",
+            "reason": "no_result"})
 
     now = now_iso()
     with conn:

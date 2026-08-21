@@ -74,6 +74,41 @@ from .watcher import TimelineWatcher
 
 log = logging.getLogger("ccsync.app")
 
+# The log window an editor's diagnostics bundle can carry back.
+# ops-efficiency-9 (CR-66, CR-67 item 9, 2026-08-21): this was 5 MB x 3 = 20 MB,
+# and a machine turned up to log_level = "DEBUG" for an incident rotates through
+# the whole of it in about half an hour -- so by the time the editor is asked
+# for the log, the event that prompted the ask is already gone. 10 keeps the
+# same 5 MB files and buys ~2.5 hours at DEBUG, ~days at INFO, for 30 MB more
+# disk on a machine that holds terabytes of video.
+LOG_MAX_BYTES = 5_000_000
+LOG_BACKUP_COUNT = 10
+
+
+class RotatingLogHandler(logging.handlers.RotatingFileHandler):
+    """RotatingFileHandler that records its own rotations.
+
+    ops-efficiency-9 (CR-66, 2026-08-21): nothing in a rotated log said that
+    anything had been dropped, so "the log does not mention it" read as "it
+    never happened" in exactly the incidents where the window had simply been
+    exhausted. One INFO line at the head of each new file makes the truncation
+    visible to whoever reads it.
+    """
+
+    def doRollover(self) -> None:
+        super().doRollover()
+        try:
+            # Emitted through the handler rather than the `ccsync` logger:
+            # logging a rotation from inside the rotation is how a handler
+            # recurses. The fresh file cannot roll over again on one line.
+            self.emit(logging.LogRecord(
+                "ccsync.log", logging.INFO, __file__, 0,
+                "log rotated: %d file(s) of ~%d MB are kept, anything older is gone",
+                (self.backupCount, self.maxBytes // 1_000_000), None,
+            ))
+        except Exception:
+            pass
+
 
 def setup_logging(cfg: dict[str, Any]) -> None:
     log_path = config_mod.resolved_log_path(cfg)
@@ -84,8 +119,8 @@ def setup_logging(cfg: dict[str, Any]) -> None:
     root.setLevel(level)
     root.handlers.clear()
 
-    file_handler = logging.handlers.RotatingFileHandler(
-        log_path, maxBytes=5_000_000, backupCount=3, encoding="utf-8"
+    file_handler = RotatingLogHandler(
+        log_path, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8"
     )
     handlers: list[logging.Handler] = [file_handler]
     # In the windowed (console=False) build sys.stderr is None -- a
@@ -195,7 +230,30 @@ _single_instance_token: Any = None
 # is deliberately narrow: only the pid we were told we replace, only for as
 # long as a normal shutdown takes.
 _REPLACES_PID_ENV = "CCSYNC_REPLACES_PID"
-PREDECESSOR_WAIT_SECONDS = 20.0
+# What a normal shutdown actually costs, summed from the bounded joins
+# shutdown() and _stop_lanes() perform in series (comp-app-core-1,
+# 2026-08-21):
+#
+#   sequencer.stop()      5  (_wait_for_lane_c_turn_idle)
+#                       + 10 (worker join -- rclone_lane.run_once never sees
+#                             the sequencer's _interrupt, so a worker parked
+#                             on an rclone child sits out the whole join)
+#   lane C stop            5
+#   lane B stop            5 (periodic join) + 5 (observer join)
+#   watcher + media tree   5 + 5 (a fusionscript call that does not return)
+#   proxy generator        5, b-roll ingest 5, youtube importer 5
+#   lane A stop, reporter, manifest cache, 8899 socket, tray: the rest
+#
+# 55 s of joins before anything unbounded, which is why the wait below is
+# not 20 s any more. It WAS, and 20 s is less than the teardown it waits
+# for: the child reaches the guard ~1 s after being spawned, gave up while
+# the parent was still inside those joins, and the machine was left with no
+# companion until the next logon -- R11's outcome, reached through the timer
+# R11 introduced. The wait costs nothing when the predecessor exits early
+# (it polls) and only ever applies to an upgrade hand-off, never to an
+# editor double-clicking the exe.
+SHUTDOWN_WORST_CASE_SECONDS = 55.0
+PREDECESSOR_WAIT_SECONDS = 90.0
 PREDECESSOR_POLL_SECONDS = 0.25
 
 
@@ -231,7 +289,7 @@ def _pid_is_alive_win32(pid: int) -> bool:
         if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
             return True  # can't tell -- assume alive, i.e. fail safe
         # A process that genuinely exited with 259 reads as alive; the cost is
-        # one 20 s predecessor wait, versus killing a live companion.
+        # one predecessor wait, versus killing a live companion.
         return code.value == _STILL_ACTIVE
     finally:
         kernel32.CloseHandle(handle)
@@ -768,6 +826,19 @@ class CompanionApp:
         self._pushed_update_refused = ""
         self._pushed_update_announced = ""
         self._pushed_update_retry_at = 0.0
+        # UNATTENDED updates (site [features] auto_update) get the same
+        # treatment, and for the same reason (comp-app-core-4, 2026-08-21).
+        # The auto path fired exactly once per offer -- on_available is only
+        # called when the offered version CHANGES -- so a stand-down ("a
+        # CCSync window is open", a consolidate) or a failed download left
+        # the flag dead for that build until the tray was restarted. On the
+        # machines §9 named as the reason for auto_update (an out-of-tree
+        # popup takes the lock seconds after every launch, CR-27) the restart
+        # loses the race too, so "unattended" meant "never".
+        self._auto_update_version = ""
+        self._auto_update_applying = ""
+        self._auto_update_announced = ""
+        self._auto_update_retry_at = 0.0
         # macOS took the tree away from us, rather than the editor unplugging
         # it: the ad-hoc-signed companion loses its Full Disk Access grant on
         # every self-upgrade (item 16). Checked once after an upgrade, read by
@@ -859,7 +930,15 @@ class CompanionApp:
                 api_key=cfg.get("syncthing_api_key", ""),
             )
             self.sequencer = Sequencer(
-                self._lane_a, self._lane_b, self.syncthing_admin, self.selection_client, cfg
+                self._lane_a, self._lane_b, self.syncthing_admin, self.selection_client, cfg,
+                # sync-safety-2 (CR-48, CR-67 item 1): the once-per-pass shared
+                # asset-folder reconcile RELEASES a paused folder, so without
+                # this predicate a halt held the LUT, B-roll archive and music
+                # libraries down for exactly one sequencer pass and then let
+                # them sync again while every tray still said nothing was.
+                # `self.halt` is built above, before _build_lanes, precisely so
+                # this closure has something to read on the first pass.
+                halted=lambda: self.halt.active,
             )
 
         # Local disk media manifest (per-project file rollups + per-file
@@ -877,6 +956,10 @@ class CompanionApp:
         # on its own slow background thread; see _refresh_media_tree_once().
         self.media_tree_refresh_interval = config_mod.coerce_numeric(cfg, "media_tree_refresh_interval", 120)
         self._media_tree_cache: dict[str, list[dict[str, Any]]] = {}
+        # {file_path: (present, monotonic when probed)} -- see
+        # _media_presence() (ops-efficiency-8, CR-66/CR-67 item 9). Touched
+        # only from the media-tree thread, so it needs no lock of its own.
+        self._media_presence_cache: dict[str, tuple[bool, float]] = {}
         self._media_tree_lock = threading.Lock()
         self._media_tree_stop_event = threading.Event()
         self._media_tree_thread: Optional[threading.Thread] = None
@@ -1207,6 +1290,10 @@ class CompanionApp:
         # ...and an admin clearing this machine's lane B breaker (CR-45,
         # 2026-08-20).
         self._apply_resume_lane_b(resp)
+        # An unattended update that stood down (an open window, a consolidate,
+        # a failed download) gets its next go here rather than waiting for a
+        # NEW version to be published (comp-app-core-4, 2026-08-21).
+        self._maybe_auto_update()
 
     def _on_resolve_project_changed(self, name: str) -> None:
         if self.project_setup is not None:
@@ -1803,7 +1890,8 @@ class CompanionApp:
             "ccsync-companion: mapping warning",
         )
 
-    def _handle_non_canonical(self, items: list[dict[str, Any]]) -> None:
+    def _handle_non_canonical(self, items: list[dict[str, Any]],
+                              user_initiated: bool = False) -> None:
         """Auto-relink in-tree clips stored under the LOCAL spelling.
 
         The 2026-08-12 Energy Transition incident's importing-side class:
@@ -1823,15 +1911,33 @@ class CompanionApp:
         detection, and _stop_event unobserved so a Quit or self-upgrade could
         not stop the watcher cleanly (AUDIT_2 CORE-M2 / COMP-GUARD-5,
         2026-08-14).
+
+        `user_initiated` is Tray -> Advanced -> Scan whole project asking, and
+        it skips the rate limit below (comp-resolve-1, 2026-08-21): the
+        limiter exists because nobody consented to the unprompted pass, and
+        this is the consent. It is also the only thing that drains a burst
+        the limiter refused -- which the refusal's own log line has been
+        promising since the limiter shipped.
         """
         fresh = [
             item for item in items
             if item.get("file_path") and item.get("media_pool_item") is not None
         ]
-        if not fresh:
-            return
         with self._canon_relink_lock:
-            self._canon_relink_pending.extend(fresh)
+            if fresh:
+                if user_initiated:
+                    # The scan re-offers paths the watcher already handed over
+                    # (both producers latch once per process, this one does
+                    # not), so a path already waiting must not be queued twice.
+                    from .watcher import _norm_key
+
+                    waiting = {_norm_key(str(item.get("file_path") or ""))
+                               for item in self._canon_relink_pending}
+                    fresh = [item for item in fresh
+                             if _norm_key(str(item.get("file_path") or "")) not in waiting]
+                self._canon_relink_pending.extend(fresh)
+            if not self._canon_relink_pending:
+                return
             if self._canon_relink_busy:
                 return
             self._canon_relink_busy = True
@@ -1846,7 +1952,7 @@ class CompanionApp:
         # The refused clips stay in _canon_relink_pending -- the watcher
         # offers each path once per process, so dropping them strands them.
         project = resolve_bridge.current_project_name()
-        if not resolve_journal.allow_automatic(project, "canon-relink"):
+        if not user_initiated and not resolve_journal.allow_automatic(project, "canon-relink"):
             with self._canon_relink_lock:
                 self._canon_relink_busy = False
                 waiting = len(self._canon_relink_pending)
@@ -1940,7 +2046,19 @@ class CompanionApp:
         tray's spawned thread like every other action; never raises.
         """
         try:
-            summary = resolve_journal.describe_latest()
+            # Describe the journal the undo will actually replay (comp-resolve-2,
+            # CR-51, CR-67 item 9). describe_latest() with no project reads the
+            # newest journal of ANY project, so an editor undoing in one project
+            # was told the clip count of a pass made in another -- while
+            # resolve_bridge.undo_last_relink now chooses the OPEN project's
+            # journal and refuses a mismatch. The no-project fallback mirrors
+            # the bridge's own fallback: a journal that names no project (the
+            # pre-2026-08-21 shape) is still replayable, and this summary is
+            # only ever shown when something was undone.
+            project = resolve_bridge.current_project_name()
+            summary = resolve_journal.describe_latest(project) if project else ""
+            if not summary:
+                summary = resolve_journal.describe_latest()
             result = resolve_bridge.undo_last_relink()
         except Exception:
             log.exception("undo of the last relink failed")
@@ -2195,6 +2313,20 @@ class CompanionApp:
             if classify_path(path, local_root, canonical_prefix) == OUT_OF_TREE:
                 out_of_tree.append(item)
 
+        # comp-resolve-1 (2026-08-21). The auto-relink limiter's refusal has
+        # always said "Tray -> Advanced -> Scan whole project runs it now",
+        # and this scan did not: the held clips sat in _canon_relink_pending
+        # for the life of the process (both producers latch per path per
+        # process, so nothing ever re-offered them) and stayed spelled for
+        # this machine only -- Media Offline for every other editor who opens
+        # the project. Draining it here is what makes that sentence true.
+        # Nothing is re-classified: an in-tree clip is in the tree whatever
+        # its spelling, which is what the message below says and what this
+        # scan is for. user_initiated=True skips the limiter, because the
+        # limiter guards the UNPROMPTED path and a tray click is the consent
+        # it is waiting for.
+        self._drain_held_relinks()
+
         if not out_of_tree:
             log.info("whole-project scan: all media is in the tree")
             self._notify_tray("Whole-project scan: all media is in the tree", "ccsync-companion")
@@ -2202,6 +2334,22 @@ class CompanionApp:
 
         log.info("whole-project scan: %d clip(s) outside %s", len(out_of_tree), local_root)
         self._show_out_of_tree_popup(out_of_tree)
+
+    def _drain_held_relinks(self) -> None:
+        """Run the non-canonical relinks the rate limiter deferred, now.
+
+        comp-resolve-1 (2026-08-21). Never raises: this is a side errand of
+        whatever the editor actually asked for."""
+        try:
+            with self._canon_relink_lock:
+                waiting = len(self._canon_relink_pending)
+            if not waiting:
+                return
+            log.info("whole-project scan: re-addressing %d held clip(s) that the "
+                     "automatic pass deferred", waiting)
+            self._handle_non_canonical([], user_initiated=True)
+        except Exception:
+            log.exception("could not drain the held non-canonical relinks")
 
     def _server_roots_result(self) -> tuple[Optional[dict[str, str]], str]:
         """(mapping, source) -- source "unreachable" means DO NOT resolve a
@@ -2600,6 +2748,53 @@ class CompanionApp:
         with self._media_tree_lock:
             return dict(self._media_tree_cache)
 
+    # How long a clip that WAS on disk is believed without another stat().
+    # Not forever: a file really can go away, and a media tree that never
+    # notices is worse than a slow one. Fifteen minutes is ~7 media-tree
+    # cycles at the default interval, so a deletion still surfaces well
+    # inside the ten-minute report window CR-62 opened up.
+    MEDIA_PRESENCE_TTL_SECONDS = 900.0
+
+    def _media_presence(self, paths: list[str]) -> dict[str, bool]:
+        """{file_path: present} for this pass, re-statting as little as it can.
+
+        ops-efficiency-8 (CR-66, CR-67 item 9, 2026-08-21): a wired rig's media
+        pool lives on the SMB share, and this walk stat()ed EVERY clip in it
+        every media_tree_refresh_interval (120 s by default) -- a thousand-clip
+        project is a thousand round trips a minute over SMB to answer a
+        question whose answer almost never changes. The answer that DOES change
+        is "absent", because that is the one a lane B download flips, so an
+        absent path (and a path never seen before) is probed every pass while a
+        present one is trusted for MEDIA_PRESENCE_TTL_SECONDS.
+
+        Pruned to the paths in this pass, so closing a project does not leave
+        its clips in here for the life of the process. Never raises: a stat
+        that throws is "absent", exactly as before."""
+        now = time.monotonic()
+        fresh: dict[str, tuple[bool, float]] = {}
+        out: dict[str, bool] = {}
+        for path in paths:
+            if not path:
+                out[path] = False
+                continue
+            if path in out:
+                # The same clip can be in two bins. One stat, not two.
+                continue
+            cached = self._media_presence_cache.get(path)
+            if (cached is not None and cached[0]
+                    and (now - cached[1]) < self.MEDIA_PRESENCE_TTL_SECONDS):
+                out[path] = True
+                fresh[path] = cached
+                continue
+            try:
+                present = bool(self._exists_fn(path))
+            except Exception:
+                present = False
+            out[path] = present
+            fresh[path] = (present, now)
+        self._media_presence_cache = fresh
+        return out
+
     def _refresh_media_tree_once(self) -> None:
         """Rescan the media pool and update the cache. Fault-isolated: never
         raises, and any failure just leaves the previous cache in place
@@ -2628,13 +2823,14 @@ class CompanionApp:
                 self._media_tree_cache = {}
             return
 
+        items = result.get("items", [])
+        presence = self._media_presence(
+            [str(item.get("file_path", "") or "") for item in items]
+        )
         clips: list[dict[str, Any]] = []
-        for item in result.get("items", []):
+        for item in items:
             file_path = item.get("file_path", "") or ""
-            try:
-                present = bool(self._exists_fn(file_path)) if file_path else False
-            except Exception:
-                present = False
+            present = presence.get(file_path, False)
             clips.append(
                 {
                     "bin_path": item.get("bin_path", "") or "",
@@ -4063,15 +4259,30 @@ class CompanionApp:
             guard["removal_overrides"] = list(self._removal_overrides)[-5:]
         return guard
 
-    def resume_lane_b(self, by: str = "tray") -> tuple[bool, str]:
+    def resume_lane_b(self, by: str = "tray",
+                      request_id: Optional[str] = None) -> tuple[bool, str]:
         """Clear the lane B breaker after the operator has checked the
         server. Returns (ok, message); never raises.
 
         `by` is only ever a log label -- "tray" for the editor's own click,
         an admin's username when the dashboard asked (CR-45). Both are the
-        same assertion about the server; neither is more privileged."""
+        same assertion about the server; neither is more privileged.
+
+        `request_id` is the dashboard request's `requested_at` stamp, and it
+        is what makes a remote resume ONE-SHOT (comp-lanes-ab-2,
+        2026-08-21): the dashboard keeps the request standing on every reply
+        until a report says the breaker is clear, so a pass that re-trips
+        inside the report interval used to be resumed again by the next
+        reply, and again, moving another --max-delete 100 proxies into
+        .ccsync-trash each cycle from a single admin click -- the unbounded
+        sequence the breaker exists to stop. One click resumes once; a later
+        trip is a later judgement and needs a fresh one. Persisted, because a
+        latch that lives only in memory is cleared by the tray restart an
+        editor tries first (the breaker's own state file, beside the latch
+        it clears -- see LaneBBreaker.resume)."""
         try:
-            if not self._lane_b.resume_after_trip(by):
+            if not self._resume_lane_b_breaker(by, request_id):
+                # Not tripped, or this request has already been applied here.
                 return False, "proxy download is not stopped"
         except Exception:
             log.exception("resume_lane_b failed")
@@ -4087,7 +4298,64 @@ class CompanionApp:
                 self.sequencer.trigger_pass_now()
             except Exception:
                 log.exception("resume_lane_b: could not trigger a pass")
+        # OFF-CYCLE, before that pass can re-trip (comp-lanes-ab-2,
+        # 2026-08-21). The reporter's next tick was chosen before this reply
+        # arrived -- 60 s with nothing SYNCING, which is exactly the parked
+        # state a resume ends -- and the dashboard only drops the standing
+        # request when it sees a report with the breaker clear. Telling it
+        # now is what keeps a re-trip inside that window from being resumed
+        # by a request nobody renewed.
+        self._report_off_cycle("lane B resumed")
         return True, "Proxy download resumed."
+
+    def _resume_lane_b_breaker(self, by: str, request_id: Optional[str]) -> bool:
+        """rclone_lane.resume_after_trip, with the request id when that half
+        accepts one (comp-lanes-ab-2, 2026-08-21).
+
+        The breaker is where the one-shot rule lives -- it persists the
+        applied request beside the latch it clears -- so this only has to
+        hand the id over. Probed rather than assumed, because a lane double
+        or an older build may not take one: such a lane still RESUMES (a
+        button that stops working is worse than the repeat), and says so, so
+        the missing half is discoverable from the log rather than from a
+        second afternoon of proxies in the trash."""
+        resume = self._lane_b.resume_after_trip
+        if not request_id:
+            return bool(resume(by))
+        try:
+            import inspect
+
+            params = inspect.signature(resume).parameters
+            takes_id = "request_id" in params or any(
+                p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+        except (TypeError, ValueError):
+            takes_id = False
+        if not takes_id:
+            log.warning("this lane does not remember which resume request it has "
+                        "applied -- a standing dashboard request can resume more "
+                        "than one trip (comp-lanes-ab-2)")
+            return bool(resume(by))
+        return bool(resume(by, request_id=request_id))
+
+    def _report_off_cycle(self, why: str) -> None:
+        """Post ONE light report now, on a thread of its own. Never raises.
+
+        Its own thread because every caller so far is the reporter thread
+        itself, inside on_report_response -- posting inline would nest a
+        report inside a report (comp-lanes-ab-2, 2026-08-21). Light: the
+        sync_guard section rides every tick including light ones, and that
+        section is the whole reason to post early."""
+        def _post() -> None:
+            try:
+                self.reporter.post_once(light=True)
+            except Exception:
+                log.debug("off-cycle report (%s) failed", why, exc_info=True)
+
+        try:
+            threading.Thread(target=_post, name="ccsync-report-off-cycle",
+                             daemon=True).start()
+        except Exception:
+            log.debug("could not post an off-cycle report (%s)", why, exc_info=True)
 
     def halt_all_sync(self, reason: str, scope: str = lane_guard.HALT_SCOPE_LOCAL) -> tuple[bool, str]:
         """STOP -- not pause. Stops lanes A and B AND pauses every lane C
@@ -4130,7 +4398,7 @@ class CompanionApp:
         ok, message = self.halt.release(by=by, force=force)
         if not ok:
             return False, message
-        self._pause_lane_c_folders(False)
+        self._release_lane_c_folders()
         self._set_express_paused(self._paused)
         try:
             self._start_lanes()
@@ -4144,6 +4412,32 @@ class CompanionApp:
                if self.halt.scope == lane_guard.HALT_SCOPE_FLEET
                else "syncing is STOPPED on this machine")
         return f"STOPPED: {who}" + (f" -- {reason}" if reason else "")
+
+    def _release_lane_c_folders(self) -> None:
+        """Put lane C back after a halt is lifted. Never raises.
+
+        Through the sequencer, NOT by PATCHing `paused: false` onto every
+        folder the halt paused (sync-safety-4, CR-48, CR-67 item 1): that
+        bypassed the "its .stignore never landed, stay paused" latch, so a
+        release could put an unfiltered `sendreceive` folder online and offer
+        every original and every Proxy/ file to the fleet. release_for_halt()
+        goes through _unpause_all's existing ignores-confirmed filter and
+        re-reconciles the shared asset libraries, which the halt now pauses
+        too. A failure here is logged and left paused: staying paused is the
+        safe side of this decision, and the next pass sweeps it up.
+
+        The direct unpause survives only as the no-sequencer fallback (legacy
+        mode, and any sequencer double that predates release_for_halt), where
+        nothing else would ever release the folders at all."""
+        release = getattr(self.sequencer, "release_for_halt", None)
+        if release is None:
+            self._pause_lane_c_folders(False)
+            return
+        try:
+            release()
+        except Exception:
+            log.exception("halt release: the sequencer could not release lane C "
+                          "-- the folders stay paused until the next pass")
 
     def _pause_lane_c_folders(self, paused: bool) -> int:
         """Pause/unpause every lane C folder through Syncthing's REST API.
@@ -4160,8 +4454,18 @@ class CompanionApp:
         if self.syncthing_admin is None:
             return 0
         try:
-            folders = (self.sequencer.expected_folder_slugs()
-                       if self.sequencer is not None else [])
+            # halt_folder_ids() is the project selection PLUS the fleet-wide
+            # asset libraries (sync-safety-2, CR-48, CR-67 item 1). This walked
+            # expected_folder_slugs() alone, which names no shared folder, so a
+            # halt pressed BECAUSE a bad ingest or a mass rename in the B-roll
+            # archive was spreading left exactly those folders syncing on every
+            # machine in the fleet. getattr, not a hard call: a sequencer
+            # double (and any build older than this one) has only the
+            # selection list, and the halt must still pause what it can.
+            lister = getattr(self.sequencer, "halt_folder_ids", None)
+            if lister is None:
+                lister = getattr(self.sequencer, "expected_folder_slugs", None)
+            folders = lister() if lister is not None else []
         except Exception:
             log.exception("halt: could not list lane C folders")
             return 0
@@ -4211,13 +4515,79 @@ class CompanionApp:
                     info.get("version"), config_mod.VERSION,
                 )
                 return
-            log.info("auto-update: applying v%s (this site has unattended "
-                     "updates on)", info.get("version"))
-            threading.Thread(
-                target=self.apply_upgrade, name="ccsync-auto-upgrade", daemon=True,
-            ).start()
+            # ARMED, not fired-and-forgotten (comp-app-core-4, 2026-08-21):
+            # _maybe_auto_update() re-attempts from the next report while
+            # this version is still the offer in hand, with the pushed
+            # update's back-off. See _run_auto_update.
+            self._auto_update_version = str(info.get("version") or "").strip()
+            self._auto_update_retry_at = 0.0
+            self._maybe_auto_update()
         except Exception:
             log.exception("auto-update check failed -- leaving the offer to the tray")
+
+    def _maybe_auto_update(self) -> None:
+        """Take the armed unattended update, now or on a later report.
+
+        The gate is the OFFER, not the clock: an offer that has moved on
+        re-arms through _on_upgrade_available (which fires on a version
+        change), and one that has been withdrawn stops this dead. Never
+        raises -- called from the reporter thread."""
+        try:
+            wanted = self._auto_update_version
+            if not wanted or wanted == config_mod.VERSION:
+                return
+            if not site_mod.feature_enabled("auto_update"):
+                # The site turned unattended updates back off while this one
+                # was waiting out a retry. Fails closed, as everywhere else.
+                self._auto_update_version = ""
+                return
+            if self._auto_update_applying == wanted:
+                return              # already on it; the swap takes a few seconds
+            if time.monotonic() < self._auto_update_retry_at:
+                return              # stood down a moment ago
+            offer = self.upgrade.available
+            if offer is None or str(offer.get("version") or "") != wanted:
+                # Withdrawn, or replaced by an offer _on_upgrade_available
+                # has judged for itself. Either way this one is over.
+                self._auto_update_version = ""
+                return
+            self._auto_update_applying = wanted
+            first_attempt = self._auto_update_announced != wanted
+            if first_attempt:
+                self._auto_update_announced = wanted
+                log.info("auto-update: applying v%s (this site has unattended "
+                         "updates on)", wanted)
+            else:
+                log.info("auto-update: retrying v%s", wanted)
+            threading.Thread(
+                target=self._run_auto_update, args=(wanted, first_attempt),
+                name="ccsync-auto-upgrade", daemon=True,
+            ).start()
+        except Exception:
+            log.exception("auto-update attempt failed -- leaving the offer to the tray")
+
+    def _run_auto_update(self, wanted: str, first_attempt: bool) -> None:
+        """The unattended-update thread body: _run_pushed_update's shape on
+        the auto path (CR-41 fixed the latch-once bug for the admin PUSH and
+        left this path a single fire -- comp-app-core-4, 2026-08-21). `quiet_refusals` from the
+        second attempt on: an editor whose window stays open must not get the
+        same balloon every 90 seconds."""
+        outcome = "failed"
+        try:
+            outcome = self.apply_upgrade(quiet_refusals=not first_attempt)
+            if outcome is None:     # a stub with no return value: treat as applied
+                outcome = ""
+        except Exception:
+            log.exception("auto-update to v%s raised", wanted)
+        finally:
+            if outcome:
+                wait = (PUSHED_UPDATE_FAILED_RETRY_SECONDS if outcome in ("failed", "no-offer")
+                        else PUSHED_UPDATE_RETRY_SECONDS)
+                self._auto_update_retry_at = time.monotonic() + wait
+                if self._auto_update_applying == wanted:
+                    self._auto_update_applying = ""
+                log.info("auto-update to v%s did not apply (%s); will try again "
+                         "in %ds", wanted, outcome, int(wait))
 
     def _apply_pushed_update(self, resp: Any) -> None:
         """Apply the build an admin asked this machine to take.
@@ -4330,13 +4700,17 @@ class CompanionApp:
         admin who checked the NAS is *more* qualified to make that call than
         the editor being asked to click through a warning about it.
 
-        Idempotent by construction, and that is why it tests `tripped` rather
-        than remembering which request it has seen: the dashboard keeps the
-        request standing until this machine reports the breaker clear, so a
-        companion that restarts mid-flight simply resumes again -- and one
-        that has already resumed does nothing, even if the reply still
-        carries the command. A LATER, unrelated trip is never cleared by a
-        stale request, because the dashboard has dropped it by then.
+        ONE CLICK, ONE RESUME (comp-lanes-ab-2, 2026-08-21). This used to
+        test `tripped` and nothing else, on the reasoning that "the dashboard
+        has dropped the request by then" -- but the dashboard only drops it
+        when a report arrives with the breaker CLEAR, and the reporter's next
+        tick is up to a report interval away. A pass that re-trips inside
+        that window (a deleting pass moves its --max-delete 100 in seconds)
+        was resumed again by the next reply, and again, every cycle, from one
+        admin click: the unbounded sequence the breaker was built to stop.
+        The request's `requested_at` is now carried into resume_lane_b, which
+        applies each one exactly once and persists that. A later, unrelated
+        trip is a later judgement and needs a fresh click.
 
         Never raises: this runs on the reporter thread."""
         try:
@@ -4350,7 +4724,9 @@ class CompanionApp:
             if not self.lane_b_breaker.tripped:
                 return
             by = str(command.get("requested_by") or "your administrator").strip()
-            ok, message = self.resume_lane_b(by=f"{by} (dashboard)")
+            request_id = str(command.get("requested_at") or "").strip()
+            ok, message = self.resume_lane_b(by=f"{by} (dashboard)",
+                                             request_id=request_id)
             if not ok:
                 log.warning("dashboard asked to resume proxy download: %s", message)
                 return
@@ -4381,7 +4757,11 @@ class CompanionApp:
                 self.halt_all_sync(self.halt.reason, lane_guard.HALT_SCOPE_FLEET)
             elif engaged is False:
                 log.warning("the dashboard released the fleet halt -- restarting sync")
-                self._pause_lane_c_folders(False)
+                # Same filtered release the tray's own [ RESUME ] takes
+                # (sync-safety-4, CR-48, CR-67 item 1): an admin's release must
+                # not be the one path that can put a folder with no .stignore
+                # online.
+                self._release_lane_c_folders()
                 self._set_express_paused(self._paused)
                 self._start_lanes()
                 self._notify_tray(
@@ -4511,11 +4891,27 @@ class CompanionApp:
         out.append("")
         out.append("-- syncthing --")
         try:
-            reachable = self._lane_c.check_once()
-            out.append(f"  reachable: {reachable.state != 'error'} ({reachable.state})")
-            out.append(f"  detail: {reachable.detail or reachable.last_error or ''}")
+            # CACHED, not check_once() (comp-lane-c-5, CR-50, CR-67 item 9).
+            # check_once() walks every shared folder through Syncthing's REST
+            # API, which is up to 20 s of a worker thread on the slow or
+            # half-dead Syncthing that is the exact condition a diagnostics
+            # bundle is collected under. Lane C's own poll loop refreshes this
+            # every cycle, so the cache is at most one poll interval stale.
+            cached = self._lane_c.status()
+            out.append(f"  reachable: {cached.state != 'error'} ({cached.state}) "
+                       "[last poll, not a fresh sweep]")
+            out.append(f"  detail: {cached.detail or cached.last_error or ''}")
         except Exception as exc:
             out.append(f"  <failed: {exc}>")
+        try:
+            # The one live question the cache cannot answer, and the cheap one:
+            # api_reachable() is a single localhost ping, not a per-folder
+            # sweep (see SyncthingLane.api_reachable).
+            probe = getattr(self._lane_c, "api_reachable", None)
+            if probe is not None:
+                out.append(f"  api answers right now: {bool(probe())}")
+        except Exception as exc:
+            out.append(f"  api answers right now: <failed: {exc}>")
 
         out.append("")
         out.append("-- transport health (relay path / orphaned uploads) --")
@@ -4965,6 +5361,12 @@ class CompanionApp:
                 # "a fleet machine" and this proves whose. Same getter shape
                 # the reporter uses, so a sign-out stops claims at once.
                 identity_token_fn=lambda: self.identity.token,
+                # ...and the root guard, which every other feature that writes
+                # into the tree already asks (comp-ytdl-1, 2026-08-21). The
+                # cached verdict, for the same reason the ytdlp status is
+                # cached: the capability probe has a 1 s budget. The executor
+                # runs the full probe itself before it creates a directory.
+                root_present_fn=self.root_is_present,
             )
         except Exception:
             log.exception("failed to build the ytdl executor dependencies")

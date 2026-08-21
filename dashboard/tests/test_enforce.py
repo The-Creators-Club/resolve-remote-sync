@@ -112,8 +112,15 @@ def test_once_a_machine_owns_the_device_the_share_follows_its_own_plan(
     the other computer stops reaching this one."""
     collector.run_cycle(conn, ["config", "enforce"])
     now = dbmod.utcnow_iso()
+    # The laptop's device is APPROVED on the server (comp-lane-c-1,
+    # 2026-08-21): a device the server does not have cannot be shared with,
+    # Syncthing drops the entry from the PUT, and the cycle would re-issue it
+    # for ever. This test is about plans, not approval -- see
+    # test_a_device_the_server_has_not_approved_is_not_shared_with.
+    laptop_device = "LAPTOPX-LAPTOPX"
+    fake.state["devices"].append({"deviceID": laptop_device, "name": laptop_device})
     dbmod.upsert_machine(conn, "jsmith", "JS-DESKTOP", now, syncthing_device_id=EDITOR_ID)
-    dbmod.upsert_machine(conn, "jsmith", "JS-LAPTOP", now, syncthing_device_id="LAPTOPX-LAPTOPX")
+    dbmod.upsert_machine(conn, "jsmith", "JS-LAPTOP", now, syncthing_device_id=laptop_device)
     # The seeded row is the unassigned bucket; give the LAPTOP a plan of its
     # own and the desktop keeps the bucket.
     dbmod.add_selection(conn, "jsmith", "2026-ff5-elections", "admin", now, machine="JS-LAPTOP")
@@ -122,13 +129,43 @@ def test_once_a_machine_owns_the_device_the_share_follows_its_own_plan(
     assert EDITOR_ID in folder_devices(fake)
 
     # Now the desktop gets an explicit plan that does NOT include this folder.
+    # Its first own row COPIES what it was inheriting (dash-core-1), so the
+    # folder leaves this machine's plan when it is UNTICKED for it, not as a
+    # side effect of ticking something else.
     dbmod.add_selection(conn, "jsmith", "2026-ff5-elections", "admin", now, machine="JS-DESKTOP")
+    assert dbmod.remove_selection(conn, "jsmith", SLUG, machine="JS-DESKTOP") is True
     conn.commit()
     collector.run_cycle(conn, ["enforce"])
 
     assert EDITOR_ID not in folder_devices(fake)
     assert SERVER_ID in folder_devices(fake)          # the server is never dropped
     assert EDITOR2_ID in folder_devices(fake)         # unmapped devices untouched (B16)
+
+
+def test_a_device_the_server_has_not_approved_is_not_shared_with(conn, fake, collector):
+    """comp-lane-c-1 / dash-admin-6, 2026-08-21.
+
+    A companion reports its Syncthing device id as soon as it has one, which
+    is typically BEFORE an admin approves the pending device. Syncthing drops
+    a folder-device entry naming a device it does not have and still answers
+    200, so the plan never converged: every 60s cycle re-PUT the folder and
+    logged '+[<id>]' while no share was ever made."""
+    collector.run_cycle(conn, ["config", "enforce"])
+    now = dbmod.utcnow_iso()
+    dbmod.upsert_machine(conn, "newbie", "NEW-LAPTOP", now,
+                         syncthing_device_id="PENDING-PENDING")
+    dbmod.record_known_editor(conn, "newbie", "admin", now)
+    dbmod.add_selection(conn, "newbie", SLUG, "admin", now, machine="NEW-LAPTOP")
+    conn.commit()
+    fake.state.pop("put_folder_calls", None)
+
+    collector.run_cycle(conn, ["enforce"])
+
+    assert "PENDING-PENDING" not in folder_devices(fake)
+    assert "put_folder_calls" not in fake.state      # nothing to do, so nothing written
+    # ...and it stays that way, cycle after cycle
+    collector.run_cycle(conn, ["enforce"])
+    assert "put_folder_calls" not in fake.state
 
 
 def test_enforce_noop_makes_no_puts(conn, fake, collector):

@@ -60,6 +60,14 @@ _progress = {}
 # it forever) costs seconds rather than forever.
 IDLE_WAIT = 5.0
 
+# How long a RED AI-health cache is left alone before the idle loop probes
+# again (ytdl-web-4, 2026-08-21). Minutes, not seconds: the failure this
+# recovers from is a container that booted before the NAS had a WAN uplink, and
+# a provider that is wedged for an hour must not cost a probe every idle tick.
+# claude_cli._MIN_PROBE_INTERVAL is the floor underneath this, not a substitute
+# for it -- nothing was asking for a re-probe at all.
+UNHEALTHY_RECHECK = 300.0
+
 # Leftovers older than this in a folder we own get swept. yt-dlp resumes its
 # own .part within a run; a day-old one belongs to a container that is gone.
 STALE_AFTER = 24 * 3600
@@ -193,8 +201,43 @@ def _run():
             log.exception('worker tick failed')
             c = None
         if not worked:
+            recheck_health()
             _nudge.wait(IDLE_WAIT)
             _nudge.clear()
+
+
+def recheck_health():
+    """Probe the AI backend again while the cache is RED and we are idle.
+    -> whether a probe was run.
+
+    ytdl-web-4 (2026-08-21). refresh_health(force=True) at thread start was the
+    only probe anything in this tree ever ran, and the worker starts at MOUNT
+    time -- on a NAS reboot that is routinely before the uplink is up. The boot
+    probe then failed with "could not reach the Anthropic API from this
+    container", every editor's /ytdl page showed the red pip, and nothing
+    re-checked: the only way back to green was somebody ignoring the warning
+    and submitting a job, which succeeded and let _note_ok flip it. That is the
+    self-healing YTDL-5 asked for, arriving hours late.
+
+    Only while red, only when there is no job to run, and no more often than
+    UNHEALTHY_RECHECK -- a probe is a real (tiny) billed call, and on a site
+    with the CLI providers on it can be a slow one.
+    """
+    try:
+        cached = claude_cli.health()
+        if cached.get('claude') == 'ok':
+            return False
+        last = cached.get('checked_at')
+        if last and (time.time() - last) < UNHEALTHY_RECHECK:
+            return False
+        state = claude_cli.refresh_health()
+        if state.get('claude') == 'ok':
+            log.info('the AI backend answered again (%s); the health pip is '
+                     'green without a restart', state.get('provider') or 'no provider')
+        return True
+    except Exception:  # noqa: BLE001 - a probe must never kill the worker
+        log.exception('AI health re-probe failed')
+        return False
 
 
 def _tick(c):

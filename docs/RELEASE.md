@@ -109,6 +109,38 @@ dashboard\.venv\Scripts\python.exe tools\publish_feed.py `
     --feed-dir .\feed --github-repo <owner/repo> --github-upload   # 4. the CLAP audio tower
 ```
 
+### The command actually used since 2026-08-19: `tools/publish_latest.py`
+
+The four commands above are the *by hand* path. What actually ships a build
+is this, and it was documented nowhere until 2026-08-21
+(release-pipeline-10):
+
+```powershell
+dashboard\.venv\Scripts\python.exe tools\publish_latest.py            # everything new
+dashboard\.venv\Scripts\python.exe tools\publish_latest.py --dry-run  # say what it would do
+dashboard\.venv\Scripts\python.exe tools\publish_latest.py --kind onboard --platform macos --make-current
+```
+
+**CI builds; this rig signs; `ship.cmd` is for the studio's own dashboard.**
+`publish_latest` takes the newest green `release-windows` / `release-macos`
+run **on `main`**, downloads its artefact, re-verifies the sha256 against the
+manifest, refuses a dirty tree, refuses a commit that is not an ancestor of
+`origin/main`, refuses a version older than the channel already carries
+(`--allow-older` for a deliberate rollback), then hands it to `publish_feed`.
+It publishes four things: the companion and the **installer** (`kind=onboard`)
+for both platforms — the installer route was added 2026-08-21
+(release-pipeline-4), because a customer dashboard fed only from the vendor
+channel had an **empty [ INSTALLER ] page** and no way to onboard a new
+editor.
+
+`--make-current` is not the default: without it a record is *staged* and
+customers keep being offered what they are offered now.
+
+**`ship.cmd` still publishes only to this deployment's dashboard**, so a
+studio-built companion is one feed customers can never receive. It says so at
+the end of every run and prints the command to mirror it; `-PublishFeed` does
+it in the same invocation (release-pipeline-2, 2026-08-21).
+
 Three things to know before you start:
 
 - **The CLAP artefacts are not in git.** `music/web/data/audio_encoder/` is
@@ -335,6 +367,20 @@ Bump `dashboard/src/ccsync_dashboard/__init__.py`'s `VERSION`, then rebuild
 the container (`dashboard/deploy/compose.yaml`,
 `docker compose up -d --build`). `GET /api/v1/health` must report the new
 version — that is the only externally visible proof the container is current.
+
+**In image mode this step is not `ship.cmd`'s to do** (2026-08-21,
+release-pipeline-3). When `site.toml`'s `[stack] mode = "image"` — which the
+studio has run since 2026-08-18 — the container runs the CI-built image and
+takes its code over the air, so `install_dashboard_app.py` pushes nothing and
+only restarts the live container. `ship.cmd` therefore **skips step 1
+entirely** on such a site (no restart of the thing that tells everyone
+whether their footage is syncing), and its health gate becomes **live >=
+repo** rather than live == repo. If the repo's dashboard VERSION is *ahead*
+of the container, the ship stops before building anything and prints the
+over-the-air recipe: `build_dashboard_bundle.py` → `publish_feed.py --kind
+dashboard` → Settings → Packages → check → [ APPLY ]. Before that change, a
+companion ship after a dashboard VERSION bump waited 90 seconds and failed
+"investigate before continuing", with nothing saying why.
 
 **For feed customers, that is not how the dashboard is updated** (2026-08-18,
 `ZERO_TOUCH_PLAN.md` WP K). Their dashboards pull their own **code** from the
@@ -682,6 +728,30 @@ Set it per release with `$env:CCSYNC_MIN_VERSION` (Windows ship) /
 `CCSYNC_MIN_VERSION` (macOS scripts); default `0.0.0`, i.e. no floor. **Raise
 it whenever a release fixes something a downgrade would reintroduce.**
 
+### A floor above the build it describes is refused everywhere (CR-52)
+
+`--min-version 0.9.54` on a 0.9.44 build signs perfectly and then refuses
+itself: every companion raises its monotonic floor the moment it **sees** the
+offer, before checking the offer against it, so one stale
+`CCSYNC_MIN_VERSION` in a build environment put the whole fleet above the
+build on offer — refusing that build, every earlier build, and the corrected
+republish. Recovery was a version numbered past the typo, or deleting
+`upgrade_floor.json` by hand on every editor's machine.
+
+Four independent gates now refuse such a record, so it cannot be made, stored
+or acted on (2026-08-21):
+
+| Where | What happens |
+|---|---|
+| `installer\build_editor_package.ps1` | fails **before PyInstaller runs** when `$env:CCSYNC_MIN_VERSION` is above `config.py`'s `VERSION`, and again immediately before the signing call |
+| `tools/sign_release.py` | exits non-zero before the key is even read |
+| the dashboard | 400 before the signature check (`release_trust.min_version_exceeds_version`), covering the human PUT and the feed's auto-publish |
+| the companion | refuses the offer **before** `note_floor`, so the corrected republish stays installable |
+
+There is no override flag for this one anywhere. A record that can only ever
+refuse itself is a mistake, never an intention: fix the environment variable
+and re-run.
+
 ### Lowering it
 
 **You cannot.** The floor is monotonic on purpose, and no signed record can
@@ -752,11 +822,29 @@ xcrun notarytool store-credentials ccsync-notary \
     --apple-id you@example.com --team-id TEAMID --password <app-specific-password>
 ```
 
-`tools/release.ps1` signs with `signtool sign /fd sha256 /tr <url> /td sha256`
-(the timestamp is not optional — without it every signature this build ever
-made turns invalid the day the certificate expires) and **stops the run** if
-signtool fails: a build that was meant to be signed must not slip out
-unsigned under a signed build's version number. `tools/release_macos.sh` and
+**One signtool call site: `tools/sign_windows_binary.ps1`** (2026-08-21,
+installer-onboard-tools-1). `tools/release.ps1` calls it for
+`companion/dist/ccsync-companion.exe`, `installer/build_editor_package.ps1`
+calls it for `onboarding/dist/onboard.exe` right after `-RebuildOnboard`, and
+`.github/workflows/release-windows.yml` calls it for the wizard it builds.
+Until that date release.ps1 was the *only* thing in the repo that ever ran
+signtool and it signed the companion exe alone — so **onboard.exe, the binary
+a fresh install actually double-clicks from the dashboard's [ INSTALLER ]
+link, would have shipped unsigned even with a certificate configured**, which
+is the exact outcome the certificate is bought to remove.
+`build_editor_package.ps1` now refuses `-MakeCurrent` for an unsigned
+onboard.exe (before the companion upload, so a refusal leaves the channel
+untouched) unless it is given `-AllowUnsignedBinary`, which `ship.ps1` passes
+through; and `check_deploy_drift.ps1` reports the current `kind=onboard`
+row's `signed_binary` beside the companion's.
+
+It signs with `signtool sign /fd sha256 /tr <url> /td sha256` (the timestamp
+is not optional — without it every signature this build ever made turns
+invalid the day the certificate expires) and **stops the run** if signtool
+fails: a build that was meant to be signed must not slip out unsigned under a
+signed build's version number. A run with no signing identity configured is a
+no-op, deliberately: refusing would mean nobody can build anything until a
+certificate is bought. `tools/release_macos.sh` and
 `tools/build_onboard_macos.sh` do `codesign --sign "$CCSYNC_APPLE_DEV_ID"
 --options runtime --timestamp`, then `notarytool submit --wait`, then
 `stapler`. The wizard `.app` is stapled *before* the shipping zip is made
@@ -768,10 +856,41 @@ advisory and marks the record `signed_binary: false`.
 
 ### Operator TODO
 
-No certificate exists for this fleet yet. Everything above is wired and
-tested; buying the certificates and setting the four env vars is the whole
-remaining step, and until it happens `tools\ship.cmd` needs
-`-AllowUnsignedBinary`.
+No certificate exists for this fleet yet, so **none of this has ever run
+against a real certificate** — it is wired on both Windows artefacts and on
+both Mac ones, and it is exercised by source-level tests
+(`tools/tests/test_release_scripts.py`), but "wired" is not "tested"
+(corrected 2026-08-21, product-surface-6: this section used to claim the
+latter). Expect to debug the first signed build. Buying the certificates and
+setting the env vars is the remaining step; until it happens `tools\ship.cmd`
+needs `-AllowUnsignedBinary`.
+
+### Where the Authenticode key should live (decide before buying)
+
+`.github/workflows/release-windows.yml` can sign on the runner from
+`CCSYNC_SIGN_PFX_BASE64` + `CCSYNC_SIGN_PFX_PASSWORD`. That route works (the
+step that materialises the .pfx was dead until 2026-08-21 — see
+installer-onboard-tools-2 — and is fixed), but it **contradicts the policy
+the release key follows**: `tools/publish_latest.py` exists precisely because
+"a runner that could sign would mean anyone who compromised the repo, a
+third-party action or the account could push code that every editor's
+companion trusts". CI builds; this rig signs.
+
+The two decisions were made separately and are not reconciled
+(release-pipeline-11). Before a certificate is bought, pick one deliberately:
+
+- **Sign on the rig** (recommended, and consistent with the release key):
+  drop `CCSYNC_SIGN_PFX_BASE64` from the workflow, let CI produce unsigned
+  artefacts, and let `build_editor_package.ps1` / a small local re-sign step
+  apply Authenticode where the token or .pfx already is. An EV certificate
+  forces this anyway: the key is on physical hardware.
+- **Sign in CI**, accepting that a repo or action compromise yields
+  SmartScreen-trusted binaries carrying the product's identity. Companions
+  would still refuse them (no release-record signature), but every fresh
+  install and AV allowlist would not. If this is the choice, say so here and
+  put the certificate behind an environment with required reviewers, or use
+  Azure Trusted Signing with OIDC and branch protection instead of a
+  long-lived .pfx secret.
 
 ---
 
@@ -928,6 +1047,12 @@ and the lock is where it first appears.
 .\tools\ship.cmd -DashboardOnly                 # stop after the dashboard deploy
 .\tools\ship.cmd -AllowDirty                    # publish from a dirty tree (deliberate hotfix)
 .\tools\ship.cmd -AllowUnsignedBinary           # make an exe with no Authenticode signature CURRENT
+.\tools\ship.cmd -PublishFeed                   # ...and mirror this build to the vendor feed
+python tools\publish_latest.py                  # THE ship for a CI build: newest green main run -> feed
+python tools\publish_latest.py --dry-run        # ...say what it would do
+python tools\publish_latest.py --kind onboard --make-current   # the INSTALLER channel, both platforms
+python tools\publish_feed.py --retract companion/windows/0.6.1 `
+    --feed-dir .\feed --github-repo <owner/repo> --github-upload   # withdraw a bad build
 python tools\release_key.py new|pubkey|bake     # the offline release signing key (once, ever)
 .\tools\check_deploy_drift.ps1                  # what is actually running, anywhere
 .\tools\release.ps1                             # parity + tests + build + manifest

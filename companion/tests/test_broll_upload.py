@@ -437,3 +437,85 @@ def test_a_cancelled_job_reports_cancelled_not_a_failure(monkeypatch):
 
     ok, error = up.run_upload(job, ["rclone"])
     assert ok is False and error == "cancelled"
+
+
+# ---------------------------------------------------------------------------
+# the stop latch and the retry (comp-loopback-1 / comp-loopback-3, 2026-08-21)
+# ---------------------------------------------------------------------------
+
+def test_a_stopped_queue_never_takes_another_job():
+    """comp-loopback-1: `stop_all` is a ONE-WAY latch. `_ensure_thread`
+    refuses to start a worker while `_stopped` is set, so anything enqueued
+    afterwards sits in a list nothing will ever drain -- which is why the
+    orchestrator drops a stopped queue instead of reusing it."""
+    ran: list = []
+    queue = _queue(runner=lambda q, job, cmd: ran.append(job) or q._finish(job, True))
+    queue.stop_all()
+
+    queue.enqueue("a.jpg", "posters/1.jpg", up.KIND_POSTER)
+    time.sleep(0.1)
+
+    assert ran == [], "a stopped queue must not start a worker"
+    assert queue.progress()["queued"] == 1
+    assert queue.uploaded() == []
+
+
+def test_stop_all_says_what_it_cancelled():
+    """What was killed did NOT go up: a reader that only ever saw `done` would
+    report a batch whose uploads were cancelled as one with nothing
+    outstanding (comp-loopback-1, 2026-08-21)."""
+    started = threading.Event()
+
+    def runner(q, job, cmd):
+        started.set()
+        time.sleep(0.3)
+        q._finish(job, True)
+
+    queue = _queue(runner=runner)
+    queue.enqueue("a.mp4", "x/a.mp4", up.KIND_PROXY)
+    queue.enqueue("b.mp4", "x/b.mp4", up.KIND_PROXY)
+    started.wait(timeout=2)
+    queue.stop_all()
+
+    rels = [entry["rel"] for entry in queue.failures()]
+    assert "x/b.mp4" in rels
+    assert queue.failures()[-1]["error"] == "cancelled"
+
+
+def test_retry_forgets_a_failure_so_the_file_can_be_sent_again():
+    """comp-loopback-3: `failures()` is a ledger, not a queue. A rel left in
+    it reads as still broken on every later tick, so the caller re-sending a
+    failed upload has to clear the verdict first."""
+    attempts: list = []
+
+    def runner(q, job, cmd):
+        attempts.append(job.remote_rel)
+        ok = len(attempts) > 1
+        q._finish(job, ok, "" if ok else "rclone exited with code 1")
+
+    queue = _queue(runner=runner)
+    queue.enqueue("a.jpg", "posters/1.jpg", up.KIND_POSTER)
+    _drain(queue, 1)
+    assert [entry["rel"] for entry in queue.failures()] == ["posters/1.jpg"]
+
+    dropped = queue.retry(["posters/1.jpg"])
+    queue.enqueue("a.jpg", "posters/1.jpg", up.KIND_POSTER)
+    _drain(queue, 1)
+
+    assert dropped == 1
+    assert queue.failures() == []
+    assert [entry["rel"] for entry in queue.uploaded()] == ["posters/1.jpg"]
+    queue.stop_all()
+
+
+def test_retry_leaves_the_failures_it_was_not_asked_about():
+    queue = _queue(runner=lambda q, job, cmd: q._finish(job, False, "no"))
+    queue.enqueue("a.jpg", "posters/1.jpg", up.KIND_POSTER)
+    queue.enqueue("b.jpg", "posters/2.jpg", up.KIND_POSTER)
+    _drain(queue, 2)
+
+    queue.retry(["posters/1.jpg"])
+
+    assert [entry["rel"] for entry in queue.failures()] == ["posters/2.jpg"]
+    assert queue.retry([]) == 0
+    queue.stop_all()

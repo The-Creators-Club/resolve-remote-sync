@@ -516,9 +516,20 @@ def translate_path_with_root(
         raise PathTraversalError("empty rel_path after normalization")
 
     root = (mounts or {}).get(share)
+    # A BLANK entry counts as absent, which is what resolve_mounts' docstring
+    # and the README written into ~/.broll-companion.json have always said and
+    # what this function did not do: '' passed the isinstance check below and
+    # became the filesystem root, so the translated path was '/<rel_path>' and
+    # contained_local_path's containment test (guarded by `if root:`) was
+    # skipped entirely -- any readable file on the machine could be named
+    # (comp-loopback-5, 2026-08-21). resolve_mounts only fills a blank in for
+    # its OWN share and only when local_root derives a default, so a leftover
+    # template file from the standalone-companion days reached here as ''.
+    if isinstance(root, str) and not root.strip():
+        root = None
     if root is None and plat == "darwin":
         root = probe_darwin_mount(share, isdir=isdir)
-    if root is None:
+    if root is None or (isinstance(root, str) and not root.strip()):
         raise MountNotConfiguredError(f"no mount configured for share '{share}'")
     if not isinstance(root, str):
         raise MountNotConfiguredError(
@@ -565,15 +576,19 @@ def contained_local_path(share: str, rel_path: str, mounts: dict) -> str:
     # not configured" case (MED-11, 2026-08-11).
     root, local = translate_path_with_root(share, rel_path, mounts)
 
-    if root:
-        try:
-            Path(local).resolve(strict=False).relative_to(
-                Path(root).resolve(strict=False)
-            )
-        except ValueError:
-            raise PathTraversalError(
-                f"rel_path escapes the share root: {rel_path!r}"
-            ) from None
+    # UNCONDITIONAL. This used to be `if root:`, and a blank mount entry made
+    # it False -- the one case where the containment test mattered most, since
+    # the "root" was then the whole filesystem (comp-loopback-5, 2026-08-21).
+    # translate_path_with_root now refuses a blank root outright, so there is
+    # no legitimate falsey root left to skip for.
+    try:
+        Path(local).resolve(strict=False).relative_to(
+            Path(root).resolve(strict=False)
+        )
+    except ValueError:
+        raise PathTraversalError(
+            f"rel_path escapes the share root: {rel_path!r}"
+        ) from None
     return local
 
 
@@ -1104,7 +1119,8 @@ def build_music_ingest_capabilities(
 
 
 def pick_ingest_sources(kind: str,
-                        exts: Optional[Any] = None) -> tuple[int, dict[str, Any]]:
+                        exts: Optional[Any] = None,
+                        ingestor: Any = None) -> tuple[int, dict[str, Any]]:
     """Run the native file/folder picker and answer with real paths.
 
     THE ONLY route that learns a local path from this machine rather than
@@ -1135,6 +1151,18 @@ def pick_ingest_sources(kind: str,
                                              "on this machine"}
     if not files:
         return 200, {"ok": False, "message": "cancelled"}
+    # What the picker returned is also the allow-list `prepare` measures a
+    # source='path' item against: this route being "the only one that learns a
+    # local path" was a docstring and not a check until 2026-08-21
+    # (comp-loopback-6). Recorded from the PICKER's answer, never from the
+    # body of the prepare that follows it. `ingestor` is optional so the
+    # music/b-roll routes and the tests can still call this bare.
+    if ingestor is not None:
+        try:
+            ingestor.note_picked(files)
+        except Exception:  # noqa: BLE001 - a bookkeeping failure is not a refusal
+            log.warning("broll ingest: could not record the picked folders",
+                        exc_info=True)
     return 200, {"ok": True, "files": files}
 
 
@@ -1702,7 +1730,8 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
             # its own or the folder walk offers every .mov in the album.
             wanted = None if kind.name == ingest_kinds.BROLL else kind.exts
             status, result = pick_ingest_sources(str(body.get("kind") or "files"),
-                                                 exts=wanted)
+                                                 exts=wanted,
+                                                 ingestor=self._ingestor(kind))
             self._send_json(status, result)
             return True
 

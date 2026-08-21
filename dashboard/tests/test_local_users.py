@@ -134,6 +134,10 @@ def test_is_local_admin(conn):
     assert local_users.is_local_admin(conn, "owen") is True
     assert local_users.is_local_admin(conn, "jsmith") is False
     assert local_users.is_local_admin(conn, "ghost") is False
+    # A SECOND admin, because disabling the last enabled one is refused
+    # (dash-admin-5, 2026-08-21) -- what this test is about is that a disabled
+    # row stops being an admin, not that the guard can be walked past.
+    local_users.create_user(conn, "boss", "correct-horse-battery-staple", "admin")
     local_users.disable_user(conn, "owen", True)
     conn.commit()
     assert local_users.is_local_admin(conn, "owen") is False
@@ -188,3 +192,45 @@ def test_warn_missing_admin_users_logs_for_unknown_names(conn, caplog):
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
     assert any("ghost" in r.message for r in warnings)
     assert not any("owen" in r.message for r in warnings)
+
+
+# ------------------------------------------------ the last enabled admin
+# dash-admin-5 (2026-08-21): `delete_user` has always refused to remove the
+# last enabled admin, but DISABLING one had no guard at all -- and a disabled
+# row cannot sign in and is not an admin (is_local_admin), so the softer
+# button was a way to lock every admin out of an appliance with no shell.
+
+
+def test_disabling_the_last_enabled_admin_is_refused(conn):
+    local_users.create_user(conn, "owen", "correct-horse-battery-staple", "admin")
+    with pytest.raises(local_users.LocalUserError) as exc:
+        local_users.disable_user(conn, "owen", True)
+    assert "last enabled admin" in str(exc.value)
+    assert local_users.is_local_admin(conn, "owen") is True
+
+    local_users.create_user(conn, "boss", "correct-horse-battery-staple", "admin")
+    local_users.disable_user(conn, "owen", True)          # a second admin makes it fine
+    assert local_users.is_local_admin(conn, "owen") is False
+
+
+def test_disabling_the_account_you_are_signed_in_as_is_refused(conn):
+    local_users.create_user(conn, "owen", "correct-horse-battery-staple", "admin")
+    local_users.create_user(conn, "boss", "correct-horse-battery-staple", "admin")
+    with pytest.raises(local_users.LocalUserError) as exc:
+        local_users.disable_user(conn, "OWEN", True, requested_by="owen")
+    assert "signed in as" in str(exc.value)
+
+
+def test_re_enabling_is_never_refused(conn):
+    local_users.create_user(conn, "owen", "correct-horse-battery-staple", "admin")
+    local_users.create_user(conn, "boss", "correct-horse-battery-staple", "admin")
+    local_users.disable_user(conn, "boss", True)
+    local_users.disable_user(conn, "boss", False, requested_by="boss")
+    assert local_users.is_local_admin(conn, "boss") is True
+
+
+def test_disabling_a_non_admin_never_consults_the_admin_count(conn):
+    local_users.create_user(conn, "owen", "correct-horse-battery-staple", "admin")
+    local_users.create_user(conn, "jsmith", "correct-horse-battery-staple", "editor")
+    local_users.disable_user(conn, "jsmith", True)
+    assert local_users.get_user(conn, "jsmith")["disabled"] == 1

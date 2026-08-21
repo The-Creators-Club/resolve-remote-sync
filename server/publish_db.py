@@ -146,11 +146,16 @@ def install_identity(which: str, backend, target: str) -> tuple[str, str, str]:
     is the tool that does preserve them (`cp -a` does not).
 
     music.db is not in the tree share on either platform -- it is under the
-    app root -- so it keeps the deploy's 3000:3000 660, which is what the
-    container needs to write queued ingest rows.
+    app root -- so it keeps the deploy's <uid>:<private gid> 660, which is what
+    the container needs to write queued ingest rows. Rendered from
+    install_dashboard_app's APP_UID/APP_PRIVATE_GID rather than the literal
+    3000:3000 it was until 2026-08-21, for server-4's reason: the container
+    runs as site.toml's [stack] uid, and a publish that chowned to someone
+    else's id would hand the live index to an account that is not the one
+    holding it open.
     """
     if which == "music":
-        return "3000:3000", "660", ""
+        return f"{ida.APP_UID}:{ida.APP_PRIVATE_GID}", "660", ""
     if getattr(backend, "kind", "") == "synology":
         live_q = shell_quote(target)
         new_q = shell_quote(target + ".new")
@@ -349,14 +354,75 @@ def build_rollback_script(target: str, prev: str, aside: str) -> str:
     )
 
 
-def newest_prev(backend, remote_dir: str, filename: str, dry_run: bool) -> str:
-    """The most recent <filename>.prev-<ts> on the NAS, or ""."""
-    pattern = shell_quote(f"{remote_dir}/{filename}.prev-*")
-    rc, out, _err = ida.run_ssh_guarded(f"ls -1d {pattern} 2>/dev/null | sort | tail -n 1",
-                                        dry_run, 60)
-    if dry_run or rc != 0:
-        return ""
-    return (out or "").strip().splitlines()[-1:][0].strip() if out.strip() else ""
+def list_prev_command(remote_dir: str, filename: str) -> str:
+    """The remote command that lists every <filename>.prev-<ts>.
+
+    UNDER SUDO, like every other filesystem probe in this package (SERVER-9,
+    OPS-5, check_tree). server-1 (2026-08-21): this was the one exception, and
+    it could never work -- the b-roll archive is 3000:3001 mode 2770 and
+    music-data is 3000:3000 mode 770, and TRUENAS_USER can traverse neither.
+
+    `find`, not `ls ... | sort | tail`: a pipeline's rc is the LAST command's,
+    so `tail` turned an EACCES into rc 0 with empty stdout and an unreadable
+    directory became indistinguishable from an empty one. find's own rc is the
+    answer, and the sort happens in Python where nothing can swallow it.
+    """
+    return ('echo "$SUDO_PW" | sudo -S -p "" '
+            f"find {shell_quote(remote_dir)} -maxdepth 1 -mindepth 1 "
+            f"-name {shell_quote(filename + '.prev-*')}")
+
+
+def newest_prev(backend, remote_dir: str, filename: str,
+                dry_run: bool) -> tuple[str, str]:
+    """(the most recent <filename>.prev-<ts> on the NAS, why it could not be read).
+
+    Three answers, not two: a path, "nothing there" (both strings empty), and
+    "the NAS would not tell us" (second string set). do_rollback used to print
+    the same "there is nothing to roll back to" for all three, which is how the
+    documented first-line recovery (docs/BACKUP_RESTORE.md 4d) reported an
+    absent .prev over a directory that held one.
+    """
+    if dry_run:
+        return "", ""
+    rc, out, err = ida.run_ssh_guarded(list_prev_command(remote_dir, filename),
+                                       False, 60)
+    if rc != 0:
+        return "", ((err or out or f"rc={rc}").strip()[:300]
+                    or f"the listing of {remote_dir} exited {rc}")
+    found = sorted(line.strip() for line in (out or "").splitlines() if line.strip())
+    return (found[-1] if found else ""), ""
+
+
+def staging_parent(backend, dry_run: bool) -> str:
+    """Where the uploaded copy is staged on the NAS, before the rename.
+
+    /tmp everywhere except DSM, where it CANNOT work: the SFTP channel is
+    chrooted to the share view for the administrator too, so /tmp does not
+    exist there at all and every `sftp.put` into it fails with "no such file"
+    (server-5, 2026-08-21; measured during the 2026-08-17 bring-up, see
+    backends/synology.py's module docstring). The deploy has special-cased this
+    since day one (install_dashboard_app's code_staging_parent); publish_db
+    never did, so no index could be published to a Synology box at all.
+
+    The directory is the same <apps root>/staging build_synology_host_dirs
+    creates; it is (re-)made here because publish_db can run against a box
+    whose stack was installed by hand.
+    """
+    if getattr(backend, "kind", "") != "synology":
+        return "/tmp"
+    root = require_site_value(DEFAULT_APPS_ROOT, "[apps] root", "")
+    parent = f"{root.rstrip('/')}/{ida.SYNOLOGY_STAGING_DIRNAME}"
+    _host, user, _pw = truenas_conn_params(dry_run=dry_run)
+    prepare = (f"mkdir -p {shell_quote(parent)}; "
+               f"chown {shell_quote(user)} {shell_quote(parent)}; "
+               f"chmod 700 {shell_quote(parent)}")
+    rc, _out, err = ida.run_ssh_guarded(backend.root_cmd(prepare), dry_run, 120)
+    if not dry_run and rc != 0:
+        # Non-fatal: an existing staging dir is the normal case, and the
+        # mktemp below is what actually decides whether this works.
+        print(f"NOTE: could not prepare {parent} ({err.strip()[:200]}) -- the upload "
+              f"below will say if it is unusable.", file=sys.stderr)
+    return parent
 
 
 # --------------------------------------------------------------------------
@@ -364,8 +430,31 @@ def newest_prev(backend, remote_dir: str, filename: str, dry_run: bool) -> str:
 def do_rollback(args, backend, spec) -> int:
     remote_dir = remote_dir_for(args.which, backend)
     target = posixpath.join(remote_dir, spec["filename"])
-    prev = args.from_prev or newest_prev(backend, remote_dir, spec["filename"],
-                                         args.dry_run)
+    prev, why = "", ""
+    if args.from_prev:
+        prev = args.from_prev
+    else:
+        prev, why = newest_prev(backend, remote_dir, spec["filename"], args.dry_run)
+    if why:
+        # A directory this could not READ is not a directory with nothing in
+        # it, and telling the operator otherwise sends them looking for a
+        # backup that is right there (server-1, 2026-08-21).
+        print(f"FAILED: could not list {remote_dir} to find the previous "
+              f"{spec['filename']} ({why}). Nothing was changed. Name the .prev "
+              f"explicitly with --from-prev if you know it.", file=sys.stderr)
+        return 1
+    if not prev and args.dry_run:
+        # The listing is a privileged read of the live NAS, so a dry-run does
+        # not perform it. Describing the rollback of the newest .prev is the
+        # honest answer; the old code printed the FAILED line every time
+        # --rollback was typed without --apply (server-1, 2026-08-21).
+        print(f"[dry-run] would find the newest {spec['filename']}.prev-* in "
+              f"{remote_dir} with:")
+        print(f"  {list_prev_command(remote_dir, spec['filename'])}")
+        print(f"[dry-run] ...and rename it back over {target}, keeping the index that "
+              f"is live now as {target}.rolledback-<ts>.")
+        print("\n[dry-run] nothing was changed. Re-run with --apply.")
+        return 0
     if not prev:
         print(f"FAILED: no {spec['filename']}.prev-* found in {remote_dir} -- there is "
               f"nothing to roll back to. (A publish keeps exactly one .prev per run and "
@@ -386,9 +475,25 @@ def do_rollback(args, backend, spec) -> int:
         print(f"FAILED to roll back (remote exit {rc}): {err.strip()[:400]}",
               file=sys.stderr)
         return rc
-    print("Done. Restart the dashboard container if the app does not pick it up: "
-          "the app reopens the database per connection, so a rename is normally "
-          "enough.")
+    # What the app does with a renamed file, per index (CR-67 seam 11,
+    # 2026-08-21). The old text said "the app reopens the database per
+    # connection, so a rename is normally enough" for both, which was never
+    # true of a long-lived connection: a rename replaces the file the PATH
+    # names while every OPEN handle keeps reading the unlinked old inode.
+    # musicweb now notices (db._check_swapped, one os.stat per con(), plus
+    # db.file_state for the derived search matrices) -- but only where the
+    # deployed music-web tree is new enough, and a deployment is not
+    # necessarily as new as this script.
+    print("Done.")
+    if args.which == "music":
+        print("  The music app notices a swapped index by itself (one stat per "
+              "connection) and reopens within a request or two. An OLDER "
+              "deployment does not: it answers from the deleted inode until "
+              "somebody POSTs /music/api/reload or the container restarts.")
+    else:
+        print("  Restart the dashboard container if the app does not pick it "
+              "up: the b-roll app reopens the database per connection, so a "
+              "rename is normally enough.")
     return 0
 
 
@@ -489,7 +594,8 @@ def main():
         # From here on the NAS is touched. Everything below is staged-verify-
         # swap, and the live file is only ever replaced by a rename.
         timeout = ida.tree_ssh_timeout(size)
-        staging = ida.make_staging_dir(args.dry_run, f"ccsync-{args.which}db-upload")
+        staging = ida.make_staging_dir(args.dry_run, f"ccsync-{args.which}db-upload",
+                                       parent=staging_parent(backend, args.dry_run))
         if not staging:
             print("FAILED: no staging dir on the NAS -- the live index is untouched.",
                   file=sys.stderr)

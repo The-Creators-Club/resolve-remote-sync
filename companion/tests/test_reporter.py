@@ -1472,3 +1472,171 @@ def test_the_ingest_section_is_scalars_only():
 
     assert all(not isinstance(v, (dict, list))
                for v in calls[0]["broll_ingest"].values())
+
+
+# -- unchanged heavy sections (ops-efficiency-1, 2026-08-21) ----------------
+
+
+def _manifest_reporter(post, manifest, tree):
+    return DashboardReporter(
+        lambda: [], _cfg(), http_post=post,
+        get_local_manifest=lambda: dict(manifest),
+        get_media_tree=lambda: dict(tree),
+    )
+
+
+def test_an_unchanged_manifest_is_not_re_sent_every_minute():
+    """The manifest is rebuilt every 300 s and the media tree every 120 s,
+    but the heavy report goes out every 60 s -- so most sends were
+    byte-identical, and the dashboard answered each with a DELETE + INSERT of
+    thousands of rows on the NAS. An absent key already means "leave that
+    table alone"."""
+    calls = []
+    manifest = {"2026/FF5/Nuclear": {"n_originals": 3}}
+    tree = {"MyProject": [{"clip_name": "a.mov"}]}
+    reporter = _manifest_reporter(
+        lambda u, d, h, t: calls.append(d) or {}, manifest, tree)
+
+    reporter.post_once()
+    reporter.post_once()
+
+    assert calls[0]["local_manifest"] == manifest
+    assert calls[0]["media_tree"] == tree
+    assert "local_manifest" not in calls[1]
+    assert "media_tree" not in calls[1]
+    # ...and the rest of the report is untouched.
+    assert "lanes" in calls[1]
+
+
+def test_a_changed_section_goes_out_again_at_once():
+    calls = []
+    manifest = {"2026/FF5/Nuclear": {"n_originals": 3}}
+    tree = {"MyProject": [{"clip_name": "a.mov"}]}
+    reporter = _manifest_reporter(
+        lambda u, d, h, t: calls.append(d) or {}, manifest, tree)
+    reporter.post_once()
+    manifest["2026/FF5/Nuclear"] = {"n_originals": 4}
+    reporter.post_once()
+
+    assert calls[1]["local_manifest"]["2026/FF5/Nuclear"] == {"n_originals": 4}
+    # The media tree did not change, so it is still omitted.
+    assert "media_tree" not in calls[1]
+
+
+def test_an_unchanged_section_is_sent_again_on_the_forced_cadence(monkeypatch):
+    """The periodic full resend is what makes the suppression safe: a
+    dashboard restored from backup or a pruned row converges without this
+    side having to know it happened."""
+    calls = []
+    reporter = _manifest_reporter(
+        lambda u, d, h, t: calls.append(d) or {}, {"a": 1}, {"b": []})
+    reporter.post_once()
+    assert "local_manifest" not in _manifest_second(reporter, calls)
+
+    monkeypatch.setattr(reporter_mod, "SECTION_RESEND_SECONDS", 0.0)
+    reporter.post_once()
+    assert calls[-1]["local_manifest"] == {"a": 1}
+    assert calls[-1]["media_tree"] == {"b": []}
+
+
+def _manifest_second(reporter, calls):
+    reporter.post_once()
+    return calls[-1]
+
+
+def test_a_report_that_never_arrived_does_not_suppress_the_next_one():
+    calls = []
+    boom = {"n": 0}
+
+    def post(url, data, headers, timeout):
+        calls.append(data)
+        boom["n"] += 1
+        if boom["n"] == 1:
+            raise RuntimeError("the dashboard was restarting")
+        return {}
+
+    reporter = _manifest_reporter(post, {"a": 1}, {"b": []})
+    with pytest.raises(RuntimeError):
+        reporter.post_once()
+    reporter.post_once()
+
+    assert calls[1]["local_manifest"] == {"a": 1}
+
+
+def test_a_section_the_dashboard_truncated_is_sent_again():
+    calls = []
+    reporter = _manifest_reporter(
+        lambda u, d, h, t: calls.append(d) or {"truncated": ["local_manifest"]},
+        {"a": 1}, {"b": []})
+    reporter.post_once()
+    reporter.post_once()
+
+    assert calls[1]["local_manifest"] == {"a": 1}
+
+
+def test_a_light_tick_never_touches_the_section_bookkeeping():
+    calls = []
+    reporter = _manifest_reporter(
+        lambda u, d, h, t: calls.append(d) or {}, {"a": 1}, {"b": []})
+    reporter.post_once(light=True)
+    reporter.post_once(light=False)
+
+    assert calls[1]["local_manifest"] == {"a": 1}
+
+
+# -- the device id can change under a running companion (comp-lane-c-3) -----
+
+
+def test_the_syncthing_device_id_is_re_read_on_a_slow_cadence(monkeypatch):
+    """`syncthing serve` on a home whose key/cert are gone mints a NEW
+    identity, and the supervisor restarting a wiped home is the one event
+    that changes myID mid-run. Reporting the dead id keeps the dashboard
+    sharing folders with a device that no longer exists."""
+    calls = []
+    # The middle post is inside the TTL and asks nothing at all.
+    answers = iter(["DEV-1", "DEV-2"])
+    reporter = DashboardReporter(
+        lambda: [], _cfg(), http_post=lambda u, d, h, t: calls.append(d) or {},
+        get_syncthing_device_id=lambda: next(answers),
+    )
+    reporter.post_once()
+    reporter.post_once()   # inside the TTL: no second read
+    monkeypatch.setattr(reporter_mod, "DEVICE_ID_REFRESH_SECONDS", 0.0)
+    reporter.post_once()
+
+    assert [c["syncthing_device_id"] for c in calls] == ["DEV-1", "DEV-1", "DEV-2"]
+
+
+def test_a_refresh_that_fails_keeps_the_known_device_id(monkeypatch):
+    calls = []
+    answers = iter(["DEV-1", ""])
+    reporter = DashboardReporter(
+        lambda: [], _cfg(), http_post=lambda u, d, h, t: calls.append(d) or {},
+        get_syncthing_device_id=lambda: next(answers),
+    )
+    reporter.post_once()
+    monkeypatch.setattr(reporter_mod, "DEVICE_ID_REFRESH_SECONDS", 0.0)
+    reporter.post_once()
+
+    assert [c["syncthing_device_id"] for c in calls] == ["DEV-1", "DEV-1"]
+
+
+def test_signing_in_as_a_different_editor_resends_the_heavy_sections():
+    """The dashboard keys media rows on (editor, machine), so the new
+    identity's tables are empty -- suppressing a section on the strength of
+    what the previous identity was sent would leave them that way."""
+    calls = []
+    who = {"name": "owen"}
+    reporter = DashboardReporter(
+        lambda: [], _cfg(), http_post=lambda u, d, h, t: calls.append(d) or {},
+        get_local_manifest=lambda: {"a": 1},
+        get_media_tree=lambda: {"b": []},
+        get_editor_name=lambda: who["name"],
+    )
+    reporter.post_once()
+    reporter.post_once()
+    assert "local_manifest" not in calls[1]
+
+    who["name"] = "ruskin"
+    reporter.post_once()
+    assert calls[2]["local_manifest"] == {"a": 1}

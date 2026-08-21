@@ -683,3 +683,142 @@ def test_nothing_known_and_nothing_cached_is_still_unreachable(tmp_path):
     mapping, source = client.project_roots_result()
 
     assert (mapping, source) == ({}, "unreachable")
+
+
+# -- untick: machine-scoped first (comp-lane-c-2 / data-model-3, 2026-08-21) --
+
+
+class _FakeResponse:
+    def __init__(self, body: bytes = b""):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _untick_recorder(monkeypatch, answers):
+    """Stub the no-redirect opener; `answers` maps a URL to a body (bytes) or
+    an exception to raise. Returns the list of (method, url) issued."""
+    from ccsync_companion import selection as selection_mod
+
+    seen: list[tuple[str, str]] = []
+
+    class _Opener:
+        def open(self, req, timeout=None):
+            seen.append((req.get_method(), req.full_url))
+            answer = answers(req.full_url)
+            if isinstance(answer, Exception):
+                raise answer
+            return _FakeResponse(answer)
+
+    monkeypatch.setattr(
+        selection_mod.upgrade_mod, "build_no_redirect_opener", lambda *a: _Opener())
+    return seen
+
+
+def test_untick_names_this_machine(tmp_path, monkeypatch):
+    """The tray item says "Remove this project from this machine" and the
+    wire used to say "remove it from every machine this person owns" --
+    deleting the other computer's own plan row with it."""
+    from ccsync_companion import selection as selection_mod
+
+    monkeypatch.setattr(selection_mod, "_machine_name", lambda: "EDIT-LAPTOP")
+    body = json.dumps({"editor": "owen", "machine": "EDIT-LAPTOP",
+                       "selection": [], "changed": True}).encode("utf-8")
+    seen = _untick_recorder(monkeypatch, lambda url: body)
+
+    client = SelectionClient(_cfg(), tmp_path)
+    ok, message = client.untick("abcd-2026-ff5-nuclear")
+
+    assert ok and message == "unticked"
+    assert len(seen) == 1
+    assert seen[0][0] == "DELETE"
+    assert "machine=EDIT-LAPTOP" in seen[0][1]
+
+
+def test_untick_widens_only_when_this_machine_rides_the_unassigned_bucket(
+        tmp_path, monkeypatch):
+    """A machine with no plan row of its own syncs by the bucket, which a
+    machine-scoped DELETE cannot touch -- so the tray's action would come
+    back as a no-op. That, and only that, still removes it everywhere."""
+    from ccsync_companion import selection as selection_mod
+
+    monkeypatch.setattr(selection_mod, "_machine_name", lambda: "EDIT-LAPTOP")
+    still_there = json.dumps({
+        "editor": "owen", "machine": "EDIT-LAPTOP",
+        "selection": [{"slug": "abcd-2026-ff5-nuclear"}],
+    }).encode("utf-8")
+    gone = json.dumps({"editor": "owen", "machine": "", "selection": []}).encode("utf-8")
+    seen = _untick_recorder(
+        monkeypatch, lambda url: still_there if "machine=" in url else gone)
+
+    client = SelectionClient(_cfg(), tmp_path)
+    ok, _message = client.untick("abcd-2026-ff5-nuclear")
+
+    assert ok
+    assert [url for _m, url in seen] == [
+        "http://dash.example.com/api/v1/selection/owen/abcd-2026-ff5-nuclear"
+        "?machine=EDIT-LAPTOP",
+        "http://dash.example.com/api/v1/selection/owen/abcd-2026-ff5-nuclear",
+    ]
+
+
+def test_untick_does_not_widen_when_the_machine_scoped_delete_worked(
+        tmp_path, monkeypatch):
+    from ccsync_companion import selection as selection_mod
+
+    monkeypatch.setattr(selection_mod, "_machine_name", lambda: "EDIT-LAPTOP")
+    other_project = json.dumps({
+        "editor": "owen", "machine": "EDIT-LAPTOP",
+        "selection": [{"slug": "efgh-2026-ff5-blast"}],
+    }).encode("utf-8")
+    seen = _untick_recorder(monkeypatch, lambda url: other_project)
+
+    client = SelectionClient(_cfg(), tmp_path)
+    ok, _message = client.untick("abcd-2026-ff5-nuclear")
+
+    assert ok and len(seen) == 1
+
+
+def test_untick_falls_back_when_the_dashboard_does_not_know_this_machine(
+        tmp_path, monkeypatch):
+    import urllib.error
+
+    from ccsync_companion import selection as selection_mod
+
+    monkeypatch.setattr(selection_mod, "_machine_name", lambda: "RENAMED-PC")
+
+    def answer(url):
+        if "machine=" in url:
+            return urllib.error.HTTPError(url, 404, "no such computer", {}, None)
+        return json.dumps({"selection": []}).encode("utf-8")
+
+    seen = _untick_recorder(monkeypatch, answer)
+    client = SelectionClient(_cfg(), tmp_path)
+    ok, _message = client.untick("abcd-2026-ff5-nuclear")
+
+    assert ok
+    assert len(seen) == 2 and "machine=" not in seen[1][1]
+
+
+def test_untick_reports_a_refusal_and_asks_once(tmp_path, monkeypatch):
+    import urllib.error
+
+    from ccsync_companion import selection as selection_mod
+
+    monkeypatch.setattr(selection_mod, "_machine_name", lambda: "EDIT-LAPTOP")
+    seen = _untick_recorder(
+        monkeypatch,
+        lambda url: urllib.error.HTTPError(url, 401, "nope", {}, None))
+
+    client = SelectionClient(_cfg(), tmp_path)
+    ok, message = client.untick("abcd-2026-ff5-nuclear")
+
+    assert not ok and "401" in message
+    assert len(seen) == 1

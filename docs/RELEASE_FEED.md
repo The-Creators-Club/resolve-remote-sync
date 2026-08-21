@@ -68,6 +68,18 @@ A feed is two files at a stable URL prefix (call it `<base>`):
   display; kept for a future beta/stable split.
 - `pubkey_id` — informational: which key signed the channel wrapper. Trust
   is never decided by this field — see §2.3.
+- `current` — **optional**, added 2026-08-21 (release-pipeline-5):
+  `{"<kind>/<platform>": "<version>"}`, e.g.
+  `{"companion/windows": "0.9.43", "onboard/macos": "1.0.35"}`. It names the
+  ONE record per kind/platform a dashboard on the `current` policy should
+  publish and make current. Without it, `_apply_policy` replayed every
+  verified record in **append order** and the last one won — which is not
+  version order, so republishing an older build (`--force`, or a late macOS
+  CI run) offered the whole fleet a rollback. Maintained by
+  `publish_feed.py --make-current`; a record published without that flag is
+  STAGED. Absent (an older feed), a dashboard falls back to its previous
+  behaviour. It is inside the signed document, so nobody can move the
+  pointer without the offline key.
 - `dashboard_image` — `tag`/`digest` of the current vendor dashboard image.
   Advisory only: nothing here can pull or apply an update to the container
   (§4). It exists so the admin page can say "an update is available" and
@@ -289,6 +301,55 @@ What it does, per invocation:
   2026-08-18 the tool refused to upload at all and printed the `gh release
   upload` / `rclone sync` one-liners for a human to run; publishing a release
   is now one command. See §3.1.
+- **The PUBLISHED channel is the base, not `feed/`** (2026-08-21,
+  release-pipeline-1). With `--github-upload` the tool first downloads the
+  live `channel.json` + `.sig`, verifies it against the release public keys
+  baked into this checkout, and merges the new record into **that**. Until
+  that date it rebuilt the channel from `<feed-dir>/channel.json` alone — a
+  **gitignored** directory that exists on one machine — and `gh release
+  upload --clobber` then replaced the live document with it. From a fresh
+  clone, a Mac, a new base rig or after a `--feed-dir` typo, 18 package
+  records and 2 CLAP artefacts would have become 1, correctly signed, so
+  nothing logged an error and the loss would have been discovered by a
+  customer. Consequences of the merge:
+  - a run that cannot *read* the published channel refuses to upload
+    ("I could not ask" is never "nothing is published");
+  - a published channel that does not verify against this build's keys
+    refuses too — that is either tampering or a key rotation this checkout
+    predates (`release_key.py bake --add`, then rebuild);
+  - an upload that would drop anything published refuses unless
+    `--allow-shrink`;
+  - the local `feed/` dir is still written and signed even when the upload
+    is refused, exactly as before.
+- `--retract KIND/PLATFORM/VERSION`: removes one record and any `current`
+  pointer at it, then republishes the channel. The **asset stays** on the
+  release: a dashboard that already holds that record must keep being able to
+  fetch the bytes it verified. Retraction stops the build being *offered*; it
+  does not uninstall it anywhere. Publish a newer build to move machines that
+  already took it.
+- **A record already on the feed is protected twice** (2026-08-21, CR-59
+  item 8). Both refusals happen before anything is signed or uploaded, and
+  both name the flag that overrides them:
+  - **same `(kind, platform, version)`, different bytes** → refused unless
+    `--allow-replace`. A dashboard that already installed that version never
+    fetches it again, so replacing it in place leaves two different builds
+    wearing one version number with nothing in the field able to tell them
+    apart. The normal answer is a version bump (`config.py` **and**
+    `pyproject.toml`); `--allow-replace` is for correcting a record nothing
+    has downloaded yet. Identical bytes are not a replacement, so re-running
+    after a failed upload is fine.
+  - **`--min-version` below the highest floor already published for that
+    kind/platform** → refused unless `--allow-floor-drop`. A companion's
+    floor is monotonic: once it has seen a record demanding 0.9.44 it never
+    installs below 0.9.44 again, so this does not lower anything in the
+    field. What it does is drop the policy for any dashboard reading the feed
+    fresh, and the usual cause is a forgotten `CCSYNC_MIN_VERSION` on this
+    build rather than a decision.
+
+  The third case, a **`min_version` above the version it describes**, is not
+  overridable anywhere: `sign_release.py` refuses to produce that record at
+  all, and so do the dashboard and the companion (§2.3, `KNOWN_BUGS.md`
+  CR-52).
 - **Any static file host still works.** Nothing in the format requires GitHub
   and no server-side code runs at `<base-url>` at all — an S3-compatible
   bucket behind a CDN is `rclone sync .\feed remote:ccsync-releases

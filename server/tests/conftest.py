@@ -28,7 +28,13 @@ FIXTURE_SITE = Path(__file__).resolve().parent / "fixtures" / "site.toml"
 # failed on the base rig only. Clear the identity overrides here, before
 # common is imported. A test that WANTS one sets it with monkeypatch.setenv,
 # which is unaffected.
-for _shadowing in ("TRUENAS_HOST", "SYNO_HOST", "TRUENAS_USER", "SYNO_USER"):
+#
+# DASH_TRUSTED_PROXIES joined the list 2026-08-21 (CR-67 seam 5): it reaches
+# the compose TEMPLATE now, and trusted_proxies_for reads the deploying
+# shell's value first by design -- so an operator who exported one would
+# render it into the byte-for-byte goldens.
+for _shadowing in ("TRUENAS_HOST", "SYNO_HOST", "TRUENAS_USER", "SYNO_USER",
+                   "DASH_TRUSTED_PROXIES"):
     os.environ.pop(_shadowing, None)
 
 # setdefault, not a bare assignment: running the suite against another site's

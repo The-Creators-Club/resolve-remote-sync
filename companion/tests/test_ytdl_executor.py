@@ -309,6 +309,11 @@ def fake_ffmpeg(tmp_path) -> str:
 
 
 def make_cfg(tmp_path, **overrides) -> dict:
+    # local_root must EXIST, test_app.py's rule and now the executor's too:
+    # since comp-ytdl-1 (2026-08-21) a job asks root_guard.probe_root before
+    # it creates its destination, and a directory that was never created is a
+    # DISCONNECTED tree, not a working machine.
+    (tmp_path / "tree").mkdir(parents=True, exist_ok=True)
     cfg = {
         "dashboard_url": "http://dash.local:8000",
         "dashboard_token": "fleet-token",
@@ -571,7 +576,8 @@ def test_the_claim_carries_what_the_server_gates_on(tmp_path, ytdlp):
                     "template_version": ytdl_common.TEMPLATE_VERSION,
                     "sidecar_version": ytdl_common.SIDECAR_VERSION,
                     "scope_qualities": ["480p", "720p", "1080p"],
-                    "free_bytes": 500 * 1024 ** 3}
+                    "free_bytes": 500 * 1024 ** 3,
+                    "machine_id": body["machine_id"]}
     assert body["scope_qualities"] == list(ex.SCOPE_QUALITIES)
     assert headers["X-CCSync-Token"] == "fleet-token"
     # H5 (2026-08-17): the identity header carries the dashboard-SIGNED token,
@@ -580,6 +586,44 @@ def test_the_claim_carries_what_the_server_gates_on(tmp_path, ytdlp):
     # a companion and another editor's job. The body's `editor` is still sent
     # (an older server reads it) and the server now ignores it.
     assert headers["X-CCSync-Identity"] == "v2.identity.token-for-editor2"
+
+
+def test_the_claim_names_this_computer_not_only_its_editor(tmp_path, ytdlp, monkeypatch):
+    """data-model-7 (CR-66/CR-67): the download lease is keyed on the editor
+    NAME, so one account's two computers are one lease holder and the second
+    machine's claim comes back 409 while its editor watches the server do the
+    download their own machine was ready to do. The companion half is to say
+    WHICH computer is claiming -- the same id reporter.py sends, minted into
+    ~/.ccsync/machine.json and surviving a rename."""
+    from ccsync_companion import machine as machine_mod
+
+    monkeypatch.setattr(machine_mod, "machine_id", lambda *a, **k: "cafef00d")
+    fleet = FakeFleet(manifest_for())
+    deps = make_deps(tmp_path, fleet=fleet, ytdlp=ytdlp)
+
+    run_job(deps)
+
+    _method, _path, body, _headers = fleet.claimed[0]
+    assert body["machine_id"] == "cafef00d"
+
+
+def test_a_machine_with_no_id_still_claims(tmp_path, ytdlp, monkeypatch):
+    """The id is a KEY, never a credential: a machine whose machine.json
+    cannot be read or written must claim exactly as it does today, and the
+    server half tolerates the empty string (data-model-7)."""
+    from ccsync_companion import machine as machine_mod
+
+    def boom(*a, **k):
+        raise OSError("machine.json is unreadable")
+
+    monkeypatch.setattr(machine_mod, "machine_id", boom)
+    fleet = FakeFleet(manifest_for())
+    deps = make_deps(tmp_path, fleet=fleet, ytdlp=ytdlp)
+
+    run_job(deps)
+
+    _method, _path, body, _headers = fleet.claimed[0]
+    assert body["machine_id"] == ""
 
 
 def test_the_argv_is_the_shared_naming_contract(tmp_path, ytdlp):

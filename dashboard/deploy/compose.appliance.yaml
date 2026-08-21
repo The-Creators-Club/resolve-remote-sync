@@ -101,6 +101,13 @@ services:
     command:
       - |
         set -eu
+        # FILE NAMES ARE A CONTRACT (dash-admin-2, 2026-08-21). These two
+        # files are what the syncthing and sftp services env_file below, AND
+        # what the dashboard's secrets_boot.ensure_secrets ADOPTS on first
+        # boot (secrets_boot.SIDECAR_ENV_FILES) instead of generating a
+        # second value of its own. Rename either one here and the dashboard
+        # mints a different token than the sidecar presents: every
+        # AuthorizedKeysCommand call 401s and no editor can authenticate.
         mkdir -p /data/secrets
         if [ ! -f /data/secrets/syncthing.env ]; then
           key="$$(python -c 'import secrets; print(secrets.token_hex(16))')"
@@ -127,6 +134,14 @@ services:
     volumes:
       - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/data:/data
     restart: "no"
+    # The same 100 MB stdout cap the dashboard service carries
+    # (ops-efficiency-7, 2026-08-21): json-file has no default limit and
+    # nobody reads an appliance's logs until something has gone wrong.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   dashboard:
     image: "${CCSYNC_IMAGE:-ghcr.io/the-creators-club/ccsync}:1"
@@ -187,6 +202,20 @@ services:
     ports:
       - "127.0.0.1:8480:8480"
     restart: unless-stopped
+    # A CAP ON THIS CONTAINER'S STDOUT (ops-efficiency-7, 2026-08-21).
+    # docker's json-file driver has no limit of its own, and an APPLIANCE is
+    # precisely the deployment nobody logs into: every companion posts
+    # /api/v1/report every 5 s while a lane syncs and every open tab polls
+    # /partials/* every 2 s, so unbounded stdout fills the customer's disk and
+    # makes `docker logs` useless for the one time it matters. run.sh drops
+    # uvicorn's access log for the same reason. 100 MB total, five files, so a
+    # rotation still leaves the last few hours of an incident to read. Same
+    # block as compose.yaml and install_dashboard_app.LOG_ROTATION.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
     # Identical to dashboard/deploy/compose.yaml's own healthcheck --
     # server/tests/test_safety.py holds compose.yaml and compose.image.yaml
     # to matching text; keep this one in the same shape by hand until this
@@ -249,6 +278,14 @@ services:
     # not just work.
     network_mode: service:tailscale
     restart: unless-stopped
+    # The same 100 MB stdout cap the dashboard service carries
+    # (ops-efficiency-7, 2026-08-21): json-file has no default limit and
+    # nobody reads an appliance's logs until something has gone wrong.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   sftp:
     image: "${CCSYNC_SFTP_IMAGE:-ghcr.io/the-creators-club/ccsync-sftp}:1"
@@ -285,15 +322,37 @@ services:
       # under one sftp root, exactly as it does against the NAS host's own
       # sshd today (dashboard/deploy/sftp/README.md "chroot layout").
       - ${CCSYNC_TREE:?set CCSYNC_TREE to the shared folder your projects live in, e.g. /volume1/Projects}:/jail/tree:rw
-      # Host keys PERSIST here. Never wiped between `up`s, never
-      # regenerated once present -- a changed host key makes every editor's
-      # rclone refuse the NAS on its next connection
-      # (dashboard/deploy/sftp/README.md "host keys persist, deliberately").
+      # Host keys PERSIST here. Never wiped between `up`s, never regenerated
+      # once present (dashboard/deploy/sftp/README.md "host keys persist,
+      # deliberately").
+      #
+      # This comment used to claim "a changed host key makes every editor's
+      # rclone refuse the NAS on its next connection". IT DOES NOT, and
+      # believing it is worse than not having it (trust-model-4, corrected
+      # 2026-08-21): both bootstraps write the rclone sftp stanza with NO
+      # known_hosts_file and the companion passes no --sftp-known-hosts-file,
+      # so rclone accepts ANY host key, and /api/v1/site publishes none for it
+      # to check against. Lanes A and B authenticate the editor TO the NAS and
+      # never the NAS to the editor; inside the tailnet WireGuard authenticates
+      # the peer, which is the only reason this has not bitten.
+      #
+      # Persisting them still matters -- an interactive `ssh` from the base
+      # rig, and anything that later DOES pin (docs/SERVER.md "Editor lanes do
+      # NOT verify the NAS host key" has the four-part shape of that fix) --
+      # but nothing on an editor machine notices today.
       - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/sftp-hostkeys:/etc/ssh/keys
     # :22 becomes reachable on the tailnet node's own IP, same as
     # Syncthing's :22000 above -- no host port for this either.
     network_mode: service:tailscale
     restart: unless-stopped
+    # The same 100 MB stdout cap the dashboard service carries
+    # (ops-efficiency-7, 2026-08-21): json-file has no default limit and
+    # nobody reads an appliance's logs until something has gone wrong.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   tailscale:
     # Pinned to the EXACT digest the spike resolved and ran
@@ -358,6 +417,14 @@ services:
     # TS_USERSPACE switch to flip -- the flag on the entrypoint line IS the
     # switch).
     restart: unless-stopped
+    # The same 100 MB stdout cap the dashboard service carries
+    # (ops-efficiency-7, 2026-08-21): json-file has no default limit and
+    # nobody reads an appliance's logs until something has gone wrong.
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
 
 # tailscale-sock: how the dashboard (no shared network namespace with
 # tailscale) still reaches tailscaled's LocalAPI over the unix socket file --

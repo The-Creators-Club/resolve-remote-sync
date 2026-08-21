@@ -65,7 +65,9 @@ from typing import Any, Callable, Optional
 from . import canon
 from . import config as config_mod
 from . import ffmpeg_tools
+from . import machine as machine_mod
 from . import resolve_bridge
+from . import root_guard
 from . import upgrade as upgrade_mod
 from . import sidecar_tools
 from . import ytdl_attestation
@@ -272,6 +274,16 @@ REASON_NOT_ATTESTED = ("the YouTube terms have not been accepted on this "
 # "editors never see a broken local downloader -- they see the old behaviour".
 REASON_NO_FFMPEG = ("ffmpeg is not installed on this machine, so downloaded "
                     "video and audio cannot be merged")
+# comp-ytdl-1 (2026-08-21). Every lane, the youtube importer, the proxy
+# generator and the on-demand b-roll fetch ask the root guard before they
+# write; this executor, which creates its own destination directories, never
+# did. On macOS an absent /Volumes/<Name> is not an error: mkdir CREATES it on
+# the boot volume, GBs land on the internal disk, and the next replug mounts
+# the real drive at "/Volumes/<Name> 1" -- the ROOT_MISPLACED outage
+# root_guard.py opens by describing. Same gap COMMERCIAL_READINESS item 5
+# closed for broll_fetch.fetch_refusal.
+REASON_TREE_ABSENT = ("this machine's tree isn't mounted right now, so there "
+                      "is nowhere to download into")
 
 
 class LeaseLost(Exception):
@@ -411,12 +423,23 @@ class Deps:
         run_fn: Optional[RunFn] = None,
         sleep_fn: Optional[Callable[[float], None]] = None,
         identity_token_fn: Optional[Callable[[], Optional[str]]] = None,
+        root_present_fn: Optional[Callable[[], bool]] = None,
+        root_probe_fn: Optional[Callable[[str], str]] = None,
     ) -> None:
         self.cfg = cfg or {}
         self.ytdlp = ytdlp
         self._editor_fn = editor_fn
         self._selection_fn = selection_fn
         self._identity_token_fn = identity_token_fn
+        # comp-ytdl-1 (2026-08-21). Two seams, because the two callers have
+        # different budgets: `root_present_fn` is app.root_is_present, a
+        # zero-I/O read of the guard's cached verdict, which is all
+        # capabilities() (1 s probe budget, no subprocesses) may use;
+        # `root_probe_fn` is the full root_guard.probe_root, run once off the
+        # fast path before a job creates any directory. Absent seams mean "no
+        # new information" and pass, exactly as ROOT_UNKNOWN does.
+        self._root_present_fn = root_present_fn
+        self._root_probe_fn = root_probe_fn
         self.request = request_fn or default_request
         self.run = run_fn or default_run
         self.sleep = sleep_fn or time.sleep
@@ -436,6 +459,32 @@ class Deps:
         `dashboard_token` stops 403-ing the moment the editor signs in.
         """
         return str(self.cfg.get("dashboard_token", "") or "").strip()
+
+    def tree_is_absent(self) -> bool:
+        """True only when the tree is KNOWN to be gone. "Can't tell" is
+        False -- a probe that has not answered must never be the reason an
+        editor cannot download (root_guard's contract). Never raises."""
+        try:
+            present_fn = self._root_present_fn
+            if present_fn is not None and not present_fn():
+                return True
+        except Exception:
+            log.debug("ytdl: the root-presence check failed", exc_info=True)
+        return False
+
+    def tree_is_misplaced(self) -> bool:
+        """The full probe, for the paths that are about to WRITE. Costs a
+        stat (and on a misplaced macOS volume, one cached diskutil), so it is
+        never on the capabilities path. Never raises."""
+        probe = self._root_probe_fn or root_guard.probe_root
+        try:
+            root = str(self.cfg.get("local_root", "") or "").strip()
+            if not root:
+                return False
+            return probe(root) in (root_guard.ROOT_ABSENT, root_guard.ROOT_MISPLACED)
+        except Exception:
+            log.debug("ytdl: the root probe failed", exc_info=True)
+            return False
 
     def editor(self) -> str:
         """The verified editor name, or "" when nobody is signed in.
@@ -534,6 +583,16 @@ def normalize_label(value: Any) -> str:
     if not isinstance(value, str):
         return ""
     return value.replace("\\", "/").strip().strip("/").casefold()
+
+
+def _label_parts(value: Any) -> list:
+    """A project label split into path segments, in its ORIGINAL spelling.
+
+    normalize_label's casefolded twin is for COMPARING labels; this is for
+    walking the disk with one (comp-ytdl-5, 2026-08-21)."""
+    if not isinstance(value, str):
+        return []
+    return [p for p in value.replace("\\", "/").strip().strip("/").split("/") if p]
 
 
 def free_bytes_at(path: Any) -> Optional[int]:
@@ -694,6 +753,14 @@ def capabilities(deps: Deps) -> dict:
         # capability whose `--ffmpeg-location` will be there (COMP-BROLL-5).
         result["reason"] = REASON_NO_FFMPEG
         return result
+    if deps.tree_is_absent():
+        # LAST, and off the guard's cached verdict rather than a fresh probe:
+        # this answer has a 1 s budget (comp-ytdl-1, 2026-08-21). Note that
+        # free_bytes above cannot catch this -- free_bytes_at walks up to the
+        # first EXISTING ancestor, so with /Volumes/T7 unplugged it reports
+        # the boot volume's free space and passes.
+        result["reason"] = REASON_TREE_ABSENT
+        return result
     result["ok"] = True
     return result
 
@@ -701,6 +768,23 @@ def capabilities(deps: Deps) -> dict:
 # ---------------------------------------------------------------------------
 # the fleet API client
 # ---------------------------------------------------------------------------
+
+
+def _this_machine_id() -> str:
+    """This computer's id for the claim body, "" when there is none.
+
+    Never raises and never blocks the claim: the id is a KEY the server may
+    scope the lease by (data-model-7), not a credential and not a requirement.
+    Deliberately UNCACHED here, unlike reporter.py's per-instance cache: a
+    claim happens once per job, machine.json is one small local file, and a
+    module-level cache would outlive the tray's own re-read of an id an editor
+    replaced by hand.
+    """
+    try:
+        return str(machine_mod.machine_id() or "")
+    except Exception:
+        log.debug("ytdl: this machine has no id to claim with", exc_info=True)
+        return ""
 
 
 class FleetClient:
@@ -826,6 +910,18 @@ class FleetClient:
             # check below still hands the job back.
             "scope_qualities": list(SCOPE_QUALITIES),
             "free_bytes": free_bytes,
+            # data-model-7 (CR-66, CR-67): the download lease is keyed on the
+            # editor NAME, so one account's two computers are one lease holder
+            # -- the second machine's claim is refused as "somebody else holds
+            # it" and its editor watches the server download a job their own
+            # machine was ready to take (docs/MULTI_MACHINE_PLAN.md: a plan
+            # belongs to a COMPUTER). This is the same id reporter.py already
+            # sends, minted once into ~/.ccsync/machine.json and surviving a
+            # rename. "" when the file cannot be read or written, which is what
+            # a server keying per (editor, machine_id) must treat exactly as
+            # today's person-wide lease; the server half tolerates its absence
+            # either way.
+            "machine_id": _this_machine_id(),
         }
         try:
             status, parsed = self.deps.request(
@@ -1417,6 +1513,18 @@ class DownloadJob:
                         "resolve (%r) -- downloading nothing", self.job_id,
                         manifest.get("project_rel_path"))
             return
+        # RE-CHECKED HERE, with the full probe (comp-ytdl-1, 2026-08-21):
+        # capabilities() answered when the SPA asked, the claim and the
+        # manifest are two round trips later, and the mkdir below is the line
+        # that would create a fake /Volumes/<Name> on a Mac's boot disk. The
+        # job is not failed, it is left alone -- the lease expires and the
+        # server downloads it, which is what every other refusal on this path
+        # does.
+        if self.deps.tree_is_misplaced():
+            log.warning("ytdl: job %s -- this machine's tree is not mounted, so "
+                        "nothing is being downloaded into %s (the server will)",
+                        self.job_id, outdir)
+            return
         try:
             Path(outdir).mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -1468,7 +1576,17 @@ class DownloadJob:
             return False
         if self.deps.is_base_rig:
             root = projects_root(self.deps.cfg)
-            here = Path(root) / Path(*wanted.split("/")) if root else None
+            # The label's OWN spelling, not the casefolded comparison form
+            # (comp-ytdl-5, 2026-08-21): `wanted` exists to compare against
+            # the selection labels, and stat-ing it turned "2026/FF5/Energy
+            # Transition" into "2026/ff5/energy transition" -- the same
+            # directory on NTFS and default APFS, and no directory at all on a
+            # case-sensitive volume (case-sensitive APFS, a Mac SMB mount of a
+            # case-sensitive ZFS dataset). There the job was refused, the
+            # lease expired, and nothing was ever downloaded on that rig. This
+            # is the spelling destination_for writes with.
+            parts = [p for p in _label_parts(label) if p]
+            here = Path(root).joinpath(*parts) if root and parts else None
             if here is not None and here.is_dir():
                 return True
             log.warning("ytdl: job %s names project %r, which is not in this "

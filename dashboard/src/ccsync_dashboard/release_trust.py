@@ -127,6 +127,40 @@ def verify_record(
     return False, "no configured release public key verifies this record"
 
 
+def _version_tuple(text: Any) -> tuple[int, ...]:
+    raw = str(text or "").strip()
+    if not raw or any(ch not in _MIN_VERSION_OK for ch in raw):
+        return ()
+    try:
+        return tuple(int(p) for p in raw.split(".") if p != "")
+    except ValueError:
+        return ()
+
+
+def min_version_exceeds_version(version: Any, min_version: Any) -> bool:
+    """Whether a record's downgrade floor is ABOVE the build it describes.
+
+    dash-release-ai-3 (2026-08-21): one typo on the release rig
+    (`--min-version 0.9.54` for a 0.9.44 build) was accepted by every
+    verifier, and `upgrade.note_floor` on each companion is monotonic and
+    persistent -- so merely SEEING that offer raised every machine's floor
+    above the build on offer, refused it, and then refused the corrected
+    republish and the rollback too. Recovery was a build numbered past the
+    typo or deleting `upgrade_floor.json` by hand on every editor's machine.
+    A record that can only ever refuse itself is a mistake, never an
+    intention, so nothing may publish one.
+
+    Unparseable input is NOT reported as exceeding: `valid_min_version` is
+    the check that owns "is this a version at all", and two refusals for one
+    fault would name the wrong one.
+    """
+    left = _version_tuple(min_version)
+    right = _version_tuple(version)
+    if not left or not right:
+        return False
+    return left > right
+
+
 def valid_min_version(text: Any) -> bool:
     """A dotted-numeric version, or empty. The floor is compared numerically
     by the companion (upgrade.parse_version), which refuses anything it

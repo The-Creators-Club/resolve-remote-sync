@@ -267,3 +267,58 @@ def test_the_index_is_consistent_while_refreshes_run(tmp_path, isolated_index):
     finally:
         stop.set()
         con.close()
+
+
+# --- music-2: a change made by ANOTHER process --------------------------------
+
+def _isolated_pool(monkeypatch, path):
+    """A con() cache and a shared Index of this test's own, over `path`."""
+    monkeypatch.setattr(db.config, 'DB_PATH', path)
+    monkeypatch.setattr(db, '_local', threading.local())
+    monkeypatch.setattr(db, '_schema_ready', False)
+    monkeypatch.setattr(db, '_open_identity', None)
+    monkeypatch.setattr(search, '_index', None)
+    monkeypatch.setattr(search, '_last_stale_check', 0.0)
+
+
+def _add_track(con, n):
+    con.execute('INSERT INTO tracks(id,rel_path,filename,ext,embedding,dim,'
+                'file_hash,model) VALUES(?,?,?,?,?,?,?,?)',
+                (n, f'{n}.wav', f'{n}.wav', '.wav', db.to_blob(_unit(n)), DIM,
+                 f'h{n}', 'test-model'))
+    con.commit()
+
+
+def test_a_drain_applied_by_another_process_reaches_search(tmp_path, monkeypatch):
+    """`python -m musicweb.drain apply` is a separate stdlib process writing
+    straight to the file (DEPLOY.md 3a). It calls neither invalidate() nor
+    refresh(), and no runbook told anyone to POST /api/reload -- so the drained
+    tracks were in browse and in /api/audio and invisible to text search and
+    /api/similar (music-2, 2026-08-21)."""
+    live = tmp_path / 'music.db'
+    _isolated_pool(monkeypatch, live)
+    _add_track(db.con(), 1)
+    assert list(search.index().track_ids) == [1]
+
+    other = db.connect(live)                      # "another process"
+    _add_track(other, 2)
+    other.close()
+
+    monkeypatch.setattr(search, '_last_stale_check', 0.0)   # past the rate limit
+    assert sorted(int(i) for i in search.index().track_ids) == [1, 2]
+
+
+def test_the_staleness_check_is_rate_limited(tmp_path, monkeypatch):
+    """The stat is nothing; the REBUILD it triggers reads every embedding. A
+    burst of fleet ingest must not cost one of those per search."""
+    live = tmp_path / 'music.db'
+    _isolated_pool(monkeypatch, live)
+    _add_track(db.con(), 1)
+    first = search.index()
+
+    other = db.connect(live)
+    _add_track(other, 2)
+    other.close()
+
+    monkeypatch.setattr(search, '_last_stale_check', time.monotonic())
+    assert search.index() is first

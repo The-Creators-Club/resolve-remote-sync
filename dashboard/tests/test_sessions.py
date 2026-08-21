@@ -111,8 +111,15 @@ def test_throttle_counts_username_and_ip_separately_and_backs_off(tmp_path):
     for _ in range(sessions.LOGIN_FAILURE_LIMIT):
         store.record_failure("jsmith", "10.0.0.9", now=now)
     assert store.throttled("jsmith", "10.0.0.9", now=now) > 0
-    # the IP budget bites even for a username that has never failed -- which is
-    # the whole point: spraying one password across every username used to be
+    # One address is very often one GATEWAY (trust-model-3, 2026-08-21), so
+    # the IP budget is far larger than the username one and has NOT bitten yet.
+    assert store.throttled("someone-else", "10.0.0.9", now=now) == 0
+    for n in range(sessions.LOGIN_FAILURE_LIMIT_IP - sessions.LOGIN_FAILURE_LIMIT):
+        # A DIFFERENT username each time: this is the spray the IP budget
+        # exists for, and it is the only budget counting it.
+        store.record_failure(f"victim{n}", "10.0.0.9", now=now)
+    # ...but it does bite, for a username that has never failed -- which is the
+    # whole point: spraying one password across every username used to be
     # unbounded (item 15).
     assert store.throttled("someone-else", "10.0.0.9", now=now) > 0
     # ...and a different host is unaffected
@@ -122,9 +129,9 @@ def test_throttle_counts_username_and_ip_separately_and_backs_off(tmp_path):
     store.record_failure("jsmith", "10.0.0.9", now=now)
     assert store.throttled("jsmith", "10.0.0.9", now=now) > first   # exponential
 
-    # a success clears both budgets
-    store.clear_failures("jsmith", "10.0.0.9")
-    assert store.throttled("jsmith", "10.0.0.9", now=now) == 0
+    # a success clears the username budget
+    store.clear_failures("jsmith")
+    assert store.throttled("jsmith", "10.0.0.10", now=now) == 0
 
 
 def test_throttle_survives_a_restart(tmp_path):

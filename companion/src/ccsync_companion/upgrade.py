@@ -171,8 +171,45 @@ FLOOR_FILENAME = "upgrade_floor.json"
 
 
 def floor_path(cfg: Any) -> Path:
-    """Where this machine remembers the highest min_version it has accepted."""
+    """Where this machine remembers the highest min_version it has accepted.
+
+    config_mod.CONFIG_DIR, the directory identity.json and eula_accepted.json
+    already use -- NOT the log's directory (comp-app-core-5, 2026-08-21). It
+    was derived from resolved_log_path, which honours config.toml's
+    `log_path`, so on a machine whose log had been redirected to a second
+    drive the floor lived there too: the deletion docs/RELEASE.md prescribes
+    (and this module's own comments describe) removed a file that was not
+    there, and editing `log_path` silently moved the floor to a new, empty
+    location -- a monotonic guarantee that could be reset by a config edit is
+    not one."""
+    return config_mod.CONFIG_DIR / FLOOR_FILENAME
+
+
+def legacy_floor_path(cfg: Any) -> Path:
+    """Where the floor lived before comp-app-core-5 (2026-08-21): beside the
+    log. Identical to floor_path() on every machine with a default log_path,
+    which is every machine in the field."""
     return config_mod.resolved_log_path(cfg or {}).parent / FLOOR_FILENAME
+
+
+def adopt_legacy_floor(cfg: Any, path: Path) -> str:
+    """Carry a floor written under the old log-dir location forward, once.
+
+    Without this, moving the file (above) would LOWER the floor to nothing on
+    exactly the machines the move was meant to help -- and the floor only
+    ever goes up. note_floor is monotonic, so this is safe to run on every
+    start; it never raises."""
+    try:
+        legacy = Path(legacy_floor_path(cfg))
+        if legacy == Path(path):
+            return read_floor(path)
+        remembered = read_floor(legacy)
+        if not remembered:
+            return read_floor(path)
+        return note_floor(path, remembered)
+    except Exception:
+        log.debug("upgrade: could not adopt the legacy downgrade floor", exc_info=True)
+        return ""
 
 
 def read_floor(path: Path) -> str:
@@ -239,6 +276,23 @@ def below_floor(version: Any, floor: str) -> bool:
     if offered is None:
         return True
     return offered < have
+
+
+def _min_version_above_own(info: Any) -> bool:
+    """Does this record demand a floor its own build cannot satisfy?
+
+    comp-app-core-3 (2026-08-21). Both halves have to parse for the answer to
+    mean anything: an absent or unrankable min_version is the ordinary case
+    (no floor to raise), and an unrankable version is already refused by
+    below_floor. Never raises.
+    """
+    if not isinstance(info, dict):
+        return False
+    floor = parse_version(info.get("min_version"))
+    offered = parse_version(info.get("version"))
+    if floor is None or offered is None:
+        return False
+    return floor > offered
 
 
 def verify_offer(
@@ -629,6 +683,10 @@ class UpgradeManager:
         # BEFORE it computes its state dir, and the floor deliberately lives
         # one level up from state/ anyway (see note_floor).
         self._floor_file = Path(floor_file) if floor_file else floor_path(cfg)
+        # One-time migration of a floor written beside a redirected log
+        # (comp-app-core-5, 2026-08-21). A no-op on a default install, where
+        # both paths are the same file.
+        adopt_legacy_floor(cfg, self._floor_file)
         self._transport_note_logged = False
         self._refusal_logged = ""
 
@@ -648,6 +706,24 @@ class UpgradeManager:
             ok, detail = verify_offer(info)
             if not ok:
                 return False, f"release signature rejected ({detail})"
+            # BEFORE note_floor, which is monotonic and persisted
+            # (comp-app-core-3, 2026-08-21). A record that says "you may not
+            # install below X" while offering X-1 is self-contradictory and
+            # can only be a signing-tool or operator slip -- one stale
+            # CCSYNC_MIN_VERSION in the environment. Honouring it raised
+            # every reporting machine's floor past the build being offered,
+            # refused that build and every later one below the typo, and the
+            # only way back was deleting upgrade_floor.json BY HAND on each
+            # machine: the cost the floor is designed to impose on an
+            # attacker, imposed on the fleet by a typo. The floor is raised
+            # on RECEIPT of an offer, so this needs no click to bite.
+            if _min_version_above_own(info):
+                return False, (
+                    f"the release record for v{info.get('version')} says it needs "
+                    f"v{info.get('min_version')} or newer, which that build is not. "
+                    f"The record is malformed and this machine's downgrade floor "
+                    f"has NOT been changed"
+                )
             floor = note_floor(self._floor_file, info.get("min_version"))
             if below_floor(info.get("version"), floor):
                 return False, (

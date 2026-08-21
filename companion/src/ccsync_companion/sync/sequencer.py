@@ -31,6 +31,9 @@ from typing import Any, Optional
 
 from .. import config as config_mod
 from ..selection import SelectionClient
+# A LANE's error state, not one of this module's own STATE_* (which describe
+# the sequencer itself) -- hence the alias.
+from .base import STATE_ERROR as STATE_ERROR_LANE
 from .rclone_lane import clone_directory_tree
 from .repath import ProjectRepather, normalized_safe_rel
 from .shared_folders import SharedFolderManager
@@ -63,6 +66,24 @@ PROJECTS_PREFIX = "Projects/"
 #               the duration of the current project's turn.
 PAUSE_SCHEME_NONE = "none"
 PAUSE_SCHEME_ROTATE = "rotate"
+
+# How long a project's turn waits on lane C when nothing is being paused
+# (ops-efficiency-3, 2026-08-21). Long enough that a project with a couple
+# of small files finishes inside its own turn and the dashboard's
+# current_project reads sensibly, short enough that a folder with a big
+# backlog does not hold every other project's proxies for ten minutes.
+DEFAULT_LANE_C_SETTLE_SECONDS = 30
+
+# Idle backoff after a pass that moved nothing (ops-efficiency-2,
+# 2026-08-21). A steady-state pass costs 3 rclone processes, 2 recursive
+# SFTP listings and 3 local walks PER PROJECT -- ~300 SSH handshakes a pass
+# for ten editors with ten projects each -- purely to discover that nothing
+# changed. Multipliers on `sequencer_idle_seconds`, applied only while
+# consecutive passes keep finding nothing, and reset to 1x by any evidence
+# that something DID (a transfer, a selection change, a watcher event, a
+# tray action). Capped rather than open-ended: lane B has no NAS-side change
+# signal, so the backoff is also the worst-case latency of a proxy arriving.
+IDLE_BACKOFF_STEPS = (1, 2, 5)
 
 # What a per-turn read of a folder's .stignore found (SYNC-6, 2026-08-14).
 # "missing" deliberately covers a read that failed as well as one that came
@@ -152,6 +173,7 @@ class Sequencer:
         clone_tree_fn: Any = clone_directory_tree,
         repather: Optional[ProjectRepather] = None,
         shared_folders: Optional[Any] = None,
+        halted: Optional[Any] = None,
     ) -> None:
         self.lane_a = lane_a
         self.lane_b = lane_b
@@ -163,10 +185,14 @@ class Sequencer:
         # selection and not part of the rotation -- see sync/shared_folders.py
         # -- so the sequencer's only job here is to call reconcile() often
         # enough, INCLUDING on the no-selection path where nothing else runs.
+        # `halted` is app.py's "is syncing stopped on this machine" predicate
+        # (lane_guard.HaltState.active). Optional: a sequencer built without
+        # one behaves as before, which is what every existing test assumes.
+        self._halted = halted
         self.shared_folders = (
             shared_folders
             if shared_folders is not None
-            else SharedFolderManager(admin, self.local_root)
+            else SharedFolderManager(admin, self.local_root, halted=halted)
         )
         # EVERY numeric here goes through config.coerce_numeric/coerce_count.
         # A bare float(cfg.get(...)) raises on a hand-edited
@@ -221,6 +247,14 @@ class Sequencer:
         # What replaces the pause scheme's pacing. 0 disables the write.
         self.lane_c_max_folder_concurrency = config_mod.coerce_count(
             cfg, "lane_c_max_folder_concurrency", 2
+        )
+        # The lane C settle with the pause scheme OFF -- see
+        # _lane_c_wait_budget (ops-efficiency-3). coerce_count, not
+        # coerce_numeric: 0 is a legal value here and means "restore the old
+        # behaviour" (wait the whole project_rotation_seconds either way),
+        # which coerce_numeric's positive-only gate would reject.
+        self.lane_c_settle_seconds = config_mod.coerce_count(
+            cfg, "lane_c_settle_seconds", DEFAULT_LANE_C_SETTLE_SECONDS
         )
         # AUDIT_2 P8/P15/C-7: count orphan .partial files on the NAS every N
         # passes and REPORT them. Never deletes. 0 disables the scan.
@@ -289,6 +323,16 @@ class Sequencer:
         # called it every 5 s -- ~120 requests + 120 disk writes per project
         # per pass per editor (AUDIT_2 P11/L-5).
         self._selection_cache: Optional[tuple[float, Any, str]] = None
+        # Files the pass in flight has moved, and how far the between-passes
+        # wait has backed off (ops-efficiency-2). Plain attributes: both are
+        # touched from the sequencer thread, and a torn read would cost one
+        # wait of the wrong length.
+        self._pass_moved = 0
+        self._idle_step = 0
+        # Set when a project's lanes A and B BOTH failed -- "the NAS is not
+        # reachable from here" (ops-efficiency-4). Cleared at the head of
+        # each pass.
+        self._offline_pass = False
         # Folders THIS sequencer paused and has not released yet -- lets the
         # pre-lane release below issue only the PATCHes that are actually
         # needed instead of a blind sweep over the whole selection (each one
@@ -382,6 +426,7 @@ class Sequencer:
         self._resume_event.set()
         self._wake_event.set()
         self._interrupt.set()
+        self._wake_up_now()
 
     def _wait_for_lane_c_turn_idle(self, timeout: float) -> None:
         """Bounded, non-blocking-past-timeout wait for _lane_c_turn's
@@ -399,6 +444,10 @@ class Sequencer:
     def trigger_pass_now(self) -> None:
         self._wake_event.set()
         self._interrupt.set()
+        # An explicit "sync now" is the clearest possible evidence that the
+        # idle backoff has to go back to the normal cadence
+        # (ops-efficiency-2).
+        self._wake_up_now()
 
     # -- introspection -----------------------------------------------------
     @property
@@ -461,6 +510,46 @@ class Sequencer:
         with self._lock:
             return list(self._slug_to_item)
 
+    def halt_folder_ids(self) -> list[str]:
+        """EVERY lane C folder a halt has to pause: the selected projects
+        plus the fleet-wide asset libraries.
+
+        The halt walked expected_folder_slugs() alone, which is the project
+        selection -- so a fleet halt pressed because a bad ingest or a mass
+        rename in `Assets/B-roll Archive` was spreading left the B-roll,
+        music and LUT folders syncing on every machine in the fleet while
+        every tray said nothing was (sync-safety-2, 2026-08-21). Deliberately
+        NOT folded into expected_folder_slugs: that list is also lane C's
+        "which folders am I behind on" input, and the asset libraries are not
+        part of the rotation it describes."""
+        ids = self.expected_folder_slugs()
+        seen = set(ids)
+        try:
+            extra = list(self.shared_folders.folder_ids()) if self.shared_folders else []
+        except Exception:
+            log.debug("sequencer: could not list the shared asset folders", exc_info=True)
+            extra = []
+        for folder_id in extra:
+            if folder_id and folder_id not in seen:
+                seen.add(folder_id)
+                ids.append(folder_id)
+        return ids
+
+    def release_for_halt(self) -> None:
+        """Release lane C folders after a halt is lifted, through the SAME
+        filter the leak-recovery sweep uses.
+
+        The halt's own release PATCHed `paused: false` onto every folder it
+        had paused, which includes a folder deliberately left paused because
+        its .stignore never landed -- putting an unfiltered `sendreceive`
+        folder online, offering every original and every Proxy/ file
+        (sync-safety-4, 2026-08-21). _unpause_all already knows not to do
+        that, and it also skips the invalid/de-selected items SYNC-2 is
+        about. The shared asset folders come back through their own
+        reconcile, which checks their ignores the same way."""
+        self._unpause_all(self._last_selection)
+        self._reconcile_shared_folders()
+
     # -- watcher hand-off -----------------------------------------------------
     def notify_change(self, rel: str) -> None:
         """rel is "Projects/<year>/<series>/<project>" (from RcloneLane's
@@ -482,6 +571,7 @@ class Sequencer:
                 # the wait between passes.
                 self._wake_event.set()
                 self._interrupt.set()
+                self._wake_up_now()
                 return
             item = self._slug_to_item.get(slug)
             if item is None:
@@ -492,6 +582,10 @@ class Sequencer:
                 self._queue_slugs = [i.get("slug") for i in self._queue]
         self._wake_event.set()
         self._interrupt.set()
+        # The editor just wrote a file in a selected project: whatever the
+        # idle backoff had decided, the next pass is worth running at the
+        # normal cadence (ops-efficiency-2).
+        self._wake_up_now()
 
     # -- main loop -----------------------------------------------------
     def _run(self) -> None:
@@ -523,6 +617,7 @@ class Sequencer:
 
             self._update_known_selection(selection)
             self._reconcile_paths(selection)
+            self._check_remote_root()
             self._run_pass(selection)
 
             if self._stop_event.is_set() or not self._resume_event.is_set():
@@ -533,13 +628,34 @@ class Sequencer:
                 self._current_slug = None
                 self._queue_slugs = []
             self._unpause_all(self._last_selection)
-            if self._wait_or_wake(self.sequencer_idle_seconds):
+            self._note_pass_finished()
+            if self._wait_or_wake(self._idle_seconds()):
                 break
 
         with self._lock:
             self._state = STATE_STOPPED
             self._current_slug = None
             self._queue_slugs = []
+
+    def _check_remote_root(self) -> None:
+        """Ask lane B to probe `remote_root` itself, once per process.
+
+        sync-safety-5 (2026-08-21): the breaker's marker-directory rule only
+        applies to the whole-tree scope, and in managed mode every pass names
+        a project subpath -- so the "is remote_root actually the tree" check
+        SYNC_SAFETY.md credits the fleet with has never run on it. A
+        remote_root pointing at a stale copy of the tree (a backup dataset, a
+        snapshot clone mounted for a restore drill) passes every per-project
+        probe and then trashes every proxy newer than the copy. Never raises,
+        and never blocks the pass: the lane parks itself if the breaker
+        trips."""
+        probe = getattr(self.lane_b, "check_remote_root", None)
+        if probe is None or not self.lane_b_enabled:
+            return
+        try:
+            probe()
+        except Exception:
+            log.debug("sequencer: the remote_root probe failed", exc_info=True)
 
     def _reconcile_shared_folders(self) -> None:
         """Keep the fleet-wide asset libraries online. Never raises."""
@@ -763,9 +879,14 @@ class Sequencer:
             if isinstance(item.get("slug"), str) and item.get("slug").strip()
         }
         with self._lock:
+            changed = set(slug_to_item) != set(self._slug_to_item)
             self._rel_to_slug = rel_to_slug
             self._slug_to_item = slug_to_item
             self._last_selection = list(selection)
+        if changed:
+            # A tick or an untick is exactly the moment a backed-off
+            # sequencer has to be prompt again (ops-efficiency-2).
+            self._wake_up_now()
         self._prune_bookkeeping(set(slug_to_item), slugged)
 
     def _prune_bookkeeping(
@@ -965,6 +1086,8 @@ class Sequencer:
         # list changed (AUDIT_2 L-10).
         with self._lock:
             self._processed_slugs = set()
+        self._pass_moved = 0
+        self._offline_pass = False
         processed_entries: dict[str, dict] = {}
         try:
             while True:
@@ -1015,6 +1138,24 @@ class Sequencer:
                         self._queue_slugs = [i.get("slug") for i in (self._queue or [])]
 
                     if self._stop_event.is_set() or not self._resume_event.is_set():
+                        with self._lock:
+                            self._queue = None
+                        return
+
+                    if self._offline_pass:
+                        # Both rclone lanes failed on that project, i.e. the
+                        # NAS is not reachable from here (ops-efficiency-4,
+                        # 2026-08-21). Every remaining project would spend
+                        # the same contimeout x retries per lane -- roughly
+                        # 45 minutes of doomed subprocesses for ten projects
+                        # -- to learn the same thing. Abandon the pass; the
+                        # idle backoff makes the retry cadence sane, and any
+                        # watcher/tray/selection event still cuts it short.
+                        log.warning(
+                            "sequencer: lanes A and B both failed on %s -- treating the "
+                            "server as unreachable and ending this pass early; the next "
+                            "one runs in %.0fs", item.get("slug"), self._idle_seconds(),
+                        )
                         with self._lock:
                             self._queue = None
                         return
@@ -1104,23 +1245,29 @@ class Sequencer:
         that repath runs first. Two lane A runs on the same project are
         still impossible: RcloneLane._run_lock covers that."""
         run_b = self.lane_b_enabled
+        outcomes: dict[str, Any] = {}
 
         def _a() -> None:
             try:
-                self._run_lane(self.lane_a, subpath, budget)
+                outcomes["a"] = self._run_lane(self.lane_a, subpath, budget)
             except Exception:
                 log.exception("sequencer: lane A run_once failed for %s", subpath)
+            finally:
+                self._note_lane_moved(self.lane_a)
 
         def _b() -> None:
             try:
-                self._run_lane(self.lane_b, subpath, budget)
+                outcomes["b"] = self._run_lane(self.lane_b, subpath, budget)
             except Exception:
                 log.exception("sequencer: lane B run_once failed for %s", subpath)
+            finally:
+                self._note_lane_moved(self.lane_b)
 
         if not (self.concurrent_lanes and run_b):
             _a()
             if run_b and not (self._stop_event.is_set() or not self._resume_event.is_set()):
                 _b()
+            self._note_transport(outcomes, run_b)
             return
 
         thread = threading.Thread(
@@ -1133,6 +1280,66 @@ class Sequencer:
             # Always join: an un-joined lane B would still be writing into
             # the project directory while the next project's repath moves it.
             thread.join()
+        self._note_transport(outcomes, run_b)
+
+    # -- pass economics (ops-efficiency-2 / -4, 2026-08-21) ---------------
+    def _note_lane_moved(self, lane: Any) -> None:
+        """Add what a lane run just moved to this pass's total. Never
+        raises: `last_run_moved` is not part of the LaneAdapter contract, so
+        a test double or a future adapter without one simply contributes
+        nothing (and the pass then looks idle, which only costs a longer
+        wait)."""
+        try:
+            getter = getattr(lane, "last_run_moved", None)
+            if getter is None:
+                return
+            self._pass_moved += max(0, int(getter() or 0))
+        except Exception:
+            log.debug("sequencer: could not read a lane's moved count", exc_info=True)
+
+    def _note_transport(self, outcomes: dict[str, Any], run_b: bool) -> None:
+        """Did BOTH rclone lanes fail on this project?
+
+        The cheapest honest test for "this machine cannot reach the NAS"
+        that costs no extra probe (ops-efficiency-4, 2026-08-21). A laptop
+        off the tailnet spends ~60 s x 3 attempts per lane per project
+        blackholed in contimeout, so ten ticked projects burn roughly
+        45 minutes of doomed subprocesses per pass, and 60 s later start
+        again. One lane failing is ordinary (a missing remote dir, a
+        filename rclone refuses); both failing on the same project, in
+        opposite directions, is the link. Only consulted when lane B is
+        enabled -- on a base rig lane A is alone and its failures are not
+        evidence of anything.
+        """
+        if not run_b:
+            return
+        states = [getattr(outcomes.get(key), "state", None) for key in ("a", "b")]
+        if all(state == STATE_ERROR_LANE for state in states):
+            self._offline_pass = True
+
+    def _note_pass_finished(self) -> None:
+        """Advance or reset the idle backoff at the end of a pass."""
+        moved = self._pass_moved
+        step = self._idle_step
+        if moved > 0:
+            self._idle_step = 0
+        elif step < len(IDLE_BACKOFF_STEPS) - 1:
+            self._idle_step = step + 1
+        if self._idle_step != step:
+            log.debug(
+                "sequencer: pass moved %d file(s) -- next idle wait is %.0fs",
+                moved, self._idle_seconds())
+
+    def _wake_up_now(self) -> None:
+        """Something happened that a backed-off sequencer must react to at
+        the normal cadence: a watcher event, a tray trigger, a resume, a
+        selection change."""
+        self._idle_step = 0
+
+    def _idle_seconds(self) -> float:
+        """The between-passes wait, with the backoff applied."""
+        step = min(max(0, self._idle_step), len(IDLE_BACKOFF_STEPS) - 1)
+        return self.sequencer_idle_seconds * IDLE_BACKOFF_STEPS[step]
 
     @staticmethod
     def _run_lane(lane: Any, subpath: str, budget: Optional[float]) -> Any:
@@ -1565,8 +1772,33 @@ class Sequencer:
                 continue
         return True
 
+    def _lane_c_wait_budget(self) -> float:
+        """How long a project's turn may wait on lane C before moving on.
+
+        The full `project_rotation_seconds` (600) is load-bearing ONLY under
+        PAUSE_SCHEME_ROTATE, where the next project's turn will pause this
+        folder and the wait is what stops that happening mid-transfer. With
+        the default scheme ("none") nothing is paused and Syncthing paces
+        every folder itself via maxFolderConcurrency, so the wait gates
+        nothing at all -- it just parks the whole sequencer for up to ten
+        minutes per project on any folder with a large backlog or a
+        permanently non-zero need (a conflict, a deleted-but-still-ticked
+        remote), delaying lane B proxies for every project behind it by up to
+        N x 600 s (ops-efficiency-3, 2026-08-21). A short settle is kept so
+        `current_project` still reads sensibly on the dashboard rather than
+        flickering through the queue.
+        """
+        rotation = self.project_rotation_seconds
+        if self.lane_c_pause_scheme == PAUSE_SCHEME_ROTATE:
+            return rotation
+        settle = self.lane_c_settle_seconds
+        if settle <= 0:
+            return rotation
+        return min(rotation, settle) if rotation > 0 else settle
+
     def _wait_for_folder_sync(self, slug: str, base_slugs: list[str]) -> None:
         start = self._now()
+        budget = self._lane_c_wait_budget()
         device_ids = self._remote_device_ids(slug)
         while True:
             if self._stop_event.is_set() or not self._resume_event.is_set():
@@ -1579,7 +1811,7 @@ class Sequencer:
                 return  # can't tell -- don't block the whole rotation on it
             if need == 0 and self._uploads_drained(slug, device_ids):
                 return
-            if self._now() - start >= self.project_rotation_seconds:
+            if self._now() - start >= budget:
                 return
 
             # Throttled, NOT per 5-second tick: see _selection_get_throttled

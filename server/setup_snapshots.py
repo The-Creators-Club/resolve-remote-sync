@@ -3,7 +3,8 @@
 
     python setup_snapshots.py                 # dry-run: say what would change
     python setup_snapshots.py --apply         # actually create/update the tasks
-    python setup_snapshots.py --list          # what snapshots exist right now
+    python setup_snapshots.py --list --apply  # what snapshots exist right now,
+                                              # and what cannot be scheduled
 
 Until 2026-08-17 this repo had zero references to snapshots, replication or
 restore (docs/COMMERCIAL_READINESS.md item 8). Every recovery path was a
@@ -167,6 +168,27 @@ def main():
     for label, path in where:
         report_existing(backend, label, path, dry_run)
     if args.list:
+        # --list is what BACKUP_RESTORE calls "the check that backups are
+        # working", so it has to answer for a target that CANNOT be scheduled
+        # as well as for one with no snapshots yet (server-6, 2026-08-21). On
+        # this fleet the apps root is a plain directory in the pool root, so
+        # it has ALWAYS failed here and --list said nothing about it. An empty
+        # policy asks the backend the question without describing any task;
+        # `dry_run` is passed through for report_existing's reason, so the
+        # live answer comes from `--list --apply` (a read either way: the
+        # refusal happens before the backend reads anything).
+        unschedulable = [
+            f"{label}: {detail}"
+            for label, path in where
+            for state, detail in backend.ensure_snapshot_schedule(path, [], dry_run)
+            if state == "failed"
+        ]
+        for line in unschedulable:
+            print(f"\nCANNOT BE SCHEDULED -- {line}", file=sys.stderr)
+        if unschedulable:
+            print("\nBackups are NOT fully configured. See docs/BACKUP_RESTORE.md.",
+                  file=sys.stderr)
+            return 1
         return 0
 
     policy = schedules(args.hourly_keep, args.daily_keep)
@@ -210,7 +232,8 @@ def main():
         print("\nBackups are NOT fully configured. See docs/BACKUP_RESTORE.md.",
               file=sys.stderr)
         return 1
-    print("\nDone. Verify within the hour with: python setup_snapshots.py --list")
+    print("\nDone. Verify within the hour with: python setup_snapshots.py "
+          "--list --apply")
     return 0
 
 

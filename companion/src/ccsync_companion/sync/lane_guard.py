@@ -116,19 +116,33 @@ def _read_json(path: Path) -> dict:
 
 
 def _write_json(path: Path, data: dict) -> bool:
-    """Persist a small state file. Returns False (and logs) on failure.
+    """Persist a small state file ATOMICALLY. Returns False (and logs) on
+    failure.
 
-    Not atomic on purpose: these files are single-writer, a few hundred
-    bytes, and a torn write degrades to `_read_json` returning {} -- which
-    for the breaker means "not tripped". That is the one direction a torn
-    write must NOT take, so `LaneBBreaker.trip()` also logs at ERROR, and
-    the trip is re-derived from the next pass's evidence anyway."""
+    tmp + os.replace (sync-safety-8, 2026-08-21). This used to write in
+    place, arguing that a torn write degrades to `_read_json` returning {}
+    and that the trip is "re-derived from the next pass's evidence anyway".
+    That argument does not hold for trigger 1: the same file carries
+    `remote_counts`, the ONLY memory of how big the NAS listing was last
+    time, and losing it means the empty/shrink probes have nothing to
+    compare against and cannot fire at all until a pass re-seeds them.
+    Losing a live `sync_halt.json` mid-write releases a fleet halt on one
+    machine. Both are the direction a latch must never fail, and
+    os.replace is atomic on NTFS and APFS, so there is no reason to accept
+    either."""
+    target = Path(path)
+    tmp = target.with_name(target.name + ".tmp")
     try:
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_text(json.dumps(data, indent=1), encoding="utf-8")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+        os.replace(tmp, target)
         return True
     except OSError as exc:
         log.warning("could not persist %s: %s", path, exc)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
         return False
 
 
@@ -226,6 +240,13 @@ class LaneBBreaker:
         self._bytes = int(state.get("bytes") or 0)
         self._last_pass_deletes = int(state.get("last_pass_deletes") or 0)
         self._resumed_at = str(state.get("resumed_at") or "")
+        # The dashboard's [ RESUME ] is a STANDING request: it rides every
+        # report reply until the admin clears it, so the companion has to
+        # remember which one it already honoured or it would re-resume the
+        # breaker on every report (CR-45's delivery channel, comp-lanes-ab-2,
+        # 2026-08-21). Persisted with the latch, because a tray restart is
+        # exactly when the standing request is re-read.
+        self._applied_resume_request = str(state.get("applied_resume_request") or "")
         remote = state.get("remote_counts")
         self._remote_counts: dict[str, int] = (
             {str(k): int(v) for k, v in remote.items()} if isinstance(remote, dict) else {}
@@ -265,6 +286,7 @@ class LaneBBreaker:
             "bytes": self._bytes,
             "last_pass_deletes": self._last_pass_deletes,
             "resumed_at": self._resumed_at,
+            "applied_resume_request": self._applied_resume_request,
             # Bounded: one int per project scope this machine syncs, and the
             # sequencer's scope set is the editor's selection.
             "remote_counts": dict(list(self._remote_counts.items())[:512]),
@@ -293,12 +315,35 @@ class LaneBBreaker:
                 log.exception("lane B breaker: on_trip callback failed")
         return True
 
-    def resume(self, by: str = "tray") -> bool:
-        """Operator says the remote is fine. Clears the latch AND the
-        counters -- resuming without clearing them re-trips on the next pass
-        against the cumulative rule, which reads as "the button doesn't
-        work". Returns False when it was not tripped."""
+    def resume(self, by: str = "tray", request_id: Optional[str] = None) -> bool:
+        """Operator says the remote is fine. Clears the latch AND every
+        counter the triggers compare against. Returns False when it was not
+        tripped, or when `request_id` has already been applied.
+
+        Clearing the counters is not tidiness: resuming without clearing them
+        re-trips on the next pass and reads as "the button doesn't work".
+        That was only half done. `_remote_counts` -- the remembered SIZE of
+        each scope's NAS listing -- was left alone, so a trigger-1 trip
+        ("shrank from 10 to 3", "listed EMPTY and it held 10") re-tripped
+        against the identical listing the instant the lane ran again, with no
+        way out but deleting this file while the companion was stopped
+        (comp-lanes-ab-1, 2026-08-21). An operator who resumes has asserted
+        that the server is in the state it should be synced from, so the next
+        listing is the new baseline.
+
+        `request_id` is the dashboard's standing resume request (its
+        `requested_at`): the same request rides every report reply until an
+        admin clears it, so applying it more than once would fight the
+        breaker forever. Recorded (and persisted) BEFORE the latch clears, so
+        a crash in between can only ever cost the request, never repeat it.
+        """
+        rid = str(request_id or "").strip()
         with self._lock:
+            if rid and rid == self._applied_resume_request:
+                return False
+            if rid:
+                self._applied_resume_request = rid
+                self._persist_locked()
             if not self._tripped:
                 return False
             reason, self._reason = self._reason, ""
@@ -307,6 +352,7 @@ class LaneBBreaker:
             self._deletes = 0
             self._bytes = 0
             self._last_pass_deletes = 0
+            self._remote_counts.clear()
             self._resumed_at = _now_iso()
             self._persist_locked()
         log.warning("lane B breaker RESUMED by %s (was: %s)", by, reason)
@@ -384,10 +430,11 @@ class LaneBBreaker:
         `relocation_probe` answers "how many of the files this pass trashed
         are still on the NAS, at a different path?" -- i.e. how many were a
         REORGANISATION rather than a deletion (2026-08-20, KNOWN_BUGS CR-44).
-        It is called at most once per pass and ONLY when the pass would
-        otherwise trip, because it costs a recursive listing of the scope:
-        on the ~99% of passes that are nowhere near a limit it must not be
-        spent at all. A move is the common benign shape -- an editor drags a
+        It is called at most once per pass, and only when the pass would
+        otherwise trip or when it trashed at least half the per-pass cap
+        (see `eager` below), because it costs a recursive listing of the
+        scope: on the ~99% of passes that are nowhere near a limit it must
+        not be spent at all. A move is the common benign shape -- an editor drags a
         folder in Explorer and every proxy under it "disappears" from the
         server at once -- and it was tripping the breaker on exactly the
         event the breaker has nothing to say about."""
@@ -404,7 +451,20 @@ class LaneBBreaker:
         limit = self.max_deletes_per_pass
         if local_proxies >= self.min_local_sample:
             limit = min(limit, max(1, int(local_proxies * self.max_delete_fraction)))
-        if deleted <= limit and cumulative <= self.max_deletes_cumulative:
+        would_trip = deleted > limit or cumulative > self.max_deletes_cumulative
+        # ...and a pass that is NOT about to trip, but trashed enough files
+        # to be a reorganisation rather than a cleanup, is probed too
+        # (comp-lanes-ab-5, 2026-08-21). The probe stayed lazy to the point
+        # of being useless for trigger 3: everything a sub-limit pass trashed
+        # went onto the cumulative counter permanently, moves included, so a
+        # week of 40-file Explorer drags filled it with files that are all
+        # still on the NAS and the next handful of REAL deletions tripped
+        # "a slow leak of 208 file(s)". Discount them as they happen. The
+        # threshold is the ABSOLUTE per-pass cap's half, never the
+        # fraction-narrowed `limit`: on a 12-proxy project that would spend a
+        # recursive listing on a two-file cleanup.
+        eager = deleted >= max(2, self.max_deletes_per_pass // 2)
+        if not (would_trip or eager):
             return None
         # About to trip on one rule or the other -- NOW it is worth asking
         # whether what left the folder actually left the server.

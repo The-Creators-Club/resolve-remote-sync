@@ -31,6 +31,7 @@ import logging
 import os
 import platform
 import threading
+import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -60,6 +61,10 @@ HttpGetFn = Callable[[str, str, float], Any]
 # a direct connection.
 RELAY_CONNECTION_PREFIX = "relay"
 RELAYED_DETAIL = "relayed, slow path"
+
+# How long this lane may go on believing its own device id (comp-lane-c-3,
+# 2026-08-21). One loopback GET per interval; see _get_my_device_id.
+DEVICE_ID_REFRESH_SECONDS = 300.0
 
 
 def summarize_connections(payload: Any) -> dict[str, Any]:
@@ -228,6 +233,8 @@ class SyncthingLane(LaneAdapter):
         # to tell OUTGOING need (what remote devices still lack from us)
         # apart from our own downloads. See check_once's sending branch.
         self._my_device_id: Optional[str] = None
+        # Monotonic stamp of the last successful myID read (comp-lane-c-3).
+        self._my_device_id_at = 0.0
         # Last /rest/system/connections summary (AUDIT_2 C-6). Public via
         # connection_path_summary() so the reporter payload -- owned
         # elsewhere -- can send it to the dashboard without re-polling.
@@ -363,7 +370,18 @@ class SyncthingLane(LaneAdapter):
         return f"{detail}; {path_detail}" if detail else path_detail
 
     def _get_my_device_id(self) -> str:
-        if self._my_device_id:
+        """This instance's own device id, re-read on a slow cadence.
+
+        It was cached for the process ("it never changes"), which is true of
+        a Syncthing home that survives -- and the supervisor restarting a
+        home whose key/cert are gone mints a NEW identity, which is the one
+        event that changes myID under a running companion, and one this
+        companion causes itself (comp-lane-c-3, 2026-08-21). The outgoing-need
+        calculation then compared remote devices against an id that no longer
+        exists. A failed re-read keeps the known id: Syncthing being down for
+        a poll is not evidence of a new identity."""
+        now = time.monotonic()
+        if self._my_device_id and (now - self._my_device_id_at) < DEVICE_ID_REFRESH_SECONDS:
             return self._my_device_id
         try:
             status = self._get("/rest/system/status")
@@ -371,8 +389,13 @@ class SyncthingLane(LaneAdapter):
         except Exception:
             my_id = ""
         if my_id:
+            if self._my_device_id and my_id != self._my_device_id:
+                log.warning(
+                    "%s: this machine's Syncthing device id changed (%s -> %s) -- its "
+                    "config was regenerated", self.name, self._my_device_id, my_id)
             self._my_device_id = my_id
-        return my_id
+            self._my_device_id_at = now
+        return my_id or (self._my_device_id or "")
 
     @staticmethod
     def _human_size(n: int) -> str:
@@ -436,6 +459,15 @@ class SyncthingLane(LaneAdapter):
     def check_once(self) -> LaneStatus:
         """Single synchronous status check. Never raises."""
         if not self._has_any_api_key():
+            # The supervisor is told, and told UNREACHABLE (comp-lane-c-4,
+            # 2026-08-21). No key anywhere means no config.xml anywhere,
+            # which is the state a wiped or never-generated Syncthing home is
+            # in -- and `syncthing serve --home=...` (what the shim runs)
+            # regenerates the home and brings the API back. This branch
+            # returned before saying anything at all, so the one thing that
+            # could repair it was never asked, and an incident opened before
+            # the file vanished could never be closed either.
+            self._note_supervisor(False)
             status = LaneStatus(
                 name=self.name,
                 state=STATE_ERROR,

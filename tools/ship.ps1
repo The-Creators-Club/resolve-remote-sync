@@ -20,6 +20,12 @@
          deploy; compose-level changes still need --recreate by hand),
          then POLLS /api/v1/health until it reports the repo's dashboard
          VERSION (a cold restart can take longer than one check).
+         IN IMAGE MODE ([stack] mode = "image") this step does NOTHING:
+         the container runs the CI image and takes code over the air, so
+         there is nothing to push and no reason to restart the live
+         dashboard on a companion ship. The gate becomes live >= repo,
+         and a repo that is AHEAD stops the ship with the over-the-air
+         recipe rather than a 90-second timeout (release-pipeline-3).
       2. PUBLISH    tools\release.ps1 first -- version parity, the editable
          install (without which build.spec's import probe silently drops the
          tray), the COMPANION AND DASHBOARD SUITES, PyInstaller, and the
@@ -114,7 +120,18 @@ param(
     # Authenticode signature CURRENT for the whole fleet anyway. The upgrade
     # channel's own ed25519 signature is separate and always required; this
     # is about the editor-facing SmartScreen/AV experience.
-    [switch]$AllowUnsignedBinary
+    [switch]$AllowUnsignedBinary,
+    # ALSO publish this build to the VENDOR FEED (release-pipeline-2,
+    # 2026-08-21). There are two publish paths for one fleet -- this script's
+    # PUT into one dashboard, and the CI + tools/publish_latest.py route every
+    # customer reads -- and they had no reconciliation at all: the feed
+    # carries a macOS companion 0.9.3 that Windows never got, because that one
+    # shipped by PUT only. OFF by default, because "CI builds, this rig signs"
+    # is the standing policy (tools/publish_latest.py's docstring); this is
+    # for the case where the studio build IS the release. Needs `gh` and the
+    # release key, same as publish_latest.
+    [switch]$PublishFeed,
+    [string]$FeedRepo = "The-Creators-Club/ccsync-releases"
 )
 
 # "Continue", not "Stop": the deploy script prints an SSH host-key WARNING to
@@ -222,11 +239,17 @@ Write-Step "repo says: dashboard v$DashVersion, companion v$CompanionVersion"
 # a password prompt) wasted a run twice on 2026-07-26. The download endpoint
 # answers with the shared token, so check FIRST.
 if (-not $DashboardOnly) {
+    # -r 0-0 and --max-time, same as the installer probe below (ship.ps1's
+    # own comment there explains why, and this one had neither --
+    # installer-onboard-tools-6, 2026-08-21). Without them an ALREADY
+    # PUBLISHED version pulled the whole ccsync-companion.exe over the tailnet
+    # to learn "200", and a dashboard mid-restart hung step 0 with no output
+    # and no deadline, before any gate had reported.
     $pubCode = Invoke-CurlWithToken `
         -Uri "$DashboardUrl/api/v1/companion/package/windows/$CompanionVersion" `
         -Token $env:DASH_REPORT_TOKEN `
-        -ExtraArgs @("-o", "NUL", "-w", "%{http_code}")
-    if ($pubCode -eq "200") {
+        -ExtraArgs @("-o", "NUL", "-r", "0-0", "--max-time", "20", "-w", "%{http_code}")
+    if ($pubCode -eq "200" -or $pubCode -eq "206") {
         Write-Fail "companion v$CompanionVersion is ALREADY published on the server."
         Write-Step "bump VERSION in companion\src\ccsync_companion\config.py AND companion\pyproject.toml"
         Write-Step "(and, if onboard.exe's contents changed, `$InstallerVersion in installer\windows_bootstrap.ps1 + onboarding\steps.py), then re-run"
@@ -393,15 +416,76 @@ else {
     Write-Step "server + onboarding tests skipped (-SkipTests)"
 }
 
+# --- which deploy shape is this site? (release-pipeline-3, 2026-08-21) ------
+# ship.ps1 had no idea image mode existed. In image mode the container runs
+# the CI-built image and updates its own code over the air (Settings >
+# Packages), so install_dashboard_app.py pushes NO code -- it only pulls and
+# `docker restart`s the live container, which is "the thing that tells
+# everyone whether their footage is syncing" bounced for nothing on every
+# companion ship. Worse, the health gate below compares live == repo, so the
+# first ship after a dashboard VERSION bump waited 90 s, failed "investigate
+# before continuing" and never built or published the companion, with no
+# output saying the remedy is bundle + publish_feed + APPLY.
+# check_deploy_drift.ps1 has read this key since 2026-08-18; same reader,
+# same $env:CCSYNC_SITE precedence every server/ script uses.
+function Get-SiteScalar {
+    param([string]$Path, [string]$Section, [string]$Key)
+    if (-not (Test-Path -LiteralPath $Path)) { return "" }
+    $inSection = $false
+    foreach ($line in (Get-Content -LiteralPath $Path -Encoding UTF8)) {
+        $t = $line.Trim()
+        if ($t -match '^\[([^\]]+)\]$') { $inSection = ($Matches[1] -eq $Section); continue }
+        if (-not $inSection) { continue }
+        if ($t.StartsWith("#")) { continue }
+        if ($t -match ("^" + [regex]::Escape($Key) + '\s*=\s*"([^"]*)"')) { return $Matches[1] }
+    }
+    return ""
+}
+function Compare-Version {
+    # -1 / 0 / 1 on a dotted numeric version. Two-digit minors compare as
+    # NUMBERS, not text: after 0.9.9 comes 0.10.0 (owner's rule 2026-08-18),
+    # and "0.10.0" -lt "0.9.9" as a string.
+    param([string]$A, [string]$B)
+    $pa = @(($A -split '[^0-9]+') | Where-Object { $_ -ne "" } | ForEach-Object { [int]$_ })
+    $pb = @(($B -split '[^0-9]+') | Where-Object { $_ -ne "" } | ForEach-Object { [int]$_ })
+    for ($i = 0; $i -lt [Math]::Max($pa.Count, $pb.Count); $i++) {
+        $x = if ($i -lt $pa.Count) { $pa[$i] } else { 0 }
+        $y = if ($i -lt $pb.Count) { $pb[$i] } else { 0 }
+        if ($x -lt $y) { return -1 }
+        if ($x -gt $y) { return 1 }
+    }
+    return 0
+}
+$SitePath = $env:CCSYNC_SITE
+if (-not $SitePath) { $SitePath = Join-Path $RepoRoot "site.toml" }
+$StackMode = Get-SiteScalar -Path $SitePath -Section "stack" -Key "mode"
+if (-not $StackMode) { $StackMode = "bind" }
+$ImageMode = ($StackMode -eq "image")
+Write-Step "dashboard stack mode: $StackMode ([stack] mode in $(Split-Path -Leaf $SitePath))"
+
 # --- 1. dashboard -----------------------------------------------------------
 Write-Host ""
-Write-Step "--- step 1: deploy dashboard ---"
-$deployArgs = @()
-if ($Recreate) { $deployArgs += "--recreate"; Write-Step "(--recreate: compose-level changes will take effect)" }
-python server\install_dashboard_app.py @deployArgs
-if ($LASTEXITCODE -ne 0) {
-    Write-Fail "install_dashboard_app.py exited $LASTEXITCODE -- stopping"
-    exit 1
+if ($ImageMode -and -not $Recreate) {
+    Write-Step "--- step 1: dashboard (image mode: nothing to deploy from here) ---"
+    Write-Step "this site runs the CI image and takes dashboard code OVER THE AIR."
+    Write-Step "Neither the container nor its code is touched by a companion ship."
+    Write-Step "(-Recreate still runs the deploy script: compose-level changes are not code.)"
+}
+else {
+    if ($ImageMode) {
+        # -Recreate is an explicit request about the CONTAINER (ports, mounts,
+        # env), which image mode does not make somebody else's job. Silently
+        # ignoring it would be worse than the restart it costs.
+        Write-Step "(image mode, but -Recreate was asked for: running the deploy script for the compose-level change)"
+    }
+    Write-Step "--- step 1: deploy dashboard ---"
+    $deployArgs = @()
+    if ($Recreate) { $deployArgs += "--recreate"; Write-Step "(--recreate: compose-level changes will take effect)" }
+    python server\install_dashboard_app.py @deployArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "install_dashboard_app.py exited $LASTEXITCODE -- stopping"
+        exit 1
+    }
 }
 # POLL, don't peek (OPS-10). This was a fixed 8 s sleep plus a single check,
 # and the container legitimately takes longer than that to answer: the venv
@@ -410,7 +494,9 @@ if ($LASTEXITCODE -ne 0) {
 # 8 s turned a good deploy into "investigate before continuing" and aborted
 # before the companion was ever published. First good answer wins; the ceiling
 # is only reached when something is actually wrong.
-$deadline = (Get-Date).AddSeconds(90)
+# In image mode nothing was restarted, so one answer is enough and the wait
+# collapses to the first read.
+$deadline = (Get-Date).AddSeconds($(if ($ImageMode) { 10 } else { 90 }))
 $live = ""
 $reported = $false
 while ($true) {
@@ -422,6 +508,7 @@ while ($true) {
     }
     catch { $live = "" }
     if ($live -eq $DashVersion) { break }
+    if ($ImageMode -and $live) { break }
     if ((Get-Date) -ge $deadline) { break }
     if (-not $reported) {
         Write-Step "waiting for the dashboard to come back up (up to 90s)..."
@@ -430,6 +517,21 @@ while ($true) {
 }
 if ($live -eq $DashVersion) {
     Write-Step "dashboard is LIVE at v$live"
+}
+elseif ($ImageMode -and $live -and (Compare-Version $live $DashVersion) -ge 0) {
+    # LIVE >= REPO is the image-mode pass condition: the container can
+    # legitimately be AHEAD of this checkout (someone published a newer bundle
+    # from another tree, or an image update landed).
+    Write-Step "dashboard is LIVE at v$live, repo says v$DashVersion -- ahead of this checkout, fine"
+}
+elseif ($ImageMode -and $live) {
+    Write-Fail "dashboard is LIVE at v$live but this repo is v$DashVersion -- a companion ship cannot deliver dashboard code in image mode."
+    Write-Step "Publish the dashboard OVER THE AIR first, then re-run:"
+    Write-Step "  python tools\build_dashboard_bundle.py"
+    Write-Step "  python tools\publish_feed.py --artifact <bundle> --kind dashboard --platform linux --version $DashVersion --feed-dir .\feed --github-repo <owner/repo> --github-upload"
+    Write-Step "  then Dashboard > Settings > Packages > check, then [ APPLY ]"
+    Write-Step "(or roll the site back to bind mode: python server\install_dashboard_app.py --mode bind)"
+    exit 1
 }
 else {
     Write-Fail "dashboard /health says '$live', repo says '$DashVersion' after 90s -- investigate before continuing"
@@ -494,11 +596,58 @@ if (Test-Path -LiteralPath $builtExe) {
     }
 }
 
-& powershell -NoProfile -ExecutionPolicy Bypass -File "installer\build_editor_package.ps1" `
-    -RebuildOnboard -Publish -MakeCurrent -DashboardUrl $DashboardUrl -AdminUser $AdminUser
+# -AllowUnsignedBinary rides along: step 2b builds onboard.exe AFTER this
+# script's gate above and applies the same Authenticode refusal to it, since
+# that is the binary a fresh install actually double-clicks
+# (installer-onboard-tools-1, 2026-08-21).
+$pkgArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "installer\build_editor_package.ps1",
+             "-RebuildOnboard", "-Publish", "-MakeCurrent",
+             "-DashboardUrl", $DashboardUrl, "-AdminUser", $AdminUser)
+if ($AllowUnsignedBinary) { $pkgArgs += "-AllowUnsignedBinary" }
+& powershell @pkgArgs
 if ($LASTEXITCODE -ne 0) {
     Write-Fail "build_editor_package.ps1 exited $LASTEXITCODE -- stopping before the local upgrade"
     exit 1
+}
+
+# --- 2b2. the VENDOR FEED (release-pipeline-2, 2026-08-21) ------------------
+# What step 2b just did reaches THIS dashboard and nothing else. Every
+# customer dashboard reads the vendor feed instead, so a build published only
+# by PUT is one the rest of the world can never receive -- which is exactly
+# how the feed ended up holding a macOS companion 0.9.3 with no Windows twin.
+# Advisory by default; -PublishFeed does it.
+Write-Host ""
+if ($PublishFeed) {
+    Write-Step "--- step 2b2: publish to the vendor feed ($FeedRepo) ---"
+    $feedDir = Join-Path $RepoRoot "feed"
+    $feedFailed = $false
+    foreach ($item in @(
+        @{ Kind = "companion"; Manifest = "companion\dist\ccsync-release.json"; Artifact = "companion\dist\ccsync-companion.exe" },
+        @{ Kind = "onboard";   Manifest = "";                                   Artifact = "onboarding\dist\onboard.exe"; Version = $InstallerVersion }
+    )) {
+        $artifactPath = Join-Path $RepoRoot $item.Artifact
+        if (-not (Test-Path -LiteralPath $artifactPath)) {
+            Write-Host "[ship] WARNING: no $($item.Artifact) -- $($item.Kind) NOT published to the feed" -ForegroundColor Yellow
+            $feedFailed = $true
+            continue
+        }
+        $feedArgs = @("tools\publish_feed.py", "--kind", $item.Kind, "--artifact", $artifactPath,
+                      "--feed-dir", $feedDir, "--github-repo", $FeedRepo,
+                      "--make-current", "--github-upload")
+        if ($item.Manifest) { $feedArgs += @("--manifest", (Join-Path $RepoRoot $item.Manifest)) }
+        else { $feedArgs += @("--platform", "windows", "--version", $item.Version) }
+        python @feedArgs
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[ship] WARNING: publish_feed.py exited $LASTEXITCODE for $($item.Kind) -- the feed does NOT have this build" -ForegroundColor Yellow
+            $feedFailed = $true
+        }
+    }
+    if (-not $feedFailed) { Write-Step "vendor feed updated (channel republished and made current)" }
+}
+else {
+    Write-Step "NOTE: nothing was published to the VENDOR FEED. This dashboard has v$CompanionVersion; feed customers do not."
+    Write-Step "      Mirror it with:  python tools\publish_feed.py --manifest companion\dist\ccsync-release.json --artifact companion\dist\ccsync-companion.exe --kind companion --feed-dir .\feed --github-repo $FeedRepo --make-current --github-upload"
+    Write-Step "      (or re-run this ship with -PublishFeed; for CI builds use tools\publish_latest.py.)"
 }
 
 # --- 2c. is the macOS companion channel keeping up? (advisory) --------------

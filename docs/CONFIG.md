@@ -38,6 +38,7 @@ it stops and names it; that is the enforcement.
 | `host` | — | `TRUENAS_HOST` | **R**. LAN or tailnet address |
 | `admin_user` | — | `TRUENAS_USER` | **R**. TrueNAS: `truenas_admin`. DSM: a member of `administrators`, **2FA off** (SSH is admin-only there) |
 | `verify_ssl` | `"0"` | `TRUENAS_VERIFY_SSL` / `SYNO_VERIFY_SSL` | `"0"` trusts a self-signed cert — the out-of-box state of both platforms, **and warned about on every run since 2026-08-17**, because these calls carry the admin password. Point it at a CA bundle once the NAS has a real certificate |
+| `ssh_port` | *(unset → `[net] sftp_port`, then `22`)* | `CCSYNC_SSH_PORT` | The port **the operator scripts** reach the NAS's sshd on. Until 2026-08-21 (`server-7`) every script here hardcoded 22, so a site that moved sshd — DSM often does — had a working fleet and a toolchain that could not reach the box at all. The host-key pin is recorded **per port**, the way OpenSSH spells it: moving sshd means a fresh `ssh-keyscan -p <port>` |
 | `ssh_hostkey` | — | `--host-key` / `CCSYNC_SSH_HOSTKEY` | Effectively **R**. An unpinned host not already in `~/.ccsync/known_hosts` is refused; use `--trust-host-key-on-first-use` (or `CCSYNC_SSH_TRUST_ON_FIRST_USE=1`) exactly once. A key that *changes* is always a refusal |
 
 ### `[tree]`
@@ -70,6 +71,8 @@ it stops and names it; that is the enforcement.
 | `sftp_concurrency` | `64` | Synology: `16` |
 | `sftp_host` | *(unset)* | **Leave unset on a dual-homed site** — the wizard then uses the host of whichever dashboard URL the editor reached. Set it only to a name reachable from everywhere (MagicDNS / DNS), never a LAN IP |
 | `rclone_remote` | `ccsync_sftp` | The remote *name* in each editor's `rclone.conf` |
+| `trusted_proxies` | *(unset → built by the deploy)* | Whose `X-Forwarded-*` the dashboard believes, comma separated (addresses or CIDRs) — see `DASH_TRUSTED_PROXIES` in [§2.3](#23-auth). Unset, `install_dashboard_app.trusted_proxies_for` builds `127.0.0.1,::1,<docker_bridge_cidr>,<bind_tailnet>`. Set it only to **narrow** that: naming a proxy means believing any `X-Forwarded-For` it sends. `$DASH_TRUSTED_PROXIES` in the deploying shell wins over both |
+| `docker_bridge_cidr` | `172.16.0.0/12` | The range Docker hands bridge networks, used to build the list above. **Which /16 this stack lands on is the daemon's choice at `up`**, not this file's, so the range is what can be stated in advance. `192.168.0.0/16` is in Docker's pool too and is deliberately not the default: on a studio LAN that is everybody's desk |
 | `shell_type` | `unix` | rclone's shell probing. **Ignored and forced to `none`** whenever `[stack] editor_shell = "sftp-only"` — a nologin editor cannot run `md5sum` whatever this says, and the two disagreeing is what produces "failed to calculate hash" on every pass |
 
 ### `[syncthing]`
@@ -88,7 +91,15 @@ it stops and names it; that is the enforcement.
 | `org_short` | `""` | The same name where only a few characters fit. Blank = use `org_name` |
 | `product_name` | `CC Sync` | **The vendor's** product name — the one brand string here with a non-blank default, because every deployment runs the same software. Set it only if you resell |
 | `brand_logo` | `""` | The mark in every editor's tray, window title bars and taskbar buttons. Blank wears the product's own — the **Creators Club** mark (`cc_mark_white.png`); this is CC-branded software, so that is what every customer's build shows unless a white-label fleet says otherwise. A bare name selects a mark the companion build already ships (`ccsync_mark.png` is the neutral one); anything with a separator is an absolute path on the **editor's** machine. Must be **white on transparent** — the tray tints it red/amber/green to carry sync status, so a pre-coloured logo renders as a solid blob. Per machine, `$CCSYNC_BRAND_LOGO` overrides it |
-| `canonical_prefix` | `P:\` | The drive letter editors map the tree as. Hardcoded by decision (2026-07-26); published so no client has to assume it |
+| `canonical_prefix` | `P:\` | The drive letter editors map the tree as. **Site data since 2026-08-17** (`COMMERCIAL_READINESS.md` item 11), not a hardcoded decision: both installers, both uninstallers and the companion read this key and `[tree] tree_name`, so a second customer no longer forks the installer. `P:` stays the shipped default and every machine in the field is on it. This row said "hardcoded by decision (2026-07-26)" until 2026-08-21 — true when it was written, and four days out of date by the time anyone read it |
+
+### `[broll]`
+
+| Key | Default | Notes |
+|---|---|---|
+| `default_collection` / `default_collection_label` | `""` | The own-footage collection's slug (it travels in every search URL) and the label the folder tree shows. Blank leaves the neutral `owned` / "Our Footage". The old `creators_club` slug is still accepted on the wire, so a bookmarked URL keeps working. Nothing in the database moves when you change these — the collection is derived at query time |
+| `creators_shares` | `""` | Which archive shares hold **your own** footage, comma separated. Everything not listed browses as a download. **Empty is the safe direction**: an unconfigured archive shows everything under Downloads, where filing somebody's bought footage as theirs would be the worse mistake. This was one customer's project name, hardcoded as the default in both compose templates and the deploy script, until 2026-08-21 (`product-surface-3`). **One transitional exception, and it expires:** a manifest with *no `[broll]` table at all* still gets that historical value, because the fleet running today predates the key and a redeploy that emptied its own-footage collection would look like the archive had lost 7,000 clips. Writing any `[broll]` key turns the fallback off |
+| `archive_creators_dir` | `Creators_Club` | The top-level folder own-footage shoots are **ingested** under: `<archive root>/<this>/<share>/<shoot dirs>/`. The default cannot simply change — the ~7,000 files already published sit under that name — so this governs **new writes only**. Published to the container as `BROLL_ARCHIVE_CREATORS_DIR` ([§2.6](#26-mounts-and-cadences)) |
 
 ### `[features]`
 
@@ -128,6 +139,7 @@ fails verification and is logged and discarded.
 |---|---|---|
 | `uid`, `gid` | `3000`, `3001` | What the container runs as. DSM assigns ≥ 1026 — read the real values with `id <user>` there rather than assuming |
 | `owner`, `group` | `broll`, `editors` | Their names, used for `chown -R` on the tree |
+| `private_gid` | *(unset → `uid`)* | The group on the container's **private** directories (`data/`, `venv/`, `music-data/`, `ytdl-data/`) — emphatically **not** `gid`. With group `editors` and mode 770 every editor could write into `/data` and swap the interpreter `run.sh` execs (AUDIT C-2). Unset it is the service account's own group, which is what the deploy has emitted since 2026-08-11. Name it only where that gid differs (`server-4`, 2026-08-21) |
 | `editor_shell` | `sftp-only` | `sftp-only` (nologin + an sshd `Match Group` block with `ForceCommand internal-sftp` and no password auth) or `shell`. Changing it changes what the manifest publishes as `sftp_shell_type`; redeploy afterwards. Migration: `setup_editor_account.py --migrate-existing [--apply]` |
 | `project_acl` | `shared` | `shared` = one `editors` group, 2770 everywhere: **every editor can read, write and delete every other editor's project**. `per-project` adds a `proj-<slug>` group per project plus sticky bits. Read [`TENANCY.md`](TENANCY.md) first — it changes an existing tree. **This is not the multi-org switch** |
 | `mode` | `bind` | How the dashboard container gets its code. `bind` = a stock `python:3.12.7-slim` with the four code trees and `/venv` bind-mounted off the host (what every deployment runs today). `image` = the vendor image carries all five as read-only layers, nothing is uploaded, and the dashboard can update its own **code** from the signed feed without touching the image (`ZERO_TOUCH_PLAN.md` WP K). Migrating either way is one command and deletes nothing — `install_dashboard_app.py --mode image` / `--mode bind`, which imply `--recreate`. **Image mode refuses to deploy without `DASH_RELEASE_PUBKEYS`**: with no keys the image can never verify a code bundle, so no over-the-air update could ever apply. [`DOCKER.md`](DOCKER.md) |
@@ -172,10 +184,15 @@ NOT already in the environment is loaded from
 `<DASH_DB_PATH's parent>/secrets/<lowercase name>`, or generated with
 `secrets.token_urlsafe(32)` and persisted there 0600 if no file exists
 either. **Env always wins over the file** — rotating a secret by setting the
-env var stays possible. It also writes `secrets/syncthing.env`
-(`STGUIAPIKEY=…`) and `secrets/sftp.env` (`CCSYNC_INTERNAL_TOKEN=…`,
+env var stays possible. The per-secret file is the env var's name **lower-cased** — so
+`CCSYNC_INTERNAL_TOKEN` is `secrets/ccsync_internal_token`, not
+`secrets/internal_token`. It also writes `secrets/syncthing.env`
+(`STGUIAPIKEY=…`) and `secrets/internal.env` (`CCSYNC_INTERNAL_TOKEN=…`,
 `APP_UID=…`, `APP_GID=…`) as `env_file:` targets for the `syncthing` and
-`sftp` sidecar services in agent A's compose (`ZERO_TOUCH_PLAN.md` §3.1) —
+`sftp` sidecar services in `compose.appliance.yaml` (`ZERO_TOUCH_PLAN.md` §3.1).
+**`internal.env`, not `sftp.env`**: the compose file names the former, this doc
+named the latter until 2026-08-21 (CR-67 seam 11), and `secrets_boot` deletes a
+stale `sftp.env` left by an earlier boot —
 neither of those images reads `DASH_*` variables or generates its own
 secret. This is a **no-op** for every deployment running today: it only
 runs when `create_app` is called with no explicit `Settings` (every test in
@@ -213,7 +230,7 @@ The full annotated table, including the Synology-only rows, is in
 | `DASH_NAS_PW` / `TRUENAS_PW` | **S** | Only `/admin/users` needs it. Unset = that section is 503, everything else works |
 | `DASH_NAS_API_KEY` / `TRUENAS_API_KEY` | **S** | A **scoped** TrueNAS API key, **preferred over the password when both are set**. The password in the container is root-equivalent and readable with `docker inspect`; this UI only ever calls user/group/`sharing.smb`. Mint with `server/create_api_key.py`. TrueNAS only |
 | `DASH_OIDC_CLIENT_SECRET` | **S F** | The confidential client's secret |
-| `CCSYNC_INTERNAL_TOKEN` | **S** | Bearer token guarding `/internal/sftp/*` (WP C) — what the sftp sidecar's `AuthorizedKeysCommand` presents. Unset falls back to a file at `<db dir>/secrets/internal_token` (agent D's SetupEngine writes it at first boot; this dashboard only ever reads it). Neither configured = both routes answer `503`, never authenticate everyone |
+| `CCSYNC_INTERNAL_TOKEN` | **S** | Bearer token guarding `/internal/sftp/*` (WP C) — what the sftp sidecar's `AuthorizedKeysCommand` presents. Unset falls back to a file at `<db dir>/secrets/ccsync_internal_token` (the env var's name lower-cased; this doc said `internal_token` until 2026-08-21) (agent D's SetupEngine writes it at first boot; this dashboard only ever reads it). Neither configured = both routes answer `503`, never authenticate everyone |
 
 ### 2.2 Core
 
@@ -238,7 +255,7 @@ The full annotated table, including the Synology-only rows, is in
 | `DASH_ADMIN_USERS` | `""` | csv, lowercase. Grants dashboard admin **and** decides who is `role: base` at `/api/v1/verify` |
 | `DASH_SHARED_REPORT_TOKEN_ENABLED` | `1` | Whether the one shared `DASH_REPORT_TOKEN` is still accepted alongside per-editor tokens. **Only an explicit `"0"` turns it off** — a typo must not disconnect the fleet. Turn it off once Settings ▸ Users stops naming machines on the shared credential |
 | `DASH_COOKIE_SECURE` | `auto` | `auto` = on for https. `1` forces it on **and refuses login over provable plain http**. Behind Tailscale Serve, use `1` |
-| `DASH_TRUSTED_PROXIES` | `127.0.0.1,::1` | Whose `X-Forwarded-Proto` is believed. It used to be everyone's. A proxy on the *docker host* arrives from the bridge gateway (e.g. `172.17.0.1`) |
+| `DASH_TRUSTED_PROXIES` | `127.0.0.1,::1` (**the deploy overrides this**) | Whose `X-Forwarded-*` is believed, and with it what `auth.client_ip` calls "the client". It used to be everyone's; then it was loopback only, **which the container never sees** — the stack publishes its port with compose `ports:`, so a request Tailscale Serve makes from the NAS host is NATed and arrives from the docker bridge gateway. The result was one shared client IP for the whole fleet: the login throttle's per-IP budget became one bucket, so one editor with caps lock on could `429` `/login` **and** `/api/v1/verify` for everybody (`trust-model-3`, 2026-08-21). `install_dashboard_app.py` has set it since — `[net] trusted_proxies`, else loopback + `[net] docker_bridge_cidr` + this node's tailnet address |
 | `DASH_SESSION_IDLE_SECONDS` | `43200` (12h) | Refreshed by activity |
 | `DASH_SESSION_ABSOLUTE_SECONDS` | `604800` (7d) | Never extended |
 | `DASH_OIDC_ISSUER` | `""` | **F**. Blank + method `oidc` is refused at boot rather than silently falling back to passwords |
@@ -246,6 +263,8 @@ The full annotated table, including the Synology-only rows, is in
 | `DASH_OIDC_SCOPES` | `openid profile email` | **F** |
 | `DASH_OIDC_USERNAME_CLAIM` | `preferred_username` | **F**. **Must resolve to the NAS username** — a value containing `@` is refused rather than guessed |
 | `DASH_OIDC_ADMIN_CLAIM` / `_VALUES` | `""` | **F**. Logged, **not obeyed**: admin comes from `DASH_ADMIN_USERS` |
+| `DASH_OIDC_GROUPS_CLAIM` | `groups` | Which claim in the ID token carries group membership. Only consulted when the next row is set |
+| `DASH_OIDC_ALLOWED_GROUPS` | `""` (empty set) | **WHO MAY SIGN IN AT ALL** (`trust-model-5`, 2026-08-21). Comma separated, lower-cased on both sides. Password sign-in runs `_require_fleet_member` (the `editors` group on the NAS); OIDC had **no equivalent**, so pointing the issuer at a company directory let every account in it — accounting, interns, a contractor tenant — in as an editor, and one whose `preferred_username` happened to equal a real editor's inherited that editor's plans and devices. **Empty (the default) does not mean "everyone"**: the username must then be one the fleet already knows. Set this when you would rather the IdP be the authority. A first boot with an empty fleet skips the check and logs it, rather than locking the operator out of their own dashboard on day one |
 | `DASH_OIDC_REDIRECT_URL` | `""` (derived) | Set it when something rewrites `Host` |
 | `DASH_RELEASE_PUBKEYS` | `()` | Base64 Ed25519 public keys the publish route accepts signatures from, comma- or space-separated. **Entries that do not decode to a 32-byte key are dropped**, so a leftover `REPLACE_ME` produces "no release key configured" rather than "signature rejected". Empty = publishing is refused |
 | `DASH_DEV_INSECURE` | `""` | **Lab/test only, and the only escape hatch there is.** Bypasses the boot secret floor, the server-side session rule and CSRF. Logged loudly at every boot; it must never be set on a deployment |
@@ -448,6 +467,7 @@ for `broll_ingest_*`):
 | `DASH_INTERVAL_INVENTORY` | `900` | **900, not 300, on purpose**: the directory-signature check is mtime-only, so every file lane A uploads re-triggers a full per-file walk — 100k stats plus a full SQLite rewrite, on the box simultaneously serving SFTP and Syncthing. Trade-off: inventory freshness drops from 5 to 15 minutes |
 | `DASH_INVENTORY_PROJECTS_PER_CYCLE` | `8` | |
 | `DASH_INTERVAL_CONNECTIONS` | `15` | |
+| `DASH_COMPLETION_BUDGET_SECONDS` | `30` | **Wall-clock budget for ONE completion pass** (`ops-efficiency-5`, 2026-08-21). The collector is one thread running every due kind in series, so a Syncthing that *hangs* rather than refuses parked enforce, connections, provisioning and the health signal behind ~120 sequential 10 s-timeout calls — up to 20 minutes with no tick enforced and `/api/v1/health` saying `ok=false`. Past the budget the pass stops issuing new calls, writes what it has, and a rotating cursor makes the next cycle start where this one stopped: a slow fleet converges more slowly instead of starving enforce. Recorded as `partial` in `poll_runs`. `0` disables the budget |
 | `DASH_INTERVAL_COMPLETION` | `60` | **60, not 30**: completion polling scales as folders × devices and is computed on demand. Trade-off: percentages update half as often |
 | `DASH_INTERVAL_REMOTENEED` | `60` | |
 | `DASH_INTERVAL_PRUNE` | `3600` | |

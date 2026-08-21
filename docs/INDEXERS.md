@@ -65,7 +65,7 @@ mounts its config read-only, so "edit the file" is not always available.
 | Setting | Environment | What it is |
 |---|---|---|
 | the index | `MUSIC_DB_PATH`, or `--db` | **required**: `index_music.py` refuses to pick one. Guessing is how a drain reports "nothing to analyse" about a database nobody was asking about (MUSIC-3) |
-| the data root | `MUSIC_DATA_ROOT` | proxies, staging |
+| the data root | `MUSIC_DATA_ROOT` | proxies, staging. A preview proxy is named by track id and `tracks.id` is reused (see below), so every path that deletes a row or creates one now drops the file at that id with it (music-4, 2026-08-21) |
 | the library | `MUSIC_LIBRARY_ROOT` | where this host has the music share mounted |
 | ffmpeg | `FFMPEG` / `FFPROBE`, else `PATH` | required; `require_tools()` refuses up front rather than failing per track |
 | CLAP weights | `MUSIC_MODEL_CACHE` (or `HF_HOME`) | ~600 MB |
@@ -251,6 +251,23 @@ is not touched, and is still `pending` afterwards. `python -m musicweb.drain
 inspect drain.db` shows what a bundle holds. The design and its three safety
 properties are in `music/web/musicweb/drain.py`.
 
+**Failures travel too, since 2026-08-21** (music-3). A file the base rig could
+not analyse used to be parked `failed` only in the pulled copy, so on the live
+index the row stayed `pending` for good: the editor's ingest panel counted it
+as waiting, the duplicate defences went on treating the file as held (a fixed
+re-export of the same track was refused as a duplicate), and every later drain
+decoded the broken file again. The bundle now carries those rows, and `apply`
+parks them with their reason — under the same agreement checks, and never over
+a row that has since finished.
+
+**And the running app notices, since the same day** (music-2). `apply` writes
+straight to the file; `musicweb` caches a connection per worker thread and
+builds its search matrices once per process, so the drained tracks used to be
+in browse and invisible to search until someone POSTed `/music/api/reload`.
+It now re-stats the database on the way through (at most every couple of
+seconds) and reopens or rebuilds when it has moved. A container running a
+musicweb from before 2026-08-21 still needs that POST, or a restart.
+
 ## The CLAP audio tower is an artefact now (`export_audio_encoder.py`)
 
 *2026-08-18, `docs/MUSIC_INGEST_PLAN.md` step 1.* The drain above is the
@@ -341,6 +358,14 @@ What an operator needs to know about the new path:
 - **It needs no GPU and it does not use one.** ~90 ms per 10 s window on one
   CPU core, so a music batch never stands proxy generation down the way a
   b-roll batch does.
+- **It creates rows on the NAS, and `tracks.id` is reused.** `id` is an
+  INTEGER PRIMARY KEY with no AUTOINCREMENT, so a new row takes the id of the
+  highest one ever deleted — and a preview proxy is `<id>.mp3`, chosen on
+  existence alone. Every editor previewing the new cue heard the deleted one
+  (music-4, 2026-08-21). Creating a row and pruning one now both drop the file
+  at that id. Shipping a base rig's whole `proxies/` directory over the NAS's
+  is still unsafe once the two indexes have diverged: regenerate with
+  `make_proxies.py --prune` there first, or push nothing.
 - **A track it could not analyse is not lost.** The item ends
   `queued_for_base_rig` in the ledger with the reason, the file stays staged
   on the editor's machine, and the page offers the browser upload -- which is

@@ -1089,3 +1089,38 @@ def test_a_settings_less_probe_never_writes_not_installed_into_the_cache(env, mo
     blind = ai_providers.probe_cli(conn, name, force=True)          # no settings
     assert not blind["installed"]
     assert ai_providers._cached_probe(name) is None, "a blind answer was cached"
+
+
+# --------------------------------------------- no publisher checksum, no install
+# trust-model-7 (2026-08-21): with no `codex-package_SHA256SUMS` asset the
+# install used to run with expected_sha="" and finish with
+# checksum_verified: False in a state file nobody reads, while this module's
+# docstring, the page and CLAUDE.md all call the fetch "verified against the
+# publisher's own checksum". The dashboard EXECUTES this binary with fleet
+# ytdl prompts, so it either gets that check or we do not install it.
+
+
+CODEX_RELEASE_NO_SUMS = {
+    "tag_name": "rust-v0.147.0",
+    "assets": [
+        {"name": "codex-package-x86_64-unknown-linux-musl.tar.gz",
+         "browser_download_url": "https://github.com/openai/codex/releases/download/"
+                                 "rust-v0.147.0/codex-package-x86_64-unknown-linux-musl.tar.gz"},
+    ],
+}
+
+
+def test_codex_install_is_refused_when_the_publisher_ships_no_checksum(settings, monkeypatch):
+    monkeypatch.setattr(cli_tools, "codex_target",
+                        lambda *a, **k: "x86_64-unknown-linux-musl")
+    monkeypatch.setattr(cli_tools, "codex_release", lambda: CODEX_RELEASE_NO_SUMS)
+    downloaded = []
+    monkeypatch.setattr(cli_tools, "_download",
+                        lambda *a, **k: downloaded.append(a) or ("", 0))
+
+    with pytest.raises(cli_tools.ToolError) as exc:
+        cli_tools._install_codex(settings)
+    assert "no checksum" in str(exc.value)
+    assert "type its full path" in str(exc.value)
+    assert downloaded == []
+    assert cli_tools.installed_binary(settings, cli_tools.CODEX) == ""

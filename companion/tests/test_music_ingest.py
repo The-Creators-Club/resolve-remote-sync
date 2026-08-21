@@ -99,7 +99,12 @@ class FakeSidecar:
 
 class FakeQueue:
     """broll_upload.UploadQueue's surface. Everything lands at once unless a
-    test says otherwise."""
+    test says otherwise.
+
+    `stop_all` is modelled as the ONE-WAY latch it really is (2026-08-21):
+    anything enqueued after it goes nowhere, which is what a queue reused
+    across a cancel would have done to the next album.
+    """
 
     def __init__(self):
         self.jobs: list = []
@@ -107,10 +112,15 @@ class FakeQueue:
         self.stopped = False
         self.land = True
         self._paused = False
+        self.dead: list = []
 
     def enqueue(self, local_path, remote_rel, kind, item_uid="", size_bytes=None):
-        self.jobs.append({"rel": remote_rel, "kind": kind, "item_uid": item_uid,
-                          "size": size_bytes, "local": str(local_path)})
+        job = {"rel": remote_rel, "kind": kind, "item_uid": item_uid,
+               "size": size_bytes, "local": str(local_path)}
+        if self.stopped:
+            self.dead.append(job)
+            return
+        self.jobs.append(job)
 
     def uploaded(self):
         return list(self.jobs) if self.land else []
@@ -656,3 +666,63 @@ def test_the_state_file_is_written_where_the_plan_says(tmp_path):
     saved = json.loads((tmp_path / "state" / "music_ingest.json").read_text())
     assert saved["version"] == 1
     assert not (tmp_path / "state" / "broll_ingest.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# the shared upload queue's lifetime (comp-loopback-1, 2026-08-21)
+# ---------------------------------------------------------------------------
+
+def test_a_cancelled_batch_leaves_the_next_one_a_working_queue(tmp_path):
+    """The b-roll fix reaches music because the orchestrator is shared:
+    `stop_all` latches an UploadQueue shut for ever, so the object cannot
+    outlive the batch that was cancelled or every later album's file is handed
+    to a queue nothing will ever drain."""
+    server = FakeServer()
+    queues = [FakeQueue()]
+    ing = make_ingestor(tmp_path, server=server, queue=queues[0])
+
+    def _fresh():
+        queues.append(FakeQueue())
+        return queues[-1]
+
+    ing._new_queue = _fresh
+    first = stage_one(ing, tmp_path)
+    ing.run("b" * 32, first)
+    ing.cancel("cancelled from the tray")
+
+    second = stage_one(ing, tmp_path)
+    status, answer = ing.run("b" * 32, second)
+    ing.tick()
+
+    assert status == 202, answer
+    assert len(queues) == 2, "the cancelled queue is dead; the next batch needs a new one"
+    assert queues[1].jobs, "and the next track has to reach a queue that runs"
+    assert queues[1].dead == []
+
+
+def test_a_new_queue_points_at_this_batchs_library(tmp_path):
+    """Per BATCH, not per process: the library path is the SERVER's answer to
+    this batch's claim, so a queue built for the previous one would upload
+    into the wrong place (comp-loopback-1, 2026-08-21)."""
+    ing = make_ingestor(tmp_path, uploader=None)
+    ing._batch = {"uid": "b" * 32, "archive_remote_rel": "Assets/Music Library"}
+
+    queue = ing._new_queue()
+
+    assert queue._archive_rel == "Assets/Music Library"
+
+
+def test_the_upload_plan_names_the_one_file_the_server_named(tmp_path):
+    """Both kinds have to answer "which local file is behind this remote rel"
+    for the retry path to be shared (comp-loopback-3, 2026-08-21). A track
+    with no allocated name has nothing to answer with, which is the same case
+    `_enqueue_uploads` fails it for."""
+    ing = make_ingestor(tmp_path)
+    item = {"dest_name": "Slow Burn_2.mp3",
+            "outputs": {"audio": str(tmp_path / "Slow Burn.mp3")}}
+
+    plan = ing._upload_plan(item)
+
+    assert plan == {"Slow Burn_2.mp3": (music_ingest.KIND_AUDIO,
+                                        str(tmp_path / "Slow Burn.mp3"))}
+    assert ing._upload_plan({"outputs": {"audio": "x.mp3"}}) == {}

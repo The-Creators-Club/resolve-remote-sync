@@ -30,6 +30,7 @@ all, and the indexer half must not drag in fastapi. Only the ffmpeg shelling
 stays per-half, because tool discovery differs between the two hosts.
 """
 import hashlib
+import logging
 import os
 import re
 import shutil
@@ -42,6 +43,8 @@ from pathlib import Path
 import numpy as np
 
 from musicweb import config
+
+log = logging.getLogger(__name__)
 
 # Highest schema version this codebase knows how to run against. Bump it, add
 # the file to _MIGRATIONS, and give it a predicate.
@@ -171,6 +174,91 @@ def invalidate():
         _schema_ready = False
 
 
+def generation():
+    """Which set of cached connections is current. Bumped by invalidate().
+
+    Read by search.Index, which holds matrices built from a connection and has
+    to know when that connection's FILE stopped being the live one.
+    """
+    return _generation
+
+
+# (path, dev, inode) as last seen by _check_swapped. `None` until the first
+# successful stat, which is never a swap. The PATH is part of it because a swap
+# is "this path now names a different file": a run that repoints DB_PATH
+# altogether (the eval sweep, the tests) has changed database, not had one
+# swapped underneath it, and must not invalidate connections it does not own.
+_open_identity = None
+
+
+def _file_identity(path=None):
+    """(st_dev, st_ino) of the database file, or None if it cannot be stat'd.
+
+    Identity, not content: a rename-swap replaces the file the PATH points at
+    while every open connection goes on reading the unlinked old inode.
+    """
+    try:
+        st = os.stat(path or config.DB_PATH)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def file_state(path=None):
+    """A cheap fingerprint of the database AND its -wal: identity plus size and
+    mtime of both, or None.
+
+    What it is for (music-2, 2026-08-21): the derived search matrices are built
+    once per process and only refresh() replaces them, so a change made by
+    ANOTHER process -- `python -m musicweb.drain apply` on the NAS, or a
+    publish that renames a new music.db into place -- was invisible to text
+    search and /api/similar until somebody POSTed /api/reload, which no runbook
+    told anyone to do. The -wal half matters because an in-place apply commits
+    there first: on a busy container the main file may not be checkpointed for
+    a long time.
+
+    Deliberately not `PRAGMA data_version`: that counter is per CONNECTION, and
+    this app has one per thread, so two threads comparing their own counters
+    against one shared Index would rebuild it on every alternating request.
+    """
+    p = Path(path or config.DB_PATH)
+    try:
+        st = os.stat(p)
+    except OSError:
+        return None
+    out = [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns]
+    try:
+        wal = os.stat(str(p) + '-wal')
+        out += [wal.st_size, wal.st_mtime_ns]
+    except OSError:
+        out += [0, 0]                 # no -wal: not a WAL database, or idle
+    return tuple(out)
+
+
+def _check_swapped():
+    """Notice a database file that was REPLACED, and drop the stale handles.
+
+    MUSIC-10 (2026-08-14) fixed this for /api/reload, which calls invalidate()
+    by hand. Nothing else did -- so after `publish_db.py --which music --apply`
+    renamed a fresh index into place, every long-lived worker thread went on
+    answering browse, facets, audio lookups and search from the deleted inode,
+    indefinitely, because anyio reuses the most recently idle thread and the
+    dashboard is polled every 2 s (music-2, 2026-08-21). One os.stat per con().
+    """
+    global _open_identity
+    ident = _file_identity()
+    if ident is None:
+        return
+    ident = (str(config.DB_PATH),) + ident
+    with _schema_lock:
+        previous, _open_identity = _open_identity, ident
+    if previous is not None and previous[0] == ident[0] and previous != ident:
+        log.warning('the music index at %s has been replaced (a publish, or a '
+                    'restore): dropping every cached connection so the next '
+                    'read opens the new file', config.DB_PATH)
+        invalidate()
+
+
 def con():
     """One SQLite connection per thread.
 
@@ -181,6 +269,7 @@ def con():
     concurrent readers cheap, so per-thread connections cost nothing.
     """
     global _schema_ready
+    _check_swapped()
     c = getattr(_local, 'con', None)
     if c is not None and getattr(_local, 'generation', None) != _generation:
         try:
@@ -312,7 +401,9 @@ def prune_missing(con, present, force=False, max_share=0.2, floor=5):
         raise PruneRefused('refusing to prune with foreign keys disabled')
 
     present = {str(p) for p in present}
-    rows = [r['rel_path'] for r in con.execute('SELECT rel_path FROM tracks')]
+    by_rel = {r['rel_path']: r['id']
+              for r in con.execute('SELECT id,rel_path FROM tracks')}
+    rows = list(by_rel)
     gone = sorted(r for r in rows if r not in present)
     if not gone:
         return []
@@ -327,6 +418,12 @@ def prune_missing(con, present, force=False, max_share=0.2, floor=5):
             'the root, then re-run with --prune if it really is one.')
     con.executemany('DELETE FROM tracks WHERE rel_path=?', [(g,) for g in gone])
     con.commit()
+    # The id is now free, and SQLite hands the next insert max(rowid)+1: leaving
+    # the proxy behind is how an editor ends up previewing a deleted cue under
+    # a new track's name (music-4, 2026-08-21). Deletion is what frees the id,
+    # so deletion is what removes the file.
+    for rel in gone:
+        config.drop_proxy(by_rel[rel])
     return gone
 
 

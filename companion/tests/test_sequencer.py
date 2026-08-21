@@ -1513,3 +1513,204 @@ def test_a_blank_local_root_never_clones(tmp_path):
     seq = _clone_spy_sequencer("", calls)
     seq._clone_structure("Projects/2026/FF5/Alpha")
     assert calls == []
+
+
+# -- the 2026-08-21 hunt ----------------------------------------------------
+
+
+class _StatusLane(FakeLane):
+    """A lane that answers with a LaneStatus, like the real adapters, and
+    reports what its last run moved."""
+
+    def __init__(self, name, events, state, moved=0):
+        super().__init__(name, events)
+        self.state = state
+        self.moved = moved
+
+    def run_once(self, subpath=None):
+        super().run_once(subpath)
+        from ccsync_companion.sync.base import LaneStatus
+
+        return LaneStatus(name=self.name, state=self.state)
+
+    def last_run_moved(self):
+        return self.moved
+
+
+def test_the_lane_c_wait_is_a_short_settle_when_nothing_is_being_paused():
+    """ops-efficiency-3: the 600 s wait is load-bearing only under the
+    "rotate" scheme, where the next project's turn would pause this folder
+    mid-transfer. With the default scheme Syncthing paces lane C itself, and
+    the wait just parked the whole sequencer -- so lane B proxies for every
+    project behind a big backlog arrived up to N x 600 s late."""
+    admin = FakeAdmin()
+    seq, _a, _b, _e = _build(FakeSelectionClient(selection=[]), admin,
+                             project_rotation_seconds=600.0)
+    assert seq._lane_c_wait_budget() == 30.0
+
+    rotating, _a2, _b2, _e2 = _build(
+        FakeSelectionClient(selection=[]), FakeAdmin(),
+        project_rotation_seconds=600.0, lane_c_pause_scheme="rotate")
+    assert rotating._lane_c_wait_budget() == 600.0
+
+
+def test_a_folder_that_never_settles_does_not_hold_the_whole_rotation():
+    clock = {"now": 0.0}
+
+    def fake_now():
+        clock["now"] += 5.0
+        return clock["now"]
+
+    admin = FakeAdmin()
+    admin.status_by_slug["s-a"] = 7          # never reaches zero
+    lane_a = FakeLane("lane_a", admin.events)
+    lane_b = FakeLane("lane_b", admin.events)
+    seq = Sequencer(
+        lane_a, lane_b, admin, FakeSelectionClient(selection=[]),
+        _cfg(project_rotation_seconds=600.0), folder_status_poll_seconds=0.001,
+        now=fake_now,
+    )
+    seq._wait_for_folder_sync("s-a", ["s-a"])
+    # 30 s of settle at 5 s a tick, not 600.
+    assert len(admin.status_calls) <= 8
+
+
+def test_the_idle_wait_backs_off_only_while_nothing_is_moving():
+    """ops-efficiency-2: a steady-state pass costs 3 rclone processes, 2
+    recursive SFTP listings and 3 local walks per project, every 60 s, to
+    discover that nothing changed."""
+    seq, _a, _b, _e = _build(FakeSelectionClient(selection=[]), FakeAdmin(),
+                             sequencer_idle_seconds=60.0)
+    assert seq._idle_seconds() == 60.0
+    seq._note_pass_finished()
+    assert seq._idle_seconds() == 120.0
+    seq._note_pass_finished()
+    assert seq._idle_seconds() == 300.0
+    seq._note_pass_finished()
+    assert seq._idle_seconds() == 300.0, "the backoff is capped"
+
+    # A pass that actually moved something is back to the normal cadence...
+    seq._pass_moved = 3
+    seq._note_pass_finished()
+    assert seq._idle_seconds() == 60.0
+
+    # ...and so is a tray trigger, a watcher event or a selection change.
+    seq._pass_moved = 0
+    seq._note_pass_finished()
+    seq._note_pass_finished()
+    assert seq._idle_seconds() > 60.0
+    seq.trigger_pass_now()
+    assert seq._idle_seconds() == 60.0
+
+
+def test_a_selection_change_ends_the_backoff():
+    seq, _a, _b, _e = _build(FakeSelectionClient(selection=[]), FakeAdmin(),
+                             sequencer_idle_seconds=60.0)
+    seq._note_pass_finished()
+    assert seq._idle_seconds() == 120.0
+    seq._update_known_selection([_item("s-a", "2026/FF5/Alpha", 0)])
+    assert seq._idle_seconds() == 60.0
+
+
+def test_both_lanes_failing_ends_the_pass_instead_of_asking_every_project():
+    """ops-efficiency-4: a laptop off the tailnet spends contimeout x retries
+    per lane per project -- ~45 minutes of doomed subprocesses for ten
+    projects, then starts again 60 s later."""
+    from ccsync_companion.sync.base import STATE_ERROR
+
+    items = [_item("s-a", "2026/FF5/Alpha", 0), _item("s-b", "2026/FF5/Bravo", 1),
+             _item("s-c", "2026/FF5/Charlie", 2)]
+    admin = FakeAdmin()
+    lane_a = _StatusLane("lane_a", admin.events, STATE_ERROR)
+    lane_b = _StatusLane("lane_b", admin.events, STATE_ERROR)
+    seq = Sequencer(
+        lane_a, lane_b, admin, FakeSelectionClient(selection=items),
+        _cfg(), folder_status_poll_seconds=0.02,
+    )
+    seq._update_known_selection(items)
+    seq._run_pass(items)
+
+    assert lane_a.calls == ["Projects/2026/FF5/Alpha"]
+    assert lane_b.calls == ["Projects/2026/FF5/Alpha"]
+
+
+def test_one_failing_lane_is_not_an_offline_machine():
+    from ccsync_companion.sync.base import STATE_ERROR, STATE_IDLE
+
+    items = [_item("s-a", "2026/FF5/Alpha", 0), _item("s-b", "2026/FF5/Bravo", 1)]
+    admin = FakeAdmin()
+    lane_a = _StatusLane("lane_a", admin.events, STATE_IDLE)
+    lane_b = _StatusLane("lane_b", admin.events, STATE_ERROR)
+    seq = Sequencer(
+        lane_a, lane_b, admin, FakeSelectionClient(selection=items),
+        _cfg(), folder_status_poll_seconds=0.02,
+    )
+    seq._update_known_selection(items)
+    seq._run_pass(items)
+
+    assert len(lane_a.calls) == 2
+
+
+def test_the_halt_scope_includes_the_shared_asset_folders():
+    """sync-safety-2: a fleet halt pressed over a mass rename in the B-roll
+    archive left the archive, music and LUT folders syncing on every machine
+    while every tray said nothing was."""
+    class _Shared:
+        def folder_ids(self):
+            return ["ccsync-assets-luts", "ccsync-assets-broll"]
+
+        def reconcile(self):
+            return {}
+
+    items = [_item("s-a", "2026/FF5/Alpha", 0)]
+    admin = FakeAdmin()
+    seq = Sequencer(
+        FakeLane("lane_a", admin.events), FakeLane("lane_b", admin.events),
+        admin, FakeSelectionClient(selection=items), _cfg(),
+        shared_folders=_Shared(),
+    )
+    seq._update_known_selection(items)
+    assert seq.halt_folder_ids() == ["s-a", "ccsync-assets-luts", "ccsync-assets-broll"]
+    # ...and lane C's "am I behind" list is deliberately NOT widened.
+    assert seq.expected_folder_slugs() == ["s-a"]
+
+
+def test_releasing_a_halt_keeps_an_unfiltered_folder_paused():
+    """sync-safety-4: the halt's release PATCHed paused:false onto every
+    folder it had paused, including one deliberately left paused because its
+    .stignore never landed -- putting an unfiltered sendreceive folder
+    online."""
+    items = [_item("s-a", "2026/FF5/Alpha", 0), _item("s-b", "2026/FF5/Bravo", 1)]
+    admin = FakeAdmin()
+    admin.paused_state = {"s-a": True, "s-b": True}
+    admin._ignores_unconfirmed.add("s-b")
+    seq, _a, _b, _e = _build(FakeSelectionClient(selection=items), admin)
+    seq._update_known_selection(items)
+
+    seq.release_for_halt()
+
+    released = [fid for fid, paused in admin.pause_calls if paused is False]
+    assert "s-a" in released
+    assert "s-b" not in released
+
+
+def test_each_pass_asks_lane_b_to_check_the_remote_root():
+    """sync-safety-5: in managed mode every pass names a project subpath, so
+    the breaker's marker-directory rule never ran at all."""
+    probes = []
+
+    class _LaneB(FakeLane):
+        def check_remote_root(self):
+            probes.append(1)
+            return True
+
+    items = [_item("s-a", "2026/FF5/Alpha", 0)]
+    admin = FakeAdmin()
+    seq = Sequencer(
+        FakeLane("lane_a", admin.events), _LaneB("lane_b", admin.events),
+        admin, FakeSelectionClient(selection=items), _cfg(),
+    )
+    seq.start()
+    assert _wait_until(lambda: probes)
+    seq.stop()
+    assert probes

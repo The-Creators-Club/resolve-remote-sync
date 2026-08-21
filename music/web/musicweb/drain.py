@@ -113,6 +113,19 @@ CREATE TABLE IF NOT EXISTS bundle_debias (
     idx INTEGER PRIMARY KEY,
     vec BLOB
 );
+-- One row per journal entry this drain PARKED (music-3, 2026-08-21). The
+-- failure used to exist only in the pulled copy, so on the live index the row
+-- stayed `pending` forever: the editor's panel showed it waiting, the
+-- duplicate defences went on treating the file as held (so a fixed re-export
+-- was refused as a duplicate), and every subsequent drain decoded the same
+-- broken file again. `error` is what index_music wrote there, carried across
+-- verbatim so the reason is readable where the editor is looking.
+CREATE TABLE IF NOT EXISTS bundle_failures (
+    uid          TEXT PRIMARY KEY,
+    content_hash TEXT,
+    rel_path     TEXT,
+    error        TEXT
+);
 """ % ',\n    '.join(TRACK_COLS)
 # The track columns above are declared with NO TYPE on purpose. A transport
 # table must hand back exactly what it was given, and SQLite type affinity is a
@@ -157,13 +170,22 @@ def _require_journal(con, what):
 # --------------------------------------------------------------------- export
 
 
-def export_bundle(con, uids, out_path, include_rescore=True, source=None):
+def export_bundle(con, uids, out_path, include_rescore=True, source=None,
+                  failures=()):
     """Write the analysis of `uids` to a bundle file. -> a summary dict.
 
     `uids` is what the drain actually closed, in order. A uid whose track row is
     missing or has no embedding is REPORTED, not written: the point of the
     bundle is that everything in it is finished work, so that the apply side can
     treat a present row as authoritative.
+
+    `failures` is the other half of the same fact: (uid, error) pairs for the
+    rows this drain PARKED (music-3, 2026-08-21). They carry no analysis by
+    definition, so they travel in their own table and close the live journal
+    row as `failed` rather than `done`. Optional, and the table is read with
+    "if it is there" on the apply side, so a bundle written by an older base rig
+    still applies -- which is why BUNDLE_VERSION is unchanged: this is purely
+    additive in both directions.
 
     `include_rescore` carries the tags and axes of the WHOLE library plus the
     source-bias axes, because both are library-relative: `index_music.retag`
@@ -204,6 +226,8 @@ def export_bundle(con, uids, out_path, include_rescore=True, source=None):
             _copy_children(con, out, t['id'], t['rel_path'])
             written.append(uid)
 
+        parked = _copy_failures(con, out, failures)
+
         if include_rescore:
             _copy_rescore(con, out)
 
@@ -212,6 +236,7 @@ def export_bundle(con, uids, out_path, include_rescore=True, source=None):
             ('created_at', _now()),
             ('source', str(source or '')),
             ('tracks', str(len(written))),
+            ('failures', str(len(parked))),
             ('rescore', '1' if include_rescore else '0'),
         ])
         out.commit()
@@ -222,7 +247,28 @@ def export_bundle(con, uids, out_path, include_rescore=True, source=None):
         raise
     out.close()
     return {'path': str(out_path), 'tracks': len(written), 'uids': written,
-            'skipped': missing, 'rescore': bool(include_rescore)}
+            'skipped': missing, 'failures': parked,
+            'rescore': bool(include_rescore)}
+
+
+def _copy_failures(con, out, failures):
+    """Write the parked rows to the bundle. -> the uids written.
+
+    The journal row is looked up so the apply side can make the SAME agreement
+    checks a successful row gets: a path whose bytes changed since the pull has
+    not been shown to be broken, and must stay pending for the next drain.
+    """
+    parked = []
+    for uid, error in failures or ():
+        q = con.execute('SELECT rel_path, content_hash FROM ingest_queue '
+                        'WHERE uid=?', (uid,)).fetchone()
+        if q is None:
+            continue
+        out.execute('INSERT OR REPLACE INTO bundle_failures'
+                    '(uid,content_hash,rel_path,error) VALUES(?,?,?,?)',
+                    (uid, q['content_hash'], q['rel_path'], str(error)[:2000]))
+        parked.append(uid)
+    return parked
 
 
 def _copy_children(con, out, track_id, rel_path):
@@ -296,18 +342,25 @@ def apply_bundle(con, bundle_path, apply_rescore=True):
     _require_journal(con, 'the index being written')
 
     b = _connect(bundle_path)
-    report = {'applied': [], 'skipped': [], 'rescored_tracks': 0,
+    report = {'applied': [], 'skipped': [], 'failed': [], 'rescored_tracks': 0,
               'bundle': dict(meta)}
     try:
         cols = ','.join(TRACK_COLS)
         placeholders = ','.join('?' * len(TRACK_COLS))
         updates = ','.join(f'{c}=excluded.{c}' for c in TRACK_COLS
                            if c != 'rel_path')
+        created = []
         for row in b.execute(f'SELECT uid,content_hash,{cols} FROM bundle_tracks'):
             reason = _reject_reason(con, row)
             if reason:
                 report['skipped'].append((row['uid'], reason))
                 continue
+            # A row created here takes max(rowid)+1 -- the id of the highest
+            # track ever deleted from this index, whose preview proxy may still
+            # be on disk (music-4, 2026-08-21). Collected now, dropped after
+            # the commit: the filesystem has no part in this transaction.
+            fresh = con.execute('SELECT id FROM tracks WHERE rel_path=?',
+                                (row['rel_path'],)).fetchone() is None
             con.execute(
                 f'INSERT INTO tracks({cols}) VALUES({placeholders}) '
                 f'ON CONFLICT(rel_path) DO UPDATE SET {updates}',
@@ -326,7 +379,11 @@ def apply_bundle(con, bundle_path, apply_rescore=True):
                 'UPDATE ingest_queue SET state=?, error=NULL, track_id=?, '
                 'attempts=attempts+1, updated_at=? WHERE uid=?',
                 (DONE, live['id'], _now(), row['uid']))
+            if fresh:
+                created.append(live['id'])
             report['applied'].append(row['uid'])
+
+        _apply_failures(con, b, report)
 
         if apply_rescore and meta.get('rescore') == '1':
             # Imported HERE, not at module scope, and that is load-bearing:
@@ -344,7 +401,46 @@ def apply_bundle(con, bundle_path, apply_rescore=True):
         raise
     finally:
         b.close()
+
+    # After the commit, and never fatal (music-4, 2026-08-21). `config` is
+    # stdlib-only -- paths and env vars -- so importing it here keeps this
+    # module runnable by whatever python3 the NAS host happens to have, which
+    # is the whole reason `rescore` is imported lazily above too.
+    from musicweb import config
+    for track_id in created:
+        config.drop_proxy(track_id)
     return report
+
+
+def _apply_failures(con, b, report):
+    """Park on the LIVE journal the rows this drain could not analyse.
+
+    music-3, 2026-08-21. Without this the failure existed only in the pulled
+    copy: the live row stayed `pending`, so the ingest panel showed it waiting
+    forever, `find_reencode`/`find_content_duplicate_by_digest` went on treating
+    the file as a held track (a fixed re-export of it was refused as a
+    duplicate), and every later drain decoded the same broken file again.
+
+    Same agreement checks as a successful row, and one more: a row that is
+    already `done` is never forced back to failed. Older bundles have no such
+    table and simply have no failures to apply.
+    """
+    try:
+        rows = b.execute('SELECT uid,content_hash,rel_path,error '
+                         'FROM bundle_failures').fetchall()
+    except sqlite3.DatabaseError:
+        return                       # a bundle written before music-3
+    for row in rows:
+        reason = _reject_reason(con, row)
+        if reason:
+            report['skipped'].append((row['uid'], reason))
+            continue
+        con.execute(
+            'UPDATE ingest_queue SET state=?, error=?, attempts=attempts+1, '
+            'updated_at=? WHERE uid=?',
+            (FAILED, str(row['error'] or 'the drain could not analyse this '
+                         'file')[:2000], _now(), row['uid']))
+        report['failed'].append(row['uid'])
 
 
 def _reject_reason(con, row):
@@ -448,8 +544,23 @@ def main(argv=None):
     print(f'applied {len(report["applied"])} track(s) to {db_path}')
     if report['rescored_tracks']:
         print(f'  re-scored {report["rescored_tracks"]} track(s) library-wide')
+    if report['failed']:
+        # music-3, 2026-08-21: these are the rows the base rig could not
+        # analyse. They are now parked HERE too, which is what stops the
+        # editor's panel counting them as still waiting.
+        print(f'  parked {len(report["failed"])} row(s) as failed; the ingest '
+              'panel shows the reason. Nothing retries them on their own.')
     for uid, reason in report['skipped']:
         print(f'  SKIPPED {uid}: {reason}')
+    if report['applied'] or report['failed']:
+        # music-2, 2026-08-21: this process writes the file directly, so the
+        # app's cached connections and its search matrices are what have to
+        # notice. They do, within a couple of seconds, since musicweb watches
+        # the file. An older deployment does not: say so rather than leaving
+        # the operator wondering why the new cues are unsearchable.
+        print('  the live app picks this up on its next search. If it is '
+              'running a musicweb older than 2026-08-21, POST '
+              '/music/api/reload or restart the dashboard container.')
     # Non-zero when anything was refused: a scheduled apply must be visibly
     # partial rather than quietly so.
     return 1 if report['skipped'] else 0

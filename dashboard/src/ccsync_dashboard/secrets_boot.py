@@ -97,6 +97,47 @@ def _read_secret_file(path: Path) -> str:
         return ""
 
 
+# The two secrets a SIDECAR also holds, and the `KEY=VALUE` env_file each one
+# reads: {env var: (filename, key inside it)}.
+#
+# dash-admin-2 (2026-08-21): compose.appliance.yaml's `secrets-init` service
+# generates these two into `syncthing.env` / `internal.env` BEFORE this
+# container starts (the sidecars have no secret generator of their own and
+# compose reads an env_file at container start, so somebody has to write them
+# first). This module used to look only at `<data>/secrets/<lower env name>`,
+# find nothing, GENERATE a second value, and then overwrite `syncthing.env`
+# with it -- so Syncthing answered 403 until its container was restarted, and
+# the sftp sidecar (which is NOT restarted, and whose token is only read at
+# its own startup) presented a token the dashboard had never heard of: every
+# `AuthorizedKeysCommand` call 401'd and no editor could authenticate at all.
+# Adopting whatever the sidecar file already holds is what makes the three
+# parties agree on first boot; the plain file is written too, so the name
+# every other reader uses exists from then on.
+SIDECAR_ENV_FILES = {
+    "SYNCTHING_API_KEY": ("syncthing.env", "STGUIAPIKEY"),
+    "CCSYNC_INTERNAL_TOKEN": ("internal.env", "CCSYNC_INTERNAL_TOKEN"),
+}
+
+
+def _read_env_file_value(path: Path, key: str) -> str:
+    """One `KEY=VALUE` out of a compose env_file. Tolerant of blank lines,
+    comments and `export ` prefixes; never raises."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        name, sep, value = line.partition("=")
+        if sep and name.strip() == key:
+            return value.strip().strip('"').strip("'")
+    return ""
+
+
 def ensure_secrets(
     env: MutableMapping[str, str] | None = None,
     names: tuple[str, ...] = SECRET_ENV_VARS,
@@ -139,6 +180,21 @@ def ensure_secrets(
             env[name] = existing
             provenance[name] = "file"
             continue
+        # A sidecar's env_file, if one already carries this secret
+        # (dash-admin-2, 2026-08-21 -- see SIDECAR_ENV_FILES). Adopted, never
+        # regenerated: the sidecar that wrote it is already running with it.
+        sidecar = SIDECAR_ENV_FILES.get(name)
+        if sidecar is not None:
+            adopted = _read_env_file_value(secrets_dir / sidecar[0], sidecar[1])
+            if adopted:
+                env[name] = adopted
+                provenance[name] = "sidecar-file"
+                try:
+                    _write_secret_file(path, adopted)
+                except OSError as exc:                              # noqa: BLE001
+                    log.warning("could not mirror %s from %s to %s (%s)",
+                                name, sidecar[0], path, exc)
+                continue
         value = secrets.token_urlsafe(32)
         try:
             _write_secret_file(path, value)
@@ -156,8 +212,9 @@ def ensure_secrets(
 
 
 def _write_sidecar_env_files(env: Mapping[str, str], secrets_dir: Path) -> None:
-    """`syncthing.env` (`STGUIAPIKEY=`) and `sftp.env` (`CCSYNC_INTERNAL_TOKEN=`,
-    `APP_UID=`, `APP_GID=`) -- the `env_file:` targets agent A's compose
+    """`syncthing.env` (`STGUIAPIKEY=`) and `internal.env`
+    (`CCSYNC_INTERNAL_TOKEN=`, `APP_UID=`, `APP_GID=`) -- the `env_file:`
+    targets agent A's compose
     (WP A/C) points the `syncthing` and `sftp` sidecar services at, because
     neither of them reads `DASH_*` variables and neither has its own secret
     generator. Rewritten every boot so a secret rotated by setting the env
@@ -193,7 +250,13 @@ def _write_sidecar_env_files(env: Mapping[str, str], secrets_dir: Path) -> None:
                 lines.append(f"APP_UID={app_uid}\n")
             if app_gid:
                 lines.append(f"APP_GID={app_gid}\n")
-            _write_secret_file(secrets_dir / "sftp.env", "".join(lines))
+            # `internal.env`, which is the file compose.appliance.yaml's sftp
+            # service actually env_files -- NOT `sftp.env`, which this
+            # function wrote until 2026-08-21 and which nothing has ever read
+            # (dash-admin-2). A stale copy of a live secret with no reader is
+            # not worth keeping around, so an old one is removed.
+            _write_secret_file(secrets_dir / "internal.env", "".join(lines))
+            (secrets_dir / "sftp.env").unlink(missing_ok=True)
     except OSError as exc:  # noqa: BLE001
         log.warning("could not write sidecar env_file targets under %s (%s)",
                     secrets_dir, exc)

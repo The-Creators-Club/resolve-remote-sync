@@ -1047,6 +1047,7 @@ def list_remote_files(
     # and only when the alternative is stopping the lane, so a slow answer
     # still beats no answer -- but it must not hang the sequencer forever.
     timeout: float = 600.0,
+    paths_out: Optional[set] = None,
 ) -> Optional[dict[str, set[int]]]:
     """`{basename: {size, ...}}` for every file under the remote side of a
     lane B pass, or None when the listing failed.
@@ -1063,6 +1064,13 @@ def list_remote_files(
     answers and the caller must not confuse them -- an empty remote is the
     case where every local file really is a deletion, which is precisely
     when the breaker must be free to trip.
+
+    `paths_out`, when supplied, is filled with each file's RELATIVE POSIX
+    PATH under the scope as well. The basename index above cannot answer
+    "is this exact file still where it was", which is the question a file
+    the age gate merely filtered out needs answering (comp-lanes-ab-3) --
+    and one walk has to serve both, because it is a ten-minute-capped
+    recursive listing inside the sequencer's run lock.
     """
     if not remote or not remote_root:
         return None
@@ -1089,9 +1097,12 @@ def list_remote_files(
             size = int(size_text.strip())
         except ValueError:
             continue
-        name = path.strip().rstrip("/").rsplit("/", 1)[-1]
+        rel = path.strip().rstrip("/").lstrip("/")
+        name = rel.rsplit("/", 1)[-1]
         if name:
             found.setdefault(name, set()).add(size)
+            if paths_out is not None:
+                paths_out.add(rel)
     return found
 
 
@@ -1591,6 +1602,9 @@ _FATAL_NOTICE = "fatal error received"
 _ERROR_LEVELS = ("error", "critical", "fatal")
 # The per-file line --backup-dir writes instead of a delete.
 _BACKUP_MOVE = "into backup dir"
+# ...and the record rclone emits immediately BEFORE it, for the same object.
+# Measured against the bundled 1.74.4 with --use-json-log (comp-lanes-ab-4).
+_SERVER_SIDE_MOVE = "Moved (server-side)"
 
 
 def _most_informative_error(errors: list) -> str:
@@ -1669,6 +1683,19 @@ class RcloneRunTally:
             # transferred AND one more deleted file. A lane B pass that
             # trashed 12 proxies over ten minutes reported ~300 deletions to
             # the dashboard. Stats records describe the run, never a file.
+            return
+        elif _SERVER_SIDE_MOVE in msg:
+            # --backup-dir emits TWO records per file it moves aside:
+            # "Moved (server-side)" and then "Moved into backup dir", both
+            # naming the same object. The first matched the per-file rule
+            # below, so every trashed proxy was counted as a COMPLETED
+            # DOWNLOAD and landed in the dashboard's transfer history as a
+            # file that had just arrived, while "transferred N file(s)"
+            # counted it twice (comp-lanes-ab-4, 2026-08-21 -- the SYNC-10
+            # symptom through the record SYNC-10's fix did not know about).
+            # The "into backup dir" twin is what carries the meaning, so this
+            # one is worth nothing at all: lane B is the only lane that can
+            # emit it (lane A is `copy`).
             return
         elif "Copied" in msg or "Moved" in msg or "Deleted" in msg:
             # Per-file records ("clip.mov: Copied (new)") only — the run-
@@ -2054,6 +2081,18 @@ class RcloneLane(LaneAdapter):
         self._express_seq = 0
         # Lane B's --backup-dir for the run in flight (see _notify_trash).
         self._last_backup_dir: Optional[str] = None
+        # Files the last run actually moved (transferred + trashed). The
+        # sequencer reads it to tell a pass that did work from one that found
+        # nothing to do, which is what its idle backoff keys on
+        # (ops-efficiency-2, 2026-08-21).
+        self._last_run_moved = 0
+        # Has `remote_root` itself been confirmed to hold the marker dirs
+        # this process? In managed mode every pass names a project subpath,
+        # so the breaker's root probe never ran at all (sync-safety-5,
+        # 2026-08-21). Once per process: it is one `lsf` of one directory,
+        # and a root that answered correctly does not become somebody's home
+        # directory later.
+        self._remote_root_checked = False
         # Completed-file events awaiting the next report (the dashboard's
         # transfer HISTORY). Bounded; drained by pop_completions().
         self._pending_completions: deque = deque(maxlen=400)
@@ -2539,6 +2578,10 @@ class RcloneLane(LaneAdapter):
     def _run_once_locked(
         self, subpath: Optional[str] = None, max_duration_seconds: Optional[float] = None
     ) -> LaneStatus:
+        # Cleared here rather than only set at the end, so an early return
+        # (breaker, stopped lane, missing root) reads as "this pass moved
+        # nothing" instead of repeating the last real pass's count.
+        self._last_run_moved = 0
         # THE SAFETY LINE, and it is first for a reason. This lane is
         # `rclone sync <NAS> <local_root>` in the DOWN direction. Against a
         # local_root that is not there -- a macOS editor's external SSD
@@ -2700,6 +2743,11 @@ class RcloneLane(LaneAdapter):
             self._set_periodic_scope(None)
 
         self._record_completions(result, subpath)
+        # What this pass actually moved, for the sequencer's idle backoff
+        # (ops-efficiency-2, 2026-08-21). Trashed files count: a pass that
+        # tidied 12 proxies is a pass that found something to do.
+        self._last_run_moved = max(0, int(result.transferred or 0)) + max(
+            0, int(result.deleted or 0))
         # Ahead of every return below, including the stop-mid-transfer one: a
         # pass that was killed halfway still moved whatever it moved, and a
         # breaker that only counts tidy passes is a breaker that a flapping
@@ -2935,23 +2983,35 @@ class RcloneLane(LaneAdapter):
             return 0
         return total
 
-    def _trashed_this_pass(self) -> list[tuple[str, int]]:
-        """(basename, size) for every file this run put in its --backup-dir.
+    def _trashed_this_pass(self) -> list[tuple[str, int, str]]:
+        """(basename, size, rel_path) for every file this run put in its
+        --backup-dir.
+
+        `rel_path` is posix and relative to the backup dir, which rclone
+        mirrors from the sync DESTINATION root -- i.e. the same origin the
+        remote listing's paths have (comp-lanes-ab-3, 2026-08-21).
 
         Reads _last_backup_dir WITHOUT clearing it, exactly as
         _backup_dir_bytes does and for the same reason: _notify_trash runs
         after the accounting and still needs it."""
         backup_dir = self._last_backup_dir
-        out: list[tuple[str, int]] = []
+        out: list[tuple[str, int, str]] = []
         if not backup_dir:
             return out
+        base = Path(backup_dir)
         try:
             for dirpath, _dirnames, filenames in os.walk(backup_dir):
                 for name in filenames:
+                    full = Path(dirpath) / name
                     try:
-                        out.append((name, os.path.getsize(os.path.join(dirpath, name))))
+                        size = full.stat().st_size
                     except OSError:
                         continue
+                    try:
+                        rel = full.relative_to(base).as_posix()
+                    except ValueError:
+                        rel = name
+                    out.append((name, size, rel))
         except OSError:
             return out
         return out
@@ -2967,18 +3027,33 @@ class RcloneLane(LaneAdapter):
         being emptied (ruskin's PC, 2026-08-19: 100 files in one pass,
         stopped for a day, and every byte was still on the server).
 
-        A trashed file's own remote path is gone by construction -- rclone
-        moved it out precisely BECAUSE the remote does not have it there --
-        so any basename+size match in the recursive listing is at some other
-        path, which is what "moved" means. Returns 0 on any failure: see
-        LaneBBreaker._count_relocations for why that is the safe direction.
+        Two shapes count as "not a deletion":
+
+        1. the file is on the NAS under ANOTHER path at the same
+           basename+size -- a move, which is what CR-44 was about;
+        2. the file is on the NAS at the SAME relative path, any size
+           (comp-lanes-ab-3, 2026-08-21). A trashed file's own remote path
+           was assumed gone by construction, and for a `sync` alone it is --
+           but lane B carries `--min-age 120s`, which hides a proxy the NAS
+           REWROTE in the last two minutes from the source listing while the
+           editor's older local copy stays on the destination side, so rclone
+           moves it aside without replacing it. Same for a plain overwrite,
+           which --backup-dir also routes through the trash. Neither is the
+           server losing a file, and a bulk re-render (same names, new sizes,
+           fresh mtimes) otherwise trips the breaker on ~60 files that are
+           all sitting on the NAS -- which the basename+size rule cannot
+           excuse, because a re-encode changes the size.
+
+        Returns 0 on any failure: see LaneBBreaker._count_relocations for why
+        that is the safe direction.
         """
         trashed = self._trashed_this_pass()
         if not trashed:
             return 0
+        remote_paths: set[str] = set()
         remote_files = list_remote_files(
             self.rclone_path, self.remote, self.remote_root, subpath,
-            run_fn=self._remote_list_fn,
+            run_fn=self._remote_list_fn, paths_out=remote_paths,
         )
         if not remote_files:
             # None = the listing failed, {} = the remote really is empty.
@@ -2986,10 +3061,51 @@ class RcloneLane(LaneAdapter):
             # the breaker exists for.
             return 0
         relocated = 0
-        for name, size in trashed:
-            if size in remote_files.get(name, ()):
+        for name, size, rel in trashed:
+            if rel and rel in remote_paths:
+                relocated += 1
+            elif size in remote_files.get(name, ()):
                 relocated += 1
         return relocated
+
+    def check_remote_root(self) -> bool:
+        """Probe `remote_root` ITSELF for the breaker's marker directories.
+
+        sync-safety-5 (2026-08-21). `LaneBBreaker.check_remote` only applies
+        the marker rule to the WHOLE-TREE scope (`if not key`), and in
+        managed mode every pass names a project subpath -- so the one
+        pre-flight that catches a `remote_root` pointing at the wrong dataset
+        has never run on a managed fleet, while SYNC_SAFETY.md credits it
+        with exactly that. One `lsf` of one directory, cached for the process
+        once it passes: a root that holds `Projects/` does not stop holding
+        it mid-run, and the per-project probes cover everything below.
+
+        Returns True when the root looks like the tree (including when there
+        is nothing to check, or the listing failed -- a failed listing is
+        never a trip, see check_remote), False when the breaker tripped.
+        Never raises."""
+        if self.direction != DIRECTION_DOWN or self.breaker is None:
+            return True
+        if self._remote_root_checked or not self.breaker.marker_dirs:
+            return True
+        try:
+            entries = list_remote_top(
+                self.rclone_path, self.remote, self.remote_root, None,
+                run_fn=self._remote_list_fn,
+            )
+            if entries is None:
+                return True
+            tripped = self.breaker.check_remote("", entries) is not None
+        except Exception:
+            log.exception("%s: the remote_root marker probe failed", self.name)
+            return True
+        if not tripped:
+            self._remote_root_checked = True
+        return not tripped
+
+    def last_run_moved(self) -> int:
+        """Files the last run transferred or trashed (ops-efficiency-2)."""
+        return self._last_run_moved
 
     def _account_pass(
         self, result: RcloneRunResult, subpath: Optional[str], local_proxies: int
@@ -3010,13 +3126,18 @@ class RcloneLane(LaneAdapter):
             log.exception("%s: breaker accounting failed", self.name)
             return False
 
-    def resume_after_trip(self, by: str = "tray") -> bool:
-        """Operator clears the breaker (tray action). Also re-arms the lane's
-        stop latch, because a trip that happened during a sign-out leaves
-        both latched and clearing one is not obviously enough."""
+    def resume_after_trip(self, by: str = "tray", request_id: Optional[str] = None) -> bool:
+        """Operator clears the breaker (tray action, or the dashboard's
+        standing [ RESUME ] request). Also re-arms the lane's stop latch,
+        because a trip that happened during a sign-out leaves both latched
+        and clearing one is not obviously enough.
+
+        `request_id` is passed straight to the breaker, which applies any one
+        id exactly once -- the dashboard's request rides every report reply
+        until an admin clears it (comp-lanes-ab-2, 2026-08-21)."""
         if self.breaker is None:
             return False
-        cleared = self.breaker.resume(by)
+        cleared = self.breaker.resume(by, request_id=request_id)
         if cleared:
             with self._lock:
                 self._status.state = STATE_IDLE

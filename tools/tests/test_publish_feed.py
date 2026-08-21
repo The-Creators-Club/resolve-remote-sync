@@ -332,7 +332,11 @@ def test_upload_argv_has_clobber_the_channel_the_sig_and_every_artifact(key, art
 def test_release_is_created_when_absent_and_the_run_still_succeeds(key, artifact, tmp_path):
     gh = FakeGh(release_exists=False)
     assert _build(tmp_path / "feed", artifact, upload=True, runner=gh) == pf.EXIT_OK
-    assert gh.verbs() == ["auth status", "release view", "release create", "release upload"]
+       # `release download` is the published channel being fetched to merge
+    # into (release-pipeline-1, 2026-08-21) -- it comes first, and it needs
+    # the same credential, which is why `auth status` now runs once up front.
+    assert gh.verbs() == ["auth status", "release download", "release view",
+                          "release create", "release upload"]
     create = [c for c in gh.calls if c[1:3] == ["release", "create"]][0]
     assert create[3] == GH_TAG and "-R" in create and GH_REPO in create
 
@@ -396,7 +400,11 @@ def test_signing_happens_before_any_upload(key, artifact, tmp_path):
     observed: dict = {}
 
     def on_call(argv):
-        observed.setdefault("first_verb", " ".join(argv[1:3]))
+        # The UPLOAD, not merely the first gh call: since 2026-08-21 a run
+        # begins by downloading the published channel, which happens (and must
+        # happen) before anything is signed.
+        if argv[1:3] != ["release", "upload"]:
+            return
         observed.setdefault("channel", (feed_dir / pf.CHANNEL_FILENAME).is_file())
         observed.setdefault("sig", (feed_dir / pf.SIG_FILENAME).is_file())
         if "channel_bytes" not in observed and (feed_dir / pf.CHANNEL_FILENAME).is_file():
@@ -423,7 +431,11 @@ def test_a_record_pointing_somewhere_else_is_refused_before_any_gh_call(key, art
     rc = pf.main(["--set-image", "1.2.3@sha256:" + "a" * 64, "--feed-dir", str(feed_dir),
                   "--github-repo", GH_REPO, "--github-upload"], runner=gh)
     assert rc == pf.EXIT_USAGE
-    assert gh.calls == []
+    # Nothing was CREATED or UPLOADED. (auth status + the published-channel
+    # download do run first now -- they are reads, and the refusal still lands
+    # before any write.)
+    assert "release upload" not in gh.verbs()
+    assert "release create" not in gh.verbs()
 
 
 def test_asset_plan_refuses_two_records_sharing_one_asset_name(tmp_path):
@@ -587,3 +599,355 @@ def test_an_asset_whose_url_does_not_match_the_upload_target_is_refused(key, cla
     channel = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
     with pytest.raises(pf.PublishFeedError):
         pf.github_asset_plan(feed_dir, channel, base_url=BASE_URL)
+
+
+# --- the LIVE channel is the base, not this rig's feed/ dir ------------------
+#
+# release-pipeline-1 (2026-08-21). publish_feed rebuilt the channel from
+# <feed-dir>/channel.json -- a GITIGNORED directory that exists on exactly one
+# machine -- and "gh release upload --clobber" then replaced the live document
+# with it. From a fresh clone, a Mac, a new base rig or after a --feed-dir
+# typo, that meant 18 package records and 2 CLAP artefacts became 1, correctly
+# signed, so no consumer logged an error and the loss reached a customer.
+#
+# PublishedGh serves a real signed channel from `release download`, which is
+# the only way to exercise the merge without a network.
+
+
+class PublishedGh(FakeGh):
+    """FakeGh that also answers `release download` by writing a channel.json
+    (+ .sig) into the --dir the tool asked for."""
+
+    def __init__(self, channel=None, signature=None, **kw):
+        super().__init__(**kw)
+        self.channel = channel
+        self.signature = signature
+
+    def __call__(self, argv):
+        if argv[1:3] == ["release", "download"] and self.channel is not None:
+            dest = Path(argv[argv.index("--dir") + 1])
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / pf.CHANNEL_FILENAME).write_text(
+                json.dumps(self.channel, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            if self.signature is not None:
+                (dest / pf.SIG_FILENAME).write_text(self.signature + "\n", encoding="utf-8")
+        return super().__call__(argv)
+
+
+def _sign_channel_for(channel, key_path):
+    """Sign `channel` with the tmp release key, the way write_channel does."""
+    secret = release_key_mod.read_secret(key_path)
+    pub = base64.b64encode(ed25519.public_key(secret)).decode("ascii")
+    channel["pubkey_id"] = release_pubkey.pubkey_id(pub)
+    message = pf.canonical_channel_bytes(channel)
+    return base64.b64encode(ed25519.sign(secret, message)).decode("ascii"), pub
+
+
+@pytest.fixture
+def trusted_key(key, monkeypatch):
+    """The tmp key, ALSO installed as a baked release pubkey -- the published
+    channel is verified against release_pubkey.RELEASE_PUBKEYS, which in a
+    real build is baked in."""
+    secret = release_key_mod.read_secret(release_key_mod.key_path(""))
+    pub = base64.b64encode(ed25519.public_key(secret)).decode("ascii")
+    monkeypatch.setattr(release_pubkey, "RELEASE_PUBKEYS", (pub,), raising=False)
+    return key
+
+
+def _published_channel(key_path, *, records=(), artefacts=()):
+    channel = {
+        "schema": pf.SCHEMA, "channel": "stable", "generated_at": "2026-08-20T00:00:00Z",
+        "pubkey_id": "", "dashboard_image": {"tag": "", "digest": ""},
+        "packages": list(records), "artefacts": list(artefacts),
+    }
+    signature, _pub = _sign_channel_for(channel, key_path)
+    return channel, signature
+
+
+def _record(kind, platform, version, filename):
+    return {"kind": kind, "platform": platform, "version": version, "filename": filename,
+            "sha256": "0" * 64, "size_bytes": 1, "min_version": "0.0.0",
+            "signed_binary": False, "published_at": "2026-08-01T00:00:00Z",
+            "url": f"{DERIVED}/{filename}", "signature": "x", "pubkey_id": "y"}
+
+
+def test_history_the_local_feed_never_had_survives_the_upload(trusted_key, artifact, tmp_path):
+    mac = _record("companion", "macos", "0.9.3", "ccsync-companion-0.9.3-macos.zip")
+    dash = _record("dashboard", "linux", "0.7.4", "ccsync-dashboard-0.7.4.tar.gz")
+    clap = {"kind": "music-clap-audio", "version": "1", "filename": "clap-audio-1.onnx",
+            "sha256": "1" * 64, "size_bytes": 2, "url": f"{DERIVED}/clap-audio-1.onnx"}
+    published, signature = _published_channel(
+        release_key_mod.key_path(""), records=[mac, dash], artefacts=[clap])
+    gh = PublishedGh(channel=published, signature=signature)
+
+    feed_dir = tmp_path / "feed"          # EMPTY: a fresh clone
+    assert _build(feed_dir, artifact, upload=True, runner=gh) == pf.EXIT_OK
+
+    final = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
+    keys = pf.package_keys(final)
+    assert ("companion", "macos", "0.9.3") in keys
+    assert ("dashboard", "linux", "0.7.4") in keys
+    assert ("companion", "windows", "0.8.0") in keys   # the one just built
+    assert pf.artefact_keys(final) == {("music-clap-audio", "clap-audio-1.onnx")}
+
+
+def test_the_uploaded_channel_is_the_merged_one(trusted_key, artifact, tmp_path):
+    mac = _record("companion", "macos", "0.9.3", "ccsync-companion-0.9.3-macos.zip")
+    published, signature = _published_channel(release_key_mod.key_path(""), records=[mac])
+    gh = PublishedGh(channel=published, signature=signature)
+    feed_dir = tmp_path / "feed"
+    assert _build(feed_dir, artifact, upload=True, runner=gh) == pf.EXIT_OK
+    uploaded = [a for a in gh.upload_argv() if str(a).endswith(pf.CHANNEL_FILENAME)]
+    assert uploaded, gh.upload_argv()
+    on_disk = json.loads(Path(uploaded[0]).read_text())
+    assert len(on_disk["packages"]) == 2
+    # ...and it still verifies as a whole document.
+    sig = (feed_dir / pf.SIG_FILENAME).read_text().strip()
+    ok, detail = pf.verify_channel_signature(
+        on_disk, sig, _pubkeys_for(release_key_mod.key_path("")))
+    assert ok, detail
+
+
+def test_a_channel_that_does_not_verify_is_never_merged_or_uploaded(
+        trusted_key, artifact, tmp_path, capsys):
+    published, _sig = _published_channel(release_key_mod.key_path(""))
+    gh = PublishedGh(channel=published, signature=base64.b64encode(b"z" * 64).decode("ascii"))
+    rc = _build(tmp_path / "feed", artifact, upload=True, runner=gh)
+    assert rc == pf.EXIT_UPLOAD_FAILED
+    assert "release upload" not in gh.verbs()
+    assert "does not verify" in capsys.readouterr().err
+
+
+def test_an_unreadable_feed_is_not_mistaken_for_an_empty_one(key, artifact, tmp_path, capsys):
+    # `gh` failing for any reason OTHER than "no such release/asset" must
+    # refuse: --clobber cannot be undone, and "I could not ask" is not
+    # "nothing is published".
+    gh = FakeGh(rc_by_verb={"release download": 1})
+    rc = _build(tmp_path / "feed", artifact, upload=True, runner=gh)
+    assert rc == pf.EXIT_UPLOAD_FAILED
+    assert "release upload" not in gh.verbs()
+    assert "could not read the channel already published" in capsys.readouterr().err
+
+
+def test_a_first_publish_with_no_release_yet_still_works(key, artifact, tmp_path, capsys):
+    gh = FakeGh(release_exists=False)
+    assert _build(tmp_path / "feed", artifact, upload=True, runner=gh) == pf.EXIT_OK
+    assert "first publish" in capsys.readouterr().out
+
+
+def test_the_local_feed_is_still_written_when_the_fetch_refuses(key, artifact, tmp_path):
+    feed_dir = tmp_path / "feed"
+    gh = FakeGh(rc_by_verb={"release download": 1})
+    assert _build(feed_dir, artifact, upload=True, runner=gh) == pf.EXIT_UPLOAD_FAILED
+    pubkeys = _pubkeys_for(release_key_mod.key_path(""))
+    ok, report = pf.verify_feed_dir(feed_dir, pubkeys=pubkeys)
+    assert ok, report
+
+
+def test_shrinking_the_channel_is_refused_without_allow_shrink():
+    # The merge makes an accidental shrink impossible, so the check is driven
+    # directly: it is the backstop for any future path that assembles the
+    # channel some other way.
+    published = {"packages": [_record("companion", "macos", "0.9.3", "a.zip")],
+                 "artefacts": [{"kind": "music-clap-audio", "filename": "clap.onnx"}]}
+    candidate = {"packages": [], "artefacts": []}
+    assert pf.shrink_report(published, candidate) == [
+        "package companion/macos 0.9.3", "artefact music-clap-audio clap.onnx"]
+    assert pf.shrink_report(published, candidate,
+                            {("companion", "macos", "0.9.3")}) == [
+        "artefact music-clap-audio clap.onnx"]
+
+
+def test_a_retraction_removes_the_record_and_the_current_pointer(
+        trusted_key, artifact, tmp_path, capsys):
+    bad = _record("companion", "windows", "0.6.1", "ccsync-companion-0.6.1.exe")
+    good = _record("companion", "macos", "0.9.3", "mac.zip")
+    published, _signature = _published_channel(
+        release_key_mod.key_path(""), records=[bad, good])
+    published["current"] = {"companion/windows": "0.6.1"}
+    signature, _pub = _sign_channel_for(published, release_key_mod.key_path(""))
+    gh = PublishedGh(channel=published, signature=signature)
+    feed_dir = tmp_path / "feed"
+    rc = pf.main(["--retract", "companion/windows/0.6.1", "--feed-dir", str(feed_dir),
+                  "--github-repo", GH_REPO, "--github-upload"], runner=gh)
+    assert rc == pf.EXIT_OK
+    final = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
+    assert pf.package_keys(final) == {("companion", "macos", "0.9.3")}
+    assert final.get("current", {}) == {}
+    assert "RETRACTED" in capsys.readouterr().out
+
+
+def test_retract_wants_kind_platform_version(key, tmp_path):
+    assert pf.main(["--retract", "companion/windows",
+                    "--feed-dir", str(tmp_path / "feed")]) == pf.EXIT_USAGE
+
+
+# --- the `current` pointer (release-pipeline-5, 2026-08-21) ------------------
+#
+# Without it, a dashboard on the "current" policy replayed the whole channel
+# in APPEND order and whichever record happened to be last won -- so a --force
+# republish of an older build, or a late macOS CI run, offered the entire
+# fleet a rollback.
+
+
+def test_make_current_writes_the_pointer(key, artifact, tmp_path):
+    feed_dir = tmp_path / "feed"
+    assert _build(feed_dir, artifact, "--make-current") == pf.EXIT_OK
+    channel = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
+    assert channel["current"] == {"companion/windows": "0.8.0"}
+
+
+def test_without_make_current_nothing_is_pointed_at(key, artifact, tmp_path):
+    feed_dir = tmp_path / "feed"
+    assert _build(feed_dir, artifact) == pf.EXIT_OK
+    channel = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
+    assert "current" not in channel
+
+
+def test_the_pointer_is_per_kind_and_platform(key, artifact, tmp_path):
+    feed_dir = tmp_path / "feed"
+    assert _build(feed_dir, artifact, "--make-current") == pf.EXIT_OK
+    assert pf.main(["--artifact", str(artifact), "--platform", "macos", "--version", "0.9.3",
+                    "--feed-dir", str(feed_dir), "--github-repo", GH_REPO,
+                    "--make-current"]) == pf.EXIT_OK
+    channel = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
+    assert channel["current"] == {"companion/windows": "0.8.0", "companion/macos": "0.9.3"}
+
+
+def test_the_pointer_rides_the_channel_signature(key, artifact, tmp_path):
+    feed_dir = tmp_path / "feed"
+    assert _build(feed_dir, artifact, "--make-current") == pf.EXIT_OK
+    channel = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
+    sig = (feed_dir / pf.SIG_FILENAME).read_text().strip()
+    pubkeys = _pubkeys_for(release_key_mod.key_path(""))
+    channel["current"]["companion/windows"] = "0.0.1"
+    ok, _detail = pf.verify_channel_signature(channel, sig, pubkeys)
+    assert not ok
+
+
+# --- CR-59 item 8 / CR-67 item 8: what a record already on the feed is owed --
+# The dashboard's own publish path refuses same-version-different-bytes with a
+# 409 that names the mismatch (release-pipeline-6), and every companion keeps a
+# monotonic downgrade floor. Neither protects the FEED, which is the channel a
+# customer's dashboard reads: until 2026-08-21 this tool would silently replace
+# a published record's bytes, or publish a floor below the one already out
+# there, and sign both.
+
+def _publish(feed_dir, artifact, version, *extra, min_version="0.0.0"):
+    return pf.main(["--artifact", str(artifact), "--platform", "windows",
+                    "--version", version, "--min-version", min_version,
+                    "--feed-dir", str(feed_dir), "--base-url", BASE_URL, *extra])
+
+
+def test_republishing_the_same_version_with_different_bytes_is_refused(
+        key, artifact, tmp_path, capsys):
+    feed_dir = tmp_path / "feed"
+    assert _publish(feed_dir, artifact, "0.8.0") == pf.EXIT_OK
+    other = tmp_path / "rebuilt.exe"
+    other.write_bytes(b"MZ" + b"y" * 5000)   # same version, different build
+    assert _publish(feed_dir, other, "0.8.0") == pf.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "already published with DIFFERENT bytes" in err
+    # The way out is a version bump, and the message has to say so: an
+    # operator who reads "refused" and reaches for a --force flag has learned
+    # the wrong lesson.
+    assert "Bump VERSION" in err and "config.py" in err
+    # ...and the published record is untouched.
+    channel = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
+    assert len(channel["packages"]) == 1
+    assert channel["packages"][0]["size_bytes"] == artifact.stat().st_size
+
+
+def test_republishing_identical_bytes_is_not_a_replacement(key, artifact, tmp_path):
+    """A re-run after a failed upload must stay possible: same key, same
+    sha256, nothing to lose."""
+    feed_dir = tmp_path / "feed"
+    assert _publish(feed_dir, artifact, "0.8.0") == pf.EXIT_OK
+    assert _publish(feed_dir, artifact, "0.8.0") == pf.EXIT_OK
+    channel = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
+    assert len(channel["packages"]) == 1
+
+
+def test_allow_replace_is_the_deliberate_override(key, artifact, tmp_path):
+    feed_dir = tmp_path / "feed"
+    assert _publish(feed_dir, artifact, "0.8.0") == pf.EXIT_OK
+    other = tmp_path / "rebuilt.exe"
+    other.write_bytes(b"MZ" + b"y" * 5000)
+    assert _publish(feed_dir, other, "0.8.0", "--allow-replace") == pf.EXIT_OK
+    channel = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
+    assert len(channel["packages"]) == 1
+    assert channel["packages"][0]["size_bytes"] == other.stat().st_size
+
+
+def test_a_retracted_version_may_be_republished_with_new_bytes(key, artifact, tmp_path):
+    """--retract is the deliberate withdrawal, so the record it removed is no
+    longer "already published" and needs no override to replace."""
+    feed_dir = tmp_path / "feed"
+    assert _publish(feed_dir, artifact, "0.8.0") == pf.EXIT_OK
+    other = tmp_path / "rebuilt.exe"
+    other.write_bytes(b"MZ" + b"y" * 5000)
+    assert _publish(feed_dir, other, "0.8.0",
+                    "--retract", "companion/windows/0.8.0") == pf.EXIT_OK
+    channel = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
+    assert [p["size_bytes"] for p in channel["packages"]] == [other.stat().st_size]
+
+
+def test_a_floor_below_the_published_one_is_refused(key, artifact, tmp_path, capsys):
+    feed_dir = tmp_path / "feed"
+    assert _publish(feed_dir, artifact, "0.9.44", min_version="0.9.40") == pf.EXIT_OK
+    # The next ship forgets CCSYNC_MIN_VERSION -- the default is no floor at all.
+    assert _publish(feed_dir, artifact, "0.9.45", min_version="0.0.0") == pf.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "BELOW the highest floor already published" in err
+    assert "--min-version 0.9.40" in err          # names the value to re-run with
+    assert "--allow-floor-drop" in err
+
+
+def test_the_floor_is_the_highest_ever_published_not_the_last(key, artifact, tmp_path):
+    """A companion's floor is monotonic: once it has SEEN 0.9.40 it never
+    installs below 0.9.40 again, whatever order later records arrive in."""
+    feed_dir = tmp_path / "feed"
+    assert _publish(feed_dir, artifact, "0.9.44", min_version="0.9.40") == pf.EXIT_OK
+    assert _publish(feed_dir, artifact, "0.9.45", min_version="0.9.40") == pf.EXIT_OK
+    assert _publish(feed_dir, artifact, "0.9.46", min_version="0.9.39") == pf.EXIT_USAGE
+
+
+def test_two_digit_minors_compare_as_numbers_in_the_floor_check(key, artifact, tmp_path):
+    """After 0.9.9 comes 0.10.0 (owner's rule 2026-08-18); a string compare
+    would read 0.10.0 as below 0.9.9 and refuse a good publish."""
+    feed_dir = tmp_path / "feed"
+    assert _publish(feed_dir, artifact, "0.9.9", min_version="0.9.9") == pf.EXIT_OK
+    assert _publish(feed_dir, artifact, "0.10.0", min_version="0.10.0") == pf.EXIT_OK
+
+
+def test_the_floor_is_per_kind_and_platform(key, artifact, tmp_path):
+    feed_dir = tmp_path / "feed"
+    assert _publish(feed_dir, artifact, "0.9.44", min_version="0.9.40") == pf.EXIT_OK
+    # macOS has published no floor of its own, so it is not held to Windows'.
+    assert pf.main(["--artifact", str(artifact), "--platform", "macos",
+                    "--version", "0.9.44", "--min-version", "0.0.0",
+                    "--feed-dir", str(feed_dir), "--base-url", BASE_URL]) == pf.EXIT_OK
+
+
+def test_allow_floor_drop_is_the_deliberate_override(key, artifact, tmp_path):
+    feed_dir = tmp_path / "feed"
+    assert _publish(feed_dir, artifact, "0.9.44", min_version="0.9.40") == pf.EXIT_OK
+    assert _publish(feed_dir, artifact, "0.9.45", "--allow-floor-drop",
+                    min_version="0.9.30") == pf.EXIT_OK
+
+
+def test_a_refused_publish_uploads_nothing(key, artifact, tmp_path):
+    """Both refusals raise before write_channel, so the feed dir keeps the
+    document it had and no `gh` command is ever reached."""
+    feed_dir = tmp_path / "feed"
+    assert _publish(feed_dir, artifact, "0.8.0") == pf.EXIT_OK
+    before = (feed_dir / pf.CHANNEL_FILENAME).read_bytes()
+    other = tmp_path / "rebuilt.exe"
+    other.write_bytes(b"MZ" + b"y" * 5000)
+    gh = FakeGh(release_exists=True)
+    rc = pf.main(["--artifact", str(other), "--platform", "windows", "--version", "0.8.0",
+                  "--feed-dir", str(feed_dir), "--github-repo", GH_REPO,
+                  "--github-upload"], runner=gh)
+    assert rc == pf.EXIT_USAGE
+    assert (feed_dir / pf.CHANNEL_FILENAME).read_bytes() == before
+    assert "release upload" not in gh.verbs()

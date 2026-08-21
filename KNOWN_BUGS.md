@@ -2724,9 +2724,18 @@ CR-66 with its reason.
 
 ## Resolve's launch window, and BPG's INI escaping (CR-68, CR-69, 2026-08-21)
 
-Two owner reports the evening of 2026-08-21, both fixed in repo as
-**companion 0.9.45**, unshipped (ships with the 0.9.44 pass; dashboard
-unchanged). Suite after: companion 4457 passed / 2 skipped.
+Two owner reports the evening of 2026-08-21, both fixed as **companion
+0.9.45** and **SHIPPED the same evening** (commit `4d3f4a3`): dashboard
+0.7.5 applied over the air (carrying the whole 0.9.44 pass's dashboard
+half; live 0.7.3 -> 0.7.5, runtime id unchanged), then CI-built companion
+0.9.45 + installer 1.0.36 published to the vendor feed with
+`publish_latest.py --make-current` and pulled into the studio dashboard as
+current for windows AND macos; the base rig upgraded in place. Every
+editor is offered 0.9.45 on their next check. Suite after: companion 4457
+passed / 2 skipped. The guard was also ported the same evening into the
+MulticamPipeline tools (committed there) and the Resolve MCP server
+(`src/utils/resolve_connect.py`, uncommitted alongside that repo's
+earlier in-flight work).
 
 ### CR-68 - a client polling during Resolve's launch kills scripting for the session - FIXED in repo
 **Symptom, every editor, for months.** Companion already running, Resolve
@@ -2827,6 +2836,40 @@ Latin-1 encoding is the UTF-8 of a folder we want - i.e. only our own past
 damage, never an editor's `P:\Café`. Tests: `tests/test_bpg_qt_escape.py`.
 The live base-rig INI still carries the two garbled entries until the next
 BPG launch from a 0.9.45 companion cleans them.
+
+### CR-70 - the tray menu sometimes opens late (variable delay, not every click) - OPEN, investigated 2026-08-21
+**Symptom.** Right-clicking the tray icon sometimes shows the menu a
+fraction of a second to many seconds late; survived the 2026-07-26 fixes and
+the 2026-08-17 `tray_native` rewrite. Full investigation:
+`docs/TRAY_MENU_LATENCY.md`.
+
+**Primary cause.** The tray's window procedure is a ctypes callback and
+needs the GIL; every fusionscript call holds the GIL for its whole native
+duration, and a single call takes as long as Resolve's main thread takes to
+service it (ms idle, seconds during playback/conform/render/modal). The
+existing mitigations (`wait_while_menu_open`, `_sweep_yield`, the poll
+cache) protect the OPEN menu and cut the number of calls per poll; none
+bounds one call, and the watcher makes several every 3 s. The base-rig log
+proves the GIL hold: six `_note_wedge` warnings 2026-08-19..21 (calls of
+33-91 s) are each timestamped at the moment the call RETURNED, not at the
+30 s mark the waiter timed out at. Sub-30 s stalls are recorded nowhere.
+
+**Secondary.** GC pauses (unmeasured), `SHAppBarMessage` into Explorer on
+the click path, working-set trimming, possible EcoQoS throttling; plus two
+backend defects seen in the log - `_show_menu` has no re-entry guard
+(GetLastError 1446 when a queued second click is dispatched inside the open
+menu's modal loop) and clicks dispatched after the window is destroyed
+(1400).
+
+**Recommended order.** (1) instrument - DONE in repo 2026-08-21:
+`tray_native._pump` stamps `GetTickCount() - MSG.time` per click and
+`_show_menu` logs one WARNING ("tray menu opened late: the click waited N ms
+in the queue and the menu took M ms to build (Resolve call in flight: ...;
+gc counts ...)") when either passes 150 ms, DEBUG otherwise; tests in
+`test_tray.py`. Ships with the next companion build; (2) re-entry/dead-
+window guard in `_show_menu`; (3) move fusionscript into a killable child
+process, the `music_worker` pattern, which also delivers the per-call
+timeout the bridge cannot have in-process. Nothing built yet.
 
 ## Open — residuals from the 2026-08-14 fix pass
 

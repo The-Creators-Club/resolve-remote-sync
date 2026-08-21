@@ -210,6 +210,7 @@ _WM_NULL = 0x0000
 _WM_LBUTTONUP = 0x0202
 _WM_RBUTTONUP = 0x0205
 _WM_LBUTTONDBLCLK = 0x0203
+_MENU_CLICKS = (_WM_RBUTTONUP, _WM_LBUTTONUP, _WM_LBUTTONDBLCLK)
 
 _NIM_ADD = 0x00000000
 _NIM_MODIFY = 0x00000001
@@ -367,6 +368,70 @@ def _anchor_clear_of_taskbar(x: int, y: int, flags: int):
     except Exception:
         log.debug("taskbar anchor adjustment skipped", exc_info=True)
         return x, y, flags
+
+
+# -- click-to-menu latency (CR-70, 2026-08-21) -------------------------------
+#
+# Three rounds of work on "the menu opens late" were aimed by feel, because
+# nothing measured the delay: resolve_bridge's wedge detector starts at 30 s
+# and below that the companion recorded nothing. Windows hands us the number
+# for free -- MSG.time is the tick count at which Explorer POSTED the click,
+# so GetTickCount() minus it at dispatch is the queue latency of that click,
+# measured by the OS. Anything above _SLOW_CLICK_MS is logged ONCE per click
+# with the fusionscript call in flight (the expected culprit: a fusionscript
+# call holds the GIL for its whole native duration and the window procedure
+# below cannot run without it) and the GC counters (the other suspect).
+# docs/TRAY_MENU_LATENCY.md.
+
+_SLOW_CLICK_MS = 150
+_TICK_WRAP = 1 << 32
+
+
+def _queue_latency_ms(now_tick: int, posted_tick: int) -> int:
+    """GetTickCount() - MSG.time, both 32-bit and both wrapping every 49.7
+    days; the subtraction is done modulo 2**32 so a click straddling the
+    wrap reads as a few ms, not as -4 billion. Pure and total."""
+    try:
+        return (int(now_tick) - int(posted_tick)) % _TICK_WRAP
+    except Exception:
+        return 0
+
+
+def _bridge_activity_text() -> str:
+    """What resolve_bridge says is inside Resolve right now, as text.
+
+    Imported lazily and guarded: tray_native must stay importable (and the
+    click path must stay alive) on a machine with no Resolve and in a test
+    that stubs the bridge."""
+    try:
+        from . import resolve_bridge
+        activity = resolve_bridge.bridge_activity()
+    except Exception:
+        return "bridge unavailable"
+    if not activity:
+        return "no Resolve call in flight"
+    return "Resolve call in flight: %s for %.1fs" % (
+        activity.get("call", "?"), float(activity.get("seconds", 0.0)))
+
+
+def _gc_text() -> str:
+    try:
+        import gc
+        return "gc counts %s" % (gc.get_count(),)
+    except Exception:
+        return "gc counts unavailable"
+
+
+def _describe_slow_click(queued_ms: int, build_ms: float) -> str:
+    """The one WARNING line for a click that waited, assembled from the
+    queue latency (the GIL/dispatch wait) and the build time (everything in
+    _show_menu before TrackPopupMenuEx: menu build, SHAppBarMessage,
+    SetForegroundWindow). The two name different suspects, so both are
+    reported even when only one was slow."""
+    return ("tray menu opened late: the click waited %d ms in the queue and "
+            "the menu took %.0f ms to build (%s; %s)"
+            % (int(queued_ms), float(build_ms),
+               _bridge_activity_text(), _gc_text()))
 
 
 def _escape_menu_label(text: str) -> str:
@@ -531,6 +596,8 @@ class _Win32:
         u.DestroyIcon.restype = wintypes.BOOL
         u.GetSystemMetrics.argtypes = [ctypes.c_int]
         u.GetSystemMetrics.restype = ctypes.c_int
+        self.kernel32.GetTickCount.argtypes = []
+        self.kernel32.GetTickCount.restype = wintypes.DWORD
 
         g.CreateDIBSection.argtypes = [wintypes.HDC,
                                        ctypes.POINTER(BITMAPINFOHEADER),
@@ -686,6 +753,9 @@ class _WindowsIcon:
         self._taskbar_created_msg = 0
         self._detached_thread: Optional[threading.Thread] = None
         self._pump_thread_id: Optional[int] = None
+        # Queue latency of the click being dispatched, stamped by _pump
+        # just before DispatchMessageW and consumed by _show_menu (CR-70).
+        self._click_queued_ms = 0
 
     # -- the properties tray.py assigns ------------------------------------
 
@@ -931,6 +1001,13 @@ class _WindowsIcon:
                 log.error("tray message pump failed (GetLastError=%d)",
                           ctypes.get_last_error())
                 return
+            if msg.message == _CCSYNC_WM_TRAY and (msg.lParam & 0xFFFF) in _MENU_CLICKS:
+                # How long Explorer's click sat in our queue before this
+                # thread got to run it -- in practice, how long another
+                # thread held the GIL (CR-70). Stamped here, reported by
+                # _show_menu once the menu is actually up.
+                self._click_queued_ms = _queue_latency_ms(
+                    api.kernel32.GetTickCount(), msg.time)
             api.user32.TranslateMessage(ctypes.byref(msg))
             api.user32.DispatchMessageW(ctypes.byref(msg))
 
@@ -942,7 +1019,7 @@ class _WindowsIcon:
             # the mouse message. The coordinates come from GetCursorPos, not
             # from lParam, exactly as the documentation for this shape says.
             mouse = lparam & 0xFFFF
-            if mouse in (_WM_RBUTTONUP, _WM_LBUTTONUP, _WM_LBUTTONDBLCLK):
+            if mouse in _MENU_CLICKS:
                 self._show_menu()
             return 0
         if msg == _CCSYNC_WM_QUIT_TRAY:
@@ -1037,7 +1114,12 @@ class _WindowsIcon:
     def _show_menu(self) -> None:
         import ctypes
 
+        import time
+
         api = _Win32.get()
+        queued_ms = self._click_queued_ms
+        self._click_queued_ms = 0
+        build_started = time.perf_counter()
         menu = self.menu
         if not menu:
             return
@@ -1054,6 +1136,12 @@ class _WindowsIcon:
         # click that follows, and a WM_NULL has to be posted afterwards for
         # the same reason.
         api.user32.SetForegroundWindow(self._hwnd)
+        build_ms = (time.perf_counter() - build_started) * 1000.0
+        if queued_ms >= _SLOW_CLICK_MS or build_ms >= _SLOW_CLICK_MS:
+            log.warning(_describe_slow_click(queued_ms, build_ms))
+        else:
+            log.debug("tray menu: click queued %d ms, built in %.1f ms",
+                      queued_ms, build_ms)
         self._menu_open.set()
         try:
             ctypes.set_last_error(0)

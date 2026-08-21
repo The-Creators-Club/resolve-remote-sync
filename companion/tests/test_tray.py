@@ -3066,3 +3066,36 @@ def test_a_dead_sync_engine_turns_the_icon_red():
                            last_error="the sync engine (Syncthing) is not running "
                                       "on this machine -- restarting it")]
     assert compute_overall_color(statuses) == "red"
+
+
+# -- CR-70: click-to-menu latency instrumentation (2026-08-21) ---------------
+
+
+def test_queue_latency_is_modulo_tick_wrap():
+    from ccsync_companion.tray_native import _queue_latency_ms
+
+    assert _queue_latency_ms(1000, 800) == 200
+    # GetTickCount wraps every 49.7 days; a click posted just before the wrap
+    # and dispatched just after must read as a few ms, never as negative.
+    assert _queue_latency_ms(5, (1 << 32) - 10) == 15
+    assert _queue_latency_ms("bad", None) == 0
+
+
+def test_describe_slow_click_names_the_resolve_call(monkeypatch):
+    from ccsync_companion import resolve_bridge, tray_native
+
+    monkeypatch.setattr(resolve_bridge, "bridge_activity",
+                        lambda: {"call": "get_timeline_items", "seconds": 4.2})
+    text = tray_native._describe_slow_click(1830, 3.0)
+    assert "1830 ms in the queue" in text
+    assert "get_timeline_items for 4.2s" in text
+    assert "gc counts" in text
+
+    monkeypatch.setattr(resolve_bridge, "bridge_activity", lambda: {})
+    assert "no Resolve call in flight" in tray_native._describe_slow_click(200, 1.0)
+
+    def boom():
+        raise RuntimeError("stubbed away")
+
+    monkeypatch.setattr(resolve_bridge, "bridge_activity", boom)
+    assert "bridge unavailable" in tray_native._describe_slow_click(200, 1.0)

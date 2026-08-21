@@ -2808,7 +2808,8 @@ at +16.4 s (a 0.5 s window), both threads held off (8 skips), connected at
 both ways on this rig.
 
 **0.9.45 was not enough - the second pass, same evening (companion
-0.9.46).** Two launches with 0.9.45 running (17:56 and 17:57) died the old
+0.9.46, SHIPPED 18:31: feed current for windows + macos via publish_latest
+--make-current, pulled into the studio dashboard, base rig upgraded).** Two launches with 0.9.45 running (17:56 and 17:57) died the old
 way, and the companion log shows why: no "holding off" line, because
 `connect()` probed BEFORE the listener existed, got "no listener", failed
 OPEN and called `scriptapp()` - and `scriptapp("Resolve")` with no server

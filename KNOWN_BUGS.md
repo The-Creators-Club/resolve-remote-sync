@@ -2825,6 +2825,18 @@ hold. `ready_to_connect()` is the one predicate, and the two ports use it
 killed the 17:42 launch (two connections 0.08 s apart) was the pre-patch
 Timeline Cards process, restarted at 17:43:30 by the owner.
 
+**Third pass, 0.9.47 (shipped 19:20, feed current both platforms, base rig
+on it):** the owner's first 0.9.46 launch worked, but within seconds of
+quitting Resolve the tray said "running but isn't accepting scripting
+connections - restart the companion first". That explainer jumped from
+"Resolve.exe exists, no script server" straight to the dead-scripting
+verdict, which is wrong for the minutes around a launch (server spawned
+90-470 s in) or a quit (Resolve.exe lingers; the process probe is cached 30
+s). Now `NO_SERVER_MESSAGE` ("starting up or shutting down") with a
+10-minute grace clock, reset by any successful enumeration; the dead-server
+advice leads with "quit and reopen Resolve" since the companion is no
+longer what breaks it.
+
 **Not done / for the owner.** (a) macOS `lsof` path untested against a
 live Mac. (b) The Resolve MCP server's copy is in its working tree,
 uncommitted, next to that repo's earlier in-flight mutex work; restart the

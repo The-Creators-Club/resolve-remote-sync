@@ -2972,7 +2972,7 @@ backoff) before giving up, which covers the boot-time network gap. Note the
 residual: every image update resets /venv, so a site whose network is down
 for longer than the retries still degrades until the next container boot.
 
-### CR-74 - long server downloads crawl at 3-4 MiB/s even with the PO token working - FIXED in repo (dashboard 0.7.8)
+### CR-74 - long server downloads crawl at 3-4 MiB/s even with the PO token working - FIXED, shipped 2026-08-24 (dashboard 0.7.8 OTA)
 **Symptom** (owner, 2026-08-24, after CR-73's live fix): job 22's short news
 clips landed in seconds, but a 36-minute 562 MiB clip sustained only 3-4
 MiB/s (the SPA read 2.67 MiB/s), forty minutes after the same container
@@ -2996,7 +2996,7 @@ companion's local-download argv is deliberately untouched: editors get real
 https formats via player_client=web_safari (CR-39) and a companion change is
 a fleet release. Needs a dashboard deploy.
 
-### CR-75 - a search nobody downloads from blocks every later search, with no visible way out - FIXED in repo (dashboard 0.7.8)
+### CR-75 - a search nobody downloads from blocks every later search, with no visible way out - FIXED, shipped 2026-08-24 (dashboard 0.7.8 OTA)
 **Symptom** (owner, 2026-08-24): run a search, download nothing from its
 results, and every later SEARCH / GET LINKS answers "you already have a job
 in progress" until the parked job is cancelled - and the only cancel was the

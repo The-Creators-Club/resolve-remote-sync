@@ -145,9 +145,27 @@ if [ "${DASH_SITE_YOUTUBE_UNBLOCK:-0}" = "1" ]; then
     have_unblock="$(cat "$STAMP_UNBLOCK" 2>/dev/null || true)"
     if [ "$want_unblock" != "$have_unblock" ]; then
         echo "run.sh: youtube_unblock is on -- installing $REQS_UNBLOCK"
-        if "$VENV/bin/pip" install --quiet --no-cache-dir $PIP_HASH_FLAG_UNBLOCK -r "$REQS_UNBLOCK"; then
-            printf '%s' "$want_unblock" > "$STAMP_UNBLOCK"
-        else
+        # RETRIED with short sleeps (CR-73, 2026-08-24): the only failure seen
+        # in the field was this install running in the container's first
+        # seconds, before its network/DNS was usable -- it failed once per
+        # boot, on both recorded boots, and the worker then ran for DAYS with
+        # no PO-token provider. YouTube withholds the https formats without
+        # one, so every server download crawled through the throttled HLS
+        # ladder (~1.8 MiB/s) or ended "The downloaded file is empty", while
+        # nothing looked wrong but one boot-time WARNING nobody was watching.
+        unblock_ok=""
+        for unblock_delay in 5 15 30 0; do
+            if "$VENV/bin/pip" install --quiet --no-cache-dir $PIP_HASH_FLAG_UNBLOCK -r "$REQS_UNBLOCK"; then
+                printf '%s' "$want_unblock" > "$STAMP_UNBLOCK"
+                unblock_ok=1
+                break
+            fi
+            if [ "$unblock_delay" != "0" ]; then
+                echo "run.sh: unblock install failed -- retrying in ${unblock_delay}s" >&2
+                sleep "$unblock_delay"
+            fi
+        done
+        if [ -z "$unblock_ok" ]; then
             echo "run.sh: WARNING: youtube_unblock dependency install FAILED" >&2
             echo "run.sh: WARNING: (PyPI unreachable?). /ytdl's PO-token path will" >&2
             echo "run.sh: WARNING: bot-check-fail until this succeeds; everything" >&2

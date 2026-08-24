@@ -2972,6 +2972,50 @@ backoff) before giving up, which covers the boot-time network gap. Note the
 residual: every image update resets /venv, so a site whose network is down
 for longer than the retries still degrades until the next container boot.
 
+### CR-74 - long server downloads crawl at 3-4 MiB/s even with the PO token working - FIXED in repo (dashboard 0.7.8)
+**Symptom** (owner, 2026-08-24, after CR-73's live fix): job 22's short news
+clips landed in seconds, but a 36-minute 562 MiB clip sustained only 3-4
+MiB/s (the SPA read 2.67 MiB/s), forty minutes after the same container
+measured 20.6 MiB/s on CR-73's verification clip.
+
+**Mechanism.** Even with a GVS PO token, YouTube SABR-forces the https
+formats away (their URLs are withheld from the player response), so nearly
+every server download walks the HLS m3u8 ladder - and yt-dlp fetches its
+fragments ONE at a time, at whatever pace YouTube gives a single connection.
+Short videos ride hot CDN caches; long ones get per-connection pacing.
+Isolated live in the deployed container against the same clip and format:
+sequential 23 MiB/s on a short video, 3-4 MiB/s sustained on the long one,
+53 MiB/s with six fragments in flight. Not the pipe (raw curl 51 MB/s), not
+the pool (writes to /projects at 27 MiB/s), not the worker process (8% CPU).
+
+**Fix** (`ytdl/web/ytdlweb/vendor/downloader.py`): `concurrent_fragment_
+downloads` = `fragment_jobs()`, default 6, env-tunable via
+`YTDL_FRAGMENT_JOBS`, bounded 1..16 (1 restores the old behaviour; the
+ceiling keeps one download from looking like bulk automation). The
+companion's local-download argv is deliberately untouched: editors get real
+https formats via player_client=web_safari (CR-39) and a companion change is
+a fleet release. Needs a dashboard deploy.
+
+### CR-75 - a search nobody downloads from blocks every later search, with no visible way out - FIXED in repo (dashboard 0.7.8)
+**Symptom** (owner, 2026-08-24): run a search, download nothing from its
+results, and every later SEARCH / GET LINKS answers "you already have a job
+in progress" until the parked job is cancelled - and the only cancel was the
+small [ CANCEL ] on the progress strip, which nobody read as "throw this
+search away". (The 409s are in the live log within minutes of the report.)
+
+**Fix** (`ytdl/web/static/app.js`, `index.html`). Three affordances, all on
+the existing cancel endpoint (the server has cancelled a ready_for_review
+job outright since YTDL-1): (1) the review header now carries
+[ CANCEL SEARCH ], shown only while the job is parked at ready_for_review
+(a done job's review is the re-download view, CR-35), which cancels,
+clears the page and refreshes Recent searches; (2) a SEARCH refused with a
+409 against a job parked at ready_for_review - the one non-terminal phase
+with nothing in flight - offers a confirm to discard it and re-sends the
+refused payload as-is; (3) the same offer on GET LINKS. Declining, or a
+browser with no confirm(), is exactly the old behaviour: re-attach and the
+loud toast (which now names [ CANCEL SEARCH ]). Harness scenarios in
+`tests/test_static_app.py`. Needs a dashboard deploy.
+
 ## Open — residuals from the 2026-08-14 fix pass
 
 ### R16 — eight 08-14 findings deliberately not fixed

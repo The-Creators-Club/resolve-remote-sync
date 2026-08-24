@@ -1106,6 +1106,10 @@ function renderGrid() {
   // arrive as a toast; a permanently grey button is not a better error message.
   $('#download').disabled =
     !sel.length || !['ready_for_review', 'done'].includes(m.job.phase);
+  // The way out of a parked review (owner, 2026-08-24): only a job actually
+  // WAITING here can be cancelled from here. A done job's review is the
+  // re-download view (CR-35) and has nothing to cancel.
+  $('#discard').classList.toggle('hidden', m.job.phase !== 'ready_for_review');
 }
 
 function card(v) {
@@ -1207,6 +1211,38 @@ async function bulk(selected) {
 }
 
 // ---------------------------------------------------------------- actions
+
+// Throwing away a parked review is safe in bytes (ready_for_review means
+// nothing from it has been downloaded; a download moves the job on) but not in
+// effort -- a manifest can sit for a week mid-curation -- so it is asked out
+// loud, never assumed. The typeof guard keeps the test harness, which has no
+// window.confirm, on the decline path, and declining is also the safe default.
+const confirmDiscard = msg => typeof confirm === 'function' && confirm(msg);
+
+const askDiscardParked = () => confirmDiscard(
+  'Your previous search is still waiting for review and nothing from it was '
+  + 'downloaded. Discard it and start the new one?');
+
+// The 409's other half (owner, 2026-08-24): one job per editor, so a search
+// nobody downloaded from blocked every later search until the editor found
+// the small [ CANCEL ] on the progress strip. When the blocking job is parked
+// at ready_for_review -- the ONE non-terminal phase with no work in flight --
+// offer to discard it and re-run the refused request right away, instead of
+// only re-attaching and telling the editor which button to go and press.
+// -> true when it took over (cancelled + retried, or failed loudly trying).
+async function discardParkedAndRetry(info, retry) {
+  if (!info || info.phase !== 'ready_for_review' || !askDiscardParked()) {
+    return false;
+  }
+  try {
+    await post(`api/jobs/${info.job_id}/cancel`);
+    await retry();
+  } catch (e) {
+    toast(e.message, true, 12000);
+  }
+  return true;
+}
+
 async function runSearch() {
   const go = $('#go');
   // Disabled means either "no projects ticked" or "a POST is already in
@@ -1220,38 +1256,46 @@ async function runSearch() {
   const slug = $('#project').value;
   if (!slug) { toast('pick a project first', true); return; }
   go.disabled = true;
-  try {
-    const r = await post('api/jobs', {
-      term, project_slug: slug,
-      quality: $('#quality').value,
-      period: $('#period').value || null,
-      // Which rubric both AI passes run under. Always sent; the server
-      // refuses a mode it does not know rather than reading it as the
-      // default, so this must never send anything but a key from the table.
-      mode: state.searchMode,
-      // Always sent, even when it is every box or none: the server tells an
-      // omitted field (an old client, which gets the defaults) apart from an
-      // empty one (this editor asked for no bias).
-      shot_types: shotKeys(),
-      // Always one of CANDIDATE_CAPS; the server refuses anything else rather
-      // than clamping it, so this must never send the raw DOM value.
-      max_candidates: capValue(),
-    });
+  // Hoisted out of the POST so the discard-and-retry path below re-sends
+  // EXACTLY what was refused, not whatever the form says by the time the
+  // editor has answered the confirm.
+  const payload = {
+    term, project_slug: slug,
+    quality: $('#quality').value,
+    period: $('#period').value || null,
+    // Which rubric both AI passes run under. Always sent; the server
+    // refuses a mode it does not know rather than reading it as the
+    // default, so this must never send anything but a key from the table.
+    mode: state.searchMode,
+    // Always sent, even when it is every box or none: the server tells an
+    // omitted field (an old client, which gets the defaults) apart from an
+    // empty one (this editor asked for no bias).
+    shot_types: shotKeys(),
+    // Always one of CANDIDATE_CAPS; the server refuses anything else rather
+    // than clamping it, so this must never send the raw DOM value.
+    max_candidates: capValue(),
+  };
+  const launch = async () => {
+    const r = await post('api/jobs', payload);
     // Only now: the server decides whether a second job is allowed, and
     // tearing the live view down first left the page showing nothing while
     // the refused-against job kept running (YTDL-8, 2026-08-11).
     detach();
     $('#progress').classList.remove('hidden');
     await attach(r.job_id);
+  };
+  try {
+    await launch();
   } catch (e) {
     if (e.status === 409 && e.info && e.info.job_id) {
+      if (await discardParkedAndRetry(e.info, launch)) return;
       // The job the server refused to duplicate is exactly the one the editor
       // has lost sight of -- including a forgotten manifest from last week.
       // Loud, red and specific: a quiet amber "showing it below" over a
       // four-day-old review read as "SEARCH does nothing" (owner, 2026-08-18).
       toast(`A previous search is still open below (job #${e.info.job_id}). ` +
-            `Finish its review or press CANCEL on it, then search again. ` +
-            `(${e.message})`, true, 15000);
+            `Finish its review or press [ CANCEL SEARCH ] on it, then search ` +
+            `again. (${e.message})`, true, 15000);
       $('#progress').classList.remove('hidden');
       await attach(e.info.job_id);
     } else {
@@ -1275,15 +1319,18 @@ async function runUrls() {
   const slug = $('#project').value;
   if (!slug) { toast('pick a project first', true); return; }
   btn.disabled = true;
-  try {
+  // Hoisted for the same reason runSearch's payload is: the discard-and-retry
+  // path re-sends what was refused, not the form's current state.
+  const payload = {
     // The links and the shared destination pickers, and nothing else: a paste
     // has the same destination choice a search has, which is the project
     // (owner's call, 2026-08-11), and its clips land in that project's Youtube
     // root because there is no term to sort individual downloads by.
-    const r = await post('api/jobs/urls', {
-      urls, project_slug: slug,
-      quality: $('#quality').value,
-    });
+    urls, project_slug: slug,
+    quality: $('#quality').value,
+  };
+  const launch = async () => {
+    const r = await post('api/jobs/urls', payload);
     // GET LINKS offers the job to this editor's machine too (CR-36,
     // 2026-08-19). It never did: dispatchLocal lived only in startDownload,
     // the review-grid path, so EVERY pasted link this fleet has ever fetched
@@ -1294,7 +1341,7 @@ async function runUrls() {
     //
     // Same contract as startDownload's: not awaited, the server has already
     // accepted the job, and a companion that cannot take it changes nothing.
-    dispatchLocal(r.job_id, $('#quality').value);
+    dispatchLocal(r.job_id, payload.quality);
     detach();
     $('#progress').classList.remove('hidden');
     await attach(r.job_id);
@@ -1304,8 +1351,12 @@ async function runUrls() {
       toast(`${r.queued} queued · ${r.skipped.length} already in the tree`,
             false, 12000);
     }
+  };
+  try {
+    await launch();
   } catch (e) {
     if (e.status === 409 && e.info && e.info.job_id) {
+      if (await discardParkedAndRetry(e.info, launch)) return;
       toast(`${e.message}, showing it below`, false, 12000);
       $('#progress').classList.remove('hidden');
       await attach(e.info.job_id);
@@ -1341,6 +1392,27 @@ async function startDownload() {
     await poll();
   } catch (e) {
     toast(e.message, true, 12000);
+  }
+}
+
+// The [ CANCEL SEARCH ] button on the review header (owner, 2026-08-24): the
+// same cancel the progress strip offers, but where the editor is actually
+// looking, and it CLEARS the page afterwards -- a cancelled review left on
+// screen reads as a cancel that did not work, which is exactly the 409 trap
+// this button exists to end.
+async function discardReview() {
+  if (!state.jobId) return;
+  if (!confirmDiscard('Discard this search? Nothing from it was downloaded, '
+                      + 'and its results will be thrown away.')) return;
+  try {
+    await post(`api/jobs/${state.jobId}/cancel`);
+    detach();
+    toast('search cancelled');
+    // The cancelled job is a Recent-searches row now; show it there rather
+    // than leaving the panel a state behind.
+    loadRecent();
+  } catch (e) {
+    toast(e.message, true);
   }
 }
 
@@ -1982,6 +2054,7 @@ async function init() {
   });
   $('#cancel').onclick = cancelJob;
   $('#cancel2').onclick = cancelJob;
+  $('#discard').onclick = discardReview;
   $('#dlserver').onclick = lockToServer;
   $('#selall').onclick = () => bulk(true);
   $('#selnone').onclick = () => bulk(false);

@@ -181,6 +181,15 @@
       <div class="resulthead">
         <span id="counts"></span>
         <button id="showfiltered" class="text-btn hidden">[ SHOW FILTERED OUT ]</button>
+        <!-- The way OUT of a parked review (owner, 2026-08-24): one job per
+             editor means an undownloaded manifest blocks every new search, and
+             the only cancel used to be the small [ CANCEL ] up on the progress
+             strip, which nobody read as "throw this search away". On the LEFT,
+             away from DOWNLOAD, because one is destructive and the other is
+             the whole point of the page. Hidden unless the job is parked at
+             ready_for_review; a done job's review (re-download) has nothing to
+             cancel. -->
+        <button id="discard" class="text-btn hidden">[ CANCEL SEARCH ]</button>
         <span class="grow"></span>
         <button id="selall" class="text-btn">[ SELECT ALL ]</button>
         <button id="selnone" class="text-btn">[ SELECT NONE ]</button>

@@ -269,3 +269,24 @@ def test_temp_is_left_alone_so_partials_stay_beside_their_clip(tmp_path):
     """
     opts = downloader.build_opts(str(tmp_path), quality='1080p')
     assert 'temp' not in opts['paths']
+
+
+def test_fragments_download_in_parallel_and_the_knob_is_bounded(tmp_path, monkeypatch):
+    """CR-74 (2026-08-24): with a PO token YouTube still SABR-forces the https
+    formats away, so nearly every server download is an m3u8 ladder -- whose
+    fragments were fetched ONE at a time, at whatever pace YouTube gives a
+    single connection (3-4 MiB/s sustained on a long clip, measured live,
+    against 53 MiB/s with six in flight). The env override is an operator
+    lever; junk and out-of-range values must not take the download down."""
+    monkeypatch.delenv(downloader.FRAGMENT_JOBS_ENV, raising=False)
+    opts = downloader.build_opts(str(tmp_path), quality='1080p')
+    assert opts['concurrent_fragment_downloads'] == 6
+
+    monkeypatch.setenv(downloader.FRAGMENT_JOBS_ENV, '3')
+    assert downloader.fragment_jobs() == 3
+    monkeypatch.setenv(downloader.FRAGMENT_JOBS_ENV, '0')
+    assert downloader.fragment_jobs() == 1        # 1 is the old behaviour
+    monkeypatch.setenv(downloader.FRAGMENT_JOBS_ENV, '99')
+    assert downloader.fragment_jobs() == 16       # bulk-automation ceiling
+    monkeypatch.setenv(downloader.FRAGMENT_JOBS_ENV, 'junk')
+    assert downloader.fragment_jobs() == 6

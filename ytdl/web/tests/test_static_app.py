@@ -1799,6 +1799,142 @@ scenarios['a_refused_hand_back_says_so_and_comes_back'] = async () => {
           hidden: btn.hidden};
 };
 
+// A search refused against a review nobody downloaded from can now discard it
+// and go (owner, 2026-08-24): the parked job is the ONE non-terminal phase
+// with nothing in flight, so cancelling it is safe, and the refused payload is
+// re-sent as-is. The harness has no window.confirm, so scenarios opt in.
+scenarios['blocked_search_offers_discard_and_retries'] = async () => {
+  let posts = 0;
+  const h = await boot(async (method, url, body) => {
+    const b = baseline(method, url); if (b) return b;
+    if (method === 'POST' && url === 'api/jobs') {
+      posts++;
+      if (posts === 1) {
+        return {status: 409, json: {detail: {detail: 'you already have a job in progress',
+                                             job_id: 77, phase: 'ready_for_review'}}};
+      }
+      return {json: {job_id: 88, phase: 'queued'}};
+    }
+    if (method === 'POST' && url === 'api/jobs/77/cancel') {
+      return {json: {ok: true, phase: 'cancelled'}};
+    }
+    if (url === 'api/jobs/88') return {json: POLLRES(JOB({id: 88, phase: 'searching'}))};
+    return {json: {}};
+  });
+  h.ctx.confirm = () => true;
+  h.get('q').value = 'reef';
+  h.get('project').value = 's';
+  await h.app.runSearch();
+  await flush();
+  const cancel_calls = h.calls.filter(c => c.method === 'POST'
+                                           && c.url === 'api/jobs/77/cancel').length;
+  return {posts, cancel_calls, job_id: h.app.state.jobId,
+          go_disabled: h.get('go').disabled, polling: h.polling()};
+};
+
+// Declining the offer is the OLD behaviour exactly: re-attach, loud toast,
+// nothing cancelled. (No-confirm-at-all is pinned by refused_search_reattaches
+// above -- the guard treats an absent confirm as a decline too.)
+scenarios['declining_the_discard_keeps_the_parked_review'] = async () => {
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (method === 'POST' && url === 'api/jobs') {
+      return {status: 409, json: {detail: {detail: 'you already have a job in progress',
+                                           job_id: 77, phase: 'ready_for_review'}}};
+    }
+    if (url === 'api/jobs/77') return {json: POLLRES(JOB({id: 77, phase: 'searching'}))};
+    return {json: {}};
+  });
+  h.ctx.confirm = () => false;
+  h.get('q').value = 'reef';
+  h.get('project').value = 's';
+  await h.app.runSearch();
+  await flush();
+  return {job_id: h.app.state.jobId,
+          cancels: h.calls.filter(c => c.url.endsWith('/cancel')).length,
+          toast: h.get('toast').textContent};
+};
+
+// The same offer on GET LINKS: a paste is refused against a parked review by
+// the same one-job rule, and had the same dead end.
+scenarios['blocked_paste_offers_discard_and_retries'] = async () => {
+  let posts = 0;
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (method === 'POST' && url === 'api/jobs/urls') {
+      posts++;
+      if (posts === 1) {
+        return {status: 409, json: {detail: {detail: 'you already have a job in progress',
+                                             job_id: 77, phase: 'ready_for_review'}}};
+      }
+      return {json: {job_id: 90, phase: 'queued', queued: 1, skipped: []}};
+    }
+    if (method === 'POST' && url === 'api/jobs/77/cancel') {
+      return {json: {ok: true, phase: 'cancelled'}};
+    }
+    if (url === 'api/jobs/90') return {json: POLLRES(JOB({id: 90, phase: 'downloading', dl_total: 1}))};
+    return {json: {}};
+  });
+  h.ctx.confirm = () => true;
+  h.get('urls').value = 'https://youtu.be/JJJJJJJJJJJ';
+  h.get('project').value = 's';
+  await h.app.runUrls();
+  await flush();
+  const cancel_calls = h.calls.filter(c => c.method === 'POST'
+                                           && c.url === 'api/jobs/77/cancel').length;
+  return {posts, cancel_calls, job_id: h.app.state.jobId,
+          golinks_disabled: h.get('golinks').disabled};
+};
+
+// The review header's own way out: [ CANCEL SEARCH ] on a parked review
+// cancels it and CLEARS the page -- a cancelled review left on screen reads
+// as a cancel that did not work.
+scenarios['review_offers_cancel_search_and_clears_the_page'] = async () => {
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (url === 'api/jobs/9') {
+      return {json: POLLRES(JOB({id: 9, phase: 'ready_for_review'}))};
+    }
+    if (url === 'api/jobs/9/manifest') {
+      return {json: MANIFEST({job: JOB({id: 9, phase: 'ready_for_review'})})};
+    }
+    if (method === 'POST' && url === 'api/jobs/9/cancel') {
+      return {json: {ok: true, phase: 'cancelled'}};
+    }
+    return {json: {}};
+  });
+  await h.app.attach(9);
+  await flush();
+  const visible_at_review = !h.get('discard').hidden;
+  h.ctx.confirm = () => true;
+  await h.get('discard').onclick();
+  await flush();
+  const cancelled = h.calls.some(c => c.method === 'POST' && c.url === 'api/jobs/9/cancel');
+  return {visible_at_review, cancelled,
+          review_hidden: h.get('review').hidden,
+          progress_hidden: h.get('progress').hidden,
+          job_id: h.app.state.jobId,
+          toast: h.get('toast').textContent};
+};
+
+// A done job's review is the re-download view (CR-35): nothing to cancel, so
+// the button is not there to press.
+scenarios['a_done_reviews_grid_has_no_cancel_search'] = async () => {
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (url === 'api/jobs/9') {
+      return {json: POLLRES(JOB({id: 9, phase: 'done', terminal: true}))};
+    }
+    if (url === 'api/jobs/9/manifest') {
+      return {json: MANIFEST({job: JOB({id: 9, phase: 'done', terminal: true})})};
+    }
+    return {json: {}};
+  });
+  await h.app.attach(9);
+  await flush();
+  return {discard_hidden: h.get('discard').hidden};
+};
+
 // ---- run them -----------------------------------------------------------
 (async () => {
   const out = {};
@@ -1844,6 +1980,53 @@ def test_a_refused_search_re_attaches_to_the_job_it_was_refused_against(spa):
     assert r['progress_hidden'] is False
     assert 'already have a job' in r['toast']
     assert r['go_disabled'] is False        # and the button came back
+
+
+# ---------------------------------------------- the parked-review way out
+def test_a_blocked_search_can_discard_the_undownloaded_review_and_go(spa):
+    """Owner, 2026-08-24: one job per editor, so a search nobody downloaded
+    from blocked every later search until the editor found the small
+    [ CANCEL ] on the progress strip. ready_for_review is the one non-terminal
+    phase with nothing in flight, so the refused search may offer to cancel it
+    and re-send itself."""
+    r = spa['blocked_search_offers_discard_and_retries']
+    assert r['cancel_calls'] == 1, r
+    assert r['posts'] == 2, 'the refused payload was not re-sent'
+    assert r['job_id'] == 88, 'the page did not attach the NEW job'
+    assert r['polling'] is True
+    assert r['go_disabled'] is False
+
+
+def test_declining_the_discard_keeps_the_parked_review(spa):
+    r = spa['declining_the_discard_keeps_the_parked_review']
+    assert r['cancels'] == 0, 'declining the confirm must cancel nothing'
+    assert r['job_id'] == 77, 'the old re-attach behaviour must survive a decline'
+    assert 'CANCEL SEARCH' in r['toast']
+
+
+def test_a_blocked_paste_gets_the_same_discard_offer(spa):
+    r = spa['blocked_paste_offers_discard_and_retries']
+    assert r['cancel_calls'] == 1, r
+    assert r['posts'] == 2
+    assert r['job_id'] == 90
+    assert r['golinks_disabled'] is False
+
+
+def test_the_review_itself_offers_cancel_search_and_clears_the_page(spa):
+    """The review header's [ CANCEL SEARCH ]: same cancel as the progress
+    strip, but where the editor is looking, and the page is cleared after --
+    a cancelled review left on screen reads as a cancel that did not work."""
+    r = spa['review_offers_cancel_search_and_clears_the_page']
+    assert r['visible_at_review'] is True, 'the button must show on a parked review'
+    assert r['cancelled'] is True
+    assert r['review_hidden'] is True and r['progress_hidden'] is True
+    assert r['job_id'] is None
+    assert 'cancelled' in r['toast']
+
+
+def test_a_done_reviews_grid_has_no_cancel_search_button(spa):
+    """A done job's review is the re-download view (CR-35): nothing to cancel."""
+    assert spa['a_done_reviews_grid_has_no_cancel_search']['discard_hidden'] is True
 
 
 def test_a_failed_search_leaves_the_running_job_attached(spa):

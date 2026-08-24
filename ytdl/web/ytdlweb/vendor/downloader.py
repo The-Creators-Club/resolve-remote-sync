@@ -125,6 +125,35 @@ def cache_dir() -> str | None:
     return (os.environ.get(CACHE_DIR_ENV) or "").strip() or None
 
 
+FRAGMENT_JOBS_ENV = "YTDL_FRAGMENT_JOBS"
+
+
+def fragment_jobs() -> int:
+    """How many HLS/DASH fragments to fetch at once (CR-74, 2026-08-24).
+
+    HLS is this deployment's COMMON case, not its fallback: even with a GVS PO
+    token YouTube SABR-forces the https formats away (their URLs are withheld),
+    so nearly every server download walks an m3u8 ladder -- and its fragments
+    were fetched one at a time, at whatever pace YouTube gives one connection.
+    Measured live in the deployed container, same clip, same format: a short
+    video did 23 MiB/s sequentially but a 36-minute one sustained only 3-4
+    MiB/s, while six fragments in flight did 53 MiB/s. Per-connection pacing,
+    not the pipe (raw curl 50+ MB/s) and not the pool (writes at 27 MiB/s).
+
+    Bounded 1..16: 1 restores the old behaviour, and the ceiling keeps one
+    download from looking like the bulk automation the cookies+POT setup
+    exists to not look like. Env-tunable for the same reason the POT address
+    is -- it is a deployment fact, and the day YouTube changes the calculus an
+    operator needs a lever that is not a release.
+    """
+    raw = (os.environ.get(FRAGMENT_JOBS_ENV) or "").strip()
+    try:
+        n = int(raw) if raw else 6
+    except ValueError:
+        n = 6
+    return max(1, min(16, n))
+
+
 def build_opts(outdir: str, quality: str, container: str = "mp4",
                progress_hook=None, ffmpeg_location: str | None = None,
                edit_codec: str = "h264", cookies_browser: str | None = None,
@@ -181,6 +210,9 @@ def build_opts(outdir: str, quality: str, container: str = "mp4",
         "fragment_retries": 10,
         "extractor_retries": 3,
         "file_access_retries": 5,
+        # [vendor] Parallel fragment fetches -- see fragment_jobs() for the
+        # measurements and the bound (CR-74, 2026-08-24).
+        "concurrent_fragment_downloads": fragment_jobs(),
         # YouTube now requires solving JS challenges for full-quality formats.
         # Use whichever runtime is installed and allow fetching the solver.
         "js_runtimes": {"deno": {}, "node": {}},

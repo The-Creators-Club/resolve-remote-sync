@@ -265,3 +265,14 @@ while the server and dashboard provision **365 days** (`maxAge 31536000`,
 `setup_syncthing_folder.py:444`, `provision.py:157`/`:316`). Whichever wrote the
 folder last wins. Worth reconciling to one intended retention, but it is a
 separate decision from this patch.
+
+## Borrowed folders (2026-08-24)
+
+A machine that borrows a folder from another project holds the LENDER's
+Syncthing folder, restricted by a local `.stignore`
+(`SHARED_FOLDERS_PLAN.md` D4). `borrowed_folders.BorrowedFolderManager`
+accepts that folder through the same `accept_folder` path as any other, so
+`ignoreDelete: true` and staggered versioning are set at creation, and its
+per-pass reconcile runs `ensure_ignore_delete` like the sequencer's turn
+does for selected folders. The protection story is unchanged: this device
+never applies a delete another device made, borrowed subtree included.

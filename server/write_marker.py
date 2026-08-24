@@ -156,12 +156,28 @@ def main():
     elif not args.dry_run:
         print(f"no existing marker at {base}/{MARKER_FILENAME} -- writing a fresh identity")
 
+    # Additive marker keys (`includes` and anything future, SHARED_FOLDERS_PLAN.md
+    # §2.1) survive the rewrite: the write here merges over what was read.
+    # An unparseable existing marker has nothing recoverable to preserve.
+    preserved: dict = {}
+    if present:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                preserved = {k: v for k, v in data.items() if k not in ("slug", "created_by")}
+        except ValueError:
+            print("existing marker is not valid JSON; its non-identity keys "
+                  "cannot be preserved", file=sys.stderr)
+    extra = sorted(k for k in preserved if k != "created_at")
+    if extra:
+        print(f"preserving additive marker keys: {', '.join(extra)}")
+
     base_q = shell_quote(base)
     missing_msg = shell_quote(f"MISSING: {base}")
     script = "\n".join([
         "set -e",
         f'echo "$SUDO_PW" | sudo -S -p "" test -d {base_q} || {{ echo {missing_msg} >&2; exit 2; }}',
-        build_marker_write_cmd(base, slug, created_by=args.created_by),
+        build_marker_write_cmd(base, slug, created_by=args.created_by, extra_keys=preserved),
     ])
     rc, out, err = run_ssh(script, dry_run=args.dry_run)
     if args.dry_run:

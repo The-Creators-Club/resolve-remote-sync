@@ -3459,9 +3459,56 @@ class CompanionApp:
             out["blocked"] = True
             out["reasons"].append("that project is not selected on this machine")
             return out
+
+        # Borrowed folders (SHARED_FOLDERS_PLAN.md §3.2/§5). Two extra
+        # questions, both answered from the cached selection's `includes`:
+        #   * removing a BORROWER: its borrowed dirs were this machine's to
+        #     upload from too, so each include subpath gets the same lane A
+        #     dry-run as the project's own dir below.
+        #   * removing a LENDER while a borrower is still selected here:
+        #     rmtree takes the borrowed subtree with it. Blocked with a
+        #     reason (the next pass re-pulls it, but the editor should know
+        #     what they are detaching).
+        my_includes: list[dict[str, Any]] = []
+        try:
+            entries, _source = (self.selection_client.get()
+                                if self.selection_client is not None else ([], ""))
+        except Exception:
+            entries = []
+        for entry in entries or []:
+            raw = entry.get("includes")
+            if not isinstance(raw, list):
+                continue
+            for inc in raw:
+                if not isinstance(inc, dict):
+                    continue
+                if str(entry.get("slug") or "") == slug and not inc.get("covered"):
+                    my_includes.append(inc)
+                if str(inc.get("lender_slug") or "") == slug:
+                    borrower = str(entry.get("label") or entry.get("slug") or "")
+                    sub = str(inc.get("sub_rel") or "")
+                    out["blocked"] = True
+                    out["reasons"].append(
+                        f"part of this project ('{sub}') is shared into {borrower}, "
+                        f"which is still selected here"
+                    )
+
         subpath = f"{PROJECTS_PREFIX}{rel}"
         try:
             pending = self._lane_a.pending_uploads(subpath)
+            for inc in my_includes:
+                inc_sub = str(inc.get("subpath") or "").strip()
+                if not inc_sub or pending is None:
+                    continue
+                more = self._lane_a.pending_uploads(f"{PROJECTS_PREFIX}{inc_sub}")
+                if more is None:
+                    pending = None
+                    break
+                pending = {
+                    "count": int(pending.get("count") or 0) + int(more.get("count") or 0),
+                    "samples": (list(pending.get("samples") or [])
+                                + list(more.get("samples") or [])),
+                }
         except Exception:
             log.exception("removal gate: pending_uploads failed for %s", subpath)
             pending = None
@@ -5033,7 +5080,11 @@ class CompanionApp:
         # ("Projects/<year>/<series>/<project>") to the matching slug
         # before reporting -- leave it as-is if unmapped (defensive: a
         # transient selection gap shouldn't make status reporting blow up).
-        rel_to_slug = self.sequencer.rel_to_slug
+        # Borrowed rels map to their BORROWER: it is the borrower's turn that
+        # runs the borrowed subpath, and the dashboard's queue is keyed on
+        # the borrower's slug (SHARED_FOLDERS_PLAN.md §3.1).
+        getter = getattr(self.sequencer, "rel_to_slug_with_borrowed", None)
+        rel_to_slug = getter() if getter is not None else self.sequencer.rel_to_slug
         mapped: list[LaneStatus] = []
         for status in statuses:
             copy = LaneStatus(**vars(status))

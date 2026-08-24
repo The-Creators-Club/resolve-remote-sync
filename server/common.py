@@ -688,7 +688,8 @@ def build_marker_read_cmd(base: str) -> str:
 
 
 def build_marker_write_cmd(base: str, slug: str, created_by: str = "setup_tree",
-                           only_if_absent: bool = False) -> str:
+                           only_if_absent: bool = False,
+                           extra_keys: dict | None = None) -> str:
     """Shell line writing the project marker into `base` (root via sudo,
     then chowned by the caller's chown -R). JSON kept minimal + quoted for
     embedding in the SSH script.
@@ -699,10 +700,18 @@ def build_marker_write_cmd(base: str, slug: str, created_by: str = "setup_tree",
     every slug-keyed dashboard row (AUDIT DEL-8). Deliberate identity changes
     go through write_marker.py, where --slug is explicit and --force gates
     the change.
+
+    `extra_keys` are additive marker keys the caller read from the EXISTING
+    marker and wants to survive the rewrite (`includes`,
+    SHARED_FOLDERS_PLAN.md WP1); slug/created_by always win over them. JSON
+    kept ASCII (the default) so the payload embeds safely in the SSH script
+    whatever the remote locale.
     """
     import json as _json
 
-    payload = _json.dumps({"slug": slug, "created_by": created_by})
+    payload_data = dict(extra_keys or {})
+    payload_data.update({"slug": slug, "created_by": created_by})
+    payload = _json.dumps(payload_data)
     marker_q = shell_quote(f"{base}/{MARKER_FILENAME}")
     payload_q = shell_quote(payload)
     write = (

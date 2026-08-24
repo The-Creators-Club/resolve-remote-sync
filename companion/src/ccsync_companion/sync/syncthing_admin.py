@@ -188,6 +188,75 @@ def missing_ignore_lines(fetched: Any) -> list[str]:
     return [want for want in STIGNORE_LINES if want not in present]
 
 
+# --------------------------------------------------------------------------
+# Borrowed folders: restricted ignores (SHARED_FOLDERS_PLAN.md D4/WP3)
+# --------------------------------------------------------------------------
+
+# Characters Syncthing's glob patterns treat specially inside a path. A
+# folder name containing one ("What? [Take 2]") must match LITERALLY, or the
+# restriction widens or misses. `\` first so the escapes themselves survive.
+_GLOB_SPECIALS = "\\*?[]{}"
+
+
+def escape_ignore_glob(rel: str) -> str:
+    """A posix rel path escaped for literal use in a .stignore pattern."""
+    out = str(rel)
+    for ch in _GLOB_SPECIALS:
+        out = out.replace(ch, "\\" + ch)
+    return out
+
+
+def restricted_ignore_lines(subs: list[str]) -> list[str]:
+    """The device-local .stignore that turns a LENDER's whole Syncthing
+    folder into just its borrowed subtrees on this machine.
+
+    Shape (spiked 2026-08-24 against Syncthing v2.1.2; the fleet installs
+    v2.1.3):
+
+        STIGNORE_LINES...        # first match wins: video/Proxy/partials
+                                 # stay excluded even inside the subtree
+        !/<sub>                  # the borrowed dir itself
+        !/<sub>/**               # and everything below it
+        **                       # everything else in the lender stays out
+
+    NO ancestor `!` lines: the plan's draft assumed Syncthing needed
+    `!/Interviewees` to descend, but a pattern matching a directory matches
+    everything WITHIN it, so that line un-ignored the ancestor's every
+    sibling (measured: `Interviewees/Other/skip.txt` synced). Syncthing
+    v2.1.x descends into `**`-ignored directories on its own when a negation
+    could match below -- the bare recipe pulled exactly the subtree and
+    nothing else. No `(?i)` on the negations: the borrowed path is matched
+    case-exact.
+
+    `.stignore` is device-local and never synced, so the NAS and every other
+    device are untouched.
+    """
+    lines = list(STIGNORE_LINES)
+    for sub in subs:
+        esc = escape_ignore_glob(str(sub).strip().strip("/"))
+        if not esc:
+            continue
+        lines += [f"!/{esc}", f"!/{esc}/**"]
+    lines.append("**")
+    return lines
+
+
+def is_restricted(fetched: Any) -> bool:
+    """Does this .stignore carry a borrowed-folder restriction? True when
+    the last non-blank line is the catch-all `**` and at least one `!` line
+    precedes it. The fail-closed EXTRA test for a SELECTED folder: the
+    missing-lines check is a superset test, which a restricted list passes,
+    so a lender the editor just ticked would otherwise stay restricted and
+    quietly never sync its other folders."""
+    lines = fetched.get("ignore") if isinstance(fetched, dict) else fetched
+    if not isinstance(lines, (list, tuple)):
+        return False
+    stripped = [str(line).strip() for line in lines if str(line).strip()]
+    if not stripped or stripped[-1] != "**":
+        return False
+    return any(line.startswith("!") for line in stripped)
+
+
 def http_request(
     method: str, url: str, api_key: str, body: Optional[dict] = None, timeout: float = 5.0
 ) -> Any:

@@ -1714,3 +1714,190 @@ def test_each_pass_asks_lane_b_to_check_the_remote_root():
     assert _wait_until(lambda: probes)
     seq.stop()
     assert probes
+
+
+# -- borrowed folders (SHARED_FOLDERS_PLAN.md WP2) --------------------------
+
+
+def _inc(subpath, lender_slug, sub_rel, covered=False):
+    lender_rel = subpath[: -(len(sub_rel) + 1)]
+    return {"subpath": subpath, "sub_rel": sub_rel, "lender_slug": lender_slug,
+            "lender_label": lender_rel, "covered": covered}
+
+
+def _borrower_item(includes):
+    item = _item("s-borrower", "2026/FF5/Elections", 0)
+    item["includes"] = includes
+    return item
+
+
+def test_include_runs_lanes_after_the_projects_own(monkeypatch):
+    items = [_borrower_item([
+        _inc("2026/FF5/Civil Defence/Interviewees/Aha Chu",
+             "s-lender", "Interviewees/Aha Chu"),
+    ])]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    seq.start()
+    borrowed = "Projects/2026/FF5/Civil Defence/Interviewees/Aha Chu"
+    assert _wait_until(lambda: ("lane_a", borrowed) in events)
+    seq.stop()
+
+    own = "Projects/2026/FF5/Elections"
+    a_calls = [e for e in events if e[0] == "lane_a"]
+    assert a_calls.index(("lane_a", own)) < a_calls.index(("lane_a", borrowed))
+    assert ("lane_b", borrowed) in events
+
+
+def test_invalid_includes_are_dropped_never_widened():
+    bad = [
+        {"subpath": "../../evil", "sub_rel": "evil", "lender_slug": "s-x"},
+        {"subpath": "2026/FF5/CD/Proxy", "sub_rel": "Proxy", "lender_slug": "s-x"},
+        {"subpath": "2026/FF5/CD/Sub", "sub_rel": "Other", "lender_slug": "s-x"},   # tail mismatch
+        {"subpath": "just-one-segment", "sub_rel": "just-one-segment", "lender_slug": "s-x"},
+        {"subpath": "2026/FF5/CD/Sub", "sub_rel": "Sub", "lender_slug": ""},
+        "not a dict",
+    ]
+    items = [_borrower_item(bad)]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+    seq._update_known_selection(items)
+    assert seq._borrowed_includes("s-borrower") == []
+    assert seq.borrowed_lenders() == {}
+
+
+def test_include_under_a_selected_rel_is_skipped():
+    inc = _inc("2026/FF5/Civil Defence/Interviewees/Aha Chu",
+               "s-lender", "Interviewees/Aha Chu")
+    items = [
+        _borrower_item([inc]),
+        _item("s-lender", "2026/FF5/Civil Defence", 1),
+    ]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+    seq._update_known_selection(items)
+    assert seq._borrowed_includes("s-borrower") == []
+    # and a covered-marked include is skipped without a warning even when
+    # the lender's rel spelling would not match
+    covered = _borrower_item([_inc("2026/FF5/Civil Defence/Interviewees/Aha Chu",
+                                   "s-lender", "Interviewees/Aha Chu", covered=True)])
+    seq._update_known_selection([covered])
+    assert seq._borrowed_includes("s-borrower") == []
+
+
+def test_nested_includes_longest_prefix_wins():
+    outer = _inc("2026/FF5/Civil Defence/Interviewees", "s-lender", "Interviewees")
+    inner = _inc("2026/FF5/Civil Defence/Interviewees/Aha Chu",
+                 "s-lender", "Interviewees/Aha Chu")
+    items = [_borrower_item([outer, inner])]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+    seq._update_known_selection(items)
+    subs = [i["subpath"] for i in seq._borrowed_includes("s-borrower")]
+    assert subs == ["2026/FF5/Civil Defence/Interviewees"]
+
+
+def test_known_rels_carries_borrowed_but_rel_to_slug_does_not():
+    items = [_borrower_item([
+        _inc("2026/FF5/Civil Defence/Interviewees/Aha Chu",
+             "s-lender", "Interviewees/Aha Chu"),
+    ])]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+    seq._update_known_selection(items)
+
+    borrowed = "2026/FF5/Civil Defence/Interviewees/Aha Chu"
+    assert borrowed in seq.known_rels()
+    # rel_to_slug feeds _selected_project_rels (manifest + proxy scan scope):
+    # the borrowed rel must NOT be in it
+    assert borrowed not in seq.rel_to_slug
+    assert seq.rel_to_slug_with_borrowed()[borrowed] == "s-borrower"
+
+
+def test_halt_folder_ids_includes_borrowed_lenders():
+    items = [_borrower_item([
+        _inc("2026/FF5/Civil Defence/Interviewees/Aha Chu",
+             "s-lender", "Interviewees/Aha Chu"),
+    ])]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+    seq._update_known_selection(items)
+    assert "s-lender" in seq.halt_folder_ids()
+    # a SELECTED lender is already in the list via the selection itself
+    items2 = [_borrower_item([]), _item("s-lender", "2026/FF5/Civil Defence", 1)]
+    seq._update_known_selection(items2)
+    assert seq.halt_folder_ids().count("s-lender") == 1
+
+
+def test_borrowed_bookkeeping_pruned_with_the_borrower():
+    items = [_borrower_item([
+        _inc("2026/FF5/Civil Defence/Interviewees/Aha Chu",
+             "s-lender", "Interviewees/Aha Chu"),
+    ])]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+    seq._update_known_selection(items)
+    seq._clone_ages["s-borrower::2026/FF5/Civil Defence/Interviewees/Aha Chu"] = 1
+    seq._clone_ages["s-borrower"] = 1
+    seq._update_known_selection([_item("s-other", "2026/FF5/Other", 0)])
+    assert seq._clone_ages == {}
+
+
+def test_notify_change_in_a_borrowed_dir_promotes_the_borrower():
+    items = [_borrower_item([
+        _inc("2026/FF5/Civil Defence/Interviewees/Aha Chu",
+             "s-lender", "Interviewees/Aha Chu"),
+    ])]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+    seq._update_known_selection(items)
+    seq._wake_event.clear()
+    # lane A's watchdog attributes a write in the borrowed dir to the
+    # borrowed rel (longest known rel); the promotion must resolve it to
+    # the BORROWER, whose turn runs the borrowed subpath
+    seq.notify_change("Projects/2026/FF5/Civil Defence/Interviewees/Aha Chu")
+    assert seq._wake_event.is_set()
+
+
+def test_a_selected_lender_with_restricted_ignores_is_rewritten_before_unpause():
+    """SHARED_FOLDERS_PLAN.md §3.3: the editor ticks a lender they were
+    borrowing from. Its .stignore is still the borrowed-folder restriction,
+    which PASSES the missing-lines superset test -- so without the
+    is_restricted check the folder would come online syncing only the
+    borrowed subtree while the tick promises the whole project."""
+    from ccsync_companion.sync.syncthing_admin import restricted_ignore_lines
+
+    items = [_item("s-lender", "2026/FF5/Civil Defence", 0)]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    admin.folder_ignores["s-lender"] = restricted_ignore_lines(
+        ["Interviewees/Aha Chu"])
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    seq.start()
+    assert _wait_until(lambda: ("s-lender", list(STIGNORE_LINES))
+                       in [(c[0], c[1]) for c in admin.ignore_calls])
+    seq.stop()
+    assert admin.folder_ignores["s-lender"] == list(STIGNORE_LINES)
+
+
+def test_startup_verify_latches_a_restricted_selected_folder():
+    from ccsync_companion.sync.syncthing_admin import restricted_ignore_lines
+
+    items = [_item("s-lender", "2026/FF5/Civil Defence", 0)]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    admin.folder_ignores["s-lender"] = restricted_ignore_lines(
+        ["Interviewees/Aha Chu"])
+    seq, lane_a, lane_b, events = _build(selection, admin)
+    seq._verify_startup_ignores(items)
+    assert seq._ignores_unconfirmed_for("s-lender")

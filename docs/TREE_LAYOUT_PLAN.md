@@ -142,6 +142,13 @@ One shape, three languages of default. Field names are the manifest keys.
 Not in the layout: the Resolve bin names (`B-Roll/Archive`, `Youtube`) - they
 are media-pool labels, not folders; leave them until someone asks.
 
+Also not in the layout: the marker's `includes` key (SHARED_FOLDERS_PLAN.md,
+built 2026-08-24). It is **marker data** - a per-project declaration that
+travels with the project directory, like `slug` - not a site layout key. Its
+one layout dependency is the `Projects/` leading segment of each declared
+path (`links.PROJECTS_SEGMENT`), which WP1/WP2 here must swap to
+`layout().projects_dir` alongside every other literal.
+
 ---
 
 ## 3. Work packages

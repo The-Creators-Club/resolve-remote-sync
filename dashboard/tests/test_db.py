@@ -638,3 +638,54 @@ def test_a_vram_warning_survives_the_batch_and_a_clean_section_clears_it(conn):
         ingest={"at": T2, "active": 1, "warning": None, "done": 0, "total": 3},
     )
     assert dbmod.fetch_broll_ingest_map(conn)[("jsmith", "EDIT-PC")]["warning"] == ""
+
+
+# --------------------------------------------- cross-project links (v27)
+
+def test_project_links_replace_and_fetch(conn):
+    now = dbmod.utcnow_iso()
+    dbmod.upsert_project(conn, "lender", "2026/Lender", "/data/Projects/2026/Lender", now)
+    dbmod.upsert_project(conn, "borrower", "2026/Borrower", "/data/Projects/2026/Borrower", now)
+    rows = [
+        {"declared_path": "Projects/2026/Lender/Sub", "lender_slug": "lender",
+         "sub_rel": "Sub", "status": "ok", "detail": None},
+        {"declared_path": "Projects/2026/Lender/Bad/Proxy", "lender_slug": None,
+         "sub_rel": None, "status": "invalid", "detail": "cannot share a Proxy folder"},
+    ]
+    dbmod.replace_project_links(conn, "borrower", rows, now)
+
+    fetched = dbmod.fetch_links_for_borrowers(conn)["borrower"]
+    assert {r["declared_path"] for r in fetched} == {
+        "Projects/2026/Lender/Sub", "Projects/2026/Lender/Bad/Proxy"}
+    ok = next(r for r in fetched if r["status"] == "ok")
+    assert ok["lender_label"] == "2026/Lender"
+    assert ok["first_seen"] == now
+
+    # replace keeps first_seen for surviving keys, drops the vanished one
+    later = dbmod.utcnow_iso()
+    dbmod.replace_project_links(conn, "borrower", rows[:1], later)
+    fetched = dbmod.fetch_links_for_borrowers(conn)["borrower"]
+    assert len(fetched) == 1
+    assert fetched[0]["first_seen"] == now
+    assert fetched[0]["last_seen"] == later
+
+    # empty replacement clears the borrower entirely
+    dbmod.replace_project_links(conn, "borrower", [], later)
+    assert dbmod.fetch_links_for_borrowers(conn) == {}
+
+
+def test_fetch_borrowers_of_and_by_lender(conn):
+    now = dbmod.utcnow_iso()
+    dbmod.upsert_project(conn, "lender", "2026/Lender", "/p", now)
+    dbmod.upsert_project(conn, "b1", "2026/B1", "/p", now)
+    dbmod.upsert_project(conn, "b2", "2026/B2", "/p", now)
+    dbmod.replace_project_links(conn, "b1", [
+        {"declared_path": "Projects/2026/Lender/S1", "lender_slug": "lender",
+         "sub_rel": "S1", "status": "ok", "detail": None}], now)
+    dbmod.replace_project_links(conn, "b2", [
+        {"declared_path": "Projects/2026/Lender/S2", "lender_slug": "lender",
+         "sub_rel": "S2", "status": "missing", "detail": "folder not found"}], now)
+
+    # ok only: a missing link shares nothing and shows on the borrower side
+    assert [b["borrower_slug"] for b in dbmod.fetch_borrowers_of(conn, "lender")] == ["b1"]
+    assert dbmod.fetch_borrowers_by_lender(conn) == {"lender": {"b1"}}

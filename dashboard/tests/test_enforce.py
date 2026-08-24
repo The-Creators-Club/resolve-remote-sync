@@ -368,3 +368,60 @@ def test_the_brake_counts_share_removals_not_devices(conn, fake, collector):
                          if f["id"] == slug for d in f["devices"]}
     ]
     assert still_shared == slugs        # nothing was unshared
+
+
+# -- borrowed folders (SHARED_FOLDERS_PLAN.md §4.1, WP2) --------------------
+
+
+def add_link(conn, borrower, lender, sub_rel, lender_label, status="ok"):
+    dbmod.replace_project_links(conn, borrower, [
+        {"declared_path": f"Projects/{lender_label}/{sub_rel}",
+         "lender_slug": lender, "sub_rel": sub_rel, "status": status,
+         "detail": None}], dbmod.utcnow_iso())
+    conn.commit()
+
+
+def lender_folder(fake, slug="2026-ff5-lender"):
+    fake.state["folders"].append({
+        "id": slug, "label": "2026/FF5/Lender",
+        "path": "/data/Projects/2026/FF5/Lender",
+        "devices": [{"deviceID": SERVER_ID}],
+        "type": "sendreceive", "ignorePerms": True,
+    })
+
+
+def test_borrowers_device_gets_the_lenders_folder(conn, fake, collector):
+    """jsmith ticks only the BORROWER; an ok link makes the lender's folder
+    follow, so lane C can pull the borrowed subtree (restricted client-side
+    by .stignore, WP3). Unticking the borrower removes it again."""
+    lender_folder(fake)
+    collector.run_cycle(conn, ["config", "enforce"])   # seeds jsmith on SLUG
+    devices = {d["deviceID"] for f in fake.state["folders"]
+               if f["id"] == "2026-ff5-lender" for d in f["devices"]}
+    assert devices == {SERVER_ID}                       # no link yet
+
+    add_link(conn, SLUG, "2026-ff5-lender", "Interviewees/Aha Chu", "2026/FF5/Lender")
+    collector.run_cycle(conn, ["enforce"])
+    devices = {d["deviceID"] for f in fake.state["folders"]
+               if f["id"] == "2026-ff5-lender" for d in f["devices"]}
+    assert devices == {SERVER_ID, EDITOR_ID}
+
+    # untick the borrower everywhere: the lender share follows it out (the
+    # removal is under the same blast-radius brake as every other unshare)
+    dbmod.remove_selection(conn, "jsmith", SLUG)
+    conn.commit()
+    collector.run_cycle(conn, ["enforce"])
+    devices = {d["deviceID"] for f in fake.state["folders"]
+               if f["id"] == "2026-ff5-lender" for d in f["devices"]}
+    assert devices == {SERVER_ID}
+
+
+def test_broken_link_shares_nothing(conn, fake, collector):
+    lender_folder(fake)
+    collector.run_cycle(conn, ["config", "enforce"])
+    add_link(conn, SLUG, "2026-ff5-lender", "Gone", "2026/FF5/Lender",
+             status="missing")
+    collector.run_cycle(conn, ["enforce"])
+    devices = {d["deviceID"] for f in fake.state["folders"]
+               if f["id"] == "2026-ff5-lender" for d in f["devices"]}
+    assert devices == {SERVER_ID}

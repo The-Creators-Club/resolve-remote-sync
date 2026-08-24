@@ -25,6 +25,8 @@
       <span class="label">{{ p.short if p.short is defined else p.label }}</span>
     </a>
     {% if p.editors_behind %}<span class="behind">{{ p.editors_behind }}⇣</span>{% endif %}
+    {% if p.links_bad %}<span class="chip red" title="a shared-folder link on this project needs attention: open the project page">[ LINK ]</span>
+    {% elif p.links_ok %}<span class="chip" title="shares {{ p.links_ok }} folder{{ 's' if p.links_ok != 1 }} from other projects">[ +{{ p.links_ok }} ]</span>{% endif %}
   </div>
 {% endmacro %}
 {% macro render_node(node, path) %}

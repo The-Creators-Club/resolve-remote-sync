@@ -1114,3 +1114,21 @@ def test_the_companion_asks_for_the_chapters_the_servers_postprocessor_defaults_
         "companion's --embed-chapters has to be re-derived from it")
     args = companion_ytdl_exec.CREDITS_METADATA_ARGS
     assert "--embed-metadata" in args and "--embed-chapters" in args
+
+
+def test_restricted_ignore_lines_start_with_the_exact_stignore_prefix():
+    """SHARED_FOLDERS_PLAN.md WP3: a borrowed lender folder's restricted
+    .stignore is STIGNORE_LINES plus negations plus `**`. The prefix must
+    stay BYTE-IDENTICAL to the project list -- first match wins, so any
+    drift there changes which video/Proxy/partial files lane C carries
+    inside the borrowed subtree, i.e. the lane split itself."""
+    lines = companion_admin.restricted_ignore_lines(["Interviewees/Aha Chu"])
+    base = list(companion_admin.STIGNORE_LINES)
+    assert lines[: len(base)] == base
+    assert lines[-1] == "**"
+    negations = lines[len(base):-1]
+    assert negations == ["!/Interviewees/Aha Chu", "!/Interviewees/Aha Chu/**"]
+    # every line the DASHBOARD's project builder emits is in the prefix too
+    # (the companion's list is a superset: its .ccsync-tmp pair is editor-
+    # side only, same relationship the missing-lines check builds on)
+    assert set(dash_provision.build_stignore_lines()) <= set(base)

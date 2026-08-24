@@ -686,6 +686,44 @@ instead.
 
 ---
 
+## 6. The `.ccsync-project` marker
+
+A directory IS a project because it carries this JSON file; the `slug`
+inside is the project's immutable identity (see `dashboard/.../provision.py`).
+Since 2026-08-24 the marker may also carry `includes` — the cross-project
+folder links of `SHARED_FOLDERS_PLAN.md`:
+
+```json
+{
+ "slug": "2026-ff5-elections",
+ "created_by": "dashboard",
+ "created_at": "2026-08-05T15:17:21+00:00",
+ "includes": [
+  {
+   "path": "Projects/2026/FF5/Civil Defence/Interviewees/Aha Chu",
+   "note": "interview reused in the Elections episode",
+   "added_by": "footage-sorter",
+   "added_at": "2026-08-23T00:26:00+00:00"
+  }
+ ]
+}
+```
+
+- `includes` declares folders this project **borrows** from other projects.
+  An entry is an object with `path` (required) or, shorthand, a bare string.
+- `path` is tree-relative posix including the projects dir name
+  (`Projects/...`) — the canonical `P:\Projects\...` with the prefix
+  stripped and `\` flipped to `/`.
+- `note` / `added_by` / `added_at` are informational; unknown keys are kept.
+- The dashboard **validates and never trusts** the file: the collector
+  resolves each entry every provision cycle into the `project_links` table
+  (statuses `ok | missing | invalid | lender-inactive`; the project page
+  shows each refusal's reason) and only `ok` links ever reach a companion.
+- Writers must preserve every other key — `provision.write_marker` and
+  `server/write_marker.py` both merge over the existing file.
+- At most 32 entries; a `Proxy` folder, a whole project, anything outside
+  `Projects/`, or a subtree containing another project are all refused.
+
 ## See also
 
 - [`INSTALL.md`](INSTALL.md) · [`ARCHITECTURE.md`](ARCHITECTURE.md) · [`API.md`](API.md)

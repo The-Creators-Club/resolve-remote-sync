@@ -1053,3 +1053,21 @@ def test_express_stands_down_when_the_local_root_is_gone(tmp_path):
     shutil.rmtree(lane.local_root)
     lane._express_run(["Projects/2026/FF5/Alpha/clip.mov"])
     assert len(calls) == 1, "express spawned rclone against an unmounted tree"
+
+
+def test_write_in_a_borrowed_dir_attributes_to_the_borrowed_rel(tmp_path):
+    """SHARED_FOLDERS_PLAN.md §3.2: the sequencer's known_rels() carries
+    borrowed rels alongside the selection's own, and the longest known rel
+    wins -- so a clip dropped into a borrowed dir is express-uploaded under
+    the LENDER's NAS path (the subtree the borrower actually runs), never
+    the lender's root (not selected here) and never dropped."""
+    from ccsync_companion.sync.rclone_lane import _project_rel_for_path
+
+    root = str(tmp_path)
+    borrowed = "2026/FF5/Civil Defence/Interviewees/Aha Chu"
+    known = ["2026/FF5/Elections", borrowed]      # what known_rels() returns
+    path = str(tmp_path / "Projects/2026/FF5/Civil Defence/Interviewees/Aha Chu/clip.mov")
+    assert _project_rel_for_path(root, path, known) == f"Projects/{borrowed}"
+    # a write elsewhere in the lender is NOT in scope on this machine
+    other = str(tmp_path / "Projects/2026/FF5/Civil Defence/B-roll/clip.mov")
+    assert _project_rel_for_path(root, other, known) is None

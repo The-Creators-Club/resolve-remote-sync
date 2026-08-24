@@ -170,6 +170,21 @@ proxy to its original automatically. CC Sync is built around it: the
 default; your admin can set a different list per site. The `Assets`
 libraries are fixed by the product.
 
+**Sharing a folder between two projects.** Sometimes one folder genuinely
+belongs to two projects: an interview shot for one episode and reused in
+another. Copying it doubles the storage and the two copies drift apart the
+moment anyone renames or deletes one side. Instead, a project can *borrow* a
+folder from another project: on the borrowing project's dashboard page,
+[ SHARE A FOLDER INTO THIS PROJECT ] takes the folder's path (for example
+`2026/FF5/Elections/Interviewees/...`). From then on, everyone syncing the
+borrowing project also receives that folder, at its original path, through
+the same three lanes; nothing is copied and nothing needs relinking in
+Resolve. The project page lists what a project shares from others (and what
+is shared out of it), and a red [ LINK ] chip in the sidebar means one of
+those declarations needs attention. Whole projects cannot be borrowed (tick
+both projects instead), and `Proxy` folders cannot be borrowed directly
+(share their parent).
+
 ---
 
 ## 4. The three sync lanes

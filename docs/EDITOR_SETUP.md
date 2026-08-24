@@ -436,6 +436,13 @@ xattr -d com.apple.quarantine ~/.local/ccsync/bin/ccsync-companion
 
 - Anything you drop into your local project folder under `Audio/`,
   `AE/`, `Subs/`, etc. syncs both ways automatically (Syncthing, lane C).
+- **A folder shared from another project** (dashboard: project page →
+  [ SHARE A FOLDER INTO THIS PROJECT ]) arrives at its *original* path --
+  e.g. a borrowed interview under the other project's `Interviewees/` --
+  and behaves exactly like your own project's folders: proxies down,
+  uploads up, small files both ways. You do not need the other project
+  ticked, and clips already cut into timelines keep working because the
+  path never changes.
 - Video you add (in `B-roll/`, `Interviewees/`, etc., outside any `Proxy/`
   folder) uploads to the NAS automatically but does **not** download to
   other editors as originals -- only its generated proxy comes back down,

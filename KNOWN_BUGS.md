@@ -2867,6 +2867,21 @@ damage, never an editor's `P:\Café`. Tests: `tests/test_bpg_qt_escape.py`.
 The live base-rig INI still carries the two garbled entries until the next
 BPG launch from a 0.9.45 companion cleans them.
 
+### CR-71 - borrowed files are not counted in the borrower's MEDIA column - OPEN by design (v1), 2026-08-24
+**Symptom.** A project that shares a folder from another project
+(SHARED_FOLDERS_PLAN.md, built 2026-08-24) shows the borrowed clips nowhere
+in its own MEDIA figures: the presence manifest reports files under the
+project that OWNS the directory, and `_selected_project_rels` deliberately
+excludes borrowed rels from the manifest scan scope (they would otherwise
+also feed proxy generation scope on editors).
+
+**Why it is deferred, not fixed.** Reporting borrowed files under the
+borrower needs a per-file attribution split in `manifest.py` and a schema
+addition on the dashboard side; SHARED_FOLDERS_PLAN.md carries it as WP6
+(out of scope for v1). The sync itself is complete and visible: the borrowed
+folder's rows appear on the LENDER's project page, and the borrower's page
+lists the link under SHARES FROM.
+
 ### CR-70 - the tray menu sometimes opens late (variable delay, not every click) - OPEN, investigated 2026-08-21
 **Symptom.** Right-clicking the tray icon sometimes shows the menu a
 fraction of a second to many seconds late; survived the 2026-07-26 fixes and

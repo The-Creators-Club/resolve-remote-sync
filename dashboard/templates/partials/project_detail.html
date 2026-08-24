@@ -26,6 +26,52 @@
       [ {{ "UNTICK" if tick_for in pickers else "TICK" }} FOR {{ "ME" if tick_for == session_user else tick_for | upper }} ]</button>
   {% endif %}
 </div>
+{# Cross-project folder links (SHARED_FOLDERS_PLAN.md §4.3). SHARES FROM
+   shows every declaration, broken ones included, because the borrower's page
+   is where the declaration lives and where an admin looks when a link chip
+   goes red. SHARED INTO on the lender's side lists ok links only. #}
+{% if project.links %}
+<div class="mono-sm">SHARES FROM:
+  {% for l in project.links %}
+    <div class="link-row">
+      {% if l.status == "ok" %}<span class="chip green">[ OK ]</span>
+      {% else %}<span class="chip red">[ {{ l.status | upper }} ]</span>{% endif %}
+      <span class="mono">{{ l.sub_rel or l.declared_path }}</span>
+      {% if l.lender_slug %}from <a href="/project/{{ l.lender_slug }}">{{ l.lender_label or l.lender_slug }}</a>{% endif %}
+      {% if l.detail %}<span class="muted">{{ l.detail }}</span>{% endif %}
+      {% if session_user %}
+      <form style="display:inline" hx-post="/partials/project/{{ project.slug }}/links/remove"
+            hx-target="#project-detail" hx-swap="innerHTML">
+        <input type="hidden" name="path" value="{{ l.declared_path }}">
+        <button class="btn" title="stop sharing this folder into {{ project.label }} (nothing on disk is deleted)">[ UNSHARE ]</button>
+      </form>
+      {% endif %}
+    </div>
+  {% endfor %}
+</div>
+{% endif %}
+{% if session_user %}
+<div class="mono-sm">
+  <form style="display:inline" hx-post="/partials/project/{{ project.slug }}/links"
+        hx-target="#project-detail" hx-swap="innerHTML">
+    <input type="text" name="path" size="60"
+           placeholder="share a folder from another project, e.g. 2026/FF5/Elections/Interviewees/..."
+           title="paste a folder that lives inside ANOTHER project; anyone syncing this project will receive it at its original path">
+    <button class="btn">[ SHARE A FOLDER INTO THIS PROJECT ]</button>
+  </form>
+  {% if link_error %}<span class="chip red">[ ! ]</span> <span class="muted">{{ link_error }}</span>{% endif %}
+</div>
+{% endif %}
+{% if project.borrowers %}
+<div class="mono-sm">SHARED INTO:
+  {% for b in project.borrowers %}
+    <div class="link-row">
+      <span class="mono">{{ b.sub_rel }}</span>
+      into <a href="/project/{{ b.borrower_slug }}">{{ b.borrower_label or b.borrower_slug }}</a>
+    </div>
+  {% endfor %}
+</div>
+{% endif %}
 <div class="rule">{{ "─" * 100 }}</div>
 
 {% if project.editors %}

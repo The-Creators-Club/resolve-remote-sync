@@ -18,7 +18,7 @@ from typing import Any, Callable
 
 from pathlib import Path
 
-from . import db, provision
+from . import db, links, provision
 from .settings import Settings
 from .syncthing_client import SyncthingClient, SyncthingError
 
@@ -473,6 +473,16 @@ class Collector:
             log.error("shared asset folder provisioning failed: %s", exc)
             failures.append(f"shared-assets: {exc}")
 
+        # -- 6. cross-project folder links (SHARED_FOLDERS_PLAN.md §2.3) ----
+        # Same posture as the shared-folder step: a broken declaration must
+        # not stop projects provisioning, but a failed pass is still recorded
+        # so the cycle retries with backoff.
+        try:
+            self._run_links(conn, by_slug, projects_dir)
+        except Exception as exc:
+            log.error("cross-project link resolution failed: %s", exc)
+            failures.append(f"project-links: {exc}")
+
         if failures:
             raise RuntimeError(
                 f"{len(failures)} folder(s) failed to provision: " + "; ".join(failures)
@@ -541,6 +551,101 @@ class Collector:
                 log.warning(
                     "REPAIRED folder settings on shared asset folder %s: %s",
                     folder_id, ", ".join(f"{k}={v}" for k, v in sorted(drift.items())))
+
+    def _run_links(self, conn, by_slug: dict[str, list[str]], projects_dir: Path) -> None:
+        """Resolve every scanned marker's `includes` into project_links
+        (SHARED_FOLDERS_PLAN.md §2.3). The marker on the tree is the truth
+        and the table is the resolved cache: a borrower whose marker has no
+        `includes` key gets its rows cleared. Rows of a borrower that
+        vanished from the scan entirely are left alone -- same reasoning as
+        "never deletes folders" above: a transiently unreadable marker must
+        not unshare a lender's folder from a whole fleet of borrowers.
+
+        Per-borrower fault isolation as in the provision loop; failures are
+        raised at the end so the cycle is recorded as failed and retried."""
+        now = db.utcnow_iso()
+        prior = db.fetch_links_for_borrowers(conn)
+        proj_rows = {
+            r["slug"]: {"label": r["label"], "active": r["active"]}
+            for r in conn.execute("SELECT slug, label, active FROM projects")
+        }
+        failures: list[str] = []
+        for slug, rels in by_slug.items():
+            if len(rels) > 1:
+                # Copied project dir: the provision loop already warned; there
+                # is no way to know WHICH tree the declaration belongs to.
+                continue
+            rel = rels[0]
+            try:
+                data = provision.read_marker_data(projects_dir / rel) or {}
+                results = links.resolve_marker_includes(
+                    projects_dir, rel, data.get("includes"))
+                prior_by_declared = {
+                    r["declared_path"]: r for r in prior.get(slug, [])}
+                rows = []
+                for res in results:
+                    res = self._retarget_link(
+                        res, prior_by_declared.get(res.declared), projects_dir,
+                        rel, proj_rows)
+                    status, detail = res.status, res.detail
+                    if status in (links.STATUS_OK, links.STATUS_MISSING):
+                        lender = proj_rows.get(res.lender_slug or "")
+                        if lender is None or not lender["active"]:
+                            status = links.STATUS_LENDER_INACTIVE
+                            detail = "the lending project is not active on the dashboard"
+                    keep_lender = status in (links.STATUS_OK, links.STATUS_MISSING)
+                    rows.append({
+                        "declared_path": res.declared,
+                        "lender_slug": res.lender_slug if keep_lender else None,
+                        "sub_rel": res.sub_rel if keep_lender else None,
+                        "status": status,
+                        "detail": detail or None,
+                    })
+                db.replace_project_links(conn, slug, rows, now)
+                # Commit per borrower (the retarget branch's precedent): a
+                # LATER borrower's failure rolls the cycle back, and the good
+                # rows resolved before it must not vanish with it.
+                conn.commit()
+            except Exception as exc:
+                log.error("link resolution failed for %s (%s): %s", slug, rel, exc)
+                failures.append(f"{slug}: {exc}")
+        dropped = db.clear_links_of_vanished_borrowers(conn, by_slug.keys())
+        if dropped:
+            conn.commit()
+            log.info("cleared %d link row(s) of deleted borrower project(s)", dropped)
+        if failures:
+            raise RuntimeError(
+                f"{len(failures)} borrower(s) failed link resolution: "
+                + "; ".join(failures))
+
+    @staticmethod
+    def _retarget_link(res, prior_row, projects_dir: Path, borrower_rel: str,
+                       proj_rows: dict) -> "links.LinkResult":
+        """A lender that moved on the NAS leaves the declared path stale while
+        the prior row's lender_slug + sub_rel still identify the folder --
+        re-resolve through the lender's CURRENT label and, if that lands,
+        keep the link alive with a "declaration is stale" note. The product
+        never rewrites the customer's marker for this (TREE_LAYOUT_PLAN D6)."""
+        if res.status == links.STATUS_OK or prior_row is None:
+            return res
+        lender_slug = prior_row.get("lender_slug")
+        sub_rel = prior_row.get("sub_rel")
+        if not lender_slug or not sub_rel:
+            return res
+        lender = proj_rows.get(lender_slug)
+        if lender is None or not lender["active"]:
+            return res
+        candidate = f"{links.PROJECTS_SEGMENT}/{lender['label']}/{sub_rel}"
+        again = links.resolve_include(projects_dir, borrower_rel, candidate)
+        if again.status != links.STATUS_OK or again.lender_slug != lender_slug:
+            return res
+        return links.LinkResult(
+            declared=res.declared, status=links.STATUS_OK,
+            lender_rel=again.lender_rel, sub_rel=again.sub_rel,
+            lender_slug=lender_slug,
+            detail=f"declared path is stale; the folder moved to "
+                   f"{links.PROJECTS_SEGMENT}/{again.lender_rel}/{again.sub_rel}. "
+                   f"Update the declaration when convenient.")
 
     def _provision_slug(
         self, conn, slug: str, rels: list[str], folders_by_id: dict, projects_dir: Path,
@@ -946,6 +1051,10 @@ class Collector:
         # is precisely the old behaviour and the safe direction.
         selections = db.fetch_machine_selections(conn)
         editor_selections = db.fetch_all_selections(conn)
+        # Cross-project folder links (SHARED_FOLDERS_PLAN.md §4.1): a device
+        # whose plan holds a BORROWER of this folder receives the lender's
+        # folder too; its own restricted .stignore limits what it pulls (D4).
+        borrowers_of = db.fetch_borrowers_by_lender(conn)
         machine_devices: dict[tuple[str, str], str] = {}
         for row in db.fetch_machines(conn):
             device_id = row.get("syncthing_device_id")
@@ -982,7 +1091,17 @@ class Collector:
                 for editor_device_ids in editor_devices.values():
                     desired |= editor_device_ids
             else:
-                for editor, machine in selections.get(slug, []):
+                # This folder's own ticks, plus the ticks of every project
+                # that BORROWS a folder from it -- a borrower's device needs
+                # the lender's folder to pull the borrowed subtree (§4.1).
+                # Same device resolution, same unapproved-device warning,
+                # same blast-radius brake below.
+                plan_rows = list(selections.get(slug, []))
+                plan_editors = list(editor_selections.get(slug, []))
+                for borrower in sorted(borrowers_of.get(slug, set())):
+                    plan_rows.extend(selections.get(borrower, []))
+                    plan_editors.extend(editor_selections.get(borrower, []))
+                for editor, machine in plan_rows:
                     device_id = machine_devices.get((editor, machine))
                     if device_id and device_id not in id_to_editor:
                         # NOT APPROVED YET (dash-admin-6 / comp-lane-c-1,
@@ -1012,7 +1131,7 @@ class Collector:
                 # registry has never seen, and dropping it here would unshare
                 # a working editor the moment they upgraded the dashboard
                 # ahead of their companion (the B16 failure shape again).
-                for editor in editor_selections.get(slug, []):
+                for editor in plan_editors:
                     desired |= {
                         d for d in editor_devices.get(editor, set())
                         if d not in mapped_device_ids

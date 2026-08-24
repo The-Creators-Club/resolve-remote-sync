@@ -17,7 +17,10 @@
           <td><span class="dot {{ item.status }}">●</span></td>
           <td><span class="who">{{ item.label }}</span>
               {% if item.is_current %}<span class="chip amber">[ SYNCING NOW ]</span>{% endif %}
-              {% if item.missing_project %}<span class="chip red" title="project no longer exists on the server">[ GONE ]</span>{% endif %}</td>
+              {% if item.missing_project %}<span class="chip red" title="project no longer exists on the server">[ GONE ]</span>{% endif %}
+              {% for inc in item.includes %}
+              <div class="muted mono-sm">shares {{ inc.sub_rel }} from {{ inc.lender_label }}</div>
+              {% endfor %}</td>
           <td class="mono">{% if item.completion is not none %}<span class="cssbar"><span class="fill" style="width:{{ [[item.completion, 100] | min, 0] | max }}%"></span></span> {{ "%.0f" | format(item.completion) }}%{% else %}<span class="muted">no data yet</span>{% endif %}</td>
           <td class="mono-sm">
             {% if item.need_items %}{{ item.need_items }} files · {{ item.need_bytes | human_bytes }}

@@ -277,16 +277,27 @@ MARKER_FILENAME = ".ccsync-project"
 SLUG_RE = re.compile(r"^[a-z0-9-]+$")
 
 
-def read_marker(directory: Path) -> str | None:
-    """The marker's slug, or None (missing/unreadable/malformed/invalid slug
-    -- never raises; callers treat None as 'not a project' or log-and-skip)."""
+def read_marker_data(directory: Path) -> dict | None:
+    """The marker's full JSON dict, or None (missing/unreadable/malformed --
+    never raises). Callers that only need the identity use read_marker;
+    this exists for the additive keys (`includes`, SHARED_FOLDERS_PLAN.md
+    §2.1) that ride in the same file."""
     import json
 
     try:
         data = json.loads((Path(directory) / MARKER_FILENAME).read_text(encoding="utf-8-sig"))
-        slug = str(data.get("slug", "")).strip()
     except (OSError, ValueError):
         return None
+    return data if isinstance(data, dict) else None
+
+
+def read_marker(directory: Path) -> str | None:
+    """The marker's slug, or None (missing/unreadable/malformed/invalid slug
+    -- never raises; callers treat None as 'not a project' or log-and-skip)."""
+    data = read_marker_data(directory)
+    if data is None:
+        return None
+    slug = str(data.get("slug", "")).strip()
     if not slug:
         return None
     if not SLUG_RE.match(slug):
@@ -338,16 +349,33 @@ def marked_descendants(directory: Path, max_depth: int = 8) -> list[str]:
 
 def write_marker(directory: Path, slug: str, created_by: str = "dashboard") -> None:
     """Atomic marker write (tmp + replace) so a concurrent scan never sees a
-    partial file. Raises OSError on failure -- callers decide severity."""
+    partial file. Raises OSError on failure -- callers decide severity.
+
+    MERGES over any existing marker (SHARED_FOLDERS_PLAN.md WP1): additive
+    keys like `includes` survive a rewrite of the identity. Before this, any
+    write here (self-heal, adopt, repair) silently dropped every key it did
+    not know about."""
     import datetime as _dt
     import json
     import os as _os
 
-    payload = json.dumps({
+    data = read_marker_data(directory) or {}
+    data.update({
         "slug": slug,
         "created_by": created_by,
         "created_at": _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat(),
-    }, indent=1)
+    })
+    write_marker_data(directory, data)
+
+
+def write_marker_data(directory: Path, data: dict) -> None:
+    """Atomic full-marker write (tmp + replace). The caller holds the whole
+    dict (from read_marker_data) -- the link-authoring endpoints go through
+    here so every key they do not own survives verbatim."""
+    import json
+    import os as _os
+
+    payload = json.dumps(data, indent=1, ensure_ascii=False)
     target = Path(directory) / MARKER_FILENAME
     tmp = Path(directory) / (MARKER_FILENAME + ".tmp")
     tmp.write_text(payload, encoding="utf-8")

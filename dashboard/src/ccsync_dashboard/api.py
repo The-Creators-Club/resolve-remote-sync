@@ -25,7 +25,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from . import VERSION, auth, db, health, local_users, package_store, release_trust
+from . import VERSION, auth, db, health, links, local_users, package_store, release_trust
 from .nas import EDITORS_GROUP, NasBackend, NasError, is_valid_username, looks_like_ssh_pubkey
 from .nas import factory as nas_factory
 from .syncthing_client import SyncthingClient, SyncthingError
@@ -262,12 +262,19 @@ def build_projects_view(conn: sqlite3.Connection, now: str | None = None) -> dic
     collector = db.fetch_collector_status(conn)
     reachable = collector["syncthing_reachable"]
     lanes_by_editor = _lanes_by_editor(conn)
+    links_by_borrower = db.fetch_links_for_borrowers(conn)
     projects = []
     for p in db.fetch_projects(conn):
         editors = [_editor_view(e, lanes_by_editor, reachable, now) for e in p["editors"]]
+        my_links = links_by_borrower.get(p["slug"], [])
         projects.append({
             "slug": p["slug"],
             "label": p["label"],
+            # Cross-project folder links (SHARED_FOLDERS_PLAN.md §4.3): the
+            # sidebar chips. ok counts what syncs; bad counts what an admin
+            # needs to look at (invalid / missing / lender-inactive).
+            "links_ok": sum(1 for l in my_links if l["status"] == "ok"),
+            "links_bad": sum(1 for l in my_links if l["status"] != "ok"),
             "path": p["path"],
             # Syncthing's own folder health -- 'stopped' with "folder marker
             # missing" is the tell that a project dir was moved out from under
@@ -368,6 +375,11 @@ def build_project_view(conn: sqlite3.Connection, slug: str, now: str | None = No
         "editors": editors,
         "nas_media": nas,
         "project_row_id": project["id"],
+        # Cross-project folder links, both directions (SHARED_FOLDERS_PLAN.md
+        # §4.3): what this project borrows (all statuses, so a broken link is
+        # visible where it was declared) and who borrows from it (ok only).
+        "links": db.fetch_links_for_borrowers(conn, [slug]).get(slug, []),
+        "borrowers": db.fetch_borrowers_of(conn, slug),
     }
 
 
@@ -1232,6 +1244,7 @@ def build_queue_view(conn: sqlite3.Connection, editor: str, now: str | None = No
         r["current_project"]: r for r in lane_rows
         if r["current_project"] and r["speed_bps"] is not None
     }
+    links_by_borrower = db.fetch_links_for_borrowers(conn)
     items = []
     for sel in db.fetch_selections(conn, editor, machine=machine):
         slug = sel["slug"]
@@ -1253,6 +1266,13 @@ def build_queue_view(conn: sqlite3.Connection, editor: str, now: str | None = No
             "eta_seconds": (rclone["eta_seconds"] if rclone else None)
                             or (best["eta_seconds"] if best else None),
             "status": best["status"] if best else "green",
+            # Borrowed folders this queued project pulls in (ok links only)
+            # -- shown as muted sub-lines under the queue row (§4.3).
+            "includes": [
+                {"sub_rel": l["sub_rel"],
+                 "lender_label": l["lender_label"] or l["lender_slug"]}
+                for l in links_by_borrower.get(slug, []) if l["status"] == "ok"
+            ],
         })
     ticked = {i["slug"] for i in items}
     # NOT rendered anywhere since 2026-08-18: the queue panel's [ ADD TO QUEUE ]
@@ -1474,9 +1494,59 @@ def _machine_arg(machine: str | None) -> str | None:
     return value or None
 
 
+def _expand_includes(
+    conn: sqlite3.Connection, rows: list,
+) -> dict[str, list[dict[str, Any]]]:
+    """slug -> borrowed-folder entries for ONE machine's selection rows
+    (SHARED_FOLDERS_PLAN.md §4.2). Server-side policy, so the companion
+    stays dumb (D5): `ok` links only; an include equal to or inside another
+    granted include is omitted (longest prefix wins) so no subtree is ever
+    handed out twice.
+
+    A link whose lender is itself in this machine's selection is NOT
+    omitted (a deliberate deviation from the plan's first draft): it is
+    marked `covered: true`. The companion never runs a covered include (its
+    own dedupe drops anything under a selected rel -- the double-dedupe the
+    plan requires anyway), but the tray's removal gate needs the
+    relationship to warn that removing the LENDER strands a selected
+    borrower's shared folder."""
+    selected = {r["slug"] for r in rows}
+    links_by_borrower = db.fetch_links_for_borrowers(conn, selected)
+    out: dict[str, list[dict[str, Any]]] = {}
+    claimed: list[str] = []
+    for r in rows:                                   # position order
+        entries = []
+        for link in links_by_borrower.get(r["slug"], []):
+            if link["status"] != "ok" or not link["lender_slug"] or not link["sub_rel"]:
+                continue
+            lender_label = link["lender_label"]
+            if not lender_label:
+                # No projects row for the lender: no current rel to build a
+                # subpath from. _run_links will have downgraded the status
+                # next cycle anyway.
+                continue
+            covered = link["lender_slug"] in selected
+            subpath = f"{lender_label}/{link['sub_rel']}"
+            if not covered:
+                if any(subpath == c or subpath.startswith(c + "/") for c in claimed):
+                    continue
+                claimed.append(subpath)
+            entries.append({
+                "subpath": subpath,
+                "lender_slug": link["lender_slug"],
+                "lender_label": lender_label,
+                "sub_rel": link["sub_rel"],
+                "covered": covered,
+            })
+        if entries:
+            out[r["slug"]] = entries
+    return out
+
+
 def _selection_view(conn: sqlite3.Connection, editor: str,
                     machine: str | None = None) -> dict[str, Any]:
     rows = db.fetch_selections(conn, editor, machine=machine)
+    includes_by_slug = _expand_includes(conn, rows)
     return {
         "editor": editor,
         "machine": machine or "",
@@ -1493,6 +1563,11 @@ def _selection_view(conn: sqlite3.Connection, editor: str,
                 "rel_path": r["label"],   # folder label IS the year/series/project rel path
                 "position": r["position"],
                 "active": bool(r["active"]) if r["active"] is not None else False,
+                # Borrowed folders (SHARED_FOLDERS_PLAN.md §4.2): additive
+                # key, ignored by old companions; `subpath` is spelled like
+                # rel_path so the companion prefixes PROJECTS_PREFIX exactly
+                # as it does for the project's own runs.
+                "includes": includes_by_slug.get(r["slug"], []),
             }
             for r in rows
         ],
@@ -1698,6 +1773,187 @@ def api_untick(
 class ProjectRootIn(BaseModel):
     resolve_project: str = Field(min_length=1, max_length=256)
     slug: str | None = None   # None = delete the mapping (re-detected on next report)
+
+
+# ---------------------------------------------- cross-project folder links
+# (SHARED_FOLDERS_PLAN.md WP5). The MARKER is the truth: these endpoints
+# edit the borrower's .ccsync-project `includes` (preserving every other
+# key) and refresh the project_links mirror inline so the UI answers
+# immediately rather than one provision cycle later.
+
+
+class ProjectLinkIn(BaseModel):
+    path: str = Field(min_length=1, max_length=1024)
+
+
+def _require_link_write(request: Request, conn: sqlite3.Connection, slug: str) -> str:
+    """Admin, or an editor with this project ticked (the plan's rule: the
+    people a project syncs to are the ones who may reshape what it pulls)."""
+    settings = request.app.state.settings
+    user = auth.get_session_user(request)
+    if user is None:
+        raise HTTPException(status_code=401, detail="log in first")
+    if auth.is_admin(settings, user):
+        return user
+    if user in db.fetch_all_selections(conn).get(slug, []):
+        return user
+    raise HTTPException(
+        status_code=403,
+        detail="only an admin or an editor syncing this project can change its shared folders",
+    )
+
+
+def _link_marker_dir(settings, conn: sqlite3.Connection, slug: str) -> tuple[Path, str, Path]:
+    """(projects_dir, borrower_rel, marker_dir) for a link edit, or an
+    HTTPException. The marker must carry THIS slug: editing a marker whose
+    identity disagrees with the projects row would write the declaration
+    into somebody else's project."""
+    from . import provision
+
+    try:
+        projects_dir = _projects_dir_or_error(settings)
+    except ProjectSetupError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    row = conn.execute(
+        "SELECT label FROM projects WHERE slug=? AND active=1", (slug,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"unknown or inactive project {slug!r}")
+    borrower_rel = str(row["label"])
+    directory = projects_dir / Path(*[p for p in borrower_rel.split("/") if p])
+    if provision.read_marker(directory) != slug:
+        raise HTTPException(
+            status_code=409,
+            detail="this project's folder marker does not carry its identity; "
+                   "repair the marker before editing its shared folders",
+        )
+    return projects_dir, borrower_rel, directory
+
+
+def _sync_link_rows(conn: sqlite3.Connection, projects_dir: Path, borrower_rel: str,
+                    slug: str) -> None:
+    """Refresh the project_links mirror for one borrower from its marker.
+    The same resolve + lender-active downgrade the collector's _run_links
+    applies (minus the stale-path retarget, which needs prior rows and a
+    moved lender -- the next provision cycle covers that case)."""
+    from . import provision
+
+    data = provision.read_marker_data(projects_dir / Path(*borrower_rel.split("/"))) or {}
+    results = links.resolve_marker_includes(projects_dir, borrower_rel, data.get("includes"))
+    proj_rows = {
+        r["slug"]: r["active"]
+        for r in conn.execute("SELECT slug, active FROM projects")
+    }
+    rows = []
+    for res in results:
+        status, detail = res.status, res.detail
+        if status in (links.STATUS_OK, links.STATUS_MISSING):
+            if not proj_rows.get(res.lender_slug or ""):
+                status = links.STATUS_LENDER_INACTIVE
+                detail = "the lending project is not active on the dashboard"
+        keep = status in (links.STATUS_OK, links.STATUS_MISSING)
+        rows.append({
+            "declared_path": res.declared,
+            "lender_slug": res.lender_slug if keep else None,
+            "sub_rel": res.sub_rel if keep else None,
+            "status": status,
+            "detail": detail or None,
+        })
+    db.replace_project_links(conn, slug, rows, db.utcnow_iso())
+    conn.commit()
+
+
+def _link_path_with_prefix(raw: str) -> str:
+    """The UI lets people paste the label spelling ('2026/FF5/...'); the
+    declaration always carries the projects dir name."""
+    text = links.normalise_declared(raw)
+    if text and not text.startswith(links.PROJECTS_SEGMENT + "/") \
+            and text != links.PROJECTS_SEGMENT and not text.startswith("/"):
+        return f"{links.PROJECTS_SEGMENT}/{text}"
+    return text
+
+
+def add_project_link(settings, conn: sqlite3.Connection, slug: str, path: str,
+                     user: str) -> dict[str, Any]:
+    """Shared by the JSON endpoint and the UI partial. Raises HTTPException
+    on every refusal, with the validator's own reason in the detail."""
+    from . import provision
+
+    projects_dir, borrower_rel, directory = _link_marker_dir(settings, conn, slug)
+    res = links.resolve_include(projects_dir, borrower_rel, _link_path_with_prefix(path))
+    if res.status != links.STATUS_OK:
+        raise HTTPException(status_code=422,
+                            detail=f"cannot share that folder: {res.detail or res.status}")
+    data = provision.read_marker_data(directory) or {}
+    includes = data.get("includes")
+    includes = list(includes) if isinstance(includes, list) else []
+    existing, _bad = links.parse_includes(includes)
+    changed = all(links.normalise_declared(p) != res.declared for p in existing)
+    if changed:
+        if len(includes) >= links.MAX_INCLUDES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"this project already shares {links.MAX_INCLUDES} folders; "
+                       f"remove one first")
+        includes.append({"path": res.declared, "added_by": user,
+                         "added_at": db.utcnow_iso()})
+        data["includes"] = includes
+        provision.write_marker_data(directory, data)
+    _sync_link_rows(conn, projects_dir, borrower_rel, slug)
+    return {"changed": changed, "declared_path": res.declared}
+
+
+def remove_project_link(settings, conn: sqlite3.Connection, slug: str, path: str,
+                        user: str) -> dict[str, Any]:
+    from . import provision
+
+    projects_dir, borrower_rel, directory = _link_marker_dir(settings, conn, slug)
+    want = links.normalise_declared(_link_path_with_prefix(path))
+    data = provision.read_marker_data(directory) or {}
+    includes = data.get("includes")
+    includes = list(includes) if isinstance(includes, list) else []
+
+    def declared_of(entry: Any) -> str:
+        if isinstance(entry, str):
+            return links.normalise_declared(entry)
+        if isinstance(entry, dict) and isinstance(entry.get("path"), str):
+            return links.normalise_declared(entry["path"])
+        return ""
+
+    kept = [e for e in includes if declared_of(e) != want]
+    changed = len(kept) != len(includes)
+    if changed:
+        if kept:
+            data["includes"] = kept
+        else:
+            data.pop("includes", None)
+        provision.write_marker_data(directory, data)
+    _sync_link_rows(conn, projects_dir, borrower_rel, slug)
+    return {"changed": changed, "declared_path": want}
+
+
+@router.post("/projects/{slug}/links")
+def api_add_project_link(
+    slug: str, payload: ProjectLinkIn, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    user = _require_link_write(request, conn, slug)
+    settings = request.app.state.settings
+    out = add_project_link(settings, conn, slug, payload.path, user)
+    out["links"] = db.fetch_links_for_borrowers(conn, [slug]).get(slug, [])
+    return out
+
+
+@router.delete("/projects/{slug}/links")
+def api_remove_project_link(
+    slug: str, path: str, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    user = _require_link_write(request, conn, slug)
+    settings = request.app.state.settings
+    out = remove_project_link(settings, conn, slug, path, user)
+    out["links"] = db.fetch_links_for_borrowers(conn, [slug]).get(slug, [])
+    return out
 
 
 def _require_admin(request: Request) -> str:

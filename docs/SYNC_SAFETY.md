@@ -297,6 +297,40 @@ Recovery order for "an admin deleted footage on the NAS", best first:
 4. whichever editor still has the originals locally -- which is not a backup,
    it is a replica that has not caught up yet.
 
+## 8. Borrowed folders (shared between projects)
+
+Since 2026-08-24 a project can declare that it borrows a folder from another
+project (`SHARED_FOLDERS_PLAN.md`; the declaration is `includes` in the
+borrower's `.ccsync-project`). The safety shape, lane by lane:
+
+- **Lanes A/B** run the borrowed dir as an extra, deeper subpath inside the
+  borrowing project's turn. Same filters, same `.ccsync-trash` layout, and
+  the breaker is **scoped to the borrowed subpath**, so a trip there parks
+  only that subtree's proxy download, not the borrower's own.
+- **Lane C** shares the LENDER's whole Syncthing folder with the borrowing
+  machine, restricted by a device-local `.stignore`
+  (`syncthing_admin.restricted_ignore_lines`): the standard project ignores,
+  then `!/<sub>` + `!/<sub>/**` per borrowed dir, then `**`. The manager
+  (`sync/borrowed_folders.py`) never unpauses the folder until that
+  restricted list is CONFIRMED — the plain project list on a lender folder
+  here would pull the lender's entire non-video tree to a machine that never
+  ticked it. Verified against Syncthing v2.1.2 (the fleet installs v2.1.3):
+  no ancestor `!` lines — a pattern matching a directory matches everything
+  within it, so `!/Interviewees` would leak every sibling.
+- **A halt pauses borrowed lender folders too** (`halt_folder_ids` includes
+  them), and the reconcile refuses to release them while halted, exactly as
+  it does for the asset libraries.
+- **Ticking a lender you were borrowing from** hands the folder to the
+  sequencer: it detects the leftover restriction (`is_restricted`) and keeps
+  the folder paused until the full ignore list is rewritten.
+- **Removing a project from a machine**: removing the borrower rmtree's only
+  the borrower's own dir (the partial lender dir stays; its Syncthing config
+  is dropped by the manager once no borrower needs it, files untouched).
+  Removing a lender that a selected borrower still shares from is blocked
+  with a named reason; the removal gate also dry-runs each borrowed subpath
+  so un-uploaded footage in a borrowed dir blocks like any other.
+- **Nothing here deletes on the NAS**, same as everywhere else.
+
 ## Config knobs
 
 All documented commented-out in `config.example.toml` (the shipped numbers are

@@ -35,9 +35,15 @@ from ..selection import SelectionClient
 # the sequencer itself) -- hence the alias.
 from .base import STATE_ERROR as STATE_ERROR_LANE
 from .rclone_lane import clone_directory_tree
-from .repath import ProjectRepather, normalized_safe_rel
+from .borrowed_folders import BorrowedFolderManager
+from .repath import ProjectRepather, _default_move, normalized_safe_rel
 from .shared_folders import SharedFolderManager
-from .syncthing_admin import STIGNORE_LINES, SyncthingAdmin, missing_ignore_lines
+from .syncthing_admin import (
+    STIGNORE_LINES,
+    SyncthingAdmin,
+    is_restricted,
+    missing_ignore_lines,
+)
 
 log = logging.getLogger("ccsync.sync.sequencer")
 
@@ -141,6 +147,42 @@ def _item_rel(item: dict) -> Optional[str]:
     return normalized_safe_rel(item.get("rel_path"))
 
 
+def _include_is_valid(entry: object) -> Optional[dict]:
+    """A selection item's `includes` entry (SHARED_FOLDERS_PLAN.md §4.2),
+    validated to the same standard as the item itself -- the cached
+    selection.json is a file on the editor's own disk, so nothing in it is
+    trusted with a path. Returns {"subpath", "sub_rel", "lender_rel",
+    "lender_slug"} or None. Fail closed, never widen: an entry that fails
+    here is dropped, and a dropped entry syncs NOTHING extra (the borrowed
+    dir simply is not run), which is the safe direction.
+
+    Checks: subpath survives normalized_safe_rel (traversal, drive letters,
+    leading slash), is at least lender + one sub segment deep, has no
+    `proxy` segment (lane A's `- **/Proxy/**` is relative to the run root,
+    so a run rooted inside Proxy/ would upload proxies as originals),
+    lender_slug is a non-blank str, and sub_rel is the subpath's own tail
+    (which is what makes lender_rel derivable)."""
+    if not isinstance(entry, dict):
+        return None
+    sub = normalized_safe_rel(entry.get("subpath"))
+    if sub is None:
+        return None
+    parts = sub.split("/")
+    if len(parts) < 2:
+        return None
+    if any(seg.lower() == "proxy" for seg in parts):
+        return None
+    lender_slug = entry.get("lender_slug")
+    if not isinstance(lender_slug, str) or not lender_slug.strip():
+        return None
+    sub_rel = normalized_safe_rel(entry.get("sub_rel"))
+    if sub_rel is None or not sub.endswith("/" + sub_rel) or sub == sub_rel:
+        return None
+    lender_rel = sub[: -(len(sub_rel) + 1)]
+    return {"subpath": sub, "sub_rel": sub_rel, "lender_rel": lender_rel,
+            "lender_slug": lender_slug.strip()}
+
+
 def _accepts_max_duration(fn: Any) -> bool:
     try:
         return "max_duration_seconds" in inspect.signature(fn).parameters
@@ -173,6 +215,7 @@ class Sequencer:
         clone_tree_fn: Any = clone_directory_tree,
         repather: Optional[ProjectRepather] = None,
         shared_folders: Optional[Any] = None,
+        borrowed_folders: Optional[Any] = None,
         halted: Optional[Any] = None,
     ) -> None:
         self.lane_a = lane_a
@@ -193,6 +236,19 @@ class Sequencer:
             shared_folders
             if shared_folders is not None
             else SharedFolderManager(admin, self.local_root, halted=halted)
+        )
+        # Lender folders this machine borrows from without ticking them
+        # (SHARED_FOLDERS_PLAN.md §3.3) -- same lifecycle as the asset
+        # libraries: not in the rotation, reconciled once per pass, paused
+        # by a halt. Built lazily around borrowed_lenders() so the manager
+        # always sees the freshest selection-derived set.
+        self.borrowed_folders = (
+            borrowed_folders
+            if borrowed_folders is not None
+            else BorrowedFolderManager(
+                admin, self.local_root, lenders_fn=self.borrowed_lenders,
+                selected_slugs_fn=self.expected_folder_slugs,
+                halted=halted, move_dir=_default_move)
         )
         # EVERY numeric here goes through config.coerce_numeric/coerce_count.
         # A bare float(cfg.get(...)) raises on a hand-edited
@@ -289,6 +345,16 @@ class Sequencer:
         self._queue_slugs: list[str] = []
         self._rel_to_slug: dict[str, str] = {}
         self._slug_to_item: dict[str, dict] = {}
+        # Borrowed folders (SHARED_FOLDERS_PLAN.md §3.1). Kept OUT of
+        # _rel_to_slug: rel_to_slug feeds _selected_project_rels (the
+        # manifest and proxy-scan scope), which must stay the selection's
+        # own rels. known_rels()/notify_change read both maps.
+        self._borrowed_by_slug: dict[str, list[dict]] = {}
+        self._borrowed_rel_to_slug: dict[str, str] = {}
+        # Lenders NOT in the selection whose folder this machine borrows
+        # from: lender_slug -> {"rel", "subs", "borrowers"} -- the WP3
+        # borrowed-folder manager's input, and what a halt must also pause.
+        self._borrowed_lenders: dict[str, dict] = {}
         self._queue: Optional[deque] = None  # live remaining-items during a pass; None otherwise
         self._last_selection: list[dict] = []
         self._no_selection_reason = ""
@@ -494,10 +560,23 @@ class Sequencer:
         return "stopped"
 
     def known_rels(self) -> list[str]:
-        """Selected-project rel paths (any depth) -- feeds lane A's watchdog
-        project attribution (rclone_lane.known_rels_fn)."""
+        """Selected-project rel paths (any depth), PLUS borrowed-folder rels
+        -- feeds lane A's watchdog project attribution
+        (rclone_lane.known_rels_fn, longest known rel wins), so a file
+        dropped into a borrowed dir is express-uploaded under the LENDER's
+        NAS path rather than misattributed or ignored."""
         with self._lock:
-            return list(self._rel_to_slug)
+            return list(self._rel_to_slug) + list(self._borrowed_rel_to_slug)
+
+    def rel_to_slug_with_borrowed(self) -> dict[str, str]:
+        """rel -> slug over selection AND borrowed rels (a borrowed rel maps
+        to its BORROWER: that is whose turn ran it). For status reporting;
+        _selected_project_rels keeps reading rel_to_slug, which deliberately
+        stays selection-only (manifest and proxy-scan scope, §3.1)."""
+        with self._lock:
+            merged = dict(self._borrowed_rel_to_slug)
+            merged.update(self._rel_to_slug)
+            return merged
 
     def expected_folder_slugs(self) -> list[str]:
         """The Syncthing folder IDs (== project slugs) of the current
@@ -529,6 +608,13 @@ class Sequencer:
         except Exception:
             log.debug("sequencer: could not list the shared asset folders", exc_info=True)
             extra = []
+        # ...plus the lender folders this machine borrows from without
+        # having them ticked (SHARED_FOLDERS_PLAN.md §5): they are never in
+        # ordered_selected, so nothing else would pause them on a halt. A
+        # lender folder not (yet) configured locally 404s on the pause,
+        # which the halt already tolerates.
+        with self._lock:
+            extra += list(self._borrowed_lenders)
         for folder_id in extra:
             if folder_id and folder_id not in seen:
                 seen.add(folder_id)
@@ -549,6 +635,10 @@ class Sequencer:
         reconcile, which checks their ignores the same way."""
         self._unpause_all(self._last_selection)
         self._reconcile_shared_folders()
+        # Borrowed lender folders come back the same way the asset libraries
+        # do: through their own reconcile, which re-checks the restricted
+        # ignores before any unpause.
+        self._reconcile_borrowed_folders()
 
     # -- watcher hand-off -----------------------------------------------------
     def notify_change(self, rel: str) -> None:
@@ -558,7 +648,10 @@ class Sequencer:
         whatever is running right now."""
         rel_path = rel[len(PROJECTS_PREFIX):] if rel.startswith(PROJECTS_PREFIX) else rel
         with self._lock:
-            slug = self._rel_to_slug.get(rel_path)
+            # A write in a borrowed dir promotes the BORROWER: it is the
+            # borrower's turn that runs the borrowed subpath's lanes.
+            slug = (self._rel_to_slug.get(rel_path)
+                    or self._borrowed_rel_to_slug.get(rel_path))
             if not slug or slug == self._current_slug:
                 return
             if slug in self._processed_slugs:
@@ -616,6 +709,10 @@ class Sequencer:
                 continue
 
             self._update_known_selection(selection)
+            # AFTER the selection update, deliberately: the borrowed-lender
+            # set is derived from it, and reconciling on the stale set would
+            # accept or drop a lender one pass late.
+            self._reconcile_borrowed_folders()
             self._reconcile_paths(selection)
             self._check_remote_root()
             self._run_pass(selection)
@@ -665,6 +762,16 @@ class Sequencer:
             self.shared_folders.reconcile()
         except Exception:
             log.debug("sequencer: shared folder reconcile failed", exc_info=True)
+
+    def _reconcile_borrowed_folders(self) -> None:
+        """Keep the borrowed lender folders accepted, restricted and online
+        (and drop the ones no borrower needs). Never raises."""
+        if self.borrowed_folders is None:
+            return
+        try:
+            self.borrowed_folders.reconcile()
+        except Exception:
+            log.debug("sequencer: borrowed folder reconcile failed", exc_info=True)
 
     @staticmethod
     def _describe_no_selection(selection: Optional[list[dict]], source: str) -> str:
@@ -807,7 +914,21 @@ class Sequencer:
                     self._ignores_unconfirmed.add(slug)
                 continue
             missing = missing_ignore_lines(fetched)
+            if not missing and not is_restricted(fetched):
+                continue
             if not missing:
+                # A SELECTED folder still carrying a borrowed-folder
+                # restriction: the editor just ticked a lender they were
+                # borrowing from (SHARED_FOLDERS_PLAN.md §3.3). The
+                # missing-lines check is a superset test, which the
+                # restricted list passes -- but online it would sync only
+                # the borrowed subtree while the tick promises the project.
+                log.warning(
+                    "sequencer: folder %s carries a restricted (borrowed-folder) "
+                    ".stignore but is now selected -- leaving it paused until the full "
+                    "ignore list lands", slug)
+                with self._lock:
+                    self._ignores_unconfirmed.add(slug)
                 continue
             # One line per unconfirmed folder, with the reason: a folder that
             # verifies clean must cost nothing and say nothing.
@@ -868,6 +989,8 @@ class Sequencer:
                 rel_to_slug[rel] = slug
             if slug:
                 slug_to_item[slug] = item
+        borrowed_by_slug, borrowed_rel_to_slug, borrowed_lenders = \
+            self._build_borrowed(selection, rel_to_slug, slug_to_item)
         # SYNC-2 (2026-08-11): the ignores latch is pruned against every slug
         # the selection MENTIONS, not just the usable ones. A project that
         # goes invalid without leaving the selection (archived -> rel_path
@@ -879,15 +1002,84 @@ class Sequencer:
             if isinstance(item.get("slug"), str) and item.get("slug").strip()
         }
         with self._lock:
-            changed = set(slug_to_item) != set(self._slug_to_item)
+            changed = (set(slug_to_item) != set(self._slug_to_item)
+                       or borrowed_by_slug != self._borrowed_by_slug)
             self._rel_to_slug = rel_to_slug
             self._slug_to_item = slug_to_item
+            self._borrowed_by_slug = borrowed_by_slug
+            self._borrowed_rel_to_slug = borrowed_rel_to_slug
+            self._borrowed_lenders = borrowed_lenders
             self._last_selection = list(selection)
         if changed:
             # A tick or an untick is exactly the moment a backed-off
             # sequencer has to be prompt again (ops-efficiency-2).
             self._wake_up_now()
         self._prune_bookkeeping(set(slug_to_item), slugged)
+
+    def _build_borrowed(
+        self, selection: list[dict], rel_to_slug: dict[str, str],
+        slug_to_item: dict[str, dict],
+    ) -> tuple[dict[str, list[dict]], dict[str, str], dict[str, dict]]:
+        """Validated, deduped borrowed-folder maps from the selection's
+        `includes` (SHARED_FOLDERS_PLAN.md §3.1). The server already applies
+        this policy (§4.2); re-applying it here is what stops a STALE CACHED
+        selection.json -- or a tampered one -- from double-running a subtree
+        or running one outside the declared scope. Fail closed: an invalid
+        entry is dropped with one warning, never widened."""
+        selected_rels = list(rel_to_slug)
+        by_slug: dict[str, list[dict]] = {}
+        borrowed_rel_to_slug: dict[str, str] = {}
+        lenders: dict[str, dict] = {}
+        claimed: list[str] = []
+        for item in _sort_by_position(selection):
+            if not _item_is_valid(item):
+                continue
+            slug = str(item.get("slug"))
+            raw = item.get("includes")
+            if not isinstance(raw, list):
+                continue
+            for entry in raw:
+                if isinstance(entry, dict) and entry.get("covered"):
+                    # The lender is selected on this machine: its own runs
+                    # cover the subtree. The entry exists so the removal
+                    # gate can see the relationship (app.removal_blockers).
+                    continue
+                inc = _include_is_valid(entry)
+                if inc is None:
+                    log.warning(
+                        "sequencer: dropping an invalid includes entry on %s (%r) -- "
+                        "refusing to build a path from it", slug, entry)
+                    continue
+                sub = inc["subpath"]
+                # Equal to or under a selected project: the project's own
+                # runs cover it. Under (or equal to) an include already
+                # granted this pass: longest prefix wins.
+                if any(sub == r or sub.startswith(r + "/") for r in selected_rels):
+                    continue
+                if any(sub == c or sub.startswith(c + "/") for c in claimed):
+                    continue
+                claimed.append(sub)
+                by_slug.setdefault(slug, []).append(inc)
+                borrowed_rel_to_slug[sub] = slug
+                lender = inc["lender_slug"]
+                if lender not in slug_to_item:
+                    rec = lenders.setdefault(
+                        lender, {"rel": inc["lender_rel"], "subs": [], "borrowers": []})
+                    rec["subs"].append(inc["sub_rel"])
+                    if slug not in rec["borrowers"]:
+                        rec["borrowers"].append(slug)
+        return by_slug, borrowed_rel_to_slug, lenders
+
+    def _borrowed_includes(self, slug: str) -> list[dict]:
+        with self._lock:
+            return list(self._borrowed_by_slug.get(slug, []))
+
+    def borrowed_lenders(self) -> dict[str, dict]:
+        """lender_slug -> {"rel", "subs", "borrowers"} for lenders NOT in
+        the selection -- the borrowed-folder manager's one input (WP3), and
+        the extra folders a halt pauses."""
+        with self._lock:
+            return {k: dict(v) for k, v in self._borrowed_lenders.items()}
 
     def _prune_bookkeeping(
         self, live_slugs: set[str], selection_slugs: Optional[set[str]] = None
@@ -919,8 +1111,12 @@ class Sequencer:
                 live_slugs if selection_slugs is None else selection_slugs
             )
             for ages in (self._clone_ages, self._orphan_ages):
-                for slug in [s for s in ages if s not in live_slugs]:
-                    ages.pop(slug, None)
+                # Borrowed-dir runs key these as "<slug>::<subpath>"
+                # (SHARED_FOLDERS_PLAN.md §3.1): the part before "::" is the
+                # borrower, and the key lives exactly as long as it does.
+                for key in [k for k in ages
+                            if k.split("::", 1)[0] not in live_slugs]:
+                    ages.pop(key, None)
 
     def _ignores_unconfirmed_for(self, slug: str) -> bool:
         """Whether this folder's .stignore is NOT known to be in place, so no
@@ -1229,6 +1425,23 @@ class Sequencer:
         self._run_lanes_a_and_b(subpath, budget)
         if self._stop_event.is_set() or not self._resume_event.is_set():
             return
+
+        # Borrowed folders (SHARED_FOLDERS_PLAN.md D3/§3.1): each ok include
+        # is an EXTRA subpath run inside this borrower's turn -- same
+        # filters, breaker scope, trash layout; nothing in rclone_lane.py
+        # changes, the subpath is just deeper. Each include gets its own
+        # budget (a borrower with N includes gets N+1), and its bookkeeping
+        # is keyed "<slug>::<subpath>" so it is pruned with the borrower.
+        for inc in self._borrowed_includes(slug):
+            sub = f"{PROJECTS_PREFIX}{inc['subpath']}"
+            key = f"{slug}::{inc['subpath']}"
+            self._maybe_clone_structure(sub, key, forced=False)
+            if self._stop_event.is_set() or not self._resume_event.is_set():
+                return
+            self._run_lanes_a_and_b(sub, budget)
+            if self._stop_event.is_set() or not self._resume_event.is_set():
+                return
+            self._maybe_scan_orphans(sub, key)
 
         self._maybe_scan_orphans(subpath, slug)
         self._lane_c_turn(item, ordered_selected)
@@ -1662,6 +1875,16 @@ class Sequencer:
             )
             return IGNORES_MISSING
         missing = missing_ignore_lines(fetched)
+        if not missing and is_restricted(fetched):
+            # The editor ticked a lender they were borrowing from: its
+            # .stignore is still the borrowed-folder restriction, which
+            # passes the superset test above but would sync only the
+            # borrowed subtree. Re-assert the FULL list (set_ignores
+            # replaces the whole file, restriction gone).
+            log.info(
+                "sequencer: folder %s carries a restricted (borrowed-folder) .stignore "
+                "but is selected here -- rewriting the full ignore list", slug)
+            return IGNORES_MISSING
         if not missing:
             return IGNORES_OK
         log.info(

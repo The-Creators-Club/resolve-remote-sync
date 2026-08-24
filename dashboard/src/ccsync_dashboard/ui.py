@@ -993,6 +993,57 @@ def partial_project(slug: str, request: Request, conn: sqlite3.Connection = Depe
     })
 
 
+async def _partial_project_link_edit(
+    slug: str, request: Request, conn: sqlite3.Connection, action: str,
+):
+    """Add or remove a shared-folder link from the project page
+    (SHARED_FOLDERS_PLAN.md WP5). Same auth rule as the JSON endpoints;
+    refusals come back as a banner in the re-rendered detail, not a dead
+    htmx swap."""
+    from .api import (add_project_link, remove_project_link,
+                      _require_link_write)
+
+    settings = request.app.state.settings
+    form = await _form(request)
+    path = form.get("path", "").strip()
+    error = None
+    try:
+        _require_link_write(request, conn, slug)
+        if not path:
+            error = "type or paste the folder to share (e.g. 2026/FF5/Elections/Interviewees/...)"
+        elif action == "add":
+            add_project_link(settings, conn, slug, path, auth.get_session_user(request) or "")
+        else:
+            remove_project_link(settings, conn, slug, path, auth.get_session_user(request) or "")
+    except HTTPException as exc:
+        error = str(exc.detail)
+    view = build_project_view(conn, slug)
+    if view is None:
+        raise HTTPException(status_code=404, detail=f"unknown project {slug!r}")
+    tick_editor = _queue_editor(request)
+    return _render(request, "partials/project_detail.html", {
+        "project": view,
+        "selected_by": db.fetch_all_selections(conn),
+        "tick_editor": tick_editor,
+        "as_qs": _as_qs(request, tick_editor),
+        "link_error": error,
+    })
+
+
+@router.post("/partials/project/{slug}/links")
+async def partial_project_link_add(
+    slug: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    return await _partial_project_link_edit(slug, request, conn, "add")
+
+
+@router.post("/partials/project/{slug}/links/remove")
+async def partial_project_link_remove(
+    slug: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    return await _partial_project_link_edit(slug, request, conn, "remove")
+
+
 @router.get("/partials/project/{slug}/missing/{device_id}")
 def partial_missing(
     slug: str, device_id: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)

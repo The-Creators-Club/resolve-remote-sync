@@ -137,3 +137,82 @@ def test_companion_cannot_untick_someone_elses_selection(env):
                       headers={"X-CCSync-Token": TOKEN})
     assert r.status_code == 401
     assert conn.execute("SELECT COUNT(*) FROM selections WHERE editor_username='editor2'").fetchone()[0] == 1
+
+
+# --------------------------------------------- borrowed folders (WP2, §4.2)
+
+def link(conn, borrower, lender, sub_rel, lender_label, status="ok"):
+    now = dbmod.utcnow_iso()
+    dbmod.replace_project_links(conn, borrower, [
+        {"declared_path": f"Projects/{lender_label}/{sub_rel}",
+         "lender_slug": lender, "sub_rel": sub_rel, "status": status,
+         "detail": None}], now)
+    conn.commit()
+
+
+def test_selection_carries_ok_includes(env):
+    client, conn = env
+    link(conn, "2026-ff5-energy-transition", "2025-ff4-nuclear",
+         "Interviewees/Aha Chu", "2025/FF4/Nuclear")
+    as_user(client, "jsmith")
+    client.put("/api/v1/selection/jsmith/2026-ff5-energy-transition")
+    body = client.get("/api/v1/selection/jsmith").json()
+    item = body["selection"][0]
+    assert item["includes"] == [{
+        "subpath": "2025/FF4/Nuclear/Interviewees/Aha Chu",
+        "lender_slug": "2025-ff4-nuclear",
+        "lender_label": "2025/FF4/Nuclear",
+        "sub_rel": "Interviewees/Aha Chu",
+        "covered": False,
+    }]
+
+
+def test_selection_marks_include_covered_when_lender_is_selected(env):
+    # NOT omitted: the companion refuses to run a covered include itself
+    # (its dedupe drops anything under a selected rel), and the tray's
+    # removal gate needs the relationship to warn before a lender removal.
+    client, conn = env
+    link(conn, "2026-ff5-energy-transition", "2025-ff4-nuclear",
+         "Interviewees/Aha Chu", "2025/FF4/Nuclear")
+    as_user(client, "jsmith")
+    client.put("/api/v1/selection/jsmith/2026-ff5-energy-transition")
+    client.put("/api/v1/selection/jsmith/2025-ff4-nuclear")
+    body = client.get("/api/v1/selection/jsmith").json()
+    by_slug = {i["slug"]: i for i in body["selection"]}
+    incs = by_slug["2026-ff5-energy-transition"]["includes"]
+    assert len(incs) == 1 and incs[0]["covered"] is True
+    assert by_slug["2025-ff4-nuclear"]["includes"] == []
+
+
+def test_selection_omits_broken_and_nested_includes(env):
+    client, conn = env
+    now = dbmod.utcnow_iso()
+    dbmod.replace_project_links(conn, "2026-ff5-energy-transition", [
+        {"declared_path": "Projects/2025/FF4/Nuclear/Interviewees",
+         "lender_slug": "2025-ff4-nuclear", "sub_rel": "Interviewees",
+         "status": "ok", "detail": None},
+        # nested under the first: longest prefix wins, this one is omitted
+        {"declared_path": "Projects/2025/FF4/Nuclear/Interviewees/Aha Chu",
+         "lender_slug": "2025-ff4-nuclear", "sub_rel": "Interviewees/Aha Chu",
+         "status": "ok", "detail": None},
+        # broken links never reach a companion
+        {"declared_path": "Projects/2025/FF4/Nuclear/Gone",
+         "lender_slug": "2025-ff4-nuclear", "sub_rel": "Gone",
+         "status": "missing", "detail": "folder not found"},
+    ], now)
+    conn.commit()
+    as_user(client, "jsmith")
+    client.put("/api/v1/selection/jsmith/2026-ff5-energy-transition")
+    body = client.get("/api/v1/selection/jsmith").json()
+    incs = body["selection"][0]["includes"]
+    assert [i["sub_rel"] for i in incs] == ["Interviewees"]
+
+
+def test_selection_old_shape_still_parses_without_includes(env):
+    # An item with no ok links carries an empty list -- additive by contract,
+    # schema stays 1 (site.py).
+    client, conn = env
+    as_user(client, "jsmith")
+    client.put("/api/v1/selection/jsmith/2026-ff5-energy-transition")
+    body = client.get("/api/v1/selection/jsmith").json()
+    assert body["selection"][0]["includes"] == []

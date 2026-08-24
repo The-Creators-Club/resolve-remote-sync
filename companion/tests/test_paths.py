@@ -522,3 +522,21 @@ def test_missing_canonical_clip_on_healthy_loopback_share_is_missing(monkeypatch
     )
     paths.clear_prefix_cache()
     assert got == paths.MISSING          # healthy mapping, file just not local
+
+
+def test_borrowed_canonical_path_is_ok_or_missing_never_out_of_tree():
+    """SHARED_FOLDERS_PLAN.md §5: a clip whose true path lives inside the
+    LENDING project (borrowed into the project the editor has ticked) is a
+    normal in-tree canonical path. Downloaded -> OK; not yet downloaded ->
+    MISSING. Never OUT_OF_TREE: that status feeds the fixer popup, which
+    would offer to COPY the borrowed media into the borrower -- the exact
+    duplication the feature exists to end."""
+    borrowed = r"P:\Projects\2026\FF5\Elections\Interviewees\Aha Chu\clip.braw"
+    common = dict(
+        local_root=r"C:\Creators_Club",
+        canonical_prefix="P:\\",
+        is_windows=True,
+        realpath_fn=_subst_p_to_creators_club,
+    )
+    assert classify_path(borrowed, exists_fn=_always_true, **common) == OK
+    assert classify_path(borrowed, exists_fn=_always_false, **common) == MISSING

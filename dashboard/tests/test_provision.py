@@ -620,3 +620,180 @@ def test_duplicate_path_folder_ignores_the_folder_itself():
     assert Collector._duplicate_path_folder("c", "/data/Projects/X", folders) == "a"
     assert Collector._duplicate_path_folder("c", "/data/Projects/Y", folders) == "b"
     assert Collector._duplicate_path_folder("c", "/data/Projects/Z", folders) is None
+
+
+# --------------------------------------------- cross-project links (WP1)
+
+def set_includes(directory, includes):
+    """Hand-edit a marker's `includes` the way footage-sorter or a human
+    would: read, add the key, write back."""
+    p = directory / provision.MARKER_FILENAME
+    data = json.loads(p.read_text(encoding="utf-8"))
+    data["includes"] = includes
+    p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def links_tree(tmp_path):
+    borrower = mark(tmp_path, "2026/FF5/Elections")
+    lender = mark(tmp_path, "2026/FF5/Civil Defence")
+    (lender / "Interviewees/Aha Chu").mkdir(parents=True)
+    return borrower, lender
+
+
+def run_two_cycles(collector, conn):
+    """First cycle creates folders, config poll hydrates projects rows;
+    second provision pass resolves links against those rows (the lender's
+    active flag lives on its projects row)."""
+    collector.run_cycle(conn, ["provision", "config"])
+    collector.run_cycle(conn, ["provision"])
+
+
+def test_links_cycle_resolves_ok_include(conn, fake, tmp_path):
+    borrower, lender = links_tree(tmp_path)
+    set_includes(borrower, ["Projects/2026/FF5/Civil Defence/Interviewees/Aha Chu"])
+    collector = collector_for(fake, tmp_path)
+    run_two_cycles(collector, conn)
+
+    by_borrower = dbmod.fetch_links_for_borrowers(conn)
+    rows = by_borrower["2026-ff5-elections"]
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["status"] == "ok"
+    assert r["lender_slug"] == "2026-ff5-civil-defence"
+    assert r["sub_rel"] == "Interviewees/Aha Chu"
+    assert r["lender_label"] == "2026/FF5/Civil Defence"
+
+
+def test_links_cycle_clears_rows_when_key_removed(conn, fake, tmp_path):
+    borrower, lender = links_tree(tmp_path)
+    set_includes(borrower, ["Projects/2026/FF5/Civil Defence/Interviewees/Aha Chu"])
+    collector = collector_for(fake, tmp_path)
+    run_two_cycles(collector, conn)
+    assert dbmod.fetch_links_for_borrowers(conn)
+
+    # remove the key: marker = truth, rows are a cache of it
+    provision.write_marker(borrower, "2026-ff5-elections")   # write_marker merges...
+    data = json.loads((borrower / provision.MARKER_FILENAME).read_text(encoding="utf-8"))
+    del data["includes"]
+    (borrower / provision.MARKER_FILENAME).write_text(json.dumps(data), encoding="utf-8")
+    collector.run_cycle(conn, ["provision"])
+    assert dbmod.fetch_links_for_borrowers(conn) == {}
+
+
+def test_links_cycle_marks_invalid_and_keeps_the_reason(conn, fake, tmp_path):
+    borrower, lender = links_tree(tmp_path)
+    set_includes(borrower, ["Projects/2026/FF5/Civil Defence/Interviewees/Aha Chu/Proxy"])
+    collector = collector_for(fake, tmp_path)
+    run_two_cycles(collector, conn)
+    rows = dbmod.fetch_links_for_borrowers(conn)["2026-ff5-elections"]
+    assert rows[0]["status"] == "invalid"
+    assert "Proxy" in rows[0]["detail"]
+    assert rows[0]["lender_slug"] is None
+
+
+def test_links_cycle_one_bad_marker_does_not_abort_the_rest(conn, fake, tmp_path, monkeypatch):
+    borrower, lender = links_tree(tmp_path)
+    other = mark(tmp_path, "2025/FF4/Nuclear")
+    set_includes(borrower, ["Projects/2026/FF5/Civil Defence/Interviewees/Aha Chu"])
+    set_includes(other, ["Projects/2026/FF5/Civil Defence/Interviewees/Aha Chu"])
+    collector = collector_for(fake, tmp_path)
+    collector.run_cycle(conn, ["provision", "config"])
+
+    from ccsync_dashboard import links as links_mod
+    real = links_mod.resolve_marker_includes
+
+    def boom(projects_dir, borrower_rel, raw):
+        if borrower_rel == "2025/FF4/Nuclear":
+            raise RuntimeError("bad marker")
+        return real(projects_dir, borrower_rel, raw)
+
+    monkeypatch.setattr(links_mod, "resolve_marker_includes", boom)
+    # The cycle records the failure (False) but the good borrower's rows land.
+    assert collector.run_cycle(conn, ["provision"])["provision"] is False
+    rows = dbmod.fetch_links_for_borrowers(conn)
+    assert "2026-ff5-elections" in rows
+    assert rows["2026-ff5-elections"][0]["status"] == "ok"
+
+
+def test_links_cycle_lender_inactive(conn, fake, tmp_path):
+    borrower, lender = links_tree(tmp_path)
+    set_includes(borrower, ["Projects/2026/FF5/Civil Defence/Interviewees/Aha Chu"])
+    collector = collector_for(fake, tmp_path)
+    run_two_cycles(collector, conn)
+    conn.execute("UPDATE projects SET active=0 WHERE slug='2026-ff5-civil-defence'")
+    conn.commit()
+    collector.run_cycle(conn, ["provision"])
+    rows = dbmod.fetch_links_for_borrowers(conn)["2026-ff5-elections"]
+    assert rows[0]["status"] == "lender-inactive"
+    assert rows[0]["lender_slug"] is None
+
+
+def test_links_cycle_stale_declared_path_resolved_via_slug(conn, fake, tmp_path):
+    """Lender moved on the NAS: the declared path is stale, but the prior
+    row's lender_slug + sub_rel re-resolve through the lender's CURRENT
+    label. The link stays ok with a 'stale' note; the marker is never
+    rewritten by the product."""
+    borrower, lender = links_tree(tmp_path)
+    set_includes(borrower, ["Projects/2026/FF5/Civil Defence/Interviewees/Aha Chu"])
+    collector = collector_for(fake, tmp_path)
+    run_two_cycles(collector, conn)
+
+    # Move the lender dir; its marker (and slug) travel with it. The
+    # provision retarget guard needs .stfolder at the new path and the old
+    # path gone, which a real move gives it.
+    new_rel = "2026/FF5/Civil Defence Renamed"
+    (tmp_path / "2026/FF5/Civil Defence").rename(tmp_path / new_rel)
+    collector.run_cycle(conn, ["provision", "config"])
+    collector.run_cycle(conn, ["provision"])
+
+    rows = dbmod.fetch_links_for_borrowers(conn)["2026-ff5-elections"]
+    assert rows[0]["status"] == "ok"
+    assert rows[0]["sub_rel"] == "Interviewees/Aha Chu"
+    assert "stale" in (rows[0]["detail"] or "")
+    # fetch_borrowers_of serves the lender page's SHARED INTO block
+    borrowers = dbmod.fetch_borrowers_of(conn, "2026-ff5-civil-defence")
+    assert [b["borrower_slug"] for b in borrowers] == ["2026-ff5-elections"]
+
+
+def test_links_cycle_missing_subfolder(conn, fake, tmp_path):
+    borrower, lender = links_tree(tmp_path)
+    set_includes(borrower, ["Projects/2026/FF5/Civil Defence/Interviewees/Not Shot Yet"])
+    collector = collector_for(fake, tmp_path)
+    run_two_cycles(collector, conn)
+    rows = dbmod.fetch_links_for_borrowers(conn)["2026-ff5-elections"]
+    assert rows[0]["status"] == "missing"
+    assert rows[0]["lender_slug"] == "2026-ff5-civil-defence"
+
+
+def test_read_marker_data_and_write_marker_merge(tmp_path):
+    d = tmp_path / "P"
+    d.mkdir()
+    provision.write_marker(d, "my-slug", created_by="test")
+    data = provision.read_marker_data(d)
+    assert data["slug"] == "my-slug" and data["created_by"] == "test"
+
+    # additive keys written by footage-sorter / a human survive a rewrite
+    data["includes"] = [{"path": "Projects/2026/X/Sub", "note": "why"}]
+    data["future_key"] = {"kept": True}
+    (d / provision.MARKER_FILENAME).write_text(
+        json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    provision.write_marker(d, "my-slug", created_by="self-heal")
+    merged = provision.read_marker_data(d)
+    assert merged["includes"] == [{"path": "Projects/2026/X/Sub", "note": "why"}]
+    assert merged["future_key"] == {"kept": True}
+    assert merged["created_by"] == "self-heal"
+    # and read_marker still answers with just the identity
+    assert provision.read_marker(d) == "my-slug"
+
+
+def test_read_marker_data_tolerates_garbage(tmp_path):
+    d = tmp_path / "P"
+    d.mkdir()
+    assert provision.read_marker_data(d) is None
+    (d / provision.MARKER_FILENAME).write_text("not json", encoding="utf-8")
+    assert provision.read_marker_data(d) is None
+    (d / provision.MARKER_FILENAME).write_text('["a list"]', encoding="utf-8")
+    assert provision.read_marker_data(d) is None
+    # a garbage marker never poisons a fresh write
+    provision.write_marker(d, "fresh")
+    assert provision.read_marker(d) == "fresh"

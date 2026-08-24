@@ -787,6 +787,28 @@ ALTER TABLE machines ADD COLUMN lane_b_resume_requested_at TEXT;
 ALTER TABLE machines ADD COLUMN lane_b_resume_requested_by TEXT;
 """
 
+# v27: cross-project folder links (SHARED_FOLDERS_PLAN.md, 2026-08-23). A
+# borrowing project's marker declares `includes`; the marker on the tree is
+# the TRUTH and this table is the resolved cache the selection API and the UI
+# read (exactly as projects.label mirrors the folder), rebuilt by the
+# collector's _run_links every provision cycle. lender_slug/sub_rel are NULL
+# unless status is ok or missing -- and they double as the fallback identity
+# when the lender moves on the NAS and the declared path goes stale.
+SCHEMA_V27 = """
+CREATE TABLE IF NOT EXISTS project_links (
+  borrower_slug TEXT NOT NULL,
+  declared_path TEXT NOT NULL,
+  lender_slug   TEXT,
+  sub_rel       TEXT,
+  status        TEXT NOT NULL,
+  detail        TEXT,
+  first_seen    TEXT NOT NULL,
+  last_seen     TEXT NOT NULL,
+  PRIMARY KEY (borrower_slug, declared_path)
+);
+CREATE INDEX IF NOT EXISTS ix_project_links_lender ON project_links(lender_slug);
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -817,6 +839,7 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (24, SCHEMA_V24),
     (25, SCHEMA_V25),
     (26, SCHEMA_V26),
+    (27, SCHEMA_V27),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -1254,6 +1277,100 @@ def upsert_project(conn: sqlite3.Connection, slug: str, label: str, path: str, n
         (slug, label, path, now, now),
     )
     return conn.execute("SELECT id FROM projects WHERE slug=?", (slug,)).fetchone()[0]
+
+
+def replace_project_links(
+    conn: sqlite3.Connection, borrower_slug: str, rows: list[dict[str, Any]], now: str,
+) -> None:
+    """This borrower's cross-project links become exactly `rows` (each
+    {declared_path, lender_slug, sub_rel, status, detail}); first_seen is
+    kept for surviving keys. A borrower whose marker lost the `includes`
+    key passes [] and its rows clear (SHARED_FOLDERS_PLAN.md §2.3)."""
+    keep = [r["declared_path"] for r in rows]
+    placeholders = ",".join("?" * len(keep)) or "''"
+    conn.execute(
+        f"DELETE FROM project_links WHERE borrower_slug=? "
+        f"AND declared_path NOT IN ({placeholders})",
+        [borrower_slug, *keep],
+    )
+    for r in rows:
+        conn.execute(
+            """INSERT INTO project_links
+                 (borrower_slug, declared_path, lender_slug, sub_rel, status, detail,
+                  first_seen, last_seen)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(borrower_slug, declared_path) DO UPDATE SET
+                 lender_slug=excluded.lender_slug, sub_rel=excluded.sub_rel,
+                 status=excluded.status, detail=excluded.detail,
+                 last_seen=excluded.last_seen""",
+            (borrower_slug, r["declared_path"], r.get("lender_slug"), r.get("sub_rel"),
+             r["status"], r.get("detail"), now, now),
+        )
+
+
+def clear_links_of_vanished_borrowers(
+    conn: sqlite3.Connection, scanned_slugs: Iterable[str],
+) -> int:
+    """Drop link rows of borrowers that are BOTH missing from this cycle's
+    marker scan AND inactive as projects -- i.e. properly deleted, past the
+    deactivation grace. Requiring both is deliberate: a transiently
+    unreadable marker leaves the projects row active, and clearing on that
+    alone would unshare the lender's folder from a whole fleet of borrower
+    machines over one bad read (the B16 shape)."""
+    slugs = list(scanned_slugs)
+    placeholders = ",".join("?" * len(slugs)) or "''"
+    cur = conn.execute(
+        f"""DELETE FROM project_links
+            WHERE borrower_slug NOT IN ({placeholders})
+              AND borrower_slug NOT IN (SELECT slug FROM projects WHERE active=1)""",
+        slugs)
+    return cur.rowcount
+
+
+def fetch_links_for_borrowers(
+    conn: sqlite3.Connection, slugs: Iterable[str] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """borrower_slug -> [link rows], each row joined with the lender's
+    current label (None when the lender row is gone). All statuses -- the
+    UI shows the broken ones; selection expansion filters to ok itself."""
+    q = """SELECT l.*, p.label AS lender_label,
+                  p.active AS lender_active
+           FROM project_links l
+           LEFT JOIN projects p ON p.slug = l.lender_slug
+           ORDER BY l.borrower_slug, l.declared_path"""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    want = set(slugs) if slugs is not None else None
+    for row in conn.execute(q):
+        r = dict(row)
+        if want is not None and r["borrower_slug"] not in want:
+            continue
+        grouped.setdefault(r["borrower_slug"], []).append(r)
+    return grouped
+
+
+def fetch_borrowers_of(conn: sqlite3.Connection, lender_slug: str) -> list[dict[str, Any]]:
+    """Link rows whose lender is `lender_slug` (ok only), with the borrower's
+    label -- the lender project page's SHARED INTO block."""
+    rows = conn.execute(
+        """SELECT l.*, p.label AS borrower_label
+           FROM project_links l
+           LEFT JOIN projects p ON p.slug = l.borrower_slug
+           WHERE l.lender_slug=? AND l.status='ok'
+           ORDER BY l.borrower_slug, l.declared_path""",
+        (lender_slug,),
+    )
+    return [dict(r) for r in rows]
+
+
+def fetch_borrowers_by_lender(conn: sqlite3.Connection) -> dict[str, set[str]]:
+    """lender_slug -> {borrower_slug, ...} for ok links -- the enforce
+    cycle's one question (SHARED_FOLDERS_PLAN.md §4.1)."""
+    grouped: dict[str, set[str]] = {}
+    for row in conn.execute(
+        "SELECT lender_slug, borrower_slug FROM project_links WHERE status='ok'"
+    ):
+        grouped.setdefault(row["lender_slug"], set()).add(row["borrower_slug"])
+    return grouped
 
 
 def deactivate_missing_projects(

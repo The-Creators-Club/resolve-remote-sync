@@ -479,3 +479,71 @@ def test_the_supervisors_state_lives_beside_the_other_latches(tmp_path):
     assert app.syncthing_supervisor.state_path.name == "syncthing_supervisor.json"
     assert (app.syncthing_supervisor.state_path.parent
             == app.lane_b_breaker.state_path.parent)
+
+
+# -- borrowed folders in the removal gate (SHARED_FOLDERS_PLAN.md WP2) ------
+
+
+class _FakeSelectionEntries:
+    def __init__(self, entries):
+        self.entries = entries
+
+    def get(self):
+        return self.entries, "cache"
+
+
+def _borrower_entries():
+    return [{
+        "slug": "p1", "label": "2026/CCT/Website Highlights",
+        "rel_path": "2026/CCT/Website Highlights", "position": 0, "active": True,
+        "includes": [{
+            "subpath": "2026/FF5/Civil Defence/Interviewees/Aha Chu",
+            "sub_rel": "Interviewees/Aha Chu",
+            "lender_slug": "s-lender", "lender_label": "2026/FF5/Civil Defence",
+            "covered": False,
+        }],
+    }]
+
+
+def test_removing_a_borrower_dry_runs_its_borrowed_dirs_too(tmp_path):
+    admin = _FakeAdmin()
+    app = _gate_app(tmp_path, {"count": 0, "samples": []}, admin)
+    app.selection_client = _FakeSelectionEntries(_borrower_entries())
+    blockers = app.removal_blockers("p1")
+    assert blockers["blocked"] is False
+    assert app._lane_a.asked == [
+        "Projects/2026/CCT/Website Highlights",
+        "Projects/2026/FF5/Civil Defence/Interviewees/Aha Chu",
+    ]
+
+
+def test_unuploaded_footage_in_a_borrowed_dir_blocks_the_removal(tmp_path):
+    admin = _FakeAdmin()
+    app = _gate_app(tmp_path, {"count": 1, "samples": ["borrowed.braw"]}, admin)
+    app.selection_client = _FakeSelectionEntries(_borrower_entries())
+    blockers = app.removal_blockers("p1")
+    assert blockers["blocked"] is True
+    # both the project's own run and the include's run counted
+    assert blockers["pending_uploads"] == 2
+
+
+def test_removing_a_lender_with_a_selected_borrower_is_blocked(tmp_path):
+    admin = _FakeAdmin()
+    app = _gate_app(tmp_path, {"count": 0, "samples": []}, admin)
+    entries = _borrower_entries()
+    # the machine also has the LENDER selected; the include is covered
+    entries[0]["includes"][0]["covered"] = True
+    entries[0]["includes"][0]["lender_slug"] = "p-lender"
+    entries.append({"slug": "p-lender", "label": "2026/FF5/Civil Defence",
+                    "rel_path": "2026/FF5/Civil Defence", "position": 1,
+                    "active": True, "includes": []})
+    app.selection_client = _FakeSelectionEntries(entries)
+    app.removable_projects = lambda: [
+        {"slug": "p1", "rel": "2026/CCT/Website Highlights"},
+        {"slug": "p-lender", "rel": "2026/FF5/Civil Defence"}]
+    blockers = app.removal_blockers("p-lender")
+    assert blockers["blocked"] is True
+    assert any("is shared into 2026/CCT/Website Highlights" in r
+               for r in blockers["reasons"])
+    # a covered include is never dry-run as the borrower's own upload scope
+    assert "Projects/2026/FF5/Civil Defence" in app._lane_a.asked[0]

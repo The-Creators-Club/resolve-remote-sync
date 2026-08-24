@@ -1335,3 +1335,22 @@ def test_a_critical_line_survives_the_whole_text_parser_too():
     )
     result = parse_json_log(text)
     assert result.errors and "Failed to create file system" in result.errors[0]
+
+
+def test_backup_dir_and_breaker_scope_take_a_deep_borrowed_subpath(tmp_path):
+    """SHARED_FOLDERS_PLAN.md §3.2: a borrowed dir's lane B run uses a
+    subpath deeper than year/series/project (5+ segments). Nothing in the
+    lane may assume the old depth: the trash lands under the full subpath
+    (so a recovery is unambiguous) and the breaker scope is the sub
+    subpath (so a trip in the borrowed dir cannot park the lender's or the
+    borrower's own runs)."""
+    lane = _make_lane(tmp_path, DIRECTION_DOWN)
+    sub = "Projects/2026/FF5/Civil Defence/Interviewees/Aha Chu"
+    backup = lane._backup_dir(sub)
+    assert backup.replace("\\", "/").endswith(
+        "/2026/FF5/Civil Defence/Interviewees/Aha Chu")
+    assert ".ccsync-trash" in backup
+
+    # a remote-shrank memory recorded for the deep scope stays keyed to
+    # exactly that scope string
+    assert lane.breaker.check_remote(sub, ["a.mp4", "b.mp4"]) is None

@@ -6,7 +6,7 @@ you sync" are the actual product, not error handling.
 """
 from fastapi.testclient import TestClient
 
-from tests.conftest import OTHER_PROJECT, OTHER_USER, PROJECTS, USER
+from tests.conftest import MACHINE, OTHER_PROJECT, OTHER_USER, PROJECTS, USER
 from ytdlweb import db, routes_api
 from ytdlweb.main import app
 
@@ -62,6 +62,70 @@ def test_an_editor_with_two_machines_sees_each_project_once(client):
         con.commit()
         con.close()
 
+    assert [p['slug'] for p in r['projects']] == [p[0] for p in PROJECTS]
+
+
+def test_a_base_only_editor_is_offered_every_active_project(client):
+    """CR-72 (2026-08-24). A wired machine works directly off the NAS tree and
+    the dashboard 409s any tick on a base-only account (CR-28), so 'the
+    projects you sync' is the empty set for that editor by construction -- and
+    the picker they saw was permanently blank. Base-only means EVERY known
+    machine reports mode 'base', with machine_state overriding a stale
+    editor_media_project row for the same machine (the dashboard's
+    machine_modes precedence)."""
+    import sqlite3
+
+    from ytdlweb import config, projects
+
+    con = sqlite3.connect(config.DASH_DB)
+    try:
+        con.executescript("""
+            CREATE TABLE IF NOT EXISTS machine_state (
+              editor_username TEXT NOT NULL,
+              machine         TEXT NOT NULL,
+              mode            TEXT
+            );
+            CREATE TABLE IF NOT EXISTS editor_media_project (
+              editor_username TEXT NOT NULL,
+              machine         TEXT NOT NULL,
+              mode            TEXT
+            );
+        """)
+        # The wired editor: one machine that once reported 'editor' pre-v22
+        # and says 'base' in machine_state now -- machine_state must win.
+        con.execute("INSERT INTO editor_media_project VALUES('alex','base-rig','editor')")
+        con.execute("INSERT INTO machine_state VALUES('alex','base-rig','base')")
+        con.commit()
+
+        r = client.get('/api/projects', headers=_headers('alex')).json()
+        assert r['projects_available'] is True
+        # Every ACTIVE project, ordered by label; the inactive 2024-old stays out.
+        assert [p['slug'] for p in r['projects']] == \
+            ['2025-ff4-nuclear', '2026-ff5-energy', '2026-ff5-water']
+        # The server-side destination check widens with the picker.
+        assert projects.resolve_project('alex', '2025-ff4-nuclear') is not None
+        assert projects.resolve_project('alex', '2024-old') is None
+
+        # A person with one wired and one remote machine is NOT base-only:
+        # they keep their ticked list (a job started from the remote machine
+        # is claimed by that machine's companion).
+        con.execute("INSERT INTO machine_state VALUES(?,?,?)", (USER, 'owen-rig', 'base'))
+        con.execute("INSERT INTO machine_state VALUES(?,?,?)", (USER, MACHINE, 'editor'))
+        con.commit()
+        r = client.get('/api/projects').json()
+        assert [p['slug'] for p in r['projects']] == [p[0] for p in PROJECTS]
+    finally:
+        con.execute('DROP TABLE machine_state')
+        con.execute('DROP TABLE editor_media_project')
+        con.commit()
+        con.close()
+
+
+def test_an_editor_with_no_known_machines_is_not_base_only(client):
+    """An account with no machines is unknown, not 'cannot sync' -- the
+    fixture database has no machine tables at all here, which is also what an
+    older dashboard looks like: both must answer the pre-CR-72 ticked list."""
+    r = client.get('/api/projects').json()
     assert [p['slug'] for p in r['projects']] == [p[0] for p in PROJECTS]
 
 

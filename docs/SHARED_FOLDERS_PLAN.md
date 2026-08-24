@@ -34,8 +34,11 @@ the rotation).
 
 * **BUILT 2026-08-24** (WP1, WP2, WP3, WP5; owner approved D1-D7 by asking
   for the build). WP4 (footage-sorter writes the declaration) tracked
-  separately in that repo. In repo, tests green, **UNSHIPPED** - deploy the
-  dashboard before the companions, as ever.
+  separately in that repo. **SHIPPED 2026-08-24**: dashboard 0.7.6 live
+  first (OTA, schema v27), then companion 0.9.48 feed-current for windows +
+  macos via publish_latest and published into the studio channel; base rig
+  upgraded. Editors pick 0.9.48 up at their tray (or Settings > Packages >
+  [ UPDATE NOW ]).
 * WP0 (the audit below) is done; every claim carries a file:line against
   `a30fb6e`.
 * **The D4 spike ran 2026-08-24** against Syncthing v2.1.2 (the fleet

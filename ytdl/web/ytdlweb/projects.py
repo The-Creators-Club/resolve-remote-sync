@@ -49,6 +49,56 @@ _SQL = ('SELECT s.project_slug AS slug, p.label AS label, '
         'WHERE s.editor_username = ? '
         'GROUP BY s.project_slug, p.label ORDER BY position, p.label')
 
+# Every active project, for the editor whose machines are all WIRED to the NAS
+# (CR-72, 2026-08-24). A base rig syncs nothing and CAN sync nothing -- the
+# dashboard 409s any tick on a base-only account (CR-28) -- so "the projects
+# you sync" is the empty set for such an editor by construction, and the
+# picker they saw was permanently blank. A wired machine works directly off
+# the whole NAS tree, so for that person every active project is a legitimate
+# destination. Ordered by label because there is no selections.position to
+# order by; label is the dashboard's own project-list order (db.fetch_projects).
+_ALL_SQL = 'SELECT slug, label FROM projects WHERE active = 1 ORDER BY label'
+
+# The same two sources ccsync_dashboard.db.machine_modes reads, in the same
+# precedence: machine_state.mode (v22) is the answer, editor_media_project.mode
+# the fallback for a machine that last reported before v22. Copied as SQL
+# rather than imported for projects.py's usual reason: this app opens the
+# dashboard's database read-only and must run with no dashboard package in
+# reach. Order matters -- the second query overwrites the first per machine.
+_MODE_SQLS = (
+    'SELECT DISTINCT machine, mode FROM editor_media_project WHERE editor_username = ?',
+    'SELECT machine, mode FROM machine_state WHERE editor_username = ?',
+)
+
+
+def _base_only(con, user):
+    """True iff the editor has at least one known machine and every one of
+    them reports mode 'base' -- the dashboard's base_only_editors predicate,
+    per person because the browser asking is a person.
+
+    Deliberately NOT "owns any wired machine": a person with one wired and one
+    remote machine keeps the ticked list, because a job they start from the
+    remote machine is claimed by THAT machine's companion (the SPA hands the
+    job id to its local loopback), and a download into a project that machine
+    does not sync is a folder nothing manages. An account with no known
+    machines is unknown, not base-only -- same rule as the dashboard's.
+
+    An older dashboard without these tables (or the v22 mode column) lands in
+    the except arm per query and answers False, which is the pre-CR-72
+    behaviour exactly.
+    """
+    modes = {}
+    for sql in _MODE_SQLS:
+        try:
+            rows = con.execute(sql, (user,)).fetchall()
+        except sqlite3.Error:
+            continue
+        for machine, mode in rows:
+            mode = str(mode or '').strip().lower()
+            if mode:
+                modes[machine] = mode
+    return bool(modes) and set(modes.values()) == {'base'}
+
 
 def _dev_projects():
     """YTDL_DEV_PROJECTS='slug=label,slug2=label2' -- standalone dev only."""
@@ -89,7 +139,15 @@ def ticked_projects(user):
 
     try:
         con.row_factory = sqlite3.Row
-        rows = con.execute(_SQL, (user,)).fetchall()
+        # A base-only editor gets the whole active project list (CR-72): their
+        # machines are wired to the NAS tree, they cannot hold a tick (CR-28),
+        # and an empty picker told them "you sync nothing" as if it were their
+        # doing. resolve_project() goes through here too, so the server-side
+        # destination check widens with the picker rather than drifting from it.
+        if _base_only(con, user):
+            rows = con.execute(_ALL_SQL).fetchall()
+        else:
+            rows = con.execute(_SQL, (user,)).fetchall()
         return {'projects': [{'slug': r['slug'], 'label': r['label']} for r in rows],
                 'available': True, 'error': None}
     except sqlite3.Error as exc:

@@ -2916,6 +2916,34 @@ window guard in `_show_menu`; (3) move fusionscript into a killable child
 process, the `music_worker` pattern, which also delivers the per-call
 timeout the bridge cannot have in-process. Nothing built yet.
 
+## The wired rig's empty ytdl picker (CR-72, 2026-08-24)
+
+### CR-72 - a base-only editor cannot pick any project in the youtube downloader - FIXED in repo
+**Symptom** (owner, 2026-08-24): on a wired/base rig the ytdl page's project
+dropdown is empty, so no download can be started from it at all.
+
+**Mechanism.** The picker is `ytdlweb/projects.ticked_projects`, which reads
+the dashboard's `selections` table: "the projects you sync are the legitimate
+destinations" (REQ 7). But a base rig syncs nothing and CAN sync nothing -
+CR-28 made the dashboard 409 any tick on a base-only account - so for an
+editor whose every machine is wired, the ticked set is empty by construction,
+forever. The two rules were individually right and jointly a lockout.
+
+**Fix** (`ytdl/web/ytdlweb/projects.py`). When the requesting editor is
+base-only - at least one known machine, every one reporting mode `base`, read
+from `machine_state` with `editor_media_project` as the pre-v22 fallback,
+same precedence as the dashboard's `machine_modes` - the picker offers EVERY
+active project, ordered by label: a wired machine works directly off the
+whole NAS tree, so every project is a legitimate destination for it.
+`resolve_project` goes through the same path, so the server-side destination
+check widens with the picker. Deliberately per-person and base-ONLY: a person
+with one wired and one remote machine keeps the ticked list, because a job
+they start is claimed by the requesting machine's own companion, and a
+download into a project that machine does not sync would be a folder nothing
+manages. An account with no known machines, or an older dashboard without the
+mode tables, answers "not base-only" and behaves exactly as before. Tests in
+`ytdl/web/tests/test_api.py`. Needs a dashboard deploy to reach the fleet.
+
 ## Open — residuals from the 2026-08-14 fix pass
 
 ### R16 — eight 08-14 findings deliberately not fixed

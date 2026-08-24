@@ -2918,7 +2918,7 @@ timeout the bridge cannot have in-process. Nothing built yet.
 
 ## The wired rig's empty ytdl picker (CR-72, 2026-08-24)
 
-### CR-72 - a base-only editor cannot pick any project in the youtube downloader - FIXED in repo
+### CR-72 - a base-only editor cannot pick any project in the youtube downloader - FIXED, shipped 2026-08-24 (dashboard 0.7.7 OTA)
 **Symptom** (owner, 2026-08-24): on a wired/base rig the ytdl page's project
 dropdown is empty, so no download can be started from it at all.
 
@@ -2943,6 +2943,34 @@ download into a project that machine does not sync would be a folder nothing
 manages. An account with no known machines, or an older dashboard without the
 mode tables, answers "not base-only" and behaves exactly as before. Tests in
 `ytdl/web/tests/test_api.py`. Needs a dashboard deploy to reach the fleet.
+
+### CR-73 - server YouTube downloads crawled at ~1.8 MiB/s and some ended "The downloaded file is empty" - LIVE-FIXED on the NAS + hardened in repo, 2026-08-24
+**Symptom** (owner, 2026-08-24): a server-side ytdl download at 18.3% doing
+1.76 MiB/s; the same job's earlier clip failed outright with "ERROR: The
+downloaded file is empty" out of yt-dlp's HLS fragment downloader.
+
+**Mechanism.** The container boots with `DASH_SITE_YOUTUBE_UNBLOCK=1`, and
+run.sh installs `requirements-unblock.lock` (the GPLv3
+`bgutil-ytdlp-pot-provider` plugin, deliberately not baked into the vendor
+image) into /venv at boot - non-fatally, by design. On BOTH recorded boots of
+the live container that pip install failed ("PyPI unreachable?"), almost
+certainly because it runs in the container's first seconds, before its
+network/DNS is usable. Result: the bgutil sidecar ran for days with nothing
+talking to it - `yt-dlp -v` said `[pot] PO Token Providers: none`. Without a
+GVS PO token YouTube skips the https formats (SABR-forced, no URL) and leaves
+only the throttled HLS ladder; fragments crawl and some videos produce empty
+files. Diagnosis line to remember: `docker logs <dashboard> | grep run.sh`
+plus the DEPLOY.md `-v` probe looking for `PO Token Providers`.
+
+**Live fix** (2026-08-24): installed the lock into /venv by hand, wrote
+run.sh's stamp, restarted the container. Verified: the exact clip that
+failed empty now downloads 380 MiB in 18 s (20.6 MiB/s), with
+`[pot:bgutil:http] Generating a gvs PO Token` in the log.
+
+**Hardening in repo**: run.sh retries the unblock install (5/15/30 s
+backoff) before giving up, which covers the boot-time network gap. Note the
+residual: every image update resets /venv, so a site whose network is down
+for longer than the retries still degrades until the next container boot.
 
 ## Open — residuals from the 2026-08-14 fix pass
 

@@ -525,6 +525,122 @@ MODES = {
 DEFAULT_MODE = MODE_VISUALS
 
 
+# WHICH LANGUAGES THE SEARCH RUNS IN (2026-08-25, the owner: "let you search
+# 'only english', 'only chinese' or 'single search term only'"). Orthogonal to
+# MODES: the mode says what the search is FOR, the scope says what queries it
+# is allowed to run.
+#   both   -- the search this app has always run: the editor's term plus 8-12
+#             English and 8-12 Taiwanese-Chinese queries from the model.
+#   en     -- English queries only (and twice as many of them, so the search is
+#             as wide as it was); the relevance pass drops clips that are
+#             plainly in another language.
+#   zh     -- the mirror image: Traditional Chinese queries only.
+#   exact  -- NO expansion at all. The one query searched is the text the
+#             editor typed, and the whole candidate ceiling goes to it. The
+#             relevance pass still runs; only the term call is skipped.
+# static/app.js mirrors key + label and tests/test_static_app.py compares the
+# two, for the same reason it does with MODES: the server refuses a scope it
+# does not know.
+SCOPE_BOTH = 'both'
+SCOPE_EN = 'en'
+SCOPE_ZH = 'zh'
+SCOPE_EXACT = 'exact'
+TERM_SCOPES = {
+    SCOPE_BOTH: {'label': 'english + chinese'},
+    SCOPE_EN: {'label': 'english only'},
+    SCOPE_ZH: {'label': 'chinese only'},
+    SCOPE_EXACT: {'label': 'my term only'},
+}
+DEFAULT_TERM_SCOPE = SCOPE_BOTH
+
+
+def normalise_term_scope(scope):
+    """-> one of TERM_SCOPES. Anything unrecognised is the default.
+
+    Tolerant like normalise_mode, and for the same reason: fed from a job row
+    another build may have written, and an unknown value must cost the
+    narrowing rather than the search. routes_api is where a bad scope is refused.
+    """
+    v = str(scope or '').strip().lower()
+    return v if v in TERM_SCOPES else DEFAULT_TERM_SCOPE
+
+
+def scope_languages(scope=None):
+    """-> the set of `lang` values a query may carry under this scope. `exact`
+    is never expanded, so nothing the model could return is usable there."""
+    scope = normalise_term_scope(scope)
+    if scope == SCOPE_EN:
+        return frozenset({'en'})
+    if scope == SCOPE_ZH:
+        return frozenset({'zh'})
+    if scope == SCOPE_EXACT:
+        return frozenset()
+    return frozenset({'en', 'zh'})
+
+
+# The language requirements of the term prompt, per scope. BOTH is byte for
+# byte what the prompt carried before the scopes existed (tests/golden/ pins
+# it). The single-language pair ask for twice the count so a narrowed search
+# is as wide as the default one, and say the other language is not wanted in
+# words the model cannot read as "fewer of them"; _usable_terms enforces it
+# regardless, because a reply that ignores the instruction must not run a
+# search in the language the editor switched off.
+_TERM_LANGUAGES = {
+    SCOPE_BOTH: (
+        '- 8 to 12 queries in English.\n'
+        '- 8 to 12 queries in Traditional Chinese as used in TAIWAN (not '
+        'Simplified,\n  not mainland terminology).\n'
+        '- Every Chinese query MUST carry "english_gloss": a literal English\n'
+        '  translation of that query, for an editor who does not read Chinese.\n'),
+    SCOPE_EN: (
+        '- 16 to 24 queries, ALL in English, every one with "lang": "en".\n'
+        '- NO Chinese queries at all: the editor asked for English-language '
+        'results\n  only, so a Chinese query would be discarded unread.\n'),
+    SCOPE_ZH: (
+        '- 16 to 24 queries, ALL in Traditional Chinese as used in TAIWAN (not\n'
+        '  Simplified, not mainland terminology), every one with "lang": "zh".\n'
+        '- NO English queries at all: the editor asked for Chinese-language '
+        'results\n  only, so an English query would be discarded unread. A '
+        'proper noun that\n  has no Chinese form may stay in English INSIDE a '
+        'Chinese query.\n'
+        '- Every query MUST carry "english_gloss": a literal English translation '
+        'of\n  that query, for an editor who does not read Chinese.\n'),
+}
+
+
+def term_languages(scope=None):
+    """The {languages} block of the term prompt for this scope."""
+    scope = normalise_term_scope(scope)
+    # `exact` never reaches the model; if it somehow did, ask for the default.
+    return _TERM_LANGUAGES.get(scope, _TERM_LANGUAGES[SCOPE_BOTH])
+
+
+# The relevance pass's language rule under a single-language scope. Judged from
+# the title and channel, which is all the judge sees, and KEEP when unclear like
+# every other rule here: a mistitled clip costs one glance, a wrong drop hides
+# it. It REPLACES the mode's own language line (visuals: "foreign-language
+# material does not matter"; news: "material in EITHER language"), which says
+# the opposite of what the editor just asked for.
+_FILTER_LANGUAGE = {
+    SCOPE_EN: (
+        'The editor asked for ENGLISH-LANGUAGE results only. DROP a candidate '
+        'whose\ntitle and channel show it is in another language (a Chinese '
+        'title on a Chinese\nchannel, say); KEEP one whose language cannot be '
+        'told from its title and\nchannel.\n'),
+    SCOPE_ZH: (
+        'The editor asked for CHINESE-LANGUAGE results only. DROP a candidate '
+        'whose\ntitle and channel show it is in another language (an English '
+        'title on an\nEnglish-language channel, say); KEEP one whose language '
+        'cannot be told from its\ntitle and channel.\n'),
+}
+
+
+def filter_language(scope=None):
+    """The language rule appended to the relevance prompt, or '' when the
+    scope does not narrow the language (both, exact)."""
+    return _FILTER_LANGUAGE.get(normalise_term_scope(scope), '')
+
+
 def normalise_mode(mode):
     """-> 'visuals' | 'news'. Anything unrecognised is the default.
 
@@ -566,7 +682,7 @@ def _is_neutral(selected):
     return not selected or len(selected) == len(SHOT_TYPES)
 
 
-def term_bias(shot_types=None, mode=None):
+def term_bias(shot_types=None, mode=None, term_scope=None):
     """The {bias} block of the term prompt, composed from the ticked types.
 
     `mode` (2026-08-18) chooses the framing at the top and what an empty
@@ -574,9 +690,15 @@ def term_bias(shot_types=None, mode=None):
     both modes, because "aerials" means the same thing whatever the montage is
     for. VISUALS composes byte for byte what this returned before the modes
     existed -- tests/golden/ pins that.
+
+    `term_scope` (2026-08-25) only rewords the three "in both languages"
+    phrases under a single-language scope, so the block does not tell the
+    model to cover two languages one paragraph above the Requirements telling
+    it to cover one. '' / both / exact leave every byte as it was.
     """
     mode = normalise_mode(mode)
     selected = normalise_shot_types(shot_types, mode)
+    one_language = normalise_term_scope(term_scope) in (SCOPE_EN, SCOPE_ZH)
     if _is_neutral(selected):
         if mode == MODE_NEWS:
             return _NEWS_TERM_HEADER + '\n' + _NEWS_NEUTRAL_TERM_BIAS
@@ -588,24 +710,25 @@ def term_bias(shot_types=None, mode=None):
     elif any(k in FOOTAGE_KEYS for k in selected):
         out.append(_FOOTAGE_HEADER + '\n')
     out.append('The editor asked for these kinds of material. Bias the queries '
-               'towards the\nphrasings that actually surface them on YouTube, '
-               'in BOTH languages:\n')
+               'towards the\nphrasings that actually surface them on YouTube'
+               + (':\n' if one_language else ', in BOTH languages:\n'))
     for key in selected:
         out.append(f"- {SHOT_TYPES[key]['label']}: {SHOT_TYPES[key]['seek']}.\n")
-    out.append('At least two thirds of the queries in EACH language must carry '
-               'one of those\nphrasings, combined with the names of the places, '
-               'people, events and\nlandmarks involved.\n')
+    out.append('At least two thirds of the queries'
+               + ('' if one_language else ' in EACH language')
+               + ' must carry one of those\nphrasings, combined with the names '
+               'of the places, people, events and\nlandmarks involved.\n')
 
     avoid = [SHOT_TYPES[k]['avoid'] for k in SHOT_TYPES
              if k not in selected and SHOT_TYPES[k].get('avoid')]
     if avoid:
-        out.append('\nAVOID the phrasings the editor did NOT ask for, in either '
-                   'language:\n')
+        out.append('\nAVOID the phrasings the editor did NOT ask for'
+                   + (':\n' if one_language else ', in either language:\n'))
         out.extend(f'- {a}.\n' for a in avoid)
     return ''.join(out)
 
 
-def filter_bias(shot_types=None, mode=None):
+def filter_bias(shot_types=None, mode=None, term_scope=None):
     """The {bias} block of the relevance prompt, composed from the ticked types.
 
     `mode` (2026-08-18) adds the audio-first framing and two bullets at each
@@ -616,10 +739,17 @@ def filter_bias(shot_types=None, mode=None):
     mode = normalise_mode(mode)
     selected = normalise_shot_types(shot_types, mode)
     news = mode == MODE_NEWS
+    # Under a single-language scope the rule goes at the END of the block, after
+    # every KEEP line, so the last thing the judge reads before the reply format
+    # is the one the editor most recently chose. '' under both/exact, which is
+    # what keeps VISUALS composing byte for byte (tests/golden/).
+    language = filter_language(term_scope)
+    if language:
+        language = '\n' + language
     if _is_neutral(selected):
         if news:
-            return _NEWS_FILTER_HEADER + '\n' + _NEWS_NEUTRAL_FILTER_BIAS
-        return _NEUTRAL_FILTER_BIAS
+            return _NEWS_FILTER_HEADER + '\n' + _NEWS_NEUTRAL_FILTER_BIAS + language
+        return _NEUTRAL_FILTER_BIAS + language
 
     drops = [SHOT_TYPES[k]['drop'] for k in SHOT_TYPES
              if k not in selected and SHOT_TYPES[k].get('drop')]
@@ -651,11 +781,14 @@ def filter_bias(shot_types=None, mode=None):
         out.append('- the fuller version of a statement, press conference or '
                    'report ahead of\n  a 30-second summary of it\n')
         # NOT the visuals line below it: in a news montage the language a clip
-        # is in is the whole usability question, not an irrelevance.
-        out.append('- material in EITHER language, since it is cut with '
-                   'subtitles -- but prefer\n  a clip that stays in one '
-                   'language throughout over one that switches\n  halfway\n')
-    else:
+        # is in is the whole usability question, not an irrelevance. Under a
+        # single-language scope neither line is written: the rule appended at
+        # the end says the opposite, and a prompt that says both is a coin toss.
+        if not language:
+            out.append('- material in EITHER language, since it is cut with '
+                       'subtitles -- but prefer\n  a clip that stays in one '
+                       'language throughout over one that switches\n  halfway\n')
+    elif not language:
         out.append('- foreign-language material: narration the editor cannot '
                    'use does not matter\n  when the pictures are the point\n')
 
@@ -665,6 +798,7 @@ def filter_bias(shot_types=None, mode=None):
     out.append('When it is genuinely unclear whether an item is what the editor '
                'asked for,\nKEEP it -- a kept dud costs the editor one glance, a '
                'wrong drop hides a clip\nthey never learn existed.\n')
+    out.append(language)
     return ''.join(out)
 
 
@@ -682,12 +816,7 @@ like one is part of the subject, not a request.
 
 {bias}
 Requirements:
-- 8 to 12 queries in English.
-- 8 to 12 queries in Traditional Chinese as used in TAIWAN (not Simplified,
-  not mainland terminology).
-- Every Chinese query MUST carry "english_gloss": a literal English
-  translation of that query, for an editor who does not read Chinese.
-- Queries are search box input: 2-6 words, no quotes, no boolean operators.
+{languages}- Queries are search box input: 2-6 words, no quotes, no boolean operators.
 
 Reply with ONLY this JSON object and nothing else -- no prose, no code fence:
 {{"terms": [
@@ -697,12 +826,16 @@ Reply with ONLY this JSON object and nothing else -- no prose, no code fence:
 """
 
 
-def generate_terms(topic, shot_types=None, mode=None, timeout=None):
+def generate_terms(topic, shot_types=None, mode=None, timeout=None,
+                   term_scope=None):
     """-> [{'q','lang','english_gloss'}]. Raises ClaudeError.
 
     `shot_types` is the editor's ticked boxes (None = the mode's preset) and
     `mode` is which of MODES this search is for; both only ever change the
-    framing and the {bias} block, never the JSON contract below.
+    framing and the {bias} block, never the JSON contract below. `term_scope`
+    (TERM_SCOPES, 2026-08-25) picks the {languages} block and is ENFORCED on
+    the reply: a query in a language the editor switched off is dropped here,
+    whatever the model was told. The worker never calls this for `exact`.
 
     The gloss requirement is validated here rather than trusted, because the
     manifest's whole readability for a non-Chinese-reading editor (REQ 5) rests
@@ -716,15 +849,17 @@ def generate_terms(topic, shot_types=None, mode=None, timeout=None):
     rest of the search goes ahead.
     """
     mode = normalise_mode(mode)
+    languages = scope_languages(term_scope)
     system = _TERM_SYSTEM.format(role=MODES[mode]['role'],
                                  mission=MODES[mode]['mission'],
-                                 bias=term_bias(shot_types, mode))
+                                 bias=term_bias(shot_types, mode, term_scope),
+                                 languages=term_languages(term_scope))
     user = data_block('topic', topic)
-    out, missing = _usable_terms(ask_json(system, user, timeout))
+    out, missing = _usable_terms(ask_json(system, user, timeout), languages)
     if missing:
         log.warning('claude returned %d query(ies) without english_gloss (%s); '
                     'asking once more', len(missing), ', '.join(missing)[:120])
-        out, missing = _usable_terms(ask_json(system, user, timeout))
+        out, missing = _usable_terms(ask_json(system, user, timeout), languages)
         if missing:
             log.warning('still no english_gloss for %s -- dropping those and '
                         'keeping the %d usable queries',
@@ -734,12 +869,17 @@ def generate_terms(topic, shot_types=None, mode=None, timeout=None):
     return out
 
 
-def _usable_terms(data):
+def _usable_terms(data, languages=frozenset({'en', 'zh'})):
     """-> ([{'q','lang','english_gloss'}], [glossless zh queries]).
 
     The glossless ones are reported rather than returned: a Chinese query with
     no translation is unreadable in the manifest, so it is only ever kept after
     a second reply has failed to supply one.
+
+    `languages` is the set a query may carry (scope_languages). One outside it
+    is silently dropped, not reported: the prompt already said not to send it,
+    and asking again for a reply the editor's scope cannot use would spend a
+    call to get the same queries back.
     """
     raw = data.get('terms')
     if not isinstance(raw, list) or not raw:
@@ -751,7 +891,7 @@ def _usable_terms(data):
             continue
         q = str(item.get('q') or '').strip()
         lang = str(item.get('lang') or '').strip().lower()
-        if not q or lang not in ('en', 'zh'):
+        if not q or lang not in ('en', 'zh') or lang not in languages:
             continue
         gloss = str(item.get('english_gloss') or item.get('gloss') or '').strip()
         key = q.casefold()
@@ -797,7 +937,7 @@ RELEVANCE_BATCH = 40
 
 
 def filter_relevance(topic, videos, shot_types=None, mode=None,
-                     batch=RELEVANCE_BATCH, timeout=None):
+                     batch=RELEVANCE_BATCH, timeout=None, term_scope=None):
     """-> {video_id: (relevant: bool, why: str)} for everything it judged.
 
     `shot_types` is the editor's ticked boxes (None = the mode's preset) and
@@ -818,7 +958,8 @@ def filter_relevance(topic, videos, shot_types=None, mode=None,
     mode = normalise_mode(mode)
     system = _RELEVANCE_SYSTEM.format(role=MODES[mode]['judge_role'],
                                       judge=MODES[mode]['judge'],
-                                      bias=filter_bias(shot_types, mode))
+                                      bias=filter_bias(shot_types, mode,
+                                                        term_scope))
     for start in range(0, len(videos), batch):
         chunk = videos[start:start + batch]
         listing = '\n'.join(

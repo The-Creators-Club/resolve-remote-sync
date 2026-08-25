@@ -1,0 +1,32 @@
+-- v11: jobs.term_scope, jobs.date_from, jobs.date_to -- the two search
+-- narrowings the owner asked for on 2026-08-25: "let you search 'only
+-- english', 'only chinese' or 'single search term only'", and "a date
+-- selector".
+--
+-- term_scope: 'both' | 'en' | 'zh' | 'exact' (ytdlweb.claude_cli.TERM_SCOPES).
+-- Orthogonal to `mode` above it: the mode says what the search is FOR, the
+-- scope says which queries it may run. 'en' and 'zh' change the language
+-- block of the term prompt and add a language rule to the relevance prompt;
+-- 'exact' skips the term call entirely and runs ONE flat search of exactly
+-- what the editor typed, with the whole candidate ceiling given to it. The
+-- DEFAULT is 'both', which is the only search this app ran before today and
+-- composes the previous prompts byte for byte (tests/golden/), so there is no
+-- backfill and no row's history is rewritten. The literal is duplicated from
+-- claude_cli.DEFAULT_TERM_SCOPE (schema.sql carries it too); tests/test_db.py
+-- pins the three together.
+--
+-- date_from / date_to: an UPLOAD-DATE range as YYYYMMDD, the shape yt-dlp
+-- gives `upload_date` and job_videos stores it in, so the two compare as
+-- strings. NULL is "no bound on that side", which is every pre-existing row.
+-- YouTube's search has no range filter (its `sp=` windows are what `period`
+-- already carries), so the range is enforced on each candidate's metadata in
+-- the filter phase, as a mechanical drop like the live/over-length ones -- a
+-- video with no upload_date is KEPT, under the same rule as every other
+-- "cannot tell" here.
+--
+-- Stored per job for the same reason shot_types, max_candidates and mode are:
+-- a job re-run from `queued` after a container restart must be re-run as the
+-- editor submitted it.
+ALTER TABLE jobs ADD COLUMN term_scope TEXT NOT NULL DEFAULT 'both';
+ALTER TABLE jobs ADD COLUMN date_from TEXT;
+ALTER TABLE jobs ADD COLUMN date_to TEXT;

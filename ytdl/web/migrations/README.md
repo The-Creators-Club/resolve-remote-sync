@@ -78,3 +78,11 @@ This database was created at v1. Since then (2026-08-11 bug hunt):
   the field, and `db.claim_download` reads an unknown holding machine exactly as
   it read every holder before this. There is deliberately no backfill — a
   machine_id cannot be invented for a lease already taken.
+- `011_jobs_term_scope_dates.sql` — v11 (2026-08-25), `jobs.term_scope`
+  (`both` | `en` | `zh` | `exact`, `claude_cli.TERM_SCOPES`: which languages
+  the search runs in, or the editor's text alone with no AI expansion) and
+  `jobs.date_from` / `jobs.date_to` (an upload-date range, YYYYMMDD, enforced
+  on the metadata in the filter phase because YouTube's search has no range
+  filter). Like 009, the scope's default IS what every old row ran — `both`
+  composes the previous prompts byte for byte — and a NULL date is no bound,
+  so there is no backfill.

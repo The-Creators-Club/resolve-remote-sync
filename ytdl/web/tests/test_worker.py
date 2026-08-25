@@ -1513,3 +1513,149 @@ def test_a_cancel_during_the_search_pause_is_honoured(con, job, fake_claude,
     assert fresh['phase'] == 'cancelled'
     # the first term was searched; the second was abandoned in its pause
     assert fresh['terms_done'] == 1
+
+
+# -------------------------------------------------------- the term scope
+# 2026-08-25. Like the mode, it is read off the JOB ROW at every phase.
+
+
+def test_the_jobs_scope_reaches_both_ai_calls(con, job, fake_claude, fake_youtube):
+    slug, label, _ = PROJECTS[1]
+    db.set_phase(con, job['id'], 'cancelled')
+    mine = db.create_job(con, USER, 'algal reef controversy', 'algal reef',
+                         slug, label, term_scope='zh')
+    _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa']})
+    worker.run_job(con, mine)
+    assert fake_claude.scopes == [('terms', 'zh'), ('relevance', 'zh')]
+    assert db.get_job(con, mine)['phase'] == 'ready_for_review'
+
+
+def test_an_old_job_row_is_re_run_as_a_both_languages_search(
+        con, job, fake_claude, fake_youtube):
+    assert db.get_job(con, job['id'])['term_scope'] == claude_cli.SCOPE_BOTH
+    _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa']})
+    worker.run_job(con, job['id'])
+    assert [s for _stage, s in fake_claude.scopes] == ['both', 'both']
+
+
+def test_an_exact_search_never_asks_claude_for_terms_and_gets_the_whole_ceiling(
+        con, job, fake_claude, fake_youtube):
+    """'single search term only': the editor's text is the ONE term, no model
+    call expands it, and that one flat search is given the candidate ceiling
+    rather than the 15-per-term the expanded search paces itself with. The
+    relevance pass still runs -- it judges the topic, not the queries."""
+    slug, label, _ = PROJECTS[1]
+    db.set_phase(con, job['id'], 'cancelled')
+    mine = db.create_job(con, USER, 'algal reef controversy', 'algal reef',
+                         slug, label, max_per_term=5, max_candidates=50,
+                         term_scope='exact')
+    fake_claude.term_error = claude_cli.ClaudeError(
+        claude_cli.ERR_AUTH, 'must never be reached')
+    _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa', 'bbbbbbbbbbb']})
+    worker.run_job(con, mine)
+
+    fresh = db.get_job(con, mine)
+    assert fresh['phase'] == 'ready_for_review', fresh['error']
+    assert [c[0] for c in fake_claude.calls] == ['relevance']
+    assert fake_claude.scopes == [('relevance', 'exact')]
+    terms = db.terms(con, mine)
+    assert [(t['term'], t['source']) for t in terms] == \
+        [('algal reef controversy', 'user')]
+    assert fresh['terms_total'] == 1 and fresh['terms_done'] == 1
+    assert fake_youtube.searched == [('algal reef controversy', 50, None)]
+    assert fresh['candidates'] == 2
+
+
+def test_an_exact_search_runs_with_the_ai_provider_down_for_terms(
+        con, job, fake_claude, fake_youtube):
+    """The one search that needs no model to START. The relevance pass still
+    degrades the way it always has (banner, unfiltered manifest)."""
+    slug, label, _ = PROJECTS[1]
+    db.set_phase(con, job['id'], 'cancelled')
+    mine = db.create_job(con, USER, 'reef', 'reef', slug, label, term_scope='exact')
+    fake_claude.term_error = claude_cli.ClaudeError(claude_cli.ERR_AUTH, 'logged out')
+    fake_claude.relevance_error = claude_cli.ClaudeError(claude_cli.ERR_AUTH, 'logged out')
+    _wire(fake_youtube, {'reef': ['aaaaaaaaaaa']})
+    worker.run_job(con, mine)
+    fresh = db.get_job(con, mine)
+    assert fresh['phase'] == 'ready_for_review'
+    assert fresh['error'] and fresh['error'].startswith(claude_cli.ERR_AUTH)
+    assert [v['video_id'] for v in db.videos(con, mine)] == ['aaaaaaaaaaa']
+
+
+def test_a_single_language_scope_still_searches_the_editors_own_term_first(
+        con, job, fake_claude, fake_youtube):
+    """The editor typed it, whatever language it is in: a chinese term under
+    ENGLISH ONLY is still the first search (source='user')."""
+    slug, label, _ = PROJECTS[1]
+    db.set_phase(con, job['id'], 'cancelled')
+    mine = db.create_job(con, USER, '藻礁', '藻礁', slug, label, term_scope='en')
+    _wire(fake_youtube, {'藻礁': ['aaaaaaaaaaa']})
+    worker.run_job(con, mine)
+    terms = db.terms(con, mine)
+    assert (terms[0]['term'], terms[0]['lang'], terms[0]['source']) == ('藻礁', 'zh', 'user')
+    assert fake_youtube.searched[0][0] == '藻礁'
+
+
+# --------------------------------------------------------- the date range
+# YouTube's search has no range filter, so the range is enforced on each
+# candidate's metadata in the filter phase -- a soft drop like the live and
+# over-length ones, and a card the editor can still overrule.
+
+
+def _dated_job(con, job, **over):
+    slug, label, _ = PROJECTS[1]
+    db.set_phase(con, job['id'], 'cancelled')
+    return db.create_job(con, USER, 'reef', 'reef', slug, label, **over)
+
+
+def test_candidates_outside_the_upload_date_range_are_dropped_mechanically(
+        con, job, fake_claude, fake_youtube):
+    mine = _dated_job(con, job, date_from='20190101', date_to='20191231')
+    _wire(fake_youtube, {'reef': ['aaaaaaaaaaa', 'bbbbbbbbbbb', 'ccccccccccc',
+                                  'ddddddddddd', 'eeeeeeeeeee']},
+          meta={'aaaaaaaaaaa': {'upload_date': '20190615'},   # inside
+                'bbbbbbbbbbb': {'upload_date': '20181231'},   # the day before
+                'ccccccccccc': {'upload_date': '20200101'},   # the day after
+                'ddddddddddd': {'upload_date': '20191231'},   # the last day: inside
+                'eeeeeeeeeee': {'upload_date': None}})        # unknown: kept
+    worker.run_job(con, mine)
+    rows = {v['video_id']: v for v in db.videos(con, mine)}
+    assert rows['aaaaaaaaaaa']['relevant'] == 1
+    assert rows['ddddddddddd']['relevant'] == 1
+    assert rows['eeeeeeeeeee']['relevant'] == 1, 'no upload_date never drops'
+    assert rows['bbbbbbbbbbb']['relevant'] == 0 and rows['bbbbbbbbbbb']['selected'] == 0
+    assert rows['ccccccccccc']['relevant'] == 0
+    assert rows['bbbbbbbbbbb']['relevance_note'] == \
+        'uploaded 2018-12-31, outside 2019-01-01 to 2019-12-31'
+    # ...and the judge never saw the dropped ones: no tokens spent on a card
+    # the range already decided
+    judged = [c[2] for c in fake_claude.calls if c[0] == 'relevance'][0]
+    assert set(judged) == {'aaaaaaaaaaa', 'ddddddddddd', 'eeeeeeeeeee'}
+
+
+def test_a_one_sided_range_binds_one_side(con, job, fake_claude, fake_youtube):
+    mine = _dated_job(con, job, date_from='20250101')
+    _wire(fake_youtube, {'reef': ['aaaaaaaaaaa', 'bbbbbbbbbbb']},
+          meta={'aaaaaaaaaaa': {'upload_date': '20240101'},
+                'bbbbbbbbbbb': {'upload_date': '20260801'}})
+    worker.run_job(con, mine)
+    rows = {v['video_id']: v for v in db.videos(con, mine)}
+    assert rows['aaaaaaaaaaa']['relevant'] == 0
+    assert rows['aaaaaaaaaaa']['relevance_note'] == \
+        'uploaded 2024-01-01, outside 2025-01-01 onwards'
+    assert rows['bbbbbbbbbbb']['relevant'] == 1
+    assert worker._date_range_text(None, '20250101') == 'up to 2025-01-01'
+
+
+def test_no_range_drops_nothing_and_the_note_is_the_old_one(
+        con, job, fake_claude, fake_youtube):
+    _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa']},
+          meta={'aaaaaaaaaaa': {'upload_date': '19990101'}})
+    worker.run_job(con, job['id'])
+    v = db.videos(con, job['id'])[0]
+    assert v['relevant'] == 1 and not v['relevance_note']
+    assert not worker._outside_dates({'upload_date': '19990101'}, None, None)
+    # a malformed bound (a row written by hand) is no bound, never a crash
+    assert not worker._outside_dates({'upload_date': '19990101'}, 'soon', None)
+    assert not worker._outside_dates({'upload_date': 'junk'}, '20200101', None)

@@ -783,11 +783,15 @@ its policy.
 of `/api/v1`; it is documented with the feature (`ytdl/web/DEPLOY.md`). The job
 row a browser polls carries, besides the phase and the counters: `kind`
 (`search` | `urls`), `mode` (`visuals` | `news` -- which rubric the two AI calls
-ran under, 2026-08-18), `shot_types` (the ticked boxes, as a list) and
-`max_candidates`. All four are inputs to the search that already ran and none of
-them is updatable afterwards; `mode` and `shot_types` are validated on create
-(400 on an unknown value, never silently defaulted) and a row written before a
-column existed reads as what it actually ran with. The **fleet** job routes the
+ran under, 2026-08-18), `shot_types` (the ticked boxes, as a list),
+`max_candidates`, `term_scope` (`both` | `en` | `zh` | `exact` -- which
+languages the search ran in, or the editor's text alone with no AI expansion,
+2026-08-25) and `date_from` / `date_to` (an upload-date range as `YYYYMMDD`,
+or null; accepted as ISO `YYYY-MM-DD` on create). All of them are inputs to the
+search that already ran and none is updatable afterwards; `mode`, `shot_types`,
+`term_scope` and the dates are validated on create (400 on an unknown value, a
+non-calendar date or a reversed range, never silently defaulted) and a row
+written before a column existed reads as what it actually ran with. The **fleet** job routes the
 companion calls are §1's gate plus `docs/YTDL_LOCAL_DOWNLOAD.md` §4.
 
 The mounted SPAs are currently exempt from the CSRF check

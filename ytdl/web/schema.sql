@@ -69,6 +69,20 @@ CREATE TABLE IF NOT EXISTS jobs (
     -- NOT `download_mode` / `mode_lock` below, which are about which MACHINE
     -- fetches the clips.
     mode             TEXT NOT NULL DEFAULT 'visuals',
+    -- WHICH LANGUAGES the search runs in: 'both' | 'en' | 'zh' | 'exact'
+    -- (claude_cli.TERM_SCOPES, 2026-08-25). Orthogonal to `mode`: 'en'/'zh'
+    -- narrow the queries the model writes (and add a language rule to the
+    -- relevance pass), 'exact' skips the model and searches the editor's
+    -- text alone. The default is claude_cli.DEFAULT_TERM_SCOPE and
+    -- test_db.py pins the pair; an old row (and one written by
+    -- migrations/011) reads as 'both', the only search before today.
+    term_scope       TEXT NOT NULL DEFAULT 'both',
+    -- An UPLOAD-DATE range, YYYYMMDD like job_videos.upload_date so the two
+    -- compare as strings; NULL = no bound on that side. Enforced in the
+    -- filter phase as a mechanical drop (YouTube's search has no range
+    -- filter; `period` above is its fixed windows).
+    date_from        TEXT,
+    date_to          TEXT,
     -- queued > generating_terms > searching > enriching > filtering >
     -- ready_for_review > downloading > done | failed | cancelled
     -- (kind='urls' skips the middle: queued > downloading > done)

@@ -703,18 +703,19 @@ def _golden(name):
     return (GOLDEN / name).read_text(encoding='utf-8').replace('\r\n', '\n')
 
 
-def _term_system(shot_types=None, mode=None):
+def _term_system(shot_types=None, mode=None, term_scope=None):
     m = claude_cli.MODES[claude_cli.normalise_mode(mode)]
     return claude_cli._TERM_SYSTEM.format(
         role=m['role'], mission=m['mission'],
-        bias=claude_cli.term_bias(shot_types, mode))
+        bias=claude_cli.term_bias(shot_types, mode, term_scope),
+        languages=claude_cli.term_languages(term_scope))
 
 
-def _relevance_system(shot_types=None, mode=None):
+def _relevance_system(shot_types=None, mode=None, term_scope=None):
     m = claude_cli.MODES[claude_cli.normalise_mode(mode)]
     return claude_cli._RELEVANCE_SYSTEM.format(
         role=m['judge_role'], judge=m['judge'],
-        bias=claude_cli.filter_bias(shot_types, mode))
+        bias=claude_cli.filter_bias(shot_types, mode, term_scope))
 
 
 @pytest.mark.parametrize('selection,term_file,rel_file', [
@@ -918,3 +919,120 @@ def test_note_failure_updates_the_cache_without_running_anything(run):
     claude_cli.note_failure(claude_cli.ClaudeError(claude_cli.ERR_MISSING, 'gone'))
     assert claude_cli.health()['claude'] == 'missing'
     assert len(run.calls) == n
+
+
+# ------------------------------------------------------- the term scope
+# 2026-08-25, the owner: "let you search 'only english', 'only chinese' or
+# 'single search term only'". The scope is a fourth input to the two prompts,
+# orthogonal to the mode; `both` composes exactly what the prompts were.
+
+
+def test_the_default_scope_is_the_search_this_app_has_always_run():
+    assert claude_cli.DEFAULT_TERM_SCOPE == claude_cli.SCOPE_BOTH
+    assert list(claude_cli.TERM_SCOPES) == ['both', 'en', 'zh', 'exact']
+    for junk in (None, '', 'english', 'EN ', 42):
+        assert claude_cli.normalise_term_scope(junk) in claude_cli.TERM_SCOPES
+    assert claude_cli.normalise_term_scope(None) == 'both'
+    assert claude_cli.normalise_term_scope('english') == 'both'
+    assert claude_cli.normalise_term_scope(' EN ') == 'en'
+    assert claude_cli.normalise_term_scope('Exact') == 'exact'
+    # ...and both prompt builders compose the golden text under it: the
+    # additive-change pin above already covers this, this says why in words
+    assert claude_cli.term_languages('both') in _term_system()
+    assert _relevance_system(term_scope='both') == _relevance_system()
+    assert _relevance_system(['aerial'], 'news', 'both') == \
+        _relevance_system(['aerial'], 'news')
+
+
+@pytest.mark.parametrize('scope,lang,other', [('en', 'en', 'zh'), ('zh', 'zh', 'en')])
+def test_a_single_language_scope_asks_for_that_language_only(run, scope, lang, other):
+    """Twice the count, so a narrowed search is as wide as the default, and
+    the other language named as NOT wanted -- in the prompt, and enforced on
+    the reply below."""
+    run.outcome = _terms_reply()
+    claude_cli.generate_terms('x', term_scope=scope)
+    p = _system(run)
+    assert '16 to 24 queries' in p
+    assert '8 to 12 queries' not in p
+    assert f'"lang": "{lang}"' in p
+    assert ('NO Chinese queries' if scope == 'en' else 'NO English queries') in p
+    assert claude_cli.scope_languages(scope) == frozenset({lang})
+    assert other not in claude_cli.scope_languages(scope)
+
+
+def test_a_query_in_the_switched_off_language_is_dropped_whatever_the_model_said(run):
+    """The reply to an english-only search carried a chinese query anyway
+    (models do). It is dropped HERE, silently and without a retry: the search
+    must not run in a language the editor switched off, and asking again would
+    spend a call to get the same english queries back."""
+    run.outcome = _terms_reply()
+    out = claude_cli.generate_terms('x', term_scope='en')
+    assert [t['q'] for t in out] == ['presidential office building taipei aerial']
+    assert len(run.calls) == 1, 'no retry for a dropped-by-scope query'
+
+    run.calls.clear()
+    run.outcome = _terms_reply()
+    out = claude_cli.generate_terms('x', term_scope='zh')
+    assert [t['q'] for t in out] == ['總統府 空拍']
+    assert out[0]['english_gloss'] == 'presidential office drone'
+    assert len(run.calls) == 1
+
+
+def test_a_reply_with_nothing_in_the_scopes_language_is_the_usual_no_terms_error(run):
+    run.outcome = FakeMessage(json.dumps({'terms': [
+        {'q': '總統府 空拍', 'lang': 'zh', 'english_gloss': 'presidential office drone'},
+    ]}))
+    with pytest.raises(claude_cli.ClaudeError) as exc:
+        claude_cli.generate_terms('x', term_scope='en')
+    assert exc.value.prefix == claude_cli.ERR_OUTPUT
+
+
+def test_exact_is_never_a_language_the_model_is_asked_for():
+    """The worker never calls generate_terms for `exact`; if something did,
+    nothing the model returned could be used, and the prompt it would have
+    sent is the default one rather than an invented fifth."""
+    assert claude_cli.scope_languages('exact') == frozenset()
+    assert claude_cli.term_languages('exact') == claude_cli.term_languages('both')
+    assert claude_cli.filter_language('exact') == ''
+
+
+@pytest.mark.parametrize('mode', ['visuals', 'news'])
+@pytest.mark.parametrize('selection', [None, [], ['aerial', 'interview']])
+def test_the_relevance_pass_gets_the_language_rule_under_a_narrow_scope(mode, selection):
+    """Every branch of filter_bias -- neutral and composed, both modes -- ends
+    with the language rule under en/zh, and the mode's own contrary language
+    line ("foreign-language material does not matter" / "material in EITHER
+    language") is gone, because a prompt that says both is a coin toss."""
+    for scope, word in (('en', 'ENGLISH-LANGUAGE'), ('zh', 'CHINESE-LANGUAGE')):
+        bias = claude_cli.filter_bias(selection, mode, scope)
+        assert bias.rstrip().endswith(claude_cli.filter_language(scope).rstrip()), bias[-160:]
+        assert word in bias
+        assert 'foreign-language material' not in bias
+        assert 'EITHER language' not in bias
+        # ...and the KEEP-when-unclear rule is still there in the composed case
+        if selection:
+            assert 'KEEP it' in bias
+    plain = claude_cli.filter_bias(selection, mode)
+    assert 'ENGLISH-LANGUAGE' not in plain and 'CHINESE-LANGUAGE' not in plain
+    assert plain == claude_cli.filter_bias(selection, mode, 'exact')
+
+
+def test_the_scope_reaches_the_relevance_call(run):
+    run.outcome = FakeMessage('{"keep": [0, 1, 2], "drop": []}')
+    claude_cli.filter_relevance('x', _videos(3), mode='news', term_scope='zh')
+    assert 'CHINESE-LANGUAGE results only' in _system(run)
+    assert claude_cli.filter_bias(None, 'news', 'zh') in _system(run)
+
+
+def test_the_ticked_boxes_do_not_ask_for_two_languages_under_one(run):
+    """The composed {bias} block said "in BOTH languages" and "in EACH
+    language" a paragraph above a Requirements block saying english only."""
+    run.outcome = _terms_reply()
+    claude_cli.generate_terms('x', shot_types=['aerial'], term_scope='en')
+    p = _system(run)
+    for two in ('BOTH languages', 'EACH language', 'either language'):
+        assert two not in p, two
+    assert 'Aerial / drone' in p and 'AVOID the phrasings' in p, 'the ticks still bias'
+    # ...and the default composes byte for byte, as the golden pin says
+    assert claude_cli.term_bias(['aerial'], None, 'both') == claude_cli.term_bias(['aerial'])
+    assert claude_cli.term_bias(['aerial'], None, 'exact') == claude_cli.term_bias(['aerial'])

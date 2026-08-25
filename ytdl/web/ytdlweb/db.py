@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 
 # Highest schema version this codebase knows how to run against. Bump it, add
 # the file to _MIGRATIONS, and give it a predicate.
-CURRENT_SCHEMA_VERSION = 10
+CURRENT_SCHEMA_VERSION = 11
 
 # "the version this migration produces" -> (filename, already-applied predicate).
 # The predicate must answer "is this migration's effect already in the database?"
@@ -74,6 +74,13 @@ _MIGRATIONS = {
     # companion sends a machine_id.
     10: ('010_jobs_claimed_machine.sql',
          lambda con: 'claimed_machine' in _columns(con, 'jobs')),
+    # The language scope and the upload-date range (2026-08-25). Three columns
+    # in one file, so the predicate asks about ALL of them, the way 007's does:
+    # a half-applied 011 should be impossible, but the predicate is what
+    # decides (migrations/README.md).
+    11: ('011_jobs_term_scope_dates.sql',
+         lambda con: {'term_scope', 'date_from', 'date_to'}
+         <= set(_columns(con, 'jobs'))),
 }
 
 # What made a job. 'search' is a topic Claude expands and the editor reviews;
@@ -112,6 +119,13 @@ DEFAULT_SHOT_TYPES = claude_cli.DEFAULT_SHOT_TYPES
 MODES = claude_cli.MODES
 DEFAULT_MODE = claude_cli.DEFAULT_MODE
 
+# WHICH LANGUAGES THE SEARCH RUNS IN (2026-08-25): 'both' | 'en' | 'zh' |
+# 'exact'. Orthogonal to the mode; the table and what each value does to the
+# two AI calls are in claude_cli.TERM_SCOPES. Read back the same tolerant way
+# the mode is: an old row is 'both', the only search before the scopes existed.
+TERM_SCOPES = claude_cli.TERM_SCOPES
+DEFAULT_TERM_SCOPE = claude_cli.DEFAULT_TERM_SCOPE
+
 
 def encode_shot_types(shot_types, mode=None):
     """A selection -> the column value. None means the MODE's preset.
@@ -140,6 +154,50 @@ def mode_of(row_or_value):
     if isinstance(value, bytes):
         value = value.decode('utf-8', 'replace')
     return claude_cli.normalise_mode(value)
+
+
+def term_scope_of(row_or_value):
+    """A jobs row (or the raw column, or a string) -> one of TERM_SCOPES.
+
+    Takes the ROW for the reason mode_of does: a row from a database the
+    migration has not reached, or from a SELECT that did not ask for the
+    column, has no such key -- and that reads as 'both', which is the search
+    those rows actually ran.
+    """
+    value = row_or_value
+    if value is not None and not isinstance(value, (str, bytes)):
+        try:
+            value = row_or_value['term_scope']
+        except (IndexError, KeyError, TypeError):
+            value = None
+    if isinstance(value, bytes):
+        value = value.decode('utf-8', 'replace')
+    return claude_cli.normalise_term_scope(value)
+
+
+def _column(row, key):
+    """row[key] or None, for a row that may predate the column."""
+    try:
+        return row[key]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
+def date_range_of(row):
+    """A jobs row -> (date_from, date_to) as YYYYMMDD strings or None each.
+
+    Tolerant like the other readers: a row without the columns, or one holding
+    something that is not eight digits, has no bound on that side. The API is
+    where a malformed date is refused; here it must never fail a job.
+    """
+    out = []
+    for key in ('date_from', 'date_to'):
+        v = _column(row, key)
+        if isinstance(v, bytes):
+            v = v.decode('utf-8', 'replace')
+        v = str(v or '').strip()
+        out.append(v if len(v) == 8 and v.isdigit() else None)
+    return tuple(out)
 
 
 def shot_types_of(row_or_value):
@@ -385,10 +443,12 @@ def _update(c, table, where_sql, where_args, allowed, cols):
 
 def create_job(c, created_by, term, term_dir, project_slug, project_label,
                quality='1080p', period=None, max_per_term=15, shot_types=None,
-               max_candidates=None, mode=None):
+               max_candidates=None, mode=None, term_scope=None, date_from=None,
+               date_to=None):
     """A kind='search' job. `shot_types=None` is the mode's preset selection,
-    `max_candidates=None` the default candidate ceiling, and `mode=None` the
-    default search mode ('visuals').
+    `max_candidates=None` the default candidate ceiling, `mode=None` the
+    default search mode ('visuals'), `term_scope=None` the default language
+    scope ('both'), and a None date is no bound on that side.
 
     All three are written HERE and never again: the two Claude calls read the
     mode and the selection off the row and the search phase reads the ceiling
@@ -400,13 +460,15 @@ def create_job(c, created_by, term, term_dir, project_slug, project_label,
     try:
         cur = c.execute(
             'INSERT INTO jobs(created_by,term,term_dir,project_slug,project_label,'
-            'quality,period,max_per_term,max_candidates,mode,shot_types,phase,'
-            'created_at,updated_at) '
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)",
+            'quality,period,max_per_term,max_candidates,mode,shot_types,'
+            'term_scope,date_from,date_to,phase,created_at,updated_at) '
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)",
             (created_by, term, term_dir, project_slug, project_label, quality,
              period, max_per_term, max_candidates_of(max_candidates),
              claude_cli.normalise_mode(mode),
-             encode_shot_types(shot_types, mode), ts, ts))
+             encode_shot_types(shot_types, mode),
+             claude_cli.normalise_term_scope(term_scope),
+             date_from or None, date_to or None, ts, ts))
     except sqlite3.IntegrityError:
         # The one-active-job index refused it (YTDL-25) -- and a failed INSERT
         # leaves this connection's implicit transaction OPEN, holding a write
@@ -1387,6 +1449,10 @@ def job_dict(row):
     # the column (a database the migration has not reached, a partial SELECT) --
     # the same rule shot_types is read under.
     d['max_candidates'] = max_candidates_of(row)
+    # 'both' | 'en' | 'zh' | 'exact', and the upload-date bounds (or None):
+    # the SPA labels every view of a job with them, under the rule mode is.
+    d['term_scope'] = term_scope_of(row)
+    d['date_from'], d['date_to'] = date_range_of(row)
     return d
 
 

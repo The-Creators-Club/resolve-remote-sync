@@ -3016,6 +3016,61 @@ browser with no confirm(), is exactly the old behaviour: re-attach and the
 loud toast (which now names [ CANCEL SEARCH ]). Harness scenarios in
 `tests/test_static_app.py`. Needs a dashboard deploy.
 
+## YouTube downloader: language scope and an upload-date range (CR-77, 2026-08-25)
+
+### CR-77 - the search always expanded into both languages, and a date meant one of YouTube's five windows - FIXED in repo (dashboard 0.7.10), UNSHIPPED
+**Ask** (owner, 2026-08-25): "add some search modes to the youtube downloader:
+'only english', 'only chinese' or 'single search term only' - so it only
+searches things that match the exact input the user provided", and "there
+should also be a date selector". Every search ran the editor's term plus
+8-12 English and 8-12 Taiwanese-Chinese queries the model wrote from it,
+with no way to switch either language off or to search the typed text alone;
+and the only date control was the `any date / today / week / month / year`
+select, which is YouTube's own `sp=` filter and cannot say "2019".
+
+**Fix.** Two new per-job inputs, stored on the job row like `mode` is
+(migration `011_jobs_term_scope_dates.sql`, schema v11), so a job re-run from
+`queued` after a restart runs as it was submitted:
+
+- `term_scope`: `both` (default, byte for byte the search that ran before -
+  `tests/golden/` still pins it), `en`, `zh`, `exact`
+  (`claude_cli.TERM_SCOPES`). `en`/`zh` swap the term prompt's language
+  block (16-24 queries in the one language, the other named as not wanted),
+  reword the ticked-box bias so it stops asking for "BOTH languages", and
+  append a language rule to the relevance pass that DROPs a candidate whose
+  title and channel are plainly in the other language (KEEP when it cannot be
+  told). `_usable_terms` ENFORCES the language on the reply, so a model that
+  ignores the instruction still cannot run a query in the switched-off
+  language. `exact` skips the term call entirely: the editor's text is the
+  one term, and that one flat search is given the whole candidate ceiling
+  (`max_candidates`, not the 15-per-term the expanded search paces with).
+  The relevance pass still runs, and degrades the way it always has - which
+  means an exact search STARTS with the AI provider down.
+- `date_from` / `date_to`: ISO in (`<input type=date>`), `YYYYMMDD` stored
+  (yt-dlp's `upload_date` shape, so the worker compares strings). Enforced
+  in the filter phase as a mechanical drop beside the live/over-length ones,
+  BEFORE the judge sees the card (no tokens on a card the range decided);
+  a video with no `upload_date` is kept. Refused with a 400: a
+  non-calendar date, a reversed pair.
+
+SPA: a `SEARCH IN` row above the search box - `[ EN + ZH ] [ ENGLISH ONLY ]
+[ CHINESE ONLY ] [ MY TERM ONLY ]`, remembered per browser like the mode
+(`ytdl.term_scope`), a note under `MY TERM ONLY` saying no expansion happens
+and the candidate limit is the search's size - and two date inputs with a
+`[ CLEAR ]` that appears only when one is set. The dates are deliberately
+NOT remembered: a range is about one search, and one carried silently into
+next week's would drop most of what it found. Every view of a job (ticker,
+review header, Recent searches) names its scope and range when they narrow
+it; the default claims nothing. A url job carries neither.
+
+Tests: `test_claude_cli.py` (prompt blocks per scope, reply enforcement,
+golden unchanged), `test_api.py` (storage, 400s, url-job ignores),
+`test_worker.py` (exact skips the model + gets the ceiling, scope reaches
+both calls, date drops and their notes), `test_db.py` (v10 -> v11 migration,
+tolerant readers), `test_static_app.py` (three harness scenarios + source
+pins, table matched against the server's). ytdl suite 708, dashboard suite
+1666 green. Needs a dashboard deploy (OTA).
+
 ## Admins can delete users and computers (CR-76, 2026-08-24)
 
 ### CR-76 - no way to delete a user or a computer from the dashboard - FIXED, SHIPPED as dashboard 0.7.9 (OTA, 2026-08-25)

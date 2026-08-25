@@ -55,6 +55,28 @@
       <span class="shotcaption muted">SHOTS OF IT = footage of the subject; ALSO KEEP = people talking about it</span>
     </div>
 
+    <!-- WHICH LANGUAGES the search runs in (2026-08-25, the owner: "let you
+         search 'only english', 'only chinese' or 'single search term only').
+         Filled in by app.js from its SEARCH_SCOPES table, which mirrors
+         claude_cli.TERM_SCOPES, and remembered like the mode is. Beside it,
+         the upload-date range: YouTube's search cannot express one (the
+         "any date" select is its fixed windows), so the server enforces it on
+         each candidate's metadata. NOT remembered between visits: a range is
+         about one search, and one silently carried into next week's would
+         drop most of what it found. -->
+    <div class="ctrl-row scoperow">
+      <span class="shotcaption muted">SEARCH IN</span>
+      <div id="scopes" class="modes" role="group" aria-label="which languages the search runs in"></div>
+      <span id="scopenote" class="shotnote muted"></span>
+      <span class="daterange muted">
+        <label for="datefrom">uploaded from</label>
+        <input id="datefrom" type="date" title="Keep only videos uploaded on or after this date. Leave both dates empty for any date.">
+        <label for="dateto">to</label>
+        <input id="dateto" type="date" title="Keep only videos uploaded on or before this date. Leave both dates empty for any date.">
+        <button id="dateclear" type="button" class="modebtn hidden" title="Clear the date range">[ CLEAR ]</button>
+      </span>
+    </div>
+
     <div class="ctrl-row">
       <div class="search-bar">
         <input id="q" type="search" autocomplete="off"

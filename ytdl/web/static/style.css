@@ -518,6 +518,30 @@ a.brand:hover { color: var(--red-hot); }
   white-space: nowrap;
 }
 
+/* The language scope and the upload-date range a past search ran under, on
+   its Recent searches row (2026-08-25). Same shape as .modesum and for the
+   same reason: "english only" is why this search found half of that one. */
+.recentrow .scopesum {
+  color: var(--muted);
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* The upload-date range on the scope row: two date inputs in the form
+   family's paint, small, and the [ CLEAR ] that only shows when one is set. */
+.daterange {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.daterange input[type="date"] {
+  padding: 0.15rem 0.3rem;
+  font-size: 11px;
+}
+
 /* The same selection, one line long, on a Recent searches row. Deliberately
    NOT .shots: that is the header's flex container. */
 .recentrow .shotsum {

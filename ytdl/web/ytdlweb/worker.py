@@ -349,18 +349,27 @@ def _phase_generate_terms(c, job):
     """Claude call #1: one topic in, EN + ZH search queries out.
 
     The editor's own term goes in FIRST and unconditionally (source='user'), so
-    a job whose expansion is thin still searches what was actually asked for.
+    a job whose expansion is thin still searches what was actually asked for --
+    and under the `exact` scope it is the ONLY term: no model call at all,
+    which also means an exact search runs with the AI provider down.
     """
     job_id = job['id']
     db.add_term(c, job_id, job['term'],
                 'zh' if _looks_chinese(job['term']) else 'en', 'user')
 
-    # The mode and the shot types come off the JOB ROW, not from a default
-    # here: a job that sat queued over a restart must be expanded under the
-    # rubric the editor chose and with the boxes they ticked when they
-    # submitted it.
+    # The mode, the shot types and the scope come off the JOB ROW, not from a
+    # default here: a job that sat queued over a restart must be expanded
+    # under the rubric the editor chose and with the boxes they ticked when
+    # they submitted it.
+    scope = db.term_scope_of(job)
+    if scope == claude_cli.SCOPE_EXACT:
+        db.set_job(c, job_id, terms_total=1)
+        db.set_phase(c, job_id, 'searching')
+        return
+
     generated = claude_cli.generate_terms(
-        job['term'], shot_types=db.shot_types_of(job), mode=db.mode_of(job))
+        job['term'], shot_types=db.shot_types_of(job), mode=db.mode_of(job),
+        term_scope=scope)
     for item in generated:
         if len(db.terms(c, job_id)) >= config.MAX_TERMS:
             # A ceiling, not a target. 24 terms x 15 results is already a
@@ -405,6 +414,15 @@ def _phase_search(c, job):
     """
     job_id = job['id']
     cap = db.max_candidates_of(job)
+    # Under `exact` there is exactly one term, so the per-term count is the
+    # whole ceiling: the editor chose 100 (or 400) candidates, and a single
+    # search returning 15 of them would be a search they did not ask for. One
+    # flat search paginates at YouTube's own 20 per page, with no per-page
+    # pause -- but a 400-row ytsearch is still one search endpoint call chain
+    # against the 24 back-to-back ones the pause below exists for, and the
+    # metadata pass behind it is what the cap was sized for (2026-08-11).
+    per_term = (cap if db.term_scope_of(job) == claude_cli.SCOPE_EXACT
+                else job['max_per_term'])
     # Loaded once and kept in memory: the alternative is a SELECT per search
     # hit, and this loop already runs 24 x 15 times on a big job. A resumed job
     # starts from the rows it already has, so its ceiling is absolute rather
@@ -425,7 +443,7 @@ def _phase_search(c, job):
                 return
         first = False
         try:
-            entries = ytsearch.search(term['term'], job['max_per_term'], job['period'])
+            entries = ytsearch.search(term['term'], per_term, job['period'])
         except Exception as exc:  # noqa: BLE001
             if _bot_checked(exc):
                 raise BotCheckError(BOT_CHECK_NOTE) from exc
@@ -552,6 +570,7 @@ def _phase_filter(c, job):
     """Mechanical drops, then Claude's verdicts, then the dedupe flags."""
     job_id = job['id']
     rows = db.videos(c, job_id)
+    date_from, date_to = db.date_range_of(job)
 
     # (a) mechanical. A live stream has no fixed duration and cannot be cut
     # with; a missing duration means the metadata fetch got nothing usable.
@@ -569,6 +588,16 @@ def _phase_filter(c, job):
             db.set_video(c, job_id, v['video_id'], relevant=0, selected=0,
                          relevance_note='over %d minutes'
                                         % (config.MAX_DURATION_SECONDS // 60))
+        elif _outside_dates(v, date_from, date_to):
+            # The editor's upload-date range (2026-08-25). YouTube's search
+            # cannot express one, so it is enforced here on the metadata, the
+            # same soft way: the card stays, deselected, and the editor can
+            # overrule from the manifest. No upload_date at all is KEPT --
+            # "cannot tell" never drops anything in this phase.
+            db.set_video(c, job_id, v['video_id'], relevant=0, selected=0,
+                         relevance_note='uploaded %s, outside %s'
+                                        % (_iso(v['upload_date']),
+                                           _date_range_text(date_from, date_to)))
 
     # (b) Claude's relevance verdicts. DEGRADE, DO NOT FAIL: an editor with an
     # unfiltered manifest and a banner is fine; an editor with no manifest
@@ -587,7 +616,7 @@ def _phase_filter(c, job):
             # throw away the reporting it went looking for.
             verdicts = claude_cli.filter_relevance(
                 job['term'], payload, shot_types=db.shot_types_of(job),
-                mode=db.mode_of(job))
+                mode=db.mode_of(job), term_scope=db.term_scope_of(job))
         except claude_cli.ClaudeError as exc:
             claude_cli.note_failure(exc)
             log.warning('job %s: relevance filter unavailable (%s)', job_id, exc)
@@ -608,6 +637,46 @@ def _phase_filter(c, job):
     mark_duplicates(c, job)
 
     db.set_phase(c, job_id, 'ready_for_review')
+
+
+def _outside_dates(video, date_from, date_to):
+    """True when the video's upload_date is KNOWN and outside [from, to].
+
+    Both sides are YYYYMMDD strings (yt-dlp's shape, and what the API stores),
+    so this is a string comparison on purpose: no parsing to get wrong, and a
+    value that is not eight digits is "unknown", which never drops.
+    """
+    def _ymd(v):
+        v = str(v or '').strip()
+        return v if len(v) == 8 and v.isdigit() else None
+
+    # The bounds are sanitised here too, not only in db.date_range_of: a row
+    # written by hand with 'soon' in it must be no bound, never a string
+    # comparison that drops every video ('19990101' < 'soon' is True).
+    date_from, date_to = _ymd(date_from), _ymd(date_to)
+    if not date_from and not date_to:
+        return False
+    d = _ymd(video['upload_date'])
+    if d is None:
+        return False
+    if date_from and d < date_from:
+        return True
+    return bool(date_to and d > date_to)
+
+
+def _iso(yyyymmdd):
+    d = str(yyyymmdd or '')
+    return f'{d[:4]}-{d[4:6]}-{d[6:]}' if len(d) == 8 else d
+
+
+def _date_range_text(date_from, date_to):
+    """The range as the relevance note says it: a hyphen, never an em dash
+    (owner's rule, 2026-08-18) -- this string reaches the review grid."""
+    if date_from and date_to:
+        return f'{_iso(date_from)} to {_iso(date_to)}'
+    if date_from:
+        return f'{_iso(date_from)} onwards'
+    return f'up to {_iso(date_to)}'
 
 
 def mark_duplicates(c, job):

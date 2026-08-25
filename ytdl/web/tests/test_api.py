@@ -4,6 +4,7 @@ The refusals are the interesting half. This app writes into the Projects tree,
 so "409 because you already have a job" and "400 because that is not a project
 you sync" are the actual product, not error handling.
 """
+import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import MACHINE, OTHER_PROJECT, OTHER_USER, PROJECTS, USER
@@ -1048,3 +1049,88 @@ def test_ui_is_served(client):
     assert client.get('/app.js').headers['content-type'].startswith('application/javascript')
     assert client.get('/style.css').headers['content-type'].startswith('text/css')
     assert client.get('/favicon.svg').headers['content-type'].startswith('image/svg')
+
+
+# ------------------------------------------------ the term scope + dates
+# 2026-08-25: which languages the search runs in ('both' | 'en' | 'zh' |
+# 'exact'), and an upload-date range. Both are validated here and stored on the
+# job row, because the worker reads them back off that row -- including after
+# a container restart re-runs the job from `queued`.
+
+
+def test_the_term_scope_is_stored_on_the_job(client, con):
+    r, job = _job_shots(client, con, term_scope='zh')
+    assert r.status_code == 200, r.text
+    assert job['term_scope'] == 'zh'
+    assert db.term_scope_of(job) == 'zh'
+
+
+def test_omitting_the_scope_is_both(client, con):
+    """A client that predates the toggle keeps exactly the search it has
+    always run."""
+    r, job = _job_shots(client, con)
+    assert r.status_code == 200
+    assert db.term_scope_of(job) == 'both'
+    assert db.date_range_of(job) == (None, None)
+
+
+def test_an_unknown_scope_is_refused_rather_than_defaulted(client, con):
+    r = client.post('/api/jobs', json={'term': 'reef',
+                                       'project_slug': PROJECTS[0][0],
+                                       'term_scope': 'english'})
+    assert r.status_code == 400
+    assert 'english' in r.json()['detail']
+    for known in ('both', 'en', 'zh', 'exact'):
+        assert known in r.json()['detail']
+    assert db.active_job(con, USER) is None, 'the refused job was created anyway'
+
+
+def test_the_date_range_is_stored_as_yyyymmdd(client, con):
+    """ISO in (what <input type=date> emits), yt-dlp's shape out, so the
+    worker compares it to upload_date as a string."""
+    r, job = _job_shots(client, con, date_from='2019-01-01', date_to='2019-12-31')
+    assert r.status_code == 200, r.text
+    assert (job['date_from'], job['date_to']) == ('20190101', '20191231')
+    assert db.date_range_of(job) == ('20190101', '20191231')
+    # ...and the poll reports it, so the SPA can label the job
+    j = client.get(f'/api/jobs/{job["id"]}').json()['job']
+    assert (j['date_from'], j['date_to']) == ('20190101', '20191231')
+    assert j['term_scope'] == 'both'
+
+
+def test_one_sided_and_empty_dates_are_fine(client, con):
+    r, job = _job_shots(client, con, date_from='20200229', date_to='')
+    assert r.status_code == 200, r.text
+    assert db.date_range_of(job) == ('20200229', None)
+
+
+@pytest.mark.parametrize('bad', ['2026-02-30', 'yesterday', '2026/01/01', '202601'])
+def test_a_malformed_date_is_refused(client, con, bad):
+    r = client.post('/api/jobs', json={'term': 'reef',
+                                       'project_slug': PROJECTS[0][0],
+                                       'date_to': bad})
+    assert r.status_code == 400, r.text
+    assert bad in r.json()['detail'] and 'date_to' in r.json()['detail']
+    assert db.active_job(con, USER) is None
+
+
+def test_a_reversed_range_is_refused(client, con):
+    """A range that can match nothing is a mistake, not a search."""
+    r = client.post('/api/jobs', json={'term': 'reef',
+                                       'project_slug': PROJECTS[0][0],
+                                       'date_from': '2020-01-01',
+                                       'date_to': '2019-01-01'})
+    assert r.status_code == 400
+    assert 'reversed' in r.json()['detail']
+    assert db.active_job(con, USER) is None
+
+
+def test_a_url_job_ignores_a_scope_and_dates_cleanly(client, con):
+    r = client.post('/api/jobs/urls', json={
+        'urls': 'https://youtu.be/aaaaaaaaaaa',
+        'project_slug': PROJECTS[0][0],
+        'term_scope': 'nonsense', 'date_from': 'nonsense'})
+    assert r.status_code == 200, r.text
+    job = db.get_job(con, r.json()['job_id'])
+    assert db.term_scope_of(job) == 'both'
+    assert db.date_range_of(job) == (None, None)

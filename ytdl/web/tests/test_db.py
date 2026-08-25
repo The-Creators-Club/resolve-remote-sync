@@ -1115,3 +1115,76 @@ def test_safe_join_refuses_to_leave_the_root(tmp_path):
     for bad in ('..', '../elsewhere', '/etc', 'C:'):
         with pytest.raises(config.PathTraversalError):
             config.safe_join(tmp_path, bad)
+
+
+# ------------------------------------ the term scope + date range (011)
+# 2026-08-25: which languages the search runs in, and an upload-date range.
+# Stored per job for the reason mode is, and read back the same tolerant way.
+
+
+def _at_v10(tmp_path, name='v10.db'):
+    """A database in the shape the fleet's ytdl.db is in BEFORE 011, built by
+    migrating a v5 one through the app's own files (see _at_v8)."""
+    con = db.connect(tmp_path / name)
+    con.executescript(_V5_DDL)
+    for version in (6, 7, 8, 9, 10):
+        db._apply_migration(con, db._MIGRATIONS[version][0])
+    con.execute('PRAGMA user_version = 10')
+    con.commit()
+    return con
+
+
+def test_a_v10_database_gains_the_scope_and_dates_and_old_rows_read_as_both(tmp_path):
+    """011. Like 009, the default IS what every old row ran: `both` composes
+    the previous prompts byte for byte, and no date is no bound."""
+    con = _at_v10(tmp_path)
+    con.execute("INSERT INTO jobs(created_by,term,term_dir,project_slug,"
+                "project_label,phase,created_at,updated_at) "
+                "VALUES(?,'reef','reef','s','2026/FF5/Energy','done','x','x')",
+                (USER,))
+    con.commit()
+    for col in ('term_scope', 'date_from', 'date_to'):
+        assert col not in db._columns(con, 'jobs')
+    # ...and a row from before the columns already reads tolerantly
+    old = con.execute('SELECT * FROM jobs').fetchone()
+    assert db.term_scope_of(old) == claude_cli.SCOPE_BOTH
+    assert db.date_range_of(old) == (None, None)
+
+    db.ensure_schema(con)
+
+    assert con.execute('PRAGMA user_version').fetchone()[0] == db.CURRENT_SCHEMA_VERSION
+    for col in ('term_scope', 'date_from', 'date_to'):
+        assert col in db._columns(con, 'jobs')
+    old = con.execute('SELECT * FROM jobs').fetchone()
+    assert old['term_scope'] == claude_cli.SCOPE_BOTH
+    assert (old['date_from'], old['date_to']) == (None, None)
+    d = db.job_dict(old)
+    assert d['term_scope'] == 'both' and d['date_from'] is None and d['date_to'] is None
+    # ...and nothing the earlier migrations wrote is disturbed
+    assert db.mode_of(old) == claude_cli.MODE_VISUALS
+    assert db.shot_types_of(old) == db.DEFAULT_SHOT_TYPES
+    con.close()
+
+
+def test_the_migrations_scope_default_is_the_pythons_default():
+    sql = (config.MIGRATIONS_DIR / '011_jobs_term_scope_dates.sql').read_text(encoding='utf-8')
+    assert f"DEFAULT '{db.DEFAULT_TERM_SCOPE}'" in sql
+    schema = config.SCHEMA_PATH.read_text(encoding='utf-8')
+    assert f"term_scope       TEXT NOT NULL DEFAULT '{db.DEFAULT_TERM_SCOPE}'" in schema
+    assert db.DEFAULT_TERM_SCOPE in db.TERM_SCOPES
+    assert db._MIGRATIONS[11][0] == '011_jobs_term_scope_dates.sql'
+    assert db.CURRENT_SCHEMA_VERSION == 11
+
+
+def test_the_scope_and_dates_are_written_once_at_create(con):
+    slug, label, _ = PROJECTS[0]
+    job_id = db.create_job(con, USER, 'reef', 'reef', slug, label,
+                           term_scope='exact', date_from='20190101')
+    job = db.get_job(con, job_id)
+    assert db.term_scope_of(job) == 'exact'
+    assert db.date_range_of(job) == ('20190101', None)
+    # tolerant readers, like the mode's: junk is the default, never an error
+    assert db.term_scope_of('nonsense') == 'both'
+    assert db.term_scope_of(b'zh') == 'zh'
+    assert db.term_scope_of(None) == 'both'
+    assert db.date_range_of({'date_from': 'soon', 'date_to': b'20191231'}) == (None, '20191231')

@@ -192,7 +192,8 @@ async function boot(handler, seed, hash) {
     + '"renderProgress","renderTerms","renderGrid","toast","setBanner",'
     + '"visibleVideos","SHOT_TYPES","shotKeys","shotSummary","renderShots",'
     + '"startDownload","dispatchLocal","lockToServer","renderMode",'
-    + '"SEARCH_MODES","setSearchMode","searchModeSummary"]'
+    + '"SEARCH_MODES","setSearchMode","searchModeSummary",'
+    + '"SEARCH_SCOPES","setTermScope","termScopeSummary","dateSummary"]'
     + '.forEach(k => { try { globalThis.__[k] = eval(k); } catch (e) {} });', h.ctx);
   await flush();
   h.app = h.ctx.__;
@@ -1935,6 +1936,123 @@ scenarios['a_done_reviews_grid_has_no_cancel_search'] = async () => {
   return {discard_hidden: h.get('discard').hidden};
 };
 
+// ---- the term scope + date range ------------------------------------------
+// 2026-08-25: [ EN + ZH ] [ ENGLISH ONLY ] [ CHINESE ONLY ] [ MY TERM ONLY ]
+// on its own row above the search box, remembered like the mode; and two
+// date inputs beside it that are posted with the search and NOT remembered.
+
+const scopeButtons = h => h.get('scopes').children;
+const clickScope = (h, label) => {
+  const b = scopeButtons(h).find(x => x.textContent.includes(label));
+  b.onclick();
+};
+
+scenarios['the_scope_and_dates_are_posted_with_the_search'] = async () => {
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (method === 'POST' && url === 'api/jobs') return {json: {job_id: 71}};
+    if (url === 'api/jobs/71') return {json: POLLRES(JOB({id: 71, phase: 'queued'}))};
+    return {json: {}};
+  });
+  const buttons = scopeButtons(h).map(b => [b.textContent, b.className,
+                                            b.getAttribute('aria-pressed')]);
+  const note_before = h.get('scopenote').textContent;
+  const clear_before = h.get('dateclear').className;
+  clickScope(h, 'MY TERM ONLY');
+  const lit = scopeButtons(h).map(b => b.className);
+  const note_after = h.get('scopenote').textContent;
+  h.get('datefrom').value = '2019-01-01';
+  h.get('dateto').value = '2019-12-31';
+  // the inputs' own change event is what shows [ CLEAR ]
+  (h.get('datefrom')._listeners.change || []).forEach(fn => fn());
+  const clear_after = h.get('dateclear').className;
+  h.get('q').value = 'reef';
+  h.get('project').value = 's';
+  await h.app.runSearch();
+  await flush();
+  const post = h.calls.filter(c => c.method === 'POST' && c.url === 'api/jobs')[0];
+  // the mode and its ticks are untouched by the scope: they are separate dials
+  const mode_lit = modeButtons(h).map(b => b.className);
+  h.get('dateclear').onclick();
+  return {buttons, note_before, note_after, lit, clear_before, clear_after,
+          body: post && post.body, stored: h.store['ytdl.term_scope'],
+          mode_lit, ticks: ticked(h),
+          cleared: [h.get('datefrom').value, h.get('dateto').value,
+                    h.get('dateclear').className]};
+};
+
+scenarios['the_scope_comes_back_from_localstorage_and_a_stale_one_does_not'] = async () => {
+  const out = {};
+  for (const [name, seed] of [['saved', 'zh'], ['stale', 'klingon']]) {
+    const h = await boot(async (method, url) => {
+      const b = baseline(method, url); if (b) return b;
+      if (method === 'POST' && url === 'api/jobs') return {json: {job_id: 72}};
+      if (url === 'api/jobs/72') return {json: POLLRES(JOB({id: 72}))};
+      return {json: {}};
+    }, {'ytdl.term_scope': seed});
+    h.get('q').value = 'reef';
+    h.get('project').value = 's';
+    await h.app.runSearch();
+    await flush();
+    const post = h.calls.filter(c => c.method === 'POST' && c.url === 'api/jobs')[0];
+    out[name] = {posted: post && post.body.term_scope,
+                 dates: post && [post.body.date_from, post.body.date_to],
+                 lit: scopeButtons(h).map(b => b.className)};
+  }
+  return out;
+};
+
+scenarios['the_scope_and_dates_show_on_the_running_job_and_the_recent_views'] = async () => {
+  const recent = [
+    {id: 54, kind: 'search', term: 'reef', project_label: '2026/FF5/Energy',
+     phase: 'done', created_at: '2026-08-25T09:00:00', mode: 'visuals',
+     term_scope: 'zh', date_from: '20190101', date_to: '20191231',
+     shot_types: ['aerial']},
+    {id: 55, kind: 'search', term: 'wind', project_label: '2026/FF5/Energy',
+     phase: 'done', created_at: '2026-08-25T09:10:00', mode: 'visuals',
+     term_scope: 'exact', date_from: null, date_to: '20200101',
+     shot_types: ['aerial']},
+    // the default scope and no range claim nothing: the usual search
+    {id: 56, kind: 'search', term: 'lng', project_label: '2026/FF5/Energy',
+     phase: 'done', created_at: '2026-08-25T09:20:00', mode: 'visuals',
+     term_scope: 'both', date_from: null, date_to: null, shot_types: ['aerial']},
+    // a paste has none of it, whatever the row carries
+    {id: 57, kind: 'urls', term: '', project_label: '2026/FF5/Energy',
+     phase: 'done', created_at: '2026-08-25T09:30:00', mode: 'visuals',
+     term_scope: 'en'},
+    // a row from before the columns existed claims nothing at all
+    {id: 58, kind: 'search', term: 'solar', project_label: '2026/FF5/Energy',
+     phase: 'done', created_at: '2026-08-25T09:40:00', shot_types: ['aerial']},
+  ];
+  const running = JOB({id: 54, phase: 'searching', mode: 'visuals',
+                       term_scope: 'en', date_from: '20190101', date_to: null,
+                       terms_total: 4, terms_done: 2});
+  const manifest = MANIFEST({
+    job: JOB({id: 54, phase: 'ready_for_review', mode: 'news',
+              term_scope: 'exact', date_from: '20190101', date_to: '20191231',
+              shot_types: ['interview', 'news'], max_candidates: 100}),
+    videos: [VIDEO('LLLLLLLLLLL')],
+    terms: [{id: 1, term: 'reef', lang: 'en', english_gloss: null,
+             source: 'user', hits: 1, videos: 1}],
+    counts: {relevant: 1, duplicates: 0, irrelevant: 0},
+  });
+  const h = await boot(async (method, url) => {
+    if (url.startsWith('api/jobs?')) return {json: {jobs: recent}};
+    const b = baseline(method, url); if (b) return b;
+    if (url.startsWith('api/jobs/54/manifest')) return {json: manifest};
+    if (url === 'api/jobs/54') return {json: POLLRES(running)};
+    return {json: {}};
+  });
+  await h.app.attach(54);
+  await flush();
+  const ticker = h.get('ticker').textContent;
+  await h.app.loadManifest(54);
+  await flush();
+  return {ticker, jobshots: h.get('jobshots').textContent,
+          rows: h.get('recentlist').byClass('recentrow')
+                 .map(r => r.byClass('scopesum').map(m => m.textContent).join(' | '))};
+};
+
 // ---- run them -----------------------------------------------------------
 (async () => {
   const out = {};
@@ -3503,3 +3621,102 @@ def test_an_absent_clip_is_offered_a_fetch_in_source():
     # The poll is what shows progress; without it the toast lies about a
     # download that is still running.
     assert "body.state === 'downloading'" in body and 'setTimeout' in body
+
+
+# ------------------------------------------------ the term scope + dates
+# 2026-08-25, the owner: "let you search 'only english', 'only chinese' or
+# 'single search term only'", and "there should also be a date selector".
+
+
+def test_the_scope_toggle_offers_the_four_scopes_and_posts_the_choice(spa):
+    r = spa['the_scope_and_dates_are_posted_with_the_search']
+    assert [b[0] for b in r['buttons']] == ['[ EN + ZH ]', '[ ENGLISH ONLY ]',
+                                            '[ CHINESE ONLY ]', '[ MY TERM ONLY ]'], r
+    assert [b[1] for b in r['buttons']] == ['modebtn on', 'modebtn', 'modebtn', 'modebtn']
+    assert [b[2] for b in r['buttons']] == ['true', 'false', 'false', 'false']
+    # the default needs no note; the exact search explains itself
+    assert r['note_before'] == ''
+    assert 'no claude expansion' in r['note_after'] and 'candidate limit' in r['note_after']
+    assert r['lit'] == ['modebtn', 'modebtn', 'modebtn', 'modebtn on'], r
+    # ONE submit carries the scope and both dates, as the ISO strings the
+    # inputs emit; the server turns them into YYYYMMDD
+    assert r['body']['term_scope'] == 'exact', r['body']
+    assert r['body']['date_from'] == '2019-01-01' and r['body']['date_to'] == '2019-12-31'
+    assert r['body']['mode'] == 'visuals', 'the mode is a separate dial'
+    assert r['stored'] == 'exact'
+    assert r['mode_lit'] == ['modebtn on', 'modebtn'] and r['ticks'][0] == 'aerial'
+
+
+def test_the_date_clear_shows_only_when_a_date_is_set_and_clears_both(spa):
+    r = spa['the_scope_and_dates_are_posted_with_the_search']
+    assert 'hidden' in r['clear_before'].split(), r
+    assert 'hidden' not in r['clear_after'].split(), r
+    assert r['cleared'][0] == '' and r['cleared'][1] == ''
+    assert 'hidden' in r['cleared'][2].split()
+
+
+def test_the_scope_is_remembered_but_the_dates_are_not(spa):
+    """A chinese-only week is a week; a date range is one search, and one
+    silently carried into the next would drop most of what it found."""
+    r = spa['the_scope_comes_back_from_localstorage_and_a_stale_one_does_not']
+    assert r['saved']['posted'] == 'zh', r
+    assert r['saved']['lit'] == ['modebtn', 'modebtn', 'modebtn on', 'modebtn']
+    assert r['saved']['dates'] == [None, None], 'a fresh page has no range'
+    # the server refuses a scope it does not know, so a stale value would 400
+    # every search from this browser until localStorage was cleared by hand
+    assert r['stale']['posted'] == 'both', r
+    assert r['stale']['lit'] == ['modebtn on', 'modebtn', 'modebtn', 'modebtn']
+
+
+def test_every_view_of_a_job_says_how_it_was_narrowed(spa):
+    r = spa['the_scope_and_dates_show_on_the_running_job_and_the_recent_views']
+    assert 'search in: english only' in r['ticker'], r['ticker']
+    assert 'uploaded from 2019-01-01' in r['ticker'], r['ticker']
+    assert r['ticker'].index('mode:') < r['ticker'].index('search in:') < r['ticker'].index('terms')
+    assert r['jobshots'].startswith(
+        'mode: news montage · search in: my term only · uploaded 2019-01-01 to 2019-12-31 · '), r
+    assert r['rows'] == ['chinese only | uploaded 2019-01-01 to 2019-12-31',
+                         'my term only | uploaded up to 2020-01-01',
+                         '', '', ''], r['rows']
+
+
+_SCOPE_ROW = re.compile(r"\{key: '([a-z]+)', label: '([^']+)', short: '([^']*)',")
+
+
+def test_the_scope_table_matches_the_servers():
+    """Same duplication the mode carries (claude_cli.TERM_SCOPES -> the
+    toggle): the server refuses a scope that is not on ITS list, so a drift
+    here is a 400 on every search."""
+    from ytdlweb import claude_cli
+
+    js = _js()
+    block = js[js.index('const SEARCH_SCOPES = ['):js.index('const DEFAULT_SCOPE')]
+    rows = _SCOPE_ROW.findall(block)
+    assert [r[0] for r in rows] == list(claude_cli.TERM_SCOPES), rows
+    for key, label, short in rows:
+        assert label.strip(), key
+        # the default is unlabelled on a job (the usual search); every other
+        # scope names itself
+        assert bool(short) == (key != claude_cli.DEFAULT_TERM_SCOPE), key
+    assert f"const DEFAULT_SCOPE = '{claude_cli.DEFAULT_TERM_SCOPE}';" in js
+
+
+def test_the_search_posts_the_scope_and_dates_and_the_paste_posts_none():
+    js = _js()
+    body = js[js.index('async function runSearch()'):js.index('async function runUrls()')]
+    assert 'term_scope: state.termScope' in body, body
+    assert '...dateRange()' in body, body
+    paste = js[js.index('async function runUrls()'):js.index('async function startDownload()')]
+    assert 'term_scope' not in paste and 'dateRange' not in paste, paste
+
+
+def test_the_scope_row_and_the_date_inputs_are_in_the_markup():
+    html = _html()
+    for needle in ('id="scopes"', 'id="scopenote"', 'id="datefrom"', 'id="dateto"',
+                   'id="dateclear"', 'type="date"'):
+        assert needle in html, needle
+    # the scope row sits between the shot boxes and the search box: chosen
+    # before the topic is typed, like the mode and the boxes are
+    assert html.index('id="modes"') < html.index('id="scopes"') < html.index('id="q"')
+    # and [ CLEAR ] starts hidden: nothing to clear on a fresh page
+    assert re.search(r'id="dateclear"[^>]*class="[^"]*\bhidden\b', html)

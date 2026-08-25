@@ -116,6 +116,37 @@ const DEFAULT_MODE = 'visuals';
 // Remembered per browser like the ticks and the candidate cap are.
 const MODE_KEY = 'ytdl.search_mode';
 
+// WHICH LANGUAGES THE SEARCH RUNS IN (2026-08-25, the owner: "let you search
+// 'only english', 'only chinese' or 'single search term only'"). Mirrors
+// ytdlweb.claude_cli.TERM_SCOPES key for key -- tests/test_static_app.py
+// compares the two -- because the server refuses a scope it does not know.
+// Orthogonal to the mode above: the mode says what the search is FOR, this
+// says which queries it may run. `exact` is the one that skips claude
+// entirely, which is why its note names the candidate limit: that one search
+// gets the whole ceiling.
+const SEARCH_SCOPES = [
+  {key: 'both', label: 'EN + ZH', short: '',
+   hint: 'The usual search: your topic, plus english and chinese queries '
+         + 'claude writes from it',
+   note: ''},
+  {key: 'en', label: 'ENGLISH ONLY', short: 'english only',
+   hint: 'Claude writes english queries only, and the relevance filter drops '
+         + 'clips that are plainly in another language',
+   note: 'english queries only; clips plainly in another language are filtered out'},
+  {key: 'zh', label: 'CHINESE ONLY', short: 'chinese only',
+   hint: 'Claude writes traditional chinese queries only, and the relevance '
+         + 'filter drops clips that are plainly in another language',
+   note: 'chinese queries only; clips plainly in another language are filtered out'},
+  {key: 'exact', label: 'MY TERM ONLY', short: 'my term only',
+   hint: 'No claude expansion at all: one search of exactly what you typed, '
+         + 'and the whole candidate limit goes to it',
+   note: 'no claude expansion: one search of exactly what you type, up to the candidate limit'},
+];
+const DEFAULT_SCOPE = 'both';
+// Remembered per browser like the mode is: an editor cutting a chinese-only
+// film wants it chinese-only all week.
+const SCOPE_KEY = 'ytdl.term_scope';
+
 // How many candidates one search may collect. Mirrors
 // ytdlweb.config.CANDIDATE_CAPS -- the server validates against its own list
 // and tests/test_static_app.py compares the two -- because each candidate is a
@@ -175,6 +206,8 @@ const state = {
   shots: new Set(),    // ticked shot-type keys; init() fills it
   searchMode: DEFAULT_MODE,  // 'visuals' | 'news' -- which rubric the two AI
                        // passes run under; init() fills it from localStorage
+  termScope: DEFAULT_SCOPE,  // 'both' | 'en' | 'zh' | 'exact' -- which queries
+                       // the search may run; init() fills it from localStorage
   collapsed: new Set(),// folded-away panel ids; initPanels() fills it
   phase: null,         // the last phase this page SAW for the attached job:
                        // "newly reached ready_for_review" is a transition, not
@@ -545,6 +578,107 @@ function searchModeSummary(mode) {
   return m ? m.short : '';
 }
 
+// ------------------------------------------------------------ term scope
+// The language toggle on its own row above the search box. The SERVER does
+// everything it means (the prompt blocks, the reply filtering, the exact
+// search's ceiling); this file knows the four names and remembers the choice.
+
+function loadTermScope() {
+  let saved = null;
+  try { saved = localStorage.getItem(SCOPE_KEY); }
+  catch { /* unreadable or absent: the default */ }
+  // Validated against THIS build's list, never trusted: the server refuses a
+  // scope it does not know, so a stale value would 400 every search.
+  return SEARCH_SCOPES.some(s => s.key === saved) ? saved : DEFAULT_SCOPE;
+}
+
+function saveTermScope() {
+  try { localStorage.setItem(SCOPE_KEY, state.termScope); }
+  catch { /* it still applies to this search, just not the next visit */ }
+}
+
+function setTermScope(key) {
+  const scope = SEARCH_SCOPES.some(s => s.key === key) ? key : DEFAULT_SCOPE;
+  state.termScope = scope;
+  saveTermScope();
+  renderTermScopes();
+}
+
+function renderTermScopes() {
+  const box = $('#scopes');
+  box.textContent = '';
+  SEARCH_SCOPES.forEach(s => {
+    const on = state.termScope === s.key;
+    const b = el('button', 'modebtn' + (on ? ' on' : ''), `[ ${s.label} ]`);
+    b.type = 'button';
+    b.title = s.hint;
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    b.onclick = () => setTermScope(s.key);
+    box.appendChild(b);
+  });
+  const chosen = SEARCH_SCOPES.find(s => s.key === state.termScope);
+  $('#scopenote').textContent = chosen ? chosen.note : '';
+}
+
+// What a job WAS run under, for the job header, the review header and Recent
+// searches. '' for the default and for an unknown or absent value (a row from
+// before the column existed): the usual search needs no label, and a rubric a
+// job never ran under must not be claimed for it.
+function termScopeSummary(scope) {
+  const s = SEARCH_SCOPES.find(x => x.key === scope);
+  return s ? s.short : '';
+}
+
+// ------------------------------------------------------------ date range
+// Two <input type=date>, posted as the ISO strings they emit ('' -> null).
+// The server validates, stores YYYYMMDD and enforces the range on the
+// metadata; this file only reads the boxes and shows a [ CLEAR ] when either
+// holds a value, because a date input's own clear affordance is browser
+// dependent and a range left set by accident narrows every later search.
+
+function dateRange() {
+  return {date_from: $('#datefrom').value || null,
+          date_to: $('#dateto').value || null};
+}
+
+function renderDateClear() {
+  const r = dateRange();
+  $('#dateclear').classList.toggle('hidden', !r.date_from && !r.date_to);
+}
+
+function clearDates() {
+  $('#datefrom').value = '';
+  $('#dateto').value = '';
+  renderDateClear();
+}
+
+function initDates() {
+  ['datefrom', 'dateto'].forEach(id => {
+    $('#' + id).addEventListener('change', renderDateClear);
+    $('#' + id).addEventListener('input', renderDateClear);
+  });
+  $('#dateclear').onclick = clearDates;
+  renderDateClear();
+}
+
+// 'YYYYMMDD' (what the server stores) -> 'YYYY-MM-DD'; anything else as is.
+function isoDate(d) {
+  const s = String(d || '');
+  return /^\d{8}$/.test(s) ? `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6)}` : s;
+}
+
+// What range a job WAS run with, or '' when it had none (every job before the
+// columns existed, and most since).
+function dateSummary(job) {
+  if (!job) return '';
+  const lo = job.date_from ? isoDate(job.date_from) : '';
+  const hi = job.date_to ? isoDate(job.date_to) : '';
+  if (lo && hi) return `uploaded ${lo} to ${hi}`;
+  if (lo) return `uploaded from ${lo}`;
+  if (hi) return `uploaded up to ${hi}`;
+  return '';
+}
+
 // All ticked and none ticked are the same instruction to the server -- no bias
 // at all -- and an editor who has just cleared every box deserves to be told
 // that rather than left expecting a filter that is not running.
@@ -886,6 +1020,12 @@ function renderProgress(job, r) {
   // job is never searched, so it has none to name.
   const mode = job.kind === 'urls' ? '' : searchModeSummary(job.mode);
   if (mode) bits.push('mode: ' + mode);
+  // ...then how it was narrowed, when it was: the language scope and the
+  // upload-date range explain a thin manifest before the counters do.
+  const scope = job.kind === 'urls' ? '' : termScopeSummary(job.term_scope);
+  if (scope) bits.push('search in: ' + scope);
+  const dates = job.kind === 'urls' ? '' : dateSummary(job);
+  if (dates) bits.push(dates);
   const en = (r.terms || []).filter(t => t.lang === 'en').length;
   const zh = (r.terms || []).filter(t => t.lang === 'zh').length;
   if (job.terms_total) bits.push(`${job.terms_total} terms (${en} en / ${zh} zh)`);
@@ -1011,10 +1151,13 @@ function renderTerms() {
   // The ticks and the ceiling this search actually ran with -- not the ones in
   // the header, which are whatever the editor has since changed them to.
   const mode = searchModeSummary(state.manifest.job.mode);
+  const scope = termScopeSummary(state.manifest.job.term_scope);
+  const dates = dateSummary(state.manifest.job);
   const shots = shotSummary(state.manifest.job.shot_types, true);
   const cap = capSummary(state.manifest.job.max_candidates);
   $('#jobshots').textContent =
-    [mode ? 'mode: ' + mode : '', shots ? 'shot types: ' + shots : '', cap]
+    [mode ? 'mode: ' + mode : '', scope ? 'search in: ' + scope : '', dates,
+     shots ? 'shot types: ' + shots : '', cap]
       .filter(Boolean).join(' · ');
 
   const box = $('#termchips');
@@ -1267,6 +1410,12 @@ async function runSearch() {
     // refuses a mode it does not know rather than reading it as the
     // default, so this must never send anything but a key from the table.
     mode: state.searchMode,
+    // Which queries the search may run. Same rule as the mode: always a key
+    // from the table, because the server refuses one it does not know.
+    term_scope: state.termScope,
+    // The upload-date range, or nulls. The server refuses a malformed or
+    // reversed pair with a 400 the toast shows, rather than searching without.
+    ...dateRange(),
     // Always sent, even when it is every box or none: the server tells an
     // omitted field (an old client, which gets the defaults) apart from an
     // empty one (this editor asked for no bias).
@@ -1720,6 +1869,10 @@ async function loadRecent() {
     // were pasted.
     const mode = j.kind === 'urls' ? '' : searchModeSummary(j.mode);
     if (mode) row.appendChild(el('span', 'modesum', mode));
+    const scope = j.kind === 'urls' ? '' : termScopeSummary(j.term_scope);
+    if (scope) row.appendChild(el('span', 'scopesum', scope));
+    const dates = j.kind === 'urls' ? '' : dateSummary(j);
+    if (dates) row.appendChild(el('span', 'scopesum', dates));
     const shots = j.kind === 'urls' ? '' : shotSummary(j.shot_types);
     if (shots) row.appendChild(el('span', 'shotsum', shots));
     const cap = j.kind === 'urls' ? '' : capSummary(j.max_candidates);
@@ -2040,6 +2193,9 @@ async function init() {
   state.shots = new Set(loadShots(state.searchMode));
   renderSearchModes();
   renderShots();
+  state.termScope = loadTermScope();
+  renderTermScopes();
+  initDates();
   renderCaps();
   // Also before anything is awaited: a panel this editor folded away must not
   // flash open for the length of a fetch on every visit.

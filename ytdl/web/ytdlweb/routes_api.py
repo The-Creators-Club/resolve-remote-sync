@@ -20,6 +20,7 @@ import logging
 import re
 import shutil
 import sqlite3
+from datetime import date
 from urllib.parse import parse_qs, urlparse
 
 from fastapi import APIRouter, HTTPException, Request
@@ -195,6 +196,15 @@ class NewJob(BaseModel):
     # no limit is what reached 336 candidates and got the NAS's IP bot-checked
     # partway through the metadata pass (2026-08-11).
     max_candidates: int | None = None
+    # WHICH LANGUAGES the search runs in: 'both' | 'en' | 'zh' | 'exact'
+    # (claude_cli.TERM_SCOPES, 2026-08-25). OMITTED is 'both', the only search
+    # this app ran before the scopes existed, so an old client keeps it.
+    term_scope: str | None = None
+    # An upload-date range, ISO 'YYYY-MM-DD' (what <input type=date> emits) or
+    # bare 'YYYYMMDD'. Either side may be omitted or ''. Enforced on the
+    # metadata in the filter phase; see migrations/011.
+    date_from: str | None = None
+    date_to: str | None = None
 
 
 # A topic, not a document. The cap is a fleet-availability guard as much as a
@@ -228,6 +238,56 @@ def _validated_mode(raw):
             400, f'unknown search mode {raw!r}. Known: '
                  f'{", ".join(claude_cli.MODES)}')
     return str(raw)
+
+
+def _validated_term_scope(raw):
+    """The request's language scope -> what db.create_job wants, or a 400.
+
+    Same rule as the mode: None passes through as the default, an unknown value
+    is REFUSED rather than read as 'both' -- an editor who asked for Chinese
+    only and silently got both would not be able to tell from the manifest why.
+    """
+    if raw is None:
+        return None
+    if str(raw) not in claude_cli.TERM_SCOPES:
+        raise HTTPException(
+            400, f'unknown search scope {raw!r}. Known: '
+                 f'{", ".join(claude_cli.TERM_SCOPES)}')
+    return str(raw)
+
+
+_DATE_RE = re.compile(r'^(\d{4})-?(\d{2})-?(\d{2})$')
+
+
+def _validated_date(raw, which):
+    """'YYYY-MM-DD' or 'YYYYMMDD' -> 'YYYYMMDD', '' / None -> None, else 400.
+
+    A real calendar date, not just eight digits: 2026-02-30 stored as a bound
+    would silently drop or keep every candidate around it.
+    """
+    s = str(raw or '').strip()
+    if not s:
+        return None
+    m = _DATE_RE.match(s)
+    if m:
+        try:
+            date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            return ''.join(m.groups())
+        except ValueError:
+            pass
+    raise HTTPException(
+        400, f'{which} must be a date like 2026-01-31 (that was {s!r})')
+
+
+def _validated_date_range(req):
+    """-> (date_from, date_to) as YYYYMMDD or None, refusing a reversed pair:
+    a range that can match nothing is a mistake, not a search."""
+    lo = _validated_date(req.date_from, 'date_from')
+    hi = _validated_date(req.date_to, 'date_to')
+    if lo and hi and lo > hi:
+        raise HTTPException(
+            400, 'the date range is reversed: "from" is after "to"')
+    return lo, hi
 
 
 def _validated_shot_types(raw):
@@ -304,6 +364,8 @@ def create_job(req: NewJob, request: Request):
     mode = _validated_mode(req.mode)
     shot_types = _validated_shot_types(req.shot_types)
     max_candidates = _validated_max_candidates(req.max_candidates)
+    term_scope = _validated_term_scope(req.term_scope)
+    date_from, date_to = _validated_date_range(req)
 
     c = con()
     # One job per editor at a time. Not a resource limit -- the worker is
@@ -319,7 +381,8 @@ def create_job(req: NewJob, request: Request):
             project['label'], quality=req.quality, period=req.period or None,
             max_per_term=max(1, min(50, int(req.max_per_term))),
             shot_types=shot_types, max_candidates=max_candidates,
-            mode=mode)
+            mode=mode, term_scope=term_scope, date_from=date_from,
+            date_to=date_to)
     except sqlite3.IntegrityError:
         # The read above and this INSERT are not one transaction, and a
         # double-clicked SEARCH lands squarely between them; the partial unique

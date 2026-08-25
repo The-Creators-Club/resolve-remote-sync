@@ -275,23 +275,27 @@ class FakeClaude:
         self.calls = []
         self.shot_types = []          # [(stage, what the worker passed), ...]
         self.modes = []               # ...and the search mode, same shape
+        self.scopes = []              # ...and the language scope (2026-08-25)
 
-    def generate_terms(self, topic, shot_types=None, mode=None, timeout=None):
+    def generate_terms(self, topic, shot_types=None, mode=None, timeout=None,
+                       term_scope=None):
         # The shot types and the mode are recorded, not interpreted: what this
         # fake is for is proving the JOB'S selection and rubric reached both
         # calls.
         self.calls.append(('terms', topic))
         self.shot_types.append(('terms', shot_types))
         self.modes.append(('terms', mode))
+        self.scopes.append(('terms', term_scope))
         if self.term_error:
             raise self.term_error
         return self.terms
 
     def filter_relevance(self, topic, videos, shot_types=None, mode=None,
-                         batch=40, timeout=None):
+                         batch=40, timeout=None, term_scope=None):
         self.calls.append(('relevance', topic, [v['id'] for v in videos]))
         self.shot_types.append(('relevance', shot_types))
         self.modes.append(('relevance', mode))
+        self.scopes.append(('relevance', term_scope))
         if self.relevance_error:
             raise self.relevance_error
         return self.verdicts

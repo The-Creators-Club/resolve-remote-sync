@@ -3018,7 +3018,7 @@ loud toast (which now names [ CANCEL SEARCH ]). Harness scenarios in
 
 ## Companion: the tray says how a local YouTube download is going, and fetches it six fragments at a time (CR-78, 2026-08-25)
 
-### CR-78 - local YouTube downloads were invisible in the tray and crawled one HLS fragment at a time - FIXED in repo (companion 0.9.49), UNSHIPPED
+### CR-78 - local YouTube downloads were invisible in the tray and crawled one HLS fragment at a time - FIXED, SHIPPED as companion 0.9.49 (CI builds on 2b29b54, vendor feed + studio channel current on both platforms, base rig upgraded 2026-08-25 11:24)
 **Ask** (owner, 2026-08-25): "the companion should be updated so that when
 it is downloading a youtube clip it shows the information. Downloading: x/x
 (xx mb/s). Right now it seems like the youtube downloads are going very
@@ -3073,7 +3073,7 @@ the upgrade kills a download in flight.
 
 ## YouTube downloader: language scope and an upload-date range (CR-77, 2026-08-25)
 
-### CR-77 - the search always expanded into both languages, and a date meant one of YouTube's five windows - FIXED in repo (dashboard 0.7.10), UNSHIPPED
+### CR-77 - the search always expanded into both languages, and a date meant one of YouTube's five windows - FIXED, SHIPPED as dashboard 0.7.10 (OTA, 2026-08-25 02:57Z; waited out local job 23, never forced)
 **Ask** (owner, 2026-08-25): "add some search modes to the youtube downloader:
 'only english', 'only chinese' or 'single search term only' - so it only
 searches things that match the exact input the user provided", and "there

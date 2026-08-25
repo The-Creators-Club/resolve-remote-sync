@@ -234,9 +234,13 @@ def test_delete_revokes_sessions_and_report_tokens(env):
     conn.close()
 
 
-def test_delete_keeps_fleet_records(env):
-    """Their machine may still be syncing while the login is taken away, and a
-    grid row that vanishes turns a known editor into an unmapped stranger."""
+def test_delete_takes_the_fleet_records_with_it(env):
+    """Until CR-76 (2026-08-24) delete kept the fleet rows, on the theory
+    that a grid row vanishing turns a known editor into an unmapped stranger
+    (B16). It now removes the person everywhere: the stranger problem is
+    solved by taking their Syncthing device out first (test_admin_delete.py),
+    so a known_editors row left behind would only keep a deleted person on
+    the fleet page. DISABLE is the button that keeps everything."""
     as_user(env, "owen")
     _make(env, "newbie")
     conn = dbmod.connect(env.app.state.settings.db_path)
@@ -246,7 +250,7 @@ def test_delete_keeps_fleet_records(env):
     assert env.delete("/api/v1/admin/users/newbie").status_code == 200
 
     conn = dbmod.connect(env.app.state.settings.db_path)
-    assert "newbie" in dbmod.known_editor_usernames(conn)
+    assert "newbie" not in dbmod.known_editor_usernames(conn)
     conn.close()
 
 
@@ -297,16 +301,25 @@ def test_delete_requires_admin(env):
     assert env.delete("/api/v1/admin/users/newbie").status_code == 403
 
 
-def test_delete_is_400_outside_local_mode(tmp_path):
-    """Same carve-out as disable: the NasBackend Protocol has no delete, and a
-    NAS account owns a home directory this endpoint does not get to judge."""
+def test_delete_outside_local_mode_is_404_for_a_stranger_and_works_for_a_known_editor(tmp_path):
+    """Delete is no longer a local-mode carve-out (CR-76): with no NAS
+    configured there is no account to remove, but a name the fleet knows
+    (a report, a tick, a device) is still deletable -- that is the only way
+    its records get cleaned up. A name nobody has heard of is a 404."""
     settings = Settings(
         db_path=str(tmp_path / "smb2.db"), session_secret=SECRET,
         admin_users=frozenset({"owen"}), auth_method="smb",
     )
     with TestClient(create_app(settings)) as client:
         as_user(client, "owen")
-        assert client.delete("/api/v1/admin/users/jsmith").status_code == 400
+        assert client.delete("/api/v1/admin/users/jsmith").status_code == 404
+        conn = dbmod.connect(settings.db_path)
+        dbmod.record_known_editor(conn, "jsmith", "admin")
+        conn.commit()
+        conn.close()
+        resp = client.delete("/api/v1/admin/users/jsmith")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["deleted"]["machines"] == []
 
 
 def test_partial_delete_via_htmx(env):

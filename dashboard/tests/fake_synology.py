@@ -604,3 +604,28 @@ class FakeSynology:
                 "password of an account this dashboard didn't create."
             )
         user["password"] = password
+
+    def delete_editor(self, username: str) -> dict[str, Any]:
+        """Same refusals as set_known_password (CR-76); a missing account is
+        `deleted=False`, not an error. DSM takes the home folder with the
+        account, which the real backend reports as a warning."""
+        if not is_valid_username(username):
+            raise NasError(f"invalid username {username!r}")
+        gid, _unix_gid = self.ensure_editors_group()
+        user = self.find_user(username)
+        if user is None:
+            return {"deleted": False, "username": username, "warnings": []}
+        if int(user.get("uid", 0)) < FIRST_LOCAL_UID or username in BUILTIN_NAMES:
+            raise NasError(
+                f"{username!r} is a system account (uid {user.get('uid')}) -- refusing to "
+                "delete it. This dashboard only manages editor accounts."
+            )
+        if not self._in_editors_group(user, gid):
+            raise NasError(
+                f"{username!r} is not in the {EDITORS_GROUP!r} group -- refusing to delete "
+                "an account this dashboard didn't create."
+            )
+        self.state["users"].remove(user)
+        return {"deleted": True, "username": username, "warnings": [
+            "DSM removes the account's home folder together with the account",
+        ]}

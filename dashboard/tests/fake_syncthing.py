@@ -116,6 +116,32 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             self._json({"error": "not found"}, status=404)
 
+    def do_DELETE(self):
+        """`DELETE /rest/config/devices/{id}` (CR-76). Like the real thing,
+        removing a device also drops it from every folder's device list
+        (Syncthing's config prepare, ensureExistingDevices) -- the client
+        strips the folders itself first, so `put_folder_calls` shows that
+        happening and this is only the backstop."""
+        state = self.server.state  # type: ignore[attr-defined]
+        if state["down"]:
+            self._json({"error": "down"}, status=500)
+            return
+        url = urlparse(self.path)
+        if url.path.startswith("/rest/config/devices/"):
+            device_id = url.path.rsplit("/", 1)[1]
+            before = len(state["devices"])
+            state["devices"] = [d for d in state["devices"] if d["deviceID"] != device_id]
+            if len(state["devices"]) == before:
+                self._json({"error": "no such device"}, status=404)
+                return
+            for folder in state["folders"]:
+                folder["devices"] = [d for d in folder.get("devices", [])
+                                     if d["deviceID"] != device_id]
+            state.setdefault("deleted_devices", []).append(device_id)
+            self._json({})
+        else:
+            self._json({"error": "not found"}, status=404)
+
     def do_GET(self):
         state = self.server.state  # type: ignore[attr-defined]
         if state["down"]:

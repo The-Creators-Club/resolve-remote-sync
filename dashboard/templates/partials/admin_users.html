@@ -5,6 +5,9 @@
   {% if error %}
     <div class="banner">▲ {{ error }}</div>
   {% endif %}
+  {% if notice %}
+    <div class="banner">{{ notice }}</div>
+  {% endif %}
 
   {% if admin_users.auth_method == 'local' %}
   {# Local accounts (WP C, docs/ZERO_TOUCH_PLAN.md §3.3, 2026-08-17): the
@@ -65,7 +68,7 @@
                finding it out afterwards. #}
             <form class="inline-form" hx-post="/partials/admin/users/delete"
                   hx-target="closest .admin-users-box" hx-swap="outerHTML"
-                  hx-confirm="Delete the account {{ u.username }}? Their login, SSH keys, browser sessions and report tokens go with it. Their sync history and project selections are kept. Use DISABLE instead to stop them signing in without removing the account.">
+                  hx-confirm="Delete {{ u.username }} everywhere? Their login, SSH keys, browser sessions and report tokens go, and so do all of their computers: sync plans, status rows and Syncthing devices (they stop receiving projects). Files already on their computers stay there. Use DISABLE instead to stop them signing in without removing anything.">
               <input type="hidden" name="username" value="{{ u.username }}">
               <button class="btn" type="submit">[ DELETE ]</button>
             </form>
@@ -93,6 +96,68 @@
            style="display:block;margin:0.3rem 0;width:420px">
     <button class="btn" type="submit">[ CREATE ]</button>
   </form>
+  {% endif %}
+
+  {# The fleet's own records (CR-76, 2026-08-24), shown whatever the identity
+     backend: every computer the registry knows, with the one button that
+     removes it. Not a revocation - report tokens belong to the person - so the
+     confirm says what a still-running companion will do. #}
+  <div class="side-head" style="margin-top:1.2rem">[ COMPUTERS ]
+    <span class="muted">every computer that has reported in. REMOVE forgets it: its sync plan, its status rows and its Syncthing device.</span></div>
+  {% if admin_users.computers %}
+    <table class="editors">
+      <thead><tr><th>EDITOR</th><th>MACHINE</th><th>PLATFORM</th><th>MODE</th><th>RUNNING</th><th>PLAN</th><th>LAST REPORT</th><th></th></tr></thead>
+      <tbody>
+      {% for m in admin_users.computers %}
+        <tr class="editor-row">
+          <td class="who">{{ m.editor_username }}</td>
+          <td class="mono-sm" title="{{ m.syncthing_device_id or 'no Syncthing device reported' }}">{{ m.machine }}</td>
+          <td class="mono-sm muted">{{ m.platform or "?" }}</td>
+          <td class="mono-sm muted">{{ m.mode }}</td>
+          <td class="mono-sm">{{ m.companion_version or "?" }}</td>
+          <td class="mono-sm">{{ m.plan_count }} project{{ "" if m.plan_count == 1 else "s" }}</td>
+          <td class="muted">{{ m.last_seen | ago }}</td>
+          <td>
+            <form class="inline-form" hx-post="/partials/admin/machines/forget"
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML"
+                  hx-confirm="Remove the computer {{ m.machine }} ({{ m.editor_username }}) from the fleet? Its sync plan, its status rows and its Syncthing device go, so it stops receiving projects. Files already on it stay there. If the companion on it is still running and signed in, it will register itself again on its next report: uninstall the companion first, or delete the user instead, if it should stay gone.">
+              <input type="hidden" name="editor" value="{{ m.editor_username }}">
+              <input type="hidden" name="machine" value="{{ m.machine }}">
+              <button class="btn" type="submit">[ REMOVE ]</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <div class="muted">no computer has reported in yet</div>
+  {% endif %}
+
+  {% if admin_users.fleet_only_editors %}
+  {# An editor the fleet knows but no account backs: a device approved under a
+     name nobody provisioned, or an account already removed at the NAS by
+     hand. Only this button can clean their records and their device up. #}
+  <div class="side-head" style="margin-top:1.2rem">[ EDITORS WITHOUT AN ACCOUNT ]
+    <span class="muted">known to the fleet (a device, a plan or a report), but no account here.</span></div>
+  <table class="editors">
+    <thead><tr><th>USERNAME</th><th></th></tr></thead>
+    <tbody>
+    {% for name in admin_users.fleet_only_editors %}
+      <tr class="editor-row">
+        <td class="who">{{ name }}</td>
+        <td>
+          <form class="inline-form" hx-post="/partials/admin/users/delete"
+                hx-target="closest .admin-users-box" hx-swap="outerHTML"
+                hx-confirm="Delete {{ name }} from the fleet? All of their computers go: sync plans, status rows and Syncthing devices (they stop receiving projects). Any report tokens and browser sessions in their name are revoked. Files already on their computers stay there.">
+            <input type="hidden" name="username" value="{{ name }}">
+            <button class="btn" type="submit">[ DELETE ]</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
   {% endif %}
 
   {% if not admin_users.truenas_configured %}
@@ -149,7 +214,7 @@
     <div class="muted">account list unavailable -- {{ admin_users.truenas_error }}</div>
   {% elif admin_users.editors %}
     <table class="editors">
-      <thead><tr><th>USERNAME</th><th>UID</th><th>SSH KEY</th><th>SMB</th><th>LOCKED</th><th>SET PASSWORD</th></tr></thead>
+      <thead><tr><th>USERNAME</th><th>UID</th><th>SSH KEY</th><th>SMB</th><th>LOCKED</th><th>SET PASSWORD</th><th></th></tr></thead>
       <tbody>
       {% for e in admin_users.editors %}
         <tr class="editor-row">
@@ -164,6 +229,19 @@
               <input type="hidden" name="username" value="{{ e.username }}">
               <input type="password" name="password" placeholder="new password" required>
               <button class="btn" type="submit">[ SET ]</button>
+            </form>
+          </td>
+          <td>
+            {# CR-76 (2026-08-24): the NAS account goes through the backend's
+               delete_editor, behind the same refusals CREATE has, and the
+               confirm names everything else that goes with it. The home
+               directory's fate is the NAS's own (TrueNAS keeps it, DSM does
+               not) and comes back as a notice above. #}
+            <form class="inline-form" hx-post="/partials/admin/users/delete"
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML"
+                  hx-confirm="Delete {{ e.username }} everywhere? Their NAS account, browser sessions and report tokens go, and so do all of their computers: sync plans, status rows and Syncthing devices (they stop receiving projects). Files already on their computers stay there, and nothing in the project tree is touched.">
+              <input type="hidden" name="username" value="{{ e.username }}">
+              <button class="btn" type="submit">[ DELETE ]</button>
             </form>
           </td>
         </tr>

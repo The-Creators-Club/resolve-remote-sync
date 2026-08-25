@@ -376,6 +376,7 @@ editor has no business learning that another editor's device id exists.
 | `DELETE /selection/{editor}/{slug}?machine=` | session, **or** the companion credential above |
 | `POST /admin/machines/{editor}/{machine}/copy-plan?source=` | admin session |
 | `POST\|DELETE /admin/machines/{editor}/{machine}/update` | admin session |
+| `DELETE /admin/machines/{editor}/{machine}` | admin session. Remove ONE computer (CR-76): its Syncthing device and shares first, then its plan, prefs, status and manifest rows. The unassigned bucket and the person's account and tokens are untouched, so a companion still running there registers it again on its next report (the response `note` says so). `404` unknown machine; `502`, nothing removed, when Syncthing could not be asked |
 
 **`?machine=` (2026-08-18, `docs/MULTI_MACHINE_PLAN.md`).** The plan belongs
 to a computer, so every route above takes one. Omitting it means the PERSON,
@@ -442,7 +443,7 @@ Every route here requires a session belonging to a user in `DASH_ADMIN_USERS`
 | `POST /admin/users/{username}/disable` | **local mode only** (`400` otherwise): `{disabled: bool}` |
 | `POST /admin/users/{username}/keys` | **local mode only**: add an SSH key — `{key_text, label?}` → `{"fingerprint": "SHA256:…"}` |
 | `DELETE /admin/users/{username}/keys/{fingerprint}` | **local mode only**: revoke a key |
-| `DELETE /admin/users/{username}` | **local mode only**: delete a local account. Also deletes its SSH keys, revokes its browser sessions and revokes its per-editor report tokens — everything that could still act as it. Fleet records (grid row, selections, prefs, transfer history) are kept on purpose. `404` unknown account; `409` for the two lockout guards: the account you are signed in as, and the last enabled admin |
+| `DELETE /admin/users/{username}` | delete a person **everywhere** (CR-76, 2026-08-24; every mode). Goes, in this order: the account (local row, or the NAS account through the backend's `delete_editor`, behind the same refusals `POST /admin/users` has), every one of their computers' records, their Syncthing devices and shares, then browser sessions and per-editor report tokens. Kept: `lane_report_history`, `transfer_history`, the tree itself, and whatever is on their computers. Response `deleted` carries `machines`, `devices_removed`, `sessions_revoked`, `report_tokens_revoked`; `warnings` names the home directory's fate (TrueNAS keeps it, DSM removes it). A username the fleet knows but no backend has an account for is deletable too. `404` unknown everywhere; `409` for the lockout guards (the account you are signed in as; local mode's last enabled admin); `502` when Syncthing or the NAS could not be asked, and the detail says what was and was not done — a Syncthing failure means **nothing** was deleted, because a device left behind would be unmapped and keep its shares forever (B16). `DISABLE` is the non-destructive button |
 | `POST /admin/devices/approve` | approve a pending Syncthing device: `{username, device_id}` — unchanged, Syncthing device approval is independent of which auth method identifies editors |
 
 The NAS-account rows above need NAS credentials in the container

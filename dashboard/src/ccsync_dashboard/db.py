@@ -2819,6 +2819,127 @@ def evict_extra_machines(
     return len(victims)
 
 
+# ---------------------------------------------------------- admin deletes
+#
+# The per-machine tables, i.e. everything keyed (editor_username, machine)
+# that describes a computer's CURRENT state. lane_report_history and
+# transfer_history are deliberately not here: they are append-only logs with
+# their own age-out, and "what did that laptop upload last month" is a
+# question an admin may still ask after the laptop is gone.
+_MACHINE_STATE_TABLES = (
+    "machines", "machine_state", "selections", "editor_prefs", "lane_report_current",
+    "active_transfers", "editor_media_project", "editor_media", "media_tree_clips",
+    "report_auth",
+)
+
+
+def forget_machine(conn: sqlite3.Connection, editor: str, machine: str) -> dict[str, Any] | None:
+    """Erase one computer from the dashboard's records (admin "remove this
+    computer", CR-76, 2026-08-24). None if the registry has no such machine.
+
+    Returns what the CALLER still has to do: the machine's Syncthing device
+    id, if it ever reported one, which api.forget_machine_everywhere takes
+    out of Syncthing BEFORE this runs. Order matters: once these rows are
+    gone the enforce cycle sees an unmapped device and leaves its shares
+    alone (B16), so a device forgotten here but not there keeps receiving
+    every project it was ticked for.
+
+    The unassigned bucket (`machine = ''`) is NOT this machine's and is left
+    alone: it belongs to the person and applies to their next computer.
+
+    A companion still running on the computer registers it again on its
+    next report: report tokens authenticate the PERSON (editor_report_tokens
+    has no machine column), so "forget" is a record-keeping act, not a
+    revocation. Deleting the user is the revocation."""
+    row = conn.execute(
+        "SELECT syncthing_device_id FROM machines WHERE editor_username=? AND machine=?",
+        (editor, machine),
+    ).fetchone()
+    if row is None:
+        return None
+    if not machine or machine == ANY_MACHINE:
+        return None
+    deleted: dict[str, int] = {}
+    for table in _MACHINE_STATE_TABLES:
+        cur = conn.execute(
+            f"DELETE FROM {table} WHERE editor_username=? AND machine=?",
+            (editor, machine),
+        )
+        deleted[table] = cur.rowcount
+    return {"editor": editor, "machine": machine,
+            "syncthing_device_id": row["syncthing_device_id"], "deleted": deleted}
+
+
+def editor_device_ids(conn: sqlite3.Connection, editor: str) -> list[str]:
+    """Every Syncthing device id the dashboard associates with this person:
+    the registry's per-machine ids plus the collector's name-resolved
+    `devices` rows (a device approved under their username before any
+    companion reported, or one whose companion never sent an id)."""
+    ids: list[str] = []
+    for sql in (
+        "SELECT syncthing_device_id AS d FROM machines "
+        "WHERE editor_username=? AND syncthing_device_id IS NOT NULL",
+        "SELECT device_id AS d FROM devices WHERE editor_username=? AND is_server=0",
+    ):
+        for row in conn.execute(sql, (editor,)):
+            if row["d"] and row["d"] not in ids:
+                ids.append(row["d"])
+    return ids
+
+
+def forget_editor(conn: sqlite3.Connection, editor: str) -> dict[str, Any]:
+    """Erase a person from the fleet's records: every computer of theirs
+    (forget_machine), the unassigned bucket, their known_editors row and the
+    collector's device mapping (CR-76, 2026-08-24).
+
+    After this, known_editor_usernames() no longer returns them - all four
+    of its sources are cleared here - so a device that still carries their
+    name is unmapped from the enforce cycle's point of view. That is why the
+    caller removes their devices from Syncthing FIRST (see forget_machine).
+
+    Credentials are not this function's job: sessions and report tokens are
+    revoked by api._purge_user_credentials, which must run after the commit
+    (the session store writes through its own connection)."""
+    machines = [
+        r["machine"] for r in conn.execute(
+            "SELECT machine FROM machines WHERE editor_username=?", (editor,))
+    ]
+    forgotten = [forget_machine(conn, editor, m) for m in machines]
+    deleted: dict[str, int] = {}
+    # Rows under a machine name the registry no longer holds (evicted, or
+    # written by a report the registry rejected) plus the '' bucket: sweep
+    # every per-machine table by editor, not just by registered machine.
+    for table in _MACHINE_STATE_TABLES:
+        cur = conn.execute(f"DELETE FROM {table} WHERE editor_username=?", (editor,))
+        deleted[table] = cur.rowcount + sum(
+            (f or {}).get("deleted", {}).get(table, 0) for f in forgotten)
+    device_ids = [
+        r["device_id"] for r in conn.execute(
+            "SELECT device_id FROM devices WHERE editor_username=? AND is_server=0", (editor,))
+    ]
+    for device_id in device_ids:
+        forget_device(conn, device_id)
+    deleted["devices"] = len(device_ids)
+    deleted["known_editors"] = conn.execute(
+        "DELETE FROM known_editors WHERE editor_username=?", (editor,)).rowcount
+    return {"editor": editor, "machines": [f["machine"] for f in forgotten if f],
+            "deleted": deleted}
+
+
+def forget_device(conn: sqlite3.Connection, device_id: str) -> None:
+    """Drop the collector's mirror of one Syncthing device and the
+    completion/missing-file rows hanging off it (they reference devices.id).
+    The collector would re-create the row on its next config pass if the
+    device were still in Syncthing's config, which is exactly why the caller
+    removes it from Syncthing first."""
+    row = conn.execute("SELECT id FROM devices WHERE device_id=?", (device_id,)).fetchone()
+    if row is None:
+        return
+    for table in ("completion_current", "completion_history", "missing_files"):
+        conn.execute(f"DELETE FROM {table} WHERE device_id=?", (row["id"],))
+    conn.execute("DELETE FROM devices WHERE id=?", (row["id"],))
+
+
 def editor_reported_resolve_project(
     conn: sqlite3.Connection, editor: str, resolve_project: str
 ) -> bool:

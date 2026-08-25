@@ -2415,16 +2415,61 @@ def build_admin_users_view(settings, conn: sqlite3.Connection | None = None) -> 
     when absent, a short-lived one is opened here -- local accounts exist
     independently of any NAS credential, so this half must never wait on one.
     """
+    owned = conn is None
+    c = conn if conn is not None else db.connect(settings.db_path)
+    try:
+        return _build_admin_users_view(settings, c)
+    finally:
+        if owned:
+            c.close()
+
+
+def build_computers_view(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every computer the registry knows (v23), one row each, for the Users
+    page's [ COMPUTERS ] table and the JSON view (CR-76, 2026-08-24). The
+    registry is the authority on which computers exist; machine_state only
+    decorates the row with what its last report said."""
+    versions = db.fetch_companion_version_map(conn)
+    modes = db.machine_modes(conn)
+    plan_counts = {
+        (r["editor_username"], r["machine"]): r["n"]
+        for r in conn.execute(
+            "SELECT editor_username, machine, COUNT(*) AS n FROM selections "
+            "WHERE machine != '' GROUP BY editor_username, machine")
+    }
+    rows = []
+    for m in db.fetch_machines(conn):
+        key = (m["editor_username"], m["machine"])
+        state = versions.get(key) or {}
+        rows.append({
+            "editor_username": m["editor_username"],
+            "machine": m["machine"],
+            "platform": (m.get("platform") or state.get("platform") or "").strip().lower() or None,
+            "syncthing_device_id": m.get("syncthing_device_id"),
+            "companion_version": state.get("companion_version"),
+            "last_seen": m.get("last_seen"),
+            "mode": modes.get(key, "editor"),
+            "plan_count": plan_counts.get(key, 0),
+        })
+    return rows
+
+
+def _build_admin_users_view(settings, conn: sqlite3.Connection) -> dict[str, Any]:
     method = str(getattr(settings, "auth_method", "") or "smb").strip().lower()
     result: dict[str, Any] = {"auth_method": method, "local_users": None}
     if method == "local":
-        owned = conn is None
-        c = conn if conn is not None else db.connect(settings.db_path)
-        try:
-            result["local_users"] = local_users.list_users(c)
-        finally:
-            if owned:
-                c.close()
+        result["local_users"] = local_users.list_users(conn)
+
+    # The fleet's own records, which exist whatever the identity backend
+    # (CR-76): every computer, and every editor the fleet knows who has no
+    # account in the section above -- a device approved under a name nobody
+    # provisioned, or an account already removed at the NAS by hand. Those
+    # are the ones only [ DELETE ] on this page can clean up.
+    result["computers"] = build_computers_view(conn)
+    known = db.known_editor_usernames(conn)
+    account_names: set[str] = {
+        str(u.get("username") or "").lower() for u in (result["local_users"] or [])
+    }
 
     if not nas_factory.nas_configured(settings):
         # No NAS credential: the appliance's default shape (ZERO_TOUCH_PLAN.md
@@ -2433,7 +2478,8 @@ def build_admin_users_view(settings, conn: sqlite3.Connection | None = None) -> 
         # already answered the identity question; the NAS section (editor
         # accounts, device approval) simply has nothing to show.
         result.update({"truenas_configured": False, "editors": [], "pending_devices": [],
-                       "error": None, "truenas_error": None, "syncthing_error": None})
+                       "error": None, "truenas_error": None, "syncthing_error": None,
+                       "fleet_only_editors": sorted(known - account_names)})
         return result
 
     truenas_error: str | None = None
@@ -2490,6 +2536,8 @@ def build_admin_users_view(settings, conn: sqlite3.Connection | None = None) -> 
             syncthing_error = f"syncthing: {exc}"
             pending = []
 
+    if method != "local":
+        account_names |= {str(e["username"]).lower() for e in editor_rows}
     result.update({
         "truenas_configured": True,
         "editors": editor_rows,
@@ -2499,6 +2547,10 @@ def build_admin_users_view(settings, conn: sqlite3.Connection | None = None) -> 
         "error": "; ".join(e for e in (truenas_error, syncthing_error) if e) or None,
         "truenas_error": truenas_error,
         "syncthing_error": syncthing_error,
+        # An unreachable NAS lists no accounts, which must not read as "every
+        # editor has no account" and put a [ DELETE ] beside each of them.
+        "fleet_only_editors": (
+            [] if (truenas_error and method != "local") else sorted(known - account_names)),
     })
     return result
 
@@ -2802,34 +2854,211 @@ def _purge_user_credentials(request: Request, conn: sqlite3.Connection, username
     return {"sessions_revoked": revoked_sessions, "report_tokens_revoked": revoked_tokens}
 
 
+def _remove_editor_devices(settings, device_ids: list[str], *,
+                           named: str | None = None) -> list[dict[str, Any]]:
+    """Take every one of these devices out of Syncthing (CR-76). `named`
+    adds any configured device whose label IS that username -- a device an
+    admin approved for them before a companion ever reported an id, which
+    the registry and the collector's mirror may both still be missing.
+
+    Raises SyncthingError when Syncthing cannot be asked; the callers turn
+    that into "nothing was deleted" and roll back, because a device left in
+    Syncthing after its rows are gone is unmapped, which the enforce cycle
+    leaves alone (B16) -- it would keep receiving every project it was ever
+    shared. No Syncthing configured at all means nothing to remove."""
+    if not settings.syncthing_url:
+        return []
+    client = SyncthingClient.from_settings(settings)
+    ids = [d for d in device_ids if d]
+    if named:
+        wanted = named.strip().lower()
+        my_id = str(client.system_status().get("myID", "") or "")
+        for dev in client.config().get("devices", []):
+            device_id = dev.get("deviceID")
+            if (device_id and device_id != my_id and device_id not in ids
+                    and str(dev.get("name") or "").strip().lower() == wanted):
+                ids.append(device_id)
+    removed = []
+    for device_id in ids:
+        outcome = client.remove_device(device_id)
+        if outcome["removed"]:
+            removed.append({"device_id": device_id, "unshared": outcome["unshared"]})
+    return removed
+
+
+def delete_user_everywhere(request: Request, conn: sqlite3.Connection, username: str, *,
+                           admin: str) -> dict[str, Any]:
+    """Delete a person from the whole product (CR-76, 2026-08-24): their
+    account (local row, or the NAS account through the backend's
+    delete_editor), every one of their computers' records, their Syncthing
+    devices and shares, and every credential that could still act as them.
+    The one implementation behind DELETE /admin/users/{username} and the
+    Users page button, so the button is never a softer door than the route.
+
+    The ORDER is the point, because half of this cannot be rolled back:
+
+      1. the local account row goes first, uncommitted -- its guards (the
+         account you are signed in as, the last enabled admin) raise before
+         anything irreversible has happened;
+      2. Syncthing devices next. If Syncthing cannot be asked, everything
+         so far is rolled back and the caller gets a 502 saying nothing was
+         deleted: the alternative leaves a stranger's machine receiving
+         projects forever (B16 -- the enforce cycle will not touch it);
+      3. the NAS account, which no rollback can restore, once the shares are
+         provably gone. A refusal or a NAS error here rolls the local rows
+         back; the devices stay removed, which is the safe direction and a
+         no-op on the retry;
+      4. the fleet rows (db.forget_editor), then the commit;
+      5. sessions and report tokens, AFTER the commit -- the session store
+         writes through its own connection to the same file, and calling it
+         with a write transaction open on `conn` deadlocks the two.
+
+    A username the fleet knows but no backend has an account for (a device
+    approved under a name nobody provisioned; an account already removed at
+    the NAS by hand) is deletable too: that is the only way its records and
+    its device can be cleaned up. Unknown everywhere is a 404."""
+    settings = request.app.state.settings
+    username = username.strip().lower()
+    if not is_valid_username(username):
+        raise HTTPException(status_code=422, detail="not a valid username")
+    if username == admin.strip().lower():
+        raise HTTPException(
+            status_code=409,
+            detail="you cannot delete the account you are signed in as - sign in as "
+                   "another admin to remove this one",
+        )
+    local = _local_mode(settings)
+    known = username in db.known_editor_usernames(conn)
+    nas: NasBackend | None = None
+    account: dict[str, Any] | None = None
+    if local:
+        account = local_users.get_user(conn, username)
+    elif nas_factory.nas_configured(settings):
+        nas = _nas_client_or_503(request)
+        try:
+            account = nas.find_user(username)
+        except NasError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"{settings.nas_kind}: {exc} - nothing was deleted") from exc
+    if account is None and not known:
+        raise HTTPException(
+            status_code=404,
+            detail=f"{username!r} is not an account or an editor this dashboard knows")
+
+    result: dict[str, Any] = {"username": username, "account": None, "warnings": []}
+    if local and account is not None:
+        try:
+            result["account"] = local_users.delete_user(conn, username, requested_by=admin)
+        except local_users.LocalUserError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    try:
+        result["devices_removed"] = _remove_editor_devices(
+            settings, db.editor_device_ids(conn, username), named=username)
+    except SyncthingError as exc:
+        conn.rollback()
+        raise HTTPException(
+            status_code=502,
+            detail=f"syncthing could not be reached ({exc}), so nothing was deleted - "
+                   "try again once it is up",
+        ) from exc
+
+    if nas is not None and account is not None:
+        try:
+            result["account"] = nas.delete_editor(username)
+        except NasError as exc:
+            conn.rollback()
+            raise HTTPException(
+                status_code=502,
+                detail=f"{settings.nas_kind}: {exc} - the account and the fleet records "
+                       "were left in place",
+            ) from exc
+        result["warnings"].extend(result["account"].get("warnings") or [])
+
+    result["fleet"] = db.forget_editor(conn, username)
+    conn.commit()
+    purged = _purge_user_credentials(request, conn, username, by=admin)
+    result.update(purged)
+    log.warning(
+        "admin %r deleted user %r: account=%s, %d machine(s) forgotten (%s), %d syncthing "
+        "device(s) removed, %d session(s), %d report token(s) revoked",
+        admin, username,
+        "none" if result["account"] is None else
+        ("local" if local else (settings.nas_kind or "nas")),
+        len(result["fleet"]["machines"]), ", ".join(result["fleet"]["machines"]) or "-",
+        len(result["devices_removed"]), purged["sessions_revoked"],
+        purged["report_tokens_revoked"])
+    return result
+
+
+def forget_machine_everywhere(request: Request, conn: sqlite3.Connection, editor: str,
+                              machine: str, *, admin: str) -> dict[str, Any]:
+    """Remove one computer from the fleet (CR-76): its Syncthing device and
+    shares first (abort with nothing removed if Syncthing cannot be asked --
+    see delete_user_everywhere for why), then its records.
+
+    Not a revocation. The person keeps their account and their report
+    tokens, which authenticate the PERSON, so a companion still running on
+    that computer registers it again on its next report; the response says
+    so, and so does the button's confirm. Deleting the user is the
+    revocation; this is for the laptop that was wiped, renamed, or
+    replaced."""
+    settings = request.app.state.settings
+    editor, machine = editor.strip().lower(), machine.strip()
+    row = conn.execute(
+        "SELECT syncthing_device_id FROM machines WHERE editor_username=? AND machine=?",
+        (editor, machine),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"no machine {machine!r} for {editor!r}")
+    try:
+        removed = _remove_editor_devices(
+            settings, [row["syncthing_device_id"]] if row["syncthing_device_id"] else [])
+    except SyncthingError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"syncthing could not be reached ({exc}), so the computer was not "
+                   "removed - try again once it is up",
+        ) from exc
+    for entry in removed:
+        db.forget_device(conn, entry["device_id"])
+    forgotten = db.forget_machine(conn, editor, machine)
+    conn.commit()
+    log.warning("admin %r removed computer %s/%s (%d syncthing device(s) removed, plan rows %d)",
+                admin, editor, machine, len(removed),
+                (forgotten or {}).get("deleted", {}).get("selections", 0))
+    return {"ok": True, "editor": editor, "machine": machine, "devices_removed": removed,
+            "deleted": (forgotten or {}).get("deleted", {}),
+            "note": "a companion still running and signed in on this computer will "
+                    "register it again on its next report"}
+
+
 @router.delete("/admin/users/{username}")
 def api_admin_delete_user(
     username: str, request: Request,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> dict[str, Any]:
-    """Delete a LOCAL account. Local mode only, for the same reason disable is
-    (see api_admin_disable_user): the NasBackend Protocol has no delete, and a
-    NAS account owns a home directory whose fate is not this endpoint's to
-    decide.
+    """Delete a user everywhere (CR-76): see delete_user_everywhere for what
+    goes, in what order, and why. Until 2026-08-24 this was local mode only
+    and left the fleet's records standing; DISABLE remains the
+    non-destructive button for "stop this person signing in".
 
-    409, not 422, for the two guard refusals (last enabled admin, deleting
-    yourself): the request is well-formed and would be fine against a
-    different account -- it conflicts with the state of this one."""
+    409, not 422, for the guard refusals (deleting yourself, the last enabled
+    admin): the request is well-formed and would be fine against a different
+    account -- it conflicts with the state of this one. 502 when a backend
+    could not be asked, and the detail says what was and was not done."""
     admin = _require_admin(request)
-    _require_local_mode(request)
     settings = request.app.state.settings
-    username = username.strip().lower()
-    if local_users.get_user(conn, username) is None:
-        raise HTTPException(status_code=404, detail=f"{username!r} is not a local account")
-    try:
-        deleted = local_users.delete_user(conn, username, requested_by=admin)
-    except local_users.LocalUserError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    conn.commit()
-    purged = _purge_user_credentials(request, conn, username, by=admin)
-    log.warning("admin %r deleted local account %r (%d session(s), %d report token(s) revoked)",
-                admin, username, purged["sessions_revoked"], purged["report_tokens_revoked"])
-    return {"ok": True, "deleted": {**deleted, **purged},
+    result = delete_user_everywhere(request, conn, username, admin=admin)
+    account = result["account"] or {}
+    return {"ok": True,
+            "deleted": {**account,
+                        "machines": result["fleet"]["machines"],
+                        "devices_removed": result["devices_removed"],
+                        "sessions_revoked": result["sessions_revoked"],
+                        "report_tokens_revoked": result["report_tokens_revoked"]},
+            "warnings": result["warnings"],
             "view": build_admin_users_view(settings, conn)}
 
 
@@ -3094,6 +3323,20 @@ def api_cancel_machine_update(
     db.clear_machine_update_request(conn, editor, machine)
     conn.commit()
     return {"ok": True}
+
+
+@router.delete("/admin/machines/{editor}/{machine}")
+def api_forget_machine(
+    editor: str, machine: str, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """Remove one computer from the fleet (CR-76): its Syncthing device and
+    shares, its sync plan, its status rows. See forget_machine_everywhere
+    for the order and for why this is not a revocation. 404 when the
+    registry has no such computer; 502, with nothing removed, when Syncthing
+    cannot be asked."""
+    admin = _require_admin(request)
+    return forget_machine_everywhere(request, conn, editor, machine, admin=admin)
 
 
 @router.post("/admin/machines/{editor}/{machine}/resume-lane-b")

@@ -775,6 +775,32 @@ class SynologyClient:
             raise NasError(f"no such user: {username!r}")
         self._call("SYNO.Core.User", "set", 1, post=True, name=username, password=password)
 
+    def delete_editor(self, username: str) -> dict[str, Any]:
+        """Delete an EDITOR account (CR-76, 2026-08-24), behind the same
+        refusals as create and set_known_password: a free-text username on
+        the Users page must not be able to delete `admin`.
+
+        DSM removes the account's home folder (`homes/<name>`) together with
+        the account - that is DSM's own behaviour, with no API option to
+        keep it - so it is named in `warnings` for the admin to read. The
+        canonical tree is a shared folder, never a home, so no footage goes
+        with it. The `_delete_user` helper below stays as the test-cleanup
+        tool it is; this is the one the dashboard calls."""
+        existing = self._refuse_non_editor(username, "delete it")
+        if existing is None:
+            return {"deleted": False, "username": username, "warnings": []}
+        # DSM's spelling of the name (find_user matches case-insensitively):
+        # `delete` wants the exact account name, as a JSON ARRAY (3101 for a
+        # bare string), and reports 3102 inside data.errors even when it
+        # worked -- so the re-read is the only trustworthy check.
+        name = str(existing.get("username") or username)
+        self._call("SYNO.Core.User", "delete", 1, post=True, name=[name])
+        if self.find_user(username) is not None:
+            raise NasError(f"DSM still lists {username!r} after delete")
+        return {"deleted": True, "username": username, "warnings": [
+            "DSM removes the account's home folder together with the account",
+        ]}
+
     def sftp_enabled(self) -> bool:
         """Is DSM's SFTP service on? Lanes A/B are rclone over SFTP, and with
         the service off a key auth SUCCEEDS and the channel is then closed with

@@ -20,7 +20,8 @@ from . import (auth, dashboard_update, db, local_users, oidc, package_store, pro
 from .api import (
     build_admin_users_view, build_editors_view, build_packages_view, build_presence_view,
     build_project_view, build_projects_view, build_queue_view, build_report_tokens_view,
-    build_transfers_view, get_conn, normalize_device_id,
+    build_transfers_view, delete_user_everywhere, forget_machine_everywhere, get_conn,
+    normalize_device_id,
 )
 # The fleet-read redaction the JSON API applies, imported under a name that
 # says where the rule lives: ONE definition, two callers (COMMERCIAL_READINESS.md
@@ -1394,27 +1395,51 @@ async def partial_admin_disable_user(request: Request, conn: sqlite3.Connection 
 
 @router.post("/partials/admin/users/delete")
 async def partial_admin_delete_user(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
-    """Delete a LOCAL account, same guards and same credential purge as
-    api.api_admin_delete_user -- the button on the Users page must not be a
-    softer door than the JSON route. The refusals come back as this partial's
-    banner rather than an HTTP error, because htmx swaps the response in
-    either case and an admin needs to READ why it refused."""
+    """Delete a user everywhere (CR-76): the same implementation as
+    DELETE /api/v1/admin/users/{username} -- the button on the Users page
+    must not be a softer door than the JSON route. Refusals and backend
+    failures come back as this partial's banner rather than an HTTP error,
+    because htmx swaps the response in either case and an admin needs to
+    READ why it refused (and what, if anything, was done)."""
     admin = _require_admin_page(request)
     settings = request.app.state.settings
     form = await _form(request)
     username = form.get("username", "").strip().lower()
 
     error = None
-    if str(settings.auth_method or "smb").strip().lower() != "local":
-        error = "this action is only available with DASH_AUTH_METHOD=local"
+    notice = None
+    try:
+        result = delete_user_everywhere(request, conn, username, admin=admin)
+    except HTTPException as exc:
+        error = str(exc.detail)
     else:
-        try:
-            local_users.delete_user(conn, username, requested_by=admin)
-        except local_users.LocalUserError as exc:
-            error = str(exc)
-        else:
-            conn.commit()
-            api_purge_user_credentials(request, conn, username, by=admin)
+        if result["warnings"]:
+            notice = f"deleted {username}: " + "; ".join(result["warnings"])
+
+    return _render(request, "partials/admin_users.html", {
+        "admin_users": build_admin_users_view(settings, conn),
+        "error": error,
+        "notice": notice,
+    })
+
+
+@router.post("/partials/admin/machines/forget")
+async def partial_admin_forget_machine(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    """Remove one computer from the fleet (CR-76), from the Users page's
+    [ COMPUTERS ] table. Same implementation as
+    DELETE /api/v1/admin/machines/{editor}/{machine}; a refusal is the
+    partial's banner."""
+    admin = _require_admin_page(request)
+    settings = request.app.state.settings
+    form = await _form(request)
+    editor = form.get("editor", "").strip().lower()
+    machine = form.get("machine", "").strip()
+
+    error = None
+    try:
+        forget_machine_everywhere(request, conn, editor, machine, admin=admin)
+    except HTTPException as exc:
+        error = str(exc.detail)
 
     return _render(request, "partials/admin_users.html", {
         "admin_users": build_admin_users_view(settings, conn),

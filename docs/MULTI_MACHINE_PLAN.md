@@ -441,3 +441,44 @@ could never open -- is fixed in the same pass. Turning unattended updates on
 before that would have carried every editor across the 0.8.0 licence gate
 silently and parked them, one machine at a time, with nothing on screen to
 explain it.
+
+## 10. Deleting people and computers (built 2026-08-24, CR-76)
+
+The model in §3 has a person who owns computers, and until now nothing
+could remove either. Two operations, both on the Users page and both in the
+JSON API (`docs/API.md`):
+
+| | Delete a user | Remove a computer |
+|---|---|---|
+| Route | `DELETE /api/v1/admin/users/{username}` | `DELETE /api/v1/admin/machines/{editor}/{machine}` |
+| Account | local row, or the NAS account via `NasBackend.delete_editor` | untouched |
+| Credentials | sessions + report tokens revoked | untouched (tokens belong to the PERSON) |
+| Computers | all of them, plus the `''` bucket | this one only; the bucket stays |
+| Syncthing | every device of theirs removed, shares first | this machine's device removed |
+| Comes back? | no: its next report is a 401 | yes, if the companion is still running there |
+
+**Why Syncthing goes first, and why a failure there aborts everything.** The
+enforce cycle (`collector._run_enforce`) treats a device whose name resolves
+to no KNOWN editor as unmapped and leaves its shares exactly as they are
+(B16, the fleet-wide unshare that rule exists to prevent). So forgetting the
+person's rows before removing their device does not stop the traffic - it
+makes it permanent. `delete_user_everywhere` therefore removes the devices
+while the rows are still uncommitted, and a `SyncthingError` rolls the
+transaction back and answers 502 "nothing was deleted". The NAS account,
+which no rollback can restore, goes after the shares are provably gone.
+
+**What "remove a computer" is for.** The laptop that was wiped, renamed
+past `adopt_renamed_machine`'s refusal (§6), or replaced: a registry row
+with a plan nobody will ever sync. It is a record-keeping act, not a
+revocation - `editor_report_tokens` has no machine column, and adding one
+is the seam that would make "forget this laptop for good" possible without
+deleting the person. Not built; the confirm text and the response `note`
+say what happens instead.
+
+**What is deliberately kept.** `lane_report_history` and `transfer_history`
+(append-only logs with their own age-out; "what did that laptop upload last
+month" is still a fair question), the project tree, and every file on the
+computers themselves. The home directory's fate is the NAS's own: TrueNAS
+leaves it (`user.delete` never touches it unless asked), DSM removes it,
+and either way the backend says so in `warnings`, which the page shows as a
+notice.

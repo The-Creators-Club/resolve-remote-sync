@@ -437,3 +437,49 @@ class TrueNASClient:
         resp = self.put(f"/user/id/{user['id']}", {"password": password})
         if not ok(resp):
             raise TrueNASError(f"set password failed: HTTP {resp.status_code} {resp.text}")
+
+    def delete_editor(self, username: str) -> dict[str, Any]:
+        """Delete an EDITOR account (CR-76, 2026-08-24). Same three refusals
+        as set_known_password, same reason: the Users page takes a free-text
+        username and DELETE /user/id/1 would take the NAS admin with it.
+
+        TrueNAS' user.delete does not touch the home directory unless asked
+        (its only option is `delete_group`, and the primary group here is the
+        shared `editors` group, so that is never asked). The directory stays
+        on the pool for the NAS admin to remove; nothing this fleet syncs
+        lives under it.
+
+        A missing account is `deleted=False`, not an error: the dashboard
+        can know an editor the NAS never had, and the retry after a
+        half-failed delete must be a no-op (NasBackend.delete_editor)."""
+        if not is_valid_username(username):
+            raise TrueNASError(
+                f"invalid username {username!r}: must start with a letter and contain only "
+                "lowercase letters, digits, '.', '_', '-'"
+            )
+        gid, _unix_gid = self.ensure_editors_group()
+        user = self.find_user(username)
+        if user is None:
+            return {"deleted": False, "username": username, "warnings": []}
+        uid = user.get("uid")
+        if uid is not None and int(uid) < MIN_EDITOR_UID:
+            raise TrueNASError(
+                f"{username!r} is a system account (uid {uid}) -- refusing to delete it. "
+                "This dashboard only manages editor accounts."
+            )
+        if not self._in_editors_group(user, gid):
+            raise TrueNASError(
+                f"{username!r} is not in the {EDITORS_GROUP!r} group -- refusing to delete "
+                "an account this dashboard didn't create. Remove it in the TrueNAS UI."
+            )
+        resp = self._request("DELETE", f"/user/id/{user['id']}", json_body={"delete_group": False})
+        if not ok(resp):
+            raise TrueNASError(f"delete user failed: HTTP {resp.status_code} {resp.text}")
+        if self.find_user(username) is not None:
+            raise TrueNASError(f"TrueNAS still lists {username!r} after delete")
+        warnings = []
+        if user.get("home"):
+            warnings.append(
+                f"the home directory {user['home']} was left in place; remove it in the "
+                "TrueNAS UI if it is no longer wanted")
+        return {"deleted": True, "username": username, "warnings": warnings}

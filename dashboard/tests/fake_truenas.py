@@ -167,6 +167,30 @@ class _Handler(BaseHTTPRequestHandler):
         row.update(body)
         self._json(row)
 
+    def do_DELETE(self):
+        """`DELETE /user/id/{id}` with `{"delete_group": bool}` (CR-76). The
+        home directory is NOT removed -- that is TrueNAS' real behaviour and
+        the thing delete_editor's warning tells the admin about -- so the
+        row's `home` is remembered in `deleted_homes` for tests to check."""
+        state = self.server.state  # type: ignore[attr-defined]
+        url = urlparse(self.path)
+        path = url.path[len(PREFIX):] if url.path.startswith(PREFIX) else url.path
+        body = self._body()
+        m = re.match(r"^/user/id/(\d+)$", path)
+        if not m:
+            self._json({"error": "not found"}, status=404)
+            return
+        uid = int(m.group(1))
+        row = next((u for u in state["users"] if u["id"] == uid), None)
+        if row is None:
+            self._json({"error": "no such user"}, status=404)
+            return
+        state["users"].remove(row)
+        state.setdefault("deleted_users", []).append(
+            {"username": row["username"], "home": row.get("home"),
+             "delete_group": bool(body.get("delete_group"))})
+        self._json(True)
+
 
 class FakeTrueNAS:
     def __init__(self):

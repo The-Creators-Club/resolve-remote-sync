@@ -116,3 +116,22 @@ class NasBackend(Protocol):
 
     def set_known_password(self, username: str, password: str) -> None:
         """Set an EDITOR's password, with create_or_update_editor's refusals."""
+
+    def delete_editor(self, username: str) -> dict[str, Any]:
+        """Delete an EDITOR account (admin delete of a user, CR-76, 2026-08-24).
+
+        Returns {"deleted": bool, "username": str, "warnings": [...]}:
+        `deleted=False` means there was no such account, which is not an
+        error - the dashboard may know an editor the NAS never had (a device
+        approved under a name nobody provisioned), and a retry after a
+        half-failed delete must be a no-op.
+
+        Every backend MUST carry create_or_update_editor's refusals, for the
+        same reason: never a system/builtin account, never an account that is
+        not in EDITORS_GROUP. A free-text username on the Users page must not
+        be able to delete the NAS admin.
+
+        What happens to the home directory is the backend's own behaviour
+        and is named in `warnings` when it is not "left in place" - the
+        canonical project tree is never under a home directory, so a
+        deleted account takes no footage with it either way."""

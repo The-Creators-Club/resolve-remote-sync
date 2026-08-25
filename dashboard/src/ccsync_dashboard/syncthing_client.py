@@ -178,6 +178,43 @@ class SyncthingClient:
             existing["name"] = name
             self._request("PUT", f"/rest/config/devices/{_seg(device_id)}", json_body=existing)
 
+    def remove_device(self, device_id: str) -> dict[str, Any]:
+        """Take a device out of this server's Syncthing entirely: its folder
+        shares first, then the device record (admin delete of a user or a
+        computer, CR-76, 2026-08-24).
+
+        The enforce cycle cannot do this for us. A device whose name no
+        longer resolves to a KNOWN editor is "unmapped" and deliberately left
+        exactly as it is (B16), so forgetting the editor's rows and waiting
+        would leave their machine receiving every project it was ever shared
+        - the one outcome a delete must not have. Removing the device record
+        is what stops the traffic: Syncthing drops an unknown device from
+        every folder itself, but each folder is stripped explicitly first so
+        that the shares are gone even if that behaviour ever changes, and so
+        the log says which folders it was on.
+
+        Returns {"removed": bool, "unshared": [folder ids]}. A device this
+        server does not have is `removed=False`, not an error: the retry
+        after a half-failed delete must be a no-op, and so must forgetting a
+        computer whose companion never got as far as a Syncthing identity.
+        Raises SyncthingError only when Syncthing cannot be asked, which is
+        the caller's signal to abort the whole delete rather than leave the
+        shares standing (api.delete_user_everywhere)."""
+        cfg = self.config()
+        if not any(d.get("deviceID") == device_id for d in cfg.get("devices", [])):
+            return {"removed": False, "unshared": []}
+        unshared: list[str] = []
+        for folder in cfg.get("folders", []):
+            if not any(d.get("deviceID") == device_id for d in folder.get("devices", [])):
+                continue
+            live = self.get_folder(folder["id"])
+            live["devices"] = [d for d in live.get("devices", [])
+                               if d.get("deviceID") != device_id]
+            self.put_folder(folder["id"], live)
+            unshared.append(folder["id"])
+        self._request("DELETE", f"/rest/config/devices/{_seg(device_id)}")
+        return {"removed": True, "unshared": unshared}
+
     def connections(self) -> dict[str, Any]:
         return self._get("/rest/system/connections")
 

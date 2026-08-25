@@ -20,4 +20,4 @@
 # and the `code` object on /api/v1/health. Deploy notes: KNOWN_BUGS.md WPK-1
 # (the image must ship templates/ and static/) and WPK-2 (the first OTA needs
 # DASH_RELEASE_FEED_URL set and one manual redeploy).
-VERSION = "0.7.8"
+VERSION = "0.7.9"

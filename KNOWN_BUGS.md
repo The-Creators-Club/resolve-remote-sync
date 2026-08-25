@@ -3016,6 +3016,53 @@ browser with no confirm(), is exactly the old behaviour: re-attach and the
 loud toast (which now names [ CANCEL SEARCH ]). Harness scenarios in
 `tests/test_static_app.py`. Needs a dashboard deploy.
 
+## Admins can delete users and computers (CR-76, 2026-08-24)
+
+### CR-76 - no way to delete a user or a computer from the dashboard - BUILT in repo 2026-08-24 (dashboard 0.7.9), unshipped
+**Symptom** (owner, 2026-08-24): an editor who leaves, or a laptop that is
+wiped or replaced, stayed on the fleet page forever. DELETE on the Users
+page was local-mode only and by design left every fleet record standing
+(the docstring's B16 argument: a grid row that vanishes turns a known editor
+into an unmapped stranger). In the studio's NAS mode there was no button at
+all, and there has never been one for a computer. Worse than the clutter:
+an ex-editor's Syncthing device kept every share it had, because the enforce
+cycle deliberately leaves an UNMAPPED device alone - so "delete them at the
+NAS by hand" left their machine receiving projects.
+
+**Fix.** Two routes, one implementation each, the Users page buttons calling
+the same functions as the JSON routes (`api.delete_user_everywhere`,
+`api.forget_machine_everywhere`):
+
+- `DELETE /api/v1/admin/users/{username}` now works in every mode and
+  removes the person everywhere, IN THIS ORDER: the local account row
+  (uncommitted, so its self/last-admin guards refuse first), their Syncthing
+  devices and shares (`SyncthingClient.remove_device`; a Syncthing failure
+  rolls everything back and 502s "nothing was deleted"), the NAS account
+  (new `NasBackend.delete_editor` on both backends, behind the refusals
+  CREATE has - never a system account, never one outside `editors`), the
+  fleet rows (`db.forget_editor`: every per-machine table, the '' bucket,
+  `known_editors`, the collector's `devices` mirror), commit, then sessions
+  and report tokens. Also deletes a username the fleet knows but no backend
+  has an account for (a device approved under a name nobody provisioned).
+  Home directory: TrueNAS leaves it, DSM removes it; both come back as a
+  warning/notice. Kept on purpose: `lane_report_history`,
+  `transfer_history`, the tree, the files on their computers.
+- `DELETE /api/v1/admin/machines/{editor}/{machine}` removes ONE computer
+  (Syncthing device first, then `db.forget_machine`), leaving the person,
+  their bucket and their tokens alone. Not a revocation: report tokens
+  belong to the person, so a companion still running there re-registers on
+  its next report; the confirm and the response say so.
+- Users page: [ DELETE ] on NAS editor rows, a [ COMPUTERS ] table (every
+  registered machine, [ REMOVE ] each) and [ EDITORS WITHOUT AN ACCOUNT ]
+  for the fleet-only names. `GET /admin/users` gains `computers` and
+  `fleet_only_editors`.
+
+Tests: `dashboard/tests/test_admin_delete.py` (both NAS backends via
+`nas_case`, Syncthing-down abort, refusals, htmx twins, db layer); the two
+local-mode tests that pinned the old "keep the fleet rows" semantics were
+rewritten. Docs: `docs/API.md`, `docs/MULTI_MACHINE_PLAN.md` §10. Needs a
+dashboard deploy; no companion change.
+
 ## Open — residuals from the 2026-08-14 fix pass
 
 ### R16 — eight 08-14 findings deliberately not fixed

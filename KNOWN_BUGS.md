@@ -3018,7 +3018,7 @@ loud toast (which now names [ CANCEL SEARCH ]). Harness scenarios in
 
 ## Companion: a locally downloaded YouTube clip is checked and, if Resolve could not decode it, converted on the editor's machine (CR-79, 2026-08-25)
 
-### CR-79 - local YouTube downloads were never checked for a Resolve-decodable codec; the server's conversion did not run for them - FIXED in repo as companion 0.9.50, UNSHIPPED
+### CR-79 - local YouTube downloads were never checked for a Resolve-decodable codec; the server's conversion did not run for them - FIXED, SHIPPED as companion 0.9.50 (CI builds on 0fb926d, vendor feed + studio channel current on both platforms, base rig upgraded 2026-08-25 11:38Z)
 **Ask** (owner, 2026-08-25): "do videos downloaded locally on the companion
 still get properly remuxed into resolve-friendly format" and, on hearing the
 executor handed anything non-AVC back to the server: "surely the companion
@@ -3093,8 +3093,11 @@ lease lost mid-conversion, the phase), `test_tray.py` (the sentence),
 driven with its seams patched: the companion's command == the server's
 command for vp9+opus, h264-VFR, av1+aac and a failed probe; both leave
 h264/aac/CFR and audio-only alone; codec sets, rate rule and colour args
-agree; the forgive-only-a-guess fork). Needs a companion release on both
-platforms.
+agree; the forgive-only-a-guess fork). Shipped 2026-08-25 on the CI path
+(release-windows 32839447955 / release-macos 32839451157, `publish_latest
+--make-current`, studio pull); editors get it at their next tray click or
+auto-update. Not yet observed live: the `Converting YouTube clip N/M to
+H.264` tray line on a real non-AVC download.
 
 ## Companion: the tray says how a local YouTube download is going, and fetches it six fragments at a time (CR-78, 2026-08-25)
 

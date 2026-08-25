@@ -3018,7 +3018,7 @@ loud toast (which now names [ CANCEL SEARCH ]). Harness scenarios in
 
 ## Admins can delete users and computers (CR-76, 2026-08-24)
 
-### CR-76 - no way to delete a user or a computer from the dashboard - BUILT in repo 2026-08-24 (dashboard 0.7.9), unshipped
+### CR-76 - no way to delete a user or a computer from the dashboard - FIXED, SHIPPED as dashboard 0.7.9 (OTA, 2026-08-25)
 **Symptom** (owner, 2026-08-24): an editor who leaves, or a laptop that is
 wiped or replaced, stayed on the fleet page forever. DELETE on the Users
 page was local-mode only and by design left every fleet record standing

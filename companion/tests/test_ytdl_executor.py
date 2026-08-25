@@ -218,6 +218,16 @@ def ytdlp(tmp_path) -> FakeYtDlp:
     return FakeYtDlp(tmp_path)
 
 
+@pytest.fixture(autouse=True)
+def _no_ffprobe_from_path(monkeypatch):
+    """CR-79's probe falls back to an ffprobe on PATH when none sits beside
+    the configured ffmpeg. fake_ffmpeg has no sibling, and a developer
+    machine HAS one on PATH -- which would run the real ffprobe over
+    "video bytes", fail, and convert on suspicion through the fake. Every
+    test here that wants a probe provides one (FakeTools + fake_ffprobe)."""
+    monkeypatch.setattr(ex.shutil, "which", lambda *_a, **_k: None)
+
+
 # -- the fake fleet API -----------------------------------------------------
 
 
@@ -2226,3 +2236,361 @@ def test_the_progress_mirror_carries_the_rate_while_a_clip_downloads(tmp_path, y
     clean = [s for s in seen if s["clip"] == VID2][0]
     assert (clean["bytes_done"], clean["bytes_total"], clean["speed_bps"]) == (None, None, None)
     assert ex.progress(7)["done"] == 2
+
+
+# ---------------------------------------------------------------------------
+# edit-ready: the clip is probed and, if Resolve could not decode it,
+# converted HERE (CR-79, 2026-08-25)
+# ---------------------------------------------------------------------------
+# The decision and the ffmpeg command are the vendored downloader's, pinned
+# against it in server/tests/test_cross_component.py; these cover what this
+# side adds -- the seams, the swap-in, the three outcomes, the tray phase.
+
+
+def _probe(vcodec="h264", acodec="aac", r="24/1", avg="24/1", audio=True,
+           **video_extra) -> dict:
+    streams = []
+    if vcodec is not None:
+        v = {"codec_type": "video", "codec_name": vcodec,
+             "r_frame_rate": r, "avg_frame_rate": avg}
+        v.update(video_extra)
+        streams.append(v)
+    if audio:
+        streams.append({"codec_type": "audio", "codec_name": acodec})
+    return {"streams": streams}
+
+
+def test_edit_ready_plan_is_the_vendored_decision():
+    assert ex.edit_ready_plan(_probe())["convert"] is False
+    p = ex.edit_ready_plan(_probe(vcodec="vp9"))
+    assert (p["convert"], p["need_v"], p["need_a"], p["vcodec"]) == (True, True, False, "vp9")
+    p = ex.edit_ready_plan(_probe(acodec="opus"))
+    assert (p["need_v"], p["need_a"], p["acodec"]) == (False, True, "opus")
+    # the same rate written two ways is NOT VFR (YTDL-23); a real drift is
+    assert ex.edit_ready_plan(_probe(r="30000/1001", avg="2997/100"))["convert"] is False
+    assert ex.edit_ready_plan(_probe(r="24000/1001", avg="24/1"))["convert"] is False
+    assert ex.edit_ready_plan(_probe(r="25/1", avg="20/1"))["need_v"] is True
+    # an audio-only download has nothing to fix
+    assert ex.edit_ready_plan(_probe(vcodec=None))["convert"] is False
+    # a probe that FAILED converts both streams on suspicion (YTDL-22)...
+    p = ex.edit_ready_plan({"_probe_error": "boom"})
+    assert (p["convert"], p["need_v"], p["need_a"], p["probe_failed"]) == (True, True, True, True)
+    # ...and junk is not a failed probe, it is nothing to act on
+    assert ex.edit_ready_plan(None)["convert"] is False
+    assert ex.edit_ready_plan({"streams": "nonsense"})["convert"] is False
+
+
+def test_edit_ready_argv_copies_what_is_fine_and_encodes_what_is_not():
+    plan = ex.edit_ready_plan(_probe(vcodec="vp9", color_primaries="bt709",
+                                     color_transfer="unknown", color_range="tv"))
+    argv = ex.edit_ready_argv("/bin/ffmpeg", "in.mp4", "in.editready.mp4", plan)
+    assert argv[:11] == ["/bin/ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                         "-i", "in.mp4", "-map", "0:v:0", "-map", "0:a:0?"]
+    assert argv[argv.index("-c:v") + 1] == "libx264"
+    assert argv[argv.index("-c:a") + 1] == "copy"
+    assert argv[argv.index("-color_primaries") + 1] == "bt709"
+    assert "-color_trc" not in argv          # "unknown" is not carried
+    assert argv[argv.index("-color_range") + 1] == "tv"
+    assert argv[-5:] == ["-map_metadata", "0", "-movflags",
+                         "+use_metadata_tags+faststart", "in.editready.mp4"]
+    plan = ex.edit_ready_plan(_probe(acodec="opus"))
+    argv = ex.edit_ready_argv("f", "a", "b", plan)
+    assert argv[argv.index("-c:v") + 1] == "copy"
+    i = argv.index("-c:a")
+    assert argv[i + 1:i + 4] == ["aac", "-b:a", "320k"]
+
+
+def test_parse_probe_never_answers_an_empty_dict_for_a_failure():
+    failed = ex.parse_probe(subprocess.CompletedProcess([], 1, "", "no such file"))
+    assert failed["_probe_error"] == "no such file"
+    assert ex.parse_probe(subprocess.CompletedProcess([], 1, "", ""))["_probe_error"]
+    assert "_probe_error" in ex.parse_probe(subprocess.CompletedProcess([], 0, "not json", ""))
+    assert ex.parse_probe(subprocess.CompletedProcess([], 0, '{"streams": []}', "")) == {"streams": []}
+
+
+def test_editready_name_is_the_vendored_tmp_name():
+    assert ex.editready_name("Chan - Title [abc].mp4") == "Chan - Title [abc].editready.mp4"
+    assert ex.editready_name("Chan - Title [abc].webm") == "Chan - Title [abc].editready.mp4"
+    # a title with a dot keeps its dot: with_suffix strips ONE suffix
+    assert ex.editready_name("Chan - v2.0 [abc].mp4") == "Chan - v2.0 [abc].editready.mp4"
+
+
+def test_swap_in_moves_a_locked_original_aside_and_keeps_the_work_otherwise(
+        tmp_path, monkeypatch):
+    original = tmp_path / "clip [id].mp4"
+    original.write_bytes(b"old")
+    tmp = tmp_path / "clip [id].editready.mp4"
+    tmp.write_bytes(b"new")
+
+    # the ordinary case: same name, replaced in place, no note
+    assert ex.swap_in(tmp, original, original) == (original.name, None)
+    assert original.read_bytes() == b"new"
+
+    # Windows holding the original open: os.replace over it is refused, a
+    # rename of it is allowed -> .original beside, converted takes the name
+    original.write_bytes(b"old")
+    tmp.write_bytes(b"new")
+    real_replace = os.replace
+    refusals = {"first": True}
+
+    def locked_once(src, dst):
+        if refusals["first"] and Path(dst).name == original.name:
+            refusals["first"] = False
+            raise PermissionError("Access is denied")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(ex.os, "replace", locked_once)
+    name, note = ex.swap_in(tmp, original, original)
+    assert name == original.name
+    assert original.read_bytes() == b"new"
+    assert (tmp_path / "clip [id].original.mp4").read_bytes() == b"old"
+    assert note == "original was in use, kept as clip [id].original.mp4"
+
+    # even the rename refused: the converted file stays under its own name
+    original.write_bytes(b"old")
+    tmp.write_bytes(b"new")
+
+    def locked(src, dst):
+        raise PermissionError("Access is denied")
+
+    monkeypatch.setattr(ex.os, "replace", locked)
+    name, note = ex.swap_in(tmp, original, original)
+    assert name == tmp.name and tmp.read_bytes() == b"new"
+    assert original.read_bytes() == b"old"
+    assert note == "converted, but could not replace clip [id].mp4: saved as clip [id].editready.mp4"
+    assert "—" not in note
+
+
+def fake_ffprobe(tmp_path) -> str:
+    """The sibling ffmpeg_tools.ffprobe_for looks for beside fake_ffmpeg."""
+    binary = Path(fake_ffmpeg(tmp_path)).with_name(
+        "ffprobe.exe" if os.name == "nt" else "ffprobe")
+    if not binary.exists():
+        binary.write_text("not really ffprobe")
+    return str(binary)
+
+
+class FakeTools:
+    """deps.run that answers for ffprobe and ffmpeg itself and hands yt-dlp
+    to the generated script. Records every tool call it answered."""
+
+    def __init__(self, ytdlp, probe=None, probe_rc=0, ffmpeg_rc=0):
+        self.ytdlp = ytdlp
+        self.probe = probe if probe is not None else _probe()
+        self.probe_rc = probe_rc
+        self.ffmpeg_rc = ffmpeg_rc
+        self.calls: list = []
+
+    def __call__(self, argv, timeout, on_spawn=None, on_line=None):
+        base = os.path.basename(str(argv[0])).lower()
+        if base.startswith("ffprobe"):
+            self.calls.append(("ffprobe", list(argv), timeout))
+            if self.probe_rc:
+                return subprocess.CompletedProcess(argv, self.probe_rc, "", "ffprobe broke")
+            return subprocess.CompletedProcess(argv, 0, json.dumps(self.probe), "")
+        if base.startswith("ffmpeg"):
+            self.calls.append(("ffmpeg", list(argv), timeout))
+            if self.ffmpeg_rc == 0:
+                Path(argv[-1]).write_bytes(b"converted bytes")
+            return subprocess.CompletedProcess(argv, self.ffmpeg_rc, "", "libx264 said no")
+        return self.ytdlp.run_fn_progress(argv, timeout, on_spawn, on_line=on_line)
+
+    def named(self, tool: str) -> list:
+        return [c for c in self.calls if c[0] == tool]
+
+
+def _deps_with_tools(tmp_path, ytdlp, tools, clips=None) -> tuple:
+    fake_ffprobe(tmp_path)
+    fleet = FakeFleet(manifest_for(clips=clips))
+    ytdlp.plan({"default": {"attempts": [{}]}})
+    deps = make_deps(tmp_path, fleet=fleet, ytdlp=ytdlp)
+    deps.run = tools
+    return deps, fleet
+
+
+def test_a_clip_that_is_already_h264_aac_cfr_is_delivered_untouched(tmp_path, ytdlp):
+    tools = FakeTools(ytdlp, probe=_probe())
+    deps, fleet = _deps_with_tools(tmp_path, ytdlp, tools)
+
+    job = run_job(deps)
+
+    clip = outdir_for(tmp_path) / f"Some Channel - A clip [{VID1}].mp4"
+    assert clip.read_bytes() == b"video bytes"
+    # exactly one probe, of the landed file, with probe_streams's argv
+    (probe,) = tools.named("ffprobe")
+    assert probe[1][1:] == ["-v", "error", "-print_format", "json", "-show_streams", str(clip)]
+    assert probe[2] == ex.PROBE_TIMEOUT_SECONDS
+    assert tools.named("ffmpeg") == []
+    assert fleet.state_sequence == [(VID1, "downloading"), (VID1, "done")]
+    assert fleet.body_for(VID1, "done")["filepath_rel"] == clip.name
+    assert fleet.body_for(VID1, "done")["note"] is None
+    assert (job.done, job.failed) == (1, 0)
+    assert not list(outdir_for(tmp_path).glob("*.editready.*"))
+
+
+def test_a_vp9_opus_clip_is_converted_here_under_its_original_name(tmp_path, ytdlp):
+    tools = FakeTools(ytdlp, probe=_probe(vcodec="vp9", acodec="opus"))
+    deps, fleet = _deps_with_tools(tmp_path, ytdlp, tools)
+    phases: list = []
+    real_set = ex.DownloadJob._set
+
+    def spy(self, **fields):
+        real_set(self, **fields)
+        phases.append(self.snapshot()["phase"])
+
+    ex.DownloadJob._set = spy
+    try:
+        job = run_job(deps)
+    finally:
+        ex.DownloadJob._set = real_set
+
+    outdir = outdir_for(tmp_path)
+    clip = outdir / f"Some Channel - A clip [{VID1}].mp4"
+    # the SAME name the download had (§5: one spelling), the converted bytes
+    assert clip.read_bytes() == b"converted bytes"
+    assert not list(outdir.glob("*.editready.*")) and not list(outdir.glob("*.original.*"))
+    (conv,) = tools.named("ffmpeg")
+    argv, timeout = conv[1], conv[2]
+    assert argv[argv.index("-i") + 1] == str(clip)
+    assert argv[-1] == str(outdir / f"Some Channel - A clip [{VID1}].editready.mp4")
+    assert "libx264" in argv and argv[argv.index("-c:a") + 1] == "aac"
+    assert timeout == ex.CONVERT_TIMEOUT_SECONDS
+    # ffmpeg was the SPAWNED process for the lease's kill handle: the runner
+    # was called through the seam, which is what _register_proc hangs off
+    assert fleet.state_sequence == [(VID1, "downloading"), (VID1, "done")]
+    assert fleet.body_for(VID1, "done")["filepath_rel"] == clip.name
+    assert fleet.body_for(VID1, "done")["note"] is None
+    # the sidecar sits beside the delivered name, not a vanished .editready
+    assert Path(ytdl_common.sidecar_path(str(clip))).is_file()
+    # the tray saw the conversion, and the clip ended back in "downloading"
+    assert "converting" in phases
+    assert (job.done, job.failed) == (1, 0)
+
+
+def test_a_conversion_the_probe_asked_for_that_fails_fails_the_clip(tmp_path, ytdlp):
+    tools = FakeTools(ytdlp, probe=_probe(vcodec="vp9"), ffmpeg_rc=1)
+    deps, fleet = _deps_with_tools(tmp_path, ytdlp, tools)
+
+    job = run_job(deps)
+
+    outdir = outdir_for(tmp_path)
+    assert fleet.state_sequence == [(VID1, "downloading"), (VID1, "failed")]
+    error = fleet.body_for(VID1, "failed")["error"]
+    assert error.startswith("Edit-ready conversion failed: ")
+    assert "libx264 said no" in error
+    # the undecodable download is DISOWNED, not delivered and not left under
+    # the [id] name the dedupe scan reads (YTDL-3); the half-written
+    # .editready is gone
+    assert not (outdir / f"Some Channel - A clip [{VID1}].mp4").exists()
+    assert [p.name for p in outdir.glob("*.failed")] == [
+        f"Some Channel - A clip [{VID1}].mp4.failed"]
+    assert not list(outdir.glob("*.editready.*"))
+    assert (job.done, job.failed) == (0, 1)
+
+
+def test_a_failed_probe_converts_on_suspicion_and_forgives_a_failed_conversion(
+        tmp_path, ytdlp):
+    # the vendored YTDL-22 rule, both halves: ffprobe broke -> convert both
+    # streams anyway; that conversion failed -> keep what we have, with a note
+    tools = FakeTools(ytdlp, probe_rc=1, ffmpeg_rc=1)
+    deps, fleet = _deps_with_tools(tmp_path, ytdlp, tools)
+
+    job = run_job(deps)
+
+    (conv,) = tools.named("ffmpeg")
+    assert "libx264" in conv[1] and "aac" in conv[1]
+    clip = outdir_for(tmp_path) / f"Some Channel - A clip [{VID1}].mp4"
+    assert clip.read_bytes() == b"video bytes"
+    assert fleet.state_sequence == [(VID1, "downloading"), (VID1, "done")]
+    assert fleet.body_for(VID1, "done")["note"] == (
+        "could not probe the codecs and the safety conversion failed; kept as downloaded")
+    assert (job.done, job.failed) == (1, 0)
+
+
+def test_a_conversion_note_joins_the_truncation_note(tmp_path, ytdlp):
+    # a clip that fell a rung AND had its original moved aside: both facts
+    # reach the ledger, in one note
+    tools = FakeTools(ytdlp, probe=_probe(vcodec="vp9"))
+    deps, fleet = _deps_with_tools(tmp_path, ytdlp, tools)
+    real_replace = os.replace
+    once = {"done": False}
+
+    def locked_once(src, dst):
+        if not once["done"] and str(src).endswith(".editready.mp4"):
+            once["done"] = True
+            raise PermissionError("Access is denied")
+        return real_replace(src, dst)
+
+    ex.os.replace = locked_once
+    try:
+        run_job(deps)
+    finally:
+        ex.os.replace = real_replace
+
+    outdir = outdir_for(tmp_path)
+    clip = outdir / f"Some Channel - A clip [{VID1}].mp4"
+    assert clip.read_bytes() == b"converted bytes"
+    assert (outdir / f"Some Channel - A clip [{VID1}].original.mp4").read_bytes() == b"video bytes"
+    assert fleet.body_for(VID1, "done")["note"] == (
+        f"original was in use, kept as Some Channel - A clip [{VID1}].original.mp4")
+
+
+def test_no_ffprobe_means_delivered_unchecked_never_re_encoded(tmp_path, ytdlp,
+                                                               monkeypatch, caplog):
+    # The one deviation from the vendored rule: a machine with ffmpeg but no
+    # ffprobe beside it keeps its clip as downloaded. "Convert on suspicion"
+    # here would be a full re-encode of EVERY clip on an editor's laptop.
+    tools = FakeTools(ytdlp, probe=_probe(vcodec="vp9"))
+    fleet = FakeFleet(manifest_for())
+    ytdlp.plan({"default": {"attempts": [{}]}})
+    deps = make_deps(tmp_path, fleet=fleet, ytdlp=ytdlp)
+    deps.run = tools
+    assert not Path(fake_ffmpeg(tmp_path)).with_name("ffprobe.exe").exists()
+    assert not Path(fake_ffmpeg(tmp_path)).with_name("ffprobe").exists()
+    monkeypatch.setattr(ex.shutil, "which", lambda name: None)
+
+    with caplog.at_level(logging.WARNING, logger="ccsync.ytdl"):
+        job = run_job(deps)
+
+    assert tools.calls == []
+    clip = outdir_for(tmp_path) / f"Some Channel - A clip [{VID1}].mp4"
+    assert clip.read_bytes() == b"video bytes"
+    assert fleet.state_sequence == [(VID1, "downloading"), (VID1, "done")]
+    assert (job.done, job.failed) == (1, 0)
+    assert any("no ffprobe" in r.getMessage() for r in caplog.records)
+
+
+def test_a_lost_lease_during_conversion_ends_the_clip_quietly(tmp_path, ytdlp):
+    # the 410 lands on the `downloading` post of the NEXT clip in the other
+    # tests; here it is a lease lost while ffmpeg runs -- the tmp is cleaned,
+    # nothing is posted for the clip, the job stops
+    tools = FakeTools(ytdlp, probe=_probe(vcodec="vp9"))
+    deps, fleet = _deps_with_tools(tmp_path, ytdlp, tools, clips=[
+        {"video_id": VID1, "url": watch(VID1)},
+        {"video_id": VID2, "url": watch(VID2)},
+    ])
+    job_ref: dict = {}
+    real_call = tools.__call__
+
+    def losing(argv, timeout, on_spawn=None, on_line=None):
+        result = real_call(argv, timeout, on_spawn, on_line)
+        if os.path.basename(str(argv[0])).lower().startswith("ffmpeg"):
+            job_ref["job"]._lease_lost.set()
+        return result
+
+    deps.run = losing
+    job = ex.DownloadJob(7, deps)
+    job_ref["job"] = job
+    job.run()
+
+    outdir = outdir_for(tmp_path)
+    assert not list(outdir.glob("*.editready.*"))
+    assert fleet.state_sequence == [(VID1, "downloading")]
+    assert (job.done, job.failed) == (0, 0)
+
+
+def test_the_snapshot_carries_the_phase(tmp_path):
+    job = ex.DownloadJob(7, make_deps(tmp_path))
+    assert job.snapshot()["phase"] is None
+    job._set(phase="converting")
+    assert job.snapshot()["phase"] == "converting"

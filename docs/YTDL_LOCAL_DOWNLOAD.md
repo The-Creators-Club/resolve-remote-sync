@@ -72,10 +72,16 @@ code site:
 - The sidecar is **8 fields**, not 9 (§5 was written from memory; the vendored
   writer is the authority — `ytdl_common.SIDECAR_FIELDS`, pinned against it).
 - The local executor runs **only the h264-representable rungs** (480p/720p/
-  1080p — `ytdl_executor.SCOPE_QUALITIES`). `best`/2160p/1440p/audio need
-  `ensure_edit_ready`'s transcode (whose `.editready.mp4` NAME the executor
-  cannot reproduce) and stay server-side; an out-of-scope claim is handed back
-  by letting the lease expire.
+  1080p — `ytdl_executor.SCOPE_QUALITIES`); `best`/2160p/1440p/audio stay
+  server-side and an out-of-scope claim is handed back by letting the lease
+  expire. The reason changed on 2026-08-25 (CR-79): the "`.editready.mp4`
+  name the executor cannot reproduce" argument was a misreading of
+  `_swap_in`, which replaces the download under its ORIGINAL name. The
+  companion now runs `ensure_edit_ready`'s probe-and-convert itself
+  (`DownloadJob._ensure_edit_ready`: same decision, same ffmpeg command,
+  same swap-in, pinned equal in `server/tests/test_cross_component.py`), so
+  what keeps the higher rungs on the server is only that every one of them
+  is a full 4K VP9/AV1 → H.264 re-encode on the editor's machine.
 - There is **no release endpoint**: every early-out (scope, label, template
   skew) ends by stopping the heartbeat and letting the ≤180 s lease expire —
   one reclaim path instead of a second endpoint whose failure mode is a job

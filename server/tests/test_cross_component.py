@@ -20,6 +20,7 @@ import re
 import sys
 from pathlib import Path
 
+import subprocess
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1132,3 +1133,110 @@ def test_restricted_ignore_lines_start_with_the_exact_stignore_prefix():
     # (the companion's list is a superset: its .ccsync-tmp pair is editor-
     # side only, same relationship the missing-lines check builds on)
     assert set(dash_provision.build_stignore_lines()) <= set(base)
+
+
+# -- the local edit-ready conversion is the server's (CR-79, 2026-08-25) ------
+# The companion now ffprobes every locally-downloaded clip and converts what
+# Resolve could not decode ON THE EDITOR'S MACHINE, with what has to be the
+# vendored downloader's exact decision and exact ffmpeg command: a clip
+# converted by an editor and the same clip converted by the NAS must be the
+# same file. vendor/downloader.py imports only the stdlib at module level (yt_dlp
+# is lazy inside it), so it loads by path like ytdl_common, and its
+# ensure_edit_ready is driven with its two subprocess seams patched out.
+
+server_downloader = _load_by_path("ytdlweb_vendor_downloader_under_test",
+                                  YTDLWEB_DOWNLOADER_SRC)
+
+
+def _drive_vendored(monkeypatch, tmp_path, probe: dict, convert_ok=True):
+    """Run the vendored ensure_edit_ready on a real file with `probe` as
+    ffprobe's answer; -> (the ffmpeg cmd it ran or None, the path it returned)."""
+    original = tmp_path / "Chan - Title [abcdefghijk].mp4"
+    original.write_bytes(b"downloaded")
+    ran: list = []
+
+    def fake_run(cmd, **_kw):
+        ran.append(list(cmd))
+        if convert_ok:
+            Path(cmd[-1]).write_bytes(b"converted")
+        return subprocess.CompletedProcess(cmd, 0 if convert_ok else 1, "", "ffmpeg said no")
+
+    monkeypatch.setattr(server_downloader, "probe_streams", lambda *_a, **_k: dict(probe))
+    monkeypatch.setattr(server_downloader.subprocess, "run", fake_run)
+    result = server_downloader.ensure_edit_ready(str(original), edit_codec="h264",
+                                                 ffmpeg_location=None)
+    return (ran[0] if ran else None), result, original
+
+
+VP9_OPUS = {"streams": [
+    {"codec_type": "video", "codec_name": "vp9", "r_frame_rate": "30/1",
+     "avg_frame_rate": "30/1", "color_primaries": "bt709",
+     "color_transfer": "bt709", "color_space": "bt709", "color_range": "tv"},
+    {"codec_type": "audio", "codec_name": "opus"},
+]}
+H264_VFR = {"streams": [
+    {"codec_type": "video", "codec_name": "h264", "r_frame_rate": "30/1",
+     "avg_frame_rate": "25/1"},
+    {"codec_type": "audio", "codec_name": "aac"},
+]}
+H264_AAC = {"streams": [
+    {"codec_type": "video", "codec_name": "h264", "r_frame_rate": "30000/1001",
+     "avg_frame_rate": "2997/100"},
+    {"codec_type": "audio", "codec_name": "aac"},
+]}
+AV1_AAC = {"streams": [
+    {"codec_type": "video", "codec_name": "av1", "r_frame_rate": "24/1",
+     "avg_frame_rate": "24/1", "color_primaries": "unknown"},
+    {"codec_type": "audio", "codec_name": "aac"},
+]}
+PROBE_FAILED = {"_probe_error": "ffprobe exited 1"}
+
+
+@pytest.mark.parametrize("probe", [VP9_OPUS, H264_VFR, AV1_AAC, PROBE_FAILED],
+                         ids=["vp9+opus", "h264-vfr", "av1+aac", "probe-failed"])
+def test_the_companion_runs_the_vendored_ffmpeg_command(monkeypatch, tmp_path, probe):
+    cmd, delivered, original = _drive_vendored(monkeypatch, tmp_path, probe)
+    assert cmd is not None, "the vendored side did not convert this probe"
+    plan = companion_ytdl_exec.edit_ready_plan(probe)
+    assert plan["convert"] is True
+    tmp = tmp_path / companion_ytdl_exec.editready_name(original.name)
+    ours = companion_ytdl_exec.edit_ready_argv(cmd[0], original, tmp, plan)
+    assert ours == cmd
+    # and both deliver under the ORIGINAL name -- the fact the 0.8.0 scope cut
+    # misread as an unreproducible `.editready` deliverable
+    assert delivered == str(original)
+
+
+def test_the_companion_leaves_alone_what_the_vendored_side_leaves_alone(
+        monkeypatch, tmp_path):
+    cmd, delivered, original = _drive_vendored(monkeypatch, tmp_path, H264_AAC)
+    assert cmd is None and delivered == str(original)
+    assert companion_ytdl_exec.edit_ready_plan(H264_AAC)["convert"] is False
+    # an audio-only download, both sides
+    audio_only = {"streams": [{"codec_type": "audio", "codec_name": "opus"}]}
+    cmd, delivered, original = _drive_vendored(monkeypatch, tmp_path, audio_only)
+    assert cmd is None
+    assert companion_ytdl_exec.edit_ready_plan(audio_only)["convert"] is False
+
+
+def test_the_edit_safe_codec_sets_and_the_rate_rule_agree():
+    assert companion_ytdl_exec.EDIT_SAFE_VCODECS == frozenset(server_downloader.EDIT_SAFE_VCODECS)
+    assert companion_ytdl_exec.EDIT_SAFE_ACODECS == frozenset(server_downloader.EDIT_SAFE_ACODECS)
+    for a, b in [("24000/1001", "24/1"), ("30000/1001", "2997/100"), ("25/1", "20/1"),
+                 ("0/0", "24/1"), ("junk", "24/1"), (None, None), ("60/1", "59/1")]:
+        assert companion_ytdl_exec._same_rate(a, b) == server_downloader._same_rate(a, b), (a, b)
+    video = {"color_primaries": "bt2020", "color_transfer": "unknown",
+             "color_space": "bt2020nc", "color_range": "pc"}
+    assert companion_ytdl_exec._color_args(video) == server_downloader._color_args(video)
+
+
+def test_the_companion_forgives_a_failed_conversion_only_when_the_probe_failed(
+        monkeypatch, tmp_path):
+    # vendored: a failed conversion after a failed probe returns the original;
+    # after a probe that ASKED for it, it raises. The companion's two outcomes
+    # (note vs error) are the same fork -- pinned on the vendored behaviour.
+    _cmd, delivered, original = _drive_vendored(monkeypatch, tmp_path, PROBE_FAILED,
+                                                convert_ok=False)
+    assert delivered == str(original)
+    with pytest.raises(RuntimeError, match="Edit-ready conversion failed"):
+        _drive_vendored(monkeypatch, tmp_path, VP9_OPUS, convert_ok=False)

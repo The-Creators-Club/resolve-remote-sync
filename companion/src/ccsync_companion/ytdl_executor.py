@@ -36,11 +36,13 @@ Rules that are not negotiable here:
     machine that downloads the way the whole fleet did before this existed.
 
 Scope cut, deliberate and documented (see SCOPE_QUALITIES): only 480p/720p/
-1080p are executed locally. Everything above them -- and `audio` -- needs
-vendor/downloader.py's ensure_edit_ready transcode machinery, whose output
-lands under a DIFFERENT NAME (`<stem>.editready.mp4`) that this executor
-cannot reproduce, and half the fleet spelling a clip differently is the one
-failure this feature must not have. Those jobs are handed back to the server.
+1080p are executed locally. Since CR-79 (2026-08-25) a clip that lands here
+is ffprobed and, when it is not H.264/AAC/CFR, converted ON THIS MACHINE with
+the vendored downloader's own ffmpeg command and swap-in rule
+(ensure_edit_ready -> `_ensure_edit_ready`), so the naming objection the
+0.8.0 cut rested on is gone: the converted file takes the ORIGINAL name, and
+`.editready` was only ever the locked-file fallback. The rungs above 1080p
+stay server-side for a different reason now, a CPU one (SCOPE_QUALITIES).
 
 Added 2026-08-14 (companion 0.8.0).
 """
@@ -60,6 +62,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -83,13 +86,18 @@ log = logging.getLogger("ccsync.ytdl")
 # moved the ytdl mount is one edit.
 API_PREFIX = "/ytdl/api"
 
-# What this executor will run itself. The rungs above 1080p and `audio` are
-# NOT a capability gap in yt-dlp -- they are a NAMING one: YouTube serves
-# nothing above 1080p as AVC, so the server converts those to h264 and the
-# deliverable is `<stem>.editready.mp4` (worker._swap_in), a name built by
-# machinery that lives in the vendored downloader and cannot be reproduced
-# from the CLI. Downloading them here would put a second spelling of the clip
-# in the tree, which is the exact failure §5 exists to prevent.
+# What this executor will run itself. Until CR-79 (2026-08-25) the reason
+# given for stopping at 1080p was a NAMING one -- "the server's converted
+# deliverable is `<stem>.editready.mp4`, which the CLI cannot reproduce" --
+# and that was a misreading of vendor/downloader._swap_in: the converted file
+# REPLACES the download under its original name, and `.editready` survives
+# only when Windows holds the original open. This executor now runs the same
+# probe-and-convert (`_ensure_edit_ready`), so nothing here is unreproducible
+# any more. What still keeps 1440p/2160p/`best`/`audio` on the server is
+# cost: YouTube serves nothing above 1080p as AVC, so every one of those is a
+# guaranteed full libx264 re-encode of a 4K VP9/AV1 stream on an editor's
+# laptop, minutes to hours at 100% CPU while they edit. Widening this tuple
+# is the whole change if the owner wants it; the machinery is in place.
 SCOPE_QUALITIES = ("480p", "720p", "1080p")
 
 # yt-dlp's own in-flight litter, matched as a SUFFIX. Worker parity
@@ -1203,6 +1211,223 @@ def disown_output(outdir: Any, video_id: str, before: set) -> None:
                         path, exc, video_id)
 
 
+# ---------------------------------------------------------------------------
+# edit-ready: probe the landed clip, convert it here if Resolve could not
+# decode it (CR-79, 2026-08-25)
+# ---------------------------------------------------------------------------
+#
+# Everything in this section is vendor/downloader.py's ensure_edit_ready,
+# probe_streams, _same_rate, _color_args and _swap_in, split into pure pieces
+# so each can be run through this executor's seams (deps.run, the kill handle,
+# the tray's progress mirror) and pinned against the vendored original by
+# server/tests/test_cross_component.py. The DECISION (which codecs are fine,
+# what counts as VFR, what a failed probe means) and the ffmpeg command must
+# stay byte-for-byte the server's: a clip converted here and the same clip
+# converted on the NAS have to be the same file, or §5's "two spellings of one
+# clip" comes back as two ENCODINGS of one clip.
+#
+# Why it exists: measured 2026-08-25, `player_client=web_safari` (CR-39)
+# serves muxed HLS only, so all three AVC-constrained alternatives in
+# ytdl_common.format_selector are unsatisfiable and yt-dlp takes the last,
+# codec-unconstrained `best[height<=1080]`. That is H.264/AAC today because
+# YouTube's HLS ladder is all AVC -- but nothing on this side checked, while
+# the server ffprobes every clip. The day YouTube puts VP9 into that ladder,
+# a local download would land undecodable and silent.
+
+EDIT_SAFE_VCODECS = frozenset({"h264"})
+EDIT_SAFE_ACODECS = frozenset({"aac"})
+
+# _swap_in's two names. `.editready` is the converted file while ffmpeg
+# writes it and the DELIVERABLE only when the original cannot be replaced or
+# even renamed (Windows, clip open in Resolve); `.original` is where a locked
+# original is moved aside so the converted file can take its name.
+EDITREADY_SUFFIX = ".editready"
+ORIGINAL_SUFFIX = ".original"
+
+# ffprobe reads headers; ffmpeg re-encodes a whole clip. The conversion budget
+# is above CLIP_TIMEOUT_SECONDS because libx264 at crf 18 on a laptop runs
+# below real time on 1080p, and a two-hour clip is a legitimate download.
+# Bounded at all for the lease's reason: the heartbeat thread keeps renewing
+# while this runs, so an ffmpeg that hung would hold the job forever.
+PROBE_TIMEOUT_SECONDS = 120.0
+CONVERT_TIMEOUT_SECONDS = 3 * 3600.0
+
+
+def probe_argv(ffprobe: str, path: Any) -> list:
+    """probe_streams's command line, verbatim."""
+    return [str(ffprobe), "-v", "error", "-print_format", "json",
+            "-show_streams", str(path)]
+
+
+def parse_probe(proc: Any) -> dict:
+    """probe_streams's reading of ffprobe's answer.
+
+    YTDL-22 (2026-08-11): a failure is `{"_probe_error": why}`, never `{}` --
+    an empty dict reads as "no video stream, nothing to fix", which is how a
+    container with no ffprobe once delivered every VP9 download unconverted.
+    """
+    rc = getattr(proc, "returncode", 1)
+    if rc != 0:
+        err = str(getattr(proc, "stderr", "") or "").strip()[-300:]
+        return {"_probe_error": err or f"ffprobe exited {rc}"}
+    try:
+        return json.loads(str(getattr(proc, "stdout", "") or "") or "{}")
+    except ValueError as exc:
+        return {"_probe_error": f"unparseable ffprobe output: {exc}"}
+
+
+def _same_rate(a: Any, b: Any, tol: float = 0.01) -> bool:
+    """Are ffprobe's two frame-rate fields the same rate? (vendored verbatim)
+
+    YTDL-23 (2026-08-11): compared as numbers, not as the raw strings ffprobe
+    prints. `24000/1001` vs `24/1` and `30000/1001` vs `2997/100` are the same
+    rate written differently; string-comparing them read as VFR and triggered
+    a full libx264 re-encode. An unreadable or absent rate counts as "same".
+    """
+    try:
+        fa, fb = Fraction(str(a)), Fraction(str(b))
+    except (TypeError, ValueError, ZeroDivisionError):
+        return True
+    if fa == fb:
+        return True
+    if fa <= 0 or fb <= 0:
+        return True
+    return abs(float(fa) - float(fb)) <= tol * max(float(fa), float(fb))
+
+
+def _color_args(v: dict) -> list:
+    """Carry the source's colour tags across a re-encode. (vendored verbatim)"""
+    args: list = []
+    for flag, key in (("-color_primaries", "color_primaries"),
+                      ("-color_trc", "color_transfer"),
+                      ("-colorspace", "color_space")):
+        val = v.get(key)
+        if val and val != "unknown":
+            args += [flag, val]
+    if v.get("color_range") in ("tv", "pc"):
+        args += ["-color_range", v["color_range"]]
+    return args
+
+
+def edit_ready_plan(probe: dict) -> dict:
+    """ensure_edit_ready's decision for edit_codec="h264", as data.
+
+    -> {"convert": bool, "need_v": bool, "need_a": bool, "probe_failed": bool,
+        "vcodec": str|None, "acodec": str|None, "video": dict}
+
+    An audio-only file (a video stream absent from a probe that WORKED) needs
+    nothing. A probe that failed converts both streams on suspicion -- the
+    vendored rule -- and `_ensure_edit_ready` is where a failed conversion of
+    a suspicion is forgiven.
+    """
+    probe = probe if isinstance(probe, dict) else {}
+    probe_failed = bool(probe.get("_probe_error"))
+    streams = probe.get("streams") or []
+    video = next((s for s in streams if isinstance(s, dict)
+                  and s.get("codec_type") == "video"), None)
+    audio = next((s for s in streams if isinstance(s, dict)
+                  and s.get("codec_type") == "audio"), None)
+    plan = {"convert": False, "need_v": False, "need_a": False,
+            "probe_failed": probe_failed, "vcodec": None, "acodec": None,
+            "video": video or {}}
+    if video is None and not probe_failed:
+        return plan
+    vcodec = video.get("codec_name") if video else None
+    acodec = audio.get("codec_name") if audio else None
+    vfr = bool(video) and not _same_rate(video.get("avg_frame_rate"),
+                                         video.get("r_frame_rate"))
+    need_v = probe_failed or vcodec not in EDIT_SAFE_VCODECS or vfr
+    need_a = probe_failed or (audio is not None and acodec not in EDIT_SAFE_ACODECS)
+    plan.update(convert=bool(need_v or need_a), need_v=bool(need_v),
+                need_a=bool(need_a), vcodec=vcodec, acodec=acodec)
+    return plan
+
+
+def edit_ready_argv(ffmpeg: str, src: Any, tmp: Any, plan: dict) -> list:
+    """ensure_edit_ready's ffmpeg command for the h264 policy, verbatim.
+
+    Streams that are already fine are COPIED (`-c:v copy` / `-c:a copy`), so a
+    VP9-with-AAC download pays for the video only; `-map_metadata 0` and
+    `+use_metadata_tags` carry the embedded credits across.
+    """
+    video = plan.get("video") or {}
+    vargs = (["-c:v", "libx264", "-preset", "medium", "-crf", "18",
+              "-profile:v", "high", "-pix_fmt", "yuv420p", "-fps_mode", "cfr"]
+             + _color_args(video)) if plan.get("need_v") else ["-c:v", "copy"]
+    aargs = ["-c:a", "aac", "-b:a", "320k"] if plan.get("need_a") else ["-c:a", "copy"]
+    muxargs = ["-movflags", "+use_metadata_tags+faststart"]
+    return ([str(ffmpeg), "-y", "-hide_banner", "-loglevel", "error",
+             "-i", str(src), "-map", "0:v:0", "-map", "0:a:0?"]
+            + vargs + aargs + ["-map_metadata", "0"] + muxargs + [str(tmp)])
+
+
+def editready_name(name: str) -> str:
+    """`<stem>.editready.mp4` for a landed `<stem>.<ext>` (ensure_edit_ready's
+    `tmp`; the h264 policy's out_ext is always .mp4)."""
+    return str(Path(name).with_suffix("")) + EDITREADY_SUFFIX + ".mp4"
+
+
+def swap_in(tmp: Path, final: Path, original: Path) -> tuple[str, Optional[str]]:
+    """_swap_in, verbatim in effect: -> (name delivered, note or None).
+
+    Windows refuses to overwrite or delete a file another process holds open
+    -- a clip already in an open Resolve project fails os.replace() with
+    "Access is denied". A plain rename of the locked file IS allowed, so the
+    original is moved aside to `.original` instead of deleted; and if even
+    that fails, the converted file stays under its own `.editready` name
+    rather than the work being thrown away. The note is what on_status said.
+    """
+    same = os.path.abspath(str(final)) == os.path.abspath(str(original))
+    try:
+        if not same:
+            os.remove(original)
+        os.replace(tmp, final)
+        return final.name, None
+    except OSError:
+        pass
+    aside = Path(str(original.with_suffix("")) + ORIGINAL_SUFFIX + original.suffix)
+    try:
+        os.replace(original, aside)
+        os.replace(tmp, final)
+    except OSError:
+        return tmp.name, (f"converted, but could not replace {original.name}: "
+                          f"saved as {tmp.name}")
+    return final.name, f"original was in use, kept as {aside.name}"
+
+
+def _configured_ffmpeg(cfg: dict[str, Any]) -> str:
+    return str((cfg or {}).get("ffmpeg_path",
+                               config_mod.DEFAULTS.get("ffmpeg_path", "ffmpeg")) or "")
+
+
+def _ffprobe_binary(cfg: dict[str, Any]) -> Optional[str]:
+    """This machine's ffprobe, or None when there is none to run.
+
+    ffmpeg_tools.ffprobe_for answers the SIBLING of the resolved ffmpeg and
+    falls back to the bare name; the bare name is only worth anything when
+    PATH has it. None -- rather than the vendored "convert on suspicion" -- is
+    the one deliberate deviation from ensure_edit_ready, because on this side
+    the cost of that suspicion is a needless full re-encode of EVERY clip on
+    an editor's laptop, not a container CPU. The sidecar installs ffprobe
+    beside ffmpeg (sidecar_tools.TOOLS), so None is a machine somebody set up
+    by hand, and it is logged as such.
+    """
+    try:
+        candidate = ffmpeg_tools.ffprobe_for(_configured_ffmpeg(cfg))
+    except Exception:
+        return None
+    if os.path.isabs(candidate) and os.path.exists(candidate):
+        return candidate
+    return shutil.which(candidate)
+
+
+def _ffmpeg_binary(cfg: dict[str, Any]) -> Optional[str]:
+    try:
+        return ffmpeg_tools._resolve_binary(_configured_ffmpeg(cfg))
+    except Exception:
+        return None
+
+
 def info_scratch_dir() -> Optional[Path]:
     """Where `--write-info-json` may write, OUTSIDE the canonical tree.
 
@@ -1398,6 +1623,10 @@ class DownloadJob:
         self.bytes_done: Optional[int] = None
         self.bytes_total: Optional[int] = None
         self.speed_bps: Optional[float] = None
+        # "downloading" while yt-dlp runs, "converting" while ffmpeg does
+        # (CR-79): the tray must not read a ten-minute re-encode as a stalled
+        # download. None between clips and before the first.
+        self.phase: Optional[str] = None
 
     # -- progress mirror --------------------------------------------------
     def snapshot(self) -> dict:
@@ -1411,7 +1640,8 @@ class DownloadJob:
                     "failed": self.failed, "total": self.total,
                     "bytes_done": self.bytes_done,
                     "bytes_total": self.bytes_total,
-                    "speed_bps": self.speed_bps}
+                    "speed_bps": self.speed_bps,
+                    "phase": self.phase}
 
     def _on_ytdlp_line(self, line: str) -> None:
         """One line of yt-dlp's stdout. Only the progress template's lines
@@ -1697,7 +1927,7 @@ class DownloadJob:
         # The previous clip's numbers must not sit under this clip's name
         # for the seconds before its first progress line.
         self._set(clip=video_id, bytes_done=None, bytes_total=None,
-                  speed_bps=None)
+                  speed_bps=None, phase="downloading")
         if not url_is_youtube(url):
             # Recorded as a failure rather than silently skipped: the row has to
             # say something, and the server's second-chance sweep is what gets
@@ -1741,6 +1971,19 @@ class DownloadJob:
                             "yt-dlp reported success but left no output file")
             return
 
+        # Resolve has to be able to decode it (CR-79). Same probe, same
+        # decision, same ffmpeg command as the server's ensure_edit_ready,
+        # run here instead of handing the clip back.
+        name, conv_note, conv_error = self._ensure_edit_ready(outdir, name, video_id)
+        if self._should_stop():
+            self._cleanup_current()
+            return
+        if conv_error:
+            self._fail_clip(outdir, video_id, before, conv_error)
+            return
+        if conv_note:
+            note = f"{note}; {conv_note}" if note else conv_note
+
         video_path = Path(outdir) / name
         # The scratch copy first (COMP-BROLL-1); the in-tree one is the fallback
         # for a yt-dlp that ignored the per-type output template.
@@ -1759,6 +2002,94 @@ class DownloadJob:
                                 channel=credits.get("channel"))
         self._set(done=self.done + 1)
         self._current = None
+
+    def _ensure_edit_ready(self, outdir: str, name: str,
+                           video_id: str) -> tuple[str, Optional[str], Optional[str]]:
+        """-> (name delivered, note or None, error or None).
+
+        ensure_edit_ready, on this machine, through this executor's seams:
+        deps.run for both subprocesses (windowless, sanitized env), the kill
+        handle so a lost lease ends a re-encode the way it ends a download,
+        and `phase` on the progress mirror so the tray says "Converting".
+
+        The three outcomes are the vendored ones. Fine as downloaded, or
+        converted and swapped in: the name (and a note when the swap had to
+        improvise). Conversion failed after the probe SAID it was needed: an
+        error, which _download_one turns into a failed clip -- the download
+        is still there and _fail_clip disowns it, so the server's sweep
+        starts over. Conversion failed after the probe merely FAILED: kept as
+        downloaded with a note, because losing the video over a guess is
+        worse than delivering it (YTDL-22).
+        """
+        src = Path(outdir) / name
+        ffprobe = _ffprobe_binary(self.deps.cfg)
+        if not ffprobe:
+            log.warning("ytdl: job %s clip %s: no ffprobe beside this machine's "
+                        "ffmpeg, so the clip is delivered as downloaded and "
+                        "unchecked (the sidecar normally installs one)",
+                        self.job_id, video_id)
+            return name, None, None
+        try:
+            proc = _call_run(self.deps.run, probe_argv(ffprobe, src),
+                             PROBE_TIMEOUT_SECONDS, self._register_proc, None)
+            probe = parse_probe(proc)
+        except subprocess.TimeoutExpired:
+            probe = {"_probe_error": "ffprobe did not answer in time"}
+        except Exception as exc:  # noqa: BLE001
+            probe = {"_probe_error": f"{type(exc).__name__}: {exc}"}
+        finally:
+            with self._lock:
+                self._proc = None
+        if self._should_stop():
+            return name, None, None
+        plan = edit_ready_plan(probe)
+        if not plan["convert"]:
+            return name, None, None
+
+        ffmpeg = _ffmpeg_binary(self.deps.cfg)
+        was = (plan["vcodec"] or "unprobeable") + (f"/{plan['acodec']}" if plan["acodec"] else "")
+        if not ffmpeg:
+            # capabilities() refused the job without ffmpeg, so this is a
+            # binary that vanished mid-job. The vendored FileNotFoundError
+            # branch: keep what we have.
+            log.warning("ytdl: job %s clip %s needs converting (was %s) but "
+                        "ffmpeg is gone; kept as downloaded", self.job_id, video_id, was)
+            return name, "could not convert (no ffmpeg); kept as downloaded", None
+        tmp = Path(outdir) / editready_name(name)
+        self._set(phase="converting", bytes_done=None, bytes_total=None, speed_bps=None)
+        log.info("ytdl: job %s clip %s: converting to H.264 (was %s)",
+                 self.job_id, video_id, was)
+        argv = edit_ready_argv(ffmpeg, src, tmp, plan)
+        rc, stderr = 1, ""
+        try:
+            proc = _call_run(self.deps.run, argv, CONVERT_TIMEOUT_SECONDS,
+                             self._register_proc, None)
+            rc = int(getattr(proc, "returncode", 1) or 0)
+            stderr = str(getattr(proc, "stderr", "") or "")
+        except subprocess.TimeoutExpired:
+            stderr = (f"ffmpeg did not finish within "
+                      f"{CONVERT_TIMEOUT_SECONDS / 3600:.0f}h and was killed")
+        except Exception as exc:  # noqa: BLE001
+            stderr = f"ffmpeg could not be run: {exc}"
+        finally:
+            with self._lock:
+                self._proc = None
+            self._set(phase="downloading")
+        if self._should_stop() or rc != 0 or not tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            if self._should_stop():
+                return name, None, None
+            if plan["probe_failed"]:
+                return name, ("could not probe the codecs and the safety "
+                              "conversion failed; kept as downloaded"), None
+            return name, None, ("Edit-ready conversion failed: "
+                                + stderr.strip()[-500:])
+        final = Path(outdir) / (str(Path(name).with_suffix("")) + ".mp4")
+        delivered, note = swap_in(tmp, final, src)
+        return delivered, note, None
 
     def _fail_clip(self, outdir: str, video_id: str, before: set,
                    error: str) -> None:

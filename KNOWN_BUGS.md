@@ -3016,6 +3016,86 @@ browser with no confirm(), is exactly the old behaviour: re-attach and the
 loud toast (which now names [ CANCEL SEARCH ]). Harness scenarios in
 `tests/test_static_app.py`. Needs a dashboard deploy.
 
+## Companion: a locally downloaded YouTube clip is checked and, if Resolve could not decode it, converted on the editor's machine (CR-79, 2026-08-25)
+
+### CR-79 - local YouTube downloads were never checked for a Resolve-decodable codec; the server's conversion did not run for them - FIXED in repo as companion 0.9.50, UNSHIPPED
+**Ask** (owner, 2026-08-25): "do videos downloaded locally on the companion
+still get properly remuxed into resolve-friendly format" and, on hearing the
+executor handed anything non-AVC back to the server: "surely the companion
+could just ffprobe and convert it itself if needed? No need to send back to
+the server."
+
+**Measured first** (base rig, companion 0.9.49's real `build_argv`, a 1080p
+test clip): the file that lands IS fine today - ISO MP4, `avc1` H.264 High
+yuv420p, AAC LC, CFR, credits tags embedded - i.e. exactly what the server's
+`ensure_edit_ready` passes through untouched. But it is fine by luck, not by
+design: `player_client=web_safari` (CR-39) serves muxed HLS only, so all
+three AVC-constrained `bestvideo+bestaudio` alternatives in
+`ytdl_common.format_selector` are unsatisfiable and yt-dlp takes the LAST,
+codec-unconstrained `best[height<=1080]` (format 96). YouTube's HLS ladder is
+all AVC today; the day it is not, a local download lands undecodable and
+silent, because `_download_one` posted `done` on whatever `landed_file`
+found. The server ffprobes every clip (`vendor/downloader.py`
+`ensure_edit_ready`, YTDL-22/23); the companion had no check at all.
+
+**The 0.8.0 scope cut was built on a misreading.** `SCOPE_QUALITIES` and
+the module header said the rungs above 1080p could not run locally because
+the server's converted deliverable is `<stem>.editready.mp4`, "a name the
+CLI cannot reproduce". `_swap_in` in fact REPLACES the download under its
+original name; `.editready` survives only when Windows holds the original
+open (clip in an open Resolve project), and `.original` is where a locked
+original is moved aside. Nothing about the name was ever unreproducible.
+
+**Fix (companion 0.9.50, `ytdl_executor.py`).** After `landed_file`, every
+clip goes through `DownloadJob._ensure_edit_ready`, which is the vendored
+`ensure_edit_ready` split into pure pieces and run through this executor's
+own seams:
+
+- `probe_argv` / `parse_probe` (probe_streams, incl. YTDL-22's "a failure
+  is never `{}`"), `_same_rate` and `_color_args` verbatim,
+  `edit_ready_plan` (the decision: h264/aac/CFR is fine; VP9/AV1/Opus or a
+  VFR stream re-encodes that stream and COPIES the other; a failed probe
+  converts both on suspicion), `edit_ready_argv` (the exact ffmpeg command:
+  libx264 medium crf 18 High yuv420p cfr + colour tags / aac 320k,
+  `-map_metadata 0`, `+use_metadata_tags+faststart`), `editready_name`,
+  `swap_in` (same-name replace, `.original` aside for a locked file,
+  `.editready` kept as a last resort, each with the vendored note).
+- Both subprocesses run through `deps.run` (windowless, sanitized env) and
+  register with the lease's kill handle, so a lost lease ends a re-encode
+  the way it ends a download; the tmp is removed on any non-success.
+  `PROBE_TIMEOUT_SECONDS` 120, `CONVERT_TIMEOUT_SECONDS` 3 h (a re-encode
+  of a two-hour clip on a laptop is legitimate; unbounded would hold the
+  lease forever).
+- The three outcomes are the vendored ones: fine or converted -> `done`
+  under the original name (a swap-in note joins the truncation note);
+  conversion failed after the probe asked for it -> the clip FAILS and the
+  download is disowned to `.failed` (so the server's second-chance sweep
+  starts over and the `[id]` dedupe never points at an undecodable file);
+  conversion failed after the probe merely failed -> kept as downloaded
+  with the note.
+- ONE deliberate deviation: no ffprobe beside ffmpeg (a hand-set-up
+  machine; the sidecar installs both) means "delivered unchecked", logged,
+  never "convert on suspicion" - on an editor's laptop that suspicion is a
+  full re-encode of every clip.
+- `phase` on the progress snapshot (`downloading` / `converting`);
+  `tray.ytdl_download_line` says `Converting YouTube clip 3/12 to H.264`
+  so a ten-minute re-encode does not read as a stalled download.
+- `SCOPE_QUALITIES` is unchanged at 480p/720p/1080p, now for the honest
+  reason: 1440p/2160p/`best` are a guaranteed full 4K VP9/AV1 -> H.264
+  re-encode on the editor's machine. Widening the tuple is the whole change
+  if the owner wants those rungs local too.
+
+Tests: `companion/tests/test_ytdl_executor.py` (the plan, the argv, the
+probe parser, the tmp name, `swap_in`'s three paths, end-to-end untouched /
+converted / failed-conversion / failed-probe / joined note / no-ffprobe /
+lease lost mid-conversion, the phase), `test_tray.py` (the sentence),
+`server/tests/test_cross_component.py` (the vendored `ensure_edit_ready`
+driven with its seams patched: the companion's command == the server's
+command for vp9+opus, h264-VFR, av1+aac and a failed probe; both leave
+h264/aac/CFR and audio-only alone; codec sets, rate rule and colour args
+agree; the forgive-only-a-guess fork). Needs a companion release on both
+platforms.
+
 ## Companion: the tray says how a local YouTube download is going, and fetches it six fragments at a time (CR-78, 2026-08-25)
 
 ### CR-78 - local YouTube downloads were invisible in the tray and crawled one HLS fragment at a time - FIXED, SHIPPED as companion 0.9.49 (CI builds on 2b29b54, vendor feed + studio channel current on both platforms, base rig upgraded 2026-08-25 11:24)

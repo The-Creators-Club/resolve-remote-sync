@@ -1751,6 +1751,9 @@ def ytdl_download_line(progress: Optional[dict]) -> Optional[str]:
         Downloading YouTube clip 3/12 (4.2 MB/s)        no total known (HLS)
         Downloading YouTube clip 3/12                   before the first update,
                                                         or merging
+        Converting YouTube clip 3/12 to H.264           ffmpeg re-encoding a
+                                                        clip Resolve could not
+                                                        decode (CR-79)
 
     The count is "which clip is in flight", one-based: done + failed + 1,
     capped at the total, because "3/12" is what the owner asked for and
@@ -1766,6 +1769,10 @@ def ytdl_download_line(progress: Optional[dict]) -> Optional[str]:
     if total <= 0:
         return "Downloading YouTube clips"
     current = min(done + 1, total)
+    if progress.get("phase") == "converting":
+        # A re-encode has no bytes-per-second worth showing, and reading it
+        # as a stalled download is the exact complaint CR-78 answered.
+        return f"Converting YouTube clip {current}/{total} to H.264"
     bits = []
     rate = _mb_per_s(progress.get("speed_bps"))
     if rate:

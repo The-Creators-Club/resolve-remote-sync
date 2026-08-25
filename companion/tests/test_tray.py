@@ -3141,6 +3141,20 @@ def test_the_download_line_leaves_out_what_it_does_not_know():
     assert ytdl_download_line(_dl(total=0, done=0)) == "Downloading YouTube clips"
 
 
+def test_a_conversion_in_flight_says_so_instead_of_looking_stalled():
+    from ccsync_companion.tray import ytdl_download_line
+
+    # CR-79: ffmpeg re-encoding a VP9 clip on this machine has no rate and no
+    # byte total; "Downloading 3/12" for ten minutes would read as stuck
+    assert ytdl_download_line(_dl(phase="converting", speed_bps=None, bytes_done=None,
+                                  bytes_total=None)) == "Converting YouTube clip 3/12 to H.264"
+    # stale numbers from the download do not leak into the sentence
+    assert ytdl_download_line(_dl(phase="converting")) == "Converting YouTube clip 3/12 to H.264"
+    assert ytdl_download_line(_dl(phase="downloading")) == "Downloading YouTube clip 3/12 (4.2 MB/s, 38%)"
+    assert ytdl_download_line(_dl(phase=None)) == "Downloading YouTube clip 3/12 (4.2 MB/s, 38%)"
+    assert "—" not in ytdl_download_line(_dl(phase="converting"))
+
+
 def test_no_download_is_no_line_and_junk_is_no_line():
     from ccsync_companion.tray import ytdl_download_line
 

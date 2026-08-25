@@ -104,7 +104,7 @@ log = logging.getLogger("ccsync.config")
 # what the dashboard's queue exclusion reads, so it sat in [ QUEUED ] under a
 # GETTING READY chip that could never clear. The tray icon is green on such a
 # machine too: "sync is off" is its correct permanent state, not a warning.
-VERSION = "0.9.49"
+VERSION = "0.9.50"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"

@@ -104,7 +104,7 @@ log = logging.getLogger("ccsync.config")
 # what the dashboard's queue exclusion reads, so it sat in [ QUEUED ] under a
 # GETTING READY chip that could never clear. The tray icon is green on such a
 # machine too: "sync is off" is its correct permanent state, not a warning.
-VERSION = "0.9.48"
+VERSION = "0.9.49"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -514,6 +514,13 @@ DEFAULTS: dict[str, Any] = {
     # downloads, exactly as before -- fine for public clips, and age-gated
     # ones fall back to the server (which has its own signed-in cookies).
     "ytdl_cookies_file": "",
+    # How many HLS/DASH fragments a local YouTube download fetches at once
+    # (yt-dlp -N; CR-74's server fix, applied to the companion 2026-08-25).
+    # web_safari serves HLS, and one fragment at a time runs at the pace
+    # YouTube gives one connection -- 3-4 MiB/s on a long clip against 53
+    # MiB/s with six in flight, measured. Bounded 1..16 by the executor; 1
+    # is the old behaviour.
+    "ytdl_fragment_jobs": 6,
     # False = leave Resolve's LUT directory alone. On by default: syncing the
     # shared LUT library to <local_root>/Assets/Luts accomplishes nothing on
     # its own, because Resolve reads LUTs from its own fixed directory and
@@ -1100,6 +1107,11 @@ ytdlp_path = ""
 # afterwards or the session rotates and the file goes stale. The tray's
 # "Sign in to YouTube (for downloads)…" writes this for you.
 ytdl_cookies_file = ""
+
+# How many pieces of a YouTube clip to fetch at once when THIS machine does the
+# download (yt-dlp -N). 6 is several times faster than 1 on a long clip; 1 is
+# the old one-at-a-time fetch. The companion keeps it between 1 and 16.
+ytdl_fragment_jobs = 6
 
 # The shared LUT library. LUTs sync to <local_root>/Assets/Luts like any other
 # asset, but Resolve only reads the LUT directories it has been told about, so

@@ -467,6 +467,11 @@ Sync interactions (all already in place, verified 2026-08-14):
   `mode_lock=server` before claim; usable when an editor is tethered/hotel
   -wifi'd). No global toggle — per-job is enough and self-documenting.
 - History rows show `download_host`.
+- Tray (companion 0.9.49, CR-78): a state line while this machine has a
+  download running, `Downloading YouTube clip 3/12 (4.2 MB/s, 38%)`, from
+  yt-dlp's own progress template streamed off stdout; the rate and percent
+  drop out when yt-dlp does not know them. `GET /ytdl/progress` carries the
+  same `bytes_done` / `bytes_total` / `speed_bps`.
 
 ## 10. Rollout
 

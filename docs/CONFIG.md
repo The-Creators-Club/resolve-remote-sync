@@ -618,7 +618,9 @@ depend on in §2.5b, because the one thing music ingest cannot work without
 `youtube_import_enabled` (true), `youtube_import_scan_interval` (60),
 `youtube_import_min_age_seconds` (120), `youtube_import_batch_limit`,
 `youtube_import_max_failures`, `ytdl_local_downloads` (true), `ytdlp_path`,
-`ytdl_cookies_file` (**S** — a cookie jar is a live sign-in).
+`ytdl_cookies_file` (**S** — a cookie jar is a live sign-in),
+`ytdl_fragment_jobs` (6 — HLS fragments in flight per local download, yt-dlp
+`-N`, bounded 1..16; 1 is the pre-0.9.49 one-at-a-time fetch).
 
 ### LUTs, stills, machine behaviour, loopback
 

@@ -38,6 +38,7 @@ from . import site as site_mod
 from . import ui_dispatch
 from . import upgrade as upgrade_mod
 from . import ytdl_cookies
+from . import ytdl_executor
 from . import ytdlp_manager
 from .sync.base import STATE_ERROR, STATE_PAUSED, STATE_SYNCING, LaneStatus
 
@@ -1730,6 +1731,57 @@ def _current_project_line(app: "CompanionApp") -> Optional[str]:
     return None
 
 
+def _mb_per_s(bps: Any) -> Optional[str]:
+    """bytes/s -> '4.2 MB/s' (decimal megabytes, what a browser's download
+    shelf shows), '0.3 MB/s' below a megabyte; None when yt-dlp said NA."""
+    try:
+        v = float(bps)
+    except (TypeError, ValueError):
+        return None
+    if v != v or v < 0:
+        return None
+    return f"{v / 1_000_000:.1f} MB/s"
+
+
+def ytdl_download_line(progress: Optional[dict]) -> Optional[str]:
+    """The state line for a local YouTube download, or None when there is
+    none running. `progress` is ytdl_executor.progress()'s dict.
+
+        Downloading YouTube clip 3/12 (4.2 MB/s, 38%)
+        Downloading YouTube clip 3/12 (4.2 MB/s)        no total known (HLS)
+        Downloading YouTube clip 3/12                   before the first update,
+                                                        or merging
+
+    The count is "which clip is in flight", one-based: done + failed + 1,
+    capped at the total, because "3/12" is what the owner asked for and
+    "2 done of 12" is a different sentence. No em dash (owner's rule).
+    """
+    if not isinstance(progress, dict) or not progress.get("running"):
+        return None
+    try:
+        total = int(progress.get("total") or 0)
+        done = int(progress.get("done") or 0) + int(progress.get("failed") or 0)
+    except (TypeError, ValueError):
+        return None
+    if total <= 0:
+        return "Downloading YouTube clips"
+    current = min(done + 1, total)
+    bits = []
+    rate = _mb_per_s(progress.get("speed_bps"))
+    if rate:
+        bits.append(rate)
+    try:
+        b_done = progress.get("bytes_done")
+        b_total = progress.get("bytes_total")
+        if b_done is not None and b_total:
+            pct = max(0, min(100, int(100 * float(b_done) / float(b_total))))
+            bits.append(f"{pct}%")
+    except (TypeError, ValueError, ZeroDivisionError):
+        pass
+    line = f"Downloading YouTube clip {current}/{total}"
+    return f"{line} ({', '.join(bits)})" if bits else line
+
+
 def resolve_bridge_line(state: Optional[dict]) -> Optional[str]:
     """One tray line for "is the Resolve bridge up, and has it EVER been?".
 
@@ -1839,6 +1891,13 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     # for one (see resolve_bridge.session_state / ui_state.menu_open).
     _get("resolve_line", lambda: resolve_bridge_line(
         (getattr(app, "resolve_bridge_state", None) or resolve_bridge.session_state)()
+    ), None)
+    # The YouTube download this machine is running, if any: a dict read
+    # under the executor's own lock, no I/O (2026-08-25, the owner: "when it
+    # is downloading a youtube clip it shows the information. Downloading:
+    # x/x (xx mb/s)").
+    _get("ytdl_line", lambda: ytdl_download_line(
+        (getattr(app, "ytdl_progress", None) or ytdl_executor.progress)()
     ), None)
     _get("setup_name", lambda: (getattr(app, "setup_project_available", None) or (lambda: None))(), None)
     _get("upgrade_info", lambda: (getattr(app, "upgrade_available", None) or (lambda: None))(), None)
@@ -1979,6 +2038,11 @@ def _menu_fingerprint(snap: dict) -> tuple:
         snap["problems"], snap.get("root_absent"),
         snap["sequencer_line"], snap["current_project_line"],
         snap.get("resolve_line"),
+        # The download line changes every update (the rate, the byte count)
+        # and on an otherwise-idle machine nothing else here moves while a
+        # clip comes down -- so without this the menu would show the same
+        # "3/12 (4.2 MB/s)" until something unrelated changed (UI-3's shape).
+        snap.get("ytdl_line"),
         snap["setup_name"], (snap["upgrade_info"] or {}).get("version"),
         snap["dashboard_url"], snap.get("ytdl_local_downloads"),
         # Their own entries: the sign-in item appears and disappears on the
@@ -2759,7 +2823,8 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
         for line in (_halt_line(guard), _breaker_line(guard),
                      _skipped_exists_line(guard),
                      snap["sequencer_line"], snap["current_project_line"],
-                     snap.get("resolve_line"), _trash_line(guard))
+                     snap.get("resolve_line"), snap.get("ytdl_line"),
+                     _trash_line(guard))
         if line
     ]
 

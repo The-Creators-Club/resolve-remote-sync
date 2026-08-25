@@ -157,6 +157,10 @@ for name in attempt.get("partials", []):
     with open(os.path.join(outdir, name.replace("{{stem}}", stem)), "w") as fh:
         fh.write("half a stream")
 
+for line in attempt.get("stdout_lines", []):
+    sys.stdout.write(line + "\n")
+    sys.stdout.flush()
+
 if attempt.get("exit"):
     sys.stderr.write(attempt.get("stderr", "yt-dlp failed"))
     sys.exit(attempt["exit"])
@@ -197,8 +201,16 @@ class FakeYtDlp:
         stubbed away. The only substitution is this interpreter in front of a
         .py "binary", which no OS runs directly; every other argument is the
         executor's own.
+
+        Deliberately the three-argument shape the seam has always had, so the
+        suite also proves a runner WITHOUT the progress keyword still works
+        (ex._call_run). run_fn_progress below is the one that forwards it.
         """
         return ex.default_run([sys.executable, *argv], timeout, on_spawn)
+
+    def run_fn_progress(self, argv, timeout, on_spawn=None, on_line=None):
+        return ex.default_run([sys.executable, *argv], timeout, on_spawn,
+                              on_line=on_line)
 
 
 @pytest.fixture
@@ -1544,7 +1556,9 @@ def test_progress_mirrors_the_running_job_then_the_last_one(tmp_path, ytdlp):
     deps = make_deps(tmp_path, fleet=fleet, ytdlp=ytdlp)
 
     assert ex.progress(7) == {"job_id": 7, "running": False, "clip": None,
-                              "done": 0, "failed": 0, "total": 0}
+                              "done": 0, "failed": 0, "total": 0,
+                              "bytes_done": None, "bytes_total": None,
+                              "speed_bps": None}
     ex.start(7, deps)
     _join_current()
 
@@ -1867,7 +1881,8 @@ def test_progress_over_http(live_server):
     client, _fleet, _deps = live_server
     status, body = client.get("/ytdl/progress?job_id=7")
     assert status == 200
-    assert set(body) == {"job_id", "running", "clip", "done", "failed", "total"}
+    assert set(body) == {"job_id", "running", "clip", "done", "failed", "total",
+                         "bytes_done", "bytes_total", "speed_bps"}
     # A junk job id is not a 400: this endpoint is a mirror the SPA may ignore.
     assert client.get("/ytdl/progress?job_id=abc")[0] == 200
 
@@ -2067,3 +2082,147 @@ def test_an_operator_can_override_the_client_without_a_release(tmp_path):
     argv = job.build_argv("https://www.youtube.com/watch?v=" + VID1,
                           str(tmp_path), "1080p")
     assert "--extractor-args" not in argv
+
+
+# -- the progress line and the fragment count (2026-08-25) -------------------
+# The owner: "when it is downloading a youtube clip it shows the information.
+# Downloading: x/x (xx mb/s). Right now it seems like the youtube downloads
+# are going very slowly". The first half is yt-dlp's progress template read
+# off stdout as it runs; the second is CR-74's -N applied to the companion.
+
+
+def test_the_argv_asks_for_a_machine_readable_progress_line(tmp_path):
+    job = ex.DownloadJob(7, ex.Deps(make_cfg(tmp_path)))
+    argv = job.build_argv("https://www.youtube.com/watch?v=" + VID1,
+                          str(tmp_path), "1080p")
+    assert "--no-progress" not in argv, "that is why the tray never said anything"
+    assert "--progress" in argv and "--newline" in argv
+    assert argv[argv.index("--progress-template") + 1] == ex.PROGRESS_TEMPLATE
+    assert ex.PROGRESS_TEMPLATE.startswith("download:" + ex.PROGRESS_PREFIX)
+    for field in ("downloaded_bytes", "total_bytes", "total_bytes_estimate", "speed"):
+        assert f"%(progress.{field})s" in ex.PROGRESS_TEMPLATE, field
+
+
+def test_the_argv_fetches_fragments_concurrently_and_the_knob_is_bounded(tmp_path):
+    """CR-74's measurement, on the server: 3-4 MiB/s one fragment at a time on
+    a long HLS clip, 53 MiB/s with six in flight. web_safari (CR-39) serves
+    HLS, so the editor's machine walked the same ladder the same slow way."""
+    cfg = make_cfg(tmp_path)
+    job = ex.DownloadJob(7, ex.Deps(cfg))
+    argv = job.build_argv("https://www.youtube.com/watch?v=" + VID1,
+                          str(tmp_path), "1080p")
+    assert argv[argv.index("-N") + 1] == "6"
+    assert ex.fragment_jobs(cfg) == 6
+    assert ex.fragment_jobs({}) == ex.DEFAULT_FRAGMENT_JOBS == 6
+    assert ex.fragment_jobs({"ytdl_fragment_jobs": 1}) == 1, "the old behaviour"
+    assert ex.fragment_jobs({"ytdl_fragment_jobs": 0}) == 1
+    assert ex.fragment_jobs({"ytdl_fragment_jobs": 400}) == ex.MAX_FRAGMENT_JOBS
+    assert ex.fragment_jobs({"ytdl_fragment_jobs": "lots"}) == 6, "junk is the default"
+    cfg["ytdl_fragment_jobs"] = 3
+    argv = ex.DownloadJob(7, ex.Deps(cfg)).build_argv(
+        "https://www.youtube.com/watch?v=" + VID1, str(tmp_path), "1080p")
+    assert argv[argv.index("-N") + 1] == "3"
+
+
+def test_the_progress_line_parses_and_everything_else_is_ignored():
+    P = ex.PROGRESS_PREFIX
+    assert ex.parse_progress_line(f"{P}\t1048576\t4194304\tNA\t2500000.5") == {
+        "bytes_done": 1048576, "bytes_total": 4194304, "speed_bps": 2500000.5}
+    # HLS: no exact total, yt-dlp's estimate stands in
+    assert ex.parse_progress_line(f"{P}\t10\tNA\t100\tNA") == {
+        "bytes_done": 10, "bytes_total": 100, "speed_bps": None}
+    # the first update, before yt-dlp knows anything
+    assert ex.parse_progress_line(f"{P}\tNA\tNA\tNA\tNA") == {
+        "bytes_done": None, "bytes_total": None, "speed_bps": None}
+    # yt-dlp talking to itself, junk, a short line, a negative: not progress
+    for junk in ("[download] Destination: x.mp4", "", None, f"{P}\t1\t2",
+                 "[Merger] Merging formats", "CCSYNC-PROGRESSX\t1\t2\t3\t4"):
+        assert ex.parse_progress_line(junk) is None, junk
+    assert ex.parse_progress_line(f"{P}\t-5\t2\t3\t-1") == {
+        "bytes_done": None, "bytes_total": 2, "speed_bps": None}
+
+
+def test_default_run_streams_stdout_lines_as_they_arrive_and_still_returns_them(tmp_path, ytdlp):
+    """The pump: each line reaches on_line while the process runs, and the
+    CompletedProcess still carries the whole stdout afterwards -- nothing that
+    read it before changes shape."""
+    ytdlp.plan({"default": {"attempts": [{"stdout_lines": ["one", "two", "three"]}]}})
+    seen = []
+    job = ex.DownloadJob(7, ex.Deps(make_cfg(tmp_path), ytdlp=None))
+    argv = [str(ytdlp.script), "-o", str(tmp_path / "%(title)s [%(id)s].%(ext)s"),
+            "https://www.youtube.com/watch?v=" + VID1]
+    proc = ex.default_run([sys.executable, *argv], 30, None, on_line=seen.append)
+    assert proc.returncode == 0
+    assert seen == ["one", "two", "three"]
+    assert proc.stdout.splitlines() == ["one", "two", "three"]
+    # ...and a callback that raises costs nothing
+    proc = ex.default_run([sys.executable, *argv], 30, None,
+                          on_line=lambda line: 1 / 0)
+    assert proc.returncode == 0 and proc.stdout.splitlines() == ["one", "two", "three"]
+    del job
+
+
+def test_a_runner_without_the_keyword_is_called_the_old_way():
+    calls = []
+
+    def three(argv, timeout, on_spawn=None):
+        calls.append(("three", argv, on_spawn))
+        return "ok"
+
+    def four(argv, timeout, on_spawn=None, on_line=None):
+        calls.append(("four", argv, on_spawn, on_line))
+        return "ok"
+
+    def star(argv, timeout, on_spawn=None, **kw):
+        calls.append(("star", kw))
+        return "ok"
+
+    cb = lambda line: None  # noqa: E731
+    assert ex._call_run(three, ["a"], 1.0, None, cb) == "ok"
+    assert ex._call_run(four, ["a"], 1.0, None, cb) == "ok"
+    assert ex._call_run(star, ["a"], 1.0, None, cb) == "ok"
+    assert calls[0] == ("three", ["a"], None)
+    assert calls[1] == ("four", ["a"], None, cb)
+    assert calls[2] == ("star", {"on_line": cb})
+    # no callback at all: the old call, whatever the runner takes
+    calls.clear()
+    ex._call_run(four, ["a"], 1.0, None, None)
+    assert calls == [("four", ["a"], None, None)]
+
+
+def test_the_progress_mirror_carries_the_rate_while_a_clip_downloads(tmp_path, ytdlp):
+    """End to end through the real default_run: the fake yt-dlp prints two
+    template lines, the job's snapshot ends up holding the LAST one's numbers
+    at the moment the file lands, and the next clip starts clean."""
+    P = ex.PROGRESS_PREFIX
+    ytdlp.plan({VID1: {"attempts": [{"stdout_lines": [
+        f"{P}\t1000\t4000\tNA\t500000",
+        f"{P}\t3000\t4000\tNA\t2500000",
+    ]}]}})
+    fleet = FakeFleet(manifest_for(clips=[
+        {"video_id": VID1, "url": watch(VID1)},
+        {"video_id": VID2, "url": watch(VID2)},
+    ]))
+    deps = make_deps(tmp_path, fleet=fleet, ytdlp=ytdlp)
+    deps.run = ytdlp.run_fn_progress
+    seen = []
+    real_set = ex.DownloadJob._set
+
+    def spy(self, **fields):
+        real_set(self, **fields)
+        seen.append(dict(self.snapshot()))
+
+    ex.DownloadJob._set = spy
+    try:
+        ex.start(7, deps)
+        _join_current()
+    finally:
+        ex.DownloadJob._set = real_set
+
+    mid = [s for s in seen if s["clip"] == VID1 and s["speed_bps"] == 2500000.0]
+    assert mid, [s for s in seen if s["clip"] == VID1]
+    assert (mid[0]["bytes_done"], mid[0]["bytes_total"]) == (3000, 4000)
+    # the second clip printed nothing, and must not inherit the first's rate
+    clean = [s for s in seen if s["clip"] == VID2][0]
+    assert (clean["bytes_done"], clean["bytes_total"], clean["speed_bps"]) == (None, None, None)
+    assert ex.progress(7)["done"] == 2

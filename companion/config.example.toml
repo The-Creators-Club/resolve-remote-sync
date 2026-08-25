@@ -533,6 +533,13 @@ ytdlp_path = ""
 # bundled; nothing to configure.
 ytdl_cookies_file = ""
 
+# How many pieces of a YouTube clip to fetch at once when THIS machine does the
+# download (yt-dlp -N). YouTube serves these downloads as HLS fragments, and one
+# at a time runs at whatever pace one connection gets: measured 3-4 MB/s on a
+# long clip against 50+ MB/s with six in flight. 1 is the old one-at-a-time
+# fetch; the companion keeps the value between 1 and 16.
+ytdl_fragment_jobs = 6
+
 # The shared LUT library. LUTs sync to <local_root>/Assets/Luts like any other
 # asset, but Resolve only reads the LUT directories it has been told about --
 # so the companion adds the library to Resolve's own supported list

@@ -3099,3 +3099,63 @@ def test_describe_slow_click_names_the_resolve_call(monkeypatch):
 
     monkeypatch.setattr(resolve_bridge, "bridge_activity", boom)
     assert "bridge unavailable" in tray_native._describe_slow_click(200, 1.0)
+
+
+# -- the YouTube download line (2026-08-25) ----------------------------------
+# The owner: "when it is downloading a youtube clip it shows the information.
+# Downloading: x/x (xx mb/s)". Built from ytdl_executor.progress()'s dict;
+# nothing here touches the executor.
+
+
+def _dl(**over):
+    base = {"job_id": 7, "running": True, "clip": "aaaaaaaaaaa", "done": 2,
+            "failed": 0, "total": 12, "bytes_done": 38_000_000,
+            "bytes_total": 100_000_000, "speed_bps": 4_200_000.0}
+    base.update(over)
+    return base
+
+
+def test_the_download_line_is_the_sentence_the_owner_asked_for():
+    from ccsync_companion.tray import ytdl_download_line
+
+    assert ytdl_download_line(_dl()) == "Downloading YouTube clip 3/12 (4.2 MB/s, 38%)"
+    # a failed clip still counts as "past": clip 4 is in flight
+    assert ytdl_download_line(_dl(done=2, failed=1)).startswith("Downloading YouTube clip 4/12")
+    # never 13/12 on the last clip's tail
+    assert ytdl_download_line(_dl(done=12)).startswith("Downloading YouTube clip 12/12")
+
+
+def test_the_download_line_leaves_out_what_it_does_not_know():
+    from ccsync_companion.tray import ytdl_download_line
+
+    # no rate yet (yt-dlp printed NA), a total: the percent alone
+    assert ytdl_download_line(_dl(speed_bps=None)) == "Downloading YouTube clip 3/12 (38%)"
+    # HLS with no total: the rate alone, never a made-up percent
+    assert ytdl_download_line(_dl(bytes_total=None)) == "Downloading YouTube clip 3/12 (4.2 MB/s)"
+    # before the first update, or merging: the count alone
+    assert ytdl_download_line(_dl(speed_bps=None, bytes_done=None, bytes_total=None)) == \
+        "Downloading YouTube clip 3/12"
+    # below a megabyte reads as a rate, not "0 MB/s" (which reads as stuck)
+    assert ytdl_download_line(_dl(speed_bps=300_000)) == "Downloading YouTube clip 3/12 (0.3 MB/s, 38%)"
+    # a manifest not yet read: still a line, still true
+    assert ytdl_download_line(_dl(total=0, done=0)) == "Downloading YouTube clips"
+
+
+def test_no_download_is_no_line_and_junk_is_no_line():
+    from ccsync_companion.tray import ytdl_download_line
+
+    assert ytdl_download_line(_dl(running=False)) is None
+    assert ytdl_download_line(None) is None
+    assert ytdl_download_line("nonsense") is None
+    assert ytdl_download_line({"running": True, "total": "many"}) is None
+    assert ytdl_download_line({"job_id": 7, "running": False, "clip": None, "done": 0,
+                               "failed": 0, "total": 0, "bytes_done": None,
+                               "bytes_total": None, "speed_bps": None}) is None
+
+
+def test_the_download_line_has_no_em_dash():
+    from ccsync_companion.tray import ytdl_download_line
+
+    for line in (ytdl_download_line(_dl()), ytdl_download_line(_dl(total=0)),
+                 ytdl_download_line(_dl(bytes_total=None))):
+        assert "\u2014" not in line

@@ -47,6 +47,7 @@ Added 2026-08-14 (companion 0.8.0).
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -342,17 +343,29 @@ def default_request(method: str, url: str, body: Optional[dict],
 # tests stub, deliberately the same shape as default_request above.
 RequestFn = Callable[[str, str, Optional[dict], dict, float], tuple[int, Any]]
 # (argv, timeout, on_spawn) -> object with .returncode/.stdout/.stderr.
+# default_run also takes an optional `on_line` keyword (each stdout line as it
+# arrives); _call_run only passes it to a runner whose signature admits it, so
+# the three-argument fakes the suite has always used keep working.
 RunFn = Callable[[list, float, Optional[Callable[[Any], None]]], Any]
 
 
 def default_run(argv: list, timeout: float,
-                on_spawn: Optional[Callable[[Any], None]] = None) -> Any:
+                on_spawn: Optional[Callable[[Any], None]] = None,
+                on_line: Optional[Callable[[str], None]] = None) -> Any:
     """Run yt-dlp, captured, windowless, with a sanitized env and a kill handle.
 
     Popen rather than subprocess.run for ONE reason: `on_spawn` hands the live
     process to the caller so a lost lease can kill a download in flight
     (subprocess.run gives nothing to kill until it returns, and a 40-clip job
     would keep fetching for an hour after the server took it back).
+
+    stdout is read LINE BY LINE on a helper thread and each line handed to
+    `on_line` as it arrives (2026-08-25): that is how the tray's "Downloading
+    YouTube clip 3/12 (4.2 MB/s)" line gets its numbers, from the progress
+    template build_argv asks yt-dlp to print. The lines are still collected
+    into .stdout afterwards, so nothing that read the CompletedProcess
+    changes. stderr stays a plain pipe read by communicate(); a callback that
+    raises is swallowed -- a tray line must never kill a download.
 
     Everything else is ytdlp_manager._default_run's construction, for its
     reasons: resolve_bridge.sanitized_child_env() because PYTHONHOME/
@@ -374,16 +387,65 @@ def default_run(argv: list, timeout: float,
     )
     if on_spawn is not None:
         on_spawn(proc)
+    lines: list = []
+
+    def _pump() -> None:
+        try:
+            for line in proc.stdout:
+                lines.append(line)
+                if on_line is not None:
+                    try:
+                        on_line(line.rstrip("\r\n"))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    pump = threading.Thread(target=_pump, name="ytdl-stdout", daemon=True)
+    pump.start()
     try:
-        out, err = proc.communicate(timeout=timeout)
+        # communicate() reads stderr; stdout is the pump's (a stream handed
+        # to communicate as well would be read twice and lose lines).
+        proc.stdout, stdout_stream = None, proc.stdout
+        try:
+            _out, err = proc.communicate(timeout=timeout)
+        finally:
+            proc.stdout = stdout_stream
     except subprocess.TimeoutExpired:
         try:
             proc.kill()
         except Exception:
             pass
-        out, err = proc.communicate()
+        proc.stdout, stdout_stream = None, proc.stdout
+        try:
+            _out, err = proc.communicate()
+        finally:
+            proc.stdout = stdout_stream
+        pump.join(timeout=5)
         raise
-    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+    pump.join(timeout=5)
+    return subprocess.CompletedProcess(argv, proc.returncode, "".join(lines), err)
+
+
+def _call_run(run: Any, argv: list, timeout: float, on_spawn: Any,
+              on_line: Any) -> Any:
+    """Invoke a RunFn, passing `on_line` only to a runner that takes it.
+
+    The seam predates the progress line and every fake in the suite (and any
+    operator's replacement) is `(argv, timeout, on_spawn)`. A runner without
+    the keyword simply produces no progress -- the tray line then reads
+    "Downloading YouTube clip 3/12" with no rate, which is true.
+    """
+    if on_line is not None:
+        try:
+            params = inspect.signature(run).parameters
+            takes = ("on_line" in params or any(
+                p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()))
+        except (TypeError, ValueError):
+            takes = False
+        if takes:
+            return run(argv, timeout, on_spawn, on_line=on_line)
+    return run(argv, timeout, on_spawn)
 
 
 # ---------------------------------------------------------------------------
@@ -1330,16 +1392,35 @@ class DownloadJob:
         self.done = 0
         self.failed = 0
         self.clip: Optional[str] = None
+        # The clip in flight, from yt-dlp's own progress line (2026-08-25):
+        # bytes so far, the total it expects (or estimates), and its rate in
+        # bytes/s. None = not known yet, or between clips (merging, the pause).
+        self.bytes_done: Optional[int] = None
+        self.bytes_total: Optional[int] = None
+        self.speed_bps: Optional[float] = None
 
     # -- progress mirror --------------------------------------------------
     def snapshot(self) -> dict:
-        """What GET /ytdl/progress answers. The SERVER rows remain the truth
-        (§7) -- this exists so the SPA can show something in the first seconds,
-        before the first status post has made the round trip."""
+        """What GET /ytdl/progress answers, and what the tray line is built
+        from. The SERVER rows remain the truth (§7) -- this exists so the SPA
+        can show something in the first seconds, before the first status post
+        has made the round trip, and so the tray can say how fast."""
         with self._lock:
             return {"job_id": self.job_id, "running": self.running,
                     "clip": self.clip, "done": self.done,
-                    "failed": self.failed, "total": self.total}
+                    "failed": self.failed, "total": self.total,
+                    "bytes_done": self.bytes_done,
+                    "bytes_total": self.bytes_total,
+                    "speed_bps": self.speed_bps}
+
+    def _on_ytdlp_line(self, line: str) -> None:
+        """One line of yt-dlp's stdout. Only the progress template's lines
+        matter (PROGRESS_PREFIX); everything else is yt-dlp talking to itself.
+        Never raises: default_run swallows anyway, but a parse error here must
+        not even cost the one update."""
+        parsed = parse_progress_line(line)
+        if parsed is not None:
+            self._set(**parsed)
 
     def _set(self, **fields) -> None:
         with self._lock:
@@ -1613,7 +1694,10 @@ class DownloadJob:
             log.warning("ytdl: job %s has a clip with no video id -- skipping it",
                         self.job_id)
             return
-        self._set(clip=video_id)
+        # The previous clip's numbers must not sit under this clip's name
+        # for the seconds before its first progress line.
+        self._set(clip=video_id, bytes_done=None, bytes_total=None,
+                  speed_bps=None)
         if not url_is_youtube(url):
             # Recorded as a failure rather than silently skipped: the row has to
             # say something, and the server's second-chance sweep is what gets
@@ -1761,7 +1845,8 @@ class DownloadJob:
     def _run_ytdlp(self, url: Any, outdir: str, quality: str) -> tuple[bool, str]:
         argv = self.build_argv(url, outdir, quality)
         try:
-            proc = self.deps.run(argv, CLIP_TIMEOUT_SECONDS, self._register_proc)
+            proc = _call_run(self.deps.run, argv, CLIP_TIMEOUT_SECONDS,
+                             self._register_proc, self._on_ytdlp_line)
         except subprocess.TimeoutExpired:
             return False, (f"yt-dlp did not finish within "
                            f"{CLIP_TIMEOUT_SECONDS / 3600:.0f}h and was killed")
@@ -1823,7 +1908,22 @@ class DownloadJob:
             "--merge-output-format", "mp4",
             "-o", ytdl_common.outtmpl(outdir),
             "--no-playlist",
-            "--no-progress",
+            # Progress as ONE machine-readable line per update, on stdout,
+            # where default_run's pump reads it (2026-08-25, the owner: the
+            # tray should say "Downloading: x/x (xx MB/s)"). --newline because
+            # yt-dlp's default progress is a carriage-return-rewritten bar
+            # that never reaches a pipe as lines; the template because its
+            # human bar is not something to parse. Replaced --no-progress,
+            # which is why the tray said nothing about a download for a year.
+            "--progress", "--newline",
+            "--progress-template", PROGRESS_TEMPLATE,
+            # Fragments in flight (CR-74's fix, applied here 2026-08-25).
+            # web_safari serves HLS, and HLS fragments fetched one at a time
+            # run at whatever pace YouTube gives ONE connection: 3-4 MiB/s on
+            # a long clip against 53 MiB/s with six in flight, measured on the
+            # server. The editor's download walked the same ladder the same
+            # way and read as "the youtube downloads are going very slowly".
+            "-N", str(fragment_jobs(self.deps.cfg)),
         ]
         argv += list(CREDITS_METADATA_ARGS)
         if self.info_dir is not None:
@@ -1891,6 +1991,74 @@ class DownloadJob:
         outdir, video_id = current
         clear_partials(outdir, video_id)
         self._drop_scratch_info(video_id)
+
+
+# The progress line yt-dlp prints, once per update, with `--newline`. A
+# prefix nothing else on stdout starts with, then tab-separated fields; a
+# field yt-dlp does not know is "NA". total_bytes is exact once the server
+# said Content-Length, total_bytes_estimate is yt-dlp's guess for HLS -- the
+# tray takes the first that is a number.
+PROGRESS_PREFIX = "CCSYNC-PROGRESS"
+PROGRESS_TEMPLATE = ("download:" + PROGRESS_PREFIX
+                     + "\t%(progress.downloaded_bytes)s"
+                     "\t%(progress.total_bytes)s"
+                     "\t%(progress.total_bytes_estimate)s"
+                     "\t%(progress.speed)s")
+
+# Fragments in flight, bounded like the server's fragment_jobs (CR-74): 1 is
+# the old sequential fetch, and the ceiling keeps one editor's download from
+# looking like bulk automation to YouTube.
+DEFAULT_FRAGMENT_JOBS = 6
+MAX_FRAGMENT_JOBS = 16
+
+
+def fragment_jobs(cfg: dict[str, Any]) -> int:
+    """`ytdl_fragment_jobs` from config.toml, bounded 1..16, default 6.
+    Never raises: a junk value is the default, not a refused download."""
+    try:
+        n = int((cfg or {}).get("ytdl_fragment_jobs",
+                                config_mod.DEFAULTS.get("ytdl_fragment_jobs",
+                                                        DEFAULT_FRAGMENT_JOBS)))
+    except (TypeError, ValueError):
+        n = DEFAULT_FRAGMENT_JOBS
+    if n < 1:
+        n = 1
+    return min(n, MAX_FRAGMENT_JOBS)
+
+
+def _num(text: Any) -> Optional[float]:
+    try:
+        v = float(str(text).strip())
+    except (TypeError, ValueError):
+        return None
+    return v if v == v and v >= 0 else None      # NaN and negatives are "NA"
+
+
+def parse_progress_line(line: Any) -> Optional[dict]:
+    """A PROGRESS_TEMPLATE line -> {bytes_done, bytes_total, speed_bps}, or
+    None for any other line (or a malformed one). Pure; never raises.
+
+    bytes_total is the exact total when yt-dlp has one, else its estimate,
+    else None. speed_bps None = yt-dlp printed NA (the first update, or a
+    stalled fragment): the tray then shows the count without a rate rather
+    than "0.0 MB/s", which would read as stuck.
+    """
+    text = str(line or "").strip()
+    if not text.startswith(PROGRESS_PREFIX):
+        return None
+    fields = text.split("\t")
+    # The first field must BE the prefix, not merely start with it: a line
+    # that happens to share the opening characters is not a progress line.
+    if len(fields) < 5 or fields[0] != PROGRESS_PREFIX:
+        return None
+    done = _num(fields[1])
+    total = _num(fields[2])
+    if total is None:
+        total = _num(fields[3])
+    speed = _num(fields[4])
+    return {"bytes_done": int(done) if done is not None else None,
+            "bytes_total": int(total) if total is not None else None,
+            "speed_bps": speed}
 
 
 def _looks_truncated(stderr: Any) -> bool:
@@ -2055,7 +2223,8 @@ def progress(job_id: Any = None) -> dict:
     if last is not None and (wanted is None or last.get("job_id") == wanted):
         return last
     return {"job_id": wanted, "running": False, "clip": None,
-            "done": 0, "failed": 0, "total": 0}
+            "done": 0, "failed": 0, "total": 0,
+            "bytes_done": None, "bytes_total": None, "speed_bps": None}
 
 
 def stop_all() -> None:

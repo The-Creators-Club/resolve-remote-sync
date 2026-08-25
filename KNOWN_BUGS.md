@@ -3016,6 +3016,61 @@ browser with no confirm(), is exactly the old behaviour: re-attach and the
 loud toast (which now names [ CANCEL SEARCH ]). Harness scenarios in
 `tests/test_static_app.py`. Needs a dashboard deploy.
 
+## Companion: the tray says how a local YouTube download is going, and fetches it six fragments at a time (CR-78, 2026-08-25)
+
+### CR-78 - local YouTube downloads were invisible in the tray and crawled one HLS fragment at a time - FIXED in repo (companion 0.9.49), UNSHIPPED
+**Ask** (owner, 2026-08-25): "the companion should be updated so that when
+it is downloading a youtube clip it shows the information. Downloading: x/x
+(xx mb/s). Right now it seems like the youtube downloads are going very
+slowly." Observed live: job 23, 22 clips, `download_mode=local` on the base
+rig, 11 done after ~40 minutes.
+
+**Two causes, one per half of the ask.**
+
+1. `build_argv` passed `--no-progress`, so yt-dlp printed nothing a tray
+   could read, and `default_run` read stdout only after the process exited
+   (`communicate`). The executor's progress mirror knew `done/total` and the
+   clip id, and the tray never asked it for even that.
+2. `web_safari` (CR-39) serves HLS, and the companion fetched fragments one
+   at a time: the same shape as CR-74 on the server, where a long clip
+   sustained 3-4 MiB/s sequentially against 53 MiB/s with six in flight.
+   CR-74 deliberately left the companion's argv alone ("a companion change
+   is a fleet release"); this is that release.
+
+**Fix (companion 0.9.49).**
+
+- `build_argv`: `--progress --newline --progress-template
+  <PROGRESS_TEMPLATE>` in place of `--no-progress` - one tab-separated
+  `CCSYNC-PROGRESS` line per update (downloaded, total, estimate, speed)
+  that nothing else on stdout can look like (`parse_progress_line` requires
+  the first field to BE the prefix); and `-N <ytdl_fragment_jobs>` (config
+  key, default 6, bounded 1..16 like the server's `fragment_jobs`; 1 is
+  the old behaviour).
+- `default_run`: stdout is pumped line by line on a helper thread to an
+  optional `on_line` keyword while the process runs; `.stdout` is still
+  the whole text afterwards. `_call_run` passes the keyword only to a
+  runner whose signature admits it, so the three-argument `RunFn` seam
+  every fake and any operator replacement uses is unchanged.
+- `DownloadJob`: `bytes_done` / `bytes_total` / `speed_bps` on the
+  snapshot (and on `GET /ytdl/progress`), reset to None as each clip
+  starts so the previous clip's rate never sits under the next clip's
+  name.
+- `tray.ytdl_download_line`: `Downloading YouTube clip 3/12 (4.2 MB/s,
+  38%)`, dropping whatever is unknown (`(38%)`, `(4.2 MB/s)` under HLS
+  with no total, bare `3/12` before the first update or while merging),
+  one-based on the clip in flight, in the state lines after the Resolve
+  line, and in the menu fingerprint so the numbers refresh on an
+  otherwise-idle machine (UI-3's shape).
+
+Tests: `test_ytdl_executor.py` (argv, the knob's bounds, the parser, the
+pump through the real `default_run` with a fake yt-dlp that prints template
+lines, `_call_run` against 3-arg / 4-arg / `**kw` runners, the end-to-end
+mirror with a clean second clip), `test_tray.py` (the sentence, what is
+left out, no line when idle, no em dash), `test_config.py` (the key is
+documented). Companion suite 4507 green. Needs a companion release on both
+platforms; the base rig's own upgrade should wait for job 23 to finish -
+the upgrade kills a download in flight.
+
 ## YouTube downloader: language scope and an upload-date range (CR-77, 2026-08-25)
 
 ### CR-77 - the search always expanded into both languages, and a date meant one of YouTube's five windows - FIXED in repo (dashboard 0.7.10), UNSHIPPED

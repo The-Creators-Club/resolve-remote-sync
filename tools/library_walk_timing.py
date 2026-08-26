@@ -94,7 +94,12 @@ def timed(label: str, work) -> dict:
 def main() -> int:
     resolve_bridge._bridge_call = _TimedBridgeCall
 
-    cfg = config_mod.load_config()
+    # NOT load_config(): it calls ensure_config_exists() first, so a
+    # read-only tool run on a rig that has no config.toml would CREATE the
+    # installer's file (library walk review 2, 2026-08-26). Absent config
+    # means defaults, which is what the merge would have given anyway.
+    cfg = (config_mod.load_config() if config_mod.CONFIG_PATH.exists()
+           else dict(config_mod.DEFAULTS))
     resolve_bridge.configure_library(cfg)
     print("library_walk = %r  host = %r" % (cfg.get("library_walk"),
                                             cfg.get("library_db_host") or "(from Resolve)"))

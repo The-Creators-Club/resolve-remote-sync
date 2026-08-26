@@ -179,6 +179,23 @@ def api_lock_is_free(timeout: float = 2.0) -> bool:
     return bool(answer and answer[0])
 
 
+def library_lock_is_free(timeout: float = 2.0) -> bool:
+    """Is _LIBRARY_LOCK unheld right now? Probed on another thread, and for
+    the same reason api_lock_is_free() is: it is an RLock."""
+    answer: list[bool] = []
+
+    def probe():
+        got = resolve_bridge._LIBRARY_LOCK.acquire(blocking=False)
+        if got:
+            resolve_bridge._LIBRARY_LOCK.release()
+        answer.append(got)
+
+    thread = threading.Thread(target=probe)
+    thread.start()
+    thread.join(timeout)
+    return bool(answer and answer[0])
+
+
 class FakeProjectLibrary:
     """Stands in for library.ProjectLibrary. Records how it was used."""
 
@@ -245,8 +262,10 @@ def rig(monkeypatch):
     info = library.LibraryInfo(kind="PostgreSQL", name="FF5", host="nas", port=5432)
     located: list[dict] = []
 
-    def _locate(_resolve, project_name, overrides):
-        located.append({"project": project_name, "overrides": dict(overrides or {})})
+    def _locate(_resolve, project_name, overrides=None, api_info=None):
+        located.append({"project": project_name, "overrides": dict(overrides or {}),
+                        "api_info": api_info,
+                        "api_lock_free": api_lock_is_free()})
         return info
 
     monkeypatch.setattr(library, "locate", _locate)
@@ -533,8 +552,30 @@ def test_proxy_keys_are_enriched_where_proxies_are_made(rig, monkeypatch):
     assert rig.clips[0].property_calls == ["Proxy Media Path", "Proxy"]
 
 
-def test_proxy_keys_stay_unknown_where_nothing_reads_them(rig, monkeypatch):
+def test_proxy_keys_are_enriched_for_the_relink_pass_too(rig, monkeypatch):
+    """The lane-B editor rig: proxy_gen_enabled derives False (lane B is on),
+    and app._relink_proxies_once still reads these keys every pass. Gating on
+    generation alone reported proxy_state "" for all 1,298 clips, which
+    proxy_relink reads as "no proxy" -- ~1,300 unasked-for LinkProxyMedia
+    calls (library walk review 2, 2026-08-26)."""
     monkeypatch.setattr(config_mod, "proxy_generation_enabled", lambda cfg: False)
+    monkeypatch.setattr(resolve_bridge, "_config_without_creating",
+                        lambda: {**config_mod.DEFAULTS, "proxy_gen_enabled": False,
+                                 "proxy_relink_enabled": True})
+
+    result = resolve_bridge.get_media_pool_items()
+
+    item = result["items"][0]
+    assert item["proxy_state"] == "1920x1080"
+    assert item["proxy_path"] == r"P:\Proxy\a.mov"
+
+
+def test_proxy_keys_stay_unknown_where_nothing_reads_them(rig, monkeypatch):
+    """Neither pass runs on this machine, so nothing will read them."""
+    monkeypatch.setattr(config_mod, "proxy_generation_enabled", lambda cfg: False)
+    monkeypatch.setattr(resolve_bridge, "_config_without_creating",
+                        lambda: {**config_mod.DEFAULTS, "proxy_gen_enabled": False,
+                                 "proxy_relink_enabled": False})
 
     result = resolve_bridge.get_media_pool_items()
 
@@ -544,16 +585,78 @@ def test_proxy_keys_stay_unknown_where_nothing_reads_them(rig, monkeypatch):
     assert rig.clips[0].property_calls == []      # Resolve was not asked at all
 
 
+def test_the_default_config_enriches(rig):
+    """Shipped defaults: proxy_relink_enabled is True, so the keys the API
+    walk always carried keep coming back."""
+    assert config_mod.DEFAULTS["proxy_relink_enabled"] is True
+
+    result = resolve_bridge.get_media_pool_items()
+
+    assert result["items"][0]["proxy_state"] == "1920x1080"
+
+
+# -- half an answer is not an answer ---------------------------------------
+
+
+def test_a_half_enriched_pool_walk_falls_back_to_the_api(rig, monkeypatch):
+    """A project that goes away mid-enrichment leaves the later chunks at
+    proxy_state "" -- which reads as "no proxy", not as "unknown". The whole
+    list goes back as None (library walk review 2, 2026-08-26)."""
+    monkeypatch.setattr(resolve_bridge, "_PROXY_ENRICH_CHUNK", 2)
+    clips = [FakeClip("uid-%d" % n, path=r"P:%d.mov" % n, proxy="1920x1080")
+             for n in range(5)]
+    rig.project._media_pool = FakeMediaPool(FakeFolder(clips=clips))
+    resolve_bridge.poll_timeline_items()          # opens the library
+    rig.library().pool = [pool_item(r"P:%d.mov" % n, uid="uid-%d" % n)
+                          for n in range(5)]
+
+    chunks: list[int] = []
+    real_head = resolve_bridge._current_project_locked
+
+    def head():
+        chunks.append(1)
+        if len(chunks) > 2:                       # first chunk only, then gone
+            return ({"ok": False, "message": "no project open in Resolve",
+                     "items": [], "project_name": ""}, rig.resolve, None, "")
+        return real_head()
+
+    monkeypatch.setattr(resolve_bridge, "_current_project_locked", head)
+
+    result = resolve_bridge.get_media_pool_items()
+
+    # The API walk answered instead, and nobody was handed the half-filled
+    # library list -- these items are Resolve's own, objects and all, where
+    # a library item carries a uid and no object.
+    assert {item["source"] for item in result["items"]} == {"api"}
+    assert all(item["media_pool_item"] is not None for item in result["items"])
+    assert resolve_bridge.library_status()["source"] == "api"
+
+
+def test_the_library_lock_is_free_while_the_proxy_keys_are_enriched(rig, monkeypatch):
+    """Enrichment touches no library object, and holding _LIBRARY_LOCK for
+    its 5 s parked _library_attempt_due(), library_status() and
+    configure_library() -- the wedge warning included."""
+    free: list[bool] = []
+    real = resolve_bridge._clip_property
+    monkeypatch.setattr(
+        resolve_bridge, "_clip_property",
+        lambda clip, key: free.append(library_lock_is_free()) or real(clip, key))
+
+    resolve_bridge.get_media_pool_items()
+
+    assert free and all(free)
+
+
 def test_the_enrichment_lets_go_of_the_lock_between_chunks(rig, monkeypatch):
     """5.5 s of proxy reads on 1,298 clips is fine as 13 holds and hostile as
     one: another client waits for a chunk, not for the walk."""
     monkeypatch.setattr(config_mod, "proxy_generation_enabled", lambda cfg: True)
     monkeypatch.setattr(resolve_bridge, "_PROXY_ENRICH_CHUNK", 2)
-    clips = [FakeClip("uid-%d" % n, path=r"P:%d.mov" % n, proxy="1920x1080")
+    clips = [FakeClip("uid-%d" % n, path=r"P:%d.mov" % n, proxy="1920x1080")
              for n in range(5)]
     rig.project._media_pool = FakeMediaPool(FakeFolder(clips=clips))
     resolve_bridge.poll_timeline_items()          # opens the library
-    rig.library().pool = [pool_item(r"P:%d.mov" % n, uid="uid-%d" % n)
+    rig.library().pool = [pool_item(r"P:%d.mov" % n, uid="uid-%d" % n)
                           for n in range(5)]
 
     holds: list[str] = []
@@ -570,8 +673,11 @@ def test_the_enrichment_lets_go_of_the_lock_between_chunks(rig, monkeypatch):
     result = resolve_bridge.get_media_pool_items()
 
     assert [item["proxy_state"] for item in result["items"]] == ["1920x1080"] * 5
-    # One hold for the head, then ceil(5/2) = 3 for the chunks (plus the
-    # connect() each one nests, which is the same lock and does not count).
+    # One hold for the pool walk's head, then ONE PER CHUNK: ceil(5/2) = 3,
+    # so four takes of _API_LOCK where the old code took it once and kept it
+    # (library walk review 2, 2026-08-26). connect() re-enters the same
+    # RLock inside each of them, which is why this counts takes by name
+    # rather than expecting an exact number.
     assert holds.count("get_media_pool_items") >= 4
 
 
@@ -638,6 +744,120 @@ def test_a_missing_property_on_a_proven_build_is_just_empty():
 
     assert resolve_bridge._clip_property(good, "Proxy") == ""
     assert resolve_bridge._ONE_ARG_CLIP_PROPERTY is True
+
+
+# -- locating the library --------------------------------------------------
+
+
+def test_locate_does_its_filesystem_work_outside_the_api_lock(rig):
+    """locate() reads the WHOLE Resolve log and, for a disk library, walks
+    "Resolve Project Library/*/Resolve Projects/<project>". Only the one API
+    call it makes belongs under _API_LOCK (library walk review 2,
+    2026-08-26)."""
+    resolve_bridge.poll_timeline_items()
+
+    assert rig.located[-1]["api_lock_free"] is True
+
+
+def test_locate_is_handed_the_api_answer_it_would_have_asked_for(rig, monkeypatch):
+    """The bridge makes GetCurrentDatabase() itself, under the lock, and
+    passes it in -- so locate() never touches `resolve`."""
+    info = library.LibraryInfo(kind="PostgreSQL", name="FF5", host="nas")
+    monkeypatch.setattr(library, "database_info", lambda resolve: info)
+
+    resolve_bridge.poll_timeline_items()
+
+    assert rig.located[-1]["api_info"] is info
+
+
+# -- the uid map -----------------------------------------------------------
+
+
+def test_a_reopened_project_is_not_served_from_the_uid_cache(rig):
+    """Same NAME, new object: every MediaPoolItem in the cached map is a dead
+    fusionscript pointer, and handing one to ReplaceClip is an access
+    violation (library walk review 2, 2026-08-26)."""
+    uid = "uid:" + r"P:\Projects\Show\a.mov"
+    assert resolve_bridge.media_pool_item_by_uid(uid) is rig.clips[0]
+
+    reopened_clip = FakeClip(uid, path=r"P:\Projects\Show\a.mov")
+    reopened = FakeProject(name=rig.project._name, timeline=rig.timeline,
+                           media_pool=FakeMediaPool(FakeFolder(clips=[reopened_clip])))
+    rig.resolve._project = reopened
+
+    assert resolve_bridge.media_pool_item_by_uid(uid) is reopened_clip
+
+
+def test_the_same_project_object_still_reuses_the_map(rig):
+    """The identity check must not throw the cache away on every call: a FIX
+    ALL over 50 clips pays for one pool walk, not 50."""
+    walks: list[int] = []
+    real_walk = resolve_bridge._walk_media_pool_uids
+
+    def counted(folder, found, depth=0, swept=None):
+        if depth == 0:
+            walks.append(1)
+        return real_walk(folder, found, depth, swept)
+
+    resolve_bridge._walk_media_pool_uids = counted
+    try:
+        uid = "uid:" + r"P:\Projects\Show\a.mov"
+        for _ in range(3):
+            assert resolve_bridge.media_pool_item_by_uid(uid) is rig.clips[0]
+    finally:
+        resolve_bridge._walk_media_pool_uids = real_walk
+
+    assert len(walks) == 1
+
+
+# -- configuration ---------------------------------------------------------
+
+
+def test_a_partial_config_does_not_switch_the_walk_off(rig):
+    """A cfg dict built by hand (the dashboard's, a tool's) carries no
+    library_walk key, and cfg.get(key) answered None -- which is false, so
+    the walk quietly stopped happening (library walk review 2, 2026-08-26)."""
+    resolve_bridge.configure_library({"library_db_host": "10.0.0.9"})
+
+    result = resolve_bridge.poll_timeline_items()
+
+    assert {item["source"] for item in result["items"]} == {"library"}
+    assert resolve_bridge.library_status()["enabled"] is True
+
+
+def test_the_lazy_config_read_never_creates_config_toml(monkeypatch):
+    """A tool, a test or a bare import must not be the thing that writes the
+    installer's first-run config.toml."""
+    created: list = []
+    monkeypatch.setattr(config_mod, "ensure_config_exists",
+                        lambda *a, **k: created.append(1))
+
+    resolve_bridge.reset_library_state()
+    assert resolve_bridge._library_settings()["library_walk"] is True
+
+    assert created == []
+    assert not config_mod.CONFIG_PATH.exists()
+
+
+# -- an old build with no timeline uid -------------------------------------
+
+
+def test_a_timeline_with_no_uid_backs_off_instead_of_saying_so_every_poll(rig, caplog):
+    """The uid is missing because of the BUILD, so it will be missing again
+    in 3 s: one note, then a backoff window (library walk review 2,
+    2026-08-26)."""
+    rig.timeline._uid = ""
+
+    with caplog.at_level(logging.DEBUG, logger="ccsync.resolve"):
+        for _ in range(5):
+            result = resolve_bridge.poll_timeline_items()
+            resolve_bridge.reset_timeline_cache()
+
+    assert result["ok"] is True                  # the API walk answered
+    notes = [record for record in caplog.records
+             if "has no unique id" in record.message]
+    assert len(notes) == 1
+    assert resolve_bridge.library_status()["retry_in"] > 0
 
 
 # -- status ----------------------------------------------------------------

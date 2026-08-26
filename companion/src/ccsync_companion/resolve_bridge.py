@@ -819,9 +819,17 @@ def configure_library(cfg: dict[str, Any]) -> None:
 
     Changing any of the six keys drops the open library, so an editor who
     fixes a wrong host does not have to restart the companion.
+
+    Each key falls back to config.DEFAULTS, not to None: a PARTIAL cfg (the
+    dashboard hands one, and so does every test that builds a dict by hand)
+    used to switch the walk off silently, because `library_walk` came back
+    None and None is false (library walk review 2, 2026-08-26).
     """
     global _library_settings_cache
-    settings = {key: cfg.get(key) for key in _LIBRARY_CONFIG_KEYS}
+    from . import config as config_mod
+
+    settings = {key: cfg.get(key, config_mod.DEFAULTS.get(key))
+                for key in _LIBRARY_CONFIG_KEYS}
     with _LIBRARY_LOCK:
         if settings != _library_settings_cache:
             _close_library("configuration changed")
@@ -830,24 +838,37 @@ def configure_library(cfg: dict[str, Any]) -> None:
             _arm_library_retry(0.0)
 
 
-def _library_settings() -> dict[str, Any]:
-    """The six library keys, from configure_library() or from config.toml.
+def _config_without_creating() -> dict[str, Any]:
+    """config.toml if it is there, DEFAULTS if it is not. Never WRITES one.
+
+    config_mod.load_config() calls ensure_config_exists() first, so every
+    lazy read in this module was a first-run config.toml waiting to happen
+    on a rig that has none -- a tool, a test or a bare import creating the
+    installer's file (library walk review 2, 2026-08-26). Nothing here needs
+    that: absent config means defaults, which is what the merge would give.
 
     Imported here, not at module scope: config.py is imported by almost
     everything and this module is imported BY config's callers, so keeping
     it lazy keeps the import graph one-way.
     """
+    from . import config as config_mod
+
+    try:
+        if config_mod.CONFIG_PATH.exists():
+            return config_mod.load_config()
+    except Exception:
+        log.debug("resolve: could not load config", exc_info=True)
+    return dict(config_mod.DEFAULTS)
+
+
+def _library_settings() -> dict[str, Any]:
+    """The six library keys, from configure_library() or from config.toml."""
     global _library_settings_cache
     with _LIBRARY_LOCK:
         if _library_settings_cache is None:
             from . import config as config_mod
 
-            try:
-                cfg = config_mod.load_config()
-            except Exception:
-                log.debug("resolve: could not load config for the library walk",
-                          exc_info=True)
-                cfg = dict(config_mod.DEFAULTS)
+            cfg = _config_without_creating()
             _library_settings_cache = {key: cfg.get(key, config_mod.DEFAULTS.get(key))
                                        for key in _LIBRARY_CONFIG_KEYS}
         return dict(_library_settings_cache)
@@ -880,7 +901,14 @@ def reset_library_state() -> None:
 
 
 def library_status() -> dict[str, Any]:
-    """What the last walk did, for the tray and the dashboard.
+    """What the last walk did -- a DIAGNOSTIC entry point, not a UI feed.
+
+    Nothing in the running companion calls this: the tray is deliberately
+    not wired to it (a menu item that says "library" or "api" is a support
+    question, not a control), and it exists for tools/library_walk_check.py,
+    tools/library_walk_timing.py and the tests (library walk review 2,
+    2026-08-26). Anything that DOES start reading it should know the answer
+    is whatever the last walk on any thread left behind.
 
     {"enabled", "source": "library"|"api"|"", "library", "project", "error",
      "walk_ms", "retry_in"}. Never raises, never calls Resolve.
@@ -966,8 +994,16 @@ def _project_library(resolve, project_name: str) -> Optional[library.ProjectLibr
         return None
 
     _arm_library_retry(_LIBRARY_RETRY_SECONDS)
+    # _API_LOCK for the API question ONLY. The rest of locate() is
+    # filesystem work -- it reads the whole Resolve log and walks
+    # "Resolve Project Library/*/Resolve Projects/..." for a disk library --
+    # and doing that under the lock put a cold-cache directory walk in front
+    # of the tray's message pump and every other scripting client on the
+    # machine (library walk review 2, 2026-08-26).
     with _bridge_call("library.locate"):
-        info = library.locate(resolve, project_name, _library_settings())
+        api_info = library.database_info(resolve)
+    info = library.locate(None, project_name, _library_settings(),
+                          api_info=api_info)
     if info is None:
         _note_library_fallback("no project library found for %r" % project_name)
         return None
@@ -1244,7 +1280,16 @@ def _library_timeline_items(allow_cached: bool = False) -> Optional[dict[str, An
         if not timeline_uid:
             # No uid, no way to find the sequence. An old API build; the
             # walk below cannot be scoped, so the API keeps this one.
-            _note_library_fallback("this Resolve build's timeline has no unique id")
+            #
+            # Backed off like any other failure: this is a property of the
+            # BUILD, so it will be true again in 3 s and again 3 s after
+            # that, and saying it every poll was a fallback note per poll
+            # with nothing armed to stop it (library walk review 2,
+            # 2026-08-26).
+            if time.monotonic() >= _library_next_attempt:
+                _note_library_fallback(
+                    "this Resolve build's timeline has no unique id")
+            _arm_library_retry(_LIBRARY_RETRY_SECONDS)
             return None
 
         project_library = _project_library(resolve, project_name)
@@ -1567,6 +1612,28 @@ def _library_media_pool_items() -> Optional[dict[str, Any]]:
     """
     if not _library_attempt_due():
         return None
+    result = _library_pool_read()
+    if result is None:
+        return None
+    # Enrichment asks RESOLVE about clips, and touches no library object at
+    # all, so it runs with _LIBRARY_LOCK RELEASED: holding it for the whole
+    # 5 s run parked the watcher's _library_attempt_due(), library_status()
+    # and configure_library() behind a walk -- including the wedge warning
+    # whose entire job is to fire while a walk is stuck (library walk review
+    # 2, 2026-08-26).
+    #
+    # A PARTIAL enrichment is not an answer: an item left at proxy_state ""
+    # reads as "no proxy" to proxy_relink, which then plans a relink for
+    # every clip in the pool. Half a pool walk goes back as None and the API
+    # walk answers instead.
+    if not _enrich_proxy_keys(result["items"]):
+        return None
+    return result
+
+
+def _library_pool_read() -> Optional[dict[str, Any]]:
+    """The library half of _library_media_pool_items -- everything that
+    needs _LIBRARY_LOCK, and nothing that does not."""
     with _LIBRARY_LOCK:
         with _bridge_call("get_media_pool_items"):
             error, resolve, _project, project_name = _current_project_locked()
@@ -1595,7 +1662,6 @@ def _library_media_pool_items() -> Optional[dict[str, Any]]:
 
         items = [item for item in walked if str(item.get("file_path") or "").strip()]
         _library_read_done()
-        _enrich_proxy_keys(items)
         elapsed_ms = (time.monotonic() - started) * 1000.0
         _library_state.update({"source": "library", "error": "",
                                "walk_ms": round(elapsed_ms, 1)})
@@ -1605,15 +1671,28 @@ def _library_media_pool_items() -> Optional[dict[str, Any]]:
                 "project_name": project_name}
 
 
-def _enrich_proxy_keys(items: list[dict[str, Any]]) -> None:
+def _enrich_proxy_keys(items: list[dict[str, Any]]) -> bool:
     """Fill in proxy_path / proxy_state on library items, from the API.
+
+    True when the answer can be handed out: every item enriched, or nothing
+    on this machine reads these keys. FALSE means the run stopped part way
+    and the caller must throw the whole list away -- see below.
 
     The library cannot give these cheaply (see ProjectLibrary.pool_items:
     BtVideoInfo.Proxy is a stub with no path and no state, and the real
     proxy path sits behind a SECOND nested zstd frame inside FieldsBlob).
     So they come from Resolve -- but ONLY where something is going to read
-    them, i.e. where this machine generates or relinks proxies. Everywhere
-    else they stay "", which is what the contract says "unknown" looks like.
+    them.
+
+    Two things read them, not one: proxy generation (proxy_gen_enabled) and
+    the PROXY RELINK pass (app._relink_proxies_once, proxy_relink_enabled,
+    default True). Gating on generation alone left every lane-B editor rig
+    -- where proxy_gen_enabled derives False and lane B syncs the proxies
+    down -- reporting proxy_state "" for all 1,298 clips, which
+    proxy_relink reads as "no proxy is linked" and answers with ~1,300
+    LinkProxyMedia calls against a pool that was already right. The API walk
+    always read these properties, so anything less is a regression (library
+    walk review 2, 2026-08-26).
 
     One folder walk for the whole list, not one lookup per clip: the uid map
     the fixer already builds (media_pool_item_by_uid) is exactly the map
@@ -1621,17 +1700,20 @@ def _enrich_proxy_keys(items: list[dict[str, Any]]) -> None:
     follows a FIX ALL pays for neither.
     """
     if not items:
-        return
+        return True
     try:
         from . import config as config_mod
 
-
-        if not config_mod.proxy_generation_enabled(config_mod.load_config()):
-            return
+        cfg = _config_without_creating()
+        wanted = (config_mod.proxy_generation_enabled(cfg)
+                  or bool(cfg.get("proxy_relink_enabled",
+                                  config_mod.DEFAULTS["proxy_relink_enabled"])))
+        if not wanted:
+            return True
     except Exception:
         log.debug("resolve: could not decide whether to enrich proxy keys",
                   exc_info=True)
-        return
+        return True
 
     # In CHUNKS, each taking _API_LOCK for itself. Two property reads over
     # 1,298 clips measured 5.5 s on the base rig -- better than the 9.4 s the
@@ -1645,10 +1727,19 @@ def _enrich_proxy_keys(items: list[dict[str, Any]]) -> None:
         with _bridge_call("get_media_pool_items"):
             _error, _resolve, project, project_name = _current_project_locked()
             if project is None:
-                return
+                # Mid-list: the project closed, or the pool cannot be walked
+                # any more. The chunks already done are enriched and the rest
+                # are still "", and a half-enriched list is WORSE than none
+                # -- "" means "no proxy" to every reader. Say so and let the
+                # caller fall back (library walk review 2, 2026-08-26).
+                log.debug("resolve: proxy enrichment stopped after %d of %d "
+                          "clips (no project)", start, len(items))
+                return False
             found = _media_pool_uid_map_locked(project, project_name)
             if not found:
-                return
+                log.debug("resolve: proxy enrichment stopped after %d of %d "
+                          "clips (empty uid map)", start, len(items))
+                return False
             for item in chunk:
                 clip = found.get(str(item.get("media_pool_uid") or ""))
                 if clip is None:
@@ -1656,6 +1747,7 @@ def _enrich_proxy_keys(items: list[dict[str, Any]]) -> None:
                 _sweep_yield(swept)
                 item["proxy_path"] = _clip_property(clip, "Proxy Media Path")
                 item["proxy_state"] = _clip_property(clip, "Proxy")
+    return True
 
 
 def _get_media_pool_items_locked() -> dict[str, Any]:
@@ -1708,11 +1800,19 @@ def _get_media_pool_items_locked() -> dict[str, Any]:
 # clips. That only ever runs when there is something to fix, unlike the walk
 # it replaces, which ran every poll.
 #
-# Cached for _MEDIA_POOL_UID_TTL_SECONDS and keyed by project name, so a FIX
-# ALL over 50 clips pays for one walk, not 50. A MISS is cached too (as the
-# freshness of the map, not as an entry): an unknown uid must not re-walk the
-# pool once per clip when a stale library row names a clip that has since been
-# deleted.
+# Cached for _MEDIA_POOL_UID_TTL_SECONDS and keyed by project name AND by the
+# live project OBJECT, so a FIX ALL over 50 clips pays for one walk, not 50. A
+# MISS is cached too (as the freshness of the map, not as an entry): an unknown
+# uid must not re-walk the pool once per clip when a stale library row names a
+# clip that has since been deleted.
+#
+# The identity check is what makes the name safe to key on. Close a project and
+# reopen it inside the TTL -- an editor bouncing a project to clear a Resolve
+# glitch does exactly that -- and the name matches while every MediaPoolItem in
+# the map is a dead fusionscript pointer; handing one to ReplaceClip is the
+# 0xc0000005 this module's header warns about (library walk review 2,
+# 2026-08-26). A reopened project is a NEW object, so `is` catches it and the
+# only cost is one pool walk that was going to be needed anyway.
 #
 # Every global below is read and written ONLY under _API_LOCK (inside the
 # _bridge_call in media_pool_item_by_uid), which is why they carry no lock of
@@ -1726,14 +1826,17 @@ _PROXY_ENRICH_CHUNK = 100
 
 _uid_cache: dict[str, Any] = {}
 _uid_cache_project = ""
+_uid_cache_project_object: Any = None
 _uid_cache_stamp = 0.0
 
 
 def _reset_media_pool_uid_cache() -> None:
     """Forget the uid map (tests, and anything that knows the pool changed)."""
     global _uid_cache, _uid_cache_project, _uid_cache_stamp
+    global _uid_cache_project_object
     _uid_cache = {}
     _uid_cache_project = ""
+    _uid_cache_project_object = None
     _uid_cache_stamp = 0.0
 
 
@@ -1775,8 +1878,10 @@ def _media_pool_uid_map_locked(project, project_name: str) -> dict[str, Any]:
     cached, unlike a walk that found nothing.
     """
     global _uid_cache, _uid_cache_project, _uid_cache_stamp
+    global _uid_cache_project_object
     now = time.monotonic()
     if (project_name == _uid_cache_project
+            and project is _uid_cache_project_object
             and (now - _uid_cache_stamp) < _MEDIA_POOL_UID_TTL_SECONDS):
         return _uid_cache
     try:
@@ -1790,6 +1895,7 @@ def _media_pool_uid_map_locked(project, project_name: str) -> dict[str, Any]:
     _walk_media_pool_uids(root_folder, found)
     _uid_cache = found
     _uid_cache_project = project_name
+    _uid_cache_project_object = project
     _uid_cache_stamp = now
     return found
 

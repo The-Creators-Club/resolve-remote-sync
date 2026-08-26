@@ -338,17 +338,36 @@ def _find_disk_db(library_name: str, project_name: str) -> str:
     return ""
 
 
-def locate(resolve: Any, project_name: str, overrides: Optional[dict] = None) -> Optional[LibraryInfo]:
+def database_info(resolve: Any) -> Optional[LibraryInfo]:
+    """The ONE Resolve call locate() makes: GetCurrentDatabase(). Never raises.
+
+    Public so a caller that serialises its Resolve calls behind a lock can
+    make this one under the lock and hand the answer to locate() as
+    `api_info`, leaving locate's filesystem work (reading the whole Resolve
+    log, walking the disk library) outside it (library walk review 2,
+    2026-08-26).
+    """
+    return _info_from_api(resolve) if resolve is not None else None
+
+
+_UNASKED = object()
+
+
+def locate(resolve: Any, project_name: str, overrides: Optional[dict] = None,
+           api_info: Any = _UNASKED) -> Optional[LibraryInfo]:
     """Work out which project library the open project lives in.
 
     Never raises. None means "no idea" and the caller keeps using the API.
     Order: the API when it answers, else Resolve's log, and config
     overrides win over both -- an override is the editor telling us the
     other two are wrong, which is the only reason to set one.
+
+    `api_info` is database_info()'s answer already fetched: pass it (even as
+    None) and `resolve` is never touched here.
     """
     overrides = overrides or {}
     try:
-        info = _info_from_api(resolve) if resolve is not None else None
+        info = database_info(resolve) if api_info is _UNASKED else api_info
         if info is None:
             info = _info_from_log(project_name)
 

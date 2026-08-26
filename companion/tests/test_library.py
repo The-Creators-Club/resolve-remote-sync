@@ -14,6 +14,7 @@ Column list and shapes measured against the fleet's FF5 library on
 
 from __future__ import annotations
 
+import os
 import socket
 import sqlite3
 import uuid
@@ -621,6 +622,205 @@ def test_queries_refuse_to_run_without_a_project_id(db, monkeypatch):
             call()
         assert "project id unknown" in str(raised.value)
     lib.close()
+
+
+# --------------------------------------------------------------------------
+# the PostgreSQL dialect
+# --------------------------------------------------------------------------
+
+def test_postgres_uid_binds_a_uuid_object():
+    """pg8000 sends a str as text and postgres will not compare text to uuid.
+
+    Every other SQL test in this file runs on SQLite, whose uid columns are
+    TEXT and whose backend hands the string straight through -- so this
+    conversion was the one piece of the reader that only ever ran on the
+    editor's machine (library walk review, 2026-08-26).
+    """
+    backend = library._PostgresBackend.__new__(library._PostgresBackend)
+    bound = backend.uid("232A7D03-5213-48E3-824E-229CF3B0B6BD")
+    assert isinstance(bound, uuid.UUID)
+    assert str(bound) == "232a7d03-5213-48e3-824e-229cf3b0b6bd"
+
+
+def test_postgres_uid_refuses_a_malformed_uid():
+    """It used to return None, which binds NULL: `IN (NULL)` matches nothing
+    and the walk came back empty instead of unavailable, so the bridge never
+    fell back to the API."""
+    backend = library._PostgresBackend.__new__(library._PostgresBackend)
+    for bad in ("", "not-a-uuid", "tl/does-not-exist", None):
+        with pytest.raises(library.LibraryUnavailable):
+            backend.uid(bad)
+
+
+PG_ENV = "CCSYNC_LIBRARY_PG"
+
+
+@pytest.mark.skipif(not os.environ.get(PG_ENV),
+                    reason="set %s=host:port:db:user:password for the live "
+                           "PostgreSQL dialect smoke test" % PG_ENV)
+def test_postgres_dialect_against_a_live_library():
+    """Read-only smoke test of the dialect path against a real library.
+
+    Skipped by default: it needs a postgres project library on the network.
+    Run on the base rig 2026-08-26 with
+    CCSYNC_LIBRARY_PG=100.71.216.3:5432:FF5:postgres:DaVinci and
+    CCSYNC_LIBRARY_PG_PROJECT="Civil Defence". Every statement it issues is
+    a SELECT; it never opens Resolve and never touches the scripting API.
+    """
+    host, port, name, user, password = os.environ[PG_ENV].split(":", 4)
+    project = os.environ.get("CCSYNC_LIBRARY_PG_PROJECT", "Civil Defence")
+    info = library.LibraryInfo(kind="PostgreSQL", name=name, host=host,
+                               port=int(port), user=user, password=password)
+    lib = library.ProjectLibrary(info, project)
+    try:
+        pool = lib.pool_items()
+        assert pool, "the project's bins came back empty"
+        assert any(item["file_path"] for item in pool)
+
+        rows = lib._query(
+            'SELECT a."DbAssociate" FROM "SM_Project" p '
+            'JOIN "SM_Project_Sm2Timeline" a ON a."DbOwner" = p."SM_Project_id" '
+            'WHERE p."ProjectName" = :n', n=project)
+        assert rows, "the project has no timelines"
+        items = []
+        for (timeline_uid,) in rows:
+            items = lib.timeline_items(str(timeline_uid))
+            if items:
+                break
+        assert items, "no timeline of %r had a single item" % project
+        for item in items:
+            assert item["source"] == "library"
+            assert item["track_type"] in ("video", "audio")
+            assert item["track_index"] >= 1
+            assert isinstance(item["media_pool_uid"], str) and item["media_pool_uid"]
+    finally:
+        lib.close()
+
+
+# --------------------------------------------------------------------------
+# locate()
+# --------------------------------------------------------------------------
+
+WINDOWS_LOG = (
+    "[0x000012a4] 25.08 09:00:01.100 | postgres project library FF5 at 100.71.216.3 "
+    "version 13.23 (ok)\n"
+    "[0x000012a4] 25.08 09:00:02.200 | Current project pointer changed to (Elections) "
+    "from project library (FF5 : Network)\n"
+    "[0x000012a4] 25.08 09:03:04.500 | Current project pointer changed to (Civil Defence) "
+    "from project library (FF5 : Network)\n"
+)
+
+MACOS_LOG = (
+    "[0x7000098] 25.08 09:00:01.100 | Current project pointer changed to (Reef) "
+    "from project library (Local Database : Disk)\n"
+)
+
+
+@pytest.fixture()
+def fake_log(tmp_path, monkeypatch):
+    def install(text: str):
+        support = tmp_path / "Support"
+        logs = support / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        path = logs / "davinci_resolve.log"
+        path.write_text(text, encoding="utf-8")
+        monkeypatch.setattr(library.luts, "resolve_log_path", lambda: path)
+        return support
+    return install
+
+
+def test_locate_reads_the_windows_log_when_the_api_says_nothing(fake_log):
+    fake_log(WINDOWS_LOG)
+    info = library.locate(None, "Civil Defence", {})
+    assert info is not None
+    assert (info.kind, info.name, info.host) == ("PostgreSQL", "FF5", "100.71.216.3")
+
+
+def test_locate_takes_the_last_pointer_line_for_the_named_project(fake_log):
+    fake_log(WINDOWS_LOG)
+    # The log is append-only across a session; asking for the other project
+    # in it must still resolve, and to the same library.
+    info = library.locate(None, "Elections", {})
+    assert info is not None and info.name == "FF5"
+
+
+def test_locate_reads_a_macos_disk_library_and_finds_its_project_db(fake_log, tmp_path):
+    support = fake_log(MACOS_LOG)
+    project_db = (support / "Resolve Project Library" / "Resolve Projects"
+                  / "Users" / "guest" / "Projects" / "Reef" / "Project.db")
+    project_db.parent.mkdir(parents=True)
+    project_db.write_bytes(b"")
+    info = library.locate(None, "Reef", {})
+    assert info is not None
+    assert info.kind == "Disk"
+    assert info.sqlite_path == str(project_db)
+
+
+def test_locate_prefers_the_api_when_it_answers(fake_log):
+    fake_log(WINDOWS_LOG)
+
+    class Manager:
+        def GetCurrentDatabase(self):
+            return {"DbType": "PostgreSQL", "DbName": "FF4", "IpAddress": "10.0.0.9"}
+
+    class Resolve:
+        def GetProjectManager(self):
+            return Manager()
+
+    info = library.locate(Resolve(), "Civil Defence", {})
+    assert (info.name, info.host) == ("FF4", "10.0.0.9")
+
+
+def test_locate_falls_back_to_the_log_when_resolve_21_returns_none(fake_log):
+    fake_log(WINDOWS_LOG)
+
+    class Manager:
+        def GetCurrentDatabase(self):
+            return None            # Resolve 21.0.1, every time
+
+    class Resolve:
+        def GetProjectManager(self):
+            return Manager()
+
+    info = library.locate(Resolve(), "Civil Defence", {})
+    assert (info.name, info.host) == ("FF5", "100.71.216.3")
+
+
+def test_locate_overrides_win_over_both(fake_log):
+    fake_log(WINDOWS_LOG)
+    info = library.locate(None, "Civil Defence", {
+        "library_db_host": "10.1.1.1",
+        "library_db_port": "6543",
+        "library_db_name": "FF6",
+        "library_db_user": "editor",
+        "library_db_password": "hunter2",
+    })
+    assert (info.kind, info.name, info.host, info.port, info.user, info.password) == (
+        "PostgreSQL", "FF6", "10.1.1.1", 6543, "editor", "hunter2")
+
+
+def test_locate_returns_none_when_nothing_knows(tmp_path, monkeypatch):
+    monkeypatch.setattr(library.luts, "resolve_log_path", lambda: tmp_path / "nope.log")
+    assert library.locate(None, "Civil Defence", {}) is None
+
+
+def test_locate_never_raises(monkeypatch):
+    def boom():
+        raise OSError("no log for you")
+    monkeypatch.setattr(library.luts, "resolve_log_path", boom)
+
+    class Resolve:
+        def GetProjectManager(self):
+            raise RuntimeError("Resolve went away mid-call")
+
+    assert library.locate(Resolve(), "Civil Defence", {}) is None
+
+
+def test_locate_accepts_a_host_override_with_no_log_at_all(tmp_path, monkeypatch):
+    monkeypatch.setattr(library.luts, "resolve_log_path", lambda: tmp_path / "nope.log")
+    info = library.locate(None, "Civil Defence", {"library_db_host": "10.1.1.1",
+                                                  "library_db_name": "FF5"})
+    assert (info.kind, info.host, info.name) == ("PostgreSQL", "10.1.1.1", "FF5")
 
 
 # --------------------------------------------------------------------------

@@ -424,8 +424,13 @@ class _PostgresBackend(_Backend):
         # uuid; a real UUID object binds as the uuid type.
         try:
             return uuid.UUID(str(value))
-        except (ValueError, AttributeError, TypeError):
-            return None
+        except (ValueError, AttributeError, TypeError) as exc:
+            # Was `return None`, which bound NULL and made the query match
+            # nothing at all -- an empty walk that looks exactly like "this
+            # timeline has no media" and stops the bridge falling back
+            # (library walk review, 2026-08-26). A malformed uid is a bug
+            # in the caller or a corrupt library; say so.
+            raise LibraryUnavailable("not a uuid: %r" % (value,)) from exc
 
     def close(self) -> None:
         try:

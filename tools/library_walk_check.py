@@ -13,10 +13,19 @@ project or timeline, never writes to the library. Every library statement
 is a SELECT and every API call is a getter -- deliberately, because this
 runs against an editor's live session.
 
-Exit 1 on any path DISAGREEMENT. Item-count differences are reported, not
-failed: the library legitimately sees more than the API does (a multicam
-answers "" to GetClipProperty("File Path") and hides its angles), which is
-the entire reason the walk exists.
+Exit 1 on any path DISAGREEMENT, and on a library that answers NOTHING.
+Item-count differences are reported, not failed: the library legitimately
+sees more than the API does (a multicam answers "" to
+GetClipProperty("File Path") and hides its angles), which is the entire
+reason the walk exists.
+
+The empty-library check exists because this tool used to pass a library
+that had gone completely dark (library walk review, 2026-08-26): compare()
+intersects the two uid sets, and the intersection of anything with the
+empty set is empty, i.e. "0 compared, 0 disagree, all compared paths
+agree". A wrong uid type, a project id that bound NULL, a library scoped to
+the wrong project -- every one of those shows up as nothing, and nothing
+was the one answer this tool called success.
 """
 
 from __future__ import annotations
@@ -105,8 +114,14 @@ def report(title, rows):
         print("   %-*s  %s" % (width, name, value))
 
 
-def compare(title, api_map, lib_map, describe):
-    """Path agreement over the uids both sides saw. Returns the mismatches."""
+def compare(title, api_map, lib_map, describe, failures=None):
+    """Path agreement over the uids both sides saw. Returns the mismatches.
+
+    An empty intersection while the API saw something is a FAILURE, not a
+    clean sheet: it means the library recognised none of the clips the API
+    is looking at, which is exactly what a broken uid binding or a
+    mis-scoped project looks like.
+    """
     shared = sorted(set(api_map) & set(lib_map))
     mismatched = [uid for uid in shared if describe(api_map[uid]) != lib_map[uid]]
     report(title, [
@@ -124,7 +139,17 @@ def compare(title, api_map, lib_map, describe):
         print("     library %r" % lib_map[uid])
     if len(mismatched) > 10:
         print("   ... and %d more" % (len(mismatched) - 10))
+    if api_map and not shared:
+        fail(failures, "%s: the library recognised NONE of the %d clips the API "
+                       "reported, so nothing was compared" % (title, len(api_map)))
     return mismatched
+
+
+def fail(failures, message):
+    """Record a failure and say so where it cannot be missed in the output."""
+    print("   !! %s" % message)
+    if failures is not None:
+        failures.append(message)
 
 
 def main() -> int:
@@ -155,6 +180,7 @@ def main() -> int:
         ("library", info.describe()),
     ])
 
+    failures = []
     lib, connect_seconds = _timed("open", lambda: library.ProjectLibrary(info, project_name))
     try:
         api_items, api_paths = None, None
@@ -164,10 +190,16 @@ def main() -> int:
             "lib timeline", lambda: lib.timeline_items(timeline_uid))
         pool_paths, _ = _timed("paths", lib.pool_paths)
 
+        # api_paths is keyed by pool uid, so its length is a count of
+        # DISTINCT clips, not of items: 451 cuts of one multicam are one
+        # entry. Labelled as such because "API items with a pool clip: 3"
+        # next to "API items walked: 926" reads as a catastrophe rather
+        # than as three clips (library walk review, 2026-08-26).
         report("timeline items", [
             ("API items walked", api_items),
-            ("API items with a pool clip", len(api_paths)),
-            ("API items with a non-empty path", sum(1 for p in api_paths.values() if p)),
+            ("API distinct pool clips", len(api_paths)),
+            ("API distinct clips with a non-empty path",
+             sum(1 for p in api_paths.values() if p)),
             ("library items", len(lib_items)),
             ("library items with a path", sum(1 for i in lib_items if i["file_path"])),
             ("library angles (via_multicam)", sum(1 for i in lib_items if i["via_multicam"])),
@@ -176,6 +208,15 @@ def main() -> int:
             ("speedup", "%.0fx" % (api_timeline_seconds / max(lib_timeline_seconds, 1e-6))),
         ])
 
+        # A library walk that returns nothing for a timeline the API can
+        # walk is the failure this tool exists to catch, and it is the one
+        # shape the path comparison below cannot see.
+        if api_items and not lib_items:
+            fail(failures, "the library returned NO items for timeline %r while "
+                           "the API walked %d" % (timeline_name, api_items))
+        if not pool_paths:
+            fail(failures, "the library returned no media paths at all")
+
         # Only the uids the API could actually resolve a path for: a
         # multicam reports "" and comparing that to the library's answer
         # would be comparing the library against a known API blind spot.
@@ -183,7 +224,7 @@ def main() -> int:
         bad = compare("timeline paths", api_timeline_real,
                       {uid: pool_paths.get(uid, "") for uid in api_timeline_real
                        if uid in pool_paths},
-                      lambda value: value)
+                      lambda value: value, failures)
 
         root = project.GetMediaPool().GetRootFolder()
         api_clips, api_pool_seconds = _timed("api pool", lambda: api_pool(root))
@@ -197,18 +238,26 @@ def main() -> int:
             ("library walk", "%.3f s" % lib_pool_seconds),
             ("speedup", "%.0fx" % (api_pool_seconds / max(lib_pool_seconds, 1e-6))),
         ])
+        if api_clips and not lib_pool:
+            fail(failures, "the library returned NO pool clips for project %r while "
+                           "the API walked %d" % (project_name, len(api_clips)))
         api_pool_real = {uid: value for uid, value in api_clips.items() if value[0]}
         bad += compare("pool paths", api_pool_real,
                        {uid: by_uid[uid]["file_path"] for uid in api_pool_real if uid in by_uid},
-                       lambda value: value[0])
+                       lambda value: value[0], failures)
         bad += compare("pool bins", api_pool_real,
                        {uid: by_uid[uid]["bin_path"] for uid in api_pool_real if uid in by_uid},
-                       lambda value: value[2])
+                       lambda value: value[2], failures)
     finally:
         lib.close()
 
-    print("\n%s" % ("DISAGREEMENTS: %d" % len(bad) if bad else "all compared paths agree."))
-    return 1 if bad else 0
+    if bad:
+        print("\nDISAGREEMENTS: %d" % len(bad))
+    for message in failures:
+        print("FAILED: %s" % message)
+    if not bad and not failures:
+        print("\nall compared paths agree.")
+    return 1 if (bad or failures) else 0
 
 
 if __name__ == "__main__":

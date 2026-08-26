@@ -1,6 +1,10 @@
 # Library walk — enumerating Resolve clips from the project library, not the API
 
-Plan and interface contract, 2026-08-26. Status: in build (branch `library-walk`).
+Plan and interface contract, 2026-08-26. Status: **built** and merged on
+branch `library-walk` (029db90), shipping as companion 0.9.51
+(KNOWN_BUGS CR-80). Read "As built" at the foot of this document for what
+differs from the plan above it; the traps live in `docs/GOTCHAS.md`
+section 16.
 
 ## Why
 
@@ -190,6 +194,9 @@ fallback, config keys, logging, `source`), then **E — docs/release**
 
 ## Open questions (A investigates, D decides)
 
+*(As asked. 1-3 are answered under "Open questions, answered" below;
+4 is still open.)*
+
 1. `proxy_path` / `proxy_state` from the library: `Sm2MpMedia.FieldsBlob`
    carries the proxy path; is there a cheap "Proxy" state (`BtVideoInfo.Proxy`?).
    If not derivable, `get_media_pool_items` may keep the API for those two keys
@@ -202,3 +209,96 @@ fallback, config keys, logging, `source`), then **E — docs/release**
    mount-resolved path? (`_log_darwin_clip_path_flavor` was written to find
    out for the API; the library answer is the *stored* string, which is what
    `classify_path` wants.)
+
+## As built (2026-08-26)
+
+Everything above stands. What the build decided that the plan did not, in the
+order it will matter to the next reader:
+
+- **The fingerprint carries a generation counter, not a `changed()` value.**
+  The plan said the library walk would re-run when `changed()` said the
+  library had moved. `changed()` returns a bool, and a bool cannot be part of
+  a cache key. `resolve_bridge._library_generation` is bumped whenever
+  `changed()` is true (or the ceiling below fires), and the fingerprint is
+  `("library", project, timeline name, timeline uid, generation)`.
+- **A 60 s ceiling on top of `changed()`.** `_LIBRARY_CACHE_MAX_SECONDS =
+  60.0`: with Live Save switched off, `DbSavedTime` does not move until the
+  editor presses Ctrl-S, so `changed()` can say "no" across a relink for an
+  arbitrarily long time. The ceiling forces a re-read (and drops the pool
+  path cache) once a minute. It costs one extra walk a minute of an operation
+  measured in milliseconds.
+- **The poll cache has its own lock.** `_TIMELINE_CACHE_LOCK`, not `_API_LOCK`
+  as the old cache implicitly had. The library walk reaches the cache with
+  `_API_LOCK` deliberately released; taking it to read three module globals
+  would put the watcher straight back behind whatever native call is in
+  flight.
+- **Items with no path are dropped, and that is most of them.** Same rule the
+  API walk has always had ("no `File Path` -> skipped"), but here it does the
+  heavy lifting: on Civil Defence - E1 the library returns ~994 items of which
+  ~44 carry a path. Every REPEAT cut of a multicam comes back as the multicam
+  itself, with the container's uid and no path.
+- **Angles are emitted at the multicam's FIRST appearance only.** The
+  alternative (expanding at every cut) hands the watcher the same 44 clips
+  hundreds of times over. `via_multicam` carries the container's uid.
+- **`item_index` is the index of the TIMELINE ITEM within its track**, 0-based
+  in Start order, not the position of the dict in the returned list. Angles of
+  a multicam therefore all carry the index of the multicam item they came
+  from. Counting emitted dicts instead made every index after a multicam
+  disagree with the API's own item order, which is what consumers match
+  against.
+- **`proxy_path` / `proxy_state` are API-enriched, and only when proxy
+  generation is on.** The library cannot give them cheaply (open question 1
+  below). `_enrich_proxy_keys` fills them from Resolve in chunks of 100
+  (`_PROXY_ENRICH_CHUNK`), each chunk taking `_API_LOCK` for itself so a card
+  click in another client waits for a chunk and not for the walk, and it
+  returns immediately when `proxy_generation_enabled()` is false. Everywhere
+  else the two keys stay `""`, which is what the contract says "unknown" looks
+  like.
+- **`GetClipProperty` takes one argument now.** Not in the plan at all: the
+  API walk that remains behind the fallback reads one property rather than
+  building the 60-key dict, 0.1 ms against 12.5 ms per clip, probed once per
+  process in case a build has no such overload. It takes the fallback walk
+  from 11 s to under 1 s, which matters because on plenty of machines the
+  fallback is the permanent state.
+- **`locate()` takes a host override alone.** A machine whose Resolve log has
+  rotated away has nothing to mine, so `library_db_host` on its own is enough
+  to construct a `LibraryInfo`; an explicit host also forces `kind` to
+  PostgreSQL, since nobody points a disk library at an IP address.
+- **Failed construction closes its backend.** `ProjectLibrary._connect()`
+  wraps the post-connect `_find_project_id()` in a try that closes the backend
+  on any failure, and `_ready()` refuses to query with no project id. Both
+  were found in review: 8 failed constructions left 8 postgres sessions
+  stranded, and a blank project id binds NULL and answers wrongly rather than
+  failing.
+
+## Open questions, answered
+
+1. **`proxy_path` / `proxy_state` from the library - NO, use the API.**
+   `BtVideoInfo.Proxy` is a bare reference stub: 197 bytes of UTF-16 property
+   bag holding UniqueId, DbType `BtVideoProxy` and DataManagerID, present on
+   3,873 of 3,873 rows whether the clip has a proxy or not, with no path and
+   no state. The proxy path IS in `Sm2MpMedia.FieldsBlob`, but behind a SECOND
+   nested zstd frame inside that property bag, and mining it costs 76 ms for
+   the library. So the plan's fallback position is what shipped: the two keys
+   come from the API, in chunks, only where proxy generation is enabled.
+2. **The cheapest "library changed" signal - `SM_Project.LastModTimeInSecs`
+   plus `MAX(Sm2Sequence.DbSavedTime)`**, joined through
+   `SM_Project_Sm2Timeline` and `Sm2Timeline`. Two indexed rows, ~3 ms.
+   `DbSavedTime` is a monotonic per-save counter, not a clock, and it is what
+   actually moves when Live Save writes a sequence back.
+   `Sm2Sequence.LastChangedTime` is 0 on every row here and
+   `Sm2Timeline.ModTimeInSecs` only updates on a timeline-level change, so
+   neither is usable. The signal is blind while Live Save is off, hence the
+   60 s ceiling above.
+3. **Scoping the pool to one project - `SM_Project.MediaPool`.** That uid
+   appears as `Sm2MpFolder.Sm2MediaPool_id` on exactly ONE folder, the
+   project's root bin, which is also the only one with
+   `Sm2MpFolder_Owner_id` NULL. Every other folder has `Sm2MediaPool_id` NULL
+   and hangs off its parent by `Sm2MpFolder_Owner_id`. So the root is a lookup
+   and the tree is a descent; there is no project column on the folders and no
+   `Sm2MpFolder_Sm2MpMedia` association to consult.
+4. **macOS path spelling - STILL OPEN.** It needs a Mac with the fleet's
+   library open, and there has not been one since this was built. The answer
+   is one line in that machine's log (`resolve: reading clips from the project
+   library ...`, then what `classify_path` is handed). KNOWN_BUGS CR-80's
+   shipping checklist carries it.

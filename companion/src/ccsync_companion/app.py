@@ -685,6 +685,10 @@ class CompanionApp:
 
     def __init__(self, cfg: dict[str, Any], exists_fn: Callable[[str], bool] = os.path.exists) -> None:
         self.config = cfg
+        # The bridge reads no config of its own; the six library keys are
+        # pushed in here so the walk knows which project library to read and
+        # whether to read one at all (library walk, 2026-08-26).
+        resolve_bridge.configure_library(cfg)
         self.log_path = config_mod.resolved_log_path(cfg)
         # Injectable for tests -- see get_media_tree()/_refresh_media_tree_once().
         self._exists_fn = exists_fn
@@ -2020,6 +2024,14 @@ class CompanionApp:
             # that carried only uids still ends in a real relink and a clip
             # the pool no longer holds is skipped BY NAME rather than
             # counted as fixed (library walk, 2026-08-26).
+            #
+            # For an item the library reached INSIDE a multicam or compound
+            # clip, this uid is the ANGLE's own pool clip, so the ReplaceClip
+            # below repoints that angle rather than the container. That is
+            # the intended behaviour and the only one that works: the
+            # container has no media path of its own, and the angle is where
+            # the non-canonical path actually is (item["via_multicam"] names
+            # the multicam it was reached through).
             mpi = resolve_bridge.resolve_media_pool_item(item)
             if mpi is None:
                 log.warning(

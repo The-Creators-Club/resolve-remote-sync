@@ -459,13 +459,21 @@ def make_timeline_item(
     track_index: int = 1,
     item_index: int = 0,
     media_pool_item=None,
+    media_pool_uid: str | None = None,
+    source: str = "api",
 ) -> dict:
-    """Build a fake resolve_bridge.get_timeline_items()-style item dict."""
+    """Build a fake resolve_bridge.get_timeline_items()-style item dict.
+
+    `media_pool_uid` defaults to the path, so every fake item carries a
+    distinct, stable uid the way a real one does (library walk, 2026-08-26).
+    Pass media_pool_item=False for the LIBRARY shape: a uid and no object.
+    """
 
     class _FakeMediaPoolItem:
         def __init__(self, path: str, name: str):
             self._path = path
             self._name = name
+            self._uid = f"uid:{path}"
             self.replace_calls: list[str] = []
             self.replace_result = True
 
@@ -475,16 +483,27 @@ def make_timeline_item(
         def GetName(self):
             return self._name
 
+        def GetUniqueId(self):
+            return self._uid
+
         def ReplaceClip(self, new_path: str):
             self.replace_calls.append(new_path)
             return self.replace_result
 
-    mpi = media_pool_item if media_pool_item is not None else _FakeMediaPoolItem(
-        file_path, clip_name or Path(file_path).name
-    )
+    if media_pool_item is False:
+        mpi = None
+    elif media_pool_item is not None:
+        mpi = media_pool_item
+    else:
+        mpi = _FakeMediaPoolItem(file_path, clip_name or Path(file_path).name)
+    if media_pool_uid is None:
+        media_pool_uid = getattr(mpi, "_uid", None) or f"uid:{file_path}"
     return {
         "file_path": file_path,
         "media_pool_item": mpi,
+        "media_pool_uid": media_pool_uid,
+        "source": source,
+        "via_multicam": None,
         "clip_name": clip_name or Path(file_path).name,
         "track_type": track_type,
         "track_index": track_index,

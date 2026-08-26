@@ -62,9 +62,12 @@ def resolve_process(monkeypatch):
 
 
 class FakeMediaPoolItem:
-    def __init__(self, file_path: str, name: str = "clip"):
+    def __init__(self, file_path: str, name: str = "clip", uid: str = ""):
         self._file_path = file_path
         self._name = name
+        # Every real MediaPoolItem has one, and it is the handle the library
+        # walk hands on in place of the object (library walk, 2026-08-26).
+        self._uid = uid or f"uid:{file_path}"
         self.replace_calls: list[str] = []
         # Model the real API: ReplaceClip returns None EVEN ON SUCCESS (the
         # bug replace_clip used to have was trusting this value). Whether the
@@ -79,6 +82,9 @@ class FakeMediaPoolItem:
 
     def GetName(self):
         return self._name
+
+    def GetUniqueId(self):
+        return self._uid
 
     def ReplaceClip(self, new_path):
         if self.raise_on_replace:

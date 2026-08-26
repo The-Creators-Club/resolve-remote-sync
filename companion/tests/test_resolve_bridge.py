@@ -1673,3 +1673,249 @@ def test_a_public_entry_point_names_itself_while_it_holds_the_bridge(
 
     assert seen["activity"]["call"] == "get_media_pool_items"
     assert resolve_bridge.bridge_activity() == {}
+
+
+# -- uid -> live MediaPoolItem (library walk, 2026-08-26) -------------------
+#
+# The project-library walk hands back uids and no objects. Everything that
+# ACTS on a clip has to be able to get from one to the other, and has to cope
+# when it cannot -- by skipping that clip loudly, never by reporting a clean
+# pass having done nothing.
+
+
+@pytest.fixture(autouse=True)
+def _forget_uid_cache():
+    """The uid map is process-global and TTL'd; no test may inherit another's."""
+    resolve_bridge._reset_media_pool_uid_cache()
+    yield
+    resolve_bridge._reset_media_pool_uid_cache()
+
+
+def _pool_resolve(*clips, subfolders=None, name="MyProject"):
+    root = FakeFolder(clips=list(clips), subfolders=list(subfolders or []))
+    project = FakeProject(media_pool=FakeMediaPool(root), name=name)
+    return FakeResolve(FakeProjectManager(project)), root
+
+
+def test_media_pool_item_by_uid_finds_the_live_object(monkeypatch):
+    wanted = FakeMediaPoolItem(r"P:\Projects\a.mov", uid="uid-a")
+    other = FakeMediaPoolItem(r"P:\Projects\b.mov", uid="uid-b")
+    resolve, _ = _pool_resolve(other, wanted)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    assert resolve_bridge.media_pool_item_by_uid("uid-a") is wanted
+
+
+def test_media_pool_item_by_uid_recurses_into_bins(monkeypatch):
+    deep = FakeMediaPoolItem(r"P:\Projects\deep.mov", uid="uid-deep")
+    bin_two = FakeFolder(clips=[deep], name="Interviews")
+    bin_one = FakeFolder(subfolders=[bin_two], name="Master")
+    resolve, _ = _pool_resolve(subfolders=[bin_one])
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    assert resolve_bridge.media_pool_item_by_uid("uid-deep") is deep
+
+
+def test_media_pool_item_by_uid_misses_return_none_not_an_exception(monkeypatch):
+    resolve, _ = _pool_resolve(FakeMediaPoolItem(r"P:\a.mov", uid="uid-a"))
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    assert resolve_bridge.media_pool_item_by_uid("uid-nobody") is None
+    assert resolve_bridge.media_pool_item_by_uid("") is None
+
+
+def test_media_pool_item_by_uid_with_no_resolve_is_none(monkeypatch):
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: None)
+    assert resolve_bridge.media_pool_item_by_uid("uid-a") is None
+
+
+def test_media_pool_item_by_uid_with_no_project_is_none(monkeypatch):
+    monkeypatch.setattr(resolve_bridge, "connect",
+                        lambda: FakeResolve(FakeProjectManager(None)))
+    assert resolve_bridge.media_pool_item_by_uid("uid-a") is None
+
+
+def test_media_pool_item_by_uid_never_raises(monkeypatch):
+    def _boom():
+        raise RuntimeError("fusionscript went away")
+
+    monkeypatch.setattr(resolve_bridge, "connect", _boom)
+    assert resolve_bridge.media_pool_item_by_uid("uid-a") is None
+
+
+def test_media_pool_item_by_uid_walks_the_pool_once_per_ttl(monkeypatch):
+    """A FIX ALL over 50 clips must pay for ONE walk, not 50: the walk is the
+    expensive thing this whole change exists to stop doing per poll."""
+    clip = FakeMediaPoolItem(r"P:\a.mov", uid="uid-a")
+    root = FakeFolder(clips=[clip])
+    walks = []
+    real_get_clip_list = root.GetClipList
+
+    def _counted():
+        walks.append(1)
+        return real_get_clip_list()
+
+    root.GetClipList = _counted
+    project = FakeProject(media_pool=FakeMediaPool(root))
+    monkeypatch.setattr(resolve_bridge, "connect",
+                        lambda: FakeResolve(FakeProjectManager(project)))
+
+    assert resolve_bridge.media_pool_item_by_uid("uid-a") is clip
+    assert resolve_bridge.media_pool_item_by_uid("uid-a") is clip
+    assert len(walks) == 1
+
+
+def test_media_pool_item_by_uid_caches_the_MISS_too(monkeypatch):
+    """An unknown uid (a library row naming a clip since deleted) must not
+    re-walk the whole pool once per clip of the batch."""
+    root = FakeFolder(clips=[FakeMediaPoolItem(r"P:\a.mov", uid="uid-a")])
+    walks = []
+    real = root.GetClipList
+    root.GetClipList = lambda: (walks.append(1), real())[1]
+    project = FakeProject(media_pool=FakeMediaPool(root))
+    monkeypatch.setattr(resolve_bridge, "connect",
+                        lambda: FakeResolve(FakeProjectManager(project)))
+
+    assert resolve_bridge.media_pool_item_by_uid("uid-gone") is None
+    assert resolve_bridge.media_pool_item_by_uid("uid-gone") is None
+    assert len(walks) == 1
+
+
+def test_media_pool_item_by_uid_re_walks_after_the_ttl(monkeypatch):
+    clip = FakeMediaPoolItem(r"P:\a.mov", uid="uid-a")
+    root = FakeFolder(clips=[clip])
+    walks = []
+    real = root.GetClipList
+    root.GetClipList = lambda: (walks.append(1), real())[1]
+    project = FakeProject(media_pool=FakeMediaPool(root))
+    monkeypatch.setattr(resolve_bridge, "connect",
+                        lambda: FakeResolve(FakeProjectManager(project)))
+
+    assert resolve_bridge.media_pool_item_by_uid("uid-a") is clip
+    resolve_bridge._uid_cache_stamp -= (
+        resolve_bridge._MEDIA_POOL_UID_TTL_SECONDS + 1.0)
+    assert resolve_bridge.media_pool_item_by_uid("uid-a") is clip
+    assert len(walks) == 2
+
+
+def test_media_pool_item_by_uid_invalidates_on_a_project_change(monkeypatch):
+    """One library holds many projects, and uids do not collide across them --
+    but the OBJECT does not survive the switch, so the map must not either."""
+    a_clip = FakeMediaPoolItem(r"P:\a.mov", uid="uid-a")
+    b_clip = FakeMediaPoolItem(r"P:\b.mov", uid="uid-b")
+    project_a = FakeProject(media_pool=FakeMediaPool(FakeFolder(clips=[a_clip])),
+                            name="Animals")
+    project_b = FakeProject(media_pool=FakeMediaPool(FakeFolder(clips=[b_clip])),
+                            name="Elections")
+    open_project = [project_a]
+    monkeypatch.setattr(
+        resolve_bridge, "connect",
+        lambda: FakeResolve(FakeProjectManager(open_project[0])))
+
+    assert resolve_bridge.media_pool_item_by_uid("uid-a") is a_clip
+    open_project[0] = project_b
+    # Same TTL window, different project: the stale map must not answer.
+    assert resolve_bridge.media_pool_item_by_uid("uid-b") is b_clip
+    assert resolve_bridge.media_pool_item_by_uid("uid-a") is None
+
+
+def test_media_pool_item_by_uid_survives_a_build_without_getuniqueid(monkeypatch):
+    class NoUid:
+        def GetClipProperty(self):
+            return {"File Path": r"P:\a.mov"}
+
+        def GetName(self):
+            return "a.mov"
+
+    resolve, _ = _pool_resolve(NoUid())
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+    assert resolve_bridge.media_pool_item_by_uid("uid-a") is None
+
+
+def test_resolve_media_pool_item_prefers_the_object_it_was_given(monkeypatch):
+    clip = FakeMediaPoolItem(r"P:\a.mov", uid="uid-a")
+
+    def _must_not_run(uid):
+        raise AssertionError("looked a clip up that was already in hand")
+
+    monkeypatch.setattr(resolve_bridge, "media_pool_item_by_uid", _must_not_run)
+    item = {"media_pool_item": clip, "media_pool_uid": "uid-a"}
+    assert resolve_bridge.resolve_media_pool_item(item) is clip
+
+
+def test_resolve_media_pool_item_looks_up_a_uid_only_item(monkeypatch):
+    clip = FakeMediaPoolItem(r"P:\a.mov", uid="uid-a")
+    resolve, _ = _pool_resolve(clip)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    item = {"media_pool_item": None, "media_pool_uid": "uid-a", "source": "library"}
+    assert resolve_bridge.resolve_media_pool_item(item) is clip
+    # Written back, so a batch touching the same dict twice pays once.
+    assert item["media_pool_item"] is clip
+
+
+def test_resolve_media_pool_item_with_neither_is_none(monkeypatch):
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: None)
+    assert resolve_bridge.resolve_media_pool_item(
+        {"media_pool_item": None, "media_pool_uid": ""}) is None
+    assert resolve_bridge.resolve_media_pool_item(None) is None
+
+
+def test_resolve_media_pool_item_passes_a_bare_object_through():
+    """Batches collected objects long before this existed; they still work."""
+    clip = FakeMediaPoolItem(r"P:\a.mov")
+    assert resolve_bridge.resolve_media_pool_item(clip) is clip
+    sentinel = object()
+    assert resolve_bridge.resolve_media_pool_item(sentinel) is sentinel
+
+
+def test_media_pool_item_is_reachable_is_the_filter_for_a_library_item():
+    assert resolve_bridge.media_pool_item_is_reachable(
+        {"media_pool_item": None, "media_pool_uid": "uid-a"}) is True
+    assert resolve_bridge.media_pool_item_is_reachable(
+        {"media_pool_item": object(), "media_pool_uid": ""}) is True
+    assert resolve_bridge.media_pool_item_is_reachable(
+        {"media_pool_item": None, "media_pool_uid": ""}) is False
+    assert resolve_bridge.media_pool_item_is_reachable(None) is False
+
+
+def test_the_api_timeline_walk_tags_every_item_with_its_uid(monkeypatch):
+    mpi = FakeMediaPoolItem(r"C:\Creators_Club\clip.mov", uid="uid-clip")
+    timeline = FakeTimeline({"video": {1: [FakeTimelineItem(mpi)]}, "audio": {}})
+    resolve = FakeResolve(FakeProjectManager(FakeProject(timeline)))
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    item = resolve_bridge.get_timeline_items()["items"][0]
+    assert item["media_pool_uid"] == "uid-clip"
+    assert item["source"] == "api"
+    # The API cannot see inside a multicam, so nothing it walks came through one.
+    assert item["via_multicam"] is None
+
+
+def test_the_api_pool_walk_tags_every_item_with_its_uid(monkeypatch):
+    clip = FakeMediaPoolItem(r"C:\Creators_Club\clip.mov", uid="uid-clip")
+    resolve, _ = _pool_resolve(clip)
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    item = resolve_bridge.get_media_pool_items()["items"][0]
+    assert item["media_pool_uid"] == "uid-clip"
+    assert item["source"] == "api"
+
+
+def test_an_api_build_without_getuniqueid_still_walks(monkeypatch):
+    """A missing method costs a weaker item dict, never an exception on the
+    watcher's path -- same rule as the timeline fingerprint's GetUniqueId."""
+    class NoUid:
+        def GetClipProperty(self):
+            return {"File Path": r"C:\Creators_Club\clip.mov"}
+
+        def GetName(self):
+            return "clip.mov"
+
+    timeline = FakeTimeline({"video": {1: [FakeTimelineItem(NoUid())]}, "audio": {}})
+    resolve = FakeResolve(FakeProjectManager(FakeProject(timeline)))
+    monkeypatch.setattr(resolve_bridge, "connect", lambda: resolve)
+
+    result = resolve_bridge.get_timeline_items()
+    assert result["ok"] is True
+    assert result["items"][0]["media_pool_uid"] == ""

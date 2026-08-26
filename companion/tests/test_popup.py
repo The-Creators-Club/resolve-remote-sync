@@ -1828,3 +1828,38 @@ def test_a_percentage_nobody_can_compute_simply_is_not_shown():
 def test_a_percentage_out_of_range_is_clamped_rather_than_drawn():
     assert _model(item_label="x", item_percent=140).item_line() == "x - 100%"
     assert _model(item_label="x", item_percent=-5).item_line() == "x - 0%"
+
+
+# -- library walk, 2026-08-26 ------------------------------------------------
+
+
+def test_dedupe_carries_the_item_dict_when_the_walk_had_no_object():
+    """Collecting objects only would make a library walk's rows fix nothing:
+    the uid has to travel to the ReplaceClip."""
+    items = [
+        {"file_path": r"C:\x\a.mov", "media_pool_item": None,
+         "media_pool_uid": "uid-a"},
+        {"file_path": r"C:\X\A.MOV", "media_pool_item": None,
+         "media_pool_uid": "uid-a"},
+    ]
+    merged = dedupe_out_of_tree_items(items)
+    assert len(merged) == 1
+    entries = merged[0]["media_pool_items"]
+    assert len(entries) == 2
+    assert all(e["media_pool_uid"] == "uid-a" for e in entries)
+
+
+def test_dedupe_still_carries_bare_objects_when_the_walk_had_them():
+    """Byte-identical to what it always was for an API walk."""
+    mpi_a, mpi_b = object(), object()
+    items = [
+        {"file_path": r"C:\x\a.mov", "media_pool_item": mpi_a, "media_pool_uid": "uid-a"},
+        {"file_path": r"C:\X\A.MOV", "media_pool_item": mpi_b, "media_pool_uid": "uid-a"},
+    ]
+    merged = dedupe_out_of_tree_items(items)
+    assert merged[0]["media_pool_items"] == [mpi_a, mpi_b]
+
+
+def test_dedupe_drops_an_item_with_neither_object_nor_uid():
+    items = [{"file_path": r"C:\x\a.mov", "media_pool_item": None, "media_pool_uid": ""}]
+    assert dedupe_out_of_tree_items(items)[0]["media_pool_items"] == []

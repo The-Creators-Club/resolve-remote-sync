@@ -923,12 +923,22 @@ def fix_clip(
             copy_with_progress(s, d, on_bytes=on_bytes, should_abort=should_abort)
     items_raw = media_pool_items if isinstance(media_pool_items, list) else [media_pool_items]
     items: list[Any] = []
-    seen_ids: set[int] = set()
-    for mpi in items_raw:
-        if id(mpi) in seen_ids:
+    # De-duplicate by UID when the entry is an item dict and by object
+    # identity when it is a MediaPoolItem (library walk, 2026-08-26): two
+    # timeline items of one clip are two DIFFERENT dicts carrying the SAME
+    # uid, and keying those by id() would put the clip cut in 50 times back
+    # to 50 identical ReplaceClips -- the re-conform storm AUDIT 6 asked
+    # this dedupe for.
+    seen: set[Any] = set()
+    for entry in items_raw:
+        if isinstance(entry, dict) and str(entry.get("media_pool_uid") or ""):
+            key: Any = ("uid", str(entry["media_pool_uid"]))
+        else:
+            key = ("id", id(entry))
+        if key in seen:
             continue
-        seen_ids.add(id(mpi))
-        items.append(mpi)
+        seen.add(key)
+        items.append(entry)
 
     src = Path(file_path)
     if not src.is_file():
@@ -1089,7 +1099,18 @@ def fix_clip(
 
     failures: list[str] = []
     relink_path = canonical_clip_path(dest_path, local_root, canonical_prefix)
-    for media_pool_item in items:
+    for entry in items:
+        # Resolved at the moment of the native call, not when the batch was
+        # collected (library walk, 2026-08-26): an entry may be an item dict
+        # carrying only a uid. A clip that cannot be found is a FAILURE, not
+        # a silent success -- the copy landed, so the editor has to be told
+        # their project was NOT repointed at it.
+        media_pool_item = resolve_bridge.resolve_media_pool_item(entry)
+        if media_pool_item is None:
+            name = (entry.get("clip_name") if isinstance(entry, dict) else "") or src.name
+            log.warning("fix_clip: no media pool item for %s -- not relinked", name)
+            failures.append(f"could not find {name} in the media pool")
+            continue
         relink_result = replace_clip_fn(media_pool_item, relink_path)
         if not relink_result.get("ok"):
             failures.append(relink_result.get("message", "unknown error"))

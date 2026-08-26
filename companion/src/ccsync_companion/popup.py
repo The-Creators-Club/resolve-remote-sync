@@ -201,6 +201,24 @@ def summarize_fix_results(
     return head
 
 
+def _relink_entry(item: dict[str, Any]) -> Any:
+    """What to carry through a batch so the relink can still be made.
+
+    The MediaPoolItem when the walk carried one -- so a batch built from the
+    API walk is byte-identical to what it always was -- and otherwise the
+    ITEM DICT, which carries "media_pool_uid" for
+    resolve_bridge.resolve_media_pool_item() to look the object up with at
+    the moment of the ReplaceClip. None when there is neither, i.e. nothing
+    that could ever be relinked (library walk, 2026-08-26).
+    """
+    media_pool_item = item.get("media_pool_item")
+    if media_pool_item is not None:
+        return media_pool_item
+    if str(item.get("media_pool_uid") or ""):
+        return item
+    return None
+
+
 def dedupe_out_of_tree_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse timeline items that share the same source file (normalized
     case-insensitive path — same rule as fixer.IgnoreTracker/resolve_bridge)
@@ -218,23 +236,22 @@ def dedupe_out_of_tree_items(items: list[dict[str, Any]]) -> list[dict[str, Any]
     All of a path's original media pool items are preserved under
     "media_pool_items" (order preserved, first-seen order) so fixing the
     one merged row can relink every timeline item that referenced it, not
-    just the first one seen.
+    just the first one seen. See _relink_entry for what an entry is: an
+    object when the walk had one, the item dict (uid inside) when it did not.
     """
     merged: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     for item in items:
         path = item.get("file_path", "")
         key = resolve_bridge._norm_path(path)
+        entry = _relink_entry(item)
         if key not in merged:
             order.append(key)
             new_item = dict(item)
-            mpi = item.get("media_pool_item")
-            new_item["media_pool_items"] = [mpi] if mpi is not None else []
+            new_item["media_pool_items"] = [entry] if entry is not None else []
             merged[key] = new_item
-        else:
-            mpi = item.get("media_pool_item")
-            if mpi is not None:
-                merged[key]["media_pool_items"].append(mpi)
+        elif entry is not None:
+            merged[key]["media_pool_items"].append(entry)
     return [merged[key] for key in order]
 
 
@@ -456,7 +473,10 @@ def perform_fix_all(
         media_pool_items = row.get("media_pool_items")
         if media_pool_items is None:
             # back-compat with any caller still building rows the old way.
-            media_pool_items = [row["media_pool_item"]] if "media_pool_item" in row else []
+            # Through _relink_entry so a row whose walk carried no object
+            # still hands the uid on (library walk, 2026-08-26).
+            entry = _relink_entry(row) if "media_pool_item" in row else None
+            media_pool_items = [entry] if entry is not None else []
 
         name = row.get("clip_name") or canon.basename(path)
         file_total = _safe_size(path)

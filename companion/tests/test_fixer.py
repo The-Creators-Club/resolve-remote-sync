@@ -4,6 +4,8 @@ resolve_bridge / copy_fn — never touches a real Resolve instance)."""
 
 from __future__ import annotations
 
+import logging
+
 import os
 import shutil
 from pathlib import Path
@@ -1431,3 +1433,82 @@ class TestDryRun:
             assert len(reads) == 1
         finally:
             fixer.reset_dry_run_cache()
+
+
+# -- library walk, 2026-08-26 ------------------------------------------------
+
+
+def test_fix_clip_resolves_a_uid_only_entry_at_the_relink(tmp_path, monkeypatch):
+    from ccsync_companion import resolve_bridge
+
+    src = tmp_path / "src" / "clip.mov"
+    src.parent.mkdir(parents=True)
+    src.write_text("video bytes")
+    live = object()
+    monkeypatch.setattr(resolve_bridge, "media_pool_item_by_uid",
+                        lambda uid: live if uid == "uid-a" else None)
+    seen = []
+
+    def _replace(mpi, path):
+        seen.append((mpi, path))
+        return {"ok": True}
+
+    result = fixer.fix_clip(
+        str(src), "B-roll/Editor Added/owen", str(tmp_path / "root"),
+        [{"media_pool_item": None, "media_pool_uid": "uid-a", "clip_name": "clip.mov"}],
+        replace_clip_fn=_replace, canonical_prefix="P:\\",
+    )
+
+    assert result["ok"] is True
+    assert seen == [(live, r"P:\B-roll\Editor Added\owen\clip.mov")]
+
+
+def test_fix_clip_dedupes_uid_only_entries_by_uid_not_by_dict_identity(
+        tmp_path, monkeypatch):
+    """Two timeline items of one clip are two DIFFERENT dicts carrying the
+    SAME uid: keying by id() would put a clip cut in 50 times back to 50
+    ReplaceClips, which is the re-conform storm the dedupe exists to stop."""
+    from ccsync_companion import resolve_bridge
+
+    src = tmp_path / "src" / "clip.mov"
+    src.parent.mkdir(parents=True)
+    src.write_text("video bytes")
+    live = object()
+    monkeypatch.setattr(resolve_bridge, "media_pool_item_by_uid", lambda uid: live)
+    calls = []
+
+    result = fixer.fix_clip(
+        str(src), "B-roll", str(tmp_path / "root"),
+        [{"media_pool_item": None, "media_pool_uid": "uid-a"},
+         {"media_pool_item": None, "media_pool_uid": "uid-a"}],
+        replace_clip_fn=lambda mpi, path: (calls.append(path), {"ok": True})[1],
+        canonical_prefix="P:\\",
+    )
+
+    assert result["ok"] is True
+    assert len(calls) == 1
+
+
+def test_fix_clip_reports_a_clip_it_could_not_find_as_a_failure(
+        tmp_path, monkeypatch, caplog):
+    """The copy landed. Saying "Fixed" while nothing was repointed at it is
+    the one outcome worse than failing."""
+    from ccsync_companion import resolve_bridge
+
+    src = tmp_path / "src" / "clip.mov"
+    src.parent.mkdir(parents=True)
+    src.write_text("video bytes")
+    monkeypatch.setattr(resolve_bridge, "media_pool_item_by_uid", lambda uid: None)
+
+    with caplog.at_level(logging.WARNING):
+        result = fixer.fix_clip(
+            str(src), "B-roll", str(tmp_path / "root"),
+            [{"media_pool_item": None, "media_pool_uid": "uid-gone",
+              "clip_name": "clip.mov"}],
+            replace_clip_fn=lambda mpi, path: {"ok": True},
+            canonical_prefix="P:\\",
+        )
+
+    assert result["ok"] is False
+    assert "clip.mov" in result["message"]
+    assert result["copied_to"]

@@ -51,6 +51,10 @@ def plan_local_consolidation(
     source path (popup.build_popup_rows already dedupes and resolves the
     destination, honoring the sticky server root). Returns:
         {"ops": [{file_path, media_pool_items, dest_rel, size}], "count", "bytes"}
+
+    "media_pool_items" is carried through opaquely -- an entry is a
+    MediaPoolItem or an item dict (see popup._relink_entry); fixer.fix_clip
+    resolves it at the ReplaceClip (library walk, 2026-08-26).
     """
     rows = popup.build_popup_rows(
         out_of_tree_items,

@@ -1919,9 +1919,17 @@ class CompanionApp:
         the limiter refused -- which the refusal's own log line has been
         promising since the limiter shipped.
         """
+        # "has an object OR a uid to find one with", not "has an object"
+        # (library walk, 2026-08-26). The project-library walk carries no
+        # fusionscript objects, so the old `is not None` test would have
+        # dropped every clip here -- silently, and the pass would have
+        # reported a clean sweep having relinked nothing. The object is
+        # resolved at the moment of the ReplaceClip instead, in
+        # _relink_non_canonical.
         fresh = [
             item for item in items
-            if item.get("file_path") and item.get("media_pool_item") is not None
+            if item.get("file_path")
+            and resolve_bridge.media_pool_item_is_reachable(item)
         ]
         with self._canon_relink_lock:
             if fresh:
@@ -2006,8 +2014,19 @@ class CompanionApp:
                 log.info("non-canonical relink stopped part-way: shutting down")
                 break
             path = item.get("file_path", "")
-            mpi = item.get("media_pool_item")
-            if not path or mpi is None:
+            if not path:
+                continue
+            # Resolved HERE, immediately before the ReplaceClip, so a walk
+            # that carried only uids still ends in a real relink and a clip
+            # the pool no longer holds is skipped BY NAME rather than
+            # counted as fixed (library walk, 2026-08-26).
+            mpi = resolve_bridge.resolve_media_pool_item(item)
+            if mpi is None:
+                log.warning(
+                    "non-canonical relink: no media pool item for %s (uid %r) "
+                    "-- skipped",
+                    item.get("clip_name") or path, item.get("media_pool_uid", ""),
+                )
                 continue
             try:
                 target = canon.local_to_canonical(

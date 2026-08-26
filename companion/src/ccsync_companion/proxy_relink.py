@@ -285,9 +285,12 @@ def plan_relinks(
     `items` are resolve_bridge.get_media_pool_items() dicts, which carry
     "proxy_path"/"proxy_state" alongside "file_path".
 
-    Each op: {"media_pool_item", "clip_name", "file_path", "old_proxy",
-    "new_proxy", "reason"} where reason is "stale" (a proxy was attached but
-    unreachable) or "unlinked" (none attached and auto-link never fired).
+    Each op: {"media_pool_item", "media_pool_uid", "clip_name", "file_path",
+    "old_proxy", "new_proxy", "reason"} where reason is "stale" (a proxy was
+    attached but unreachable) or "unlinked" (none attached and auto-link
+    never fired). "media_pool_item" is None for an item a walk produced with
+    no objects; apply_relinks looks it up by uid at the moment of the
+    LinkProxyMedia (library walk, 2026-08-26).
 
     `stat_fn` is the seam `is_refused` reads the proxy's (mtime, size)
     through, alongside `exists_fn` -- the pass keeps NO Resolve calls and no
@@ -326,6 +329,7 @@ def plan_relinks(
             ops.append(
                 {
                     "media_pool_item": item.get("media_pool_item"),
+                    "media_pool_uid": item.get("media_pool_uid", ""),
                     "clip_name": item.get("clip_name") or plat.basename(file_path),
                     "file_path": file_path,
                     "old_proxy": old_proxy,
@@ -341,6 +345,7 @@ def plan_relinks(
 
 def apply_relinks(ops: Iterable[dict[str, Any]], link_fn: Callable[[Any, str], dict[str, Any]],
                   stat_fn: Optional[Callable[[str], Any]] = None,
+                  resolve_fn: Optional[Callable[[Any], Any]] = None,
                   ) -> dict[str, Any]:
     """Run the plan through `link_fn` (resolve_bridge.link_proxy_media).
 
@@ -353,13 +358,31 @@ def apply_relinks(ops: Iterable[dict[str, Any]], link_fn: Callable[[Any, str], d
     120 s (COMP-MEDIA-5, 2026-08-14; R15 fix 4 did the same for the watcher).
     """
     stat = stat_fn if stat_fn is not None else os.stat
+    if resolve_fn is None:
+        # Imported HERE, not at module scope: plan_relinks is pure and this
+        # module's tests stay free of the bridge (and of Resolve).
+        from . import resolve_bridge
+
+        resolve_fn = resolve_bridge.resolve_media_pool_item
     relinked = 0
     failures: list[str] = []
     refused: list[str] = []
     for op in ops or []:
         name = op.get("clip_name") or "clip"
+        # The op carries the uid; the OBJECT is found here, at the native
+        # call, so a walk that produced none still ends in a real
+        # LinkProxyMedia (library walk, 2026-08-26). Not a refusal -- there
+        # is no pairing to remember -- so note_refusal is not called.
+        media_pool_item = resolve_fn(op)
+        if media_pool_item is None:
+            log.warning(
+                "proxy relink: no media pool item for %s (uid %r) -- skipped",
+                name, op.get("media_pool_uid", ""),
+            )
+            failures.append(name)
+            continue
         try:
-            result = link_fn(op.get("media_pool_item"), op["new_proxy"])
+            result = link_fn(media_pool_item, op["new_proxy"])
         except Exception:
             # NOT a refusal: fusionscript going away says nothing about this
             # pairing, and remembering it would skip a clip that never got an

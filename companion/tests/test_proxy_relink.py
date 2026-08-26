@@ -421,3 +421,72 @@ def test_a_successful_relink_leaves_no_memory_behind():
     proxy_relink.apply_relinks(ops, lambda mpi, path: {"ok": True}, stat)
 
     assert proxy_relink.is_refused(BRAW, GOOD_PROXY, stat) is False
+
+
+# -- library walk, 2026-08-26 ------------------------------------------------
+
+
+def test_plan_relinks_carries_the_uid_onto_every_op():
+    items = [{
+        "file_path": r"P:\Projects\a.mov",
+        "media_pool_item": None,
+        "media_pool_uid": "uid-a",
+        "proxy_path": "",
+        "proxy_state": "None",
+        "clip_name": "a.mov",
+    }]
+    ops = proxy_relink.plan_relinks(
+        items, r"C:\Creators_Club", "P:\\",
+        exists_fn=lambda p: True, is_windows=True)
+    assert len(ops) == 1
+    assert ops[0]["media_pool_uid"] == "uid-a"
+    assert ops[0]["media_pool_item"] is None
+
+
+def test_apply_relinks_resolves_a_uid_only_op(monkeypatch):
+    live = object()
+    linked = []
+    op = {"media_pool_item": None, "media_pool_uid": "uid-a", "clip_name": "a.mov",
+          "file_path": r"P:\a.mov", "old_proxy": "", "new_proxy": r"C:\p\a.mov",
+          "reason": "unlinked"}
+
+    result = proxy_relink.apply_relinks(
+        [op],
+        link_fn=lambda mpi, path: (linked.append((mpi, path)), {"ok": True})[1],
+        resolve_fn=lambda o: live if o.get("media_pool_uid") == "uid-a" else None,
+    )
+
+    assert result["relinked"] == 1
+    assert linked == [(live, r"C:\p\a.mov")]
+
+
+def test_apply_relinks_skips_a_clip_it_cannot_find_and_says_which(caplog):
+    op = {"media_pool_item": None, "media_pool_uid": "uid-gone", "clip_name": "gone.mov",
+          "file_path": r"P:\gone.mov", "old_proxy": "", "new_proxy": r"C:\p\gone.mov",
+          "reason": "unlinked"}
+
+    def _must_not_link(mpi, path):
+        raise AssertionError("linked a proxy to a clip that was never found")
+
+    with caplog.at_level(logging.WARNING):
+        result = proxy_relink.apply_relinks(
+            [op], link_fn=_must_not_link, resolve_fn=lambda o: None)
+
+    assert result["relinked"] == 0
+    assert result["failures"] == ["gone.mov"]
+    assert any("gone.mov" in r.getMessage() for r in caplog.records)
+
+
+def test_apply_relinks_still_passes_a_bare_object_straight_through():
+    """Behaviour with an API walk is unchanged: the object the plan carried
+    is the object LinkProxyMedia is handed."""
+    mpi = object()
+    linked = []
+    op = {"media_pool_item": mpi, "media_pool_uid": "", "clip_name": "a.mov",
+          "file_path": r"P:\a.mov", "old_proxy": "", "new_proxy": r"C:\p\a.mov",
+          "reason": "unlinked"}
+
+    proxy_relink.apply_relinks(
+        [op], link_fn=lambda m, p: (linked.append(m), {"ok": True})[1])
+
+    assert linked == [mpi]

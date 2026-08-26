@@ -5944,3 +5944,76 @@ def test_the_proxy_window_says_why_it_is_standing_aside(tmp_path):
                              "blocked_reason": "indexing b-roll first"}
 
     assert app._proxy_progress_model().note == "indexing b-roll first"
+
+
+# -- library walk, 2026-08-26: a clip that arrives as a uid and no object ----
+#
+# The project-library walk reads clips out of PostgreSQL and has no
+# fusionscript objects to hand over. The auto-canonical pass used to FILTER on
+# `media_pool_item is not None`, which would have dropped every one of them --
+# silently, reporting a clean sweep having relinked nothing.
+
+
+def test_a_uid_only_clip_still_reaches_replaceclip(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    item = _pool_item(root, "B-roll/a.mov")
+    live = item["media_pool_item"]
+    # The library shape: the uid, and no object.
+    item["media_pool_item"] = None
+    item["media_pool_uid"] = "uid-a"
+    item["source"] = "library"
+
+    monkeypatch.setattr(
+        app_mod.resolve_bridge, "media_pool_item_by_uid",
+        lambda uid: live if uid == "uid-a" else None)
+
+    app = _make_app(tmp_path, canonical_prefix="P:\\")
+    app._tray_icon = _FakeTray()
+    app._handle_non_canonical([item])
+    _join_canon_relink()
+
+    assert live.replace_calls == [r"P:\B-roll\a.mov"]
+
+
+def test_a_uid_only_clip_the_pool_no_longer_holds_is_skipped_by_name(
+        tmp_path, monkeypatch, caplog):
+    """Never crash, and never report a clean pass having fixed nothing: the
+    clip is named in the log and the batch carries on."""
+    root = tmp_path / "root"
+    gone = _pool_item(root, "B-roll/gone.mov")
+    gone["media_pool_item"] = None
+    gone["media_pool_uid"] = "uid-gone"
+    gone["clip_name"] = "gone.mov"
+    still_here = _pool_item(root, "B-roll/b.mov")
+
+    monkeypatch.setattr(
+        app_mod.resolve_bridge, "media_pool_item_by_uid", lambda uid: None)
+
+    app = _make_app(tmp_path, canonical_prefix="P:\\")
+    app._tray_icon = _FakeTray()
+    with caplog.at_level(logging.WARNING):
+        app._relink_non_canonical([gone, still_here])
+
+    assert still_here["media_pool_item"].replace_calls == [r"P:\B-roll\b.mov"]
+    assert any("gone.mov" in r.getMessage() and "no media pool item" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_the_non_canonical_filter_keeps_a_uid_only_clip_and_drops_a_bare_one(tmp_path):
+    root = tmp_path / "root"
+    library_item = _pool_item(root, "B-roll/a.mov")
+    library_item["media_pool_item"] = None
+    library_item["media_pool_uid"] = "uid-a"
+    unfixable = _pool_item(root, "B-roll/b.mov")
+    unfixable["media_pool_item"] = None
+    unfixable["media_pool_uid"] = ""
+
+    app = _make_app(tmp_path, canonical_prefix="P:\\")
+    app._tray_icon = _FakeTray()
+    # Busy, so the filter's result is observable in the queue rather than
+    # being drained by a worker mid-assertion.
+    app._canon_relink_busy = True
+    app._handle_non_canonical([library_item, unfixable])
+
+    assert [i["file_path"] for i in app._canon_relink_pending] == [
+        library_item["file_path"]]

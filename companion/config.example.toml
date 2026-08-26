@@ -705,3 +705,35 @@ mode = "editor"
 # Generator counts these up all day). A longer real project name that merely
 # starts the same -- "New Doc Final" -- is NOT ignored.
 ignored_resolve_projects = ["Untitled Project", "New Doc"]
+
+# -- the project-library walk (docs/LIBRARY_WALK_PLAN.md, 2026-08-26) --------
+#
+# The companion enumerates the open timeline and the media pool by reading
+# Resolve's PROJECT LIBRARY -- the PostgreSQL database on the NAS, or the
+# SQLite Project.db of a disk library -- rather than walking clips through the
+# scripting API. Measured on a 926-item multicam timeline: 11-14 s of API
+# calls, during which every other scripting client on the machine queues,
+# versus single-digit milliseconds of SELECTs that cost Resolve nothing. The
+# library also sees INSIDE multicam and compound clips, which the API cannot.
+#
+# Read-only, always: nothing here ever writes to the library. Any failure
+# (library unreachable, credentials wrong, a schema this build does not know)
+# falls back to the API walk and says so once in the log, so false is only for
+# forcing the old behaviour deliberately.
+# library_walk = true
+
+# Which library to read, for when Resolve's own answer is missing or wrong.
+# Resolve 21.0.1 returns None from both GetCurrentDatabase() and
+# GetDatabaseList(), so the companion normally identifies the library by
+# mining Resolve's log -- and a machine whose log has rotated away, or whose
+# library has moved since, has nothing to mine. A host alone is enough to go
+# on. Blank everywhere = work it out.
+#
+# library_db_password is a SECRET and config.toml is owner-only for exactly
+# that reason (it already carries report_token). Blank = Resolve's own default
+# password, which is what the fleet's libraries use.
+# library_db_host = ""
+# library_db_port = 5432
+# library_db_name = ""
+# library_db_user = ""
+# library_db_password = ""

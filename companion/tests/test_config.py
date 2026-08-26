@@ -205,6 +205,13 @@ def test_default_toml_text_documents_every_default_key():
         # `supervise_syncthing = true` into every first-run file would make
         # the day we need to change that default a fleet-wide edit.
         "supervise_syncthing",
+        # The project-library walk (docs/LIBRARY_WALK_PLAN.md, 2026-08-26) --
+        # same class: the walk falls back to the API on its own, so pinning
+        # `library_walk = true` in every first-run file only makes a later
+        # default change unreachable, and the library_db_* keys are overrides
+        # for what Resolve normally tells us (plus one secret).
+        "library_walk", "library_db_host", "library_db_port",
+        "library_db_name", "library_db_user", "library_db_password",
     }
     for key in config_mod.DEFAULTS:
         if key in commented_out:
@@ -273,6 +280,16 @@ EXAMPLE_COMMENTED_OUT = {
     "broll_ingest_max_concurrent_ffmpeg", "broll_ingest_staging_dir",
     # The Syncthing supervisor's kill switch, same class (SYNC-17).
     "supervise_syncthing",
+    # The project-library walk (docs/LIBRARY_WALK_PLAN.md, 2026-08-26).
+    # library_walk is ON and self-healing -- every failure falls back to the
+    # API walk by itself -- so an explicit `library_walk = true` copied into
+    # every config.toml buys nothing and is how a later default change
+    # reaches nobody. The five library_db_* keys are overrides for a value
+    # Resolve normally supplies, documented exactly the way server_p_unc is;
+    # library_db_password additionally must not be pre-seeded into a file
+    # anyone might copy about.
+    "library_walk", "library_db_host", "library_db_port", "library_db_name",
+    "library_db_user", "library_db_password",
 }
 
 # Read straight off the loaded config with .get() and DELIBERATELY absent from

@@ -688,12 +688,19 @@ def get_timeline_items(allow_cached: bool = False) -> dict[str, Any]:
 
     Each item dict: {
         "file_path": str,               # GetClipProperty()["File Path"]
-        "media_pool_item": <object>,    # for ReplaceClip / identity checks
+        "media_pool_item": <object>,    # None from a walk that had no objects
+        "media_pool_uid": str,          # MediaPoolItem.GetUniqueId(), "" if unavailable
+        "source": "api" | "library",
+        "via_multicam": str | None,     # uid of the multicam this angle came through
         "clip_name": str,
         "track_type": "video" | "audio",
         "track_index": int,             # 1-based, per Resolve's own convention
         "item_index": int,              # 0-based position within the track
     }
+
+    NEVER read "media_pool_item" to act on a clip -- call
+    resolve_media_pool_item(item), which falls back to a cached lookup by uid
+    (library walk, 2026-08-26).
 
     "project_name" is the current Resolve project's GetName() (empty string
     if unavailable) — the watcher attaches it to OUT_OF_TREE items so the
@@ -868,6 +875,20 @@ def _get_timeline_items_locked(allow_cached: bool = False) -> dict[str, Any]:
                     {
                         "file_path": file_path,
                         "media_pool_item": media_pool_item,
+                        # The uid is what survives a walk that carried no
+                        # objects (library walk, 2026-08-26): the project
+                        # library's Sm2MpMedia_id IS
+                        # MediaPoolItem.GetUniqueId(), so every consumer can
+                        # re-find the live object through
+                        # media_pool_item_by_uid() when it has to act. "" on
+                        # an API build without GetUniqueId -- such a build
+                        # simply never gets the library walk.
+                        "media_pool_uid": _safe_attr_str(media_pool_item, "GetUniqueId"),
+                        "source": "api",
+                        # Only the library walk can see INSIDE a multicam or
+                        # compound clip; the API reports the container, so
+                        # nothing here was reached through one.
+                        "via_multicam": None,
                         "clip_name": _safe_clip_name(media_pool_item),
                         "track_type": track_type,
                         "track_index": track_index,
@@ -968,6 +989,10 @@ def _walk_media_pool_folder(
             {
                 "file_path": file_path,
                 "media_pool_item": clip,
+                # See the timeline walk's note (library walk, 2026-08-26):
+                # the uid is the handle a walk with no objects hands on.
+                "media_pool_uid": _safe_attr_str(clip, "GetUniqueId"),
+                "source": "api",
                 "clip_name": _safe_clip_name(clip),
                 "resolve_project_name": project_name,
                 "bin_path": bin_path,
@@ -1005,10 +1030,15 @@ def get_media_pool_items() -> dict[str, Any]:
 
     Each item dict: {
         "file_path": str,               # GetClipProperty()["File Path"]
-        "media_pool_item": <object>,    # for ReplaceClip / identity checks
+        "media_pool_item": <object>,    # None from a walk that had no objects
+        "media_pool_uid": str,          # MediaPoolItem.GetUniqueId(), "" if unavailable
+        "source": "api" | "library",
         "clip_name": str,
         "resolve_project_name": str,    # the current project's GetName()
     }
+
+    NEVER read "media_pool_item" to act on a clip -- call
+    resolve_media_pool_item(item) (library walk, 2026-08-26).
 
     Unlike get_timeline_items (where the watcher attaches
     "resolve_project_name" itself), this function includes it directly on
@@ -1063,6 +1093,162 @@ def _get_media_pool_items_locked() -> dict[str, Any]:
                 "project_name": project_name}
 
     return {"ok": True, "message": "", "items": items, "project_name": project_name}
+
+
+# -- uid -> live MediaPoolItem (library walk, 2026-08-26) ------------------
+#
+# The project-library walk reads clips out of PostgreSQL/SQLite and so has no
+# fusionscript objects to hand back -- only Sm2MpMedia_id, which IS
+# MediaPoolItem.GetUniqueId(). Anything that must ACT on a clip (ReplaceClip,
+# LinkProxyMedia, GetName) still needs the object, so it is re-found here, on
+# demand: GetClipList per folder + GetUniqueId per clip, ~0.15 s for 1,318
+# clips. That only ever runs when there is something to fix, unlike the walk
+# it replaces, which ran every poll.
+#
+# Cached for _MEDIA_POOL_UID_TTL_SECONDS and keyed by project name, so a FIX
+# ALL over 50 clips pays for one walk, not 50. A MISS is cached too (as the
+# freshness of the map, not as an entry): an unknown uid must not re-walk the
+# pool once per clip when a stale library row names a clip that has since been
+# deleted.
+#
+# Every global below is read and written ONLY under _API_LOCK (inside the
+# _bridge_call in media_pool_item_by_uid), which is why they carry no lock of
+# their own.
+_MEDIA_POOL_UID_TTL_SECONDS = 60.0
+
+_uid_cache: dict[str, Any] = {}
+_uid_cache_project = ""
+_uid_cache_stamp = 0.0
+
+
+def _reset_media_pool_uid_cache() -> None:
+    """Forget the uid map (tests, and anything that knows the pool changed)."""
+    global _uid_cache, _uid_cache_project, _uid_cache_stamp
+    _uid_cache = {}
+    _uid_cache_project = ""
+    _uid_cache_stamp = 0.0
+
+
+def _walk_media_pool_uids(folder, found: dict[str, Any], depth: int = 0,
+                          swept: Optional[list[int]] = None) -> None:
+    """Recurse the pool collecting uid -> clip. Same shape (and same
+    depth cap, same _sweep_yield courtesy) as _walk_media_pool_folder, but
+    it reads GetUniqueId instead of the far more expensive GetClipProperty."""
+    if depth > _MAX_MEDIA_POOL_DEPTH:
+        return
+    if swept is None:
+        swept = [0]
+    try:
+        clips = folder.GetClipList() or []
+    except Exception:
+        clips = []
+    for clip in clips:
+        _sweep_yield(swept)
+        uid = _safe_attr_str(clip, "GetUniqueId")
+        if uid and uid not in found:
+            found[uid] = clip
+    try:
+        subfolders = folder.GetSubFolderList() or []
+    except Exception:
+        subfolders = []
+    for subfolder in subfolders:
+        _walk_media_pool_uids(subfolder, found, depth + 1, swept)
+
+
+def media_pool_item_by_uid(uid: str):
+    """The live MediaPoolItem with this GetUniqueId(), or None. Never raises.
+
+    None means "not findable right now" -- no Resolve, no project, a uid from
+    another project, or a clip that has been removed from the pool. Every
+    caller must treat it as "skip this clip", never as "nothing to do".
+    """
+    global _uid_cache, _uid_cache_project, _uid_cache_stamp
+    if not uid:
+        return None
+    ui_state.wait_while_menu_open()  # same GIL courtesy as the enumerators
+    with _bridge_call("media_pool_item_by_uid"):
+        try:
+            resolve = connect()
+            if resolve is None:
+                return None
+            project_manager = resolve.GetProjectManager()
+            project = project_manager.GetCurrentProject() if project_manager else None
+            if project is None:
+                return None
+            project_name = _safe_project_name(project)
+            now = time.monotonic()
+            fresh = (project_name == _uid_cache_project
+                     and (now - _uid_cache_stamp) < _MEDIA_POOL_UID_TTL_SECONDS)
+            if fresh:
+                # Including the miss: the map was built less than a TTL ago,
+                # so a uid that is not in it is not in the pool.
+                return _uid_cache.get(uid)
+            media_pool = project.GetMediaPool()
+            root_folder = media_pool.GetRootFolder() if media_pool is not None else None
+            if root_folder is None:
+                return None
+            found: dict[str, Any] = {}
+            _walk_media_pool_uids(root_folder, found)
+            _uid_cache = found
+            _uid_cache_project = project_name
+            _uid_cache_stamp = now
+            return found.get(uid)
+        except Exception:
+            log.debug("resolve: uid lookup for %r failed", uid, exc_info=True)
+            return None
+
+
+def _is_item_dict(value) -> bool:
+    """Is this one of this module's item dicts, or an opaque MediaPoolItem?
+
+    A real MediaPoolItem is a fusionscript object, never a dict -- but the
+    suite's stand-ins include bare `{}` and `object()`, and a batch entry may
+    legitimately be either. The keys this module puts on every item are what
+    tells them apart; anything else is passed through untouched.
+    """
+    return isinstance(value, dict) and (
+        "media_pool_uid" in value or "media_pool_item" in value
+    )
+
+
+def resolve_media_pool_item(item):
+    """THE accessor for the object behind an item dict. None when there is none.
+
+    `item` is a get_timeline_items/get_media_pool_items dict (or any dict
+    carrying "media_pool_item"/"media_pool_uid" -- a proxy-relink op, a popup
+    row). A bare MediaPoolItem is passed straight back, so batches that
+    collected objects before this existed keep working unchanged.
+
+    A resolved object is written back onto the dict, so a batch that touches
+    the same dict twice pays for one lookup.
+    """
+    if item is None:
+        return None
+    if not _is_item_dict(item):
+        return item  # already the object (legacy batch entry / test double)
+    media_pool_item = item.get("media_pool_item")
+    if media_pool_item is not None:
+        return media_pool_item
+    media_pool_item = media_pool_item_by_uid(str(item.get("media_pool_uid") or ""))
+    if media_pool_item is not None:
+        item["media_pool_item"] = media_pool_item
+    return media_pool_item
+
+
+def media_pool_item_is_reachable(item) -> bool:
+    """Could resolve_media_pool_item(item) plausibly find an object?
+
+    A pure, call-free predicate for FILTERS -- "has an object, or has a uid to
+    look one up with". The filters that used `is not None` would drop every
+    item a library walk produced before anything had a chance to look it up
+    (library walk, 2026-08-26).
+    """
+    if item is None:
+        return False
+    if not _is_item_dict(item):
+        return True
+    return (item.get("media_pool_item") is not None
+            or bool(str(item.get("media_pool_uid") or "")))
 
 
 # -- save point + undo journal (COMMERCIAL_READINESS.md item 9, 2026-08-17) --

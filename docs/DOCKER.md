@@ -139,9 +139,8 @@ Fill in the five `REPLACE_ME` values (`SYNCTHING_API_KEY`, `DASH_REPORT_TOKEN`,
 - **The YouTube "unblock" plugin (`bgutil-ytdlp-pot-provider`, GPLv3)** is
   NOT in the image layer either, for the exact same reason as ffmpeg above —
   and, unlike ffmpeg/deno/Claude, it is not even a *mount*: it is a pip
-  package `run.sh` installs into `/venv` (the SAME venv the base
-  `requirements.lock` populated, and the SAME mechanism — an md5-stamped,
-  `--require-hashes` `pip install`), but only when `DASH_SITE_YOUTUBE_UNBLOCK=1`,
+  package `run.sh` pip-installs (md5-stamped, `--require-hashes`), but only
+  when `DASH_SITE_YOUTUBE_UNBLOCK=1`,
   which is only ever "1" on a site whose `site.toml` sets
   `[features] youtube_unblock` (2026-08-17, `docs/COMMERCIAL_READINESS.md`
   items 2/3 — see `dashboard/deploy/requirements-unblock.txt`'s own header
@@ -152,7 +151,16 @@ Fill in the five `REPLACE_ME` values (`SYNCTHING_API_KEY`, `DASH_REPORT_TOKEN`,
   from the container — the same requirement bind-mount mode always had, now
   true for image mode too, but ONLY for this one optional feature. A future
   `ccsync-unblock` image layer that bakes this in as its own opt-in image is
-  plausible follow-up work; it does not exist.
+  plausible follow-up work; it does not exist. **Where it lands differs by
+  mode** (CR-84, 2026-08-26): bind-mount mode installs it into `/venv`, the
+  same venv the base lock populated; image mode CANNOT (that `/venv` is an
+  `a+rX` image layer and the container is uid 3000 — it failed with
+  `[Errno 13] Permission denied` on every boot of the v0.7.11 image), so there
+  it goes to `/data/unblock-site` with `--no-deps --target`, stamped at
+  `/data/.requirements-unblock-hash`, and `run.sh` appends that directory to
+  PYTHONPATH — which is all yt-dlp needs, since it discovers a plugin by
+  walking `sys.path` for a `yt_dlp_plugins` package. It therefore survives an
+  image update, like `<data>/tools/` above.
 - **Every data volume.** `/data`, `/projects`, `/broll-data`, `/music-data`,
   `/music-encoder`, `/music-proxies`, `/music-share`, `/ytdl-data`,
   `/claude-home` are unchanged, byte for byte, from `compose.yaml`. The data is
@@ -378,6 +386,16 @@ curl -s localhost:8480/api/v1/health     # {"ok": true, ...}
 because the venv came from the image. If it says it is *installing* in image
 mode, the `/venv/.image-baked` marker is missing and something rebuilt the venv
 volume over the layer — check that `compose.image.yaml` has no `/venv` mount.
+
+Two things to check after an IMAGE update specifically (CR-84, 2026-08-26,
+where both were regressions the image reintroduced): `docker exec <c>
+/venv/bin/python -c "import yt_dlp; print(yt_dlp.version.__version__)"` - the
+image installs `dashboard/deploy/requirements.lock`, the third and only
+image-relevant one of this repo's three yt-dlp locks - and, on a
+`youtube_unblock` site, that run.sh's plugin install succeeded: in image mode
+it goes to `/data/unblock-site` (`--no-deps --target`, stamped at
+`/data/.requirements-unblock-hash`, appended to PYTHONPATH), because `/venv` is
+an `a+rX` image layer this uid-3000 container cannot write.
 
 In image mode it also prints one `run.sh: PYTHONPATH=...` line per boot, and
 `select_code_root: ...` lines saying which code tree it chose and why. If the

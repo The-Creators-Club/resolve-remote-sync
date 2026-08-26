@@ -124,3 +124,22 @@ def test_cookie_jar_state_tells_configured_from_usable(tmp_path):
                     '.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tvalue\n',
                     encoding='utf-8')
     assert ytdl_evidence.cookie_jar_state(str(real)) == ytdl_evidence.JAR_PRESENT
+
+
+def test_cookie_jar_of_anonymous_cookies_is_not_a_session(tmp_path):
+    """Measured 2026-08-26: yt-dlp rewrote CR-80's parked jar with PREF, SOCS,
+    YSC and VISITOR_INFO1_LIVE, and health called that `present`. A jar with no
+    login cookie is not a path the worker may fall back to."""
+    anon = tmp_path / 'anon.txt'
+    anon.write_text('# Netscape HTTP Cookie File\n'
+                    '.youtube.com\tTRUE\t/\tTRUE\t0\tPREF\tf6=40000000\n'
+                    '.youtube.com\tTRUE\t/\tTRUE\t1803271086\tVISITOR_INFO1_LIVE\tabc\n'
+                    '.youtube.com\tTRUE\t/\tTRUE\t0\tYSC\txyz\n',
+                    encoding='utf-8')
+    assert ytdl_evidence.cookie_jar_state(str(anon)) == ytdl_evidence.JAR_ANONYMOUS
+
+    signed = tmp_path / 'signed.txt'
+    signed.write_text(anon.read_text(encoding='utf-8')
+                      + '.youtube.com\tTRUE\t/\tTRUE\t1803271086\t__Secure-3PSID\tsecret\n',
+                      encoding='utf-8')
+    assert ytdl_evidence.cookie_jar_state(str(signed)) == ytdl_evidence.JAR_PRESENT

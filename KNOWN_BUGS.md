@@ -2972,6 +2972,17 @@ backoff) before giving up, which covers the boot-time network gap. Note the
 residual: every image update resets /venv, so a site whose network is down
 for longer than the retries still degrades until the next container boot.
 
+**RESIDUAL CLOSED, and the diagnosis was wrong for image mode (CR-84,
+2026-08-26).** The failure this entry blamed on a boot-time network gap was,
+on the v0.7.11 image, `[Errno 13] Permission denied` on
+`/venv/.../yt_dlp_plugins`: in image mode /venv is an `a+rX` image layer and
+the container is uid 3000, so that install could never have succeeded, and
+the retries only repeated it. run.sh now installs into `/data/unblock-site`
+with `--no-deps --target` in image mode and puts it on PYTHONPATH, and a
+failure prints pip's own error rather than "PyPI unreachable?". And note the
+rule CR-84 adds: **there are THREE yt-dlp locks, and
+`dashboard/deploy/requirements.lock` is the image's.**
+
 ### CR-74 - long server downloads crawl at 3-4 MiB/s even with the PO token working - FIXED, shipped 2026-08-24 (dashboard 0.7.8 OTA)
 **Symptom** (owner, 2026-08-24, after CR-73's live fix): job 22's short news
 clips landed in seconds, but a 36-minute 562 MiB clip sustained only 3-4
@@ -3201,6 +3212,14 @@ signed-in export on the strength of a measurement that has since inverted.
 IMAGE update (not an OTA exit-75 restart) puts 2026.07.04 back until a build
 carries the new lock. Diagnosis is one line -
 `docker exec <c> /venv/bin/python -c "import yt_dlp;print(yt_dlp.version.__version__)"`.
+
+**AND IT DID, THE SAME DAY - CR-84.** "A build carries the new lock" meant
+`dashboard/deploy/requirements.lock`, and this entry's fix did not touch it:
+**there are THREE yt-dlp locks in this repo** (`dashboard/requirements.lock`,
+`ytdl/web/requirements.lock`, `dashboard/deploy/requirements.lock`) and the
+deploy one is the ONLY one the vendor image installs. The v0.7.11 image
+shipped 2026.07.04 straight back onto the live NAS. Fixed in the lock, and
+pinned by `test_deploy_locks_satisfy_their_own_floor_files`.
 And "YouTube flagged the account" is not a state we control: if anonymous
 downloads start failing the bot check again, the answer is a FRESH cookie
 export, tested BOTH ways before it is left in place, not the old one.
@@ -3224,7 +3243,7 @@ sooner.
 
 ## Every editor's machine was broken the same way, and could not tell anyone (CR-83, 2026-08-26)
 
-### CR-83 - the fleet half of CR-80: a yt-dlp floor of 2026.07.04, a pinned `web_safari`, an unconditional cookie jar, and a classifier blind to the phrase - FIXED in repo 2026-08-26 as dashboard 0.7.11 / companion 0.9.52, NOT SHIPPED
+### CR-83 - the fleet half of CR-80: a yt-dlp floor of 2026.07.04, a pinned `web_safari`, an unconditional cookie jar, and a classifier blind to the phrase - FIXED and the SERVER HALF SHIPPED 2026-08-26 as dashboard 0.7.11 (image mode, tag v0.7.11); companion 0.9.52 still building on CI
 
 **Symptom**: nothing. That is the bug. CR-80 was found because the NAS's
 downloads panel showed 29 failures on one job; the editors' machines had been
@@ -3337,7 +3356,7 @@ numbering are `docs/YTDL_RESILIENCE_PLAN.md`):
   job is done.
 - **WP5, health that is evidence.** `/ytdl/api/health` gains
   `yt_dlp_version` (answering it took a `docker exec` during CR-80),
-  `cookies_state` (`none|empty|present`, beside the old boolean that only ever
+  `cookies_state` (`none|empty|anonymous|present`, beside the old boolean that only ever
   meant "a path is set"), `pot_provider` (`unconfigured|ok|unreachable`, from a
   1 s probe of the bgutil sidecar's own `/ping`, cached 60 s - CR-73 sat
   undetected for days behind a sidecar that was configured and silent),
@@ -3386,7 +3405,10 @@ exact silent shape of this bug, arrived at from the other direction.
   honest version is a manual second slot an admin switches to deliberately.
 - **CR-80's own residual stands**: `/venv` belongs to the image, so a
   dashboard IMAGE update reinstalls whatever the lock says. The lock is the
-  durable fix.
+  durable fix - and it has to be `dashboard/deploy/requirements.lock`, the
+  third of this repo's three yt-dlp locks and the only one the image installs.
+  It was missed, the v0.7.11 image put 2026.07.04 back on the live NAS the
+  same day, and that is CR-84.
 
 **How to verify** (the plan's section 6, and the first diagnostic for every
 future "downloads are failing"). Run it in the live container AND on one editor
@@ -3411,6 +3433,135 @@ which is how the CR-80 fix was confirmed. On an editor machine the equivalent
 is the deployed companion's own binary and its own jar, and after the ship
 `GET /ytdl/api/health` answers three of these questions without a shell:
 `yt_dlp_version`, `pot_provider`, `last_download`.
+
+## The image update put both of the day's live fixes back (CR-84, 2026-08-26)
+
+### CR-84 - a THIRD yt-dlp lock nothing checked, and a plugin install that cannot succeed in image mode - FIXED in repo 2026-08-26, ships as dashboard 0.7.12
+
+**Symptom** (measured live on the studio NAS, container
+`ix-ccsync-dashboard-dashboard-1`, an hour after the CR-83 ship). The
+dashboard was redeployed in image mode on the CI image built from tag
+v0.7.11 (`ghcr.io/the-creators-club/ccsync@sha256:745eb71a80eeb58024fb9788f4
+fa982fed73f6b552f2e4f732538bf414c3065a`) and came up carrying both of the
+regressions the ledger had already warned an image update would bring back:
+
+1. **yt-dlp was 2026.07.04 again** - the exact version CR-80 measured as
+   having no working anonymous path left, i.e. "The page needs to be
+   reloaded" on every server download, on a container that had been
+   hand-fixed out of it that morning.
+2. **The PO-token plugin install failed four times**, with
+   `[Errno 13] Permission denied: '/venv/lib/python3.12/site-packages/
+   yt_dlp_plugins'`, once per retry, under CR-73's "PyPI unreachable?"
+   wording. No PO-token provider means the CR-73 shape: throttled HLS only,
+   ~1.8 MiB/s, some clips landing empty.
+
+Two more things happened in the same redeploy and are NOT bugs, recorded here
+because they cost time on the night: `select_code_root.py` booted the image's
+own 0.7.11 code over the OTA-staged 0.7.10 tree (correct - rule 5, an older
+or equal bundle is the image's job), and the deploy's post-check gave up
+while the container was still inside its 120 s compose `start_period`.
+
+**Mechanism.**
+
+- **There are THREE yt-dlp locks in this repo and the deploy one is the
+  image's.** CR-80 raised the floor to `yt-dlp>=2026.8.19` and re-pinned
+  `dashboard/requirements.lock` and `ytdl/web/requirements.lock`, but
+  `dashboard/deploy/requirements.lock` still said `yt-dlp==2026.7.4` - and
+  that is the file `dashboard/deploy/Dockerfile` COPYs and installs with
+  `--require-hashes`, and the one `run.sh` installs in bind-mount mode. The
+  image's `/venv/.runtime-id` therefore did not even change
+  (`b8088534983a67ad7a6b27b4582f551032f1329501acbdc2f3cea4dca01589c6`), which
+  is itself the tell: a runtime id that survives a dependency bump means the
+  bump did not reach the deploy lock. Nothing caught it, because
+  `test_deploy_requirements_match_pyproject_dependencies` compares
+  `requirements.txt` to `pyproject.toml` and both were right; a lock that no
+  longer satisfies its own floor file was unchecked.
+- **In image mode that pip install can never succeed.** `/venv` is an image
+  layer, `chmod -R a+rX` on purpose (AUDIT C-1: a writable code path in a
+  process holding the NAS admin password is remote code execution), and the
+  container runs as uid 3000. The GPLv3 `bgutil-ytdlp-pot-provider` is
+  deliberately not baked into the vendor image (licence: a customer who never
+  enabled `youtube_unblock` must not be conveyed it), so run.sh installs it at
+  boot - into the one directory it is not allowed to write. CR-73's retries
+  were treating an EACCES as a network blip and said so in the log.
+
+**Live fix applied (2026-08-26, the SECOND time for both halves):**
+
+```sh
+C=ix-ccsync-dashboard-dashboard-1
+docker exec -u 0 $C /venv/bin/pip install --no-cache-dir --require-hashes \
+    -r /app/deploy/requirements-unblock.lock
+docker exec -u 0 $C /venv/bin/pip install --no-cache-dir --upgrade \
+    yt-dlp==2026.8.19
+docker exec -u 0 $C sh -c \
+    'md5sum /app/deploy/requirements-unblock.lock | cut -d" " -f1 \
+     > /venv/.requirements-unblock-hash'
+docker restart $C
+```
+
+Both are `docker exec -u 0` into `/venv`, i.e. both are discarded by the next
+image update. That is the point of the durable fix.
+
+**Durable fix in repo** (ships as dashboard 0.7.12, whose image carries a NEW
+runtime id - so it is a real image update, not an OTA code bundle):
+
+- `dashboard/deploy/requirements.lock` re-pinned to `yt-dlp==2026.8.19` with
+  its PyPI hashes, copied from `dashboard/requirements.lock`'s block. It was
+  the only pin in that lock below a floor in its `requirements.txt`.
+- `dashboard/tests/test_hardening.py::test_deploy_locks_satisfy_their_own_
+  floor_files` - every `>=` floor (and the unblock file's `==` pin) in both
+  deploy requirement files must be satisfied by the matching lock, with PEP
+  503 name normalisation and `packaging.version` comparison. It FAILS on the
+  pre-fix lock, naming the file, the pin and the floor.
+- `dashboard/deploy/run.sh`: in image mode the unblock lock is installed with
+  `--no-deps --target /data/unblock-site` and stamped at
+  `/data/.requirements-unblock-hash`, and `/data/unblock-site` is APPENDED to
+  PYTHONPATH (in the plain export, in `IMAGE_PYTHONPATH`, and re-attached to
+  whatever `select_code_root.py` selects, so an OTA'd code tree does not lose
+  the plugin). yt-dlp discovers a plugin by walking `sys.path` for a
+  `yt_dlp_plugins` package (`yt_dlp/plugins.py`, `default_plugin_paths`:
+  "Load from PYTHONPATH directories"), so a path entry is all it needs - it
+  does not have to live inside the venv. `/data` is uid-3000-owned, 770, not
+  editor-reachable (AUDIT C-2), and survives an image update, exactly like
+  the `/data/code` tree the OTA path already executes from. `--no-deps` is a
+  CONDITION of `--target`, not a tidy-up: the lock is a hash-pinned closure of
+  one package whose only dependency is yt-dlp, which the venv already holds
+  and which has no hash in that lock, so without it `--require-hashes` would
+  refuse. Bind-mount mode is byte-for-byte unchanged - there `/venv` is a
+  bind mount uid 3000 owns, the install has always worked, and moving it would
+  strand the copy already installed.
+- The CR-73 retry loop stays, but a failure now prints **pip's own last
+  words** instead of only "PyPI unreachable?" - the whole reason this took a
+  live shell to diagnose.
+
+**THE RULE, added to the residuals of CR-73 and CR-80: there are THREE yt-dlp
+locks and `dashboard/deploy/requirements.lock` is the image's.** Bumping
+`dashboard/requirements.lock` and `ytdl/web/requirements.lock` changes what a
+dev checkout and a bind-mount site install; it changes nothing about the
+vendor image, which is what every image-mode customer runs. A dependency fix
+that is not in the deploy lock is not shipped. The one-line check after any
+image update:
+
+```sh
+docker exec <c> /venv/bin/python -c "import yt_dlp; print(yt_dlp.version.__version__)"
+docker exec <c> /venv/bin/python -m yt_dlp -v 2>&1 | grep "PO Token Providers"
+docker logs <c> 2>&1 | grep run.sh
+```
+
+**Also found during the same redeploy, same day: the parked jar had grown anonymous
+cookies.** `/ytdl/api/health` on the new build said `cookies_state: present` for
+the jar CR-80 had parked as two header lines. yt-dlp rewrites `cookies.txt` in
+place on every run it is passed to, and between the CR-80 fix and the
+anonymous-first inversion every run was passed it, so the file held PREF, SOCS,
+YSC, VISITOR_INFO1_LIVE and friends: YouTube's consent/visitor cookies, no login
+cookie, not a credential. `ytdl_evidence.cookie_jar_state` called any cookie
+line a session, so the worker would have "fallen back" to it on a bot check.
+Fixed in the same release: `present` now needs a Google login cookie name (the
+companion's `_SESSION_COOKIE_NAMES` list plus the `__Secure-*PSID` pair), a jar
+of anonymous cookies is the new `anonymous` state, and only `present` is a path.
+The NAS jar was parked again as its header lines with the anonymous copy kept
+beside it (`cookies.txt.bak-20260826-anon`); since the inversion the anonymous
+path never passes the jar to yt-dlp, so it stays parked.
 
 ## Companion: a locally downloaded YouTube clip is checked and, if Resolve could not decode it, converted on the editor's machine (CR-79, 2026-08-25)
 

@@ -387,6 +387,15 @@ Do not restore a signed-in export just because "cookies are mandatory" below
 says so; re-test both ways first, with the one-liner at the end of this section
 run with and without `--cookies`.
 
+**The version half of this reversal lives in THREE lockfiles, and after an
+image update only one of them counts** (CR-84, 2026-08-26): the vendor image
+installs `dashboard/deploy/requirements.lock`, so a yt-dlp floor raised only in
+`dashboard/requirements.lock` and `ytdl/web/requirements.lock` is put straight
+back by the next image update - which is exactly what the v0.7.11 image did.
+In the same mode the GPLv3 PO-token plugin no longer installs into `/venv`
+(unwritable there, uid 3000 vs an `a+rX` image layer) but into
+`/data/unblock-site`, which run.sh appends to PYTHONPATH.
+
 #### The rule the CODE runs on, since 2026-08-26 (CR-83)
 
 The inversion is no longer only an operating note: it is what the downloader
@@ -468,7 +477,7 @@ paint a blank pip. The keys to read instead:
 | key | values | what it tells you |
 |---|---|---|
 | `yt_dlp_version` | e.g. `2026.08.19` | the yt-dlp this container is actually running. Answering this took a `docker exec` during CR-80, and it was half the diagnosis |
-| `cookies_state` | `none` / `empty` / `present` | what the jar HOLDS, not whether a path is set. `empty` (header lines only) is the intended state since CR-80 and means the cookies path is never attempted |
+| `cookies_state` | `none` / `empty` / `anonymous` / `present` | what the jar HOLDS, not whether a path is set. `empty` (header lines only) is the intended state since CR-80 and means the cookies path is never attempted; `anonymous` is a jar yt-dlp has written its own consent/visitor cookies into (PREF, SOCS, YSC, VISITOR_INFO1_LIVE) with no login cookie, which is NOT a session and is never attempted either; only a login cookie (SID, SAPISID, LOGIN_INFO, __Secure-3PSID...) makes it `present` (CR-84) |
 | `pot_provider` | `unconfigured` / `ok` / `unreachable` | whether the bgutil sidecar ANSWERED its own `/ping`, from a 1 s probe cached for 60 s. `unconfigured` is not an error - a deployment with an unblocked IP needs no provider. `unreachable` is CR-73's shape, which sat undetected for days behind a configured-and-silent sidecar |
 | `paths` | `{anonymous\|cookies: {ok, error, at, video_id, source}}` | the last real outcome per path. A key appears only once that path has been tried. Mirrored to `<YTDL_DATA_ROOT>/ytdl_evidence.json`, so a container restart does not blank it |
 | `last_download` | the newest `paths` entry with `source: download` | "the last real download worked, anonymously, 3 minutes ago". This is the pip that goes red when downloading is broken |

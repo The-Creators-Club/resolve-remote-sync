@@ -163,7 +163,20 @@ def reset():
 
 JAR_NONE = 'none'          # no YTDL_COOKIES_FILE, or the path does not exist
 JAR_EMPTY = 'empty'        # the file holds only comments / header lines (CR-80's parked state)
-JAR_PRESENT = 'present'    # at least one cookie line
+JAR_ANONYMOUS = 'anonymous'  # cookie lines, but none of them a Google login cookie
+JAR_PRESENT = 'present'    # a signed-in session: at least one login cookie
+
+# The cookie names that mean "signed in", the same list the companion's
+# ytdl_cookies reads a session's expiry from. Measured 2026-08-26 on the NAS:
+# yt-dlp had rewritten CR-80's header-only jar with PREF, SOCS, YSC and
+# VISITOR_INFO1_LIVE -- YouTube's anonymous consent/visitor cookies -- and
+# "at least one cookie line" called that a session to fall back to. It is
+# not: a jar with no login cookie is the anonymous path with extra steps, and
+# reporting it as `present` was the CR-80 config-echo mistake in a new coat.
+_LOGIN_COOKIE_NAMES = frozenset({
+    'SID', 'SAPISID', 'SSID', 'HSID', 'APISID', 'LOGIN_INFO',
+    '__Secure-1PSID', '__Secure-3PSID', '__Secure-1PAPISID', '__Secure-3PAPISID',
+})
 
 
 def cookie_jar_state(path):
@@ -172,17 +185,24 @@ def cookie_jar_state(path):
     CR-80 (2026-08-26) parked the NAS's flagged jar as its two Netscape header
     lines with YTDL_COOKIES_FILE still set, so "a path is configured" says
     nothing about whether there is a session to try. A header-only jar is
-    JAR_EMPTY and the cookies path is simply not attempted.
+    JAR_EMPTY; a jar of anonymous cookies only (what yt-dlp writes back after
+    an anonymous run) is JAR_ANONYMOUS; only a login cookie makes it
+    JAR_PRESENT, and JAR_PRESENT is the one state the worker treats as a path.
     """
     try:
         if not path:
             return JAR_NONE
+        seen_cookie = False
         with open(path, 'r', encoding='utf-8', errors='replace') as fh:
             for line in fh:
                 stripped = line.strip()
-                if stripped and not stripped.startswith('#'):
+                if not stripped or stripped.startswith('#'):
+                    continue
+                seen_cookie = True
+                fields = stripped.split('\t')
+                if len(fields) >= 7 and fields[5] in _LOGIN_COOKIE_NAMES:
                     return JAR_PRESENT
-        return JAR_EMPTY
+        return JAR_ANONYMOUS if seen_cookie else JAR_EMPTY
     except OSError:
         return JAR_NONE
     except Exception:  # noqa: BLE001

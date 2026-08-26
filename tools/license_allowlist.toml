@@ -70,9 +70,11 @@ reason = """\
 GPLv3, and conveyed only to a customer who set [features] youtube_unblock \
 (off by default in the vendor build -- docs/COMMERCIAL_READINESS.md item 2/3, \
 docs/legal/YOUTUBE_FEATURE_NOTICE.md). It is pip-installed as an ordinary \
-importable package into the container's /venv by \
-dashboard/deploy/run.sh (never baked into dashboard/deploy/Dockerfile's \
-image layer -- see docs/DOCKER.md, 'What image mode does NOT bake in'), so \
+importable package by dashboard/deploy/run.sh -- into the container's /venv \
+in bind-mount mode, and into /data/unblock-site (on PYTHONPATH) in image \
+mode, where /venv is read-only (CR-84) -- and never baked into \
+dashboard/deploy/Dockerfile's image layer (see docs/DOCKER.md, 'What image \
+mode does NOT bake in'), so \
 the LGPL/GPL dynamic-linking-style posture paramiko relies on above applies \
 here too: nothing is statically linked, and a customer who enabled the \
 feature can replace the installed copy with their own build without \

@@ -65,6 +65,22 @@ if [ ! -x "$VENV/bin/python" ]; then
     python -m venv "$VENV"
 fi
 
+# IMAGE MODE, decided ONCE (CR-84, 2026-08-26). The marker was tested inline in
+# two places and is now needed in a third (the unblock install below), and the
+# three had to agree: in image mode /venv is a read-only image layer owned by
+# root and this container is uid 3000, so "can I pip into /venv?" is answered
+# NO before pip is ever run. Marker rather than a writability probe: the answer
+# to "is /venv writable?" is also no for a broken bind mount, which must still
+# fail loudly (see the base install below).
+IMAGE_MODE=""
+if [ -f "$VENV/.image-baked" ]; then
+    IMAGE_MODE=1
+fi
+
+# Appended to PYTHONPATH further down, empty unless the unblock block below
+# fills it in. Declared here because `set -u` would abort on an unset one.
+PYTHONPATH_EXTRA=""
+
 # Dependencies only, and only when requirements.txt changes. Two constraints
 # drive this shape: /app is mounted read-only (a group-writable code mount
 # was an editor->NAS-admin escalation, AUDIT C-1), which rules out
@@ -88,7 +104,7 @@ have="$(cat "$STAMP" 2>/dev/null || true)"
 # pip-install on every single boot, against a registry it may not be allowed to
 # reach. Marker rather than "is /venv writable?": the answer to that question is
 # also "no" for a broken mount, which must still fail loudly.
-if [ -f "$VENV/.image-baked" ]; then
+if [ -n "$IMAGE_MODE" ]; then
     have="$want"
 fi
 if [ "$want" != "$have" ]; then
@@ -128,7 +144,7 @@ fi
 # NOTE for image mode (dashboard/deploy/Dockerfile): this lock is
 # deliberately NOT baked into the image, for the same reason ffmpeg/deno/the
 # Claude CLI are not (docs/DOCKER.md, "What image mode does NOT bake in") --
-# so `.image-baked` does NOT short-circuit this block the way it does the
+# so image mode does NOT short-circuit this block the way it does the
 # base install above. A site that flips `youtube_unblock` on under image mode
 # needs PyPI reachable from the container at the NEXT boot after the flag
 # changes, same as bind-mount mode always has. (A dedicated `ccsync-unblock`
@@ -140,7 +156,43 @@ if [ "${DASH_SITE_YOUTUBE_UNBLOCK:-0}" = "1" ]; then
         REQS_UNBLOCK=/app/deploy/requirements-unblock.lock
         PIP_HASH_FLAG_UNBLOCK=--require-hashes
     fi
+    # WHERE IT LANDS, AND WHY IT IS NOT /venv IN IMAGE MODE (CR-84,
+    # 2026-08-26). In image mode /venv is an image layer, `a+rX` on purpose
+    # (AUDIT C-1: a writable code path in a process holding the NAS admin
+    # password is remote code execution), and this container is uid 3000 -- so
+    # this install could NEVER succeed there. It did not: the live NAS logged
+    # `[Errno 13] Permission denied: '/venv/.../yt_dlp_plugins'` four times per
+    # boot while the retry loop below called it a network blip, and the fix was
+    # a `docker exec -u 0 ... pip install` that the next image update threw
+    # away. So image mode installs into /data instead -- uid-3000-owned,
+    # persistent across image updates, and exactly the shape /data/code already
+    # uses for OTA code -- and puts it on PYTHONPATH. yt-dlp finds a plugin by
+    # walking sys.path for a `yt_dlp_plugins` package (yt_dlp/plugins.py,
+    # `default_plugin_paths`: "Load from PYTHONPATH directories"), so a path
+    # entry is all it needs; it does not have to be inside the venv.
+    #
+    # --no-deps is a CONDITION of --target, not an optimisation: this lock is a
+    # hash-pinned closure of exactly one package whose only dependency is
+    # yt-dlp, which the venv already holds at the version requirements.lock
+    # pins. Without it pip would try to install yt-dlp into the target too, and
+    # --require-hashes would refuse (no hash for it in this lock).
+    UNBLOCK_SITE=""
     STAMP_UNBLOCK=$VENV/.requirements-unblock-hash
+    if [ -n "$IMAGE_MODE" ]; then
+        UNBLOCK_SITE=/data/unblock-site
+        STAMP_UNBLOCK=/data/.requirements-unblock-hash
+        mkdir -p "$UNBLOCK_SITE" 2>/dev/null || true
+        PYTHONPATH_EXTRA=":$UNBLOCK_SITE"
+    fi
+    unblock_install() {
+        if [ -n "$IMAGE_MODE" ]; then
+            "$VENV/bin/pip" install --quiet --no-cache-dir --no-deps \
+                --target "$UNBLOCK_SITE" $PIP_HASH_FLAG_UNBLOCK -r "$REQS_UNBLOCK"
+        else
+            "$VENV/bin/pip" install --quiet --no-cache-dir \
+                $PIP_HASH_FLAG_UNBLOCK -r "$REQS_UNBLOCK"
+        fi
+    }
     want_unblock="$(md5sum "$REQS_UNBLOCK" | cut -d' ' -f1)"
     have_unblock="$(cat "$STAMP_UNBLOCK" 2>/dev/null || true)"
     if [ "$want_unblock" != "$have_unblock" ]; then
@@ -154,8 +206,9 @@ if [ "${DASH_SITE_YOUTUBE_UNBLOCK:-0}" = "1" ]; then
         # ladder (~1.8 MiB/s) or ended "The downloaded file is empty", while
         # nothing looked wrong but one boot-time WARNING nobody was watching.
         unblock_ok=""
+        unblock_err=""
         for unblock_delay in 5 15 30 0; do
-            if "$VENV/bin/pip" install --quiet --no-cache-dir $PIP_HASH_FLAG_UNBLOCK -r "$REQS_UNBLOCK"; then
+            if unblock_err="$(unblock_install 2>&1)"; then
                 printf '%s' "$want_unblock" > "$STAMP_UNBLOCK"
                 unblock_ok=1
                 break
@@ -166,10 +219,16 @@ if [ "${DASH_SITE_YOUTUBE_UNBLOCK:-0}" = "1" ]; then
             fi
         done
         if [ -z "$unblock_ok" ]; then
-            echo "run.sh: WARNING: youtube_unblock dependency install FAILED" >&2
-            echo "run.sh: WARNING: (PyPI unreachable?). /ytdl's PO-token path will" >&2
-            echo "run.sh: WARNING: bot-check-fail until this succeeds; everything" >&2
-            echo "run.sh: WARNING: else keeps running." >&2
+            # PIP'S OWN LAST WORDS, NOT JUST OUR GUESS (CR-84, 2026-08-26).
+            # The retry loop assumed the only possible cause was the boot-time
+            # network gap CR-73 measured, so the log said "PyPI unreachable?"
+            # four times while pip had actually said `[Errno 13] Permission
+            # denied` -- a diagnosis nobody could reach from the log they had.
+            echo "run.sh: WARNING: youtube_unblock dependency install FAILED." >&2
+            echo "run.sh: WARNING: /ytdl's PO-token path will bot-check-fail" >&2
+            echo "run.sh: WARNING: until this succeeds; everything else keeps" >&2
+            echo "run.sh: WARNING: running. pip said:" >&2
+            printf '%s\n' "$unblock_err" >&2
         fi
     fi
 fi
@@ -217,7 +276,17 @@ export PYTHONPATH=/app/src:/broll-app:/music-app:/ytdl-app
 # rather than repeated, so the list exists exactly once
 # (server/tests/test_music_deploy.py reads that line and checks every entry is
 # a real mount).
-IMAGE_PYTHONPATH="$PYTHONPATH"
+#
+# PYTHONPATH_EXTRA is the youtube_unblock plugin's own site directory in image
+# mode (CR-84) and empty everywhere else. APPENDED, never prepended: it holds
+# one namespace package and must not get a vote on where `app`, `musicweb` or
+# `ytdlweb` come from. It is a SUFFIX ON THE STRING rather than a fifth entry
+# in the list above, so that when it is empty the exported path gains no empty
+# entry -- an empty entry is how /music once came to report "absent" behind a
+# green healthcheck.
+IMAGE_PYTHONPATH="$PYTHONPATH$PYTHONPATH_EXTRA"
+PYTHONPATH="$IMAGE_PYTHONPATH"
+export PYTHONPATH
 
 # Static ffmpeg/ffprobe, mounted read-only from the host at /opt/ffmpeg by
 # compose and put there by server/install_dashboard_app.py. This image is a
@@ -294,11 +363,14 @@ fi
 # shell keeps PID 1 and has to forward the stop signal itself -- without the
 # trap, `docker stop` would kill the shell and leave uvicorn to be SIGKILLed
 # ten seconds later, mid-request.
-if [ -f "$VENV/.image-baked" ]; then
+if [ -n "$IMAGE_MODE" ]; then
     while : ; do
         selected="$("$VENV/bin/python" /app/deploy/select_code_root.py || true)"
         if [ -n "$selected" ]; then
-            PYTHONPATH="$selected"
+            # select_code_root.py prints the FOUR code roots and knows nothing
+            # about the unblock site dir, so the suffix is re-attached here --
+            # an OTA'd code tree must not lose the PO-token plugin (CR-84).
+            PYTHONPATH="$selected$PYTHONPATH_EXTRA"
         else
             echo "run.sh: WARNING: select_code_root.py printed nothing -- using the image's own code." >&2
             PYTHONPATH="$IMAGE_PYTHONPATH"

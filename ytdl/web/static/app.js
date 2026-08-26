@@ -435,6 +435,9 @@ function renderEvidence(h) {
     : jar === 'empty'
     ? 'a cookie jar is configured but holds no cookies, so this server '
       + 'downloads anonymously'
+    : jar === 'anonymous'
+    ? 'the cookie jar holds only anonymous cookies, not a signed-in session, '
+      + 'so this server downloads anonymously'
     : jar === 'none'
     ? 'no cookie jar is configured, so this server downloads anonymously'
     : '';

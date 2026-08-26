@@ -1154,3 +1154,20 @@ in `~/.ccsync/config.toml`. To point it somewhere by hand:
 the fleet's libraries use; `config.toml` is owner-only because it already
 carries `report_token`). Changing any of the six drops the open library
 immediately, so an editor who fixes a wrong host does not restart anything.
+
+### The proxy keys follow BOTH readers, and half an answer is no answer (review 2, 2026-08-26)
+
+The library cannot give `proxy_path` / `proxy_state` cheaply (the proxy path
+sits behind a second nested zstd frame in `Sm2MpMedia.FieldsBlob`), so the
+pool walk reads them through the API, one-arg, in 100-clip chunks with
+`_API_LOCK` released between chunks. The first cut gated that on
+`proxy_gen_enabled` alone. The reader of those keys is
+`app._relink_proxies_once`, gated on `proxy_relink_enabled` (default true),
+and `proxy_gen_enabled` derives to FALSE on every lane-B editor rig - exactly
+where lane B syncs proxies down. Result would have been 1,300 clips reported
+as "no proxy" and 1,300 unsolicited `LinkProxyMedia` calls on the next
+media-tree refresh. Rules now in `_enrich_proxy_keys`: enrich when EITHER
+reader is on; a run that cannot finish (project switched, uid map empty)
+returns False and `get_media_pool_items` answers from the API walk instead of
+handing out half-enriched items; `_LIBRARY_LOCK` is never held while
+enriching. `""` in those keys means "nobody reads them", never "unknown".

@@ -83,6 +83,46 @@ try:
 except Exception:  # noqa: BLE001 - a build without it fails louder at import
     hidden_imports.append("onnxruntime")
 
+# The library walk (docs/LIBRARY_WALK_PLAN.md): `library.py` reads a
+# timeline's items straight out of Resolve's project library rather than
+# walking them through the scripting API. Both of its dependencies need naming
+# here, for the same reason numpy/onnxruntime do above -- `library.py` imports
+# them INSIDE its functions so a companion that never reaches a library never
+# pays for the import, and PyInstaller does not follow a deferred import.
+#
+#   * pg8000 (PostgreSQL, for a network library). `pg8000/__init__.py` is a
+#     thin re-export, but the code paths that matter live in submodules and
+#     `pg8000.native` in particular is imported by name at call time. scramp
+#     (and its asn1crypto) is pulled in by pg8000.core's `from scramp import
+#     ScramClient` for SCRAM-SHA-256 auth: the fleet's postgres:13 currently
+#     negotiates plain md5 (AuthenticationMD5Password, code 5 -- measured
+#     2026-08-26, `password_encryption = md5`), so a frozen build that dropped
+#     scramp would work HERE and fail the day a library server is re-hashed to
+#     scram-sha-256. Name it.
+#
+#   * zstandard, for the `Clip` blob that carries a pool clip's live media
+#     path. Its `__init__` picks a backend under `if platform
+#     .python_implementation() ...` at import time; `backend_c` is the C
+#     extension we actually want and the one whose cp312 wheel we lock for
+#     win_amd64 / macosx_x86_64 / macosx_arm64. `backend_cffi` is deliberately
+#     NOT listed: it needs cffi, which is not in requirements.lock (it is an
+#     optional extra of zstandard), and naming a module that is not installed
+#     is a hard Analysis error rather than the graceful fallback it looks like.
+hidden_imports += [
+    "pg8000",
+    "pg8000.native",
+    "pg8000.dbapi",
+    "pg8000.core",
+    "pg8000.converters",
+    "pg8000.exceptions",
+    "pg8000.types",
+    "scramp",
+    "asn1crypto.x509",  # scramp.core: `from asn1crypto.x509 import Certificate`
+    "dateutil.parser",  # pg8000.converters: `from dateutil.parser import parse`
+    "zstandard",
+    "zstandard.backend_c",
+]
+
 entry_point = "launcher.py"  # absolute-import shim; running the package __main__.py directly breaks relative imports
 
 # Windows wants a .ico and we ship one. macOS wants an .icns, which this repo

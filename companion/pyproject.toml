@@ -38,6 +38,36 @@ dependencies = [
     # installed, onnxruntime ~16 MB) against a 40-odd MB exe.
     "numpy>=1.26",
     "onnxruntime>=1.20",
+    # The library walk (docs/LIBRARY_WALK_PLAN.md): the timeline watcher reads
+    # a timeline's items out of Resolve's PROJECT LIBRARY instead of walking
+    # them through the scripting API -- 904 items in 3 ms against 11-14 s, and
+    # Resolve serialises API calls, so that walk was blocking every other
+    # scripting client on the machine.
+    #
+    # pg8000 is the PostgreSQL driver for a network library (the fleet's is
+    # postgres:13 on the TrueNAS; a disk library is SQLite and needs nothing).
+    # It is deliberately NOT psycopg2/psycopg: those are C extensions that need
+    # libpq per platform, and psycopg2's licence is LGPL-3.0-with-exceptions,
+    # which is precisely the shape tools/check_licenses.py exists to stop
+    # entering a single-file freeze. pg8000 is pure Python and BSD-3-Clause; it
+    # brings scramp (MIT, SCRAM-SHA-256 auth -- what postgres:13 negotiates
+    # here), asn1crypto (MIT) and python-dateutil (Apache-2.0/BSD-3). Nothing
+    # in that closure needs an allowlist entry.
+    #
+    # zstandard decompresses the `Clip` blob on BtVideoInfo/BtAudioInfo, which
+    # is where a pool clip's LIVE media path lives (Sm2TiItem.MediaFilePath is
+    # a stale placement-time snapshot and FieldsBlob holds only the proxy
+    # path). BSD-3-Clause, one C extension with a cp312 wheel for win_amd64,
+    # macosx_x86_64 and macosx_arm64 -- the three platforms this binary is
+    # frozen on -- plus a cffi fallback we do not install.
+    #
+    # Both are unconditional rather than an extra for the reason numpy and
+    # onnxruntime are: the frozen build is one binary for the whole fleet.
+    # Combined cost is small (pg8000 ~200 KB of Python, zstandard ~700 KB).
+    # A library failure of any kind is caught and the API walk runs instead,
+    # so neither is on a path that can stop a fleet syncing.
+    "pg8000>=1.31",
+    "zstandard>=0.23",
 ]
 
 [project.optional-dependencies]

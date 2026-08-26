@@ -66,13 +66,14 @@ installs `dashboard/deploy/requirements.txt`.
 
 ### companion
 
-editor tray app; the frozen build ships a SUBSET of this (see build.spec). Venv: `E:\Projects\resolve-remote-sync\companion\.venv` — 22 package(s).
+editor tray app; the frozen build ships a SUBSET of this (see build.spec). Venv: `E:\Projects\resolve-remote-sync\companion\.venv` — 28 package(s).
 
 | Package | Version | Licence | Home page |
 |---|---|---|---|
 | `altgraph` | 0.17.5 | MIT License | https://altgraph.readthedocs.io |
-| `ccsync-companion` | 0.9.0 | UNKNOWN | UNKNOWN |
-| `ccsync-companion` | 0.9.0 | UNKNOWN | UNKNOWN |
+| `asn1crypto` | 1.5.1 | MIT License | https://github.com/wbond/asn1crypto |
+| `ccsync-companion` | 0.9.4 | UNKNOWN | UNKNOWN |
+| `ccsync-companion` | 0.9.4 | UNKNOWN | UNKNOWN |
 | `colorama` | 0.4.6 | BSD License | https://github.com/tartley/colorama |
 | `flatbuffers` | 25.12.19 | Apache Software License | https://google.github.io/flatbuffers/ |
 | `iniconfig` | 2.3.0 | MIT | https://github.com/pytest-dev/iniconfig |
@@ -80,18 +81,23 @@ editor tray app; the frozen build ships a SUBSET of this (see build.spec). Venv:
 | `onnxruntime` | 1.29.0 | MIT License | https://onnxruntime.ai |
 | `packaging` | 26.2 | Apache-2.0 OR BSD-2-Clause | https://github.com/pypa/packaging |
 | `pefile` | 2024.8.26 | MIT | https://github.com/erocarrera/pefile |
+| `pg8000` | 1.31.5 | BSD License | https://codeberg.org/tlocke/pg8000 |
 | `pillow` | 12.3.0 | MIT-CMU | https://python-pillow.github.io |
 | `pluggy` | 1.6.0 | MIT License | UNKNOWN |
 | `protobuf` | 7.35.1 | 3-Clause BSD License | https://developers.google.com/protocol-buffers/ |
+| `py-spy` | 0.4.2 | MIT License | https://github.com/benfred/py-spy |
 | `Pygments` | 2.20.0 | BSD-2-Clause | https://pygments.org |
 | `pyinstaller` | 6.21.0 | GNU General Public License v2 (GPLv2) | https://pyinstaller.org |
 | `pyinstaller-hooks-contrib` | 2026.6 | Apache Software License; GNU General Public License v2 (GPLv2) | https://github.com/pyinstaller/pyinstaller-hooks-contrib |
 | `pystray` | 0.19.5 | GNU Lesser General Public License v3 (LGPLv3) | https://github.com/moses-palmer/pystray |
 | `pytest` | 9.1.1 | MIT | https://docs.pytest.org/en/latest/ |
+| `python-dateutil` | 2.9.0.post0 | Apache Software License; BSD License | https://github.com/dateutil/dateutil |
 | `pywin32-ctypes` | 0.2.3 | BSD-3-Clause | https://github.com/enthought/pywin32-ctypes |
+| `scramp` | 1.4.17 | MIT No Attribution License (MIT-0) | https://codeberg.org/tlocke/scramp |
 | `six` | 1.17.0 | MIT License | https://github.com/benjaminp/six |
 | `watchdog` | 6.0.0 | Apache Software License | https://github.com/gorakhargosh/watchdog |
 | `xxhash` | 4.0.1 | BSD-2-Clause | https://github.com/ifduyue/python-xxhash |
+| `zstandard` | 0.25.0 | BSD-3-Clause | https://github.com/indygreg/python-zstandard |
 
 ### dashboard
 
@@ -253,7 +259,7 @@ b-roll search UI mounted at /broll; borrowed from the pre-fold repo. Venv: `E:\P
 
 ## All pip dependencies (merged)
 
-97 distinct (package, version) pair(s) across every scanned venv.
+103 distinct (package, version) pair(s) across every scanned venv.
 
 | Package | Version | Licence | Components | Licence text on disk |
 |---|---|---|---|---|
@@ -264,10 +270,11 @@ b-roll search UI mounted at /broll; borrowed from the pre-fold repo. Venv: `E:\P
 | `annotated-types` | 0.7.0 | MIT License | broll/web | yes |
 | `anthropic` | 0.122.0 | MIT License | dashboard | yes |
 | `anyio` | 4.14.2 | MIT | dashboard, music/web, broll/web | yes |
+| `asn1crypto` | 1.5.1 | MIT License | companion | yes |
 | `bcrypt` | 5.0.0 | Apache Software License | dashboard | yes |
 | `bgutil-ytdlp-pot-provider` | 1.3.1 | GNU General Public License v3 (GPLv3) | dashboard | no |
 | `broll-web` | 0.1.0 | UNKNOWN | broll/web | no |
-| `ccsync-companion` | 0.9.0 | UNKNOWN | companion, companion | no |
+| `ccsync-companion` | 0.9.4 | UNKNOWN | companion, companion | no |
 | `ccsync-dashboard` | 0.1.0 | UNKNOWN | dashboard, dashboard | no |
 | `certifi` | 2026.7.22 | Mozilla Public License 2.0 (MPL 2.0) | dashboard, music/web | yes |
 | `certifi` | 2026.6.17 | Mozilla Public License 2.0 (MPL 2.0) | broll/web | yes |
@@ -310,9 +317,11 @@ b-roll search UI mounted at /broll; borrowed from the pre-fold repo. Venv: `E:\P
 | `packaging` | 26.3 | Apache-2.0 OR BSD-2-Clause | dashboard, music/web | yes |
 | `paramiko` | 5.0.0 | LGPL-2.1 | dashboard | yes |
 | `pefile` | 2024.8.26 | MIT | companion | yes |
+| `pg8000` | 1.31.5 | BSD License | companion | yes |
 | `pillow` | 12.3.0 | MIT-CMU | companion, broll/web | yes |
 | `pluggy` | 1.6.0 | MIT License | companion, dashboard, music/web, broll/web | yes |
 | `protobuf` | 7.35.1 | 3-Clause BSD License | companion, dashboard, music/web, broll/web | yes |
+| `py-spy` | 0.4.2 | MIT License | companion | yes |
 | `py_rust_stemmers` | 0.1.8 | UNKNOWN | broll/web | yes |
 | `pycparser` | 3.0 | BSD-3-Clause | dashboard | yes |
 | `pydantic` | 2.13.4 | MIT | dashboard, music/web, broll/web | yes |
@@ -326,12 +335,14 @@ b-roll search UI mounted at /broll; borrowed from the pre-fold repo. Venv: `E:\P
 | `pyspnego` | 0.12.1 | MIT | dashboard | yes |
 | `pystray` | 0.19.5 | GNU Lesser General Public License v3 (LGPLv3) | companion | yes |
 | `pytest` | 9.1.1 | MIT | companion, dashboard, music/web, broll/web | yes |
+| `python-dateutil` | 2.9.0.post0 | Apache Software License; BSD License | companion | yes |
 | `python-dotenv` | 1.2.2 | BSD-3-Clause | music/web, broll/web | yes |
 | `python-multipart` | 0.0.32 | Apache-2.0 | dashboard, music/web | yes |
 | `pywin32-ctypes` | 0.2.3 | BSD-3-Clause | companion | yes |
 | `PyYAML` | 6.0.3 | MIT License | music/web, broll/web | yes |
 | `RapidFuzz` | 3.14.5 | MIT | dashboard, broll/web | yes |
 | `requests` | 2.34.2 | Apache Software License | dashboard, broll/web | yes |
+| `scramp` | 1.4.17 | MIT No Attribution License (MIT-0) | companion | yes |
 | `six` | 1.17.0 | MIT License | companion | yes |
 | `smbprotocol` | 1.17.0 | MIT | dashboard | yes |
 | `sniffio` | 1.3.1 | Apache Software License; MIT License | dashboard | yes |
@@ -354,6 +365,7 @@ b-roll search UI mounted at /broll; borrowed from the pre-fold repo. Venv: `E:\P
 | `win32_setctime` | 1.2.0 | MIT License | broll/web | yes |
 | `xxhash` | 4.0.1 | BSD-2-Clause | companion | yes |
 | `yt-dlp` | 2026.7.4 | Unlicense | dashboard | yes |
+| `zstandard` | 0.25.0 | BSD-3-Clause | companion | yes |
 
 <!-- BEGIN HAND-MAINTAINED -->
 ## Non-pip components (hand-maintained)

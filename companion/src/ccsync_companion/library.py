@@ -37,8 +37,20 @@ Traps that cost time to find, so that nobody has to find them twice:
 - One library holds every project (FF5: five of them, 4005 pool clips).
   Always scope: timelines by the project association, the pool by the
   project's own folder tree.
+- `Sm2TiTrack.Type` is not just 0/1: subtitle tracks are Type 2 (6 of the
+  287 tracks in FF5, carrying 3360 items) and their `DbIndex` restarts at
+  0 like every other kind's, so a subtitle track reported as "video"
+  collides with a real V1/V2. Only Types 0 and 1 are walked.
 - The library trails the UI by the Live Save interval (~0.3 s here), or
   until the next manual save with Live Save off.
+
+`item_index` on a timeline item dict is the index of the TIMELINE ITEM
+within its track, 0-based in Start order, counting the items the library
+holds -- not the position of the dict in the returned list. Angles of a
+multicam therefore all carry the index of the multicam item they were
+expanded from (library walk review, 2026-08-26: the alternative, counting
+emitted dicts, made every index after a multicam disagree with the API's
+own item order, which is what consumers match against).
 
 Driver choice: `pg8000` (BSD, pure Python) rather than psycopg2 -- the
 licence gate has no LGPL entry and there is no compiled wheel to ship per
@@ -80,8 +92,14 @@ STATEMENT_TIMEOUT = 5.0
 MAX_EXPAND_DEPTH = 8
 
 # Sm2TiTrack.Type. There is no enum in the schema; these are measured.
+# Type 2 is subtitles (6 tracks / 3360 items in FF5) and is not walked.
 _TRACK_VIDEO = 0
 _TRACK_AUDIO = 1
+
+# An unreadable Sm2TiItem.Start is worth exactly one line per process: it is
+# a property of the library, so a watcher poll would otherwise repeat it
+# every 3 s forever.
+_WARNED_START = False
 
 
 class LibraryUnavailable(Exception):
@@ -160,6 +178,11 @@ def clip_path(payload: Optional[bytes]) -> str:
     title in the file name routinely does, and a one-byte length reader
     silently truncated those before this was fixed.
 
+    Both fields are collected and the loop stops at the first tag ABOVE 2
+    (library walk review, 2026-08-26): protobuf does not promise field
+    order, and stopping the moment field 2 arrived would have dropped the
+    directory of any blob Resolve ever writes name-first.
+
     The two halves are joined with the DIRECTORY's own separator, never
     os.sep: a Mac reading a Windows-authored library must hand back the
     stored `P:\\...` spelling, because that is the string classify_path and
@@ -184,7 +207,6 @@ def clip_path(payload: Optional[bytes]) -> str:
                 directory = value.decode("utf-8", "replace")
             else:
                 name = value.decode("utf-8", "replace")
-                break
     except (IndexError, ValueError):
         return ""
     if not directory:
@@ -726,10 +748,26 @@ class ProjectLibrary:
     # -- timeline ----------------------------------------------------------
 
     def _sequence_for_timeline(self, timeline_uid: str) -> str:
+        """The current sequence of one timeline. "" when the library has none.
+
+        Live FF5 has exactly one row per timeline, but a timeline that has
+        been through a version restore can hold more, and rows[0] of an
+        unordered SELECT is whatever the planner felt like -- the walk
+        would then wander between versions from poll to poll. Newest save
+        wins, ties broken by uid so the answer is at least stable (library
+        walk review, 2026-08-26).
+        """
         rows = self._query(
-            'SELECT "Sm2Sequence_id" FROM "Sm2Sequence" WHERE "Sm2Timeline_id" = :tid',
+            'SELECT "Sm2Sequence_id", "DbSavedTime" FROM "Sm2Sequence" '
+            'WHERE "Sm2Timeline_id" = :tid',
             tid=self._uid(timeline_uid))
-        return _uid_str(rows[0][0]) if rows else ""
+        if not rows:
+            return ""
+        ordered = sorted(rows, key=lambda r: (-int(r[1] or 0), _uid_str(r[0])))
+        if len(ordered) > 1:
+            log.info("library: timeline %s has %d sequences; taking the newest saved (%s)",
+                     timeline_uid, len(ordered), _uid_str(ordered[0][0]))
+        return _uid_str(ordered[0][0])
 
     def _sequences_for_clips(self, uids: list[str]) -> dict[str, str]:
         """pool uid -> sequence id, for the multicams / compounds among them.
@@ -737,11 +775,28 @@ class ProjectLibrary:
         A multicam or compound pool clip owns a sequence of its own whose
         `Sm2MpMedia_id` is that clip. An ordinary clip owns none, so a uid
         missing from this dict is simply a leaf.
+
+        Same tie-break as _sequence_for_timeline: newest DbSavedTime, then
+        uid, so a clip with two sequences expands the same way on every
+        poll instead of following row order (library walk review,
+        2026-08-26).
         """
         rows = self._query_in(
-            'SELECT "Sm2MpMedia_id", "Sm2Sequence_id" FROM "Sm2Sequence" '
+            'SELECT "Sm2MpMedia_id", "Sm2Sequence_id", "DbSavedTime" FROM "Sm2Sequence" '
             'WHERE "Sm2MpMedia_id" IN ', "m", uids)
-        return {_uid_str(media): _uid_str(seq) for media, seq in rows if media is not None}
+        best: dict[str, tuple] = {}
+        for media, seq, saved in rows:
+            if media is None:
+                continue
+            key = _uid_str(media)
+            rank = (-int(saved or 0), _uid_str(seq))
+            if key in best:
+                log.info("library: pool clip %s owns more than one sequence; "
+                         "taking the newest saved", key)
+                if rank >= best[key][0]:
+                    continue
+            best[key] = (rank, _uid_str(seq))
+        return {key: value[1] for key, value in best.items()}
 
     def _tracks(self, sequence_ids: list[str]) -> dict[str, list[tuple[str, int, int, str]]]:
         """sequence id -> [(track id, Type, index, name)] in display order.
@@ -749,6 +804,14 @@ class ProjectLibrary:
         DbIndex on the container association is the ONLY ordering there is:
         Sm2TiTrack carries no index and its SubType is uninitialised memory
         (V1 of Civil Defence - E1 reports SubType 538976288, i.e. b"    ").
+
+        Only Types 0 (video) and 1 (audio) come back. Subtitle tracks are
+        Type 2 and their DbIndex restarts at 0 like every other kind's, so
+        the old "audio if 1 else video" reported subtitle track 1 as V1 and
+        two different tracks then claimed the same (track_type, track_index)
+        (library walk review, 2026-08-26). Live FF5 has 6 of them holding
+        3360 items; they escaped only because every one of those items has
+        a NULL MediaRef, which is luck, not a guarantee.
 
         Batched over every sequence of one recursion level. Per-sequence it
         would be one round trip per multicam, and a 451-cut timeline has
@@ -765,6 +828,8 @@ class ProjectLibrary:
             'WHERE c."Sm2Sequence_id" IN ', "s", sequence_ids)
         by_sequence: dict[str, list[tuple[str, int, int, str]]] = {}
         for seq, tid, kind, index, name in rows:
+            if int(kind or 0) not in (_TRACK_VIDEO, _TRACK_AUDIO):
+                continue
             by_sequence.setdefault(_uid_str(seq), []).append(
                 (_uid_str(tid), int(kind or 0), int(index or 0), str(name or "")))
         for tracks in by_sequence.values():
@@ -776,6 +841,11 @@ class ProjectLibrary:
 
         Start and Duration are varchar columns holding decimal frame counts
         ('355231'), so they sort as text unless they go through int().
+        Through int(float(...)), in fact: nothing in the schema promises the
+        string is integral, and int('355231.0') raises. A value we cannot
+        read at all is logged once per process rather than silently becoming
+        0, which would quietly move that item to the head of its track
+        (library walk review, 2026-08-26).
         """
         rows = self._query_in(
             'SELECT "Sm2TiTrack_id", "Name", "Start", "MediaRef" FROM "Sm2TiItem" '
@@ -783,9 +853,14 @@ class ProjectLibrary:
         by_track: dict[str, list[tuple]] = {}
         for track, name, start, media in rows:
             try:
-                position = int(str(start or "0"))
-            except ValueError:
+                position = int(float(str(start or "0")))
+            except (TypeError, ValueError):
                 position = 0
+                global _WARNED_START
+                if not _WARNED_START:
+                    _WARNED_START = True
+                    log.warning("library: Sm2TiItem.Start %r is not a number; "
+                                "that item sorts to the head of its track", start)
             by_track.setdefault(_uid_str(track), []).append(
                 (str(name or ""), position, _uid_str(media)))
         for entries in by_track.values():
@@ -799,6 +874,10 @@ class ProjectLibrary:
         within a track by Start. An item with no MediaRef -- a transition,
         a generator, a title -- is skipped: it has no media and every
         consumer of this list is looking for media.
+
+        item_index counts TIMELINE ITEMS, so the angles of a multicam all
+        carry the index of the multicam item they came from; see the module
+        docstring.
         """
         def work():
             sequence_id = self._sequence_for_timeline(timeline_uid)
@@ -832,7 +911,7 @@ class ProjectLibrary:
                         if track_name:
                             expanded.setdefault("track_name", track_name)
                         items.append(expanded)
-                        position += 1
+                    position += 1
             return items
         return self._retrying(work)
 
@@ -879,7 +958,12 @@ class ProjectLibrary:
         seen-set is per top-level item and is what makes a cyclic library
         terminate; MAX_EXPAND_DEPTH only bounds how much a corrupt one can
         cost. A multicam whose angles we cannot read is still returned as
-        itself, so the item never silently vanishes from the walk.
+        itself, so the item never silently vanishes from the walk -- and
+        that now holds for the two stopping conditions too. They used to
+        return [], which dropped the clip entirely and contradicted the
+        sentence above: a nested compound the cap cut off simply was not in
+        the walk, so the watcher never saw it was offline (library walk
+        review, 2026-08-26).
         """
         tracks_of, items_of, seq_of = graph
 
@@ -893,7 +977,7 @@ class ProjectLibrary:
             }]
 
         if media_uid in seen or depth >= MAX_EXPAND_DEPTH:
-            return []
+            return leaf()
         sequence_id = seq_of.get(media_uid, "")
         if not sequence_id or media_uid in done:
             return leaf()

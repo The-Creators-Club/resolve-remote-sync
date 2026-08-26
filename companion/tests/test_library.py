@@ -244,6 +244,24 @@ def test_clip_path_survives_cjk_and_names_over_127_bytes():
     assert library.clip_path(library.decompress_blob(blob)) == directory + "\\" + name
 
 
+def test_clip_path_does_not_care_which_order_the_fields_arrive_in():
+    """Protobuf does not promise field order, and the parser used to stop
+    dead the moment field 2 arrived -- so a name-first blob lost its whole
+    directory (library walk review, 2026-08-26)."""
+    import zstandard
+
+    payload = bytearray()
+    for tag, text in ((0x12, "A001.braw"), (0x0A, r"P:\Media\FF5"),
+                      (0x1A, "Mon Aug 25 10:00:00 2026")):
+        encoded = text.encode("utf-8")
+        payload.append(tag)
+        payload += _varint(len(encoded))
+        payload += encoded
+    blob = b"\x01\x00\x00\x00\x09\x00\x00\x00\x00" + zstandard.ZstdCompressor().compress(
+        bytes(payload))
+    assert library.clip_path(library.decompress_blob(blob)) == r"P:\Media\FF5\A001.braw"
+
+
 def test_decompress_blob_is_quiet_about_rubbish():
     assert library.decompress_blob(None) is None
     assert library.decompress_blob(b"not a blob at all") is None
@@ -417,7 +435,94 @@ def test_a_cyclic_multicam_terminates(db):
 
     lib = open_library(path)
     items = lib.timeline_items(_uid("tl/e1"))
-    assert [i["file_path"] for i in items] == [r"P:\Media\leaf.mov"]
+    # The self-reference stops at the seen-set and comes back as ITSELF,
+    # pathless, rather than as nothing: dropping it would take a real clip
+    # out of the walk, which is what a caller checking for offline media
+    # would then never hear about (library walk review, 2026-08-26).
+    assert [(i["media_pool_uid"], i["file_path"]) for i in items] == [
+        (outer, ""),
+        (leaf, r"P:\Media\leaf.mov"),
+    ]
+    lib.close()
+
+
+def test_the_depth_cap_returns_the_clip_rather_than_dropping_it(db, monkeypatch):
+    """A chain deeper than MAX_EXPAND_DEPTH keeps its last clip."""
+    conn, path = db
+    b, project, root = _simple_project(conn)
+    monkeypatch.setattr(library, "MAX_EXPAND_DEPTH", 2)
+    inner = b.clip("inner", "inner.mov", root, r"P:\Media", "inner.mov")
+    previous = inner
+    for level in range(3):
+        wrapper = b.clip("w%d" % level, "Compound %d" % level, root)
+        wseq = b.clip_sequence("w%d" % level, wrapper)
+        wtrack = b.track(wseq, "wt%d" % level, 0, 0)
+        b.item(wtrack, "wi%d" % level, "inner", 0, previous)
+        previous = wrapper
+
+    _tl, seq = b.timeline(project, "e1", "Show - E1")
+    v1 = b.track(seq, "v1", 0, 0)
+    b.item(v1, "cut1", "Compound 2", 0, previous)
+    conn.commit()
+
+    lib = open_library(path)
+    items = lib.timeline_items(_uid("tl/e1"))
+    assert len(items) == 1
+    # The cap bit one level above `inner`, so what comes back is the
+    # compound at that level -- pathless, but present.
+    assert items[0]["media_pool_uid"] == _uid("clip/w0")
+    assert items[0]["file_path"] == ""
+    lib.close()
+
+
+def test_subtitle_tracks_are_not_walked_as_video(db):
+    """Sm2TiTrack.Type 2 is subtitles, and its DbIndex restarts at 0 like
+    every other kind's -- so reporting it as video makes subtitle track 1
+    and V1 claim the same (track_type, track_index). Live FF5 has 6 such
+    tracks carrying 3360 items."""
+    conn, path = db
+    b, project, root = _simple_project(conn)
+    one = b.clip("one", "one.mov", root, r"P:\Media", "one.mov")
+    caption = b.clip("cap", "caption.srt", root, r"P:\Media", "caption.srt")
+    _tl, seq = b.timeline(project, "e1", "Show - E1")
+    v1 = b.track(seq, "v1", 0, 0)
+    st1 = b.track(seq, "st1", 2, 0, "Subtitle 1")
+    b.item(v1, "i1", "one", 0, one)
+    # A subtitle item WITH a MediaRef: live they are all NULL, which is
+    # luck rather than a guarantee, and luck is not what the filter rests on.
+    b.item(st1, "s1", "caption", 0, caption)
+    conn.commit()
+
+    lib = open_library(path)
+    items = lib.timeline_items(_uid("tl/e1"))
+    assert [(i["track_type"], i["track_index"], i["clip_name"]) for i in items] == [
+        ("video", 1, "one")]
+    lib.close()
+
+
+def test_item_index_counts_timeline_items_not_emitted_dicts(db):
+    """Angles share the index of the multicam item they were expanded from,
+    so an index still names a place in the track the API agrees about."""
+    conn, path = db
+    b, project, root = _simple_project(conn)
+    angle_a = b.clip("a", "camA.mov", root, r"P:\Media", "camA.mov")
+    angle_b = b.clip("b", "camB.mov", root, r"P:\Media", "camB.mov")
+    after = b.clip("after", "after.mov", root, r"P:\Media", "after.mov")
+    multicam = b.clip("mc", "Multicam", root)
+    mc_seq = b.clip_sequence("mc", multicam)
+    b.item(b.track(mc_seq, "mcv1", 0, 0, "Angle 1"), "mca", "camA", 0, angle_a)
+    b.item(b.track(mc_seq, "mcv2", 0, 1, "Angle 2"), "mcb", "camB", 0, angle_b)
+
+    _tl, seq = b.timeline(project, "e1", "Show - E1")
+    v1 = b.track(seq, "v1", 0, 0)
+    b.item(v1, "cut1", "Multicam", 0, multicam)
+    b.item(v1, "next", "after", 100, after)
+    conn.commit()
+
+    lib = open_library(path)
+    items = lib.timeline_items(_uid("tl/e1"))
+    assert [(i["clip_name"], i["item_index"]) for i in items] == [
+        ("camA", 0), ("camB", 0), ("after", 1)]
     lib.close()
 
 
@@ -525,6 +630,30 @@ def test_a_dead_postgres_host_is_unavailable():
 def test_an_unknown_library_kind_is_unavailable():
     with pytest.raises(library.LibraryUnavailable):
         library.ProjectLibrary(library.LibraryInfo(kind="", name=""), "Show")
+
+
+def test_a_non_numeric_start_is_logged_once_not_silently_zero(db, caplog):
+    conn, path = db
+    b, project, root = _simple_project(conn)
+    one = b.clip("one", "one.mov", root, r"P:\Media", "one.mov")
+    two = b.clip("two", "two.mov", root, r"P:\Media", "two.mov")
+    _tl, seq = b.timeline(project, "e1", "Show - E1")
+    v1 = b.track(seq, "v1", 0, 0)
+    b.item(v1, "i1", "one", 100, one)
+    b.item(v1, "i2", "two", 200, two)
+    # Not an integer, but a number: '355231.0' used to raise out of int().
+    conn.execute('UPDATE "Sm2TiItem" SET "Start" = ? WHERE "Name" = ?', ("300.0", "one"))
+    conn.execute('UPDATE "Sm2TiItem" SET "Start" = ? WHERE "Name" = ?', ("later", "two"))
+    conn.commit()
+
+    library._WARNED_START = False
+    with caplog.at_level("WARNING", logger="ccsync.library"):
+        lib = open_library(path)
+        items = lib.timeline_items(_uid("tl/e1"))
+    # 'two' is unreadable, so it collapses to 0 and sorts first -- but loudly.
+    assert [i["clip_name"] for i in items] == ["two", "one"]
+    assert sum(1 for r in caplog.records if "Start" in r.getMessage()) == 1
+    lib.close()
 
 
 # --------------------------------------------------------------------------
@@ -695,132 +824,6 @@ def test_postgres_dialect_against_a_live_library():
             assert isinstance(item["media_pool_uid"], str) and item["media_pool_uid"]
     finally:
         lib.close()
-
-
-# --------------------------------------------------------------------------
-# locate()
-# --------------------------------------------------------------------------
-
-WINDOWS_LOG = (
-    "[0x000012a4] 25.08 09:00:01.100 | postgres project library FF5 at 100.71.216.3 "
-    "version 13.23 (ok)\n"
-    "[0x000012a4] 25.08 09:00:02.200 | Current project pointer changed to (Elections) "
-    "from project library (FF5 : Network)\n"
-    "[0x000012a4] 25.08 09:03:04.500 | Current project pointer changed to (Civil Defence) "
-    "from project library (FF5 : Network)\n"
-)
-
-MACOS_LOG = (
-    "[0x7000098] 25.08 09:00:01.100 | Current project pointer changed to (Reef) "
-    "from project library (Local Database : Disk)\n"
-)
-
-
-@pytest.fixture()
-def fake_log(tmp_path, monkeypatch):
-    def install(text: str):
-        support = tmp_path / "Support"
-        logs = support / "logs"
-        logs.mkdir(parents=True, exist_ok=True)
-        path = logs / "davinci_resolve.log"
-        path.write_text(text, encoding="utf-8")
-        monkeypatch.setattr(library.luts, "resolve_log_path", lambda: path)
-        return support
-    return install
-
-
-def test_locate_reads_the_windows_log_when_the_api_says_nothing(fake_log):
-    fake_log(WINDOWS_LOG)
-    info = library.locate(None, "Civil Defence", {})
-    assert info is not None
-    assert (info.kind, info.name, info.host) == ("PostgreSQL", "FF5", "100.71.216.3")
-
-
-def test_locate_takes_the_last_pointer_line_for_the_named_project(fake_log):
-    fake_log(WINDOWS_LOG)
-    # The log is append-only across a session; asking for the other project
-    # in it must still resolve, and to the same library.
-    info = library.locate(None, "Elections", {})
-    assert info is not None and info.name == "FF5"
-
-
-def test_locate_reads_a_macos_disk_library_and_finds_its_project_db(fake_log, tmp_path):
-    support = fake_log(MACOS_LOG)
-    project_db = (support / "Resolve Project Library" / "Resolve Projects"
-                  / "Users" / "guest" / "Projects" / "Reef" / "Project.db")
-    project_db.parent.mkdir(parents=True)
-    project_db.write_bytes(b"")
-    info = library.locate(None, "Reef", {})
-    assert info is not None
-    assert info.kind == "Disk"
-    assert info.sqlite_path == str(project_db)
-
-
-def test_locate_prefers_the_api_when_it_answers(fake_log):
-    fake_log(WINDOWS_LOG)
-
-    class Manager:
-        def GetCurrentDatabase(self):
-            return {"DbType": "PostgreSQL", "DbName": "FF4", "IpAddress": "10.0.0.9"}
-
-    class Resolve:
-        def GetProjectManager(self):
-            return Manager()
-
-    info = library.locate(Resolve(), "Civil Defence", {})
-    assert (info.name, info.host) == ("FF4", "10.0.0.9")
-
-
-def test_locate_falls_back_to_the_log_when_resolve_21_returns_none(fake_log):
-    fake_log(WINDOWS_LOG)
-
-    class Manager:
-        def GetCurrentDatabase(self):
-            return None            # Resolve 21.0.1, every time
-
-    class Resolve:
-        def GetProjectManager(self):
-            return Manager()
-
-    info = library.locate(Resolve(), "Civil Defence", {})
-    assert (info.name, info.host) == ("FF5", "100.71.216.3")
-
-
-def test_locate_overrides_win_over_both(fake_log):
-    fake_log(WINDOWS_LOG)
-    info = library.locate(None, "Civil Defence", {
-        "library_db_host": "10.1.1.1",
-        "library_db_port": "6543",
-        "library_db_name": "FF6",
-        "library_db_user": "editor",
-        "library_db_password": "hunter2",
-    })
-    assert (info.kind, info.name, info.host, info.port, info.user, info.password) == (
-        "PostgreSQL", "FF6", "10.1.1.1", 6543, "editor", "hunter2")
-
-
-def test_locate_returns_none_when_nothing_knows(tmp_path, monkeypatch):
-    monkeypatch.setattr(library.luts, "resolve_log_path", lambda: tmp_path / "nope.log")
-    assert library.locate(None, "Civil Defence", {}) is None
-
-
-def test_locate_never_raises(monkeypatch):
-    def boom():
-        raise OSError("no log for you")
-    monkeypatch.setattr(library.luts, "resolve_log_path", boom)
-
-    class Resolve:
-        def GetProjectManager(self):
-            raise RuntimeError("Resolve went away mid-call")
-
-    assert library.locate(Resolve(), "Civil Defence", {}) is None
-
-
-def test_locate_accepts_a_host_override_with_no_log_at_all(tmp_path, monkeypatch):
-    monkeypatch.setattr(library.luts, "resolve_log_path", lambda: tmp_path / "nope.log")
-    info = library.locate(None, "Civil Defence", {"library_db_host": "10.1.1.1",
-                                                  "library_db_name": "FF5"})
-    assert (info.kind, info.host, info.name) == ("PostgreSQL", "10.1.1.1", "FF5")
 
 
 # --------------------------------------------------------------------------

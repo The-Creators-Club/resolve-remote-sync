@@ -819,9 +819,17 @@ def configure_library(cfg: dict[str, Any]) -> None:
 
     Changing any of the six keys drops the open library, so an editor who
     fixes a wrong host does not have to restart the companion.
+
+    Each key falls back to config.DEFAULTS, not to None: a PARTIAL cfg (the
+    dashboard hands one, and so does every test that builds a dict by hand)
+    used to switch the walk off silently, because `library_walk` came back
+    None and None is false (library walk review 2, 2026-08-26).
     """
     global _library_settings_cache
-    settings = {key: cfg.get(key) for key in _LIBRARY_CONFIG_KEYS}
+    from . import config as config_mod
+
+    settings = {key: cfg.get(key, config_mod.DEFAULTS.get(key))
+                for key in _LIBRARY_CONFIG_KEYS}
     with _LIBRARY_LOCK:
         if settings != _library_settings_cache:
             _close_library("configuration changed")
@@ -830,24 +838,37 @@ def configure_library(cfg: dict[str, Any]) -> None:
             _arm_library_retry(0.0)
 
 
-def _library_settings() -> dict[str, Any]:
-    """The six library keys, from configure_library() or from config.toml.
+def _config_without_creating() -> dict[str, Any]:
+    """config.toml if it is there, DEFAULTS if it is not. Never WRITES one.
+
+    config_mod.load_config() calls ensure_config_exists() first, so every
+    lazy read in this module was a first-run config.toml waiting to happen
+    on a rig that has none -- a tool, a test or a bare import creating the
+    installer's file (library walk review 2, 2026-08-26). Nothing here needs
+    that: absent config means defaults, which is what the merge would give.
 
     Imported here, not at module scope: config.py is imported by almost
     everything and this module is imported BY config's callers, so keeping
     it lazy keeps the import graph one-way.
     """
+    from . import config as config_mod
+
+    try:
+        if config_mod.CONFIG_PATH.exists():
+            return config_mod.load_config()
+    except Exception:
+        log.debug("resolve: could not load config", exc_info=True)
+    return dict(config_mod.DEFAULTS)
+
+
+def _library_settings() -> dict[str, Any]:
+    """The six library keys, from configure_library() or from config.toml."""
     global _library_settings_cache
     with _LIBRARY_LOCK:
         if _library_settings_cache is None:
             from . import config as config_mod
 
-            try:
-                cfg = config_mod.load_config()
-            except Exception:
-                log.debug("resolve: could not load config for the library walk",
-                          exc_info=True)
-                cfg = dict(config_mod.DEFAULTS)
+            cfg = _config_without_creating()
             _library_settings_cache = {key: cfg.get(key, config_mod.DEFAULTS.get(key))
                                        for key in _LIBRARY_CONFIG_KEYS}
         return dict(_library_settings_cache)
@@ -880,7 +901,14 @@ def reset_library_state() -> None:
 
 
 def library_status() -> dict[str, Any]:
-    """What the last walk did, for the tray and the dashboard.
+    """What the last walk did -- a DIAGNOSTIC entry point, not a UI feed.
+
+    Nothing in the running companion calls this: the tray is deliberately
+    not wired to it (a menu item that says "library" or "api" is a support
+    question, not a control), and it exists for tools/library_walk_check.py,
+    tools/library_walk_timing.py and the tests (library walk review 2,
+    2026-08-26). Anything that DOES start reading it should know the answer
+    is whatever the last walk on any thread left behind.
 
     {"enabled", "source": "library"|"api"|"", "library", "project", "error",
      "walk_ms", "retry_in"}. Never raises, never calls Resolve.

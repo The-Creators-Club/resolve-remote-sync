@@ -810,6 +810,35 @@ def test_the_same_project_object_still_reuses_the_map(rig):
     assert len(walks) == 1
 
 
+# -- configuration ---------------------------------------------------------
+
+
+def test_a_partial_config_does_not_switch_the_walk_off(rig):
+    """A cfg dict built by hand (the dashboard's, a tool's) carries no
+    library_walk key, and cfg.get(key) answered None -- which is false, so
+    the walk quietly stopped happening (library walk review 2, 2026-08-26)."""
+    resolve_bridge.configure_library({"library_db_host": "10.0.0.9"})
+
+    result = resolve_bridge.poll_timeline_items()
+
+    assert {item["source"] for item in result["items"]} == {"library"}
+    assert resolve_bridge.library_status()["enabled"] is True
+
+
+def test_the_lazy_config_read_never_creates_config_toml(monkeypatch):
+    """A tool, a test or a bare import must not be the thing that writes the
+    installer's first-run config.toml."""
+    created: list = []
+    monkeypatch.setattr(config_mod, "ensure_config_exists",
+                        lambda *a, **k: created.append(1))
+
+    resolve_bridge.reset_library_state()
+    assert resolve_bridge._library_settings()["library_walk"] is True
+
+    assert created == []
+    assert not config_mod.CONFIG_PATH.exists()
+
+
 # -- status ----------------------------------------------------------------
 
 

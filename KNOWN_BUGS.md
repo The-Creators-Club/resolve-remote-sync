@@ -3016,6 +3016,123 @@ browser with no confirm(), is exactly the old behaviour: re-attach and the
 loud toast (which now names [ CANCEL SEARCH ]). Harness scenarios in
 `tests/test_static_app.py`. Needs a dashboard deploy.
 
+## Companion: the clip walk reads Resolve's project library instead of holding the scripting API for 11-14 s (CR-80, CR-81, 2026-08-26)
+
+### CR-80 - the watcher's clip walk stalls every other Resolve client on the machine, and is blind to multicam angles - FIXED in repo 2026-08-26, NOT YET SHIPPED
+**Symptom** (owner, base rig, 2026-08-26): clicking a card in Timeline Cards
+took **7 s** instead of its usual **0.3 s**, in bursts, on a machine where
+nothing else had changed. Resolve itself felt fine.
+
+**Measured** (Resolve 21.0.1.11, project "Civil Defence", timeline
+"Civil Defence - E1", 904-926 items, library "FF5" on the fleet's
+postgres:13):
+
+- `resolve_bridge.get_timeline_items()` took **11-14 s** per walk (32-95 s on
+  a bad evening, per this companion's own "inside Resolve for Ns" warnings),
+  and ran every 10th poll plus after every edit that changed an item count.
+  Resolve serves scripting calls **one at a time**, so the entire duration is
+  time every other client on the machine spends queued. Full timing in
+  `E:\Projects\Editing\Resolve\MulticamPipeline\LAG-INVESTIGATION.md`.
+- The cost was `MediaPoolItem.GetClipProperty()` with **no argument**, which
+  builds and formats a 60-key dictionary: **12.5 ms** a clip, against 0.1 ms
+  for `GetClipProperty("File Path")`. The two agreed on all 1,298 clips of
+  the open project and on every clip kind (BRAW, R3D, ProRes, PNG sequence,
+  multicam, compound), so the dict was buying nothing but time.
+- Worse, the walk was **blind**. It found **0-3 usable file paths out of
+  904**: every item on that timeline is a multicam, a multicam answers `""`
+  to `GetClipProperty("File Path")`, and the API exposes nothing at all about
+  its angles. So the popup, the fixer and Scan whole project could not see
+  the offline media that was actually there. Read out of the project library
+  the same timeline yields all **44** angle clips.
+- The media pool walk had the same shape: **20.0 s** through the API against
+  **31 ms** out of the library, 1,298 / 1,298 paths and bin paths identical.
+
+**Fix** (branch `library-walk`, merged at 029db90; plan and interface
+contract in `docs/LIBRARY_WALK_PLAN.md`, traps in `docs/GOTCHAS.md` section
+16):
+
+- `companion/src/ccsync_companion/library.py` (new): `locate()` (the API
+  first, then Resolve's log, config overrides winning over both) and
+  `ProjectLibrary` with `timeline_items` / `pool_items` / `pool_paths` /
+  `changed` / `close`. `pg8000` (BSD, pure Python, no LGPL entry in the
+  licence gate and no compiled wheel per platform) for PostgreSQL libraries,
+  stdlib `sqlite3` for disk libraries, `zstandard` for the `Clip` blobs.
+  Read-only: every statement is a SELECT. 5 s connect and statement timeouts,
+  and every public method raises only `LibraryUnavailable`.
+- `resolve_bridge.py`: `get_timeline_items` / `poll_timeline_items` /
+  `get_media_pool_items` read the library first and fall back to the API walk
+  on ANY failure, with the item dicts unchanged in shape and a new `source`
+  key saying which. Database reads happen with `_API_LOCK` released; lock
+  order is `_LIBRARY_LOCK` then `_API_LOCK`. The API walk itself now uses the
+  one-argument `GetClipProperty`, which takes it from 11 s to under 1 s for
+  the machines that will always fall back.
+- `media_pool_item_by_uid()` / `resolve_media_pool_item()`: a library-walked
+  item carries `media_pool_uid` (`Sm2MpMedia_id` **is**
+  `MediaPoolItem.GetUniqueId()`) and no object, so every native call site
+  (`app._handle_non_canonical`, `popup`, `fixer`, `consolidate`,
+  `proxy_relink`, the undo replay) re-finds the live object on demand:
+  ~0.15 s for 1,318 clips, and only when there is something to fix.
+- Config: `library_walk` (default true), `library_db_host` / `_port` /
+  `_name` / `_user` / `_password`, documented in `config.example.toml` and
+  pushed into the bridge by `app.py`. `library_walk = false` restores the old
+  behaviour exactly.
+- Packaging: `pg8000` and `zstandard` in `companion/pyproject.toml`,
+  `requirements.lock`, `build.spec` hidden imports, and
+  `docs/legal/THIRD_PARTY_NOTICES.md`.
+
+Tests: `companion/tests/test_library.py` (a SQLite fixture built with the
+live schema's exact mixed-case quoted column names, and `Clip` blobs that are
+real Resolve framing around real zstd + protobuf; the postgres dialect; the
+malformed-uid refusal; the closed-on-failure backend), the library-first walk,
+fallback and backoff tests in the bridge suite, and the uid-only call-site
+tests. `tools/library_walk_check.py` is the live check: library versus API for
+the open project, read-only, `scriptapp()` guarded through
+`script_server.state()` (CR-68), exit 1 on any disagreement.
+
+**Shipping checklist** (nothing of this has reached an editor yet):
+
+1. On a Mac, `uv pip install -r requirements.lock` once **before** the release
+   build, to confirm the arm64 wheel hashes for `pg8000` and `zstandard`
+   resolve. The lock was generated on Windows; a missing arm64 hash fails the
+   macOS build, not the Windows one, and it fails late.
+2. Ask a Mac editor what the log line
+   `resolve: reading clips from the project library ...` reports, and which
+   spelling the library's own paths come back in - the stored canonical
+   `P:\Projects\...` or the Mapped-Mount-resolved local path.
+   `docs/LIBRARY_WALK_PLAN.md` open question 4; `classify_path` wants the
+   stored string, and this is the only question the whole design leaves open.
+3. Then the normal path: bump, build, `publish_latest --make-current`, base
+   rig first, watch for the `library walk unavailable` WARNING in the fleet's
+   logs.
+
+### CR-81 - "pystray is still in the frozen exe" - NOT A BUG, refuted 2026-08-26
+**Worry** (raised during the library-walk review, and it has been raised
+before): the LGPLv3 removal of CR-3 was incomplete and `pystray` is still
+being collected into the single-file build, or still listed in the notices.
+
+**Refuted, on the files:**
+
+- `companion/build.spec` does not collect it and says so at the top of the
+  file ("pystray USED to be collected here too and deliberately is not any
+  more (2026-08-17, docs/COMMERCIAL_READINESS.md item 3)"), with the reason
+  attached: a single-file PyInstaller freeze conveys it with no way for the
+  recipient to relink against a modified copy, which is what LGPL section 4
+  requires.
+- `companion/pyproject.toml` does not depend on it. `pyobjc-framework-Cocoa`
+  is pinned there in its own right, which is what used to arrive through it.
+- `tray.py`'s backend is `tray_native.py` (ours, ctypes on Windows and PyObjC
+  on macOS). `CCSYNC_TRAY_BACKEND=pystray` is a dev-machine affordance for
+  somebody who installs pystray by hand and is **inert in a frozen build**.
+- `docs/legal/THIRD_PARTY_NOTICES.md` is generated by `tools/gen_notices.py`,
+  which scans the **installed venv** with pip-licenses rather than a
+  hand-kept list. A package that is not installed cannot appear in the table,
+  and a package that is installed cannot be forgotten. pystray's LGPLv3 is
+  how `has_license_text()` came to exist in the first place.
+
+Recorded so the next reader does not spend an afternoon on it. If it ever
+does come back, the thing that would catch it is the licence gate
+(`tools/check_licenses.py`) on the build machine, not a reading of the spec.
+
 ## Companion: a locally downloaded YouTube clip is checked and, if Resolve could not decode it, converted on the editor's machine (CR-79, 2026-08-25)
 
 ### CR-79 - local YouTube downloads were never checked for a Resolve-decodable codec; the server's conversion did not run for them - FIXED, SHIPPED as companion 0.9.50 (CI builds on 0fb926d, vendor feed + studio channel current on both platforms, base rig upgraded 2026-08-25 11:38Z)

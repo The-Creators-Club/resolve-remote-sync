@@ -1567,6 +1567,28 @@ def _library_media_pool_items() -> Optional[dict[str, Any]]:
     """
     if not _library_attempt_due():
         return None
+    result = _library_pool_read()
+    if result is None:
+        return None
+    # Enrichment asks RESOLVE about clips, and touches no library object at
+    # all, so it runs with _LIBRARY_LOCK RELEASED: holding it for the whole
+    # 5 s run parked the watcher's _library_attempt_due(), library_status()
+    # and configure_library() behind a walk -- including the wedge warning
+    # whose entire job is to fire while a walk is stuck (library walk review
+    # 2, 2026-08-26).
+    #
+    # A PARTIAL enrichment is not an answer: an item left at proxy_state ""
+    # reads as "no proxy" to proxy_relink, which then plans a relink for
+    # every clip in the pool. Half a pool walk goes back as None and the API
+    # walk answers instead.
+    if not _enrich_proxy_keys(result["items"]):
+        return None
+    return result
+
+
+def _library_pool_read() -> Optional[dict[str, Any]]:
+    """The library half of _library_media_pool_items -- everything that
+    needs _LIBRARY_LOCK, and nothing that does not."""
     with _LIBRARY_LOCK:
         with _bridge_call("get_media_pool_items"):
             error, resolve, _project, project_name = _current_project_locked()
@@ -1595,7 +1617,6 @@ def _library_media_pool_items() -> Optional[dict[str, Any]]:
 
         items = [item for item in walked if str(item.get("file_path") or "").strip()]
         _library_read_done()
-        _enrich_proxy_keys(items)
         elapsed_ms = (time.monotonic() - started) * 1000.0
         _library_state.update({"source": "library", "error": "",
                                "walk_ms": round(elapsed_ms, 1)})
@@ -1605,15 +1626,28 @@ def _library_media_pool_items() -> Optional[dict[str, Any]]:
                 "project_name": project_name}
 
 
-def _enrich_proxy_keys(items: list[dict[str, Any]]) -> None:
+def _enrich_proxy_keys(items: list[dict[str, Any]]) -> bool:
     """Fill in proxy_path / proxy_state on library items, from the API.
+
+    True when the answer can be handed out: every item enriched, or nothing
+    on this machine reads these keys. FALSE means the run stopped part way
+    and the caller must throw the whole list away -- see below.
 
     The library cannot give these cheaply (see ProjectLibrary.pool_items:
     BtVideoInfo.Proxy is a stub with no path and no state, and the real
     proxy path sits behind a SECOND nested zstd frame inside FieldsBlob).
     So they come from Resolve -- but ONLY where something is going to read
-    them, i.e. where this machine generates or relinks proxies. Everywhere
-    else they stay "", which is what the contract says "unknown" looks like.
+    them.
+
+    Two things read them, not one: proxy generation (proxy_gen_enabled) and
+    the PROXY RELINK pass (app._relink_proxies_once, proxy_relink_enabled,
+    default True). Gating on generation alone left every lane-B editor rig
+    -- where proxy_gen_enabled derives False and lane B syncs the proxies
+    down -- reporting proxy_state "" for all 1,298 clips, which
+    proxy_relink reads as "no proxy is linked" and answers with ~1,300
+    LinkProxyMedia calls against a pool that was already right. The API walk
+    always read these properties, so anything less is a regression (library
+    walk review 2, 2026-08-26).
 
     One folder walk for the whole list, not one lookup per clip: the uid map
     the fixer already builds (media_pool_item_by_uid) is exactly the map
@@ -1621,17 +1655,20 @@ def _enrich_proxy_keys(items: list[dict[str, Any]]) -> None:
     follows a FIX ALL pays for neither.
     """
     if not items:
-        return
+        return True
     try:
         from . import config as config_mod
 
-
-        if not config_mod.proxy_generation_enabled(config_mod.load_config()):
-            return
+        cfg = _config_without_creating()
+        wanted = (config_mod.proxy_generation_enabled(cfg)
+                  or bool(cfg.get("proxy_relink_enabled",
+                                  config_mod.DEFAULTS["proxy_relink_enabled"])))
+        if not wanted:
+            return True
     except Exception:
         log.debug("resolve: could not decide whether to enrich proxy keys",
                   exc_info=True)
-        return
+        return True
 
     # In CHUNKS, each taking _API_LOCK for itself. Two property reads over
     # 1,298 clips measured 5.5 s on the base rig -- better than the 9.4 s the
@@ -1645,10 +1682,19 @@ def _enrich_proxy_keys(items: list[dict[str, Any]]) -> None:
         with _bridge_call("get_media_pool_items"):
             _error, _resolve, project, project_name = _current_project_locked()
             if project is None:
-                return
+                # Mid-list: the project closed, or the pool cannot be walked
+                # any more. The chunks already done are enriched and the rest
+                # are still "", and a half-enriched list is WORSE than none
+                # -- "" means "no proxy" to every reader. Say so and let the
+                # caller fall back (library walk review 2, 2026-08-26).
+                log.debug("resolve: proxy enrichment stopped after %d of %d "
+                          "clips (no project)", start, len(items))
+                return False
             found = _media_pool_uid_map_locked(project, project_name)
             if not found:
-                return
+                log.debug("resolve: proxy enrichment stopped after %d of %d "
+                          "clips (empty uid map)", start, len(items))
+                return False
             for item in chunk:
                 clip = found.get(str(item.get("media_pool_uid") or ""))
                 if clip is None:
@@ -1656,6 +1702,7 @@ def _enrich_proxy_keys(items: list[dict[str, Any]]) -> None:
                 _sweep_yield(swept)
                 item["proxy_path"] = _clip_property(clip, "Proxy Media Path")
                 item["proxy_state"] = _clip_property(clip, "Proxy")
+    return True
 
 
 def _get_media_pool_items_locked() -> dict[str, Any]:

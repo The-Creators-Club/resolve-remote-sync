@@ -1625,6 +1625,7 @@ def _enrich_proxy_keys(items: list[dict[str, Any]]) -> None:
     try:
         from . import config as config_mod
 
+
         if not config_mod.proxy_generation_enabled(config_mod.load_config()):
             return
     except Exception:
@@ -1632,21 +1633,29 @@ def _enrich_proxy_keys(items: list[dict[str, Any]]) -> None:
                   exc_info=True)
         return
 
-    with _bridge_call("get_media_pool_items"):
-        error, _resolve, project, project_name = _current_project_locked()
-        if project is None:
-            return
-        found = _media_pool_uid_map_locked(project, project_name)
-        if not found:
-            return
-        swept = [0]
-        for item in items:
-            clip = found.get(str(item.get("media_pool_uid") or ""))
-            if clip is None:
-                continue
-            _sweep_yield(swept)
-            item["proxy_path"] = _clip_property(clip, "Proxy Media Path")
-            item["proxy_state"] = _clip_property(clip, "Proxy")
+    # In CHUNKS, each taking _API_LOCK for itself. Two property reads over
+    # 1,298 clips measured 5.5 s on the base rig -- better than the 9.4 s the
+    # whole API pool walk used to take, but still 5.5 s in which nothing else
+    # on the machine can talk to Resolve if it is one hold. Letting go
+    # between chunks means a card click in Timeline Cards waits for a chunk,
+    # not for the walk (library walk, 2026-08-26).
+    swept = [0]
+    for start in range(0, len(items), _PROXY_ENRICH_CHUNK):
+        chunk = items[start:start + _PROXY_ENRICH_CHUNK]
+        with _bridge_call("get_media_pool_items"):
+            _error, _resolve, project, project_name = _current_project_locked()
+            if project is None:
+                return
+            found = _media_pool_uid_map_locked(project, project_name)
+            if not found:
+                return
+            for item in chunk:
+                clip = found.get(str(item.get("media_pool_uid") or ""))
+                if clip is None:
+                    continue
+                _sweep_yield(swept)
+                item["proxy_path"] = _clip_property(clip, "Proxy Media Path")
+                item["proxy_state"] = _clip_property(clip, "Proxy")
 
 
 def _get_media_pool_items_locked() -> dict[str, Any]:
@@ -1709,6 +1718,11 @@ def _get_media_pool_items_locked() -> dict[str, Any]:
 # _bridge_call in media_pool_item_by_uid), which is why they carry no lock of
 # their own.
 _MEDIA_POOL_UID_TTL_SECONDS = 60.0
+
+# How many clips one hold of _API_LOCK enriches with proxy keys. Small
+# enough that another client never waits long, large enough that the four
+# cheap calls per chunk stay noise (library walk, 2026-08-26).
+_PROXY_ENRICH_CHUNK = 100
 
 _uid_cache: dict[str, Any] = {}
 _uid_cache_project = ""

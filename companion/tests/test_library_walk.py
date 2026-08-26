@@ -544,6 +544,37 @@ def test_proxy_keys_stay_unknown_where_nothing_reads_them(rig, monkeypatch):
     assert rig.clips[0].property_calls == []      # Resolve was not asked at all
 
 
+def test_the_enrichment_lets_go_of_the_lock_between_chunks(rig, monkeypatch):
+    """5.5 s of proxy reads on 1,298 clips is fine as 13 holds and hostile as
+    one: another client waits for a chunk, not for the walk."""
+    monkeypatch.setattr(config_mod, "proxy_generation_enabled", lambda cfg: True)
+    monkeypatch.setattr(resolve_bridge, "_PROXY_ENRICH_CHUNK", 2)
+    clips = [FakeClip("uid-%d" % n, path=r"P:%d.mov" % n, proxy="1920x1080")
+             for n in range(5)]
+    rig.project._media_pool = FakeMediaPool(FakeFolder(clips=clips))
+    resolve_bridge.poll_timeline_items()          # opens the library
+    rig.library().pool = [pool_item(r"P:%d.mov" % n, uid="uid-%d" % n)
+                          for n in range(5)]
+
+    holds: list[str] = []
+    real_call = resolve_bridge._bridge_call
+
+    class Counted(real_call):
+        __slots__ = ()
+
+        def __enter__(self):
+            holds.append(self._name)
+            return super().__enter__()
+
+    monkeypatch.setattr(resolve_bridge, "_bridge_call", Counted)
+    result = resolve_bridge.get_media_pool_items()
+
+    assert [item["proxy_state"] for item in result["items"]] == ["1920x1080"] * 5
+    # One hold for the head, then ceil(5/2) = 3 for the chunks (plus the
+    # connect() each one nests, which is the same lock and does not count).
+    assert holds.count("get_media_pool_items") >= 4
+
+
 def test_the_enrichment_reuses_the_uid_map(rig, monkeypatch):
     """One folder walk, not two: the map behind media_pool_item_by_uid is
     the same map the enrichment needs."""

@@ -2053,6 +2053,186 @@ scenarios['the_scope_and_dates_show_on_the_running_job_and_the_recent_views'] = 
                  .map(r => r.byClass('scopesum').map(m => m.textContent).join(' | '))};
 };
 
+// ---- the evidence pips + the retry button (WP5/WP6, 2026-08-26) -----------
+// CR-80: the strip was green all day while nothing could download, because
+// every pip reported configuration. These scenarios are about what the strip
+// says when the server tells it what actually happened -- and, just as much,
+// about what it says when the server is too old to tell it anything.
+
+const pips = h => ['health', 'healthytdlp', 'healthpot', 'healthdl', 'healthcanary']
+  .map(id => ({id, text: h.get(id).textContent, cls: h.get(id).className,
+               hidden: h.get(id).hidden, title: h.get(id).title}));
+
+// A health payload with the whole WP5 contract on it.
+const HEALTH5 = (over = {}) => Object.assign({
+  claude: 'ok', claude_detail: '', yt_dlp: 'ok', worker_alive: true,
+  cookies: false, yt_dlp_version: '2026.08.19', cookies_state: 'empty',
+  pot_provider: 'ok',
+  paths: {anonymous: {ok: true, error: '', at: Math.round(Date.now() / 1000) - 720,
+                      video_id: 'AAAAAAAAAA1', source: 'download'}},
+  last_download: {ok: true, error: '', at: Math.round(Date.now() / 1000) - 720,
+                  video_id: 'AAAAAAAAAA1', source: 'download', path: 'anonymous'},
+  canary: {enabled: false, last: null},
+}, over);
+
+scenarios['the_strip_reports_evidence_when_the_server_sends_it'] = async () => {
+  const h = await boot(async (method, url) => {
+    if (url.startsWith('api/health')) return {json: HEALTH5()};
+    const b = baseline(method, url); if (b) return b;
+    return {json: {}};
+  });
+  await flush();
+  return {pips: pips(h)};
+};
+
+scenarios['a_broken_path_and_a_dead_sidecar_are_red'] = async () => {
+  const h = await boot(async (method, url) => {
+    if (url.startsWith('api/health')) {
+      return {json: HEALTH5({
+        pot_provider: 'unreachable',
+        cookies_state: 'present',
+        last_download: {ok: false, error: 'The page needs to be reloaded.',
+                        at: Math.round(Date.now() / 1000) - 7200,
+                        video_id: 'AAAAAAAAAA1', source: 'download',
+                        path: 'cookies'},
+        canary: {enabled: true, last: {ok: false, error: 'HTTP Error 403',
+                                       at: Math.round(Date.now() / 1000) - 300,
+                                       video_id: 'AAAAAAAAAA2',
+                                       source: 'canary', path: 'anonymous'}},
+      })};
+    }
+    const b = baseline(method, url); if (b) return b;
+    return {json: {}};
+  });
+  await flush();
+  return {pips: pips(h)};
+};
+
+// An unconfigured sidecar is not a fault, and a canary nobody enabled is not a
+// pip: neither is something an editor can act on.
+scenarios['the_quiet_states_are_grey_or_absent'] = async () => {
+  const h = await boot(async (method, url) => {
+    if (url.startsWith('api/health')) {
+      return {json: HEALTH5({pot_provider: 'unconfigured', cookies_state: 'none',
+                             last_download: null})};
+    }
+    const b = baseline(method, url); if (b) return b;
+    return {json: {}};
+  });
+  await flush();
+  return {pips: pips(h)};
+};
+
+// THE degradation test: baseline() is the pre-WP5 payload, key for key.
+scenarios['a_server_without_the_new_keys_paints_the_old_strip'] = async () => {
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    return {json: {}};
+  });
+  await flush();
+  return {pips: pips(h)};
+};
+
+// ---- WP6: the retry ------------------------------------------------------
+// `job` is what api/jobs/95 and its manifest both report; `videos` are the
+// manifest's rows (a `failed` job never fetches one -- poll() skips the
+// manifest for that phase -- which is exactly why the count has a fallback).
+function retryPage(job, videos, opts) {
+  const {downloadStatus, downloadDetail} = opts || {};
+  return boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (method === 'POST' && url === 'api/jobs/95/download') {
+      return downloadStatus
+        ? {status: downloadStatus, json: {detail: downloadDetail}}
+        : {json: {ok: true}};
+    }
+    if (url === 'api/jobs/95') return {json: POLLRES(job)};
+    if (url.startsWith('api/jobs/95/manifest')) {
+      return {json: MANIFEST({job, videos: videos || []})};
+    }
+    return {json: {}};
+  });
+}
+
+const retryView = h => ({
+  label: h.get('dlretry').textContent,
+  hidden: h.get('dlretry').hidden,
+  note: h.get('dlnote').textContent,
+  note_hidden: h.get('dlnote').hidden,
+  panel_hidden: h.get('downloads').hidden,
+});
+
+scenarios['a_done_job_with_failures_can_be_retried'] = async () => {
+  const job = JOB({id: 95, phase: 'done', terminal: true, kind: 'urls',
+                   dl_total: 3, dl_done: 1, dl_failed: 2});
+  const h = await retryPage(job, [
+    VIDEO('AAAAAAAAAA1', {dl_state: 'done'}),
+    VIDEO('AAAAAAAAAA2', {dl_state: 'failed', dl_error: 'The page needs to be reloaded.'}),
+    VIDEO('AAAAAAAAAA3', {dl_state: 'failed', dl_error: 'The page needs to be reloaded.'}),
+  ]);
+  await h.app.attach(95);
+  await flush();
+  const before = retryView(h);
+  await h.get('dlretry').onclick();
+  await flush();
+  return {before, after: retryView(h), toast: h.get('toast').textContent,
+          posts: h.calls.filter(c => c.method === 'POST').map(c => c.url)};
+};
+
+// The count is the manifest's when the poll has not carried one: a page
+// refreshed onto a terminal job renders before dl_failed is in hand.
+scenarios['the_count_falls_back_to_the_manifest_rows'] = async () => {
+  const job = JOB({id: 95, phase: 'done', terminal: true, kind: 'urls',
+                   dl_total: 2, dl_done: 1, dl_failed: 0});
+  const h = await retryPage(job, [
+    VIDEO('AAAAAAAAAA1', {dl_state: 'done'}),
+    VIDEO('AAAAAAAAAA2', {dl_state: 'failed', dl_error: 'HTTP Error 403'}),
+  ]);
+  await h.app.attach(95);
+  await flush();
+  return retryView(h);
+};
+
+// The download-phase circuit breaker parks the job in `failed` with an
+// instruction on it. That sentence is the reason the button below it is worth
+// pressing (or is not), so it is repeated where the decision is made.
+scenarios['a_parked_job_shows_the_breakers_note_above_the_button'] = async () => {
+  const job = JOB({id: 95, phase: 'failed', terminal: true, kind: 'urls',
+                   dl_total: 30, dl_done: 1, dl_failed: 5,
+                   error: 'stopped after 5 clips failed the same way: the '
+                          + 'signed-in session is being refused. An admin can '
+                          + 'clear the cookie jar and retry.'});
+  const h = await retryPage(job, null);
+  await h.app.attach(95);
+  await flush();
+  return retryView(h);
+};
+
+scenarios['a_failed_job_with_no_downloads_is_offered_nothing'] = async () => {
+  const job = JOB({id: 95, phase: 'failed', terminal: true,
+                   dl_total: 0, dl_done: 0, dl_failed: 0,
+                   error: 'claude_auth: no provider'});
+  const h = await retryPage(job, null);
+  await h.app.attach(95);
+  await flush();
+  return retryView(h);
+};
+
+scenarios['a_refused_retry_is_said_out_loud'] = async () => {
+  const job = JOB({id: 95, phase: 'failed', terminal: true, kind: 'urls',
+                   dl_total: 3, dl_done: 0, dl_failed: 3, error: 'parked'});
+  const h = await retryPage(job, null,
+                            {downloadStatus: 409,
+                             downloadDetail: 'this job has nothing to download'});
+  await h.app.attach(95);
+  await flush();
+  await h.get('dlretry').onclick();
+  await flush();
+  return {toast: h.get('toast').textContent,
+          disabled: h.get('dlretry').disabled,
+          hidden: h.get('dlretry').hidden};
+};
+
 // ---- run them -----------------------------------------------------------
 (async () => {
   const out = {};
@@ -2965,6 +3145,125 @@ def test_a_refused_hand_back_is_said_out_loud(spa):
     assert r['hidden'] is False, r
 
 
+# ------------------------------- the evidence pips (WP5, CR-80, 2026-08-26)
+def _pip(result, pip_id):
+    return next(p for p in result['pips'] if p['id'] == pip_id)
+
+
+def test_the_strip_names_the_yt_dlp_the_server_is_running(spa):
+    """CR-80: "which yt-dlp is this container on" took a docker exec, and the
+    answer was the whole bug (2026.07.04 has no working anonymous path)."""
+    r = spa['the_strip_reports_evidence_when_the_server_sends_it']
+    pip = _pip(r, 'healthytdlp')
+    assert pip['text'] == 'yt-dlp 2026.08.19', pip
+    assert 'on' in pip['cls'] and pip['hidden'] is False, pip
+
+
+def test_the_last_real_download_is_what_the_downloads_pip_reports(spa):
+    """`cookies: true` meant "a path is set" and stayed green through a day of
+    total failure. The pip reports the last attempt that actually ran, on which
+    path, and how long ago; the jar's state is a footnote on it."""
+    r = spa['the_strip_reports_evidence_when_the_server_sends_it']
+    pip = _pip(r, 'healthdl')
+    assert pip['text'] == 'last download: anonymous, 12 min ago', pip
+    assert 'on' in pip['cls'], pip
+    # the CR-80 parked state, said in words rather than as a boolean
+    assert 'holds no cookies' in pip.get('title', ''), pip
+
+
+def test_a_working_sidecar_is_a_pip_and_a_disabled_canary_is_not(spa):
+    r = spa['the_strip_reports_evidence_when_the_server_sends_it']
+    assert _pip(r, 'healthpot')['text'] == 'PO token ok', r
+    canary = _pip(r, 'healthcanary')
+    assert canary['text'] == '' and canary['hidden'] is True, canary
+
+
+def test_a_dead_sidecar_a_failed_download_and_a_failed_canary_are_red(spa):
+    """CR-73 sat undetected for days behind a sidecar that was configured and
+    unreachable, which is the same shape of lie `cookies: true` told."""
+    r = spa['a_broken_path_and_a_dead_sidecar_are_red']
+    pot = _pip(r, 'healthpot')
+    assert pot['text'] == 'PO token unreachable' and 'off' in pot['cls'], pot
+    dl = _pip(r, 'healthdl')
+    assert dl['text'] == 'last download: cookies failed, 2 hr ago', dl
+    assert 'off' in dl['cls'], dl
+    # the reason is in the title, not in a pip nobody can read at a glance
+    assert 'The page needs to be reloaded.' in dl.get('title', ''), dl
+    canary = _pip(r, 'healthcanary')
+    assert canary['text'] == 'canary failed, 5 min ago', canary
+    assert 'off' in canary['cls'] and canary['hidden'] is False, canary
+    assert 'HTTP Error 403' in canary.get('title', ''), canary
+
+
+def test_an_unconfigured_sidecar_is_grey_and_not_a_fault(spa):
+    """Plenty of deployments never need a PO-token sidecar; a red pip for one
+    that was never asked for is the noise that makes a strip unreadable."""
+    r = spa['the_quiet_states_are_grey_or_absent']
+    pot = _pip(r, 'healthpot')
+    assert pot['text'] == 'PO token off', pot
+    assert 'on' not in pot['cls'] and 'off' not in pot['cls'], pot
+    dl = _pip(r, 'healthdl')
+    assert dl['text'] == 'no downloads yet', dl
+    assert 'no cookie jar' in dl.get('title', ''), dl
+
+
+def test_a_server_without_the_new_keys_paints_exactly_the_old_strip(spa):
+    """The degradation contract: WP5 ships to the fleet as a dashboard deploy,
+    and a cached bundle talking to an older server (or the reverse) must not
+    grow four empty boxes."""
+    r = spa['a_server_without_the_new_keys_paints_the_old_strip']
+    assert _pip(r, 'health')['text'] == 'claude ok', r
+    for pip_id in ('healthytdlp', 'healthpot', 'healthdl', 'healthcanary'):
+        pip = _pip(r, pip_id)
+        assert pip['text'] == '', pip
+        assert pip['hidden'] is True, pip
+
+
+# ------------------------------------ the retry button (WP6, 2026-08-26)
+def test_a_done_job_with_failures_offers_a_retry_that_posts_the_download(spa):
+    """The CR-80 recovery was one POST api/jobs/28/download, which re-queued
+    exactly the 29 failed rows. Until now the only control that reached it was
+    DOWNLOAD on the review grid, which a done job no longer shows."""
+    r = spa['a_done_job_with_failures_can_be_retried']
+    assert r['before']['hidden'] is False, r['before']
+    assert r['before']['label'] == '[ RETRY 2 FAILED ]', r['before']
+    assert r['posts'] == ['api/jobs/95/download'], r['posts']
+    assert 'failed' in r['toast'], r['toast']
+
+
+def test_the_failure_count_falls_back_to_the_manifest(spa):
+    r = spa['the_count_falls_back_to_the_manifest_rows']
+    assert r['label'] == '[ RETRY 1 FAILED ]', r
+    assert r['hidden'] is False, r
+
+
+def test_a_parked_job_prints_its_note_above_the_retry(spa):
+    """WP6's circuit breaker parks the job in `failed` with an instruction on
+    `job.error`; that sentence is what decides whether retrying is worth
+    anything, so it is repeated beside the button and not only in the banner
+    at the top of the page."""
+    r = spa['a_parked_job_shows_the_breakers_note_above_the_button']
+    assert r['note_hidden'] is False, r
+    assert 'signed-in session is being refused' in r['note'], r
+    assert r['hidden'] is False and r['label'] == '[ RETRY 5 FAILED ]', r
+
+
+def test_a_failed_job_with_no_downloads_offers_no_retry(spa):
+    """The server 409s it, and an offer that cannot be honoured is worse than
+    no offer at all."""
+    r = spa['a_failed_job_with_no_downloads_is_offered_nothing']
+    assert r['hidden'] is True, r
+    assert r['note_hidden'] is True, r
+    assert r['panel_hidden'] is True, r
+
+
+def test_a_refused_retry_is_said_out_loud_and_the_button_comes_back(spa):
+    r = spa['a_refused_retry_is_said_out_loud']
+    assert 'nothing to download' in r['toast'], r
+    assert r['disabled'] is False, 'a 409 left a dead button'
+    assert r['hidden'] is False, r
+
+
 # --------------------------------------------------- source-level assertions
 # These run with or without node: they are the cheap backstop for the shapes
 # the harness proves, so a rewrite that reintroduces one is caught even on a
@@ -3720,3 +4019,90 @@ def test_the_scope_row_and_the_date_inputs_are_in_the_markup():
     assert html.index('id="modes"') < html.index('id="scopes"') < html.index('id="q"')
     # and [ CLEAR ] starts hidden: nothing to clear on a fresh page
     assert re.search(r'id="dateclear"[^>]*class="[^"]*\bhidden\b', html)
+
+
+# ----------------- WP5/WP6 in source, for a machine with no node (2026-08-26)
+
+def _evidence():
+    js = _js()
+    return js[js.index('function renderEvidence('):js.index('async function loadHealth()')]
+
+
+def test_every_new_health_key_is_read_with_a_null_guard():
+    """The strip is shipped by a dashboard deploy and read by whatever bundle
+    the browser has cached, in both directions. `== null` (not `!h.x`) is the
+    guard, because 'empty' / false / 0 are all real answers."""
+    body = _evidence()
+    for key in ('yt_dlp_version', 'cookies_state', 'pot_provider',
+                'last_download', 'canary'):
+        assert f'h.{key} == null' in body, key
+    # the canary's two halves are guarded too: enabled must be strictly true,
+    # and a canary that has never run is not a pip
+    assert 'canary.enabled !== true' in body, body
+    assert 'canary.last == null' in body, body
+
+
+def test_the_pips_hide_themselves_rather_than_drawing_empty_boxes():
+    js = _js()
+    setpip = js[js.index('function setPip('):js.index('function renderEvidence(')]
+    assert "pip.className = 'rstatus '" in setpip, setpip
+    assert "(text ? '' : ' hidden')" in setpip, setpip
+    # a cached index.html from before WP5 has none of these elements
+    assert 'if (!pip) return;' in setpip, setpip
+
+
+def test_the_relative_time_helper_says_no_em_dash_units():
+    js = _js()
+    ago = js[js.index('function agoText('):js.index('// One pip on the health strip')]
+    for unit in ('sec ago', 'min ago', 'hr ago', 'days ago'):
+        assert unit in ago, unit
+
+
+def test_the_new_pips_are_in_the_markup_and_start_hidden():
+    html = _html()
+    for pip_id in ('healthytdlp', 'healthpot', 'healthdl', 'healthcanary'):
+        assert re.search(rf'id="{pip_id}"[^>]*class="[^"]*\brstatus\b', html), pip_id
+        assert re.search(rf'id="{pip_id}"[^>]*class="[^"]*\bhidden\b', html), pip_id
+    # they sit beside the pip they extend, not in some other corner
+    assert html.index('id="health"') < html.index('id="healthytdlp"')
+
+
+def test_the_retry_posts_the_document_relative_download_url():
+    """test_mounted_prefix.py pins the whole bundle, but this one is worth its
+    own line: `/api/jobs/...` here would 404 against the dashboard root under
+    the /ytdl mount (YTDL-42)."""
+    js = _js()
+    body = js[js.index('async function retryFailed()'):js.index('// How much of ONE video')]
+    assert 'post(`api/jobs/${jobId}/download`)' in body, body
+    assert '/api/jobs' not in body, body
+
+
+def test_the_retry_is_offered_only_on_a_terminal_job_with_failures():
+    js = _js()
+    body = js[js.index('function renderRetry('):js.index('async function retryFailed()')]
+    assert "job.phase === 'done' || job.phase === 'failed'" in body, body
+    assert 'failed > 0' in body, body
+    # the note is the job's own error, through the same hint table the banner
+    # uses -- one field, one wording, wherever a failure is printed
+    assert 'hintFor(job.error)' in body, body
+
+
+def test_the_retry_button_and_its_note_are_in_the_markup():
+    html = _html()
+    assert '[ RETRY FAILED ]' in html, html
+    assert re.search(r'id="dlretry"[^>]*class="[^"]*\bhidden\b', html)
+    assert re.search(r'id="dlnote"[^>]*class="[^"]*\bhidden\b', html)
+    # the note is ABOVE the button: it is what decides whether pressing it is
+    # worth anything
+    assert html.index('id="dlnote"') < html.index('id="dlretry"')
+    # and both are inside the downloads panel, which is only on screen for a
+    # job that has download rows at all
+    assert html.index('id="downloads"') < html.index('id="dlnote"') < html.index('id="dllist"')
+
+
+def test_the_retry_is_wired_up_and_rendered_for_every_phase():
+    js = _js()
+    assert "$('#dlretry').onclick = retryFailed;" in js, 'the button does nothing'
+    prog = js[js.index('function renderProgress('):js.index('// [ RETRY N FAILED ]')]
+    assert 'renderRetry(job);' in prog, \
+        'the offer left by the last job outlives it unless every render clears it'

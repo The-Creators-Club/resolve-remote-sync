@@ -27,7 +27,7 @@ import threading
 import time
 from pathlib import Path
 
-from ytdlweb import claude_cli, config, db, ytdl_common
+from ytdlweb import claude_cli, config, db, ytdl_common, ytdl_evidence
 from ytdlweb.vendor import downloader, ytsearch
 # The naming/fallback contract BOTH executors run under, moved out of this file
 # on 2026-08-14 so the companion can vendor it (docs/YTDL_LOCAL_DOWNLOAD.md §5).
@@ -77,6 +77,29 @@ class BotCheckError(RuntimeError):
     """YouTube is bot-checking this IP. Nothing here can retry its way out."""
 
 
+class DownloadPathsBlockedError(BotCheckError):
+    """Anonymous AND the cookie jar are both being refused (WP3, 2026-08-26).
+
+    A subclass on purpose: every `except BotCheckError` in here already means
+    "this failure repeats for every remaining clip, stop the phase and show the
+    note", which is exactly what this is. The note is the only difference, and
+    it has to be, because the remedies are opposite ones.
+    """
+
+
+# How many consecutive clip failures with the SAME normalised signature end the
+# download phase instead of grinding on (plan WP4/WP6, 2026-08-26). CR-80's job
+# 28 discovered the same wall 29 times, burning yt-dlp's full retry budget
+# against a YouTube that was already refusing it, and left 29 rows carrying one
+# opaque string that named no fix. 0 disables the breaker; the env var is here
+# so a deployment that hits a false positive can widen or drop it without a
+# build.
+try:
+    MAX_IDENTICAL_FAILURES = int(os.environ.get('YTDL_MAX_IDENTICAL_FAILURES') or 3)
+except ValueError:
+    MAX_IDENTICAL_FAILURES = 3
+
+
 # YTDL-21 (2026-08-11): the phrase yt-dlp surfaces when the NAS's datacentre IP
 # is challenged. Both apostrophes, because yt-dlp passes YouTube's own text
 # through and it has arrived either way -- the curly one as an escape so this
@@ -86,11 +109,35 @@ class BotCheckError(RuntimeError):
 _BOT_CHECK_MARKERS = ("confirm you're not a bot",
                       "confirm you\u2019re not a bot")
 
+# Re-worded 2026-08-26 (docs/YTDL_RESILIENCE_PLAN.md WP3): downloads are
+# anonymous FIRST now, so reaching this note means the escape hatch was either
+# not configured or not usable. It still names YTDL_COOKIES_FILE because that
+# is the only lever an admin has when an IP is being challenged.
 BOT_CHECK_NOTE = (
     'YouTube is asking this server to sign in to confirm it is not a bot, so '
-    'nothing can be searched or downloaded from it right now. An admin has to '
-    'export a cookies.txt from a signed-in browser and point YTDL_COOKIES_FILE '
-    'at it (ytdl/web/DEPLOY.md, "cookies.txt escape hatch").')
+    'nothing can be searched or downloaded from it right now. Downloads run '
+    'anonymously by default and there is no signed-in session to fall back to: '
+    'an admin has to export a cookies.txt from a signed-in browser and point '
+    'YTDL_COOKIES_FILE at it (ytdl/web/DEPLOY.md, "cookies.txt escape hatch"). '
+    'A jar holding only its header lines counts as none.')
+
+# CR-80 (2026-08-26): what YouTube says about a signed-in session it has
+# decided it does not like. The cookies still authenticate; the tv client is
+# downgraded to UNPLAYABLE and every https format is SABR-forced away, so the
+# message names a page reload the container cannot perform. Opposite remedy to
+# the bot check -- that one says "this IP needs an account", this one says
+# "this account is refused" -- which is why they are two classifiers and two
+# notes and not one.
+_ACCOUNT_FLAG_MARKERS = ('the page needs to be reloaded',)
+
+BOTH_PATHS_NOTE = (
+    'Both YouTube download paths are blocked, so nothing more can be fetched '
+    'right now. Anonymous requests are being bot-checked (sign in to confirm '
+    'you are not a bot) and the signed-in cookies.txt is being refused (the '
+    'page needs to be reloaded). An admin has to export a FRESH cookies.txt '
+    'from a different signed-in session, and test the same clip both with and '
+    'without cookies before trusting it (ytdl/web/DEPLOY.md, the 2026-08-26 '
+    'reversal block).')
 
 
 def _bot_checked(text):
@@ -100,9 +147,23 @@ def _bot_checked(text):
     challenged is challenged for every video, so the alternative is burning the
     full retry budget forty times over and ending `done` with forty opaque
     per-row errors that name no fix.
+
+    Path-specific since 2026-08-26 (WP3): it is what the ANONYMOUS path says,
+    and its answer is to try the cookie jar, not to give up.
     """
     low = str(text or '').lower()
     return any(m in low for m in _BOT_CHECK_MARKERS)
+
+
+def _account_flagged(text):
+    """Is this the flagged-session message (CR-80)?
+
+    The cookies path's own failure mode, and the reason CR-80 took a day: it
+    was indistinguishable from "these videos are broken" on 29 rows. An admin
+    cannot fix it from here at all, so the remedy is to stop using the jar.
+    """
+    low = str(text or '').lower()
+    return any(m in low for m in _ACCOUNT_FLAG_MARKERS)
 
 
 def ensure_started():
@@ -915,6 +976,98 @@ def _lower_quality(quality):
     return ytdl_common.lower_quality(quality, downloader.QUALITY_HEIGHTS)
 
 
+# ------------------------------------------------ anonymous first (WP3)
+#
+# Until 2026-08-26 every download passed `cookies_file=config.COOKIES_FILE or
+# None`, unconditionally. That is what made ONE flagged YouTube account fatal
+# to every download the server could make (CR-80): there was no path that did
+# not carry the jar, so there was nothing to fall back to. The jar is the
+# escape hatch DEPLOY.md always described it as, not the default.
+#
+# The preference is STICKY and module-level rather than per clip: a job that
+# discovers the cookie jar is what works must not re-discover it forty times,
+# and a container that restarts starts anonymous again, which is the safe
+# direction (an unnecessary anonymous attempt costs one extraction; an
+# unnecessary cookies attempt spends the credential).
+_preferred_path = ytdl_evidence.PATH_ANONYMOUS
+_path_lock = threading.Lock()
+
+
+def preferred_path():
+    """Which path _download_video tries FIRST."""
+    with _path_lock:
+        return _preferred_path
+
+
+def set_preferred_path(path, why=''):
+    """Make `path` the one tried first. Logs only when it CHANGES.
+
+    Once per flip, not once per clip: the line is an operational signal ("the
+    server is downloading with cookies now") and a per-clip version would be
+    forty lines nobody reads.
+    """
+    global _preferred_path
+    with _path_lock:
+        changed = _preferred_path != path
+        _preferred_path = path
+    if changed:
+        log.warning('ytdl: the %s download path is what worked%s; preferring '
+                    'it from here on', path, f' ({why})' if why else '')
+    return changed
+
+
+def reset_preferred_path():
+    """Tests only."""
+    set_preferred_path(ytdl_evidence.PATH_ANONYMOUS)
+
+
+def cookies_available():
+    """Is there a signed-in session to fall back TO?
+
+    A configured path is not a session (CR-80 parked the flagged jar as its two
+    Netscape header lines with YTDL_COOKIES_FILE still set), so the jar has to
+    hold at least one cookie line to count as a path at all.
+    """
+    return (ytdl_evidence.cookie_jar_state(config.COOKIES_FILE)
+            == ytdl_evidence.JAR_PRESENT)
+
+
+def _first_path():
+    """The preferred path, demoted to anonymous when there is no usable jar."""
+    path = preferred_path()
+    if path == ytdl_evidence.PATH_COOKIES and not cookies_available():
+        return ytdl_evidence.PATH_ANONYMOUS
+    return path
+
+
+def _fallback_for(path, exc):
+    """The OTHER path, when `exc` is this path's own failure mode. Else None.
+
+    Path-specific means "this path is refused and the other one may not be":
+    a bot check says the IP needs an account, a flagged session says the
+    account is refused. Network errors, 403s on the media fetch, missing
+    formats and truncation are NOT path-specific and switching on them would
+    spend the credential on a failure it cannot fix.
+    """
+    if path == ytdl_evidence.PATH_ANONYMOUS and _bot_checked(exc):
+        return ytdl_evidence.PATH_COOKIES if cookies_available() else None
+    if path == ytdl_evidence.PATH_COOKIES and _account_flagged(exc):
+        return ytdl_evidence.PATH_ANONYMOUS
+    return None
+
+
+def _both_blocked(path, exc):
+    """Did the FALLBACK path fail with its own path-specific refusal too?
+
+    Not _fallback_for(): that one answers None for a bot check with no usable
+    jar, and by the time this is asked the jar is exactly what we just came
+    from. Both refusals at once is the state no retry gets out of.
+    """
+    if path == ytdl_evidence.PATH_ANONYMOUS:
+        return _bot_checked(exc)
+    return _account_flagged(exc)
+
+
 def _download_video(job_id, vid, url, outdir, quality, hook, status):
     """downloader.download(), with ONE lower rung tried on a truncated stream.
 
@@ -925,14 +1078,57 @@ def _download_video(job_id, vid, url, outdir, quality, hook, status):
     ONE rung, not the whole ladder: 1080p -> 720p is what the incident needed,
     and walking a ladder blindly would turn a bad afternoon on YouTube's side
     into 480p footage in the canonical tree with nobody the wiser.
+
+    Each rung is tried on the preferred path and, when that path's OWN failure
+    mode fires, once on the other (WP3, 2026-08-26). Composed this way round so
+    the lower rung goes through path selection as well: a truncated stream on
+    the anonymous path and a bot check on the 720p retry is a real sequence.
     """
+    def once(q, path):
+        """One real attempt, recorded as evidence whichever way it goes."""
+        try:
+            res = downloader.download(
+                url, str(outdir), quality=q,
+                progress_hook=hook, write_sidecar=True, edit_codec='h264',
+                ffmpeg_location=config.FFMPEG_DIR or None,
+                cookies_file=(config.COOKIES_FILE or None
+                              if path == ytdl_evidence.PATH_COOKIES else None),
+                on_status=status)
+        except Exception as exc:  # noqa: BLE001 - recorded, then re-raised
+            ytdl_evidence.record(path, False, exc, vid)
+            raise
+        ytdl_evidence.record(path, True, None, vid)
+        return res
+
     def attempt(q):
-        return downloader.download(
-            url, str(outdir), quality=q,
-            progress_hook=hook, write_sidecar=True, edit_codec='h264',
-            ffmpeg_location=config.FFMPEG_DIR or None,
-            cookies_file=config.COOKIES_FILE or None,
-            on_status=status)
+        """One rung, on the preferred path, with the other as the fallback."""
+        path = _first_path()
+        try:
+            return once(q, path)
+        except Exception as exc:  # noqa: BLE001 - re-raised unless path-specific
+            other = _fallback_for(path, exc)
+            if other is None:
+                if path == ytdl_evidence.PATH_ANONYMOUS and _bot_checked(exc):
+                    # Bot-checked with no jar to fall back to: the phase is
+                    # over, and the note names the one lever an admin has.
+                    raise BotCheckError(BOT_CHECK_NOTE) from exc
+                raise
+            log.warning('job %s: %s failed on the %s path (%s); retrying on '
+                        'the %s path', job_id, vid, path, exc, other)
+            _clear_partials(outdir, vid)
+            if status:
+                status(f'retrying on the {other} path')
+            try:
+                res = once(q, other)
+            except Exception as exc2:  # noqa: BLE001
+                if _both_blocked(other, exc2):
+                    raise DownloadPathsBlockedError(BOTH_PATHS_NOTE) from exc2
+                # The fallback failed for an unrelated reason (a 403, a dead
+                # network). That is one dead clip, not a verdict on the path,
+                # so the ordinary per-row handling applies.
+                raise
+            set_preferred_path(other, why=f'{path} was refused')
+            return res
 
     try:
         return attempt(quality), None
@@ -949,6 +1145,11 @@ def _download_video(job_id, vid, url, outdir, quality, hook, status):
             status(f'{quality} stream truncated; retrying at {lower}')
         try:
             return attempt(lower), TRUNCATED_NOTE.format(q=quality, lower=lower)
+        except BotCheckError:
+            # Already phase-fatal and already carrying its own note (WP3,
+            # 2026-08-26): wrapping it in a truncation message would hide the
+            # only instruction an admin can act on behind a quality story.
+            raise
         except Exception as exc2:  # noqa: BLE001
             # Wrapped rather than re-raised bare so the row says why it failed
             # twice. exc2's own text is carried through verbatim, which is what
@@ -971,6 +1172,72 @@ def _record_failure(c, job_id, vid, outdir, before, error):
     db.set_video(c, job_id, vid, dl_state='failed', dl_error=str(error)[:500])
     db.bump(c, job_id, 'dl_failed')
     _clear_progress(job_id, vid)
+
+
+# ------------------------------- the same wall, 29 times (WP4/WP6, 2026-08-26)
+#
+# The rule _bot_checked established, applied to the failures YouTube has
+# invented since: a failure that will repeat identically for every remaining
+# clip must stop the PHASE, not the clip. CR-80's job 28 failed 29 rows with
+# one opaque string, ten yt-dlp retries each, which is 29 chances to make
+# YouTube angrier for no information. Signature-based rather than
+# classifier-based because the point is "this is the same wall again", and the
+# classifier only decides what the note SAYS.
+
+# An 11-char YouTube id is the one part of a per-clip error that is guaranteed
+# to differ; paths and byte counts are the other two.
+_SIG_VIDEO_ID = re.compile(r'\b[0-9A-Za-z_-]{11}\b')
+_SIG_PATH = re.compile(r'[A-Za-z]?:?[\\/][^\s\'"]+')
+_SIG_DIGITS = re.compile(r'\d+')
+
+
+def _failure_signature(error):
+    """A key that is equal for "the same failure on a different clip"."""
+    text = _SIG_VIDEO_ID.sub(' ', str(error or ''))
+    text = _SIG_PATH.sub(' ', text)
+    text = _SIG_DIGITS.sub('', text.lower())
+    return ' '.join(text.split())[:120]
+
+
+def _yt_dlp_version():
+    """The running yt-dlp's version, or '' when it cannot be asked.
+
+    Answering "which yt-dlp is this server on" took a docker exec during
+    CR-80, and it is the first thing to check on a no-usable-formats wall.
+    """
+    try:
+        import yt_dlp
+
+        return str(yt_dlp.version.__version__)
+    except Exception:  # noqa: BLE001 - a note must never fail a job
+        return ''
+
+
+def identical_failure_note(n, error):
+    """The phase note for N clips in a row failing the same way.
+
+    Chosen by classifier because the remedies are different and an editor
+    cannot tell a SABR squeeze from a dead PO-token sidecar from a raw stderr
+    dump. Bot checks and flagged sessions never reach here: they are already
+    phase-fatal, with their own notes.
+    """
+    low = str(error or '').lower()
+    if 'requested format is not available' in low:
+        version = _yt_dlp_version()
+        where = f' (this server is on yt-dlp {version})' if version else ''
+        return (f'{n} clips in a row came back with no usable format, so the '
+                f'download stopped instead of trying the rest. That is what a '
+                f'YouTube client change looks like{where}, not a problem with '
+                f'these videos: check for a yt-dlp update on the server, then '
+                f'press RETRY to re-queue the failed clips.')
+    if 'http error 403' in low:
+        return (f'{n} clips in a row were refused when the media itself was '
+                f'fetched (HTTP Error 403), so the download stopped instead of '
+                f'trying the rest. Two things to check: the PO-token helper is '
+                f'reachable (YTDL_POT_BASE_URL) and the server yt-dlp is up to '
+                f'date. Then press RETRY to re-queue the failed clips.')
+    return (f'{n} clips in a row failed the same way: {str(error)[:200]}. Fix '
+            f'the cause, then press RETRY to re-queue the failed clips.')
 
 
 # ------------------------------------------------- the pre-download dedupe
@@ -1156,6 +1423,35 @@ def _phase_download(c, job):
         _clear_progress(job_id)
         return
 
+    # The circuit breaker's state (WP4/WP6, 2026-08-26). Per PHASE RUN rather
+    # than per job or per process: what it is counting is "this wall is still
+    # there right now", and a re-queue by hand is a human saying it may not be.
+    streak = {'sig': None, 'n': 0}
+
+    def breaker_note(error):
+        """-> the phase note when this failure has now landed N times, else None."""
+        if MAX_IDENTICAL_FAILURES <= 0:
+            return None
+        sig = _failure_signature(error)
+        if sig and sig == streak['sig']:
+            streak['n'] += 1
+        else:
+            streak['sig'], streak['n'] = sig, 1
+        if streak['n'] < MAX_IDENTICAL_FAILURES:
+            return None
+        return identical_failure_note(streak['n'], error)
+
+    def breaker_trip(note):
+        """Stop the phase the way a bot check does: rows keep their own state,
+        the manifest is still written (the companion and batch_dl.py both read
+        it, and a job that fetched 12 of 41 still has 12 clips to describe),
+        and the remaining rows stay `pending` so the retry re-queues them."""
+        log.warning('job %s: %d identical clip failures; stopping the download '
+                    'phase (%s)', job_id, streak['n'], streak['sig'])
+        _clear_progress(job_id)
+        write_manifest(c, job_id, outdir)
+        db.set_phase(c, job_id, 'failed', note[:500])
+
     pending = db.pending_videos(c, job_id)
     if not job['dl_total']:
         # Normally the API sets this when the editor presses DOWNLOAD; a job
@@ -1249,8 +1545,17 @@ def _phase_download(c, job):
             log.warning('job %s: download failed for %s (%s)', job_id, vid, exc,
                         exc_info=True)
             _record_failure(c, job_id, vid, outdir, before, exc)
+            if isinstance(exc, BotCheckError):
+                # Already classified inside _download_video (WP3, 2026-08-26)
+                # and already carrying the note for the path that was refused,
+                # which the generic BOT_CHECK_NOTE below would overwrite.
+                raise
             if _bot_checked(exc):
                 raise BotCheckError(BOT_CHECK_NOTE) from exc
+            stop = breaker_note(exc)
+            if stop:
+                breaker_trip(stop)
+                return
             continue
 
         filepath = res.get('filepath')
@@ -1263,7 +1568,17 @@ def _phase_download(c, job):
             log.warning('job %s: download for %s returned no file', job_id, vid)
             _record_failure(c, job_id, vid, outdir, before,
                             'the downloader reported no output file')
+            stop = breaker_note('the downloader reported no output file')
+            if stop:
+                breaker_trip(stop)
+                return
             continue
+
+        # A clip that landed is proof the wall is not there for everything, so
+        # the breaker's count starts again (WP6, 2026-08-26). Only CONSECUTIVE
+        # identical failures mean "stop"; three dead clips scattered through
+        # forty good ones is an ordinary afternoon on YouTube.
+        streak['sig'], streak['n'] = None, 0
 
         _chmod(filepath, 0o664)
         # The sidecar is what the Resolve credits script reads; a 0600 one

@@ -865,6 +865,19 @@ h2 {
    badge it acts on, and only [ CANCEL ] keeps the auto margin. */
 #dlserver { margin-left: 0; }
 
+/* The parked-job note and its one action (2026-08-26, YTDL_RESILIENCE_PLAN
+   WP6). Amber like a .warnline, not red: the clips that landed are still
+   there, and the sentence above the button is an instruction rather than an
+   obituary. */
+.dlnote {
+  margin-top: 8px;
+  padding: 4px 10px;
+  border: 1px solid var(--amber);
+  color: var(--amber);
+  font-size: 12px;
+}
+#dlretry { margin-top: 6px; }
+
 .dllist { margin-top: 8px; font-size: 11px; }
 /* align-items: center, not baseline: a row now carries a picture, and a
    baseline would hang it off the text. */

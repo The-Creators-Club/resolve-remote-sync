@@ -17,19 +17,24 @@ purpose:
     a project they do not sync.
 """
 import logging
+import os
 import re
 import shutil
 import sqlite3
+import threading
+import time
+import urllib.request
 from datetime import date
 from urllib.parse import parse_qs, urlparse
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from ytdlweb import attestation, claude_cli, config, db, projects, worker
+from ytdlweb import (attestation, claude_cli, config, db, projects, worker,
+                     ytdl_canary, ytdl_evidence)
 from ytdlweb.db import con
 from ytdlweb.session import current_user
-from ytdlweb.vendor import ytsearch
+from ytdlweb.vendor import downloader, ytsearch
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -112,9 +117,20 @@ def health(request: Request):
     start and whenever a live call fails -- never by probing here. `claude -p`
     costs a second or two and this endpoint is hit by every page load; a probe
     per request would turn an open tab into a subprocess factory.
+
+    2026-08-26 (plan WP5): the keys below `local_download` are EVIDENCE, not
+    configuration. `cookies: bool(COOKIES_FILE)` stayed true right through
+    CR-80 while every single download failed, because a path being set says
+    nothing about whether the session behind it still works. Every old key is
+    kept regardless of that -- an editor's cached SPA bundle reads them, and a
+    health pip going blank is a worse failure than a stale one.
+
+    Still cheap: no subprocess, no database, and the only network call is the
+    PO-token probe, which is cached for a minute.
     """
     current_user(request)
     cached = claude_cli.health()
+    paths = ytdl_evidence.snapshot()
     return {
         'claude': cached['claude'],            # ok|unauthenticated|missing|timeout|error|unknown
         'claude_detail': cached['detail'],
@@ -136,7 +152,131 @@ def health(request: Request):
         # change at all. Not a promise that a companion can do it: that is the
         # probe's answer, and a 404 from an old tray falls back silently.
         'local_download': config.LOCAL_DOWNLOAD,
+
+        # ------------------------------------------------ evidence (WP5)
+        # WHICH yt-dlp this container is on. Answering that during CR-80 took
+        # a `docker exec`, and it was half the diagnosis: 2026.07.04 had no
+        # working anonymous client left.
+        'yt_dlp_version': _yt_dlp_version(),
+        # 'none' | 'empty' | 'present' -- what the jar HOLDS, next to the old
+        # boolean that only says a path is configured. CR-80's fix parked the
+        # flagged jar as its two header lines with the path still set.
+        'cookies_state': ytdl_evidence.cookie_jar_state(config.COOKIES_FILE),
+        # 'unconfigured' | 'ok' | 'unreachable'. CR-73 sat undetected for days
+        # behind a sidecar that was configured and not answering.
+        'pot_provider': _pot_provider_state(),
+        # {'anonymous'|'cookies': {ok, error, at, video_id, source}}. A key is
+        # present only once that path has actually been tried.
+        'paths': paths,
+        'last_download': _last_download(paths),
+        'canary': {'enabled': ytdl_canary.enabled(),
+                   'last': _last_canary(paths)},
     }
+
+
+def _yt_dlp_version():
+    """The running yt-dlp's version string, or '' when it is not installed."""
+    try:
+        import yt_dlp.version
+
+        return str(yt_dlp.version.__version__ or '')
+    except Exception:  # noqa: BLE001
+        return ''
+
+
+def _newest(paths, source):
+    """The most recent evidence entry from `source`, with its `path` key.
+
+    The SPA shows one line ("last download: anonymous, ok, 3 minutes ago"), so
+    the path has to travel WITH the entry -- health's `paths` map is keyed by
+    it, and a caller that had to hold both would drift.
+    """
+    best = None
+    for name, entry in (paths or {}).items():
+        if not isinstance(entry, dict) or entry.get('source') != source:
+            continue
+        if best is None or (entry.get('at') or 0) > (best.get('at') or 0):
+            best = dict(entry, path=name)
+    return best
+
+
+def _last_download(paths):
+    """The last REAL download attempt, either path, or None."""
+    return _newest(paths, 'download')
+
+
+def _last_canary(paths):
+    """The last canary extraction, either path, or None."""
+    return _newest(paths, ytdl_canary.SOURCE)
+
+
+# How long a PO-token verdict is reused. A minute is the same window the bgutil
+# provider plugin itself caches server availability for (its
+# _check_server_availability), so health cannot be more pessimistic about the
+# sidecar than yt-dlp is; and it bounds an open dashboard tab polling health to
+# one probe a minute per worker rather than one per page load.
+_POT_TTL = 60.0
+_pot_lock = threading.Lock()
+_pot_cache = {'at': 0.0, 'state': ''}
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects. House rule (docs/GOTCHAS.md 12): no dashboard call
+    follows one, and a sidecar that answers 302 is not a healthy sidecar."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_pot_opener = urllib.request.build_opener(_NoRedirect)
+
+
+def _probe_pot(base_url):
+    """GET <base_url>/ping -> 'ok' | 'unreachable'. Never raises.
+
+    `/ping` is the bgutil HTTP server's own health route: the provider plugin
+    (yt_dlp_plugins/extractor/getpot_bgutil_http.py, bgutil-ytdlp-pot-provider
+    1.3.1) calls exactly this before every token request and refuses the
+    request when it does not answer with JSON.
+
+    Deliberately does NOT parse the body or compare versions. The question this
+    key answers is CR-73's -- is there anything listening at the address we
+    configured -- and a stricter probe would be one more thing that can report
+    red while downloads work fine. One second, because this runs on a request
+    the browser is waiting on and uvicorn here is workers=1.
+    """
+    url = base_url.rstrip('/') + '/ping'
+    try:
+        with _pot_opener.open(url, timeout=1) as resp:
+            resp.read(4096)
+            return 'ok' if 200 <= int(getattr(resp, 'status', 0) or 0) < 300 else 'unreachable'
+    except Exception as exc:  # noqa: BLE001 - health must never 500
+        log.debug('pot provider probe failed for %s (%s: %s)', url,
+                  type(exc).__name__, exc)
+        return 'unreachable'
+
+
+def _pot_provider_state():
+    """'unconfigured' | 'ok' | 'unreachable', from a cached probe.
+
+    Refreshed LAZILY on the request path, never on a timer: a dashboard nobody
+    is looking at should not be probing anything, and the first page load after
+    the cache goes stale pays one second at worst.
+    """
+    base_url = (os.environ.get(downloader.POT_BASE_URL_ENV) or '').strip()
+    if not base_url:
+        # Not an error: a deployment with an unblocked IP needs no provider at
+        # all (downloader.pot_opts says the same).
+        return 'unconfigured'
+    now = time.monotonic()
+    with _pot_lock:
+        if _pot_cache['state'] and (now - _pot_cache['at']) < _POT_TTL:
+            return _pot_cache['state']
+    state = _probe_pot(base_url)
+    with _pot_lock:
+        _pot_cache['state'] = state
+        _pot_cache['at'] = time.monotonic()
+    return state
 
 
 def _yt_dlp_state():
@@ -797,6 +937,13 @@ def start_download(job_id: int, request: Request):
     Claude spend and another twenty minutes of yt-dlp. Nothing else changes:
     mark_pending re-queues exactly the rows that failed or were never fetched,
     and answers 400 when there are none.
+
+    `failed` joins them 2026-08-26 (docs/YTDL_RESILIENCE_PLAN.md WP6), but only
+    for a job that failed IN or AFTER the download phase: that is what the
+    circuit breaker now parks a job as, and the CR-80 recovery was exactly this
+    call. A job that died in search or enrich has no download rows and nothing
+    to re-queue, so it keeps its 409 - the fix there is a new search, not a
+    button that would walk it back through a phase it never left.
     """
     user = current_user(request)
     c = con()
@@ -805,13 +952,24 @@ def start_download(job_id: int, request: Request):
     # re-versioned since the search was submitted.
     _require_attestation(c, user)
     job = _job_or_404(c, job_id, user)
-    if job['phase'] not in ('ready_for_review', 'done'):
+    if job['phase'] not in ('ready_for_review', 'done', 'failed'):
         raise HTTPException(409, {
             'detail': f'this job is {job["phase"]}, not ready for review',
             'phase': job['phase']})
-    if job['phase'] == 'done':
+    # "It failed in or after the download phase" spelled as "it has download
+    # rows", out of the two helpers that already exist rather than a third
+    # query: failed_videos is the rows the run killed, unfinished_downloads is
+    # the ones it never reached (the breaker leaves them `pending`).
+    if job['phase'] == 'failed' and not (db.failed_videos(c, job_id)
+                                         or db.unfinished_downloads(c, job_id)):
+        raise HTTPException(409, {
+            'detail': 'this job failed before any clips were queued, so there '
+                      'is nothing to retry. Start a new search.',
+            'phase': job['phase']})
+    if job['phase'] in ('done', 'failed'):
         # Reviving a finished job makes it active again, and one editor gets
-        # one active job -- in the database as well as here (YTDL-25).
+        # one active job -- in the database as well as here (YTDL-25). A failed
+        # job is terminal too, so db.active_job never returns THIS one.
         running = db.active_job(c, user)
         if running is not None:
             raise _one_job_409(running)
@@ -845,7 +1003,13 @@ def start_download(job_id: int, request: Request):
     # undone by the reclaim this function's own nudge triggers, two
     # milliseconds later, for a run that ended half an hour ago.
     db.clear_mode_lock(c, job_id)
-    db.set_job(c, job_id, dl_total=n, dl_done=0, dl_failed=0)
+    # ...and neither may the note the failure left on the job row (WP6,
+    # 2026-08-26). db.set_phase only ever WRITES `error`, so a job parked by
+    # the circuit breaker would carry "3 clips in a row failed the same way"
+    # into the run being started right now, where the SPA paints it as a banner
+    # over a download that is going fine. NULL is what the banner reads as
+    # nothing (app.js: `job.error ? hintFor(job.error) : null`).
+    db.set_job(c, job_id, dl_total=n, dl_done=0, dl_failed=0, error=None)
     db.set_phase(c, job_id, 'downloading')
     worker.nudge()
     return {'ok': True, 'queued': n}

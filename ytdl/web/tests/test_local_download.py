@@ -34,8 +34,10 @@ def _identity_header(user=USER):
     would have minted it."""
     return {'x-ccsync-identity': identity.make_identity_token(SECRET, user)}
 
-# yt-dlp's own YYYY.MM.DD, comfortably newer than the shipped floor.
-FRESH_YTDLP = '2026.08.10'
+# yt-dlp's own YYYY.MM.DD, comfortably newer than the shipped floor. Raised
+# from 2026.08.10 when CR-80 raised that floor to 2026.08.19 (2026-08-26): the
+# fleet minimum is the one number in this file the product moves under it.
+FRESH_YTDLP = '2026.08.20'
 
 
 @pytest.fixture()

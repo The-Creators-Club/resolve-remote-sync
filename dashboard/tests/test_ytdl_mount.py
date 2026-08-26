@@ -94,6 +94,18 @@ def _build_fake_ytdlweb() -> dict[str, types.ModuleType]:
 
     worker.ensure_started = ensure_started
 
+    # The download canary (ytdl 2026-08-26, docs/YTDL_RESILIENCE_PLAN.md WP5).
+    # A recorder for the same reason the worker is: the real one is a daemon
+    # thread that talks to YouTube on a timer.
+    canary = types.ModuleType("ytdlweb.ytdl_canary")
+    canary.started = 0
+
+    def canary_ensure_started() -> bool:
+        canary.started += 1
+        return False        # as the real one answers when it is not configured
+
+    canary.ensure_started = canary_ensure_started
+
     main = types.ModuleType("ytdlweb.main")
     ytdl_app = FastAPI(title="YouTube Downloader (fake)")
 
@@ -134,9 +146,11 @@ def _build_fake_ytdlweb() -> dict[str, types.ModuleType]:
     main.app = ytdl_app
     pkg.config, pkg.db, pkg.main, pkg.worker = config, db, main, worker
     pkg.ai_backend = ai_backend
+    pkg.ytdl_canary = canary
     return {"ytdlweb": pkg, "ytdlweb.config": config, "ytdlweb.db": db,
             "ytdlweb.main": main, "ytdlweb.worker": worker,
-            "ytdlweb.ai_backend": ai_backend}
+            "ytdlweb.ai_backend": ai_backend,
+            "ytdlweb.ytdl_canary": canary}
 
 
 @pytest.fixture
@@ -324,6 +338,22 @@ def test_the_storage_probe_creates_the_database_and_starts_the_worker(tmp_path,
     app = _app(tmp_path)
     assert app.state.ytdl_mounted is True
     assert (ytdl_env / "ytdldata" / "ytdl.db").is_file()
+    assert sys.modules["ytdlweb.worker"].started == 1
+    # ...and the canary is offered the same start, beside it (WP5, 2026-08-26).
+    assert sys.modules["ytdlweb.ytdl_canary"].started == 1
+
+
+def test_an_ytdlweb_without_a_canary_still_mounts(tmp_path, ytdl_env,
+                                                  monkeypatch):
+    """The canary is an OPTIONAL diagnostic, and _init_ytdl_storage is the
+    probe that tells MOUNTED from DEGRADED. An older ytdl-web tree on the host
+    has no ytdl_canary at all, and a missing diagnostic must not be able to
+    report the whole downloader as degraded."""
+    monkeypatch.delitem(sys.modules, "ytdlweb.ytdl_canary")
+    monkeypatch.delattr(sys.modules["ytdlweb"], "ytdl_canary")
+
+    app = _app(tmp_path)
+    assert app.state.ytdl_mounted is True
     assert sys.modules["ytdlweb.worker"].started == 1
 
 

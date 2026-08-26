@@ -3210,13 +3210,207 @@ zero failures, 8.8 GiB in the term folder with no leftover `.part` files. The
 retry went through the ordinary `POST /ytdl/api/jobs/28/download`, which
 re-queues exactly the failed rows on a `done` job (YTDL-16).
 
-**THE FLEET HALF OF THIS IS STILL OPEN.** The editors' companions are broken
-the same way and the NAS fix does not touch them: they are pinned to yt-dlp
-2026.07.04 by `config.DEFAULT_MIN_YTDLP_VERSION`, their
+**THE FLEET HALF OF THIS IS CR-83, FIXED IN REPO 2026-08-26 AND NOT YET
+SHIPPED.** The editors' companions were broken the same way and the NAS fix
+does not touch them: they were pinned to yt-dlp 2026.07.04 by
+`config.DEFAULT_MIN_YTDLP_VERSION`, their
 `ytdl_executor.DEFAULT_PLAYER_CLIENT = "web_safari"` returns no usable formats
 on either version, and their own cookie jars hit the same account flag.
 Measured on the base rig 2026-08-26. `docs/YTDL_RESILIENCE_PLAN.md` is the
-write-up and the plan; WP1 and WP2 there are what close it.
+write-up and the work-package numbering; CR-83 below is what was built against
+it (dashboard 0.7.11 / companion 0.9.52), and until the dashboard ships,
+`YTDL_MIN_YTDLP_VERSION=2026.08.19` on the live container moves the fleet
+sooner.
+
+## Every editor's machine was broken the same way, and could not tell anyone (CR-83, 2026-08-26)
+
+### CR-83 - the fleet half of CR-80: a yt-dlp floor of 2026.07.04, a pinned `web_safari`, an unconditional cookie jar, and a classifier blind to the phrase - FIXED in repo 2026-08-26 as dashboard 0.7.11 / companion 0.9.52, NOT SHIPPED
+
+**Symptom**: nothing. That is the bug. CR-80 was found because the NAS's
+downloads panel showed 29 failures on one job; the editors' machines had been
+failing the same way, for roughly as long, and produced no report at all - a
+claimed job that fails hands its clips back to the server, the server
+downloads them, and the editor sees a slower download rather than a broken
+one. `YTDL_LOCAL_DOWNLOAD=1` is on fleet-wide, so this was every local job.
+Job 28 only ever reached the NAS because its `download_mode` was `server`.
+
+**Measured on the base rig, 2026-08-26**, against the DEPLOYED companion's own
+yt-dlp (`%LOCALAPPDATA%\ccsync\tools\yt-dlp.exe`, 2026.07.04) and its own jar
+(`~/.ccsync/youtube-cookies.txt`), on a residential IP:
+
+| companion config | result |
+|---|---|
+| `web_safari` (its pinned default), anonymous | no usable formats |
+| `web_safari`, with its cookies | no usable formats |
+| default client, with its cookies | "The page needs to be reloaded." |
+| default client, anonymous | formats found, then HTTP 403 |
+| **2026.8.19, default client, anonymous** | **works** |
+
+**Mechanism, four independent halves.**
+
+1. *The fleet was pinned to a dead yt-dlp.* `ytdlp_manager` updates the
+   companion's binary only when it is below the floor the dashboard serves,
+   and that floor is `config.DEFAULT_MIN_YTDLP_VERSION` - `2026.07.04`, with
+   `YTDL_MIN_YTDLP_VERSION` **unset** in the live container. So every
+   companion in the fleet compared 2026.07.04 against 2026.07.04, concluded
+   "current", and stayed on the one version with no working anonymous path
+   left. The base rig's log said exactly that, nightly:
+   `ytdlp: yt-dlp 2026.07.04 is current`.
+2. *A pinned player client is a pinned bug.* CR-39 (2026-08-19) pinned
+   `ytdl_executor.DEFAULT_PLAYER_CLIENT = "web_safari"` because it was the one
+   client that worked on an editor's machine without a GVS PO-token provider.
+   Six weeks later YouTube SABR-forced its https formats away and it returns
+   no usable formats at all, on either yt-dlp, with or without cookies.
+3. *The jar was unconditional.* Every argv the executor built carried
+   `--cookies` whenever one resolved, exactly as the server's
+   `worker._download_video` passed `cookies_file=config.COOKIES_FILE or None`
+   on every call. There was no path that did not carry the jar, so when
+   YouTube flagged the account there was nothing to fall back to.
+4. *Nothing said so.* `ytdl_cookies.STALE_SIGNATURES` did not contain "the page
+   needs to be reloaded", so a flagged session was never marked stale and the
+   tray never spoke; and a failure that repeats identically for every clip was
+   handled the way one dead video is, burning yt-dlp's full retry budget per
+   row (CR-80's job 28 discovered the same wall 29 times).
+
+**Fix in repo** (branch `ytdl-resilience`; the write-up and the work-package
+numbering are `docs/YTDL_RESILIENCE_PLAN.md`):
+
+- **WP1, the floor.** `ytdlweb.config.DEFAULT_MIN_YTDLP_VERSION` is
+  `'2026.08.19'`, **zero-padded**, and `dashboard/deploy/requirements.txt`
+  raised to `yt-dlp>=2026.8.19` to match the pyproject/lock pins CR-80 already
+  made. The padding is load-bearing, not cosmetic: `routes_fleet` ranks the
+  floor as a string (the rule the fleet inherited from COMP-BROLL-9,
+  2026-08-14), and the plan's `'2026.8.19'` spelling sorts as a string ABOVE
+  every real `2026.08.xx` release - which would have 403'd every local-download
+  claim in the fleet while each companion, ranking tuples, still concluded it
+  was current.
+- **WP2, the pin.** `ytdl_executor.DEFAULT_PLAYER_CLIENT = ""`: no
+  `--extractor-args` at all, i.e. yt-dlp's own default client set, whose
+  maintainers track this weekly. `ytdl_player_client` in `config.toml` stays as
+  an override for the day a specific client is known-good and the default is
+  not. The vendored server downloader never pinned one and still does not.
+- **WP3, the inversion, on both executors.** A clip is downloaded
+  ANONYMOUSLY first; the cookie jar is spent only on the one failure it
+  answers, a bot check; and an account flag on the cookies path falls back to
+  anonymous. Both refused is `DownloadPathsBlockedError` on the server (a
+  subclass of `BotCheckError`, so it is phase-fatal on the same terms) with
+  `BOTH_PATHS_NOTE`, and `BOTH_BLOCKED_ERROR` on the row for the companion.
+  The preference is sticky - module-level on the server, per executor on the
+  companion, anonymous again after a restart - so the extra failed extraction
+  a genuinely bot-checked line costs is paid once per flip, not once per clip.
+  A jar holding only its Netscape header lines (CR-80's parked state,
+  `ytdl_evidence.cookie_jar_state` == `empty`) is not a path at all and is
+  never attempted. `cookies_used` on the companion now follows the path that
+  actually ran, so an anonymous failure can no longer light the tray warning
+  for a session nothing touched, and a clip landed by the fallback carries a
+  note on its clip-status report.
+- **WP4, the classifiers.** "the page needs to be reloaded" is an
+  account-flag class of its own on both sides, distinct from the bot check
+  because the remedies are opposite (the bot check says *this IP needs an
+  account*, the flag says *this account is refused*). On the companion it
+  joins `ytdl_cookies.STALE_SIGNATURES`, and `stale_reason` gives the tray a
+  line that says the signed-in session is being refused and downloads are
+  continuing without it, rather than the "sign in again" the other signatures
+  get - the cookies still authenticate, so a re-export of the same session
+  fixes nothing.
+- **WP6, the breaker.** N consecutive clip failures with the same normalised
+  signature stop the run instead of grinding through the rest.
+  `YTDL_MAX_IDENTICAL_FAILURES` (default 3, 0 disables) parks the server job at
+  phase `failed` with a note chosen by class - no usable format names the
+  running yt-dlp version and says to check for an update, HTTP 403 names the
+  PO-token sidecar and the yt-dlp version, anything else quotes the error and
+  says to press RETRY. Unreached rows stay `pending` and the manifest is still
+  written. `ytdl_max_identical_failures` (config.toml, else
+  `CCSYNC_YTDL_MAX_IDENTICAL_FAILURES`, default 3) is the companion's, which
+  hands the remaining clips back to the server through the existing lease
+  expiry and pokes `ytdlp_manager.ensure()` once per job when the signature
+  says the binary rather than the video. A clip that lands resets the count:
+  only CONSECUTIVE identical failures mean "stop".
+- **The retry.** `POST /ytdl/api/jobs/{id}/download` accepts phase `failed`
+  as well as `ready_for_review` and `done`, but only for a job that has
+  download rows, and it clears the job note it re-queues past. A job that died
+  in search or enrich still 409s "nothing to retry": the fix there is a new
+  search. `[ RETRY n FAILED ]` on the SPA is the button that reaches it - the
+  endpoint has re-queued exactly the failed rows since YTDL-16, and that one
+  call is what made the CR-80 recovery a one-liner, but the only control that
+  ever reached it was DOWNLOAD on the review grid, which is gone by the time a
+  job is done.
+- **WP5, health that is evidence.** `/ytdl/api/health` gains
+  `yt_dlp_version` (answering it took a `docker exec` during CR-80),
+  `cookies_state` (`none|empty|present`, beside the old boolean that only ever
+  meant "a path is set"), `pot_provider` (`unconfigured|ok|unreachable`, from a
+  1 s probe of the bgutil sidecar's own `/ping`, cached 60 s - CR-73 sat
+  undetected for days behind a sidecar that was configured and silent),
+  `paths` (the last real outcome per path, mirrored to
+  `<data>/ytdl_evidence.json` so a container restart does not blank it),
+  `last_download` and `canary`. Every old key is kept, and the SPA reads each
+  new one behind a null guard, so a cached bundle paints the strip it painted
+  before.
+- **The canary** (opt-in, OFF in this build and in the vendor default):
+  `YTDL_CANARY_INTERVAL_SECONDS` unset or 0 means it never runs; set, it is
+  floored at 300 s. One extract-only pass at `YTDL_CANARY_URL` (default
+  `https://www.youtube.com/watch?v=jNQXAC9IVRw`), anonymous then cookies on a
+  bot check, filed into the same evidence with source `canary`.
+  `ytdlweb/ytdl_canary.py`, started beside `worker.ensure_started()` in both
+  the standalone lifespan and the dashboard mount, wrapped there so a checkout
+  without it cannot report the mount degraded.
+
+**ORDERING, and what the operator can do before the ship.** The dashboard
+deploys BEFORE the companions, as always: the floor lives on the server and a
+companion reads it. Until dashboard 0.7.11 is out, the operator can move the
+whole fleet today by setting `YTDL_MIN_YTDLP_VERSION=2026.08.19` on the live
+container - every companion picks it up from
+`GET /ytdl/api/config/ytdl-client` on its next daily check and runs `yt-dlp -U`.
+**Type it zero-padded.** `2026.8.19` is compared as a string by the fleet route
+and sorts above every `2026.08.xx` release, so an unpadded floor refuses every
+claim in the fleet with "your yt-dlp is old" while no companion updates - the
+exact silent shape of this bug, arrived at from the other direction.
+
+**Residuals.**
+
+- **WP7's `cookies.txt.orig`** is documented, not enforced: yt-dlp rewrites
+  `cookies.txt` in place on every run, so an operator's export is overwritten
+  by whatever the session became. Keep the pristine export beside the jar and
+  restoring is a copy, not a re-export (`ytdl/web/DEPLOY.md`).
+- **The canary is built and off.** Turning it on is real automated traffic to
+  YouTube on a fixed cadence from the deployment's own IP, which is the shape
+  that got this NAS bot-checked on 2026-08-11. `docs/YTDL_RESILIENCE_PLAN.md`
+  section 7 parks it for the owner, along with whether the NAS should keep a
+  cookie jar configured at all now that anonymous is the normal path.
+- **WP8, a pool of accounts to rotate through, is deliberately NOT built.**
+  The reasoning is in the plan's WP8: it optimises the path the system worked
+  better without, every jar is a live credential in a deployment we ship to
+  customers, and "the product farms Google accounts" is materially harder to
+  defend than "the product supports an optional operator-supplied cookie file"
+  (`COMMERCIAL_READINESS.md` item 2). If a second jar is ever wanted, the
+  honest version is a manual second slot an admin switches to deliberately.
+- **CR-80's own residual stands**: `/venv` belongs to the image, so a
+  dashboard IMAGE update reinstalls whatever the lock says. The lock is the
+  durable fix.
+
+**How to verify** (the plan's section 6, and the first diagnostic for every
+future "downloads are failing"). Run it in the live container AND on one editor
+machine, against the same clip, with and without the jar:
+
+```sh
+# in the dashboard container
+for CK in "" "--cookies /ytdl-data/cookies.txt"; do
+  /venv/bin/python -m yt_dlp --simulate --no-warnings $CK \
+    --extractor-args "youtubepot-bgutilhttp:base_url=$YTDL_POT_BASE_URL" \
+    -f "bv*[height<=1080]+ba/b[height<=1080]" \
+    -O "%(format_id)s h=%(height)s" "https://www.youtube.com/watch?v=<id>"
+done
+```
+
+Which of the two works has flipped once already and will flip again. A
+simulate is not proof on its own - CR-80's anonymous path extracted happily on
+2026.07.04 and then 403'd on the bytes - so always finish with one REAL
+download through the production path
+(`ytdlweb.vendor.downloader.download(..., ffmpeg_location=config.FFMPEG_DIR)`),
+which is how the CR-80 fix was confirmed. On an editor machine the equivalent
+is the deployed companion's own binary and its own jar, and after the ship
+`GET /ytdl/api/health` answers three of these questions without a shell:
+`yt_dlp_version`, `pot_provider`, `last_download`.
 
 ## Companion: a locally downloaded YouTube clip is checked and, if Resolve could not decode it, converted on the editor's machine (CR-79, 2026-08-25)
 

@@ -123,7 +123,28 @@ log = logging.getLogger("ccsync.config")
 # when Resolve's own answer is missing or wrong. New frozen dependencies:
 # pg8000, zstandard. An editor sees nothing except a faster machine and,
 # where a multicam hid them, offline clips the popup could not report before.
-VERSION = "0.9.51"
+# 0.9.52: YouTube downloads on an editor's machine run ANONYMOUSLY first and
+# pin no player client (KNOWN_BUGS CR-83, docs/YTDL_RESILIENCE_PLAN.md WP2/
+# WP3/WP4/WP6, 2026-08-26). CR-80 flagged the signed-in Google account the NAS
+# downloads as; the fleet half of it was worse, because every combination an
+# editor's machine could be in was dead: `web_safari` (pinned by CR-39) returns
+# no usable formats at all now, with or without cookies, and the jar the
+# executor attached to EVERY argv hits the same account flag. Now: the pin is
+# gone (DEFAULT_PLAYER_CLIENT = "", yt-dlp's own default set, with
+# `ytdl_player_client` kept as an override); a clip is tried anonymously and
+# the editor's cookies.txt is spent only on the one failure it answers, a bot
+# check, with the preference sticky per job and the whole thing reversed on a
+# flagged session; `cookies_used` follows the path that actually ran, so the
+# tray warning can no longer be lit by an anonymous failure; "the page needs to
+# be reloaded" joins ytdl_cookies.STALE_SIGNATURES with a tray line that says
+# the session is being refused and downloads continue without it, NOT "sign in
+# again"; and N identical clip failures in a row (`ytdl_max_identical_failures`,
+# default 3, 0 disables) end this machine's turn and hand the rest of the job
+# back to the server through the existing lease expiry, poking the yt-dlp
+# sidecar once when the signature says the binary rather than the video. The
+# other half of CR-83 is the dashboard's, 0.7.11: the fleet's yt-dlp floor was
+# 2026.07.04, which is a version that cannot download at all.
+VERSION = "0.9.52"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"

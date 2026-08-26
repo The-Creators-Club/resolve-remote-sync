@@ -359,6 +359,129 @@ function hintFor(err) {
 }
 
 // ---------------------------------------------------------------- health
+// How long ago, in words, for the evidence pips (2026-08-26,
+// docs/YTDL_RESILIENCE_PLAN.md WP5). Coarse on purpose: the question a pip
+// answers is "is that recent or is it stale", and health is re-fetched on a
+// slow interval anyway, so a seconds-accurate age would be a lie by the time
+// it is read. Anything unreadable answers '' rather than 'NaN min ago'.
+function agoText(at) {
+  if (at == null) return '';
+  const then = Number(at);
+  if (!isFinite(then)) return '';
+  const secs = Math.max(0, Math.round(Date.now() / 1000 - then));
+  if (secs < 90) return `${secs} sec ago`;
+  const mins = Math.round(secs / 60);
+  if (mins < 90) return `${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 36) return `${hours} hr ago`;
+  return `${Math.round(hours / 24)} days ago`;
+}
+
+// One pip on the health strip. `cls` is the strip's existing vocabulary
+// ('on' | 'warn' | 'off' | '' for the neutral grey), and a pip with no text is
+// hidden rather than drawn as an empty box -- which is exactly how each of
+// these degrades against a server that does not send its key. `$` never
+// returns null in a browser for an id that is in the markup, but a CACHED
+// index.html from before WP5 has none of them, so nothing here may assume the
+// element exists.
+function setPip(sel, text, cls, title) {
+  const pip = $(sel);
+  if (!pip) return;
+  pip.textContent = text || '';
+  pip.className = 'rstatus ' + (cls || '') + (text ? '' : ' hidden');
+  pip.title = title || '';
+}
+
+// The health strip past the AI/yt-dlp pip (2026-08-26, plan WP5). CR-80 sat
+// green for a day while nothing could download, because every pip reported
+// CONFIGURATION: `cookies: true` means "a path is set", not "the session
+// works". These report EVIDENCE, and every new key is read with an == null
+// guard so an older server paints the strip it painted before.
+function renderEvidence(h) {
+  // WHICH yt-dlp. "Which version is the container on" took a docker exec
+  // during CR-80, and the answer was the whole bug: 2026.07.04 has no working
+  // anonymous path left. The colour stays the yt-dlp colour; only the text is
+  // new, and a server that sends no version shows no pip at all (the main pip
+  // still carries "yt-dlp missing" on its own).
+  const version = h.yt_dlp_version == null ? '' : String(h.yt_dlp_version);
+  setPip('#healthytdlp', version ? `yt-dlp ${version}` : '',
+         h.yt_dlp === 'ok' ? 'on' : 'off',
+         'the yt-dlp this server is actually running');
+
+  // The PO-token sidecar, as an ANSWER and not as a configured URL: CR-73 sat
+  // undetected for days behind a sidecar that was configured and unreachable.
+  // Unconfigured is neutral, not bad: plenty of deployments never need one.
+  const pot = h.pot_provider == null ? '' : String(h.pot_provider);
+  if (pot === 'ok') {
+    setPip('#healthpot', 'PO token ok', 'on',
+           'the PO-token sidecar answered when it was last asked');
+  } else if (pot === 'unreachable') {
+    setPip('#healthpot', 'PO token unreachable', 'off',
+           'a PO-token sidecar is configured but did not answer. Downloads can '
+           + 'be slow, empty or bot-checked until it does. See ytdl/web/DEPLOY.md.');
+  } else if (pot === 'unconfigured') {
+    setPip('#healthpot', 'PO token off', '',
+           'no PO-token sidecar is configured on this server. That is normal '
+           + 'unless YouTube starts bot-checking it.');
+  } else {
+    setPip('#healthpot', '', '');
+  }
+
+  // What the cookie jar is FOR is downloading, so its state is a footnote on
+  // the pip that says whether downloading works, not a pip of its own.
+  const jar = h.cookies_state == null ? '' : String(h.cookies_state);
+  const jarNote = jar === 'present'
+    ? 'a cookie jar is configured and holds cookies'
+    : jar === 'empty'
+    ? 'a cookie jar is configured but holds no cookies, so this server '
+      + 'downloads anonymously'
+    : jar === 'none'
+    ? 'no cookie jar is configured, so this server downloads anonymously'
+    : '';
+
+  const last = h.last_download == null ? null : h.last_download;
+  if (last) {
+    const when = agoText(last.at);
+    const path = last.path === 'cookies' ? 'cookies'
+      : last.path === 'anonymous' ? 'anonymous' : (last.path || 'unknown');
+    const tail = when ? `, ${when}` : '';
+    setPip('#healthdl',
+           last.ok ? `last download: ${path}${tail}`
+                   : `last download: ${path} failed${tail}`,
+           last.ok ? 'on' : 'off',
+           [last.ok
+             ? `the last real download attempt worked, on the ${path} path`
+             : `the last real download attempt failed: ${last.error || 'no reason recorded'}`,
+            jarNote].filter(Boolean).join(' · '));
+  } else if (jar) {
+    // A new server with nothing to report yet. Worth a pip anyway, because the
+    // jar state is the thing CR-80 turned into a trap and this is where it lives.
+    setPip('#healthdl', 'no downloads yet', '', jarNote);
+  } else {
+    setPip('#healthdl', '', '');
+  }
+
+  // The canary: one tiny public clip, extracted on a schedule off the request
+  // path. It is optional and off in most deployments, so an absent or disabled
+  // canary shows nothing at all rather than a pip nobody can act on.
+  const canary = h.canary == null ? null : h.canary;
+  if (!canary || canary.enabled !== true) { setPip('#healthcanary', '', ''); return; }
+  const run = canary.last == null ? null : canary.last;
+  if (!run) {
+    setPip('#healthcanary', 'canary: no run yet', '',
+           'the scheduled check has not run since this server started');
+    return;
+  }
+  const when = agoText(run.at);
+  const tail = when ? `, ${when}` : '';
+  setPip('#healthcanary',
+         run.ok ? `canary ok${tail}` : `canary failed${tail}`,
+         run.ok ? 'on' : 'off',
+         run.ok
+           ? `the scheduled check downloaded on the ${run.path || 'default'} path`
+           : `the scheduled check failed: ${run.error || 'no reason recorded'}`);
+}
+
 async function loadHealth() {
   let h;
   try {
@@ -387,6 +510,10 @@ async function loadHealth() {
   pip.textContent = `${aiName} ${h.claude}` + (h.yt_dlp === 'ok' ? '' : ' · yt-dlp missing');
   pip.className = 'rstatus ' + (claudeOk && h.yt_dlp === 'ok' ? 'on'
                                 : h.claude === 'unknown' ? '' : 'off');
+  // The evidence half of the strip (plan WP5). Separate function because it
+  // reads only keys this server may not have, and because the banners below
+  // are about the AI provider, which none of it touches.
+  renderEvidence(h);
   // The health contract is ok|unauthenticated|missing|timeout|error|unknown.
   // timeout/error used to fall through to the all-clear, so a wedged claude
   // gave no pre-submit warning at all -- the one thing this banner exists for
@@ -1001,6 +1128,10 @@ function renderProgress(job, r) {
   setBanner('job', job.error ? hintFor(job.error) : null,
             job.phase === 'failed');
 
+  // Unconditional, and before the branch: a job with nothing to retry has to
+  // TAKE the button away, or the offer left by the last job outlives it.
+  renderRetry(job);
+
   if (downloading) { renderDownloads(job, r); return; }
 
   const [lo, hi] = PHASE_SPAN[job.phase] || [0, 0];
@@ -1037,6 +1168,67 @@ function renderProgress(job, r) {
   if (job.phase === 'failed') bits.push(job.error || 'failed');
   $('#ticker').textContent = bits.join(' · ');
   $('#cancel').classList.toggle('hidden', !!job.terminal);
+}
+
+// [ RETRY N FAILED ] and the note above it (2026-08-26,
+// docs/YTDL_RESILIENCE_PLAN.md WP6). POST api/jobs/<id>/download has re-queued
+// exactly the failed rows of a finished job since YTDL-16, and that single
+// call is what made the CR-80 recovery a one-liner - but the only control that
+// ever reached it was DOWNLOAD on the review grid, which is gone by the time a
+// job is done and did not read as a retry anyway. The server takes a `failed`
+// job with download rows on the same terms now, which is the phase the
+// download-phase circuit breaker parks a job in.
+//
+// The failure count is the job's own `dl_failed` where the poll carries it,
+// falling back to counting the manifest's rows: a page that refreshed onto a
+// terminal job has the manifest before it has a fresh poll.
+function renderRetry(job) {
+  const rows = ((state.manifest && state.manifest.videos) || [])
+    .filter(v => v.dl_state === 'failed').length;
+  const failed = job.dl_failed || rows;
+  // done OR failed, and never a job still running: a retry mid-download would
+  // be a second queue of the rows already in flight. A failed job with NO
+  // download rows is not offered one either - the server 409s it, and an
+  // offer that cannot be honoured is worse than no offer.
+  const offer = failed > 0 && (job.phase === 'done' || job.phase === 'failed');
+  const btn = $('#dlretry');
+  if (btn) {
+    if (offer) btn.textContent = `[ RETRY ${failed} FAILED ]`;
+    btn.classList.toggle('hidden', !offer);
+  }
+  // The breaker's instruction, above the button that acts on it. `job.error` is
+  // the same field the red banner reads; it is repeated here because the banner
+  // is at the top of the page and the decision is being made down here.
+  const note = $('#dlnote');
+  if (!note) return;
+  const text = offer && job.phase === 'failed' && job.error ? hintFor(job.error) : '';
+  note.textContent = text || '';
+  note.classList.toggle('hidden', !text);
+}
+
+async function retryFailed() {
+  const jobId = state.jobId;
+  if (!jobId) return;
+  const btn = $('#dlretry');
+  if (btn) btn.disabled = true;
+  try {
+    await post(`api/jobs/${jobId}/download`);
+    toast('re-queued the clips that failed');
+    // The same shortcut the first DOWNLOAD takes: the server has accepted the
+    // work either way, and offering it to this editor's own machine sits on
+    // top of that rather than in front of it (docs/YTDL_LOCAL_DOWNLOAD.md §2).
+    dispatchLocal(jobId, state.manifest && state.manifest.job
+      ? state.manifest.job.quality : null);
+    state.pollStart = Date.now();
+    await poll();
+  } catch (e) {
+    // A 409 here is the server saying there is nothing to re-queue, or that
+    // this editor has another job in flight. It is a sentence, and it goes
+    // where every other refusal on this page goes.
+    toast(e.message, true, 12000);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 // How much of ONE video the live map says is on disk. Anything missing (before
@@ -2212,6 +2404,7 @@ async function init() {
   $('#cancel2').onclick = cancelJob;
   $('#discard').onclick = discardReview;
   $('#dlserver').onclick = lockToServer;
+  $('#dlretry').onclick = retryFailed;
   $('#selall').onclick = () => bulk(true);
   $('#selnone').onclick = () => bulk(false);
   $('#download').onclick = startDownload;

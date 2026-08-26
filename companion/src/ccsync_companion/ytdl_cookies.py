@@ -232,7 +232,38 @@ STALE_SIGNATURES = (
     "this video may be inappropriate for some users",
     "please sign in to view this video",
     "login required",
+    # CR-80 (2026-08-26): YouTube refusing a signed-in session it has FLAGGED.
+    # Not an expiry and not a rotation -- the cookies still authenticate (the
+    # subscriptions feed listed fine with them all through the incident), so
+    # nothing else in this module would ever have noticed. What YouTube does
+    # is downgrade the `tv` client to UNPLAYABLE and SABR-force every https
+    # format away, and the message it leaves names a page reload that no
+    # downloader can perform. It is a PLAYBACK flag on the account, which is
+    # why the remedy is a different export rather than a fresh sign-in to the
+    # same one, and why the executor's answer is to fall back to anonymous
+    # (plan WP3) rather than to give up.
+    "the page needs to be reloaded",
 )
+
+# The one signature above whose remedy is not "sign in again": the tray line
+# has to say something different for it (see stale_reason).
+ACCOUNT_FLAG_SIGNATURE = "the page needs to be reloaded"
+
+
+def stale_reason(sig: Any) -> str:
+    """The recorded `reason` for a matched stale signature, in the editor's
+    words. Pure; never raises.
+
+    The reason is read by a person (tray._youtube_warning_line), so a flagged
+    account must not arrive as "yt-dlp: the page needs to be reloaded" -- the
+    string that cost CR-80 a day of guessing. It keeps the signature inside it
+    so the tray can still tell the two cases apart by text.
+    """
+    text = str(sig or "")
+    if ACCOUNT_FLAG_SIGNATURE in text.lower():
+        return ("YouTube is refusing your signed-in session (the page needs to "
+                "be reloaded). Downloads are continuing without it.")
+    return f"yt-dlp: {text}"
 
 
 def status_path() -> Path:

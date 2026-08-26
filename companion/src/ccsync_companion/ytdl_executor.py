@@ -45,6 +45,14 @@ the vendored downloader's own ffmpeg command and swap-in rule
 stay server-side for a different reason now, a CPU one (SCOPE_QUALITIES).
 
 Added 2026-08-14 (companion 0.8.0).
+
+2026-08-26, CR-80 and docs/YTDL_RESILIENCE_PLAN.md WP2/WP3/WP4: a clip is
+downloaded ANONYMOUSLY first and the editor's cookie jar is spent only on the
+one failure it answers (a bot check), because an unconditional jar is what
+made one flagged Google account fatal to every download this machine could
+make; no player client is pinned any more, because a pinned client is a
+pinned bug waiting to happen; and N identical failures in a row end this
+machine's turn instead of grinding through the rest of the job.
 """
 
 from __future__ import annotations
@@ -193,12 +201,76 @@ YOUTUBE_HOSTS = frozenset({
 })
 YOUTUBE_HOST_SUFFIXES = (".googlevideo.com",)
 
-# The YouTube player client an editor's machine asks as (CR-39, 2026-08-19).
-# `web_safari` because it is the one that WORKS without a PO-token provider --
-# build_argv carries the measured table of what the others do. Not a list:
-# yt-dlp would pick the best format across every client named, which is how a
-# PO-token-bound URL gets chosen again and 403s.
-DEFAULT_PLAYER_CLIENT = "web_safari"
+# The YouTube player client an editor's machine asks as. UNPINNED since
+# 2026-08-26 (CR-80, docs/YTDL_RESILIENCE_PLAN.md WP2): empty means send no
+# --extractor-args at all, i.e. yt-dlp's own default client set.
+#
+# It was `web_safari` from CR-39 (2026-08-19) until then, because that was the
+# one client an editor's machine could use without a GVS PO-token provider.
+# Six weeks later it returns NO USABLE FORMATS at all, with or without
+# cookies, on both the yt-dlp the fleet is running and the current one --
+# measured on the base rig against the deployed companion's own binary.
+# build_argv carries both tables.
+#
+# The rule those two measurements draw, and the reason this is now empty
+# rather than a different client: A PINNED PLAYER CLIENT IS A PINNED BUG
+# WAITING TO HAPPEN. Which client works is YouTube's to change and they change
+# it every few weeks; yt-dlp's maintainers track that weekly and we do not, so
+# every pin we carry is a pin we have taken on the job of keeping current, and
+# CR-39 -> CR-80 is what that costs when we forget. `ytdl_player_client` stays
+# as an OVERRIDE for the day a specific client is known-good and the default
+# is not (_player_client) -- a lever that is not a release.
+DEFAULT_PLAYER_CLIENT = ""
+
+# ------------------------------------------------ anonymous first (WP3)
+#
+# Two failures with OPPOSITE remedies, which is why they are two classifiers
+# and two messages rather than one "download failed" (plan WP3/WP4,
+# 2026-08-26). The bot check says THIS MACHINE'S IP NEEDS AN ACCOUNT and its
+# answer is to try the editor's jar; the account flag says THIS ACCOUNT IS
+# REFUSED and its answer is to drop the jar. Spelled to match the server's
+# worker._bot_checked / _account_flagged, because a clip that fails on an
+# editor's machine is retried on the NAS and the two must read it the same way.
+#
+# Both apostrophes in the bot check, because yt-dlp passes YouTube's own text
+# through and it has arrived either way -- the curly one as an escape so this
+# file stays pure ASCII. Deliberately NOT the bare "sign in to confirm":
+# "Sign in to confirm your age" is one age-gated video, not a challenged IP.
+_BOT_CHECK_MARKERS = ("confirm you're not a bot",
+                      "confirm you’re not a bot")
+_ACCOUNT_FLAG_MARKERS = ("the page needs to be reloaded",)
+
+# What the clip row says when NEITHER path can fetch it. Editor-facing: they
+# cannot fix either half themselves, so it says what is happening and what it
+# means rather than naming a knob (the server's BOTH_PATHS_NOTE names
+# YTDL_COOKIES_FILE because an admin reads that one).
+BOTH_BLOCKED_ERROR = (
+    "both download paths are blocked on this machine: YouTube is asking the "
+    "anonymous one to confirm it is not a bot, and it is refusing the "
+    "signed-in session as well. Export a fresh cookies.txt from a different "
+    "signed-in YouTube session, or let the server download this job.")
+
+# The note that rides on the clip row when the FALLBACK is what landed it.
+# The ordinary anonymous path is deliberately noteless: it is the default, and
+# a note on every row is a note nobody reads.
+COOKIES_PATH_NOTE = ("downloaded with the signed-in YouTube session "
+                     "(the anonymous attempt was bot-checked)")
+
+# How many consecutive clip failures with the SAME normalised signature end
+# this machine's turn instead of grinding on (plan WP6, 2026-08-26). CR-80's
+# job 28 discovered the same wall 29 times. 0 disables it; `config.toml`
+# `ytdl_max_identical_failures` is the per-machine override, and it is not in
+# config.DEFAULTS for the same reason `ytdl_player_client` is not: a knob for
+# the machine that hits a false positive, not a setting to explain to every
+# editor.
+DEFAULT_MAX_IDENTICAL_FAILURES = 3
+
+# The two failure signatures that mean "the binary, not the video" (plan WP4:
+# five in a row is a client that no longer works). On this side the answer is
+# not a note but an ACTION -- ask the sidecar manager to re-check the floor and
+# update -- because CR-80's fleet half was exactly a yt-dlp too old to work
+# and a floor it already satisfied.
+_UPDATE_WORTH_TRYING = ("requested format is not available", "http error 403")
 
 # HTTP to the dashboard. Short: every one of these calls is a small JSON
 # round trip on the tailnet, and a wedged one must not outlive the lease it is
@@ -1627,6 +1699,16 @@ class DownloadJob:
         # (CR-79): the tray must not read a ten-minute re-encode as a stalled
         # download. None between clips and before the first.
         self.phase: Optional[str] = None
+        # Which path the NEXT clip is tried on first (plan WP3, 2026-08-26).
+        # Anonymous, always, at the start of a job: the jar is the fallback,
+        # and a flip that does not survive the job is the safe direction.
+        self._cookies_first = False
+        # The breaker (plan WP6): the last clip failure's normalised signature
+        # and how many in a row have carried it.
+        self._last_signature: Optional[str] = None
+        self._identical_failures = 0
+        # ONE yt-dlp update poke per job, not per clip.
+        self._update_poked = False
 
     # -- progress mirror --------------------------------------------------
     def snapshot(self) -> dict:
@@ -1855,6 +1937,20 @@ class DownloadJob:
             if self._should_stop():
                 self._cleanup_current()
                 return
+            wall = self._breaker_reason()
+            if wall is not None:
+                # Handed back the way every other refusal on this path is
+                # (§2 step 7, and the "no release endpoint" rule): stop
+                # posting, let the heartbeat stop and the lease expire, and
+                # the server reclaims the job and downloads what is missing.
+                # The clips already reported `failed` are re-queued by its
+                # second-chance sweep exactly as they would have been.
+                log.warning("ytdl: job %s -- %d clips in a row failed the same "
+                            "way (%s), so this machine is stopping at clip %d "
+                            "of %d and handing the rest back to the server",
+                            self.job_id, self._identical_failures, wall,
+                            index + 1, len(clips))
+                return
             if index:
                 # Residential pacing, server-provided (§7): the NAS's 3 s is a
                 # bot-check defence for ONE static IP, and an editor's own line
@@ -2002,6 +2098,10 @@ class DownloadJob:
                                 channel=credits.get("channel"))
         self._set(done=self.done + 1)
         self._current = None
+        # A clip that landed is proof the wall is not there any more, so the
+        # breaker counts CONSECUTIVE failures and this is where the count dies.
+        self._last_signature = None
+        self._identical_failures = 0
 
     def _ensure_edit_ready(self, outdir: str, name: str,
                            video_id: str) -> tuple[str, Optional[str], Optional[str]]:
@@ -2119,6 +2219,62 @@ class DownloadJob:
         self.client.clip_status(self.job_id, video_id, "failed", error=error)
         self._set(failed=self.failed + 1)
         self._current = None
+        self._note_failure(error)
+
+    def _note_failure(self, error: Any) -> None:
+        """Count this failure against the breaker; poke the updater if the
+        signature says the BINARY, not the video, is what is wrong."""
+        sig = failure_signature(error)
+        if sig and sig == self._last_signature:
+            self._identical_failures += 1
+        else:
+            self._last_signature = sig
+            self._identical_failures = 1
+        self._maybe_poke_ytdlp(error)
+
+    def _breaker_reason(self) -> Optional[str]:
+        """The signature this machine has hit N times in a row, or None.
+
+        Plan WP6, 2026-08-26, and it is _bot_checked's rule generalised: A
+        FAILURE THAT WILL REPEAT IDENTICALLY FOR EVERY REMAINING CLIP MUST
+        STOP THE RUN, NOT THE CLIP. CR-80's job 28 discovered one wall 29
+        times, each with yt-dlp's full retry budget behind it -- 29 chances to
+        make YouTube angrier, for no information.
+        """
+        limit = max_identical_failures(self.deps.cfg)
+        if limit and self._identical_failures >= limit:
+            return self._last_signature or "the same failure"
+        return None
+
+    def _maybe_poke_ytdlp(self, error: Any) -> None:
+        """Ask the sidecar manager to re-check yt-dlp, ONCE per job.
+
+        Only for the two signatures that mean the binary rather than the video
+        (_UPDATE_WORTH_TRYING). CR-80's fleet half was exactly this: every
+        companion sat on a yt-dlp that could not download anything, reporting
+        "2026.07.04 is current" nightly, because the floor it compared against
+        was the one that shipped with it. ensure() re-reads the dashboard's
+        floor, so the fix reaches a machine at its next failure instead of at
+        its next daily check. Absent seam (no manager, an older one with no
+        ensure) is simply no poke -- never a failed job.
+        """
+        if self._update_poked:
+            return
+        low = str(error or "").lower()
+        if not any(marker in low for marker in _UPDATE_WORTH_TRYING):
+            return
+        ensure = getattr(getattr(self.deps, "ytdlp", None), "ensure", None)
+        if not callable(ensure):
+            return
+        self._update_poked = True
+        log.info("ytdl: job %s: that failure is what an out-of-date yt-dlp "
+                 "looks like; asking the sidecar to re-check", self.job_id)
+        try:
+            result = dict(ensure() or {})
+        except Exception:  # noqa: BLE001 -- a clip failure must not become a crash
+            log.debug("ytdl: the yt-dlp re-check failed", exc_info=True)
+            return
+        log.info("ytdl: yt-dlp re-check: %s", result.get("message") or result.get("action"))
 
     def _drop_scratch_info(self, video_id: str) -> None:
         """Bin the redirected info json for a clip that will not get a sidecar.
@@ -2154,27 +2310,114 @@ class DownloadJob:
         spent and the FORMAT, rather than the moment, is the problem. Nothing
         else may cost an editor 360 lines of resolution nobody asked to lose.
         """
-        ok, stderr = self._run_ytdlp(url, outdir, quality)
+        ok, stderr, note, error = self._run_ytdlp_paths(url, outdir, quality, video_id)
         if ok:
-            return True, None, None
+            return True, note, None
         if self._should_stop():
             return False, None, None
         lower = (ytdl_common.lower_quality(quality, ytdl_common.QUALITY_HEIGHTS)
                  if _looks_truncated(stderr) else None)
         if lower is None or lower not in SCOPE_QUALITIES:
-            return False, None, _error_tail(stderr)
+            return False, None, error or _error_tail(stderr)
         log.warning("ytdl: job %s: %s came back truncated at %s; retrying at %s",
                     self.job_id, video_id, quality, lower)
         # The .part IS the truncated bytes and yt-dlp resumes a .part, so the
         # retry has to start from nothing or it inherits the corpse.
         clear_partials(outdir, video_id)
-        ok, stderr2 = self._run_ytdlp(url, outdir, lower)
+        ok, stderr2, note2, error2 = self._run_ytdlp_paths(url, outdir, lower, video_id)
         if ok:
-            return True, ytdl_common.TRUNCATED_NOTE.format(q=quality, lower=lower), None
-        return False, None, _error_tail(stderr2)
+            truncated = ytdl_common.TRUNCATED_NOTE.format(q=quality, lower=lower)
+            return True, (f"{truncated}; {note2}" if note2 else truncated), None
+        return False, None, error2 or _error_tail(stderr2)
 
-    def _run_ytdlp(self, url: Any, outdir: str, quality: str) -> tuple[bool, str]:
-        argv = self.build_argv(url, outdir, quality)
+    def _run_ytdlp_paths(self, url: Any, outdir: str, quality: str,
+                         video_id: str) -> tuple[bool, str, Optional[str], Optional[str]]:
+        """One clip, ANONYMOUSLY FIRST, the cookie jar as the fallback.
+        -> (ok, stderr of the last attempt, note, error).
+
+        THE INVERSION (plan WP3, 2026-08-26). Until then every argv carried
+        `--cookies` whenever a jar resolved, which is what made one flagged
+        Google account fatal to everything this machine could download
+        (CR-80): there was no path that did not carry the jar, so there was
+        nothing to fall back to and nothing anywhere said why. Anonymous is
+        the normal case and needs no account at all; the jar is the escape
+        hatch, and it is spent only on the ONE failure it answers.
+
+        Exactly one fallback attempt, and only on a classified failure:
+
+          anonymous -> bot check    -> retry with the jar (if there is one)
+          cookies   -> account flag -> retry anonymously
+          both refused              -> BOTH_BLOCKED_ERROR, which names both
+
+        The preference is STICKY per executor and starts anonymous: a job of
+        forty clips must not re-discover the bot check forty times, and a
+        machine that restarts starts anonymous again -- the safe direction,
+        because an unnecessary anonymous attempt costs one extraction and an
+        unnecessary cookies attempt spends the credential.
+
+        Cost, honestly: one extra failed extraction per clip on a genuinely
+        bot-checked line, before the flip. Seconds.
+        """
+        jar = _cookies_file(self.deps.cfg)
+        first = jar if (self._cookies_first and jar) else None
+        ok, stderr = self._run_ytdlp(url, outdir, quality, first)
+        if ok:
+            return True, "", self._landed_note(video_id, first), None
+        if self._should_stop():
+            return False, stderr, None, None
+
+        if first is None:
+            if not jar or not _bot_checked(stderr):
+                return False, stderr, None, None
+            log.info("ytdl: job %s clip %s: YouTube bot-checked the anonymous "
+                     "download; retrying once with the signed-in session",
+                     self.job_id, video_id)
+            ok, stderr2 = self._run_ytdlp(url, outdir, quality, jar)
+            if ok:
+                self._prefer_cookies(True, "an anonymous download was bot-checked "
+                                           "and the signed-in session worked")
+                return True, "", self._landed_note(video_id, jar), None
+            if _account_flagged(stderr2):
+                return False, stderr2, None, BOTH_BLOCKED_ERROR
+            return False, stderr2, None, None
+
+        if not _account_flagged(stderr):
+            return False, stderr, None, None
+        log.info("ytdl: job %s clip %s: YouTube is refusing the signed-in "
+                 "session; retrying once anonymously", self.job_id, video_id)
+        ok, stderr2 = self._run_ytdlp(url, outdir, quality, None)
+        if ok:
+            self._prefer_cookies(False, "YouTube is refusing the signed-in "
+                                        "session and anonymous downloads work")
+            return True, "", self._landed_note(video_id, None), None
+        if _bot_checked(stderr2):
+            return False, stderr2, None, BOTH_BLOCKED_ERROR
+        return False, stderr2, None, None
+
+    def _landed_note(self, video_id: str, cookies: Optional[str]) -> Optional[str]:
+        """Log which path landed the clip, and return the row's note for it.
+
+        Logged for every clip (CR-39's lesson: a download path that is never
+        named is a download path nobody can diagnose), noted on the row only
+        for the fallback -- see COOKIES_PATH_NOTE.
+        """
+        log.info("ytdl: job %s clip %s: downloaded %s", self.job_id, video_id,
+                 "with the signed-in YouTube session" if cookies else "anonymously")
+        return COOKIES_PATH_NOTE if cookies else None
+
+    def _prefer_cookies(self, cookies_first: bool, why: str) -> None:
+        """Flip which path the NEXT clip tries first. Logs on the flip only:
+        once per job is an operational signal, once per clip is noise."""
+        if self._cookies_first == cookies_first:
+            return
+        self._cookies_first = cookies_first
+        log.info("ytdl: job %s: downloading %s from now on (%s)", self.job_id,
+                 "with the signed-in YouTube session" if cookies_first
+                 else "anonymously", why)
+
+    def _run_ytdlp(self, url: Any, outdir: str, quality: str,
+                   cookies: Optional[str] = None) -> tuple[bool, str]:
+        argv = self.build_argv(url, outdir, quality, cookies)
         try:
             proc = _call_run(self.deps.run, argv, CLIP_TIMEOUT_SECONDS,
                              self._register_proc, self._on_ytdlp_line)
@@ -2186,7 +2429,12 @@ class DownloadJob:
         finally:
             with self._lock:
                 self._proc = None
-        cookies_used = bool(_cookies_file(self.deps.cfg))
+        # THE PATH THIS ATTEMPT ACTUALLY RAN ON, not "is a jar configured"
+        # (plan WP3, 2026-08-26). With the inversion, a machine with a perfectly
+        # good jar makes anonymous attempts all day, and reading the config here
+        # would credit an anonymous bot check to the editor's sign-in and light
+        # the tray warning for a session nothing had touched.
+        cookies_used = bool(cookies)
         if getattr(proc, "returncode", 1) == 0:
             # A cookied download that worked is proof the session is alive;
             # clear a stale mark so the tray warning goes away by itself once
@@ -2197,21 +2445,28 @@ class DownloadJob:
             return True, ""
         stderr = str(getattr(proc, "stderr", "") or "")
         # The one thing worth reading out of a failure BEYOND the clip row:
-        # yt-dlp telling us the editor's YouTube session is dead (rotated or
-        # signed out). Recorded once, not per clip; the tray warns from the
-        # record until they sign in again (ytdl_cookies.health).
+        # yt-dlp telling us the editor's YouTube session is dead (rotated,
+        # signed out, or -- since CR-80 -- flagged by YouTube). Recorded once,
+        # not per clip; the tray warns from the record. The reason is written
+        # in the editor's words (ytdl_cookies.stale_reason), because "yt-dlp:
+        # the page needs to be reloaded" is the string that cost CR-80 a day.
         sig = ytdl_cookies.classify_failure(stderr, cookies_used)
         if sig and not self._cookie_health_stale:
             self._cookie_health_stale = True
-            ytdl_cookies.mark_stale(f"yt-dlp: {sig}")
+            ytdl_cookies.mark_stale(ytdl_cookies.stale_reason(sig))
         return False, stderr
 
     # Per-executor memo so a batch of 40 age-gated clips writes the status
     # file once, not 40 times. Not authoritative -- the file is.
     _cookie_health_stale = False
 
-    def build_argv(self, url: Any, outdir: str, quality: str) -> list:
+    def build_argv(self, url: Any, outdir: str, quality: str,
+                   cookies: Optional[str] = None) -> list:
         """The yt-dlp command line. The NAMING half of it is the contract.
+
+        `cookies` is the jar to send, or None for an ANONYMOUS run (the
+        default since plan WP3, 2026-08-26): which path a clip is tried on is
+        _run_ytdlp_paths's decision, not this function's.
 
         `-f`, the outtmpl and the mp4 container are ytdl_common's and the
         server's build_opts', spelled the same way on purpose: same rung, same
@@ -2274,13 +2529,16 @@ class DownloadJob:
         deno = sidecar_tools.managed_deno()
         if deno:
             argv += ["--js-runtimes", f"deno:{deno}"]
-        # THE PLAYER CLIENT, and it is the difference between this feature
-        # working and not (CR-39, 2026-08-19). yt-dlp's default client set
-        # hands back format URLs that need a GVS PO token, and an editor's
-        # machine has no provider for one -- the NAS does, the bgutil sidecar
-        # (downloader.pot_opts, ytdl/web/DEPLOY.md), which is why the server
-        # never hit this and the requester always did. Measured on a live
-        # editor machine, same clip, same binary, same minute:
+        # THE PLAYER CLIENT, and it has now been the difference between this
+        # feature working and not in BOTH directions. Two measurements, six
+        # weeks apart, on the same machine class.
+        #
+        # CR-39 (2026-08-19), which pinned `web_safari`. yt-dlp's default
+        # client set handed back format URLs bound to a GVS PO token, and an
+        # editor's machine has no provider for one -- the NAS does, the bgutil
+        # sidecar (downloader.pot_opts, ytdl/web/DEPLOY.md), which is why the
+        # server never hit this and the requester always did. Same clip, same
+        # binary, same minute, on a live editor machine:
         #
         #     default (android_vr)  ERROR: unable to download video data:
         #                           HTTP Error 403: Forbidden
@@ -2290,26 +2548,43 @@ class DownloadJob:
         #     web                   works, but falls to format 18 -- 360p
         #     web_safari            works, 17.3 MB, full quality, exit 0
         #
-        # web_safari serves HLS, which carries no PO-token requirement. The
-        # 403 arrived ~3 s in and _fail_clip reports it without logging, so
-        # every local download since 0.8.0 looked like "it flashed
-        # 'downloading on your machine' and went back to the server".
+        # CR-80 (2026-08-26), which killed it. `web_safari` serves muxed HLS,
+        # and YouTube has SABR-forced those https formats away: it returns no
+        # usable formats at all now, on either yt-dlp, with or without the
+        # editor's cookies. Measured on the base rig against the deployed
+        # companion's own yt-dlp (2026.07.04) and its own jar:
+        #
+        #     web_safari, anonymous                 no usable formats
+        #     web_safari, with cookies              no usable formats
+        #     default client, with cookies          "The page needs to be
+        #                                            reloaded."
+        #     default client, anonymous             formats, then HTTP 403
+        #     2026.8.19, default, anonymous         WORKS
+        #
+        # So: yt-dlp's own default set, on the current yt-dlp, downloads
+        # anonymously from a residential IP with no PO-token provider at all.
+        # A pinned client is a pinned bug waiting to happen (see
+        # DEFAULT_PLAYER_CLIENT) -- the pin that was correct in August was a
+        # guaranteed failure by the end of the month, and the yt-dlp floor
+        # (ytdlp_manager) is the half of this that has to stay current.
         #
         # Config-overridable because this is YouTube's to change, and the day
         # it does an operator needs a lever that is not a release. Empty
-        # string means "send nothing", i.e. yt-dlp's own default set.
+        # string means "send nothing", which is now also the default.
         client = _player_client(self.deps.cfg)
         if client:
             argv += ["--extractor-args", f"youtube:player_client={client}"]
-        # A signed-in cookies.txt, when the editor pointed us at one. This is
-        # what passes the bot check and unlocks age-gated clips on the
-        # requester's own machine; absent, the download is anonymous (public
-        # clips only) and an age-gated one is handed back to the server, whose
-        # own cookies.txt then does it. A cookie file that resolves but is
-        # stale is yt-dlp's problem to report, not ours to second-guess.
-        cookies = _cookies_file(self.deps.cfg)
+        # The signed-in cookies.txt, when the CALLER chose the cookies path.
+        #
+        # A PARAMETER since 2026-08-26 (plan WP3), and it used to be
+        # `_cookies_file(self.deps.cfg)` resolved right here, unconditionally.
+        # That is what made one flagged Google account fatal to every download
+        # this machine could make (CR-80): there was no argv that did not carry
+        # the jar, so there was nothing to fall back to. The jar is the escape
+        # hatch it was always described as -- what answers a bot check -- not
+        # the default. _run_ytdlp_paths decides; this only spells it.
         if cookies:
-            argv += ["--cookies", cookies]
+            argv += ["--cookies", str(cookies)]
         argv.append(str(url))
         return argv
 
@@ -2390,6 +2665,68 @@ def parse_progress_line(line: Any) -> Optional[dict]:
     return {"bytes_done": int(done) if done is not None else None,
             "bytes_total": int(total) if total is not None else None,
             "speed_bps": speed}
+
+
+def _bot_checked(stderr: Any) -> bool:
+    """Is this yt-dlp stderr a bot check? (worker._bot_checked's twin.)
+
+    What the ANONYMOUS path says when YouTube wants an account, and the ONE
+    failure the cookie jar is an answer to -- so it is what decides whether a
+    clip is retried with it (plan WP3, 2026-08-26).
+    """
+    low = str(stderr or "").lower()
+    return any(marker in low for marker in _BOT_CHECK_MARKERS)
+
+
+def _account_flagged(stderr: Any) -> bool:
+    """Is this the flagged-session message (CR-80, 2026-08-26)?
+
+    The cookies path's own failure mode. The session still authenticates --
+    this is YouTube refusing to serve video to it -- so the answer is to stop
+    sending it, not to sign in again, and nothing on this machine can fix it.
+    """
+    low = str(stderr or "").lower()
+    return any(marker in low for marker in _ACCOUNT_FLAG_MARKERS)
+
+
+# An 11-char YouTube id is the one part of a per-clip error guaranteed to
+# differ between clips; paths and byte counts are the other two.
+_SIG_VIDEO_ID = re.compile(r"\b[0-9A-Za-z_-]{11}\b")
+_SIG_PATH = re.compile(r"[A-Za-z]?:?[\\/][^\s'\"]+")
+_SIG_DIGITS = re.compile(r"\d+")
+
+
+def failure_signature(error: Any) -> str:
+    """A key that is EQUAL for "the same failure on a different clip".
+
+    worker._failure_signature's rule and its regexes, so the two executors
+    count the same wall the same way. Signature-based rather than
+    classifier-based on purpose: the point is "this is the same thing again",
+    and a classifier only decides what the message says.
+    """
+    text = _SIG_VIDEO_ID.sub(" ", str(error or ""))
+    text = _SIG_PATH.sub(" ", text)
+    text = _SIG_DIGITS.sub("", text.lower())
+    return " ".join(text.split())[:120]
+
+
+def max_identical_failures(cfg: dict[str, Any]) -> int:
+    """How many identical clip failures in a row end this machine's turn.
+
+    `ytdl_max_identical_failures` in config.toml, else
+    $CCSYNC_YTDL_MAX_IDENTICAL_FAILURES, else 3. 0 (or a negative) disables the
+    breaker entirely. Never raises: junk is the default, not a refused job.
+    """
+    raw = (cfg or {}).get("ytdl_max_identical_failures", None)
+    if raw is None:
+        raw = os.environ.get("CCSYNC_YTDL_MAX_IDENTICAL_FAILURES")
+    if raw is None or str(raw).strip() == "":
+        return DEFAULT_MAX_IDENTICAL_FAILURES
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_IDENTICAL_FAILURES
+    return max(n, 0)
 
 
 def _looks_truncated(stderr: Any) -> bool:

@@ -191,3 +191,43 @@ def test_install_overwrites_a_previous_session(tmp_path):
 
     assert ok is True
     assert dest.read_text() == newer.read_text()
+
+
+# ---------------------------------------------------------------------------
+# the flagged session (CR-80, 2026-08-26, plan WP4)
+# ---------------------------------------------------------------------------
+
+
+def test_a_flagged_session_is_a_stale_signature():
+    """The one-line change the plan says should go in regardless of the rest.
+
+    Until 2026-08-26 the classifier did not carry this phrase, so a signed-in
+    session YouTube had FLAGGED never got marked stale: the executor failed N
+    clips with one opaque string and the tray went on saying the sign-in was
+    fine. It is not an expiry and not a rotation -- the cookies still
+    authenticate -- which is why nothing else in this module would ever have
+    caught it.
+    """
+    flagged = "ERROR: [youtube] aaaaaaaaaaa: The page needs to be reloaded."
+    assert yc.classify_failure(flagged, cookies_used=True) == \
+        yc.ACCOUNT_FLAG_SIGNATURE
+    assert yc.ACCOUNT_FLAG_SIGNATURE in yc.STALE_SIGNATURES
+    # Unchanged semantics: without cookies this says nothing about the
+    # editor's sign-in, because the session was never sent.
+    assert yc.classify_failure(flagged, cookies_used=False) is None
+
+
+def test_the_recorded_reason_is_written_for_the_editor():
+    """The reason is read by a person (tray._youtube_warning_line). "yt-dlp:
+    the page needs to be reloaded" is the string that cost CR-80 a day, and it
+    would have sent an editor to re-export the same flagged session. It says
+    what is happening and that downloads carry on without it, and it keeps the
+    signature inside so the tray can still tell the two cases apart."""
+    reason = yc.stale_reason(yc.ACCOUNT_FLAG_SIGNATURE)
+    assert "refusing your signed-in session" in reason
+    assert "continuing without it" in reason
+    assert yc.ACCOUNT_FLAG_SIGNATURE in reason.lower()
+    assert " -- " not in reason and "—" not in reason
+    # Every other signature keeps the shape it had.
+    assert yc.stale_reason("cookies are no longer valid") == \
+        "yt-dlp: cookies are no longer valid"

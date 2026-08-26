@@ -675,3 +675,19 @@ def _init_ytdl_storage() -> None:
     # jobs left mid-pipeline by a restart, and it cannot query tables that do
     # not exist yet.
     ytdl_worker.ensure_started()
+
+    # The download canary (ytdl 2026-08-26, docs/YTDL_RESILIENCE_PLAN.md WP5).
+    # A no-op unless YTDL_CANARY_INTERVAL_SECONDS is set, which ships unset.
+    #
+    # WRAPPED, unlike the three imports above: this module is the mount's
+    # storage probe, and its failure is what tells MOUNTED from DEGRADED. An
+    # older ytdl-web tree on the host (or the fake ytdlweb the mount tests
+    # install) has no ytdl_canary at all, and a missing OPTIONAL diagnostic
+    # must not be able to report the whole downloader as degraded.
+    try:
+        from ytdlweb import ytdl_canary  # type: ignore[import-not-found]
+
+        ytdl_canary.ensure_started()
+    except (ImportError, AttributeError) as e:
+        log.debug("ytdl canary not available (%s: %s); health will report it "
+                  "disabled", type(e).__name__, e)

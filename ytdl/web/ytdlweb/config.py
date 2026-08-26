@@ -255,7 +255,20 @@ HEARTBEAT_SECONDS = int(os.environ.get('YTDL_HEARTBEAT_SECONDS') or '30')
 # it has nothing to update: local downloads dead everywhere, and the only log
 # line anywhere says somebody's yt-dlp is old. The companion now says so out
 # loud when the two sides disagree; this is the side that stops it happening.
-DEFAULT_MIN_YTDLP_VERSION = '2026.07.04'
+# ZERO-PADDED, and it must stay that way (2026-08-26, plan WP1). This value is
+# compared BOTH ways in this deployment: routes_fleet._version_at_least ranks
+# it numerically here, but the string rule is what the fleet inherited from
+# COMP-BROLL-9 (2026-08-14), and any hand-written unpadded floor ('2026.8.19')
+# sorts as a string ABOVE every real '2026.08.xx' release. The result is the
+# silent shape CR-80 documented: every local-download claim in the fleet 403s
+# on "your yt-dlp is old" while every companion, ranking tuples, concludes it
+# is current and never updates. Padding costs nothing and removes the trap.
+#
+# Raised from 2026.07.04 by CR-80: on 2026.07.04 the anonymous path had no
+# working client left (android_vr extracted and then 403'd on the bytes), and
+# with the flagged cookie jar attached every client came back with storyboards.
+# 2026.08.19 adds the `visionos` client, which is the one that downloads.
+DEFAULT_MIN_YTDLP_VERSION = '2026.08.19'
 MIN_YTDLP_VERSION = os.environ.get('YTDL_MIN_YTDLP_VERSION') or DEFAULT_MIN_YTDLP_VERSION
 
 _VERSION_PART = re.compile(r'^\d+$')
@@ -311,6 +324,47 @@ def _validated_floor(configured):
 
 
 MIN_YTDLP_VERSION = _validated_floor(MIN_YTDLP_VERSION)
+
+# ------------------------------------------------------------------ the canary
+# docs/YTDL_RESILIENCE_PLAN.md WP5 (2026-08-26). One tiny public clip,
+# EXTRACTED (never downloaded) on a schedule, recording which path -- anonymous
+# or cookies -- still works. It is the check that would have caught CR-73 and
+# CR-80 before an editor did, because both of them left health green while
+# nothing could download.
+#
+# OFF BY DEFAULT AND OPT-IN. This is real automated traffic to YouTube on a
+# fixed cadence from the deployment's own IP, which is precisely the shape that
+# got this NAS bot-checked in the first place (2026-08-11), and the owner has
+# not yet answered the question the plan parks in section 7. A deployment turns
+# it on deliberately or it never runs at all.
+#
+# Unset, 0, or anything unparseable means off. When it IS on, a floor of 300 s
+# is enforced: an operator who types 5 must not be able to point a five-second
+# metronome at YouTube, and there is nothing this can detect that is worth
+# knowing more often than every five minutes.
+CANARY_MIN_INTERVAL_SECONDS = 300
+
+
+def _canary_interval(raw):
+    """Seconds between canary extractions, or 0 for off. Never raises."""
+    try:
+        seconds = int(float(str(raw or '0').strip()))
+    except (TypeError, ValueError):
+        return 0
+    if seconds <= 0:
+        return 0
+    return max(CANARY_MIN_INTERVAL_SECONDS, seconds)
+
+
+CANARY_INTERVAL_SECONDS = _canary_interval(
+    os.environ.get('YTDL_CANARY_INTERVAL_SECONDS'))
+
+# "Me at the zoo", 19 seconds, the oldest public video on the site: short,
+# never region-locked, never age-gated, and not going anywhere. Overridable
+# because a deployment behind a filter may need a different one, but the
+# default is deliberately the least interesting clip on YouTube.
+CANARY_URL = (os.environ.get('YTDL_CANARY_URL')
+              or 'https://www.youtube.com/watch?v=jNQXAC9IVRw')
 
 # The fleet token the companion already holds, deliberately NOT YTDL_-prefixed:
 # it is the DASHBOARD's shared secret (`DASH_REPORT_TOKEN`), the same one the

@@ -35,7 +35,7 @@ Index written 2026-08-17 (`COMMERCIAL_READINESS.md` item 13).
 | [`INDEXERS.md`](INDEXERS.md) | The GPU indexers: what runs where, and what a customer without a GPU gets |
 | [`BACKCATALOGUE_INGEST.md`](BACKCATALOGUE_INGEST.md) | Adding older projects to the b-roll archive as `source: proxies` shares: what it cost, and what it taught about the pipeline |
 | [`YTDL_LOCAL_DOWNLOAD.md`](YTDL_LOCAL_DOWNLOAD.md) | The YouTube downloader's fleet job model and the local-download path |
-| [`YTDL_RESILIENCE_PLAN.md`](YTDL_RESILIENCE_PLAN.md) | After CR-80: why cookies and pinned player clients keep breaking YouTube downloads, and the projected fix. PLAN, nothing built |
+| [`YTDL_RESILIENCE_PLAN.md`](YTDL_RESILIENCE_PLAN.md) | After CR-80: why cookies and pinned player clients keep breaking YouTube downloads, and the fix. WP1-WP7 BUILT in repo 2026-08-26 (CR-83, dashboard 0.7.11 / companion 0.9.52, unshipped); WP8 deliberately not built |
 | [`CLIENT_FOLDERS.md`](CLIENT_FOLDERS.md) | Curated b-roll folders with a link a prospective licensee can open: how to use them, what the client sees, and publishing the one path prefix with Tailscale Funnel |
 | [`DOCKER.md`](DOCKER.md) | The two ways the dashboard container gets its code and its dependencies |
 | [`CI.md`](CI.md) | What runs on a runner, and what still only runs on the base rig |

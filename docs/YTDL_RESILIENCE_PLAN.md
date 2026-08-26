@@ -1,10 +1,44 @@
 # YouTube downloading: resilience plan
 
-**Status: NOTHING IN THIS DOCUMENT IS BUILT.** It is the write-up of the
-projected change after CR-80 (2026-08-26), plus the other ways the YouTube
-downloader can be made harder to break. The CR-80 incident itself, and the
-live fix applied to the NAS that day, are in `KNOWN_BUGS.md`; the deployment
-facts are in `ytdl/web/DEPLOY.md`. This document is about what to do next.
+**Status: WP1-WP7 ARE BUILT IN REPO, 2026-08-26** (dashboard **0.7.11** /
+companion **0.9.52**, branch `ytdl-resilience`, **NOT SHIPPED**). The ledger
+entry for the work is `KNOWN_BUGS.md` **CR-83**; the incident that prompted it,
+and the live fix applied to the NAS that day, are CR-80; the deployment facts
+and the new env knobs are in `ytdl/web/DEPLOY.md`. Sections 1-3 below are the
+analysis as written on the day and are left untouched; section 4 is the plan
+they produced; "What was built" near the end maps each work package to the
+module and knob that carries it.
+
+| WP | what it is | status |
+|---|---|---|
+| WP1 | stop shipping a dead yt-dlp, both halves | **built** (server floor + `dashboard/deploy/requirements.txt`) |
+| WP2 | unpin `player_client` on both executors | **built** (`DEFAULT_PLAYER_CLIENT = ""`) |
+| WP3 | anonymous first, cookies as the fallback | **built**, both executors |
+| WP4 | classify the failures YouTube has invented since | **built**, merged with WP6 |
+| WP5 | make health mean something | **built**; the canary is built and **off by default** |
+| WP6 | do not let one job discover the same wall 29 times | **built** (breaker + `[ RETRY n FAILED ]`) |
+| WP7 | operational hygiene | **documented** (`DEPLOY.md`), not enforced |
+| WP8 | a pool of accounts to rotate through | **NOT built, deliberately** |
+
+**Two deviations from the text below, and the code wins in both:**
+
+1. **The yt-dlp floor is spelled `'2026.08.19'`, zero-padded**, not the
+   `2026.8.19` WP1 writes. `routes_fleet` ranks that floor as a **string** (the
+   rule the fleet inherited from COMP-BROLL-9, 2026-08-14), and an unpadded
+   `2026.8.19` sorts above every real `2026.08.xx` release: it would have 403'd
+   every local-download claim in the fleet while every companion, ranking
+   tuples, still concluded its yt-dlp was current. The same applies to an
+   operator typing `YTDL_MIN_YTDLP_VERSION` by hand.
+2. **WP4 and WP6 landed as one mechanism**, plus a sticky path preference WP3
+   does not mention. The circuit breaker counts a *normalised failure
+   signature* rather than a classifier, because the question is "is this the
+   same wall again"; the classifier only decides what the note says. And the
+   anonymous/cookies preference is sticky per job (per process on the server,
+   per executor on the companion) so the extra failed extraction WP3 costs on
+   a genuinely bot-checked line is paid once per flip, not once per clip.
+
+**Still off, still the owner's call**: the canary (section 7), and whether the
+NAS keeps a cookie jar configured at all.
 
 Read `docs/YTDL_LOCAL_DOWNLOAD.md` first if you have not: the requester-first
 design (an editor's own machine downloads, the NAS is the fallback) is assumed
@@ -310,14 +344,65 @@ download, and prefer the production path
 (`ytdlweb.vendor.downloader.download(..., ffmpeg_location=config.FFMPEG_DIR)`)
 over a hand-built argv, which is how the CR-80 fix was confirmed.
 
-## 7. Open decisions for the owner
+## 7. Decisions taken, and what is still the owner's
 
-- **WP8**: is the account pool dropped on the reasoning above, or do you want
-  the manual second-slot version?
-- **WP5's canary**: a scheduled extraction of one public clip is the difference
-  between finding this yourself and an editor finding it. It is a small, real
-  amount of automated traffic to YouTube on a fixed cadence. Worth it?
-- **WP3's default**: after the inversion, should the NAS keep a cookie jar
-  configured at all, or should the vendor default be "no jar, and an admin adds
-  one if their IP ever gets challenged"? The latter is cleaner for customers
-  and means one less credential in a deployment nobody is watching.
+Taken on 2026-08-26, when WP1-WP7 were built:
+
+- **WP8 is dropped.** No account pool, not even the manual second slot. The
+  reasoning is WP8's own and none of it softened while building the rest: the
+  system worked *better* with no account at all, so a pool would add more of
+  the thing that failed to protect a path we do not need. `YTDL_COOKIES_FILE`
+  stays the single, optional, operator-supplied escape hatch. If a second jar
+  is ever genuinely wanted, the honest version remains a manual
+  `YTDL_COOKIES_FILE_ALT` an admin switches to deliberately.
+- **The canary is BUILT and OFF.** `ytdlweb/ytdl_canary.py` exists, is tested,
+  and never runs unless `YTDL_CANARY_INTERVAL_SECONDS` is set (floored at 300 s
+  when it is). Building it and shipping it dark costs nothing and settles the
+  engineering half of the question; what is left is the judgement call.
+- **The jar's state is now a first-class answer, whatever the default becomes.**
+  `cookie_jar_state()` reports `none` / `empty` / `present`, and a header-only
+  jar is not a download path at all. CR-80's parked jar (two Netscape header
+  lines, `YTDL_COOKIES_FILE` still set) is therefore indistinguishable from no
+  jar to everything except the operator's own restore.
+
+**Still open, and only the owner can close them:**
+
+- **Turn the canary on?** A scheduled extraction of one public clip is the
+  difference between finding the next CR-80 yourself and an editor finding it.
+  It is also a small, real amount of automated traffic to YouTube on a fixed
+  cadence, from the IP that got bot-checked on 2026-08-11. If the answer is
+  yes, it is one env var on the container (`YTDL_CANARY_INTERVAL_SECONDS`) and
+  a redeploy, with nothing to build.
+- **Should the NAS keep a cookie jar configured at all?** After the inversion
+  the vendor default could be "no jar, and an admin adds one if their IP is
+  ever challenged". That is cleaner for customers and one less live credential
+  in a deployment nobody is watching. Today the NAS keeps the empty jar with
+  the variable set, which is CR-80's live fix left in place.
+
+## 8. What was built, and where
+
+The map from work package to the thing that carries it. Everything here is in
+the working tree on 2026-08-26 as dashboard **0.7.11** / companion **0.9.52**,
+unshipped.
+
+| WP | server (`ytdl/web`, dashboard 0.7.11) | companion (0.9.52) |
+|---|---|---|
+| WP1 | `ytdlweb/config.py` `DEFAULT_MIN_YTDLP_VERSION = '2026.08.19'` (zero-padded); `dashboard/deploy/requirements.txt` `yt-dlp>=2026.8.19` | reads the floor from `GET /ytdl/api/config/ytdl-client`; `ytdlp_manager` self-updates against it |
+| WP2 | never pinned a client (`ytdlweb/vendor/downloader.py`), unchanged | `ytdl_executor.DEFAULT_PLAYER_CLIENT = ""`; `ytdl_player_client` in `config.toml` still overrides |
+| WP3 | `worker._download_video` / `_first_path` / `_fallback_for`; `DownloadPathsBlockedError` + `BOTH_PATHS_NOTE`; sticky `preferred_path()` | `DownloadJob._run_ytdlp_paths`, `build_argv(..., cookies)`; `BOTH_BLOCKED_ERROR`, `COOKIES_PATH_NOTE`; sticky `_cookies_first` |
+| WP4 | `worker._account_flagged`, `_ACCOUNT_FLAG_MARKERS`, `identical_failure_note` | `ytdl_cookies.STALE_SIGNATURES` + `stale_reason`; `tray._youtube_warning_line`; `_account_flagged` |
+| WP5 | `ytdlweb/ytdl_evidence.py` (`record` / `snapshot` / `cookie_jar_state`, mirrored to `<data>/ytdl_evidence.json`); `/ytdl/api/health` keys `yt_dlp_version`, `cookies_state`, `pot_provider`, `paths`, `last_download`, `canary`; `static/app.js` `renderEvidence()` | `cookies_used` follows the path that actually ran, so `mark_ok` / `mark_stale` are honest |
+| WP5 (canary) | `ytdlweb/ytdl_canary.py`, started beside `worker.ensure_started()` in `main.lifespan` and in `ccsync_dashboard/ytdl.py` (wrapped); `YTDL_CANARY_INTERVAL_SECONDS`, `YTDL_CANARY_URL` | - |
+| WP6 | `worker._failure_signature` + the breaker in `_phase_download`; `YTDL_MAX_IDENTICAL_FAILURES` (default 3, 0 disables); `POST /ytdl/api/jobs/{id}/download` accepts `failed`; `[ RETRY n FAILED ]` and the note above it in the SPA | `failure_signature`, `max_identical_failures` (`ytdl_max_identical_failures`, else `CCSYNC_YTDL_MAX_IDENTICAL_FAILURES`, default 3), `_breaker_reason`, hand-back through lease expiry, `_maybe_poke_ytdlp` once per job |
+| WP7 | the two-way test and the `cookies.txt.orig` rule in `ytdl/web/DEPLOY.md`; `pot_provider` in health (folded into WP5) | - |
+
+Tests: `ytdl/web/tests/test_worker.py`, `test_api.py`, `test_static_app.py`,
+and the new `test_evidence.py`, `test_canary.py`, `test_retry_failed.py`;
+`companion/tests/test_ytdl_executor.py`, `test_ytdl_cookies.py`,
+`test_ytdl_browser_login.py`; `dashboard/tests/test_ytdl_mount.py`.
+
+**Shipping order, unchanged and load-bearing**: the dashboard deploys BEFORE
+the companions. The yt-dlp floor lives on the server and a companion reads it,
+so until 0.7.11 is out the operator's lever is
+`YTDL_MIN_YTDLP_VERSION=2026.08.19` on the live container - zero-padded, for
+the reason in the status block at the top.

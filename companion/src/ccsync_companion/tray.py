@@ -980,6 +980,14 @@ def _youtube_warning_line(snap: dict) -> str:
     h = snap.get("ytdl_cookies_health") or {}
     if h.get("status") == ytdl_cookies.STATUS_EXPIRED:
         return "⚠ YouTube sign-in has expired: age-restricted clips will fall back to the server"
+    # CR-80 (2026-08-26). A FLAGGED account is not a rotated one and the editor
+    # must not be sent to re-export the same session: the cookies still
+    # authenticate, YouTube has simply decided it will not play video for them.
+    # Downloads keep working (the executor falls back to anonymous, plan WP3),
+    # so the line says that rather than reading as an outage.
+    if ytdl_cookies.ACCOUNT_FLAG_SIGNATURE in str(h.get("reason") or "").lower():
+        return ("⚠ YouTube is refusing your signed-in session: downloads are "
+                "continuing without it")
     return "⚠ YouTube sign-in no longer works (Google rotated the session). Sign in again"
 
 

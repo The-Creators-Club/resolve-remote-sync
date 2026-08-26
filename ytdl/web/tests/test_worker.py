@@ -1659,3 +1659,397 @@ def test_no_range_drops_nothing_and_the_note_is_the_old_one(
     # a malformed bound (a row written by hand) is no bound, never a crash
     assert not worker._outside_dates({'upload_date': '19990101'}, 'soon', None)
     assert not worker._outside_dates({'upload_date': 'junk'}, '20200101', None)
+
+
+# ============================================================================
+# WP3: anonymous first, the cookie jar as the fallback (plan WP3, 2026-08-26)
+#
+# CR-80: the jar was passed on EVERY call, so one flagged YouTube account was
+# fatal to every download the server could make and there was no second path to
+# fall back to. These tests pin the inversion, both fallbacks, the sticky
+# preference and the state where neither path is left.
+# ============================================================================
+
+from ytdlweb import ytdl_evidence                                # noqa: E402
+
+_FLAG_MSG = 'ERROR: [youtube] dQw4w9WgXcQ: The page needs to be reloaded.'
+
+
+@pytest.fixture(autouse=True)
+def fresh_paths():
+    """Nothing in this module inherits another test's path verdict.
+
+    Both are module-level in the worker on purpose (a job must not re-discover
+    the working path per clip), which makes them exactly the kind of state a
+    suite has to reset between tests.
+    """
+    ytdl_evidence.reset()
+    worker.reset_preferred_path()
+    yield
+    ytdl_evidence.reset()
+    worker.reset_preferred_path()
+
+
+def _jar(tmp_path, monkeypatch, present=True):
+    """A configured cookies.txt, holding a session or only its header.
+
+    The header-only shape is CR-80's parked state: YTDL_COOKIES_FILE stays set
+    so yt-dlp keeps writing its own anonymous cookies somewhere, and there is
+    no signed-in session to fall back to.
+    """
+    p = tmp_path / 'cookies.txt'
+    body = '# Netscape HTTP Cookie File\n# comment\n'
+    if present:
+        body += '.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tabc123\n'
+    p.write_text(body, encoding='utf-8')
+    monkeypatch.setattr(config, 'COOKIES_FILE', str(p))
+    return p
+
+
+class PathAwareDownloader:
+    """A downloader that records WHICH path each attempt took.
+
+    `fail(vid, quality, path)` returns an exception to raise, or None. Real
+    files on the success path, for the same reason FakeDownloader writes them:
+    the dedupe re-check greps the folder for `[id]` names.
+    """
+
+    def __init__(self, fail=None):
+        self.fail = fail or (lambda vid, quality, path: None)
+        self.calls = []            # [(video_id, quality, path), ...]
+
+    def download(self, url, outdir, quality='best', cookies_file=None, **_kw):
+        vid = url.rsplit('=', 1)[-1]
+        path = (ytdl_evidence.PATH_COOKIES if cookies_file
+                else ytdl_evidence.PATH_ANONYMOUS)
+        self.calls.append((vid, quality, path))
+        exc = self.fail(vid, quality, path)
+        if exc is not None:
+            raise exc
+        p = Path(outdir) / f'Test Channel - {vid} title [{vid}].mp4'
+        p.write_bytes(b'fake video')
+        side = p.with_suffix('.credits.json')
+        side.write_text('{}', encoding='utf-8')
+        return {'title': f'{vid} title', 'channel': 'Test Channel',
+                'video_url': url, 'thumbnail': None, 'duration': 120,
+                'filepath': str(p), 'sidecar': str(side)}
+
+
+def _paths(fake):
+    return [c[2] for c in fake.calls]
+
+
+def test_a_download_is_anonymous_even_with_a_working_jar_configured(
+        con, job, fake_claude, fake_youtube, project_root, monkeypatch, tmp_path):
+    """The inversion itself: a configured, usable jar is the ESCAPE HATCH, not
+    the default (CR-80). Until 2026-08-26 this call carried the cookies."""
+    _jar(tmp_path, monkeypatch)
+    fake = PathAwareDownloader()
+    monkeypatch.setattr(worker.downloader, 'download', fake.download)
+    _download(con, job, fake_claude, fake_youtube, ['aaaaaaaaaaa'])
+
+    assert _paths(fake) == [ytdl_evidence.PATH_ANONYMOUS]
+    assert db.get_job(con, job['id'])['phase'] == 'done'
+    assert worker.preferred_path() == ytdl_evidence.PATH_ANONYMOUS
+    # ...and the attempt is EVIDENCE, which is what health reads (WP5)
+    snap = ytdl_evidence.snapshot()
+    assert snap[ytdl_evidence.PATH_ANONYMOUS]['ok'] is True
+    assert snap[ytdl_evidence.PATH_ANONYMOUS]['video_id'] == 'aaaaaaaaaaa'
+
+
+def test_a_bot_check_falls_back_to_the_jar_and_the_preference_sticks(
+        con, job, fake_claude, fake_youtube, project_root, monkeypatch, tmp_path):
+    """A challenged IP is what the jar is FOR. And once it has worked, the next
+    clip starts there: a job must not re-discover the same wall per clip."""
+    _jar(tmp_path, monkeypatch)
+
+    def fail(vid, quality, path):
+        if path == ytdl_evidence.PATH_ANONYMOUS:
+            return RuntimeError(_BOT_MSG)
+        return None
+
+    fake = PathAwareDownloader(fail)
+    monkeypatch.setattr(worker.downloader, 'download', fake.download)
+    _download(con, job, fake_claude, fake_youtube, ['aaaaaaaaaaa', 'bbbbbbbbbbb'])
+
+    assert _paths(fake) == [ytdl_evidence.PATH_ANONYMOUS,
+                            ytdl_evidence.PATH_COOKIES,
+                            ytdl_evidence.PATH_COOKIES]
+    fresh = db.get_job(con, job['id'])
+    assert fresh['phase'] == 'done' and (fresh['dl_done'], fresh['dl_failed']) == (2, 0)
+    assert worker.preferred_path() == ytdl_evidence.PATH_COOKIES
+    snap = ytdl_evidence.snapshot()
+    assert snap[ytdl_evidence.PATH_ANONYMOUS]['ok'] is False
+    assert snap[ytdl_evidence.PATH_COOKIES]['ok'] is True
+
+
+def test_a_flagged_session_falls_back_to_anonymous_and_is_not_fatal(
+        con, job, fake_claude, fake_youtube, project_root, monkeypatch, tmp_path):
+    """CR-80 in one test: the cookies path is refused, anonymous works, and the
+    job finishes. The old code had no path that did not carry the jar."""
+    _jar(tmp_path, monkeypatch)
+    worker.set_preferred_path(ytdl_evidence.PATH_COOKIES)
+
+    def fail(vid, quality, path):
+        if path == ytdl_evidence.PATH_COOKIES:
+            return RuntimeError(_FLAG_MSG)
+        return None
+
+    fake = PathAwareDownloader(fail)
+    monkeypatch.setattr(worker.downloader, 'download', fake.download)
+    _download(con, job, fake_claude, fake_youtube, ['aaaaaaaaaaa'])
+
+    assert _paths(fake) == [ytdl_evidence.PATH_COOKIES,
+                            ytdl_evidence.PATH_ANONYMOUS]
+    fresh = db.get_job(con, job['id'])
+    assert fresh['phase'] == 'done' and fresh['dl_done'] == 1
+    assert worker.preferred_path() == ytdl_evidence.PATH_ANONYMOUS
+
+
+def test_both_paths_blocked_stops_the_phase_and_names_both_symptoms(
+        con, job, fake_claude, fake_youtube, project_root, monkeypatch, tmp_path):
+    """The state CR-80 would have been if the IP had also been challenged: no
+    retry gets out of it, and the note has to say what to export and how to
+    test it, because "downloads are failing" names neither."""
+    _jar(tmp_path, monkeypatch)
+
+    def fail(vid, quality, path):
+        return RuntimeError(_BOT_MSG if path == ytdl_evidence.PATH_ANONYMOUS
+                            else _FLAG_MSG)
+
+    fake = PathAwareDownloader(fail)
+    monkeypatch.setattr(worker.downloader, 'download', fake.download)
+    _download(con, job, fake_claude, fake_youtube, ['aaaaaaaaaaa', 'bbbbbbbbbbb'])
+
+    assert _paths(fake) == [ytdl_evidence.PATH_ANONYMOUS,
+                            ytdl_evidence.PATH_COOKIES], 'the queue stopped'
+    fresh = db.get_job(con, job['id'])
+    assert fresh['phase'] == 'failed'
+    note = fresh['error']
+    assert 'not a bot' in note and 'page needs to be reloaded' in note
+    assert 'FRESH cookies.txt' in note and 'DEPLOY.md' in note
+    assert '—' not in note
+    # the clip that was in flight still carries its own error
+    assert db.get_video(con, job['id'], 'aaaaaaaaaaa')['dl_state'] == 'failed'
+    assert db.get_video(con, job['id'], 'bbbbbbbbbbb')['dl_state'] == 'pending'
+
+
+def test_the_blocked_both_ways_error_is_handled_by_the_bot_check_handler():
+    """Subclassed so run_job's existing `except BotCheckError` covers it: both
+    mean "this repeats for every remaining clip", only the note differs."""
+    assert issubclass(worker.DownloadPathsBlockedError, worker.BotCheckError)
+
+
+def test_a_header_only_jar_is_not_a_path_to_fall_back_to(
+        con, job, fake_claude, fake_youtube, project_root, monkeypatch, tmp_path):
+    """CR-80 parked the flagged jar as its two Netscape header lines with
+    YTDL_COOKIES_FILE still set. "A path is configured" is not a session, and
+    attempting it would spend an extraction to learn nothing."""
+    _jar(tmp_path, monkeypatch, present=False)
+    fake = PathAwareDownloader(lambda vid, q, path: RuntimeError(_BOT_MSG))
+    monkeypatch.setattr(worker.downloader, 'download', fake.download)
+    _download(con, job, fake_claude, fake_youtube, ['aaaaaaaaaaa', 'bbbbbbbbbbb'])
+
+    assert _paths(fake) == [ytdl_evidence.PATH_ANONYMOUS]
+    fresh = db.get_job(con, job['id'])
+    assert fresh['phase'] == 'failed'
+    assert 'YTDL_COOKIES_FILE' in fresh['error']
+    assert not worker.cookies_available()
+
+
+def test_a_transient_failure_never_spends_the_credential(
+        con, job, fake_claude, fake_youtube, project_root, monkeypatch, tmp_path):
+    """403s, dead networks and missing formats are not path-specific: they fail
+    the same way with an account, and switching would burn the escape hatch on
+    a failure it cannot fix."""
+    _jar(tmp_path, monkeypatch)
+    fake = PathAwareDownloader(
+        lambda vid, q, path: RuntimeError('ERROR: unable to download video '
+                                          'data: HTTP Error 403: Forbidden'))
+    monkeypatch.setattr(worker.downloader, 'download', fake.download)
+    _download(con, job, fake_claude, fake_youtube, ['aaaaaaaaaaa'])
+
+    assert _paths(fake) == [ytdl_evidence.PATH_ANONYMOUS]
+    assert db.get_video(con, job['id'], 'aaaaaaaaaaa')['dl_state'] == 'failed'
+    assert worker.preferred_path() == ytdl_evidence.PATH_ANONYMOUS
+
+
+def test_the_truncation_retry_still_composes_with_path_selection(
+        con, job, fake_claude, fake_youtube, project_root, monkeypatch, tmp_path):
+    """The 2026-08-13 fallback and the 2026-08-26 inversion in one clip: 1080p
+    ends short, the 720p rung is bot-checked anonymously, and the jar lands it.
+    The row must still say the quality it actually got."""
+    _jar(tmp_path, monkeypatch)
+
+    def fail(vid, quality, path):
+        if quality == '1080p':
+            return DownloadError(_TRUNCATED)
+        if path == ytdl_evidence.PATH_ANONYMOUS:
+            return RuntimeError(_BOT_MSG)
+        return None
+
+    fake = PathAwareDownloader(fail)
+    monkeypatch.setattr(worker.downloader, 'download', fake.download)
+    _download(con, job, fake_claude, fake_youtube, ['aaaaaaaaaaa'])
+
+    assert fake.calls == [
+        ('aaaaaaaaaaa', '1080p', ytdl_evidence.PATH_ANONYMOUS),
+        ('aaaaaaaaaaa', '720p', ytdl_evidence.PATH_ANONYMOUS),
+        ('aaaaaaaaaaa', '720p', ytdl_evidence.PATH_COOKIES)]
+    v = db.get_video(con, job['id'], 'aaaaaaaaaaa')
+    assert v['dl_state'] == 'done'
+    assert v['dl_error'] == '1080p stream truncated by YouTube, fell back to 720p'
+
+
+def test_a_bot_check_on_the_lower_rung_is_not_dressed_up_as_a_quality_failure(
+        con, job, fake_claude, fake_youtube, project_root, monkeypatch):
+    """With no jar the phase is over, and the note has to be the one naming the
+    escape hatch, not "the 720p retry failed too", which names no fix."""
+    monkeypatch.setattr(config, 'COOKIES_FILE', '')
+
+    def fail(vid, quality, path):
+        return (DownloadError(_TRUNCATED) if quality == '1080p'
+                else RuntimeError(_BOT_MSG))
+
+    fake = PathAwareDownloader(fail)
+    monkeypatch.setattr(worker.downloader, 'download', fake.download)
+    _download(con, job, fake_claude, fake_youtube, ['aaaaaaaaaaa'])
+
+    fresh = db.get_job(con, job['id'])
+    assert fresh['phase'] == 'failed'
+    assert 'YTDL_COOKIES_FILE' in fresh['error']
+
+
+# ============================================================================
+# WP4 + WP6: one job must not discover the same wall 29 times (2026-08-26)
+# ============================================================================
+
+def _same_wall(msg):
+    """A per-clip failure that differs only by video id, like YouTube's do."""
+    return lambda vid, q, path: RuntimeError(f'ERROR: [youtube] {vid}: {msg}')
+
+
+_NO_FORMAT = 'Requested format is not available. Use --list-formats'
+
+
+def test_the_same_failure_three_times_stops_the_phase(
+        con, job, fake_claude, fake_youtube, project_root, monkeypatch):
+    """CR-80's job 28 failed 29 rows with one opaque string, ten yt-dlp retries
+    each. The rows it never reached stay `pending`, which is what makes the
+    retry a one-liner."""
+    fake = PathAwareDownloader(_same_wall(_NO_FORMAT))
+    monkeypatch.setattr(worker.downloader, 'download', fake.download)
+    monkeypatch.setattr(worker, 'MAX_IDENTICAL_FAILURES', 3)
+    _download(con, job, fake_claude, fake_youtube,
+              ['aaaaaaaaaaa', 'bbbbbbbbbbb', 'ccccccccccc', 'ddddddddddd'])
+
+    fresh = db.get_job(con, job['id'])
+    assert fresh['phase'] == 'failed'
+    assert len(fake.calls) == 3, 'the fourth clip was never attempted'
+    states = {v['video_id']: v['dl_state'] for v in db.videos(con, job['id'])}
+    assert states['ddddddddddd'] == 'pending'
+    assert states['ccccccccccc'] == 'failed'
+    # the rows keep their own error, as they always have
+    assert 'Requested format' in db.get_video(con, job['id'],
+                                              'aaaaaaaaaaa')['dl_error']
+    # ...and the manifest still describes what the run did (batch_dl.py and the
+    # companion both read it)
+    assert (project_root / job['term_dir'] / 'manifest.json').exists()
+
+    note = fresh['error']
+    assert '3 clips in a row' in note and 'yt-dlp' in note
+    assert '—' not in note
+
+
+def test_two_identical_failures_are_not_a_wall(
+        con, job, fake_claude, fake_youtube, project_root, monkeypatch):
+    """N-1 is an ordinary afternoon on YouTube: the job finishes `done` with
+    two visible per-row failures, exactly as it always did."""
+    fake = PathAwareDownloader(_same_wall(_NO_FORMAT))
+    monkeypatch.setattr(worker.downloader, 'download', fake.download)
+    monkeypatch.setattr(worker, 'MAX_IDENTICAL_FAILURES', 3)
+    _download(con, job, fake_claude, fake_youtube, ['aaaaaaaaaaa', 'bbbbbbbbbbb'])
+
+    fresh = db.get_job(con, job['id'])
+    assert fresh['phase'] == 'done' and fresh['dl_failed'] == 2
+
+
+def test_a_clip_that_lands_resets_the_breaker(
+        con, job, fake_claude, fake_youtube, project_root, monkeypatch):
+    """CONSECUTIVE is the whole rule: four scattered failures around one good
+    clip is not a wall, and parking the job would lose the rest of the queue."""
+    def fail(vid, quality, path):
+        if vid == 'ccccccccccc':
+            return None
+        return RuntimeError(f'ERROR: [youtube] {vid}: {_NO_FORMAT}')
+
+    fake = PathAwareDownloader(fail)
+    monkeypatch.setattr(worker.downloader, 'download', fake.download)
+    monkeypatch.setattr(worker, 'MAX_IDENTICAL_FAILURES', 3)
+    _download(con, job, fake_claude, fake_youtube,
+              ['aaaaaaaaaaa', 'bbbbbbbbbbb', 'ccccccccccc', 'ddddddddddd',
+               'eeeeeeeeeee'])
+
+    fresh = db.get_job(con, job['id'])
+    assert fresh['phase'] == 'done'
+    assert (fresh['dl_done'], fresh['dl_failed']) == (1, 4)
+    assert len(fake.calls) == 5
+
+
+def test_two_different_failures_do_not_add_up(
+        con, job, fake_claude, fake_youtube, project_root, monkeypatch):
+    """The breaker counts THE SAME wall, not failures: three unrelated dead
+    clips are three dead clips."""
+    msgs = {'aaaaaaaaaaa': 'Private video', 'bbbbbbbbbbb': _NO_FORMAT,
+            'ccccccccccc': 'HTTP Error 403: Forbidden'}
+    fake = PathAwareDownloader(
+        lambda vid, q, path: RuntimeError(f'ERROR: [youtube] {vid}: {msgs[vid]}'))
+    monkeypatch.setattr(worker.downloader, 'download', fake.download)
+    monkeypatch.setattr(worker, 'MAX_IDENTICAL_FAILURES', 3)
+    _download(con, job, fake_claude, fake_youtube,
+              ['aaaaaaaaaaa', 'bbbbbbbbbbb', 'ccccccccccc'])
+
+    assert db.get_job(con, job['id'])['phase'] == 'done'
+    assert len(fake.calls) == 3
+
+
+def test_the_breaker_can_be_turned_off_without_a_build(
+        con, job, fake_claude, fake_youtube, project_root, monkeypatch):
+    """YTDL_MAX_IDENTICAL_FAILURES=0 is the escape hatch for a false positive:
+    grind through the queue the way it always did."""
+    fake = PathAwareDownloader(_same_wall(_NO_FORMAT))
+    monkeypatch.setattr(worker.downloader, 'download', fake.download)
+    monkeypatch.setattr(worker, 'MAX_IDENTICAL_FAILURES', 0)
+    _download(con, job, fake_claude, fake_youtube,
+              ['aaaaaaaaaaa', 'bbbbbbbbbbb', 'ccccccccccc', 'ddddddddddd'])
+
+    fresh = db.get_job(con, job['id'])
+    assert fresh['phase'] == 'done' and fresh['dl_failed'] == 4
+    assert len(fake.calls) == 4
+
+
+def test_a_failure_signature_ignores_the_video_id_and_the_numbers():
+    """What makes "the same wall on a different clip" the same key."""
+    sig = worker._failure_signature
+    assert sig('ERROR: [youtube] SAQBbd1Rxmo: Requested format is not available') \
+        == sig('ERROR: [youtube] dQw4w9WgXcQ: Requested format is not available')
+    assert sig('[Errno 13] Permission denied: /tmp/a1b2c3.tmp') \
+        == sig('[Errno 13] Permission denied: /tmp/z9y8x7.tmp')
+    assert sig('Requested format is not available') != sig('HTTP Error 403')
+    assert len(sig('x' * 400)) <= 120
+
+
+@pytest.mark.parametrize('error,expected', [
+    (f'ERROR: [youtube] x: {_NO_FORMAT}', 'no usable format'),
+    ('ERROR: unable to download video data: HTTP Error 403: Forbidden',
+     'YTDL_POT_BASE_URL'),
+    ('ERROR: something nobody has classified yet', 'failed the same way'),
+])
+def test_the_phase_note_names_the_thing_to_check(error, expected):
+    """Three walls, three remedies. An editor cannot tell a SABR squeeze from a
+    dead PO-token sidecar from a raw stderr dump, so the note has to."""
+    note = worker.identical_failure_note(4, error)
+    assert expected in note
+    assert note.startswith('4 clips in a row')
+    assert '—' not in note
+    assert 'RETRY' in note

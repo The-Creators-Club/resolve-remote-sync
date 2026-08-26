@@ -696,9 +696,11 @@ def test_no_deno_means_no_js_runtimes_flag(tmp_path, ytdlp, monkeypatch):
     assert "--js-runtimes" not in argv
 
 
-def test_a_configured_cookies_file_is_passed(tmp_path, ytdlp):
-    """The editor's signed-in cookies.txt is what passes the bot check and
-    unlocks age-gated clips on their own machine (2026-08-16)."""
+def test_a_configured_cookies_file_is_not_sent_until_it_is_needed(tmp_path, ytdlp):
+    """THE INVERSION (plan WP3, 2026-08-26). A configured jar used to be on
+    every argv; now a clip that downloads anonymously never sends it at all.
+    CR-80 is why: with no path that omitted the jar, one flagged Google
+    account was fatal to every download this machine could make."""
     cookies = tmp_path / "cookies.txt"
     cookies.write_text("# Netscape HTTP Cookie File\n")
     deps = make_deps(tmp_path, fleet=FakeFleet(manifest_for()), ytdlp=ytdlp,
@@ -708,21 +710,28 @@ def test_a_configured_cookies_file_is_passed(tmp_path, ytdlp):
     run_job(deps)
 
     (argv,) = ytdlp.calls
+    assert "--cookies" not in argv
+    # ...but build_argv still spells it when the caller chooses that path.
+    job = ex.DownloadJob(7, deps)
+    argv = job.build_argv(watch(VID1), str(tmp_path), "1080p", str(cookies))
     assert argv[argv.index("--cookies") + 1] == str(cookies)
 
 
 def test_a_missing_cookies_file_is_not_passed(tmp_path, ytdlp):
     """A configured-but-absent path is treated as no cookies: yt-dlp would
     abort the whole download on a missing --cookies file, and an anonymous
-    attempt beats refusing to try."""
+    attempt beats refusing to try. Since WP3 it also means the bot-check
+    fallback has nothing to retry WITH, which is the same answer."""
+    cfg = make_cfg(tmp_path, ytdl_cookies_file=str(tmp_path / "gone.txt"))
     deps = make_deps(tmp_path, fleet=FakeFleet(manifest_for()), ytdlp=ytdlp,
-                     cfg=make_cfg(tmp_path, ytdl_cookies_file=str(tmp_path / "gone.txt")))
+                     cfg=cfg)
     deps.cfg["ytdlp_path"] = str(ytdlp.script)
 
     run_job(deps)
 
     (argv,) = ytdlp.calls
     assert "--cookies" not in argv
+    assert ex._cookies_file(cfg) is None
 
 
 def test_no_cookies_configured_means_no_cookies_flag(tmp_path, ytdlp):
@@ -2038,15 +2047,16 @@ def test_a_shutdown_stops_the_retry_at_once(tmp_path):
     assert len(calls) == 1
 
 
-# ------------------- CR-39: the client that works without a PO token
+# ------------------- CR-39 then CR-80: the player client, pinned and unpinned
 
-def test_the_argv_names_a_player_client_that_needs_no_po_token(tmp_path):
-    """CR-39 (2026-08-19), and it is the reason requester-first downloads
-    produced almost nothing for a week. yt-dlp's DEFAULT client set hands back
-    media URLs bound to a GVS PO token; the NAS has a provider for one (the
-    bgutil sidecar) and an editor's machine has none, so the server always
-    succeeded and the requester 403'd. Measured on a live editor machine, same
-    clip, same binary, same minute:
+def test_the_argv_pins_no_player_client(tmp_path):
+    """Two measurements, six weeks apart, and the second one is why this is
+    empty (CR-80, 2026-08-26, plan WP2).
+
+    CR-39 (2026-08-19) pinned `web_safari`: yt-dlp's default client set handed
+    back media URLs bound to a GVS PO token, the NAS has a provider for one
+    (the bgutil sidecar) and an editor's machine has none, so the server always
+    succeeded and the requester 403'd.
 
         default (android_vr)  ERROR: unable to download video data:
                               HTTP Error 403: Forbidden
@@ -2055,30 +2065,41 @@ def test_the_argv_names_a_player_client_that_needs_no_po_token(tmp_path):
         web                   works, but falls to format 18 -- 360p
         web_safari            works, 17.3 MB, full quality, exit 0
 
-    ...and on a clip that HAD downloaded locally 90 minutes earlier, the
-    default client 403'd while web_safari returned the same 16.2 MB: YouTube
-    tightened enforcement during the day, which is why this read as "it worked
-    once and then stopped".
+    CR-80 killed it. web_safari serves muxed HLS and YouTube has SABR-forced
+    those formats away; measured on the base rig against the deployed
+    companion's own yt-dlp (2026.07.04) and its own jar:
+
+        web_safari, anonymous            no usable formats
+        web_safari, with cookies         no usable formats
+        default client, with cookies     "The page needs to be reloaded."
+        default client, anonymous        formats found, then HTTP 403
+        2026.8.19, default, anonymous    WORKS (1080p, residential IP,
+                                         no PO-token provider at all)
+
+    The rule: a pinned player client is a pinned bug waiting to happen.
+    yt-dlp's maintainers track which client works weekly; we do not, and every
+    pin is a pin we have taken on the job of keeping current.
     """
     job = ex.DownloadJob(7, ex.Deps(make_cfg(tmp_path)))
     argv = job.build_argv("https://www.youtube.com/watch?v=" + VID1,
                           str(tmp_path), "1080p")
-    assert "--extractor-args" in argv
-    assert argv[argv.index("--extractor-args") + 1] == \
-        "youtube:player_client=web_safari"
+    assert ex.DEFAULT_PLAYER_CLIENT == "", "the pin is what CR-80 broke"
+    assert "--extractor-args" not in argv
 
 
 def test_one_client_and_not_a_list():
-    """A comma-separated list would let yt-dlp pick the best format ACROSS the
-    clients it asked -- which is how a PO-token-bound URL gets chosen again and
-    403s. The point of naming a client is to be held to it."""
+    """If a machine ever pins one again, it pins ONE. A comma-separated list
+    lets yt-dlp pick the best format ACROSS the clients it asked, which is how
+    a PO-token-bound URL gets chosen again and 403s (CR-39)."""
     assert "," not in ex.DEFAULT_PLAYER_CLIENT
 
 
 def test_an_operator_can_override_the_client_without_a_release(tmp_path):
     """This is YouTube's to change, and the day it does, the lever must not be
-    a build. An explicit empty string sends no --extractor-args at all, which
-    is yt-dlp's own default set and the behaviour before CR-39."""
+    a build. The override survived the unpinning (plan WP2): it is what a
+    machine uses on the day a specific client is known-good and yt-dlp's
+    default set is not. An explicit empty string sends no --extractor-args at
+    all, which is now also the default."""
     cfg = make_cfg(tmp_path)
     cfg["ytdl_player_client"] = "tv_embedded"
     job = ex.DownloadJob(7, ex.Deps(cfg))
@@ -2092,6 +2113,336 @@ def test_an_operator_can_override_the_client_without_a_release(tmp_path):
     argv = job.build_argv("https://www.youtube.com/watch?v=" + VID1,
                           str(tmp_path), "1080p")
     assert "--extractor-args" not in argv
+
+
+# ---------------------------------------------------------------------------
+# WP3: anonymous first, the cookie jar as the fallback (CR-80, 2026-08-26)
+# ---------------------------------------------------------------------------
+#
+# The jar used to be on every argv. That is what made ONE flagged Google
+# account fatal to every download an editor's machine could make: there was no
+# path that did not carry it, so there was nothing to fall back to, and the
+# only thing an editor saw was 29 identical opaque errors. Anonymous is the
+# normal case and needs no account at all; the jar answers a bot check and
+# nothing else.
+
+BOT_CHECK = ("ERROR: [youtube] aaaaaaaaaaa: Sign in to confirm you're not a "
+             "bot. Use --cookies-from-browser or --cookies for the "
+             "authentication.")
+ACCOUNT_FLAG = "ERROR: [youtube] aaaaaaaaaaa: The page needs to be reloaded."
+
+
+def cookie_jar(tmp_path) -> str:
+    """A file where `ytdl_cookies_file` points. Its CONTENT is never read on
+    this path -- resolve() checks existence and yt-dlp is the authority on
+    whether a session works."""
+    jar = tmp_path / "cookies.txt"
+    if not jar.exists():
+        jar.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    return str(jar)
+
+
+def cookied_deps(tmp_path, fleet, ytdlp):
+    deps = make_deps(tmp_path, fleet=fleet, ytdlp=ytdlp,
+                     cfg=make_cfg(tmp_path, ytdl_cookies_file=cookie_jar(tmp_path)))
+    deps.cfg["ytdlp_path"] = str(ytdlp.script)
+    return deps
+
+
+def sent_cookies(argv: list) -> bool:
+    return "--cookies" in argv
+
+
+def test_a_bot_check_is_what_spends_the_cookie_jar_and_it_spends_it_once(
+        tmp_path, ytdlp):
+    """The one failure the jar is an answer to (plan WP3). Anonymous first,
+    and only "confirm you're not a bot" earns the retry -- the same classifier
+    the NAS worker has used since YTDL-21, so a clip that fails on an editor's
+    machine and is swept up by the server is read the same way in both."""
+    fleet = FakeFleet(manifest_for())
+    ytdlp.plan({VID1: {"attempts": [{"exit": 1, "stderr": BOT_CHECK}, {}]}})
+    deps = cookied_deps(tmp_path, fleet, ytdlp)
+
+    run_job(deps)
+
+    first, second = ytdlp.calls
+    assert not sent_cookies(first), "the first attempt is always anonymous"
+    assert second[second.index("--cookies") + 1] == cookie_jar(tmp_path)
+    assert fleet.state_sequence == [(VID1, "downloading"), (VID1, "done")]
+    # The row says which path landed it -- `note` is free text the server
+    # already stores, so this needed no schema change.
+    assert "signed-in" in fleet.body_for(VID1, "done")["note"]
+
+
+def test_the_flip_is_sticky_so_forty_clips_do_not_rediscover_the_bot_check(
+        tmp_path, ytdlp):
+    """A job of forty clips must not pay the failed anonymous extraction forty
+    times. The preference is per executor and does not survive it: a restart
+    starts anonymous again, which is the safe direction (an unnecessary
+    anonymous attempt costs one extraction; an unnecessary cookies attempt
+    spends the credential)."""
+    fleet = FakeFleet(manifest_for(clips=[
+        {"video_id": VID1, "url": watch(VID1)},
+        {"video_id": VID2, "url": watch(VID2)},
+    ]))
+    ytdlp.plan({VID1: {"attempts": [{"exit": 1, "stderr": BOT_CHECK}, {}]},
+                VID2: {"attempts": [{}]}})
+    deps = cookied_deps(tmp_path, fleet, ytdlp)
+
+    job = run_job(deps)
+
+    paths = [sent_cookies(argv) for argv in ytdlp.calls]
+    assert paths == [False, True, True], "clip 2 goes cookies-first"
+    assert job._cookies_first is True
+    assert job.done == 2
+
+
+def test_a_flagged_session_falls_back_to_anonymous_and_flips_back(tmp_path, ytdlp):
+    """CR-80 in one test. YouTube decides it does not like the signed-in
+    account: the cookies still authenticate, every https format is SABR-forced
+    away, and the message names a page reload no downloader can perform. The
+    remedy is the opposite of the bot check's -- stop sending the jar -- so the
+    fallback goes the other way and the preference flips back."""
+    fleet = FakeFleet(manifest_for(clips=[
+        {"video_id": VID1, "url": watch(VID1)},
+        {"video_id": VID2, "url": watch(VID2)},
+    ]))
+    ytdlp.plan({VID1: {"attempts": [{"exit": 1, "stderr": ACCOUNT_FLAG}, {}]},
+                VID2: {"attempts": [{}]}})
+    deps = cookied_deps(tmp_path, fleet, ytdlp)
+    job = ex.DownloadJob(7, deps)
+    job._cookies_first = True          # an earlier bot check flipped it
+    job.run()
+
+    paths = [sent_cookies(argv) for argv in ytdlp.calls]
+    assert paths == [True, False, False]
+    assert job._cookies_first is False
+    assert job.done == 2
+    assert fleet.body_for(VID1, "done")["note"] is None, "anonymous is the norm"
+
+
+def test_both_paths_blocked_fails_the_clip_naming_both(tmp_path, ytdlp):
+    """The editor cannot fix either half, so the row says what is happening
+    rather than naming a knob. Both remedies are in it because the two
+    failures have opposite ones."""
+    fleet = FakeFleet(manifest_for())
+    ytdlp.plan({VID1: {"attempts": [{"exit": 1, "stderr": BOT_CHECK},
+                                    {"exit": 1, "stderr": ACCOUNT_FLAG}]}})
+    deps = cookied_deps(tmp_path, fleet, ytdlp)
+
+    run_job(deps)
+
+    assert len(ytdlp.calls) == 2
+    error = fleet.body_for(VID1, "failed")["error"]
+    assert error == ex.BOTH_BLOCKED_ERROR
+    assert "not a bot" in error and "signed-in session" in error
+    assert "--" not in error, "no em dashes in what an editor reads"
+
+
+def test_with_no_jar_a_bot_check_is_simply_the_failure(tmp_path, ytdlp):
+    """Nothing to fall back to is not a reason to try twice."""
+    fleet = FakeFleet(manifest_for())
+    ytdlp.plan({VID1: {"attempts": [{"exit": 1, "stderr": BOT_CHECK}]}})
+    deps = make_deps(tmp_path, fleet=fleet, ytdlp=ytdlp)
+
+    run_job(deps)
+
+    (argv,) = ytdlp.calls
+    assert not sent_cookies(argv)
+    assert "not a bot" in fleet.body_for(VID1, "failed")["error"]
+
+
+def test_an_ordinary_failure_never_spends_the_jar(tmp_path, ytdlp):
+    """A dead video is a dead video on both paths, and every unnecessary
+    signed-in request is one more chance for YouTube to flag the account."""
+    fleet = FakeFleet(manifest_for())
+    ytdlp.plan({VID1: {"attempts": [{"exit": 1, "stderr": "ERROR: Video unavailable"}]}})
+    deps = cookied_deps(tmp_path, fleet, ytdlp)
+
+    run_job(deps)
+
+    assert [sent_cookies(a) for a in ytdlp.calls] == [False]
+
+
+def test_cookie_health_follows_the_path_actually_used(tmp_path, ytdlp):
+    """`cookies_used` was `bool(_cookies_file(cfg))` computed after the run --
+    "is a jar configured", not "did this attempt send one" (plan WP3). With
+    the inversion that credits an ANONYMOUS bot check to the editor's sign-in
+    and lights the tray warning for a session nothing touched."""
+    from ccsync_companion import ytdl_cookies
+
+    fleet = FakeFleet(manifest_for())
+    ytdlp.plan({VID1: {"attempts": [{"exit": 1, "stderr": BOT_CHECK}, {}]}})
+    deps = cookied_deps(tmp_path, fleet, ytdlp)
+
+    run_job(deps)
+
+    # The anonymous attempt matched a STALE_SIGNATURE phrase; the session was
+    # never asked, so nothing was recorded against it.
+    assert ytdl_cookies.health(deps.cfg)["status"] == ytdl_cookies.STATUS_OK
+
+
+def test_a_flagged_session_is_recorded_for_the_tray_in_the_editors_words(
+        tmp_path, ytdlp):
+    """WP4's companion half. Until CR-80 the phrase was not in
+    STALE_SIGNATURES at all, so a flagged session never lit anything: the
+    editor saw N opaque failures and a tray that said everything was fine."""
+    from ccsync_companion import ytdl_cookies
+
+    fleet = FakeFleet(manifest_for())
+    ytdlp.plan({VID1: {"attempts": [{"exit": 1, "stderr": ACCOUNT_FLAG}]}})
+    deps = cookied_deps(tmp_path, fleet, ytdlp)
+    job = ex.DownloadJob(7, deps)
+    job._cookies_first = True
+    job.run()
+
+    health = ytdl_cookies.health(deps.cfg)
+    assert health["status"] == ytdl_cookies.STATUS_STALE
+    assert "refusing your signed-in session" in health["reason"]
+    assert "continuing without it" in health["reason"]
+
+
+# ---------------------------------------------------------------------------
+# WP6: one job does not discover the same wall 29 times
+# ---------------------------------------------------------------------------
+
+VID3, VID4, VID5 = "ccccccccccc", "ddddddddddd", "eeeeeeeeeee"
+WALL = "ERROR: [youtube] xxxxxxxxxxx: Requested format is not available."
+
+
+def five_clips() -> list:
+    return [{"video_id": v, "url": watch(v)}
+            for v in (VID1, VID2, VID3, VID4, VID5)]
+
+
+def test_the_breaker_stops_at_n_not_at_n_minus_one(tmp_path, ytdlp):
+    """CR-80's job 28 hit one wall 29 times, each with yt-dlp's full retry
+    budget behind it: 29 chances to make YouTube angrier, for no information.
+    The remaining clips are handed back the way every other refusal on this
+    path is -- stop posting, let the lease expire, the server reclaims and its
+    second-chance sweep re-queues what failed."""
+    fleet = FakeFleet(manifest_for(clips=five_clips()))
+    ytdlp.plan({"default": {"attempts": [{"exit": 1, "stderr": WALL}]}})
+    deps = make_deps(tmp_path, fleet=fleet, ytdlp=ytdlp)
+
+    job = run_job(deps)
+
+    assert len(ytdlp.calls) == 3 == ex.DEFAULT_MAX_IDENTICAL_FAILURES
+    assert job.failed == 3
+    assert [v for v, state in fleet.state_sequence if state == "failed"] == \
+        [VID1, VID2, VID3]
+
+
+def test_the_breaker_counts_consecutive_failures_only(tmp_path, ytdlp):
+    """A clip that lands is proof the wall is not there any more."""
+    fleet = FakeFleet(manifest_for(clips=five_clips()))
+    ytdlp.plan({VID1: {"attempts": [{"exit": 1, "stderr": WALL}]},
+                VID2: {"attempts": [{"exit": 1, "stderr": WALL}]},
+                VID3: {"attempts": [{}]},
+                VID4: {"attempts": [{"exit": 1, "stderr": WALL}]},
+                VID5: {"attempts": [{"exit": 1, "stderr": WALL}]}})
+    deps = make_deps(tmp_path, fleet=fleet, ytdlp=ytdlp)
+
+    job = run_job(deps)
+
+    assert len(ytdlp.calls) == 5, "the success reset the count"
+    assert (job.done, job.failed) == (1, 4)
+
+
+def test_different_failures_are_not_the_same_wall(tmp_path, ytdlp):
+    """Signature-based, not count-based: three unrelated dead videos are three
+    dead videos, and stopping the job over them would be worse than the bug."""
+    fleet = FakeFleet(manifest_for(clips=five_clips()))
+    reasons = ["ERROR: Video unavailable", "ERROR: Private video",
+               "ERROR: This live event will begin later",
+               "ERROR: Video unavailable in your country",
+               "ERROR: Sign in to confirm your age"]
+    ytdlp.plan({v: {"attempts": [{"exit": 1, "stderr": reason}]}
+                for v, reason in zip((VID1, VID2, VID3, VID4, VID5), reasons)})
+    deps = make_deps(tmp_path, fleet=fleet, ytdlp=ytdlp)
+
+    run_job(deps)
+
+    assert len(ytdlp.calls) == 5
+
+
+def test_the_breaker_is_configurable_and_zero_disables_it(tmp_path, ytdlp):
+    fleet = FakeFleet(manifest_for(clips=five_clips()))
+    ytdlp.plan({"default": {"attempts": [{"exit": 1, "stderr": WALL}]}})
+    deps = make_deps(tmp_path, fleet=fleet, ytdlp=ytdlp)
+    deps.cfg["ytdl_max_identical_failures"] = 0
+
+    run_job(deps)
+
+    assert len(ytdlp.calls) == 5, "0 disables the breaker"
+    assert ex.max_identical_failures({}) == 3
+    assert ex.max_identical_failures({"ytdl_max_identical_failures": 5}) == 5
+    assert ex.max_identical_failures({"ytdl_max_identical_failures": "junk"}) == 3
+    assert ex.max_identical_failures({"ytdl_max_identical_failures": -1}) == 0
+
+
+def test_the_failure_signature_is_equal_across_clips():
+    """The video id, the paths and the byte counts are what differ between two
+    copies of the same failure. worker._failure_signature's regexes, so the
+    two executors count the same wall the same way."""
+    a = ex.failure_signature(
+        r"ERROR: [youtube] aaaaaaaaaaa: Requested format is not available. "
+        r"Wrote C:\Projects\a [aaaaaaaaaaa].part (1234 bytes)")
+    b = ex.failure_signature(
+        r"ERROR: [youtube] bbbbbbbbbbb: Requested format is not available. "
+        r"Wrote /tree/b [bbbbbbbbbbb].part (99 bytes)")
+    assert a == b and a
+    assert ex.failure_signature("ERROR: Video unavailable") != a
+    assert len(ex.failure_signature("x" * 400)) <= 120
+
+
+class EnsuringYtDlpManager(FakeYtDlpManager):
+    """A sidecar manager that records ensure() calls, which the real one
+    exposes and the plain fake does not."""
+
+    def __init__(self):
+        super().__init__()
+        self.ensured = 0
+
+    def ensure(self, min_version=None):
+        self.ensured += 1
+        return {"ok": True, "action": "none", "message": "yt-dlp is current"}
+
+
+def test_a_format_or_403_wall_pokes_the_yt_dlp_updater_once(tmp_path, ytdlp):
+    """The fleet half of CR-80: every companion sat on a yt-dlp that could not
+    download anything, reporting "2026.07.04 is current" nightly, because the
+    floor it compared against was the one that shipped with it. These two
+    signatures are what that looks like from here, so the failure asks the
+    sidecar to re-read the dashboard's floor instead of waiting for the next
+    daily check. Once per job: the answer does not change per clip."""
+    fleet = FakeFleet(manifest_for(clips=[
+        {"video_id": VID1, "url": watch(VID1)},
+        {"video_id": VID2, "url": watch(VID2)},
+    ]))
+    ytdlp.plan({"default": {"attempts": [
+        {"exit": 1, "stderr": "ERROR: unable to download video data: "
+                              "HTTP Error 403: Forbidden"}]}})
+    deps = make_deps(tmp_path, fleet=fleet, ytdlp=ytdlp)
+    manager = EnsuringYtDlpManager()
+    deps.ytdlp = manager
+
+    run_job(deps)
+
+    assert manager.ensured == 1
+
+
+def test_an_ordinary_failure_does_not_poke_the_updater(tmp_path, ytdlp):
+    fleet = FakeFleet(manifest_for())
+    ytdlp.plan({"default": {"attempts": [
+        {"exit": 1, "stderr": "ERROR: Video unavailable"}]}})
+    deps = make_deps(tmp_path, fleet=fleet, ytdlp=ytdlp)
+    manager = EnsuringYtDlpManager()
+    deps.ytdlp = manager
+
+    run_job(deps)
+
+    assert manager.ensured == 0
 
 
 # -- the progress line and the fragment count (2026-08-25) -------------------

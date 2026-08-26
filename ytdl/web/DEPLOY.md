@@ -110,7 +110,10 @@ add a two-line startup shim to your dev runner if you want a stand-in.
 | `YTDL_LOCAL_DOWNLOAD` | *(unset)* — **`install_dashboard_app.py` sets it to `1`** | `1` lets the SPA offer download jobs to the requester's companion (docs/YTDL_LOCAL_DOWNLOAD.md). Unset = the server-side path, byte for byte — which is what the fleet silently ran on for two days after 0.7.8 shipped, because nothing set this (2026-08-16). The deploy script now does; `GET /ytdl/api/health` → `local_download` says whether it took |
 | `YTDL_LEASE_SECONDS` | `180` | how long a companion's download claim lives without a heartbeat before the server reclaims the job |
 | `YTDL_HEARTBEAT_SECONDS` | `30` | how often the local executor is told to heartbeat (returned to it at claim time) |
-| `YTDL_MIN_YTDLP_VERSION` | `2026.07.04` | claims from a companion whose yt-dlp is older are refused 403; its sidecar manager reads this via `GET /ytdl/api/config/ytdl-client` and self-updates |
+| `YTDL_MIN_YTDLP_VERSION` | `2026.08.19` *(raised from `2026.07.04` on 2026-08-26, CR-83)* | claims from a companion whose yt-dlp is older are refused 403; its sidecar manager reads this via `GET /ytdl/api/config/ytdl-client` and self-updates. **Write it ZERO-PADDED.** The fleet route compares it as a string, so `2026.8.19` sorts above every real `2026.08.xx` release and refuses every claim in the fleet while no companion updates |
+| `YTDL_MAX_IDENTICAL_FAILURES` | *(unset = 3)* | how many consecutive clip failures with the same normalised signature end the download phase instead of grinding through the rest (CR-83, `docs/YTDL_RESILIENCE_PLAN.md` WP6). The job is parked at phase `failed` with a note naming the likely fix, unreached rows stay `pending`, the manifest is still written, and `[ RETRY n FAILED ]` re-queues them. `0` disables the breaker |
+| `YTDL_CANARY_INTERVAL_SECONDS` | *(unset = off)* | seconds between scheduled canary extractions. **Off by default and opt-in**: it is real automated traffic to YouTube on a fixed cadence from this deployment's IP. Any value below the 300 s floor is raised to it; unset, `0` or unparseable means the thread never starts |
+| `YTDL_CANARY_URL` | `https://www.youtube.com/watch?v=jNQXAC9IVRw` | the clip the canary extracts. "Me at the zoo", 19 seconds, never region-locked or age-gated. Only read when the canary is on |
 | `DASH_REPORT_TOKEN` | *(the dashboard's)* | **required for local downloads**: the fleet routes (claim/heartbeat/manifest/clip-status) fail closed without it. Shared with the dashboard process — the mount runs in it |
 | `DASH_SESSION_SECRET` | *(the dashboard's)* | **required for local downloads**: the fleet routes verify the companion's `X-CCSync-Identity` token against it (H5). Unset = 403, and the NAS worker downloads everything |
 | `DASH_SITE_YOUTUBE_DOWNLOAD` / `_UNBLOCK` | `0` | set from `site.toml [features]` by the deploy; published in `GET /api/v1/site` |
@@ -383,6 +386,97 @@ it, and the escape hatch is one `install` away if a future IP block needs it.
 Do not restore a signed-in export just because "cookies are mandatory" below
 says so; re-test both ways first, with the one-liner at the end of this section
 run with and without `--cookies`.
+
+#### The rule the CODE runs on, since 2026-08-26 (CR-83)
+
+The inversion is no longer only an operating note: it is what the downloader
+does. `docs/YTDL_RESILIENCE_PLAN.md` WP3 is the write-up, and the same change
+landed on the editors' companions (0.9.52) as well as the server (0.7.11).
+
+- **Anonymous is the normal path.** Every download is tried without the jar
+  first. Nothing needs an account in the ordinary case.
+- **The jar is the FALLBACK, and only for the one failure it answers.** A bot
+  check ("confirm you're not a bot") on the anonymous path retries that clip
+  once with cookies. Nothing else does - not a 403 on the media fetch, not a
+  missing format, not a truncated stream - because spending the credential on
+  a failure it cannot fix is how one flagged account took everything down.
+- **An account flag goes back the other way.** "The page needs to be reloaded"
+  on the cookies path retries anonymously, and if BOTH paths come back refused
+  the phase stops with a note that names both.
+- **The preference is sticky** until the process restarts, so the extra failed
+  extraction costs once per flip rather than once per clip. A restart starts
+  anonymous again, which is the safe direction.
+- **An empty jar is fine, and is not a path.** A `cookies.txt` holding only
+  comment/header lines is `cookies_state: empty` and the cookies path is never
+  attempted with it. That is exactly the state CR-80's fix left the NAS in, so
+  the deployment is running the intended configuration, not a broken one.
+- **Keep a pristine `cookies.txt.orig` beside the jar** if you ever do install
+  a signed-in export. **yt-dlp rewrites `cookies.txt` in place on every run**,
+  so the operator's export is overwritten by whatever the session became within
+  minutes; restoring it is then a re-export from a browser rather than a copy.
+  `install -o 3000 -g 3000 -m 600` the export twice, once as `cookies.txt` and
+  once as `cookies.txt.orig`, and only ever hand yt-dlp the first.
+
+#### The two-way test is the FIRST diagnostic (runbook step)
+
+Every future "YouTube downloads are failing" starts here, before reading a
+single job row. Which of these two works has flipped once already (2026-08-11
+cookies-only, 2026-08-26 anonymous-only) and will flip again, so the answer is
+measured, never assumed:
+
+```sh
+# in the dashboard container, same clip both ways
+for CK in "" "--cookies /ytdl-data/cookies.txt"; do
+  /venv/bin/python -m yt_dlp --simulate --no-warnings $CK \
+    --extractor-args "youtubepot-bgutilhttp:base_url=$YTDL_POT_BASE_URL" \
+    -f "bv*[height<=1080]+ba/b[height<=1080]" \
+    -O "%(format_id)s h=%(height)s" "https://www.youtube.com/watch?v=<id>"
+done
+```
+
+Then, and this is not optional, **finish with one REAL download through the
+production path** - a simulate is not proof, because CR-80's anonymous path
+extracted happily on yt-dlp 2026.07.04 and then 403'd on the bytes:
+
+```sh
+docker exec -u 3000:3001 <container> /venv/bin/python -c \
+  "from ytdlweb import config; from ytdlweb.vendor import downloader; \
+   print(downloader.download('https://www.youtube.com/watch?v=<id>', '/tmp', \
+   quality='1080p', ffmpeg_location=config.FFMPEG_DIR))"
+```
+
+Also check the running yt-dlp, which is the other half of the CR-80 diagnosis
+and now answers itself on the health strip:
+
+```sh
+docker exec <container> /venv/bin/python -c "import yt_dlp;print(yt_dlp.version.__version__)"
+```
+
+Run the same two-way test on ONE editor machine, against the deployed
+companion's own binary (`%LOCALAPPDATA%\ccsync\tools\yt-dlp.exe`) and its own
+jar (`~/.ccsync/youtube-cookies.txt`). The fleet and the NAS have failed
+independently and for different reasons in the same week (CR-80 / CR-83), and
+a server that downloads fine says nothing about an editor's machine.
+
+#### What `/ytdl/api/health` now means (2026-08-26, WP5)
+
+`cookies: true` is **not evidence that downloads work** and never was: it means
+`YTDL_COOKIES_FILE` names a path. It stayed true right through CR-80 while
+every single download failed. It is kept only so a cached SPA bundle does not
+paint a blank pip. The keys to read instead:
+
+| key | values | what it tells you |
+|---|---|---|
+| `yt_dlp_version` | e.g. `2026.08.19` | the yt-dlp this container is actually running. Answering this took a `docker exec` during CR-80, and it was half the diagnosis |
+| `cookies_state` | `none` / `empty` / `present` | what the jar HOLDS, not whether a path is set. `empty` (header lines only) is the intended state since CR-80 and means the cookies path is never attempted |
+| `pot_provider` | `unconfigured` / `ok` / `unreachable` | whether the bgutil sidecar ANSWERED its own `/ping`, from a 1 s probe cached for 60 s. `unconfigured` is not an error - a deployment with an unblocked IP needs no provider. `unreachable` is CR-73's shape, which sat undetected for days behind a configured-and-silent sidecar |
+| `paths` | `{anonymous\|cookies: {ok, error, at, video_id, source}}` | the last real outcome per path. A key appears only once that path has been tried. Mirrored to `<YTDL_DATA_ROOT>/ytdl_evidence.json`, so a container restart does not blank it |
+| `last_download` | the newest `paths` entry with `source: download` | "the last real download worked, anonymously, 3 minutes ago". This is the pip that goes red when downloading is broken |
+| `canary` | `{enabled, last}` | whether the scheduled check is on, and how its last run went (`source: canary`). `enabled: false` in every deployment that has not opted in |
+
+All of it is on the health strip at the top of the SPA, and every pip is drawn
+behind a null guard so a dashboard running an older `ytdl/web` paints exactly
+the strip it painted before.
 
 ### Cookies are MANDATORY here, and useless on their own — measured 2026-08-11
 

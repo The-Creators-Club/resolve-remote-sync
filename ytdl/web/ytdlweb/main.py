@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, Response
 
-from ytdlweb import config, db, worker
+from ytdlweb import config, db, worker, ytdl_canary
 from ytdlweb.routes_api import router as api_router
 from ytdlweb.routes_fleet import router as fleet_router
 
@@ -32,6 +32,10 @@ async def lifespan(_app):
     finally:
         con.close()
     worker.ensure_started()
+    # Beside the worker and idempotent for the same reason (plan WP5,
+    # 2026-08-26). A no-op unless YTDL_CANARY_INTERVAL_SECONDS is set, which
+    # ships unset.
+    ytdl_canary.ensure_started()
     yield
 
 

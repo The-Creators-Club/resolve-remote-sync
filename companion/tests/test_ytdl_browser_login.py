@@ -397,11 +397,15 @@ def test_executor_marks_stale_once_per_batch_and_ok_again_on_success(tmp_path, m
     job._proc = None
     job.job_id = "j1"
     job._register_proc = lambda p: None
-    monkeypatch.setattr(job, "build_argv", lambda url, outdir, q: ["yt-dlp"], raising=False)
+    monkeypatch.setattr(job, "build_argv", lambda url, outdir, q, cookies=None: ["yt-dlp"],
+                        raising=False)
 
-    assert job._run_ytdlp("u", str(tmp_path), "1080p")[0] is False
-    assert job._run_ytdlp("u", str(tmp_path), "1080p")[0] is False
-    assert job._run_ytdlp("u", str(tmp_path), "1080p")[0] is True
+    # The jar is passed IN since plan WP3 (2026-08-26): these three attempts
+    # are the cookies path, which is the only path a stale mark may come from.
+    jar = str(tmp_path / "c.txt")
+    assert job._run_ytdlp("u", str(tmp_path), "1080p", jar)[0] is False
+    assert job._run_ytdlp("u", str(tmp_path), "1080p", jar)[0] is False
+    assert job._run_ytdlp("u", str(tmp_path), "1080p", jar)[0] is True
     assert [c[0] for c in calls] == ["stale", "ok"]          # once, then cleared
 
 
@@ -419,3 +423,19 @@ def test_tray_warns_once_when_the_session_goes_stale_and_relabels_the_item(monke
     tray._maybe_warn_youtube_session(app, snap)
     assert len(app.notices) == 2 and "expired" in app.notices[1]
     assert "expired" in tray._youtube_warning_line(snap)
+
+
+def test_the_tray_line_for_a_flagged_session_says_downloads_carry_on():
+    """CR-80 (2026-08-26). A flagged account is not a rotated one: the cookies
+    still authenticate, YouTube has simply decided it will not serve video to
+    them, and downloads keep working anonymously (plan WP3). "Sign in again"
+    would send the editor to re-export the very session being refused."""
+    from ccsync_companion import tray
+
+    snap = {"ytdl_cookies_health": {
+        "status": ytdl_cookies.STATUS_STALE,
+        "reason": ytdl_cookies.stale_reason(ytdl_cookies.ACCOUNT_FLAG_SIGNATURE)}}
+    line = tray._youtube_warning_line(snap)
+    assert "refusing your signed-in session" in line
+    assert "continuing without it" in line
+    assert "rotated" not in line

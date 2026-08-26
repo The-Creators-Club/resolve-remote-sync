@@ -85,7 +85,7 @@ anthropic>=0.69
 # every download with a signature/format error. Bumping this file's hash is
 # also what makes run.sh re-run pip at all (it installs only when the hash
 # changes), so a version bump here IS the upgrade mechanism.
-yt-dlp>=2026.6.9
+yt-dlp>=2026.8.19
 
 # yt-dlp's PO-token provider MOVED OUT of this file 2026-08-17
 # (docs/COMMERCIAL_READINESS.md items 2/3, CI run 32041222871's licence gate).

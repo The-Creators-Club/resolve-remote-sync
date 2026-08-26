@@ -119,6 +119,19 @@
       </div>
       <button id="go" class="primary-btn">SEARCH</button>
       <span id="health" class="rstatus" title="server-side Claude Code + yt-dlp"></span>
+      <!-- The evidence pips (2026-08-26, docs/YTDL_RESILIENCE_PLAN.md WP5).
+           CR-80 spent a day with a green strip and nothing able to download,
+           because the strip reported CONFIGURATION: "cookies: true" only ever
+           meant "a path is set". These four report what actually happened -
+           which yt-dlp is running, whether the PO-token sidecar answered, how
+           the last real download went, and what the canary found. Each one
+           starts empty AND hidden, and app.js only fills the ones its server
+           sent a key for, so a dashboard that predates WP5 paints exactly the
+           strip it painted before. -->
+      <span id="healthytdlp" class="rstatus hidden"></span>
+      <span id="healthpot" class="rstatus hidden"></span>
+      <span id="healthdl" class="rstatus hidden"></span>
+      <span id="healthcanary" class="rstatus hidden"></span>
     </div>
 
     <!-- The second box: exact clips, no search and no review. It shares the
@@ -243,6 +256,18 @@
       <button id="cancel2" class="text-btn">[ CANCEL ]</button>
     </div>
     <div class="bar"><div id="dlfill" class="barfill"></div></div>
+    <!-- What a job that stopped has to say, and the one thing to do about it
+         (2026-08-26, docs/YTDL_RESILIENCE_PLAN.md WP6). The note is the job's
+         own error text, which the download-phase circuit breaker now writes as
+         an instruction rather than a stack trace, and it sits ABOVE the button
+         because it is what decides whether pressing it is worth anything.
+         POST api/jobs/<id>/download has always re-queued exactly the failed
+         rows of a finished job - that one call is what made the CR-80 recovery
+         a one-liner - but until now the only control that reached it was
+         DOWNLOAD on the review grid, which is gone by the time a job is done. -->
+    <div id="dlnote" class="dlnote hidden"></div>
+    <button id="dlretry" class="text-btn hidden"
+            title="Queue the clips that failed again. Nothing that already downloaded is fetched twice.">[ RETRY FAILED ]</button>
     <div id="dllist" class="dllist"></div>
   </section>
 

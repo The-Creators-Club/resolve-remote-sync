@@ -54,6 +54,48 @@ broken file had) and saves it 0600. Deliberately a FILE, never
 extraction on Windows, and reading a profile the editor is using rotates the
 session out from under them.
 
+**2026-08-26 (CR-83, companion 0.9.52): everything in that paragraph about
+WHEN the jar is sent has inverted, and the pinned player client is gone.**
+Read it as the age-gate story it is; the download path itself now works like
+this. `docs/YTDL_RESILIENCE_PLAN.md` WP2/WP3/WP4/WP6 is the write-up.
+
+- **No player client is pinned.** `DEFAULT_PLAYER_CLIENT = ""` sends no
+  `--extractor-args` at all, i.e. yt-dlp's own default set. CR-39's
+  `web_safari` was correct in August and returns no usable formats at all six
+  weeks later, with or without cookies, on either yt-dlp. `ytdl_player_client`
+  in `config.toml` stays as an override for the day a specific client is
+  known-good and the default is not.
+- **Anonymous first; the jar is the fallback.** `--cookies` used to be on
+  every argv the executor built whenever one resolved, which is what made one
+  flagged Google account fatal to every download the machine could make. Now a
+  clip is tried anonymously, and the editor's jar is spent only on the one
+  failure it answers: a bot check. "The page needs to be reloaded" on the
+  cookies path goes back the other way, and both paths refused is one clear
+  error on the row naming both. The preference is sticky for the rest of the
+  job and starts anonymous again on a restart. A clip landed by the fallback
+  carries a note saying so on its clip-status report.
+- **`cookies_used` follows the path that actually RAN**, not the config, so an
+  anonymous failure can no longer mark the editor's session stale.
+- **The tray line for a flagged session is different.** "the page needs to be
+  reloaded" is in `ytdl_cookies.STALE_SIGNATURES` now, but its remedy is not
+  the "sign in again" the other signatures get: the cookies still
+  authenticate, YouTube has simply decided it will not serve video to that
+  account. The tray says the signed-in session is being refused and downloads
+  are continuing without it.
+- **The breaker hands the job back.** N consecutive clip failures with the same
+  normalised signature stop this machine's turn instead of grinding through the
+  rest (CR-80's job 28 discovered one wall 29 times, each with yt-dlp's full
+  retry budget behind it). The hand-back is the ordinary path of §3: stop
+  posting, let the heartbeat stop, the lease expires and the server reclaims
+  the job and downloads what is missing - there is no release endpoint and this
+  does not need one. `ytdl_max_identical_failures` in `config.toml` is the
+  per-machine override (else `$CCSYNC_YTDL_MAX_IDENTICAL_FAILURES`, else **3**;
+  `0` disables the breaker). Where the signature says the BINARY rather than
+  the video ("requested format is not available", "http error 403") the
+  executor also pokes the yt-dlp sidecar manager to re-check the dashboard's
+  floor, once per job - CR-83's fleet half was exactly a yt-dlp too old to
+  download anything and a floor it already satisfied.
+
 And a policy reversal in the same release: **lane B no longer pulls
 `/Youtube/**` down** (owner's call, 2026-08-16). The R12 include existed
 while the NAS was the only downloader; with requester-first downloads the

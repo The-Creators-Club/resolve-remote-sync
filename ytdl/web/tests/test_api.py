@@ -198,6 +198,164 @@ def test_health_reports_a_missing_js_runtime(client, monkeypatch):
     assert client.get('/api/health').json()['js_runtime'] == 'ok'
 
 
+# ------------------------------------------- health as EVIDENCE (WP5, CR-80)
+# `cookies: bool(COOKIES_FILE)` was true throughout CR-80 while every download
+# failed. These keys are the answer, and the SPA is coded against these exact
+# names -- the old ones stay beside them because an editor's cached bundle
+# still reads those.
+
+@pytest.fixture()
+def no_pot_probe(monkeypatch):
+    """Never let a test put a real request on the wire for the sidecar."""
+    monkeypatch.setattr(routes_api, '_probe_pot',
+                        lambda base_url: pytest.fail('probed the network'))
+    routes_api._pot_cache.update({'at': 0.0, 'state': ''})
+    yield
+    routes_api._pot_cache.update({'at': 0.0, 'state': ''})
+
+
+def test_health_keeps_every_key_an_old_spa_bundle_reads(client, no_pot_probe):
+    h = client.get('/api/health').json()
+    assert set(h) >= {'claude', 'claude_detail', 'ai_provider', 'yt_dlp',
+                      'js_runtime', 'worker_alive', 'cookies', 'local_download'}
+    assert set(h) >= {'yt_dlp_version', 'cookies_state', 'pot_provider',
+                      'paths', 'last_download', 'canary'}
+    assert h['canary'] == {'enabled': False, 'last': None}
+    assert h['pot_provider'] == 'unconfigured'      # no YTDL_POT_BASE_URL here
+
+
+def test_health_names_the_running_yt_dlp(client, no_pot_probe):
+    """Which yt-dlp the server is on took a `docker exec` to answer during
+    CR-80, and it was half the diagnosis."""
+    import yt_dlp.version
+
+    assert client.get('/api/health').json()['yt_dlp_version'] == \
+        yt_dlp.version.__version__
+
+
+def test_health_reports_what_the_cookie_jar_holds(client, tmp_path, monkeypatch,
+                                                  no_pot_probe):
+    from ytdlweb import config
+
+    assert client.get('/api/health').json()['cookies_state'] == 'none'
+
+    jar = tmp_path / 'cookies.txt'
+    jar.write_text('# Netscape HTTP Cookie File\n', encoding='utf-8')
+    monkeypatch.setattr(config, 'COOKIES_FILE', str(jar))
+    h = client.get('/api/health').json()
+    # The old boolean says a path is configured; the new key says the flagged
+    # jar CR-80 parked has nothing in it to try.
+    assert h['cookies'] is True and h['cookies_state'] == 'empty'
+
+    jar.write_text('# Netscape HTTP Cookie File\n'
+                   '.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tv\n', encoding='utf-8')
+    assert client.get('/api/health').json()['cookies_state'] == 'present'
+
+
+def test_health_reports_a_configured_but_unreachable_pot_sidecar(client,
+                                                                 monkeypatch):
+    """CR-73 sat undetected for days behind exactly this: an address in the
+    environment and nothing answering at it."""
+    from ytdlweb.vendor import downloader
+
+    monkeypatch.setenv(downloader.POT_BASE_URL_ENV, 'http://bgutil:4416')
+    routes_api._pot_cache.update({'at': 0.0, 'state': ''})
+    probes = []
+    monkeypatch.setattr(routes_api, '_probe_pot',
+                        lambda base_url: probes.append(base_url) or 'unreachable')
+    assert client.get('/api/health').json()['pot_provider'] == 'unreachable'
+    assert probes == ['http://bgutil:4416']
+
+    # ...and the verdict is CACHED: an open dashboard tab polls health, and one
+    # probe per page load is a second of a workers=1 uvicorn per poll.
+    assert client.get('/api/health').json()['pot_provider'] == 'unreachable'
+    assert len(probes) == 1
+
+    routes_api._pot_cache.update({'at': 0.0, 'state': ''})
+    monkeypatch.setattr(routes_api, '_probe_pot', lambda base_url: 'ok')
+    assert client.get('/api/health').json()['pot_provider'] == 'ok'
+    routes_api._pot_cache.update({'at': 0.0, 'state': ''})
+
+
+def test_the_pot_probe_never_takes_health_down(client, monkeypatch):
+    """Any exception is 'unreachable'. Health that 500s is worse than health
+    that says nothing."""
+    from ytdlweb.vendor import downloader
+
+    monkeypatch.setenv(downloader.POT_BASE_URL_ENV, 'http://bgutil:4416')
+    routes_api._pot_cache.update({'at': 0.0, 'state': ''})
+
+    class Boom:
+        def open(self, *a, **k):
+            raise OSError('connection refused')
+
+    monkeypatch.setattr(routes_api, '_pot_opener', Boom())
+    assert client.get('/api/health').json()['pot_provider'] == 'unreachable'
+    routes_api._pot_cache.update({'at': 0.0, 'state': ''})
+
+
+def test_health_reports_the_last_real_download_and_the_last_canary(
+        client, tmp_path, monkeypatch, no_pot_probe):
+    from ytdlweb import ytdl_evidence
+
+    monkeypatch.setattr(ytdl_evidence, '_state_path',
+                        lambda: tmp_path / 'ytdl_evidence.json')
+    ytdl_evidence.reset()
+    try:
+        assert client.get('/api/health').json()['last_download'] is None
+
+        ytdl_evidence.record(ytdl_evidence.PATH_ANONYMOUS, True,
+                             video_id='abc', source='download')
+        ytdl_evidence.record(ytdl_evidence.PATH_COOKIES, False,
+                             error='The page needs to be reloaded.',
+                             video_id='abc', source='canary')
+        h = client.get('/api/health').json()
+
+        # The path travels WITH the entry: the SPA shows one line, and health's
+        # `paths` map is keyed by the very thing it needs to name.
+        assert h['last_download']['path'] == 'anonymous'
+        assert h['last_download']['ok'] is True
+        assert h['canary']['last']['path'] == 'cookies'
+        assert h['canary']['last']['ok'] is False
+        assert set(h['paths']) == {'anonymous', 'cookies'}
+        assert set(h['paths']['anonymous']) == {'ok', 'error', 'at', 'video_id',
+                                                'source'}
+    finally:
+        ytdl_evidence.reset()
+
+
+def test_health_says_whether_the_canary_is_on(client, monkeypatch,
+                                              no_pot_probe):
+    from ytdlweb import config
+
+    monkeypatch.setattr(config, 'CANARY_INTERVAL_SECONDS', 900)
+    assert client.get('/api/health').json()['canary']['enabled'] is True
+
+
+# ------------------------------------------------------- the fleet floor (WP1)
+
+def test_the_shipped_ytdlp_floor_is_zero_padded():
+    """COMP-BROLL-9's trap, in the direction CR-80 needed it raised. This
+    value is ranked numerically HERE and compared as a string by everything
+    that inherited the old rule, so an unpadded '2026.8.19' sorts above every
+    real 2026.08.xx release: every claim in the fleet 403s while every
+    companion says it is current."""
+    import re
+
+    from ytdlweb import config, routes_fleet
+
+    assert re.fullmatch(r'\d{4}\.\d{2}\.\d{2}', config.DEFAULT_MIN_YTDLP_VERSION)
+    assert config.DEFAULT_MIN_YTDLP_VERSION == '2026.08.19'
+    # ...and it is a floor the validator accepts, so it is never quietly
+    # replaced by the fallback.
+    assert config._validated_floor(config.DEFAULT_MIN_YTDLP_VERSION) == \
+        config.DEFAULT_MIN_YTDLP_VERSION
+    assert routes_fleet._version_at_least('2026.08.19',
+                                          config.DEFAULT_MIN_YTDLP_VERSION) is True
+    assert routes_fleet._version_at_least('2026.07.04',
+                                          config.DEFAULT_MIN_YTDLP_VERSION) is False
+
+
 def test_creating_a_job_validates_the_project_server_side(client):
     """The picker in the browser is a convenience; this is the check. Without
     it an editor could drop 40 videos into a project they do not sync."""

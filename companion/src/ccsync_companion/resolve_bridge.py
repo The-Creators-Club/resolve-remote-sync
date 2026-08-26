@@ -1763,11 +1763,19 @@ def _get_media_pool_items_locked() -> dict[str, Any]:
 # clips. That only ever runs when there is something to fix, unlike the walk
 # it replaces, which ran every poll.
 #
-# Cached for _MEDIA_POOL_UID_TTL_SECONDS and keyed by project name, so a FIX
-# ALL over 50 clips pays for one walk, not 50. A MISS is cached too (as the
-# freshness of the map, not as an entry): an unknown uid must not re-walk the
-# pool once per clip when a stale library row names a clip that has since been
-# deleted.
+# Cached for _MEDIA_POOL_UID_TTL_SECONDS and keyed by project name AND by the
+# live project OBJECT, so a FIX ALL over 50 clips pays for one walk, not 50. A
+# MISS is cached too (as the freshness of the map, not as an entry): an unknown
+# uid must not re-walk the pool once per clip when a stale library row names a
+# clip that has since been deleted.
+#
+# The identity check is what makes the name safe to key on. Close a project and
+# reopen it inside the TTL -- an editor bouncing a project to clear a Resolve
+# glitch does exactly that -- and the name matches while every MediaPoolItem in
+# the map is a dead fusionscript pointer; handing one to ReplaceClip is the
+# 0xc0000005 this module's header warns about (library walk review 2,
+# 2026-08-26). A reopened project is a NEW object, so `is` catches it and the
+# only cost is one pool walk that was going to be needed anyway.
 #
 # Every global below is read and written ONLY under _API_LOCK (inside the
 # _bridge_call in media_pool_item_by_uid), which is why they carry no lock of
@@ -1781,14 +1789,17 @@ _PROXY_ENRICH_CHUNK = 100
 
 _uid_cache: dict[str, Any] = {}
 _uid_cache_project = ""
+_uid_cache_project_object: Any = None
 _uid_cache_stamp = 0.0
 
 
 def _reset_media_pool_uid_cache() -> None:
     """Forget the uid map (tests, and anything that knows the pool changed)."""
     global _uid_cache, _uid_cache_project, _uid_cache_stamp
+    global _uid_cache_project_object
     _uid_cache = {}
     _uid_cache_project = ""
+    _uid_cache_project_object = None
     _uid_cache_stamp = 0.0
 
 
@@ -1830,8 +1841,10 @@ def _media_pool_uid_map_locked(project, project_name: str) -> dict[str, Any]:
     cached, unlike a walk that found nothing.
     """
     global _uid_cache, _uid_cache_project, _uid_cache_stamp
+    global _uid_cache_project_object
     now = time.monotonic()
     if (project_name == _uid_cache_project
+            and project is _uid_cache_project_object
             and (now - _uid_cache_stamp) < _MEDIA_POOL_UID_TTL_SECONDS):
         return _uid_cache
     try:
@@ -1845,6 +1858,7 @@ def _media_pool_uid_map_locked(project, project_name: str) -> dict[str, Any]:
     _walk_media_pool_uids(root_folder, found)
     _uid_cache = found
     _uid_cache_project = project_name
+    _uid_cache_project_object = project
     _uid_cache_stamp = now
     return found
 

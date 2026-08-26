@@ -770,6 +770,46 @@ def test_locate_is_handed_the_api_answer_it_would_have_asked_for(rig, monkeypatc
     assert rig.located[-1]["api_info"] is info
 
 
+# -- the uid map -----------------------------------------------------------
+
+
+def test_a_reopened_project_is_not_served_from_the_uid_cache(rig):
+    """Same NAME, new object: every MediaPoolItem in the cached map is a dead
+    fusionscript pointer, and handing one to ReplaceClip is an access
+    violation (library walk review 2, 2026-08-26)."""
+    uid = "uid:" + r"P:\Projects\Show\a.mov"
+    assert resolve_bridge.media_pool_item_by_uid(uid) is rig.clips[0]
+
+    reopened_clip = FakeClip(uid, path=r"P:\Projects\Show\a.mov")
+    reopened = FakeProject(name=rig.project._name, timeline=rig.timeline,
+                           media_pool=FakeMediaPool(FakeFolder(clips=[reopened_clip])))
+    rig.resolve._project = reopened
+
+    assert resolve_bridge.media_pool_item_by_uid(uid) is reopened_clip
+
+
+def test_the_same_project_object_still_reuses_the_map(rig):
+    """The identity check must not throw the cache away on every call: a FIX
+    ALL over 50 clips pays for one pool walk, not 50."""
+    walks: list[int] = []
+    real_walk = resolve_bridge._walk_media_pool_uids
+
+    def counted(folder, found, depth=0, swept=None):
+        if depth == 0:
+            walks.append(1)
+        return real_walk(folder, found, depth, swept)
+
+    resolve_bridge._walk_media_pool_uids = counted
+    try:
+        uid = "uid:" + r"P:\Projects\Show\a.mov"
+        for _ in range(3):
+            assert resolve_bridge.media_pool_item_by_uid(uid) is rig.clips[0]
+    finally:
+        resolve_bridge._walk_media_pool_uids = real_walk
+
+    assert len(walks) == 1
+
+
 # -- status ----------------------------------------------------------------
 
 

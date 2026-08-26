@@ -3243,7 +3243,7 @@ sooner.
 
 ## Every editor's machine was broken the same way, and could not tell anyone (CR-83, 2026-08-26)
 
-### CR-83 - the fleet half of CR-80: a yt-dlp floor of 2026.07.04, a pinned `web_safari`, an unconditional cookie jar, and a classifier blind to the phrase - FIXED and the SERVER HALF SHIPPED 2026-08-26 as dashboard 0.7.11 (image mode, tag v0.7.11); companion 0.9.52 still building on CI
+### CR-83 - the fleet half of CR-80: a yt-dlp floor of 2026.07.04, a pinned `web_safari`, an unconditional cookie jar, and a classifier blind to the phrase - FIXED and SHIPPED 2026-08-26: dashboard 0.7.11 then 0.7.12 (image mode, tags v0.7.11 / v0.7.12), companion 0.9.52 current on windows + macos in the studio channel, base rig upgraded and its tray logged `updated yt-dlp 2026.07.04 -> 2026.08.19`
 
 **Symptom**: nothing. That is the bug. CR-80 was found because the NAS's
 downloads panel showed 29 failures on one job; the editors' machines had been
@@ -3436,7 +3436,7 @@ is the deployed companion's own binary and its own jar, and after the ship
 
 ## The image update put both of the day's live fixes back (CR-84, 2026-08-26)
 
-### CR-84 - a THIRD yt-dlp lock nothing checked, and a plugin install that cannot succeed in image mode - FIXED in repo 2026-08-26, ships as dashboard 0.7.12
+### CR-84 - a THIRD yt-dlp lock nothing checked, and a plugin install that cannot succeed in image mode - FIXED and SHIPPED 2026-08-26 as dashboard 0.7.12 (image `ghcr.io/the-creators-club/ccsync@sha256:9bb05dd5...`, runtime id 869eed1052a8...; the plugin verified in /data/unblock-site at boot, yt-dlp 2026.08.19 from the image itself)
 
 **Symptom** (measured live on the studio NAS, container
 `ix-ccsync-dashboard-dashboard-1`, an hour after the CR-83 ship). The

@@ -14,6 +14,7 @@ Column list and shapes measured against the fleet's FF5 library on
 
 from __future__ import annotations
 
+import socket
 import sqlite3
 import uuid
 
@@ -523,6 +524,103 @@ def test_a_dead_postgres_host_is_unavailable():
 def test_an_unknown_library_kind_is_unavailable():
     with pytest.raises(library.LibraryUnavailable):
         library.ProjectLibrary(library.LibraryInfo(kind="", name=""), "Show")
+
+
+# --------------------------------------------------------------------------
+# connection lifecycle
+# --------------------------------------------------------------------------
+
+class _FakeBackend(library._Backend):
+    """A backend that connects fine and then fails every query."""
+
+    opened: list = []
+
+    def __init__(self, info):
+        self.opened.append(self)
+        self.closed = False
+
+    def query(self, sql, **params):
+        raise library.LibraryUnavailable("query failed: connection reset")
+
+    def close(self):
+        self.closed = True
+
+
+def test_a_failed_project_lookup_closes_the_backend(monkeypatch):
+    """__init__ used to leak the session it had just opened.
+
+    _find_project_id raising left self._backend holding a live postgres
+    connection that nobody outside could reach to close: 8 failed
+    constructions measured 8 extra server sessions until gc. At a 3 s
+    watcher poll and max_connections=100 that is the fleet locked out of
+    the library in minutes (library walk review, 2026-08-26).
+    """
+    monkeypatch.setattr(_FakeBackend, "opened", [], raising=False)
+    monkeypatch.setattr(library, "_PostgresBackend", _FakeBackend)
+    info = library.LibraryInfo(kind="PostgreSQL", name="FF5", host="10.0.0.1")
+    for _ in range(8):
+        with pytest.raises(library.LibraryUnavailable):
+            library.ProjectLibrary(info, "Show")
+    assert len(_FakeBackend.opened) == 8
+    assert all(backend.closed for backend in _FakeBackend.opened)
+
+
+def test_a_failed_construction_leaves_no_open_socket(monkeypatch):
+    """The same thing again, but proved at the socket rather than a flag."""
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    address = server.getsockname()
+
+    class SocketBackend(library._Backend):
+        def __init__(self, info):
+            self.sock = socket.create_connection(address, timeout=5)
+
+        def query(self, sql, **params):
+            raise library.LibraryUnavailable("no such project")
+
+        def close(self):
+            self.sock.close()
+
+    monkeypatch.setattr(library, "_PostgresBackend", SocketBackend)
+    try:
+        with pytest.raises(library.LibraryUnavailable):
+            library.ProjectLibrary(
+                library.LibraryInfo(kind="PostgreSQL", name="FF5", host="10.0.0.1"), "Show")
+        accepted, _peer = server.accept()
+        accepted.settimeout(5)
+        # EOF rather than a timeout: the client end really is gone, not
+        # merely unreferenced and waiting on the garbage collector.
+        assert accepted.recv(1) == b""
+        accepted.close()
+    finally:
+        server.close()
+
+
+def test_queries_refuse_to_run_without_a_project_id(db, monkeypatch):
+    """_project_id == "" bound NULL and matched NOTHING, quietly.
+
+    changed() then answered False forever (so pool_paths served a frozen
+    cache), timeline_items came back empty -- which reads as "this timeline
+    has no media" and stops the bridge falling back -- and _folder_tree
+    blamed the project for having no media pool.
+    """
+    conn, path = db
+    b, project, root = _simple_project(conn)
+    b.timeline(project, "e1", "Show - E1")
+    conn.commit()
+
+    lib = open_library(path)
+    lib._project_id = ""
+    # A reconnect would repair it, which is right in production and useless
+    # for a test, so keep this one wedged.
+    monkeypatch.setattr(lib, "_connect", lambda: None)
+    for call in (lambda: lib.timeline_items(_uid("tl/e1")),
+                 lib.pool_items, lib.pool_paths, lib.changed):
+        with pytest.raises(library.LibraryUnavailable) as raised:
+            call()
+        assert "project id unknown" in str(raised.value)
+    lib.close()
 
 
 # --------------------------------------------------------------------------

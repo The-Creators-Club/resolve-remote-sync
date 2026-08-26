@@ -518,13 +518,36 @@ class ProjectLibrary:
     # -- connection --------------------------------------------------------
 
     def _connect(self) -> None:
+        """Open the backend AND learn the project id, or leave nothing open.
+
+        The post-connect work is inside a try that closes the backend on
+        ANY failure (library walk review, 2026-08-26). It used to be bare:
+        a _find_project_id that raised -- a project the library does not
+        hold, a NAS that dropped the connection between connect and query
+        -- propagated out of __init__ with self._backend still holding a
+        live postgres session that nobody could reach to close. Measured:
+        8 failed constructions left 8 sessions on the server until the gc
+        happened to run. The watcher retries every 3 s and postgres ships
+        with max_connections=100, so that is the whole fleet locked out of
+        the library inside five minutes.
+        """
         if self.info.kind == "PostgreSQL":
-            self._backend = _PostgresBackend(self.info)
+            backend: _Backend = _PostgresBackend(self.info)
         elif self.info.kind == "Disk":
-            self._backend = _SqliteBackend(self.info)
+            backend = _SqliteBackend(self.info)
         else:
             raise LibraryUnavailable("unsupported project library type %r" % self.info.kind)
-        self._project_id = self._find_project_id()
+        self._backend = backend
+        try:
+            self._project_id = self._find_project_id()
+        except BaseException:
+            self._backend = None
+            self._project_id = ""
+            try:
+                backend.close()
+            except Exception:
+                log.debug("library: closing a half-open backend failed", exc_info=True)
+            raise
 
     def _reconnect(self) -> None:
         """At most once per public call. A postgres connection that has been
@@ -533,6 +556,7 @@ class ProjectLibrary:
         if self._backend is not None:
             self._backend.close()
             self._backend = None
+        self._project_id = ""
         self._paths = None
         self._connect()
 
@@ -568,12 +592,31 @@ class ProjectLibrary:
         # no worse than the API, which cannot tell them apart either.
         return _uid_str(rows[0][0])
 
+    def _ready(self) -> None:
+        """Connect if we are not, and refuse to query without a project id.
+
+        Belt and braces for the same bug _connect() now prevents (library
+        walk review, 2026-08-26). A ProjectLibrary that reached a query
+        with _project_id == "" was not merely useless, it was silently
+        wrong: self._uid("") binds NULL, `WHERE "SM_Project_id" = NULL`
+        matches nothing, _read_fingerprint answers (None, None) so
+        changed() is False forever and pool_paths() serves a cache frozen
+        at whatever it last saw, and _folder_tree blames the project for
+        "having no media pool". Falling back to the API is right; pretending
+        to answer is not.
+        """
+        if self._backend is None:
+            self._connect()
+        if not self._project_id:
+            raise LibraryUnavailable(
+                "project id unknown for %r in %s"
+                % (self.project_name, self.info.describe()))
+
     def _retrying(self, work):
         """Run `work`, and on a library failure reconnect once and rerun."""
         with self._lock:
             try:
-                if self._backend is None:
-                    self._connect()
+                self._ready()
                 return work()
             except LibraryUnavailable:
                 try:
@@ -583,6 +626,7 @@ class ProjectLibrary:
                 except Exception as exc:
                     raise LibraryUnavailable("reconnect failed: %s" % exc) from exc
                 try:
+                    self._ready()
                     return work()
                 except LibraryUnavailable:
                     raise

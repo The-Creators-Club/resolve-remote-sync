@@ -348,6 +348,42 @@ for the standalone utility's sake; nothing on the NAS sets it.
 Treat the file as a credential — it is a logged-in session for whichever
 account exported it.
 
+### 2026-08-26 REVERSAL: the signed-in cookie jar is now the thing that BREAKS it (CR-80)
+
+Read the 2026-08-11 measurement below as history, not as the current rule. On
+2026-08-26 the same account's cookies made every download fail, and the SAME
+clips downloaded at full quality anonymously:
+
+| setup (yt-dlp 2026.8.19, PO token up) | result |
+|---|---|
+| cookies | `ERROR: [youtube] <id>: The page needs to be reloaded.` on every video |
+| **anonymous** | **1080p, ~20 MiB/s, no bot check** |
+
+What YouTube does to a signed-in session it has decided it does not like is
+downgrade the `tv` client (`tv_downgraded player response playability status:
+UNPLAYABLE`) and SABR-force `web_safari`'s https formats away. Nothing is left
+to download, for any `player_client`, and the error names a page reload the
+container cannot perform. The cookies still AUTHENTICATE - the subscriptions
+feed lists fine - so `/api/health`'s `cookies: true` says nothing about whether
+downloads work. The flag arrived mid-job: job 28 downloaded 36 clips and then
+failed the remaining 29, and afterwards even the clips it had already fetched
+failed with cookies.
+
+The anonymous path that the 2026-08-11 table found dead is alive again because
+two things landed since: the `bgutil` PO-token sidecar (CR-73, 2026-08-24),
+which answers the bot check that used to need an account, and yt-dlp 2026.8.19,
+whose `visionos` client returns real https URLs where the web clients are now
+SABR-only. On 2026.07.04 anonymous extraction succeeded and then 403'd on the
+media fetch, so BOTH were required to get out of this.
+
+Operating rule until this reverses again: **leave `/ytdl-data/cookies.txt`
+holding only its two Netscape header lines.** `YTDL_COOKIES_FILE` stays set -
+an empty jar loads cleanly, yt-dlp writes its own anonymous cookies back into
+it, and the escape hatch is one `install` away if a future IP block needs it.
+Do not restore a signed-in export just because "cookies are mandatory" below
+says so; re-test both ways first, with the one-liner at the end of this section
+run with and without `--cookies`.
+
 ### Cookies are MANDATORY here, and useless on their own — measured 2026-08-11
 
 The NAS got bot-checked for real: one search enriched 336 candidates, and

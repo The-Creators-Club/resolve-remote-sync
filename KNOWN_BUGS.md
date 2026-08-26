@@ -3132,6 +3132,91 @@ being collected into the single-file build, or still listed in the notices.
 Recorded so the next reader does not spend an afternoon on it. If it ever
 does come back, the thing that would catch it is the licence gate
 (`tools/check_licenses.py`) on the build machine, not a reading of the spec.
+## Every server YouTube download failed "The page needs to be reloaded" (CR-80, 2026-08-26)
+
+### CR-80 - the signed-in cookie jar got flagged, and yt-dlp 2026.07.04 had no anonymous path left - LIVE-FIXED on the NAS + floor raised in repo, 2026-08-26
+
+**Symptom** (owner, 2026-08-26): the downloads panel on job 28 sitting at
+"0/29 downloaded - 5 failed", and by the end all 29 of the job's remaining
+clips failed. Every one of them carried the same `dl_error`:
+
+    ERROR: [youtube] <video id>: The page needs to be reloaded.
+
+The same job had already downloaded 36 clips successfully. The flag arrived
+mid-job, and afterwards even those 36 failed when retried.
+
+**Mechanism, two halves that had to be fixed together.**
+
+1. *The cookies.* `YTDL_COOKIES_FILE` pointed at a signed-in `cookies.txt`
+   (the escape hatch `ytdl/web/DEPLOY.md` has called MANDATORY since the
+   2026-08-11 bot-check). YouTube decided it did not like that session: with
+   the cookies attached, the `tv` client came back downgraded
+   (`tv_downgraded player response playability status: UNPLAYABLE`) and
+   `web_safari`'s https formats were SABR-forced away, leaving storyboards and
+   nothing else. Measured live against six video ids, every `player_client`
+   (`tv_simply`, `web`, `mweb`, `web_safari`, `android_vr`, `ios`,
+   `web_embedded`): no media formats at all. The cookies were NOT expired -
+   the subscriptions feed listed fine with them - so `/api/health`'s
+   `cookies: true` is not evidence downloads work. It is a playback flag on
+   the account, not an auth failure, and the container cannot "reload a page".
+
+2. *The yt-dlp version.* Dropping the cookies did not fix it on the installed
+   yt-dlp 2026.07.04: anonymously the only client that still produced URLs was
+   `android_vr`, and its media fetch 403'd (the CR-39 shape). 2026.8.19 adds
+   the `visionos` client, which returns real https formats anonymously - and
+   the bot check that made cookies necessary on 2026-08-11 is answered by the
+   `bgutil` PO-token sidecar that has been running since CR-73.
+
+   Measured on the same clip, in the live container:
+
+   | yt-dlp | cookies | result |
+   |---|---|---|
+   | 2026.07.04 | yes | `The page needs to be reloaded.` |
+   | 2026.07.04 | no | formats found, then `HTTP Error 403: Forbidden` |
+   | 2026.8.19 | yes | `The page needs to be reloaded.` |
+   | **2026.8.19** | **no** | **1080p, ~20 MiB/s** |
+
+**Fix applied live on the NAS** (2026-08-26, container
+`ix-ccsync-dashboard-dashboard-1`):
+
+- `docker exec -u 0 <c> /venv/bin/pip install --no-cache-dir --upgrade
+  yt-dlp==2026.8.19`
+- the flagged jar copied to `/ytdl-data/cookies.txt.bak-20260826-flagged` and
+  `/ytdl-data/cookies.txt` truncated to its two Netscape header lines.
+  `YTDL_COOKIES_FILE` stays set: an empty jar loads cleanly, yt-dlp writes its
+  own anonymous cookies back into it, and the escape hatch survives.
+- `docker restart`, then the REAL production path verified in-container -
+  `ytdlweb.vendor.downloader.download(..., quality="1080p",
+  ffmpeg_location=config.FFMPEG_DIR)` returned a merged mp4 in 16.4 s for a
+  10-minute clip.
+
+**In repo**: the yt-dlp floor raised to `>=2026.8.19` in
+`ytdl/web/pyproject.toml` and `dashboard/pyproject.toml`, both
+`requirements.lock` files re-pinned to 2026.8.19 with its PyPI hashes, and
+`ytdl/web/DEPLOY.md` given a "2026-08-26 REVERSAL" block ahead of the
+"cookies are MANDATORY" section so the next reader does not restore a
+signed-in export on the strength of a measurement that has since inverted.
+
+**RESIDUAL**, same shape as CR-73's: `/venv` is the image's, so a dashboard
+IMAGE update (not an OTA exit-75 restart) puts 2026.07.04 back until a build
+carries the new lock. Diagnosis is one line -
+`docker exec <c> /venv/bin/python -c "import yt_dlp;print(yt_dlp.version.__version__)"`.
+And "YouTube flagged the account" is not a state we control: if anonymous
+downloads start failing the bot check again, the answer is a FRESH cookie
+export, tested BOTH ways before it is left in place, not the old one.
+
+**Job 28 was re-requested and completed the same day**: 29 of 29 downloaded,
+zero failures, 8.8 GiB in the term folder with no leftover `.part` files. The
+retry went through the ordinary `POST /ytdl/api/jobs/28/download`, which
+re-queues exactly the failed rows on a `done` job (YTDL-16).
+
+**THE FLEET HALF OF THIS IS STILL OPEN.** The editors' companions are broken
+the same way and the NAS fix does not touch them: they are pinned to yt-dlp
+2026.07.04 by `config.DEFAULT_MIN_YTDLP_VERSION`, their
+`ytdl_executor.DEFAULT_PLAYER_CLIENT = "web_safari"` returns no usable formats
+on either version, and their own cookie jars hit the same account flag.
+Measured on the base rig 2026-08-26. `docs/YTDL_RESILIENCE_PLAN.md` is the
+write-up and the plan; WP1 and WP2 there are what close it.
 
 ## Companion: a locally downloaded YouTube clip is checked and, if Resolve could not decode it, converted on the editor's machine (CR-79, 2026-08-25)
 

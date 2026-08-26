@@ -10,7 +10,12 @@ dependencies = [
     # that touches it is imported lazily inside ytdlweb/vendor, so the suite
     # runs (and the app mounts) without it -- which is what stops a yt-dlp
     # upgrade breaking the dashboard's boot.
-    "yt-dlp>=2026.6.9",
+    # FLOOR RAISED to 2026.8.19 (CR-80, 2026-08-26). 2026.07.04 had no client
+    # left that YouTube would serve from this NAS: the web/web_safari/tv
+    # clients came back SABR-only (formats with no URL) and the one client that
+    # still yielded URLs, android_vr, 403'd on the media fetch. 2026.8.19 adds
+    # the `visionos` client, which returns real https formats anonymously.
+    "yt-dlp>=2026.8.19",
 ]
 
 [project.optional-dependencies]

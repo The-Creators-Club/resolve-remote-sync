@@ -82,7 +82,10 @@ ytdl = [
     # onto the NAS, authenticated by one human's personal account, so it was
     # never a package here (docs/COMMERCIAL_READINESS.md item 1).
     "anthropic>=0.69",
-    "yt-dlp>=2026.6.9",
+    # Floor raised to 2026.8.19 on 2026-08-26 (CR-80): older releases have no
+    # YouTube client left that serves this NAS -- SABR-only formats or a 403
+    # on the media fetch. 2026.8.19 adds the `visionos` client.
+    "yt-dlp>=2026.8.19",
 ]
 
 # The YouTube "unblock" plugin -- SEPARATE from `ytdl` above, and deliberately

@@ -746,6 +746,30 @@ def test_a_missing_property_on_a_proven_build_is_just_empty():
     assert resolve_bridge._ONE_ARG_CLIP_PROPERTY is True
 
 
+# -- locating the library --------------------------------------------------
+
+
+def test_locate_does_its_filesystem_work_outside_the_api_lock(rig):
+    """locate() reads the WHOLE Resolve log and, for a disk library, walks
+    "Resolve Project Library/*/Resolve Projects/<project>". Only the one API
+    call it makes belongs under _API_LOCK (library walk review 2,
+    2026-08-26)."""
+    resolve_bridge.poll_timeline_items()
+
+    assert rig.located[-1]["api_lock_free"] is True
+
+
+def test_locate_is_handed_the_api_answer_it_would_have_asked_for(rig, monkeypatch):
+    """The bridge makes GetCurrentDatabase() itself, under the lock, and
+    passes it in -- so locate() never touches `resolve`."""
+    info = library.LibraryInfo(kind="PostgreSQL", name="FF5", host="nas")
+    monkeypatch.setattr(library, "database_info", lambda resolve: info)
+
+    resolve_bridge.poll_timeline_items()
+
+    assert rig.located[-1]["api_info"] is info
+
+
 # -- status ----------------------------------------------------------------
 
 

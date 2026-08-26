@@ -966,8 +966,16 @@ def _project_library(resolve, project_name: str) -> Optional[library.ProjectLibr
         return None
 
     _arm_library_retry(_LIBRARY_RETRY_SECONDS)
+    # _API_LOCK for the API question ONLY. The rest of locate() is
+    # filesystem work -- it reads the whole Resolve log and walks
+    # "Resolve Project Library/*/Resolve Projects/..." for a disk library --
+    # and doing that under the lock put a cold-cache directory walk in front
+    # of the tray's message pump and every other scripting client on the
+    # machine (library walk review 2, 2026-08-26).
     with _bridge_call("library.locate"):
-        info = library.locate(resolve, project_name, _library_settings())
+        api_info = library.database_info(resolve)
+    info = library.locate(None, project_name, _library_settings(),
+                          api_info=api_info)
     if info is None:
         _note_library_fallback("no project library found for %r" % project_name)
         return None

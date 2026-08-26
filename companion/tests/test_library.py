@@ -915,6 +915,43 @@ def test_locate_falls_back_to_the_log_when_resolve_21_returns_none(fake_log):
     assert (info.name, info.host) == ("FF5", "100.71.216.3")
 
 
+def test_database_info_is_the_only_api_call_locate_makes(fake_log):
+    """A caller that serialises its Resolve calls behind a lock makes this
+    one under the lock and hands the answer to locate(), leaving the log
+    read and the disk-library walk outside it (library walk review 2,
+    2026-08-26)."""
+    fake_log(WINDOWS_LOG)
+
+    class Manager:
+        def GetCurrentDatabase(self):
+            return {"DbType": "PostgreSQL", "DbName": "FF4", "IpAddress": "10.0.0.9"}
+
+    class Resolve:
+        def GetProjectManager(self):
+            return Manager()
+
+    info = library.database_info(Resolve())
+    assert (info.kind, info.name, info.host) == ("PostgreSQL", "FF4", "10.0.0.9")
+    assert library.database_info(None) is None
+
+
+def test_locate_uses_the_api_answer_it_is_handed_and_asks_nothing(fake_log):
+    fake_log(WINDOWS_LOG)
+
+    class Exploding:
+        def GetProjectManager(self):
+            raise AssertionError("locate() asked Resolve after being handed an answer")
+
+    handed = library.LibraryInfo(kind="PostgreSQL", name="FF4", host="10.0.0.9")
+    info = library.locate(Exploding(), "Civil Defence", {}, api_info=handed)
+    assert (info.name, info.host) == ("FF4", "10.0.0.9")
+
+    # api_info=None means "the API had nothing", not "go and ask": the log
+    # answers, exactly as it does for a Resolve 21 that returns None.
+    info = library.locate(Exploding(), "Civil Defence", {}, api_info=None)
+    assert (info.name, info.host) == ("FF5", "100.71.216.3")
+
+
 def test_locate_overrides_win_over_both(fake_log):
     fake_log(WINDOWS_LOG)
     info = library.locate(None, "Civil Defence", {

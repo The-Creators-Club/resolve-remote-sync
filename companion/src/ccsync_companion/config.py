@@ -107,7 +107,7 @@ log = logging.getLogger("ccsync.config")
 # 0.9.51: the companion enumerates clips by reading Resolve's PROJECT
 # LIBRARY (PostgreSQL on the NAS, or a disk library's SQLite Project.db)
 # instead of walking them through the scripting API (docs/LIBRARY_WALK_PLAN.md,
-# KNOWN_BUGS CR-80, 2026-08-26). The API walk of a 904-item multicam timeline
+# KNOWN_BUGS CR-81, 2026-08-26). The API walk of a 904-item multicam timeline
 # took 11-14 s and Resolve serves scripting calls one at a time, so every
 # other client on the machine queued behind it -- Timeline Cards' card click
 # went 0.3 s -> 7 s. It was also blind: a multicam answers "" to

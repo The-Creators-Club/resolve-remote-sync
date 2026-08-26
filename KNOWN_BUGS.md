@@ -3016,9 +3016,9 @@ browser with no confirm(), is exactly the old behaviour: re-attach and the
 loud toast (which now names [ CANCEL SEARCH ]). Harness scenarios in
 `tests/test_static_app.py`. Needs a dashboard deploy.
 
-## Companion: the clip walk reads Resolve's project library instead of holding the scripting API for 11-14 s (CR-80, CR-81, 2026-08-26)
+## Companion: the clip walk reads Resolve's project library instead of holding the scripting API for 11-14 s (CR-81, CR-82, 2026-08-26)
 
-### CR-80 - the watcher's clip walk stalls every other Resolve client on the machine, and is blind to multicam angles - FIXED in repo 2026-08-26, NOT YET SHIPPED
+### CR-81 - the watcher's clip walk stalls every other Resolve client on the machine, and is blind to multicam angles - FIXED in repo 2026-08-26, NOT YET SHIPPED
 **Symptom** (owner, base rig, 2026-08-26): clicking a card in Timeline Cards
 took **7 s** instead of its usual **0.3 s**, in bursts, on a machine where
 nothing else had changed. Resolve itself felt fine.
@@ -3105,7 +3105,7 @@ the open project, read-only, `scriptapp()` guarded through
    rig first, watch for the `library walk unavailable` WARNING in the fleet's
    logs.
 
-### CR-81 - "pystray is still in the frozen exe" - NOT A BUG, refuted 2026-08-26
+### CR-82 - "pystray is still in the frozen exe" - NOT A BUG, refuted 2026-08-26
 **Worry** (raised during the library-walk review, and it has been raised
 before): the LGPLv3 removal of CR-3 was incomplete and `pystray` is still
 being collected into the single-file build, or still listed in the notices.

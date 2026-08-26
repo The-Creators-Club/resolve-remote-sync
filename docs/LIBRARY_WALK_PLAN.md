@@ -2,7 +2,7 @@
 
 Plan and interface contract, 2026-08-26. Status: **built** and merged on
 branch `library-walk` (029db90), shipping as companion 0.9.51
-(KNOWN_BUGS CR-80). Read "As built" at the foot of this document for what
+(KNOWN_BUGS CR-81). Read "As built" at the foot of this document for what
 differs from the plan above it; the traps live in `docs/GOTCHAS.md`
 section 16.
 
@@ -300,5 +300,5 @@ order it will matter to the next reader:
 4. **macOS path spelling - STILL OPEN.** It needs a Mac with the fleet's
    library open, and there has not been one since this was built. The answer
    is one line in that machine's log (`resolve: reading clips from the project
-   library ...`, then what `classify_path` is handed). KNOWN_BUGS CR-80's
+   library ...`, then what `classify_path` is handed). KNOWN_BUGS CR-81's
    shipping checklist carries it.

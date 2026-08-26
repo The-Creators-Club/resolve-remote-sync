@@ -988,3 +988,169 @@ One badly behaved client is enough to take the server down for all of them,
 so every client on a machine has to carry the guard. "Wait N seconds after
 Resolve.exe appears" does not work: the server starts 90-470 s in, and it is
 the server's start, not the process's, that opens the window.
+
+## 16. The project library knows what the API will not tell you (library walk, 2026-08-26)
+
+### Every click in every Resolve client goes slow while the companion polls
+
+Measured on the base rig (Resolve 21.0.1.11, library "FF5" on the fleet's
+postgres:13, timeline "Civil Defence - E1", 904-926 items): the watcher's old
+API walk took **11-14 s**, because `GetClipProperty()` with no argument builds
+a 60-key dictionary per clip at **12.5 ms** a clip. Resolve answers scripting
+calls one at a time, so every other client on the machine queues behind it:
+Timeline Cards' card click went from **0.3 s to 7 s**
+(`E:\Projects\Editing\Resolve\MulticamPipeline\LAG-INVESTIGATION.md`).
+
+The same walk out of the project library is **7 ms** and costs Resolve
+nothing. The media-pool walk went 20.0 s -> 31 ms, with 1,298 / 1,298 paths
+and bin paths identical to the API's.
+
+Worse than slow, it was blind. On that timeline the API finds **0-3 usable
+file paths out of 904**: every item is a multicam, a multicam answers `""` to
+`GetClipProperty("File Path")`, and the API exposes nothing at all about its
+angles. The library finds all **44**.
+
+Two things came out of that and both matter if you are reading a clip path:
+
+* `GetClipProperty("File Path")` (ONE argument) is 0.1 ms against 12.5 ms and
+  agreed with the dict on all 1,298 clips of the open project, every clip kind
+  (BRAW, R3D, ProRes, PNG sequence, multicam, compound). The one-arg overload
+  is not documented for every build we support, so `_clip_property` in
+  `resolve_bridge.py` probes it once per process and falls back to the dict.
+  This alone takes the API walk from 11 s to under 1 s on a timeline whose
+  library cannot be read.
+* Nothing else you write should poll clip properties in a loop either. See
+  section 15: one badly behaved client is enough to spoil the machine.
+
+### Where the clips actually live in the library
+
+PostgreSQL on the NAS for a network library, the project's `Project.db`
+(SQLite) for a disk library. `library.py` reads both, read-only, SELECTs only.
+
+The chain, all measured against FF5 on 2026-08-26:
+
+| need | where |
+|---|---|
+| the project | `SM_Project.ProjectName` -> `SM_Project_id` |
+| its timelines | `SM_Project_Sm2Timeline` (`DbOwner` = project, `DbAssociate` = timeline) |
+| a timeline's sequence | `Sm2Sequence.Sm2Timeline_id` |
+| its tracks | `Sm2SequenceContainer.Sm2Sequence_id` -> `Sm2SequenceContainer_Sm2TiTrack` -> `Sm2TiTrack` |
+| its items | `Sm2TiItem.Sm2TiTrack_id` (`Name`, `MediaRef` = pool uid, `Start`, `Duration`) |
+| a multicam's / compound's angles | the same chain with `Sm2Sequence.Sm2MpMedia_id` = that clip's pool uid; the tracks are named *Angle N* |
+| a pool clip's LIVE path | `BtVideoInfo.Clip` / `BtAudioInfo.Clip`, keyed by `Sm2MpMedia_id` |
+| the project's bins | `SM_Project.MediaPool` -> the one `Sm2MpFolder` whose `Sm2MediaPool_id` matches and whose `Sm2MpFolder_Owner_id` is NULL; descend by `Sm2MpFolder_Owner_id` |
+
+`Sm2MpMedia_id` **is** `MediaPoolItem.GetUniqueId()`, which is the whole
+reason a library-walked item can still be acted on: `media_pool_item_by_uid()`
+re-finds the live object on demand (~0.15 s for 1,318 clips) instead of the
+walk carrying one per clip.
+
+The `Clip` value is a Resolve blob header followed by a **zstd frame**, and
+inside that a protobuf where field 1 is the directory and field 2 the file
+name (length-prefixed varints).
+
+### The path in the database is not the path you want
+
+Four different columns look like they hold a media path. Three of them lie.
+
+* **`Sm2TiItem.MediaFilePath` is a placement-time snapshot.** It goes stale on
+  relink: 10 items in Energy Transition still carry the pre-relink `P:\` path
+  while the pool says `W:\Creators_Club\...`. `library.py` never reads it.
+* **`Sm2MpMedia.FieldsBlob` holds the PROXY path**, not the media path, and it
+  is behind a SECOND nested zstd frame inside a UTF-16 property bag.
+* **`BtVideoInfo.Proxy` is a bare reference stub** - 197 bytes of property bag
+  (UniqueId, DbType `BtVideoProxy`, DataManagerID), present on 3,873 of 3,873
+  rows whether the clip has a proxy or not, with no path and no state.
+* **Raw `Clip` bytes look like a path with letters missing.** Those are zstd
+  back-references into the directory name. Decompress before you believe
+  anything you see in a hex dump.
+
+### Joins that are NULL, and other schema traps
+
+* **`Sm2Timeline.SM_Project_id` is NULL for every row** (24/24 here). Use the
+  association table `SM_Project_Sm2Timeline`.
+* **`Sm2TiTrack.Sm2Sequence_id` is likewise NULL.** Go through
+  `Sm2SequenceContainer` and `Sm2SequenceContainer_Sm2TiTrack`, whose
+  **`DbIndex` is the only place the track order lives**. `Sm2TiTrack` has no
+  index column and its `SubType` is uninitialised garbage (0x20202020 on V1
+  here). `DbIndex` restarts at 0 **per track Type**, so a track's index means
+  nothing until you know its type.
+* **`Sm2TiTrack.Type` is not just 0/1: subtitle tracks are Type 2** (6 of
+  FF5's 287 tracks, carrying 3,360 items). A subtitle track reported as
+  "video" collides with a real V1/V2, which is why only Types 0 and 1 are
+  walked.
+* **`Sm2TiItem.Start` / `Duration` are varchar columns** holding decimal frame
+  counts. Sort them as numbers or a long timeline orders itself lexically.
+* **One library holds every project** (FF5: five of them, 4,005 pool clips).
+  Always scope: timelines by the project association, the pool by the
+  project's own folder tree.
+* **Resolve 21.0.1 returns None from `GetCurrentDatabase()` AND
+  `GetDatabaseList()`.** There is no API answer to "which library is this".
+  `library.locate()` falls back to mining Resolve's own log (the project
+  pointer line names the library and Network/Disk; the startup lines give each
+  postgres library's host), and the config overrides beat both.
+* **The library trails the UI by the Live Save interval** (~0.3 s here), or
+  until the next manual save with Live Save off. See the 60 s ceiling below.
+
+### Rules for touching the library from companion code
+
+* **A database read NEVER happens under `_API_LOCK`.** A library that has gone
+  away takes the module's 5 s statement timeout to say so, and 5 s of
+  `_API_LOCK` is 5 s of frozen tray menu and 5 s of every other scripting
+  client queueing, i.e. exactly the thing this work exists to remove.
+* **Lock order is `_LIBRARY_LOCK` then `_API_LOCK`, never the reverse.**
+  `locate()` asks Resolve which library this is, and the proxy enrichment asks
+  Resolve about clips the library has already named, so the two locks do meet.
+* **`ProjectLibrary.changed()` is dead with Live Save off.** It rides on
+  `SM_Project.LastModTimeInSecs` and `MAX(Sm2Sequence.DbSavedTime)`, and
+  `DbSavedTime` only moves when the project is SAVED. Live Save is a
+  per-machine preference this companion does not control, so an editor can
+  relink a clip and `changed()` will keep saying "no" until they press Ctrl-S,
+  which might be after lunch. `_LIBRARY_CACHE_MAX_SECONDS = 60.0` is the
+  ceiling that makes that survivable: one extra walk a minute of an operation
+  measured in milliseconds.
+* **Close the backend when construction fails.** `ProjectLibrary._connect()`
+  used to let a raising `_find_project_id()` propagate out of `__init__` with
+  a live postgres session nobody could reach. Measured: 8 failed constructions
+  left 8 sessions on the server until the gc happened to run. The watcher
+  retries every 3 s and postgres ships with `max_connections=100`, so that is
+  the whole fleet locked out of the library inside five minutes.
+* **A query with no project id is worse than an error.** `self._uid("")` binds
+  NULL, `WHERE "SM_Project_id" = NULL` matches nothing, the fingerprint reads
+  `(None, None)` so `changed()` is False forever, and the pool path cache
+  freezes at whatever it last saw. `_ready()` raises `LibraryUnavailable`
+  instead, and the API walk takes over.
+* **Every public method raises `LibraryUnavailable` and nothing else.** A bare
+  pg8000/sqlite3/zstd exception reaching the watcher would be a crash, and the
+  whole point of the walk is that it is optional.
+
+### The log says "library walk unavailable"
+
+The commonest cause is a library **name** mined from a log that no longer
+matches, or a project name that is not in the library we found. You will see:
+
+    resolve: library walk unavailable (project id unknown for 'Civil Defence - E1'
+    in PostgreSQL FF5 (10.x.x.x:5432)) -- using the API walk; clicks in other
+    Resolve clients will lag during walks
+
+or `... has no project named ...`. Nothing breaks: the API walk answers, more
+slowly and without the angles. The line is WARNING **once per process**, then
+INFO at most every 5 minutes (`_LIBRARY_FALLBACK_LOG_SECONDS = 300.0`),
+because permanent fallback is a legitimate state on plenty of machines (a disk
+library we have no reader for, a laptop off the NAS's network) and a line
+every 3 s poll would be the loudest and least useful thing in the log. A
+failed attempt is not retried for 60 s (`_LIBRARY_RETRY_SECONDS`): a NAS that
+is off costs 5 s of stalled watcher thread per attempt.
+
+A working one says so once, at INFO:
+
+    resolve: reading clips from the project library PostgreSQL FF5 (10.x.x.x:5432)
+    for 'Civil Defence'
+
+To switch the whole thing off and get the old behaviour, `library_walk = false`
+in `~/.ccsync/config.toml`. To point it somewhere by hand:
+`library_db_host`, `library_db_port`, `library_db_name`, `library_db_user`,
+`library_db_password` (blank password = Resolve's own default, which is what
+the fleet's libraries use; `config.toml` is owner-only because it already
+carries `report_token`). Changing any of the six drops the open library
+immediately, so an editor who fixes a wrong host does not restart anything.

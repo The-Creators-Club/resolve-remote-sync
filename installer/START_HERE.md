@@ -226,6 +226,15 @@ script with it, or the app can't report status or follow your ticks.)
    - Username: `postgres`
    - Password: *(your admin sends this separately)*
 3. Open the shared project. Set **Playback → Proxy Handling → Prefer Proxies**.
+
+   The CC Sync app reads this same library directly, with Resolve's own
+   credentials, to work out which clips your timeline uses. That is why it no
+   longer slows Resolve down while it checks, and why it can now see media
+   inside multicam clips. It only reads, never writes. If it can't get in it
+   quietly goes back to asking Resolve and notes it in its log; set
+   `library_db_host` (and `library_db_name` / `library_db_user` /
+   `library_db_password` if yours differ) in `~/.ccsync/config.toml` to point
+   it at the right place, or `library_walk = false` to turn it off.
 4. **macOS only:** the setup script already set Resolve's **Mapped Mount**
    (`P:\` → your sync folder) for you. Check it under Preferences → Media
    Storage. If step 2 said it couldn't — because Resolve was open, or had

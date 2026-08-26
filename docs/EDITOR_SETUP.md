@@ -277,6 +277,19 @@ depending on version) -> **Connect to a Database** (or **+** to add one):
 Once connected, the shared project(s) should appear in Project Manager
 exactly as they do for every other editor -- same bins, same timelines.
 
+**The companion reads this library too** (companion 0.9.51 and later). To work
+out which clips are on your timeline it now reads the project library directly,
+with the same credentials Resolve is using, instead of asking Resolve about
+every clip one at a time -- milliseconds instead of ten-plus seconds, it does
+not slow Resolve down while it works, and it can see inside multicam and
+compound clips, which the scripting route cannot. It only ever reads; it never
+writes to the library. If it cannot get in it falls back to the old way by
+itself and writes one line in `~/.ccsync/companion.log` saying so ("library
+walk unavailable"). If you see that and want to fix it, set `library_db_host`
+(and `library_db_name` / `library_db_user` / `library_db_password` if they
+differ from Resolve's defaults) in `~/.ccsync/config.toml`; setting
+`library_walk = false` there goes back to the old behaviour permanently.
+
 ## 5. Playback -> Proxy Handling -> Prefer Proxies
 
 In the Resolve menu bar: **Playback > Proxy Handling > Prefer Proxies**.

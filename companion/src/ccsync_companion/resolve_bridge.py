@@ -1663,11 +1663,15 @@ def undo_last_relink(session_path: Any = None) -> dict[str, Any]:
             f"\u201c{open_name}\u201d is open. Open "
             f"\u201c{journal_project}\u201d and undo there: replaying it here would "
             "re-address clips the two projects share.")}
+    # ITEM DICTS, not objects (library walk, 2026-08-26). A walk that
+    # carried no objects would otherwise leave this map empty and the undo
+    # would report "0 put back, N could not be undone -- no longer in this
+    # project's media pool" for a pool that holds every one of them. The
+    # object is looked up at the ReplaceClip below.
     by_path: dict[str, Any] = {}
     for item in pool.get("items") or []:
-        mpi = item.get("media_pool_item")
-        if mpi is not None and item.get("file_path"):
-            by_path.setdefault(_norm_path(str(item["file_path"])), mpi)
+        if item.get("file_path") and media_pool_item_is_reachable(item):
+            by_path.setdefault(_norm_path(str(item["file_path"])), item)
 
     undone = 0
     skipped = 0
@@ -1676,22 +1680,24 @@ def undo_last_relink(session_path: Any = None) -> dict[str, Any]:
         old = str(entry.get("old") or "")
         new = str(entry.get("new") or "")
         if kind == resolve_journal.KIND_REPLACE_CLIP:
-            mpi = by_path.get(_norm_path(new))
+            found = by_path.get(_norm_path(new))
+            mpi = resolve_media_pool_item(found)
             if mpi is None or not old:
                 skipped += 1
                 continue
             result = replace_clip(mpi, old, tries=1, journal=False)
             if result.get("ok"):
                 undone += 1
-                by_path[_norm_path(old)] = mpi
+                by_path[_norm_path(old)] = found
             else:
                 skipped += 1
         elif kind == resolve_journal.KIND_LINK_PROXY:
             # The clip is addressed by its ORIGINAL's path, which a proxy
             # relink never changed -- the journal's old/new are proxy paths.
-            mpi = by_path.get(_norm_path(str(entry.get("clip_path") or "")))
-            if mpi is None:
-                mpi = _find_by_clip_name(pool.get("items") or [], entry.get("clip"))
+            found = by_path.get(_norm_path(str(entry.get("clip_path") or "")))
+            if found is None:
+                found = _find_by_clip_name(pool.get("items") or [], entry.get("clip"))
+            mpi = resolve_media_pool_item(found)
             if mpi is None:
                 skipped += 1
                 continue
@@ -1714,12 +1720,14 @@ def undo_last_relink(session_path: Any = None) -> dict[str, Any]:
 
 
 def _find_by_clip_name(items: list[dict[str, Any]], name: Any) -> Any:
+    """The ITEM DICT whose clip_name matches, or None -- the caller resolves
+    the object (library walk, 2026-08-26)."""
     text = str(name or "")
     if not text:
         return None
     for item in items:
         if item.get("clip_name") == text:
-            return item.get("media_pool_item")
+            return item
     return None
 
 

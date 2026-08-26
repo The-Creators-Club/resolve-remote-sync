@@ -252,6 +252,26 @@ class TestUndo:
         assert resolve_bridge.undo_last_relink()["undone"] == 1
         assert item.proxy == r"G:\old\A001.mov"
 
+    def test_it_puts_back_a_clip_the_walk_gave_it_only_a_uid_for(self, monkeypatch):
+        """library walk, 2026-08-26. The undo used to build its path map out
+        of "media_pool_item is not None"; a walk with no objects would have
+        left it empty and every entry would come back "no longer in this
+        project's media pool" for a pool holding every one of them."""
+        _connect(monkeypatch, Manager(Project("FF5")))
+        item = Item(r"F:\a.mov")
+        resolve_bridge.replace_clip(item, r"P:\a.mov", tries=1)
+        monkeypatch.setattr(resolve_bridge, "get_media_pool_items", lambda: {
+            "ok": True, "message": "", "project_name": "FF5",
+            "items": [{"file_path": item.path, "clip_name": item.name,
+                       "media_pool_item": None, "media_pool_uid": "uid-a",
+                       "source": "library"}],
+        })
+        monkeypatch.setattr(resolve_bridge, "media_pool_item_by_uid",
+                            lambda uid: item if uid == "uid-a" else None)
+
+        assert resolve_bridge.undo_last_relink()["undone"] == 1
+        assert item.path == r"F:\a.mov"
+
     def test_with_no_journal_it_says_so_rather_than_doing_anything(self, monkeypatch):
         _connect(monkeypatch, Manager(Project("FF5")))
         result = resolve_bridge.undo_last_relink()

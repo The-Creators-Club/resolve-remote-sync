@@ -30,7 +30,10 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Optional
 
-from . import canon, proxy_relink, resolve_journal, resolve_prefs, script_server, ui_state
+from . import (
+    canon, library, proxy_relink, resolve_journal, resolve_prefs, script_server,
+    ui_state,
+)
 
 log = logging.getLogger("ccsync.resolve")
 
@@ -680,6 +683,376 @@ def _sweep_yield(counter: list[int]) -> None:
         time.sleep(_SWEEP_YIELD_SECONDS)
 
 
+# -- one clip property, the cheap way (library walk, 2026-08-26) -----------
+#
+# GetClipProperty() with NO argument builds the whole property dictionary --
+# 60-odd keys, every one of them formatted -- and measured 12.5 ms per clip
+# on the base rig against 0.1 ms for the one-argument form. Over the 1,298
+# clips of the open project the two agreed on "File Path" for every clip and
+# every clip KIND (BRAW, R3D, ProRes, PNG sequence, multicam, compound), so
+# the dict was buying nothing but time. A missing key answers None rather
+# than raising.
+#
+# The one-arg form is not documented for every Resolve version we support,
+# so the FIRST call decides for the process: an exception means this build
+# has no such overload, and a None where the full dict has a value means it
+# has one that does not work. Either way we say so once and use the dict for
+# the rest of the session.
+_ONE_ARG_CLIP_PROPERTY: Optional[bool] = None
+
+
+def _reset_clip_property_probe() -> None:
+    """Forget which form of GetClipProperty this build supports (tests)."""
+    global _ONE_ARG_CLIP_PROPERTY
+    _ONE_ARG_CLIP_PROPERTY = None
+
+
+def _clip_property_dict(media_pool_item) -> dict:
+    try:
+        return media_pool_item.GetClipProperty() or {}
+    except Exception:
+        return {}
+
+
+def _clip_property(media_pool_item, key: str) -> str:
+    """One clip property, stripped. "" when the clip has no such value.
+
+    Never raises. Caller holds _API_LOCK, like every other native call.
+    """
+    global _ONE_ARG_CLIP_PROPERTY
+    if _ONE_ARG_CLIP_PROPERTY is False:
+        return str(_clip_property_dict(media_pool_item).get(key) or "").strip()
+
+    try:
+        value = media_pool_item.GetClipProperty(key)
+    except Exception as exc:
+        if _ONE_ARG_CLIP_PROPERTY is None:
+            _ONE_ARG_CLIP_PROPERTY = False
+            log.info(
+                "resolve: GetClipProperty(<key>) is not available on this build "
+                "(%s) -- reading the full property dict per clip instead", exc,
+            )
+        return str(_clip_property_dict(media_pool_item).get(key) or "").strip()
+
+    if value is not None:
+        _ONE_ARG_CLIP_PROPERTY = True
+        return str(value).strip()
+    if _ONE_ARG_CLIP_PROPERTY:
+        # Already proven good, so None here is the honest answer: this clip
+        # has no such property (a still has no "Proxy Media Path").
+        return ""
+    # Undecided and unanswered. Only the dict can tell "no such property on
+    # this clip" from "no such overload on this build", and getting that
+    # backwards would cost every path the walk finds.
+    answer = str(_clip_property_dict(media_pool_item).get(key) or "").strip()
+    if answer:
+        _ONE_ARG_CLIP_PROPERTY = False
+        log.info(
+            "resolve: GetClipProperty(%r) answered None where the full dict "
+            "has a value -- reading the full property dict per clip instead", key,
+        )
+    return answer
+
+
+# -- the project library session (library walk, 2026-08-26) ----------------
+#
+# One ProjectLibrary per (library, project), created lazily on whichever
+# thread walks first and kept for as long as the project stays open. Its
+# reads are SELECTs against PostgreSQL (or a disk library's SQLite) and must
+# NEVER run under _API_LOCK: a library that has gone away takes the module's
+# 5 s statement timeout to say so, and _API_LOCK is what the tray's message
+# pump and every other Resolve client on the machine are waiting behind.
+#
+# Lock order is _LIBRARY_LOCK then _API_LOCK, never the reverse -- locate()
+# asks Resolve which library this is, and the proxy enrichment below asks
+# Resolve about clips the library has already named.
+_LIBRARY_LOCK = threading.RLock()
+
+# How long after a failure before we try the library again. NOT every poll:
+# a NAS that is off answers a connect attempt in 5 s of stalled watcher
+# thread, and doing that every 3 s would make the fallback more expensive
+# than the API walk it exists to avoid.
+_LIBRARY_RETRY_SECONDS = 60.0
+
+# The fallback is a permanent, load-bearing state on plenty of machines (a
+# disk library we have no reader for, a laptop off the NAS's network), so it
+# is said ONCE at WARNING and then kept at INFO on a long cadence -- a line
+# every 3 s poll would be the loudest thing in the log and the least useful.
+_LIBRARY_FALLBACK_LOG_SECONDS = 300.0
+
+# A CEILING on how stale a library answer may be, independent of
+# ProjectLibrary.changed(). That signal rides on Sm2Sequence.DbSavedTime,
+# which only moves when the project is SAVED -- so with Live Save switched
+# off (and it is a per-machine preference, not something this companion
+# controls) an editor can relink a clip and changed() will keep saying "no"
+# until they press Ctrl-S, which might be after lunch. The valve costs one
+# extra walk a minute of an operation measured in milliseconds (wave-1
+# review, 2026-08-26).
+_LIBRARY_CACHE_MAX_SECONDS = 60.0
+
+_library: Optional[library.ProjectLibrary] = None
+_library_read_stamp = 0.0
+_library_project = ""
+_library_next_attempt = 0.0
+_library_generation = 0
+_library_fallback_warned = False
+_library_fallback_logged_at = 0.0
+_library_settings_cache: Optional[dict[str, Any]] = None
+_library_state: dict[str, Any] = {
+    "source": "", "error": "", "walk_ms": 0.0, "library": "", "project": "",
+}
+
+_LIBRARY_CONFIG_KEYS = (
+    "library_walk", "library_db_host", "library_db_port", "library_db_name",
+    "library_db_user", "library_db_password",
+)
+
+
+def configure_library(cfg: dict[str, Any]) -> None:
+    """Hand this module the config the library walk needs.
+
+    This is the ONLY config the bridge reads, and it is pushed in rather
+    than loaded here so the module stays what it has always been: a thing
+    that talks to Resolve and nothing else. app.py calls this at startup.
+    Anything that never calls it (a tool, a test) gets one lazy
+    load_config() the first time a walk happens.
+
+    Changing any of the six keys drops the open library, so an editor who
+    fixes a wrong host does not have to restart the companion.
+    """
+    global _library_settings_cache
+    settings = {key: cfg.get(key) for key in _LIBRARY_CONFIG_KEYS}
+    with _LIBRARY_LOCK:
+        if settings != _library_settings_cache:
+            _close_library("configuration changed")
+            _library_settings_cache = settings
+            # A new address deserves a fresh attempt, not the old backoff.
+            _arm_library_retry(0.0)
+
+
+def _library_settings() -> dict[str, Any]:
+    """The six library keys, from configure_library() or from config.toml.
+
+    Imported here, not at module scope: config.py is imported by almost
+    everything and this module is imported BY config's callers, so keeping
+    it lazy keeps the import graph one-way.
+    """
+    global _library_settings_cache
+    with _LIBRARY_LOCK:
+        if _library_settings_cache is None:
+            from . import config as config_mod
+
+            try:
+                cfg = config_mod.load_config()
+            except Exception:
+                log.debug("resolve: could not load config for the library walk",
+                          exc_info=True)
+                cfg = dict(config_mod.DEFAULTS)
+            _library_settings_cache = {key: cfg.get(key, config_mod.DEFAULTS.get(key))
+                                       for key in _LIBRARY_CONFIG_KEYS}
+        return dict(_library_settings_cache)
+
+
+def _library_walk_enabled() -> bool:
+    return bool(_library_settings().get("library_walk", True))
+
+
+def _arm_library_retry(seconds: float) -> None:
+    global _library_next_attempt
+    _library_next_attempt = time.monotonic() + seconds
+
+
+def reset_library_state() -> None:
+    """Drop the library session and everything remembered about it (tests,
+    and anything that knows the answer has changed)."""
+    global _library_settings_cache, _library_generation, _library_read_stamp
+    global _library_fallback_warned, _library_fallback_logged_at
+    with _LIBRARY_LOCK:
+        _close_library("reset")
+        _library_settings_cache = None
+        _library_generation = 0
+        _library_read_stamp = 0.0
+        _library_fallback_warned = False
+        _library_fallback_logged_at = 0.0
+        _arm_library_retry(0.0)
+        _library_state.update({"source": "", "error": "", "walk_ms": 0.0,
+                               "library": "", "project": ""})
+
+
+def library_status() -> dict[str, Any]:
+    """What the last walk did, for the tray and the dashboard.
+
+    {"enabled", "source": "library"|"api"|"", "library", "project", "error",
+     "walk_ms", "retry_in"}. Never raises, never calls Resolve.
+    """
+    with _LIBRARY_LOCK:
+        # Deliberately does NOT load config.toml: a status read must not be
+        # the thing that creates a first-run config file.
+        enabled = True if _library_settings_cache is None else bool(
+            _library_settings_cache.get("library_walk", True))
+        retry_in = max(0.0, _library_next_attempt - time.monotonic())
+        return {
+            "enabled": enabled,
+            "connected": _library is not None,
+            "retry_in": round(retry_in, 1),
+            **{key: value for key, value in _library_state.items()},
+        }
+
+
+def _close_library(why: str) -> None:
+    """Drop the open library. Caller holds _LIBRARY_LOCK."""
+    global _library, _library_project
+    if _library is not None:
+        log.debug("resolve: closing the project library (%s)", why)
+        try:
+            _library.close()
+        except Exception:
+            log.debug("resolve: closing the project library failed", exc_info=True)
+    _library = None
+    _library_project = ""
+
+
+def _note_library_fallback(why: str) -> None:
+    """Say -- once loudly, then rarely -- that we are back on the API walk."""
+    global _library_fallback_warned, _library_fallback_logged_at
+    message = (
+        "library walk unavailable (%s) -- using the API walk; clicks in other "
+        "Resolve clients will lag during walks" % why
+    )
+    now = time.monotonic()
+    _library_state.update({"source": "api", "error": str(why)})
+    if not _library_fallback_warned:
+        _library_fallback_warned = True
+        _library_fallback_logged_at = now
+        log.warning("resolve: %s", message)
+        return
+    if now - _library_fallback_logged_at >= _LIBRARY_FALLBACK_LOG_SECONDS:
+        _library_fallback_logged_at = now
+        log.info("resolve: %s", message)
+    else:
+        log.debug("resolve: %s", message)
+
+
+def _library_attempt_due() -> bool:
+    """Is a library walk worth ATTEMPTING at all right now?
+
+    Answered without touching Resolve, so a machine that will never have a
+    library pays nothing per poll but this comparison -- the whole point of
+    the backoff.
+    """
+    with _LIBRARY_LOCK:
+        if not _library_walk_enabled():
+            return False
+        if _library is not None:
+            return True
+        return time.monotonic() >= _library_next_attempt
+
+
+def _project_library(resolve, project_name: str) -> Optional[library.ProjectLibrary]:
+    """The ProjectLibrary for the open project, or None. Never raises.
+
+    Caller holds _LIBRARY_LOCK and does NOT hold _API_LOCK: locating takes
+    two cheap Resolve calls (which take the API lock themselves) but
+    CONNECTING is a database call with a 5 s timeout.
+    """
+    global _library, _library_project
+    if _library is not None and _library_project == project_name:
+        return _library
+    if _library is not None:
+        # Project change: this library object is scoped to one project's
+        # rows and cannot answer for another.
+        _close_library("project changed to %r" % project_name)
+    if time.monotonic() < _library_next_attempt:
+        return None
+
+    _arm_library_retry(_LIBRARY_RETRY_SECONDS)
+    with _bridge_call("library.locate"):
+        info = library.locate(resolve, project_name, _library_settings())
+    if info is None:
+        _note_library_fallback("no project library found for %r" % project_name)
+        return None
+    try:
+        opened = library.ProjectLibrary(info, project_name)
+    except library.LibraryUnavailable as exc:
+        _note_library_fallback(str(exc))
+        return None
+    except Exception as exc:                     # pragma: no cover - defensive
+        _note_library_fallback("%s: %s" % (info.describe(), exc))
+        return None
+
+    _library = opened
+    _library_project = project_name
+    _arm_library_retry(0.0)
+    _library_state.update({"library": info.describe(), "project": project_name,
+                           "error": ""})
+    log.info("resolve: reading clips from the project library %s for %r",
+             info.describe(), project_name)
+    return opened
+
+
+def _library_failed(exc: Exception) -> None:
+    """A library that answered before has stopped. Caller holds _LIBRARY_LOCK."""
+    _close_library("read failed")
+    _arm_library_retry(_LIBRARY_RETRY_SECONDS)
+    _note_library_fallback(str(exc))
+
+
+def _library_answers_are_stale() -> bool:
+    """Has it been long enough that we re-read whatever changed() says?"""
+    return (time.monotonic() - _library_read_stamp) >= _LIBRARY_CACHE_MAX_SECONDS
+
+
+def _library_read_done() -> None:
+    """A walk really went to the database just now. Caller holds _LIBRARY_LOCK."""
+    global _library_read_stamp
+    _library_read_stamp = time.monotonic()
+
+
+def _drop_library_path_cache(project_library) -> None:
+    """Make the next read fetch pool paths from the database again.
+
+    ProjectLibrary caches uid -> path until changed() says the library moved,
+    and changed() cannot see an unsaved edit (see _LIBRARY_CACHE_MAX_SECONDS).
+    `invalidate()` is asked for first so that a future library.py can offer
+    one; the attribute reset is the fallback and is deliberately harmless if
+    it is ever renamed away.
+    """
+    invalidate = getattr(project_library, "invalidate", None)
+    if callable(invalidate):
+        try:
+            invalidate()
+            return
+        except Exception:
+            log.debug("resolve: library invalidate() failed", exc_info=True)
+    try:
+        project_library._paths = None
+    except Exception:                            # pragma: no cover - defensive
+        log.debug("resolve: could not drop the library's path cache", exc_info=True)
+
+
+def _current_project_locked() -> tuple[Optional[dict[str, Any]], Any, Any, str]:
+    """(error result, resolve, project, project name). Caller holds _API_LOCK.
+
+    The error result is None when there IS a project; otherwise it is the
+    dict every enumerator in this module returns for that condition, so the
+    caller can hand it straight back instead of walking anything. `resolve`
+    comes back with it so no caller pays for a second connect().
+    """
+    resolve = connect()
+    if resolve is None:
+        return ({"ok": False, "message": _NOT_CONNECTED, "items": [],
+                 "project_name": ""}, None, None, "")
+    try:
+        project_manager = resolve.GetProjectManager()
+        project = project_manager.GetCurrentProject() if project_manager else None
+    except Exception:
+        project = None
+    if project is None:
+        return ({"ok": False, "message": "no project open in Resolve", "items": [],
+                 "project_name": ""}, resolve, None, "")
+    return (None, resolve, project, _safe_project_name(project))
+
+
 def get_timeline_items(allow_cached: bool = False) -> dict[str, Any]:
     """Enumerate every video+audio timeline item on the current timeline.
 
@@ -702,6 +1075,21 @@ def get_timeline_items(allow_cached: bool = False) -> dict[str, Any]:
     resolve_media_pool_item(item), which falls back to a cached lookup by uid
     (library walk, 2026-08-26).
 
+    Items come from the PROJECT LIBRARY when one can be read (source
+    "library") and from the scripting API otherwise (source "api"); the
+    dicts are the same shape either way. Two things about the library's
+    extra reach are worth knowing at every call site:
+
+    * A multicam or compound clip is expanded to its ANGLES, and an angle's
+      "media_pool_uid" is the angle's OWN pool clip -- so anything that acts
+      on one (replace_clip, link_proxy_media) acts on the angle inside the
+      multicam, not on the multicam. That is the intent: the angle is the
+      clip with the offline path. "via_multicam" carries the container's uid
+      for anyone who needs to say which multicam it came from.
+    * Only the FIRST cut of a multicam expands. Later cuts of it, and
+      anything else with no media path, are dropped here exactly as the API
+      walk drops a clip whose "File Path" is "".
+
     "project_name" is the current Resolve project's GetName() (empty string
     if unavailable) — the watcher attaches it to OUT_OF_TREE items so the
     popup fixer can suggest a destination inside the project actually being
@@ -719,8 +1107,11 @@ def get_timeline_items(allow_cached: bool = False) -> dict[str, Any]:
     # run through a Python window procedure that needs that same GIL -- one
     # poll here froze the hover highlight for a second-plus (2026-07-26).
     ui_state.wait_while_menu_open()
-    with _bridge_call("get_timeline_items"):
-        result = _get_timeline_items_locked(allow_cached=allow_cached)
+    result = _library_timeline_items(allow_cached=allow_cached)
+    if result is None:
+        with _bridge_call("get_timeline_items"):
+            result = _get_timeline_items_locked(allow_cached=allow_cached)
+        _library_state.update({"source": "api"})
     return _explain_disconnection(result)
 
 
@@ -750,7 +1141,20 @@ def poll_timeline_items() -> dict[str, Any]:
 # change) alters no name and no count, and the watcher feeds the popup fixer,
 # which must not go blind to it.
 #
-# State is written and read only under _API_LOCK, by the two functions below.
+# The LIBRARY walk uses the same cache and the same safety valve, with a
+# fingerprint it can gather without touching a clip at all: project name,
+# timeline name, timeline uid, and a counter bumped every time
+# ProjectLibrary.changed() says the library has moved (library walk,
+# 2026-08-26). A relink that alters no name and no count moves DbSavedTime,
+# so the library sees the change the API walk needed the safety valve for --
+# the valve stays anyway, because a fingerprint is a claim and the walk is
+# the evidence.
+#
+# State below has a lock of its own rather than riding on _API_LOCK: the
+# library walk reaches it with _API_LOCK deliberately released, and taking
+# that lock just to read three module globals would put the watcher back
+# behind whatever native call is in flight.
+_TIMELINE_CACHE_LOCK = threading.Lock()
 _FULL_WALK_EVERY_POLLS = 10
 
 _timeline_cache_fingerprint: Optional[tuple] = None
@@ -762,7 +1166,7 @@ def reset_timeline_cache() -> None:
     """Forget the last poll — for tests only; the companion polls one
     timeline for its whole life and never calls this."""
     global _timeline_cache_fingerprint, _timeline_cache_result, _polls_since_full_walk
-    with _bridge_call("reset_timeline_cache"):
+    with _TIMELINE_CACHE_LOCK:
         _timeline_cache_fingerprint = None
         _timeline_cache_result = None
         _polls_since_full_walk = 0
@@ -770,24 +1174,122 @@ def reset_timeline_cache() -> None:
 
 def _cached_timeline_result(fingerprint: tuple) -> Optional[dict[str, Any]]:
     """The previous poll's answer if this poll is provably the same one, else
-    None meaning "walk it properly". Caller holds _API_LOCK."""
+    None meaning "walk it properly"."""
     global _polls_since_full_walk
-    if _timeline_cache_result is None or fingerprint != _timeline_cache_fingerprint:
-        return None
-    if _polls_since_full_walk >= _FULL_WALK_EVERY_POLLS - 1:
-        return None  # safety valve: walk it anyway
-    _polls_since_full_walk += 1
-    # A fresh outer dict and list: the watcher and the fixer own what they are
-    # handed, and a caller appending to `items` must not edit the cache.
-    return {**_timeline_cache_result, "items": list(_timeline_cache_result["items"])}
+    with _TIMELINE_CACHE_LOCK:
+        if _timeline_cache_result is None or fingerprint != _timeline_cache_fingerprint:
+            return None
+        if _polls_since_full_walk >= _FULL_WALK_EVERY_POLLS - 1:
+            return None  # safety valve: walk it anyway
+        _polls_since_full_walk += 1
+        # A fresh outer dict and list: the watcher and the fixer own what they
+        # are handed, and a caller appending to `items` must not edit the cache.
+        return {**_timeline_cache_result, "items": list(_timeline_cache_result["items"])}
 
 
 def _remember_timeline_result(fingerprint: tuple, result: dict[str, Any]) -> None:
-    """Caller holds _API_LOCK."""
     global _timeline_cache_fingerprint, _timeline_cache_result, _polls_since_full_walk
-    _timeline_cache_fingerprint = fingerprint
-    _timeline_cache_result = {**result, "items": list(result.get("items") or [])}
-    _polls_since_full_walk = 0
+    with _TIMELINE_CACHE_LOCK:
+        _timeline_cache_fingerprint = fingerprint
+        _timeline_cache_result = {**result, "items": list(result.get("items") or [])}
+        _polls_since_full_walk = 0
+
+
+def _timeline_head_locked() -> tuple[Optional[dict[str, Any]], Any, str, str, str]:
+    """(error result, resolve, project name, timeline name, timeline uid).
+
+    The FOUR cheap calls a library walk needs from Resolve -- the project,
+    its name, the current timeline, its name and uid. Nothing per track and
+    nothing per clip; the library supplies all of that. Caller holds
+    _API_LOCK and must release it before reading the library.
+    """
+    error, resolve, project, project_name = _current_project_locked()
+    if error is not None:
+        return (error, None, "", "", "")
+    try:
+        timeline = project.GetCurrentTimeline()
+    except Exception:
+        timeline = None
+    if timeline is None:
+        return ({"ok": False, "message": "no timeline open in Resolve", "items": [],
+                 "project_name": project_name}, resolve, project_name, "", "")
+    return (None, resolve, project_name,
+            _safe_attr_str(timeline, "GetName"),
+            _safe_attr_str(timeline, "GetUniqueId"))
+
+
+def _library_timeline_items(allow_cached: bool = False) -> Optional[dict[str, Any]]:
+    """The open timeline's items out of the project library, or None.
+
+    None means "the API walk, please" -- the walk is switched off, no
+    library could be located, the one we had stopped answering, or there is
+    no project/timeline/Resolve to name one. That last case falls THROUGH
+    rather than returning the error itself, so the exact dict callers have
+    always been handed for it keeps coming from one place.
+
+    The database read happens with _API_LOCK RELEASED, which is the entire
+    point of this module's half of the library walk: the read has a 5 s
+    statement timeout, and 5 s of _API_LOCK is 5 s of frozen tray menu and
+    five seconds of every other scripting client on the machine queueing.
+    """
+    global _library_generation
+    if not _library_attempt_due():
+        return None
+    with _LIBRARY_LOCK:
+        with _bridge_call("get_timeline_items"):
+            error, resolve, project_name, timeline_name, timeline_uid = \
+                _timeline_head_locked()
+        if error is not None:
+            return None
+        if not timeline_uid:
+            # No uid, no way to find the sequence. An old API build; the
+            # walk below cannot be scoped, so the API keeps this one.
+            _note_library_fallback("this Resolve build's timeline has no unique id")
+            return None
+
+        project_library = _project_library(resolve, project_name)
+        if project_library is None:
+            return None
+
+        started = time.monotonic()
+        try:
+            stale = _library_answers_are_stale()
+            if project_library.changed() or stale:
+                _library_generation += 1
+            if stale:
+                _drop_library_path_cache(project_library)
+            fingerprint = ("library", project_name, timeline_name, timeline_uid,
+                           _library_generation)
+            if allow_cached:
+                cached = _cached_timeline_result(fingerprint)
+                if cached is not None:
+                    return cached
+            walked = project_library.timeline_items(timeline_uid)
+        except library.LibraryUnavailable as exc:
+            _library_failed(exc)
+            return None
+        except Exception as exc:                 # pragma: no cover - defensive
+            _library_failed(exc)
+            return None
+
+        # Same rule as the API walk ("no File Path -> skipped"), and it does
+        # most of the work here: on Civil Defence - E1 the library returns
+        # ~994 items of which ~44 carry a path, because every REPEAT cut of a
+        # multicam comes back as the multicam itself -- uid of the container,
+        # no path, angles already emitted at its first appearance. Letting
+        # those through would hand the watcher 950 pathless "clips" to
+        # classify, and classify_path("") is not a question anyone asked.
+        items = [item for item in walked if str(item.get("file_path") or "").strip()]
+        _library_read_done()
+        elapsed_ms = (time.monotonic() - started) * 1000.0
+        _library_state.update({"source": "library", "error": "",
+                               "walk_ms": round(elapsed_ms, 1)})
+        log.debug("resolve: library walk of %r found %d items, %d with a path, in %.1f ms",
+                  timeline_name, len(walked), len(items), elapsed_ms)
+        result = {"ok": True, "message": "", "items": items,
+                  "project_name": project_name}
+        _remember_timeline_result(fingerprint, result)
+        return result
 
 
 def _timeline_tracks(timeline) -> list[tuple[str, int, list]]:
@@ -864,11 +1366,12 @@ def _get_timeline_items_locked(allow_cached: bool = False) -> dict[str, Any]:
                     media_pool_item = None
                 if media_pool_item is None:
                     continue  # generator/title/adjustment clip — no source file
-                try:
-                    props = media_pool_item.GetClipProperty() or {}
-                except Exception:
-                    props = {}
-                file_path = (props.get("File Path") or "").strip()
+                # One-arg, not the whole property dict: 0.1 ms against 12.5
+                # ms per clip, same string on all 1,298 clips of the open
+                # project (library walk, 2026-08-26). On a timeline the
+                # library cannot be read for, this alone takes the walk from
+                # 11 s to under 1 s.
+                file_path = _clip_property(media_pool_item, "File Path")
                 if not file_path:
                     continue
                 items.append(
@@ -978,11 +1481,9 @@ def _walk_media_pool_folder(
         clips = []
     for clip in clips:
         _sweep_yield(swept)
-        try:
-            props = clip.GetClipProperty() or {}
-        except Exception:
-            props = {}
-        file_path = (props.get("File Path") or "").strip()
+        # Three one-arg reads rather than one whole-dict read: measured 0.3 ms
+        # against 12.5 ms per clip (library walk, 2026-08-26).
+        file_path = _clip_property(clip, "File Path")
         if not file_path:
             continue  # timelines, compound clips, generators have no File Path
         items.append(
@@ -1000,10 +1501,10 @@ def _walk_media_pool_folder(
                 # shown by Reveal in Folder, so a clip can look correctly
                 # linked while its proxy points at a drive that has never
                 # existed here -- see proxy_relink.py.
-                "proxy_path": (props.get("Proxy Media Path") or "").strip(),
+                "proxy_path": _clip_property(clip, "Proxy Media Path"),
                 # "1920x1080" when the proxy resolves, "Offline" when
                 # attached but unreachable, "None" when there is none.
-                "proxy_state": (props.get("Proxy") or "").strip(),
+                "proxy_state": _clip_property(clip, "Proxy"),
             }
         )
 
@@ -1050,9 +1551,111 @@ def get_media_pool_items() -> dict[str, Any]:
     get_timeline_items.
     """
     ui_state.wait_while_menu_open()  # same GIL courtesy as get_timeline_items
-    with _bridge_call("get_media_pool_items"):
-        result = _get_media_pool_items_locked()
+    result = _library_media_pool_items()
+    if result is None:
+        with _bridge_call("get_media_pool_items"):
+            result = _get_media_pool_items_locked()
+        _library_state.update({"source": "api"})
     return _explain_disconnection(result)
+
+
+def _library_media_pool_items() -> Optional[dict[str, Any]]:
+    """Every clip in the project's bins, out of the project library, or None.
+
+    Same contract as _library_timeline_items: None means "the API walk", and
+    the database read happens with _API_LOCK released.
+    """
+    if not _library_attempt_due():
+        return None
+    with _LIBRARY_LOCK:
+        with _bridge_call("get_media_pool_items"):
+            error, resolve, _project, project_name = _current_project_locked()
+        if error is not None:
+            return None
+
+        project_library = _project_library(resolve, project_name)
+        if project_library is None:
+            return None
+
+        started = time.monotonic()
+        try:
+            # Not gated on changed(): unlike the timeline this is asked for
+            # every 120 s at most (the media-tree refresh) or by an editor
+            # who just pressed a button, and both want the truth now.
+            project_library.changed()
+            if _library_answers_are_stale():
+                _drop_library_path_cache(project_library)
+            walked = project_library.pool_items()
+        except library.LibraryUnavailable as exc:
+            _library_failed(exc)
+            return None
+        except Exception as exc:                 # pragma: no cover - defensive
+            _library_failed(exc)
+            return None
+
+        items = [item for item in walked if str(item.get("file_path") or "").strip()]
+        _library_read_done()
+        _enrich_proxy_keys(items)
+        elapsed_ms = (time.monotonic() - started) * 1000.0
+        _library_state.update({"source": "library", "error": "",
+                               "walk_ms": round(elapsed_ms, 1)})
+        log.debug("resolve: library pool walk of %r found %d clips, %d with a path, "
+                  "in %.1f ms", project_name, len(walked), len(items), elapsed_ms)
+        return {"ok": True, "message": "", "items": items,
+                "project_name": project_name}
+
+
+def _enrich_proxy_keys(items: list[dict[str, Any]]) -> None:
+    """Fill in proxy_path / proxy_state on library items, from the API.
+
+    The library cannot give these cheaply (see ProjectLibrary.pool_items:
+    BtVideoInfo.Proxy is a stub with no path and no state, and the real
+    proxy path sits behind a SECOND nested zstd frame inside FieldsBlob).
+    So they come from Resolve -- but ONLY where something is going to read
+    them, i.e. where this machine generates or relinks proxies. Everywhere
+    else they stay "", which is what the contract says "unknown" looks like.
+
+    One folder walk for the whole list, not one lookup per clip: the uid map
+    the fixer already builds (media_pool_item_by_uid) is exactly the map
+    needed here, so the two share it and the TTL cache means a refresh that
+    follows a FIX ALL pays for neither.
+    """
+    if not items:
+        return
+    try:
+        from . import config as config_mod
+
+
+        if not config_mod.proxy_generation_enabled(config_mod.load_config()):
+            return
+    except Exception:
+        log.debug("resolve: could not decide whether to enrich proxy keys",
+                  exc_info=True)
+        return
+
+    # In CHUNKS, each taking _API_LOCK for itself. Two property reads over
+    # 1,298 clips measured 5.5 s on the base rig -- better than the 9.4 s the
+    # whole API pool walk used to take, but still 5.5 s in which nothing else
+    # on the machine can talk to Resolve if it is one hold. Letting go
+    # between chunks means a card click in Timeline Cards waits for a chunk,
+    # not for the walk (library walk, 2026-08-26).
+    swept = [0]
+    for start in range(0, len(items), _PROXY_ENRICH_CHUNK):
+        chunk = items[start:start + _PROXY_ENRICH_CHUNK]
+        with _bridge_call("get_media_pool_items"):
+            _error, _resolve, project, project_name = _current_project_locked()
+            if project is None:
+                return
+            found = _media_pool_uid_map_locked(project, project_name)
+            if not found:
+                return
+            for item in chunk:
+                clip = found.get(str(item.get("media_pool_uid") or ""))
+                if clip is None:
+                    continue
+                _sweep_yield(swept)
+                item["proxy_path"] = _clip_property(clip, "Proxy Media Path")
+                item["proxy_state"] = _clip_property(clip, "Proxy")
 
 
 def _get_media_pool_items_locked() -> dict[str, Any]:
@@ -1116,6 +1719,11 @@ def _get_media_pool_items_locked() -> dict[str, Any]:
 # their own.
 _MEDIA_POOL_UID_TTL_SECONDS = 60.0
 
+# How many clips one hold of _API_LOCK enriches with proxy keys. Small
+# enough that another client never waits long, large enough that the four
+# cheap calls per chunk stay noise (library walk, 2026-08-26).
+_PROXY_ENRICH_CHUNK = 100
+
 _uid_cache: dict[str, Any] = {}
 _uid_cache_project = ""
 _uid_cache_stamp = 0.0
@@ -1155,6 +1763,37 @@ def _walk_media_pool_uids(folder, found: dict[str, Any], depth: int = 0,
         _walk_media_pool_uids(subfolder, found, depth + 1, swept)
 
 
+def _media_pool_uid_map_locked(project, project_name: str) -> dict[str, Any]:
+    """uid -> live MediaPoolItem for the open project. Caller holds _API_LOCK.
+
+    ONE walk shared by everything that needs to turn a library uid back into
+    an object -- media_pool_item_by_uid below and the pool walk's proxy
+    enrichment above -- so a refresh and the FIX ALL that follows it pay for
+    a single GetClipList sweep between them.
+
+    Empty dict means "could not walk it"; that answer is deliberately NOT
+    cached, unlike a walk that found nothing.
+    """
+    global _uid_cache, _uid_cache_project, _uid_cache_stamp
+    now = time.monotonic()
+    if (project_name == _uid_cache_project
+            and (now - _uid_cache_stamp) < _MEDIA_POOL_UID_TTL_SECONDS):
+        return _uid_cache
+    try:
+        media_pool = project.GetMediaPool()
+        root_folder = media_pool.GetRootFolder() if media_pool is not None else None
+    except Exception:
+        root_folder = None
+    if root_folder is None:
+        return {}
+    found: dict[str, Any] = {}
+    _walk_media_pool_uids(root_folder, found)
+    _uid_cache = found
+    _uid_cache_project = project_name
+    _uid_cache_stamp = now
+    return found
+
+
 def media_pool_item_by_uid(uid: str):
     """The live MediaPoolItem with this GetUniqueId(), or None. Never raises.
 
@@ -1162,37 +1801,17 @@ def media_pool_item_by_uid(uid: str):
     another project, or a clip that has been removed from the pool. Every
     caller must treat it as "skip this clip", never as "nothing to do".
     """
-    global _uid_cache, _uid_cache_project, _uid_cache_stamp
     if not uid:
         return None
     ui_state.wait_while_menu_open()  # same GIL courtesy as the enumerators
     with _bridge_call("media_pool_item_by_uid"):
         try:
-            resolve = connect()
-            if resolve is None:
-                return None
-            project_manager = resolve.GetProjectManager()
-            project = project_manager.GetCurrentProject() if project_manager else None
+            _error, _resolve, project, project_name = _current_project_locked()
             if project is None:
                 return None
-            project_name = _safe_project_name(project)
-            now = time.monotonic()
-            fresh = (project_name == _uid_cache_project
-                     and (now - _uid_cache_stamp) < _MEDIA_POOL_UID_TTL_SECONDS)
-            if fresh:
-                # Including the miss: the map was built less than a TTL ago,
-                # so a uid that is not in it is not in the pool.
-                return _uid_cache.get(uid)
-            media_pool = project.GetMediaPool()
-            root_folder = media_pool.GetRootFolder() if media_pool is not None else None
-            if root_folder is None:
-                return None
-            found: dict[str, Any] = {}
-            _walk_media_pool_uids(root_folder, found)
-            _uid_cache = found
-            _uid_cache_project = project_name
-            _uid_cache_stamp = now
-            return found.get(uid)
+            # A MISS from a fresh map is an answer: the map was built less
+            # than a TTL ago, so a uid that is not in it is not in the pool.
+            return _media_pool_uid_map_locked(project, project_name).get(uid)
         except Exception:
             log.debug("resolve: uid lookup for %r failed", uid, exc_info=True)
             return None
@@ -1201,14 +1820,15 @@ def media_pool_item_by_uid(uid: str):
 def _is_item_dict(value) -> bool:
     """Is this one of this module's item dicts, or an opaque MediaPoolItem?
 
-    A real MediaPoolItem is a fusionscript object, never a dict -- but the
-    suite's stand-ins include bare `{}` and `object()`, and a batch entry may
-    legitimately be either. The keys this module puts on every item are what
-    tells them apart; anything else is passed through untouched.
+    ANY dict is an item dict. A real MediaPoolItem is a fusionscript object
+    and is never a dict, so the test needs nothing else -- and keying off
+    "does it carry media_pool_uid or media_pool_item" was actively wrong: a
+    bare `{}` failed it, was therefore taken for a MediaPoolItem, and came
+    back out of resolve_media_pool_item() as itself, on its way to
+    ReplaceClip (wave-1 review, 2026-08-26). An item dict missing both keys
+    is a dict with no clip in it, which is exactly the None case.
     """
-    return isinstance(value, dict) and (
-        "media_pool_uid" in value or "media_pool_item" in value
-    )
+    return isinstance(value, dict)
 
 
 def resolve_media_pool_item(item):
@@ -1219,8 +1839,15 @@ def resolve_media_pool_item(item):
     row). A bare MediaPoolItem is passed straight back, so batches that
     collected objects before this existed keep working unchanged.
 
-    A resolved object is written back onto the dict, so a batch that touches
-    the same dict twice pays for one lookup.
+    The resolved object is deliberately NOT written back onto the dict.
+    Item dicts outlive the objects in them: popup._relink_entry keeps the
+    watcher's own dicts while a dialog is open and _canon_relink_pending can
+    hold them for hours, so a cached handle would survive a project close and
+    reopen and hand a DEAD fusionscript object to ReplaceClip (wave-1 review,
+    2026-08-26). Repeat lookups are already free -- the uid map behind
+    media_pool_item_by_uid is one walk per project per
+    _MEDIA_POOL_UID_TTL_SECONDS -- and that map is the thing that knows when
+    the project changed.
     """
     if item is None:
         return None
@@ -1229,10 +1856,7 @@ def resolve_media_pool_item(item):
     media_pool_item = item.get("media_pool_item")
     if media_pool_item is not None:
         return media_pool_item
-    media_pool_item = media_pool_item_by_uid(str(item.get("media_pool_uid") or ""))
-    if media_pool_item is not None:
-        item["media_pool_item"] = media_pool_item
-    return media_pool_item
+    return media_pool_item_by_uid(str(item.get("media_pool_uid") or ""))
 
 
 def media_pool_item_is_reachable(item) -> bool:

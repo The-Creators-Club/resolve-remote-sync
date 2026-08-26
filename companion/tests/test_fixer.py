@@ -106,8 +106,21 @@ def test_unique_destination_path_increments_past_multiple_collisions(tmp_path):
 # -- fix_clip (copy + relink) ----------------------------------------------
 
 
+class FakeClip:
+    """A stand-in MediaPoolItem: an opaque object, deliberately NOT a dict.
+
+    A real MediaPoolItem is a fusionscript object and can never be a dict,
+    and since the wave-1 review (2026-08-26) resolve_bridge treats EVERY
+    dict as one of its item dicts -- so a `{}` here would be a row with no
+    clip in it rather than a clip (resolve_bridge._is_item_dict).
+    """
+
+    def __init__(self):
+        self.relinked_to = None
+
+
 def _fake_replace_clip_ok(media_pool_item, new_path):
-    media_pool_item["relinked_to"] = new_path
+    media_pool_item.relinked_to = new_path
     return {"ok": True, "message": f"Relinked to {new_path}"}
 
 
@@ -120,7 +133,7 @@ def test_fix_clip_copies_and_relinks(tmp_path):
     src.parent.mkdir(parents=True)
     src.write_text("video bytes")
     local_root = tmp_path / "root"
-    media_pool_item = {}
+    media_pool_item = FakeClip()
 
     result = fixer.fix_clip(
         str(src), "B-roll/Editor Added/owen", str(local_root), media_pool_item,
@@ -132,7 +145,7 @@ def test_fix_clip_copies_and_relinks(tmp_path):
     assert dest.is_file()
     assert dest.read_text() == "video bytes"
     assert src.is_file(), "original must never be deleted/moved"
-    assert media_pool_item["relinked_to"] == str(dest)
+    assert media_pool_item.relinked_to == str(dest)
 
 
 def test_fix_clip_collision_renames_copy(tmp_path):
@@ -145,7 +158,7 @@ def test_fix_clip_collision_renames_copy(tmp_path):
     (dest_dir / "clip.mov").write_text("pre-existing bytes")
 
     result = fixer.fix_clip(
-        str(src), "Audio/Music", str(local_root), {}, replace_clip_fn=_fake_replace_clip_ok,
+        str(src), "Audio/Music", str(local_root), FakeClip(), replace_clip_fn=_fake_replace_clip_ok,
     )
 
     assert result["ok"] is True
@@ -156,7 +169,7 @@ def test_fix_clip_collision_renames_copy(tmp_path):
 
 def test_fix_clip_missing_source_reports_failure_no_crash(tmp_path):
     result = fixer.fix_clip(
-        str(tmp_path / "does_not_exist.mov"), "Audio/Music", str(tmp_path), {},
+        str(tmp_path / "does_not_exist.mov"), "Audio/Music", str(tmp_path), FakeClip(),
     )
     assert result["ok"] is False
     assert "not found" in result["message"]
@@ -169,7 +182,7 @@ def test_fix_clip_relink_failure_keeps_copy_and_reports_error(tmp_path):
     local_root = tmp_path / "root"
 
     result = fixer.fix_clip(
-        str(src), "Audio/Music", str(local_root), {}, replace_clip_fn=_fake_replace_clip_fail,
+        str(src), "Audio/Music", str(local_root), FakeClip(), replace_clip_fn=_fake_replace_clip_fail,
     )
 
     assert result["ok"] is False
@@ -227,7 +240,7 @@ def test_fix_clip_accepts_single_media_pool_item_back_compat(tmp_path):
     src.parent.mkdir(parents=True)
     src.write_text("video bytes")
     local_root = tmp_path / "root"
-    media_pool_item = {}
+    media_pool_item = FakeClip()
 
     result = fixer.fix_clip(
         str(src), "B-roll/Editor Added/owen", str(local_root), media_pool_item,
@@ -235,7 +248,7 @@ def test_fix_clip_accepts_single_media_pool_item_back_compat(tmp_path):
     )
 
     assert result["ok"] is True
-    assert media_pool_item["relinked_to"] is not None
+    assert media_pool_item.relinked_to is not None
 
 
 def test_fix_clip_relinks_duplicate_media_pool_items_only_once(tmp_path):
@@ -249,8 +262,8 @@ def test_fix_clip_relinks_duplicate_media_pool_items_only_once(tmp_path):
         calls.append(mpi)
         return {"ok": True, "message": "ok"}
 
-    shared = {"id": "shared"}
-    other = {"id": "other"}
+    shared = FakeClip()
+    other = FakeClip()
 
     src = tmp_path / "src.mov"
     src.write_text("bytes")
@@ -284,7 +297,7 @@ def test_fix_clip_copy_failure_mid_copy_leaves_no_dest_file(tmp_path):
         raise OSError("disk full")
 
     result = fixer.fix_clip(
-        str(src), "B-roll/Editor Added/owen", str(local_root), {},
+        str(src), "B-roll/Editor Added/owen", str(local_root), FakeClip(),
         copy_fn=flaky_copy,
     )
 
@@ -339,7 +352,7 @@ def test_fix_clip_accepts_normal_relative_destination(tmp_path):
     src.write_text("bytes")
 
     result = fixer.fix_clip(
-        str(src), "Audio/Music", str(local_root), {}, replace_clip_fn=_fake_replace_clip_ok,
+        str(src), "Audio/Music", str(local_root), FakeClip(), replace_clip_fn=_fake_replace_clip_ok,
     )
 
     assert result["ok"] is True
@@ -1245,7 +1258,7 @@ def test_fix_clip_relinks_to_canonical_path_not_physical(tmp_path):
     src.parent.mkdir(parents=True)
     src.write_text("video bytes")
     local_root = tmp_path / "root"
-    media_pool_item = {}
+    media_pool_item = FakeClip()
 
     result = fixer.fix_clip(
         str(src), "B-roll/Editor Added/owen", str(local_root), media_pool_item,
@@ -1260,7 +1273,7 @@ def test_fix_clip_relinks_to_canonical_path_not_physical(tmp_path):
     # ...but Resolve is pointed at the canonical P:\ path, spelled with
     # backslashes on every host (see the note in
     # test_canonical_clip_path_translates_local_root_to_prefix).
-    assert media_pool_item["relinked_to"] == r"P:\B-roll\Editor Added\owen\clip.mov"
+    assert media_pool_item.relinked_to == r"P:\B-roll\Editor Added\owen\clip.mov"
 
 
 # -- item 9 (COMMERCIAL_READINESS.md, 2026-08-17): the two gates around the

@@ -1850,8 +1850,11 @@ def test_resolve_media_pool_item_looks_up_a_uid_only_item(monkeypatch):
 
     item = {"media_pool_item": None, "media_pool_uid": "uid-a", "source": "library"}
     assert resolve_bridge.resolve_media_pool_item(item) is clip
-    # Written back, so a batch touching the same dict twice pays once.
-    assert item["media_pool_item"] is clip
+    # NOT written back: an item dict outlives the object (a popup row is held
+    # while a dialog is open), and a cached handle survives a project reopen
+    # as a dead fusionscript pointer. The uid map is what caches (wave-1
+    # review, 2026-08-26).
+    assert item["media_pool_item"] is None
 
 
 def test_resolve_media_pool_item_with_neither_is_none(monkeypatch):

@@ -654,6 +654,32 @@ DEFAULTS: dict[str, Any] = {
     # Each entry matches its own numbered duplicates too ("New Doc 1",
     # "New Doc 2", "Untitled Project (3)") -- see is_ignored_project().
     "ignored_resolve_projects": ["Untitled Project", "New Doc"],
+    # -- the project-library walk (docs/LIBRARY_WALK_PLAN.md, 2026-08-26) --
+    # False = enumerate timeline and pool clips through Resolve's scripting
+    # API, the way this companion did until now. On by default because that
+    # walk holds fusionscript -- and therefore EVERY other scripting client
+    # on the machine -- for 11-14 s per pass on a 900-item timeline, while
+    # reading the same clips out of the project library takes single-digit
+    # milliseconds and costs Resolve nothing. The library also sees inside
+    # multicams, which the API cannot. Any library failure falls back to the
+    # API walk automatically, so this is a switch for forcing the old
+    # behaviour, not a switch anything depends on.
+    "library_walk": True,
+    # Overrides for WHICH library to read, used only when Resolve's own
+    # answer is absent or wrong: Resolve 21.0.1 returns None from
+    # GetCurrentDatabase() and GetDatabaseList(), so the locator normally
+    # has to mine Resolve's log for the library's name and host -- and a
+    # machine whose log has rotated away has nothing to mine. Blank means
+    # "work it out"; a host alone is enough to go on.
+    "library_db_host": "",
+    "library_db_port": 5432,
+    "library_db_name": "",
+    "library_db_user": "",
+    # A SECRET, like report_token: config.toml is owner-only from the moment
+    # it exists (ensure_config_exists -> secretfile.harden). Blank means
+    # Resolve's own default password, which is what every library in the
+    # fleet uses.
+    "library_db_password": "",
 }
 
 # Profile defaults applied by load_config when mode is set and the file does
@@ -1217,6 +1243,24 @@ mode = "editor"
 # here silences "New Doc 1", "New Doc 2", "New Doc (3)" as well. A longer
 # real name that merely starts the same ("New Doc Final") is NOT ignored.
 ignored_resolve_projects = ["Untitled Project", "New Doc"]
+
+# The companion reads the open project's clips out of Resolve's PROJECT
+# LIBRARY (PostgreSQL, or the SQLite Project.db of a disk library) instead of
+# walking them through the scripting API. That walk used to hold Resolve --
+# and every other scripting client on the machine -- for 11-14 s at a time.
+# Any library failure falls back to the API walk on its own; set this to
+# false only to force the old behaviour.
+# library_walk = true
+
+# Which library, when Resolve will not say. Resolve 21.0.1 answers None to
+# GetCurrentDatabase() AND GetDatabaseList(), so the library is normally
+# identified from Resolve's own log; fill these in on a machine whose log has
+# rotated away or whose library moved. Blank = work it out.
+# library_db_host = ""
+# library_db_port = 5432
+# library_db_name = ""
+# library_db_user = ""
+# library_db_password = ""
 """
 
 
@@ -1635,6 +1679,35 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
                 f"Install ffmpeg (or set ffmpeg_path to it), or set "
                 f"proxy_gen_enabled = false. Syncing is unaffected either way."
             )
+
+    # The project-library walk (docs/LIBRARY_WALK_PLAN.md, 2026-08-26).
+    # WARNINGS, never errors: an unreadable library costs nothing but the old
+    # API walk, and stopping every sync lane over a Resolve-side read
+    # optimisation would be wildly out of proportion (DEL-3).
+    try:
+        port = int(cfg.get("library_db_port", DEFAULTS["library_db_port"]))
+        if not (0 < port < 65536):
+            raise ValueError
+    except (TypeError, ValueError):
+        warnings.append(
+            f"library_db_port must be a TCP port number, got "
+            f"{cfg.get('library_db_port')!r} -- using the default "
+            f"({DEFAULTS['library_db_port']})"
+        )
+
+    # A password with nothing to send it to is the shape of a half-finished
+    # edit, and it is silent: the locator falls back to Resolve's log, finds
+    # a host, and uses THAT library with this password -- or finds nothing
+    # and quietly walks the API forever while the editor believes they
+    # configured something.
+    if str(cfg.get("library_db_password", "") or "") and not str(
+            cfg.get("library_db_host", "") or "").strip():
+        warnings.append(
+            "library_db_password is set but library_db_host is blank -- the "
+            "password is only used for whichever library Resolve's own log "
+            "names, if any. Set library_db_host to be sure which library is "
+            "being read."
+        )
 
     scheme = str(cfg.get("lane_c_pause_scheme", DEFAULTS["lane_c_pause_scheme"])).strip().lower()
     if scheme not in ("none", "rotate"):

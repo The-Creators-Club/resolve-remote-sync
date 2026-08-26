@@ -176,6 +176,34 @@ def _no_live_resolve(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_live_project_library(request, monkeypatch):
+    """GUARD. No test may reach a REAL Resolve project library.
+
+    Same class of hazard as _no_live_resolve above, and worse in one way:
+    library.locate() falls back to mining the developer's own Resolve log
+    (Resolve 21 answers None to GetCurrentDatabase), so on the base rig a
+    walk in a test would find the fleet's PostgreSQL library, connect to the
+    NAS over the network and read another project's rows -- inside a unit
+    test, at whatever speed the NAS felt like that day.
+
+    A test that wants a library monkeypatches `locate` (and usually
+    `ProjectLibrary`) itself; its patch is applied after this one and wins.
+
+    tests/test_library.py is exempt: it OWNS this module and drives the real
+    locator against fixtures of its own (a SQLite library it builds, a fake
+    Resolve log in tmp_path), so a patch here would be the guard testing
+    itself instead of the code.
+    """
+    from ccsync_companion import library
+
+    if getattr(request.module, "__name__", "").endswith("test_library"):
+        yield
+        return
+    monkeypatch.setattr(library, "locate", lambda *a, **k: None)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _no_live_script_server_probe(monkeypatch):
     """The CR-68 launch-window probe reads THIS machine's TCP table. A test
     that wants the window open patches `script_server_starting` / `state`
@@ -320,14 +348,26 @@ def _fresh_resolve_bridge_session():
     Same for the watcher's poll cache (the fingerprint-gated skip of the
     per-clip walk): it is module state keyed on a fake timeline's shape, and
     two tests building the same fake would otherwise share an answer.
+
+    And for the library walk's session (library walk, 2026-08-26): the open
+    ProjectLibrary, the 60 s reconnect backoff, the one-per-process fallback
+    warning, the uid map and the "does this build take a one-argument
+    GetClipProperty?" verdict are all process-global for the same reason --
+    one companion, one Resolve.
     """
     from ccsync_companion import resolve_bridge
 
     resolve_bridge.reset_session_state()
     resolve_bridge.reset_timeline_cache()
+    resolve_bridge.reset_library_state()
+    resolve_bridge._reset_clip_property_probe()
+    resolve_bridge._reset_media_pool_uid_cache()
     yield
     resolve_bridge.reset_session_state()
     resolve_bridge.reset_timeline_cache()
+    resolve_bridge.reset_library_state()
+    resolve_bridge._reset_clip_property_probe()
+    resolve_bridge._reset_media_pool_uid_cache()
 
 
 @pytest.fixture

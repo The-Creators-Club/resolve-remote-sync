@@ -839,6 +839,27 @@ def test_the_lazy_config_read_never_creates_config_toml(monkeypatch):
     assert not config_mod.CONFIG_PATH.exists()
 
 
+# -- an old build with no timeline uid -------------------------------------
+
+
+def test_a_timeline_with_no_uid_backs_off_instead_of_saying_so_every_poll(rig, caplog):
+    """The uid is missing because of the BUILD, so it will be missing again
+    in 3 s: one note, then a backoff window (library walk review 2,
+    2026-08-26)."""
+    rig.timeline._uid = ""
+
+    with caplog.at_level(logging.DEBUG, logger="ccsync.resolve"):
+        for _ in range(5):
+            result = resolve_bridge.poll_timeline_items()
+            resolve_bridge.reset_timeline_cache()
+
+    assert result["ok"] is True                  # the API walk answered
+    notes = [record for record in caplog.records
+             if "has no unique id" in record.message]
+    assert len(notes) == 1
+    assert resolve_bridge.library_status()["retry_in"] > 0
+
+
 # -- status ----------------------------------------------------------------
 
 

@@ -1280,7 +1280,16 @@ def _library_timeline_items(allow_cached: bool = False) -> Optional[dict[str, An
         if not timeline_uid:
             # No uid, no way to find the sequence. An old API build; the
             # walk below cannot be scoped, so the API keeps this one.
-            _note_library_fallback("this Resolve build's timeline has no unique id")
+            #
+            # Backed off like any other failure: this is a property of the
+            # BUILD, so it will be true again in 3 s and again 3 s after
+            # that, and saying it every poll was a fallback note per poll
+            # with nothing armed to stop it (library walk review 2,
+            # 2026-08-26).
+            if time.monotonic() >= _library_next_attempt:
+                _note_library_fallback(
+                    "this Resolve build's timeline has no unique id")
+            _arm_library_retry(_LIBRARY_RETRY_SECONDS)
             return None
 
         project_library = _project_library(resolve, project_name)

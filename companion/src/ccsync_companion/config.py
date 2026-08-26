@@ -104,7 +104,26 @@ log = logging.getLogger("ccsync.config")
 # what the dashboard's queue exclusion reads, so it sat in [ QUEUED ] under a
 # GETTING READY chip that could never clear. The tray icon is green on such a
 # machine too: "sync is off" is its correct permanent state, not a warning.
-VERSION = "0.9.50"
+# 0.9.51: the companion enumerates clips by reading Resolve's PROJECT
+# LIBRARY (PostgreSQL on the NAS, or a disk library's SQLite Project.db)
+# instead of walking them through the scripting API (docs/LIBRARY_WALK_PLAN.md,
+# KNOWN_BUGS CR-80, 2026-08-26). The API walk of a 904-item multicam timeline
+# took 11-14 s and Resolve serves scripting calls one at a time, so every
+# other client on the machine queued behind it -- Timeline Cards' card click
+# went 0.3 s -> 7 s. It was also blind: a multicam answers "" to
+# GetClipProperty("File Path") and exposes nothing about its angles, so that
+# timeline yielded 0-3 usable paths out of 904 where the library yields all
+# 44. Now: library.py (pg8000 + zstandard, read-only, 5 s timeouts, every
+# failure raising LibraryUnavailable), library-first walks in resolve_bridge
+# with the API walk unchanged behind them, item dicts that carry
+# media_pool_uid and no object so every native call site re-finds its clip on
+# demand, and the one-argument GetClipProperty (0.1 ms against 12.5 ms) for
+# the machines that will always fall back. New config: library_walk (false
+# restores the old behaviour) and library_db_host/port/name/user/password for
+# when Resolve's own answer is missing or wrong. New frozen dependencies:
+# pg8000, zstandard. An editor sees nothing except a faster machine and,
+# where a multicam hid them, offline clips the popup could not report before.
+VERSION = "0.9.51"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"

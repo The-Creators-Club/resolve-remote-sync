@@ -3029,7 +3029,7 @@ loud toast (which now names [ CANCEL SEARCH ]). Harness scenarios in
 
 ## Settings, Sessions 500'd for three days on one hand-minted row (CR-89, 2026-08-27)
 
-### CR-89 - `ago` refused a timestamp with no offset, and the 2026-08-24 ship left one behind - LIVE-FIXED on the NAS 2026-08-27 (row deleted), filter hardened in repo, ships with the next dashboard
+### CR-89 - `ago` refused a timestamp with no offset, and the 2026-08-24 ship left one behind - LIVE-FIXED on the NAS 2026-08-27 (row deleted), filter hardened and SHIPPED 2026-08-28 in dashboard 0.7.15
 **Seen** while reading the container log after the 0.7.14 OTA: thirteen
 `TypeError: can't subtract offset-naive and offset-aware datetimes` in
 `partial_admin_sessions`, all before the update. Cause: the 2026-08-24 ship's
@@ -3128,7 +3128,7 @@ Tests: `dashboard/tests/test_file_moves.py`, `companion/tests/test_file_moves.py
 
 ## A Mac is permanently behind on files it already holds (CR-90, 2026-08-28)
 
-### CR-90 - the lane A/B backlog diffs macOS's decomposed filenames against the NAS's composed ones - FIXED in repo 2026-08-28 as dashboard 0.7.15
+### CR-90 - the lane A/B backlog diffs macOS's decomposed filenames against the NAS's composed ones - FIXED and SHIPPED 2026-08-28 as dashboard 0.7.15 (OTA, runtime 869eed1052a8..., live 17:57Z)
 **Symptom** (owner, 2026-08-28): "why is leso queued but not moving anything".
 The fleet page showed `leso liaoshaoxuandeMacBook-Pro.local - 2026/FF5/Animals
 : 12 file(s) - 2.9 GB [proxies]` under LIVE TRANSFERS - "nothing transferring
@@ -3179,6 +3179,14 @@ mid-download would otherwise count as transferring AND as queued.
 report (~5 min), so the phantom rows clear on the machine's next report after
 the deploy - no migration, no companion build. `nas_media` was already NFC and
 is rewritten when the tree signature changes.
+
+Measured on the live DB after the deploy: **12 of 11,447 `editor_media` rows
+were non-NFC, all 12 leso/2026-ff5-animals; 0 of 14,159 `nas_media` rows**.
+Since that machine is a laptop and was asleep, those 12 were folded in place
+rather than waited for (`UPDATE editor_media SET rel_path = NFC(rel_path)`,
+with a delete-the-duplicate arm for a key clash that did not occur), and the
+backlog query then returned 0. A fresh pre-0.7.15 database backup existed from
+the deploy itself.
 
 **Related but not this.** `links.normalise_declared` (2026-08-18) carries the
 comment "the NAS, Windows and macOS all serve these names in NFC". The first

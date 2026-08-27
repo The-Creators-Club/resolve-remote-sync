@@ -3027,6 +3027,24 @@ browser with no confirm(), is exactly the old behaviour: re-attach and the
 loud toast (which now names [ CANCEL SEARCH ]). Harness scenarios in
 `tests/test_static_app.py`. Needs a dashboard deploy.
 
+## Settings, Sessions 500'd for three days on one hand-minted row (CR-89, 2026-08-27)
+
+### CR-89 - `ago` refused a timestamp with no offset, and the 2026-08-24 ship left one behind - LIVE-FIXED on the NAS 2026-08-27 (row deleted), filter hardened in repo, ships with the next dashboard
+**Seen** while reading the container log after the 0.7.14 OTA: thirteen
+`TypeError: can't subtract offset-naive and offset-aware datetimes` in
+`partial_admin_sessions`, all before the update. Cause: the 2026-08-24 ship's
+minted admin session (`operator ship 2026-08-24 (shared folders)`, written
+with `2026-08-24 03:16:18`, no offset) was never deleted, and `ui.ago`
+subtracted it from an aware now. Every render of the Sessions page 500'd for
+whoever opened it - and the row was a standing admin credential.
+
+**Fix.** Row deleted on the live DB (no other naive rows). `ui.ago` reads a
+naive timestamp as UTC instead of raising: a template filter on the pages
+that tell the fleet whether footage is syncing must never be the reason a
+page does not render. Every scripted admin session since (ota.py,
+companions.py) writes `+00:00` stamps and deletes its row in a `finally`.
+Test: `dashboard/tests/test_ui_filters.py`.
+
 ## The tray menu is ten items, Settings is a window, and the role belongs to the computer (CR-88, 2026-08-27)
 
 ### CR-88 - "why does it think Razer is wired?": the role came from the PERSON (admin = base), and the right-click menu had grown to forty lines - BUILT in repo 2026-08-27/28 as companion 0.9.54, NOT YET SHIPPED

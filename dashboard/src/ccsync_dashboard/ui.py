@@ -62,9 +62,18 @@ def ago(ts: str | None) -> str:
     if not ts:
         return "never"
     try:
-        delta = dt.datetime.now(dt.timezone.utc) - db.parse_iso(ts)
+        stamp = db.parse_iso(ts)
     except ValueError:
         return ts
+    if stamp.tzinfo is None:
+        # A timestamp with no offset is read as UTC rather than refused: a
+        # hand-minted auth_sessions row from the 2026-08-24 ship carried
+        # `2026-08-24 03:16:18` and every render of the Sessions page 500'd
+        # on the subtraction below for three days (seen 2026-08-27). A
+        # filter used on pages that tell the fleet whether footage is
+        # syncing must never be the reason a page does not render.
+        stamp = stamp.replace(tzinfo=dt.timezone.utc)
+    delta = dt.datetime.now(dt.timezone.utc) - stamp
     seconds = max(int(delta.total_seconds()), 0)
     if seconds < 60:
         return f"{seconds}s ago"

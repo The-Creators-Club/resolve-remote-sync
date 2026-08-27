@@ -1049,8 +1049,14 @@ class Collector:
         # a device that is not in it (never reported a machine_id, or its
         # Syncthing identity was regenerated) falls back to the person, which
         # is precisely the old behaviour and the safe direction.
-        selections = db.fetch_machine_selections(conn)
-        editor_selections = db.fetch_all_selections(conn)
+        # FULL ticks only (docs/UPLOAD_ONLY_TICK.md, 2026-08-27): an
+        # upload-only tick is lane A alone. It is deliberately absent from
+        # the share set rather than shared as a `sendonly` folder -- a folder
+        # that exists but must not receive is a permanently out-of-sync row
+        # on every page that reads completion, and the whole point of the
+        # tick is that nothing comes down.
+        selections = db.fetch_machine_selections(conn, sync_modes=(db.SYNC_MODE_FULL,))
+        editor_selections = db.fetch_all_selections(conn, sync_modes=(db.SYNC_MODE_FULL,))
         # Cross-project folder links (SHARED_FOLDERS_PLAN.md §4.1): a device
         # whose plan holds a BORROWER of this folder receives the lender's
         # folder too; its own restricted .stignore limits what it pulls (D4).

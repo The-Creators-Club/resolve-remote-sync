@@ -3027,6 +3027,39 @@ browser with no confirm(), is exactly the old behaviour: re-attach and the
 loud toast (which now names [ CANCEL SEARCH ]). Harness scenarios in
 `tests/test_static_app.py`. Needs a dashboard deploy.
 
+## The upload-only tick (CR-85, 2026-08-27)
+
+### CR-85 - a tick could only mean "everything, both ways"; an editor with the footage already on their disk had no way to send the originals without the whole project coming down - BUILT in repo 2026-08-27 as dashboard 0.7.13 (schema v28) + companion 0.9.53, NOT YET SHIPPED
+**Ask** (owner, 2026-08-27): "add an upload only tick for editors who have
+backed up footage locally and want to upload originals to the server but
+don't want to sync all the other project files down."
+
+**Fix.** A tick carries a mode, `full` or `upload_only`
+(`selections.sync_mode`, v28, default `full` so an upgraded dashboard changes
+nothing for an existing fleet). Upload-only is **lane A alone**: the
+companion skips lane B for the project and never takes a lane C turn, and
+the enforce cycle never shares the Syncthing folder with that machine -
+deliberately "no share" rather than a `sendonly` folder, which would exist,
+index, and read as permanently out of sync on every page that draws
+completion. Controls: `[ UPLOAD ONLY FOR ME ]` / `[ SWITCH TO FULL SYNC ]` on
+the project page (a SET, never an untick), an `up` box in every Assignments
+cell, `?mode=` on `PUT /api/v1/selection/{editor}/{slug}` (unknown mode 400,
+never read as full). The lane A/B backlog lists uploads only for it; its
+GETTING READY row clears on the machine's first manifest, not on a
+completion row it will never have (the CR-28 shape, avoided). The tray's
+"Remove from this machine" gate asks the lane A question only. A companion
+reading an UNKNOWN mode syncs the project not at all (fail closed, logged).
+Design, limits and the deploy order in `docs/UPLOAD_ONLY_TICK.md`.
+
+**Known limits, decided for now.** Only video originals go up (lane A's
+filter is unchanged; separate-recorder audio would need the filter widened,
+owner's call). An old companion (< 0.9.53) runs lanes A and B for it -
+originals up, proxies down, still no lane C. Deploy the dashboard before
+the companions.
+
+Tests: `dashboard/tests/test_upload_only.py`,
+`companion/tests/test_upload_only.py`, `companion/tests/test_sync_halt.py`.
+
 ## Companion: the clip walk reads Resolve's project library instead of holding the scripting API for 11-14 s (CR-81, CR-82, 2026-08-26)
 
 ### CR-81 - the watcher's clip walk stalls every other Resolve client on the machine, and is blind to multicam angles - FIXED in repo 2026-08-26, NOT YET SHIPPED
@@ -3547,7 +3580,7 @@ docker exec <c> /venv/bin/python -c "import yt_dlp; print(yt_dlp.version.__versi
 docker exec <c> /venv/bin/python -m yt_dlp -v 2>&1 | grep "PO Token Providers"
 docker logs <c> 2>&1 | grep run.sh
 ```
-
+
 **Also found during the same redeploy, same day: the parked jar had grown anonymous
 cookies.** `/ytdl/api/health` on the new build said `cookies_state: present` for
 the jar CR-80 had parked as two header lines. yt-dlp rewrites `cookies.txt` in

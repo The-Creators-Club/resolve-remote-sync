@@ -809,6 +809,16 @@ CREATE TABLE IF NOT EXISTS project_links (
 CREATE INDEX IF NOT EXISTS ix_project_links_lender ON project_links(lender_slug);
 """
 
+# v28: the upload-only tick (docs/UPLOAD_ONLY_TICK.md, 2026-08-27). A tick
+# carries a MODE: `full` is what every tick was until now (lanes A, B and C);
+# `upload_only` is lane A alone -- the editor has footage backed up locally
+# and wants the originals on the server without the project's proxies and
+# shared files coming down. Every existing row is `full` by the DEFAULT, so
+# a dashboard upgraded ahead of its fleet changes nothing (the B16 rule).
+SCHEMA_V28 = """
+ALTER TABLE selections ADD COLUMN sync_mode TEXT NOT NULL DEFAULT 'full';
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -840,6 +850,7 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (25, SCHEMA_V25),
     (26, SCHEMA_V26),
     (27, SCHEMA_V27),
+    (28, SCHEMA_V28),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -1777,6 +1788,15 @@ def set_feed_state(conn: sqlite3.Connection, **fields: Any) -> None:
 # once, here, so no caller has to remember the empty string means something.
 ANY_MACHINE = ""
 
+# A tick's MODE (v28, docs/UPLOAD_ONLY_TICK.md). `full` is every lane;
+# `upload_only` is lane A alone: originals go up, nothing comes down, and the
+# Syncthing folder is never shared with that machine. Spelled here so the API,
+# the enforce cycle, the queue builders and the templates all agree on the two
+# strings the companion is also matching on.
+SYNC_MODE_FULL = "full"
+SYNC_MODE_UPLOAD_ONLY = "upload_only"
+SYNC_MODES = (SYNC_MODE_FULL, SYNC_MODE_UPLOAD_ONLY)
+
 
 def machines_of(conn: sqlite3.Connection, editor: str) -> list[str]:
     """This editor's known machines, oldest first. The registry is the
@@ -2005,7 +2025,7 @@ def copy_machine_plan(
     inheritance would silently start a 50 GB download on a laptop nobody
     asked to fill). This is the affordance that makes that bearable -- the
     admin's "same as the desktop, please" in one click."""
-    slugs = [r["slug"] for r in selections_for_machine(conn, editor, source)]
+    rows = selections_for_machine(conn, editor, source)
     conn.execute(
         "DELETE FROM selections WHERE editor_username=? AND machine=?",
         (editor, target),
@@ -2014,15 +2034,18 @@ def copy_machine_plan(
     # unassigned bucket onto a machine whose first own row is being written
     # (dash-core-1), and here the DELETE above has just made the target look
     # like one. "Replacing whatever it had" must mean the source's plan and
-    # nothing else.
-    for position, slug in enumerate(slugs, start=1):
+    # nothing else -- its modes included: an upload-only tick copied as a
+    # full one would start the very download the source was ticked to avoid.
+    for position, row in enumerate(rows, start=1):
         conn.execute(
             """INSERT OR IGNORE INTO selections
-                 (editor_username, machine, project_slug, position, created_at, created_by)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (editor, target, slug, position, now, copied_by),
+                 (editor_username, machine, project_slug, position, created_at,
+                  created_by, sync_mode)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (editor, target, row["slug"], position, now, copied_by,
+             row.get("sync_mode") or SYNC_MODE_FULL),
         )
-    return len(slugs)
+    return len(rows)
 
 
 def adopt_renamed_machine(
@@ -2102,16 +2125,18 @@ def materialise_bucket(
         return 0                      # has a plan of its own: nothing inherited
     copied = 0
     for row in conn.execute(
-        """SELECT project_slug, position, created_at, created_by FROM selections
+        """SELECT project_slug, position, created_at, created_by, sync_mode
+             FROM selections
             WHERE editor_username=? AND machine=? ORDER BY position""",
         (editor, ANY_MACHINE),
     ).fetchall():
         cur = conn.execute(
             """INSERT OR IGNORE INTO selections
-                 (editor_username, machine, project_slug, position, created_at, created_by)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+                 (editor_username, machine, project_slug, position, created_at,
+                  created_by, sync_mode)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (editor, machine, row["project_slug"], row["position"],
-             row["created_at"], row["created_by"]),
+             row["created_at"], row["created_by"], row["sync_mode"]),
         )
         copied += cur.rowcount
     return copied
@@ -2119,10 +2144,15 @@ def materialise_bucket(
 
 def add_selection(
     conn: sqlite3.Connection, editor: str, slug: str, created_by: str, now: str,
-    machine: str = ANY_MACHINE,
+    machine: str = ANY_MACHINE, sync_mode: str = SYNC_MODE_FULL,
 ) -> bool:
-    """Tick, for ONE computer. Returns False if already ticked. Position =
-    end of that machine's queue (the order its sequencer works through)."""
+    """Tick, for ONE computer, in one MODE. Returns True when something
+    changed: a new row, or an existing tick whose mode was switched.
+    Position = end of that machine's queue (the order its sequencer works
+    through); switching the mode of an existing tick keeps its position,
+    because the queue order is a separate fact from what the tick carries."""
+    if sync_mode not in SYNC_MODES:
+        raise ValueError(f"unknown sync mode {sync_mode!r}")
     # dash-core-1: BEFORE the first own row, or this tick is the only project
     # this machine is left with.
     materialise_bucket(conn, editor, machine)
@@ -2133,15 +2163,24 @@ def add_selection(
     ).fetchone()[0]
     cur = conn.execute(
         """INSERT OR IGNORE INTO selections
-             (editor_username, machine, project_slug, position, created_at, created_by)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (editor, machine, slug, next_pos, now, created_by),
+             (editor_username, machine, project_slug, position, created_at,
+              created_by, sync_mode)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (editor, machine, slug, next_pos, now, created_by, sync_mode),
+    )
+    if cur.rowcount > 0:
+        return True
+    cur = conn.execute(
+        """UPDATE selections SET sync_mode=?
+            WHERE editor_username=? AND machine=? AND project_slug=? AND sync_mode<>?""",
+        (sync_mode, editor, machine, slug, sync_mode),
     )
     return cur.rowcount > 0
 
 
 def add_selection_for_person(
-    conn: sqlite3.Connection, editor: str, slug: str, created_by: str, now: str
+    conn: sqlite3.Connection, editor: str, slug: str, created_by: str, now: str,
+    sync_mode: str = SYNC_MODE_FULL,
 ) -> bool:
     """Tick for EVERY computer this person has (the person-level control).
 
@@ -2165,7 +2204,8 @@ def add_selection_for_person(
     # A list, not a generator: any() short-circuits, and the second computer
     # would never get its row.
     return any([
-        add_selection(conn, editor, slug, created_by=created_by, now=now, machine=m)
+        add_selection(conn, editor, slug, created_by=created_by, now=now, machine=m,
+                      sync_mode=sync_mode)
         for m in targets
     ])
 
@@ -2225,7 +2265,7 @@ def _selection_rows(
     conn: sqlite3.Connection, editor: str, machine: str | None
 ) -> list[dict[str, Any]]:
     q = """SELECT s.project_slug AS slug, s.machine, s.position, s.created_at,
-                  s.created_by, p.label, p.active
+                  s.created_by, s.sync_mode, p.label, p.active
              FROM selections s LEFT JOIN projects p ON p.slug = s.project_slug
             WHERE s.editor_username = ?"""
     params: list[Any] = [editor]
@@ -2261,33 +2301,81 @@ def fetch_selections(
     return unique
 
 
-def fetch_all_selections(conn: sqlite3.Connection) -> dict[str, list[str]]:
+def _sync_mode_clause(sync_modes: tuple[str, ...] | None) -> tuple[str, list[Any]]:
+    """`AND sync_mode IN (...)` for the selection readers that take a mode
+    filter; nothing when the caller wants every tick whatever it carries."""
+    if not sync_modes:
+        return "", []
+    marks = ", ".join("?" for _ in sync_modes)
+    return f" AND sync_mode IN ({marks})", list(sync_modes)
+
+
+def fetch_all_selections(
+    conn: sqlite3.Connection, sync_modes: tuple[str, ...] | None = None,
+) -> dict[str, list[str]]:
     """slug -> [editor_username...] over all selections (deduped per editor).
 
     The person-level view the assignments grid and the project pages draw:
     "somebody's computer holds this". fetch_machine_selections is the
-    per-computer answer."""
+    per-computer answer. `sync_modes` narrows it to ticks in those modes --
+    the enforce cycle asks for `full` only, because an upload-only tick is
+    never a Syncthing share."""
+    clause, params = _sync_mode_clause(sync_modes)
     grouped: dict[str, list[str]] = {}
     for row in conn.execute(
         "SELECT DISTINCT project_slug, editor_username FROM selections "
-        "ORDER BY editor_username"
+        f"WHERE 1=1{clause} ORDER BY editor_username", params,
     ):
         grouped.setdefault(row["project_slug"], []).append(row["editor_username"])
     return grouped
 
 
+def fetch_all_selection_modes(conn: sqlite3.Connection) -> dict[str, dict[str, str]]:
+    """slug -> {editor_username -> mode}, where mode is `full`, `upload_only`
+    or `mixed` (one person, two computers, two answers). The project page and
+    the sidebar mark upload-only ticks with it; the plan itself stays per
+    computer."""
+    seen: dict[str, dict[str, set[str]]] = {}
+    for row in conn.execute(
+        "SELECT project_slug, editor_username, sync_mode FROM selections"
+    ):
+        seen.setdefault(row["project_slug"], {}).setdefault(
+            row["editor_username"], set()).add(row["sync_mode"] or SYNC_MODE_FULL)
+    out: dict[str, dict[str, str]] = {}
+    for slug, by_editor in seen.items():
+        out[slug] = {
+            editor: (next(iter(modes)) if len(modes) == 1 else "mixed")
+            for editor, modes in by_editor.items()
+        }
+    return out
+
+
 def fetch_machine_selections(
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection, sync_modes: tuple[str, ...] | None = None,
 ) -> dict[str, list[tuple[str, str]]]:
     """slug -> [(editor_username, machine)...], the unassigned bucket
     resolved against each editor's machines. This is what the enforce cycle
-    and the queue builders need: a share is made with a computer."""
+    and the queue builders need: a share is made with a computer.
+
+    `sync_modes` keeps only ticks in those modes. The bucket rule ("a machine
+    with rows of its own is never handed the bucket") is decided on ALL of a
+    machine's rows before the filter applies -- otherwise a laptop holding
+    one upload-only tick would inherit every full tick in the bucket the
+    moment a caller asked for full ticks only."""
+    wanted = set(sync_modes) if sync_modes else None
     by_editor_machines: dict[str, list[str]] = {}
     for row in conn.execute("SELECT editor_username, machine FROM machines"):
         by_editor_machines.setdefault(row["editor_username"], []).append(row["machine"])
     own: dict[tuple[str, str], set[str]] = {}
     bucket: dict[str, set[str]] = {}
-    for row in conn.execute("SELECT editor_username, machine, project_slug FROM selections"):
+    has_own: set[tuple[str, str]] = set()
+    for row in conn.execute(
+        "SELECT editor_username, machine, project_slug, sync_mode FROM selections"
+    ):
+        if row["machine"] != ANY_MACHINE:
+            has_own.add((row["editor_username"], row["machine"]))
+        if wanted is not None and (row["sync_mode"] or SYNC_MODE_FULL) not in wanted:
+            continue
         if row["machine"] == ANY_MACHINE:
             bucket.setdefault(row["editor_username"], set()).add(row["project_slug"])
         else:
@@ -2310,7 +2398,7 @@ def fetch_machine_selections(
                 grouped.setdefault(slug, []).append((editor, ANY_MACHINE))
             continue
         for machine in machines:
-            if (editor, machine) in own:
+            if (editor, machine) in has_own:
                 continue          # has a plan of its own; the bucket does not apply
             for slug in slugs:
                 grouped.setdefault(slug, []).append((editor, machine))
@@ -3581,7 +3669,7 @@ def fetch_sync_backlog(
     # it was behind on everything their desktop was ticked for.
     pair_q = """SELECT emp.editor_username AS editor, emp.machine,
                        emp.project_slug AS slug, emp.truncated,
-                       p.id AS project_id, p.label
+                       p.id AS project_id, p.label, s.sync_mode
                 FROM editor_media_project emp
                 JOIN selections s ON s.editor_username = emp.editor_username
                                  AND s.project_slug = emp.project_slug
@@ -3627,6 +3715,11 @@ def fetch_sync_backlog(
              up_totals_q, up_files_q),
         ]
         for direction, kind, args, totals_q, files_q in specs:
+            if direction == "down" and pair["sync_mode"] == SYNC_MODE_UPLOAD_ONLY:
+                # An upload-only tick never runs lane B, so the proxies it
+                # lacks are not a backlog -- listing them would show a
+                # download that is never going to start (the CR-28 shape).
+                continue
             n_files, total_bytes = conn.execute(totals_q, args).fetchone()
             if not n_files:
                 continue

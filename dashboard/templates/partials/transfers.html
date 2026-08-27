@@ -39,7 +39,10 @@
       <span class="marker">▸</span>
       {% if scope_admin %}<span class="who">{{ q.editor }}</span>{% if q.machine %} <span class="muted">{{ q.machine }}</span>{% endif %} ·{% endif %}
       {{ q.label }}
-      {% if q.pending %}
+      {% if q.pending and q.upload_only %}
+        <span class="chip amber">[ GETTING READY ]</span>
+        <span class="muted">just ticked as upload only; waiting for this computer's first file list, then its video originals start uploading (nothing is downloaded)</span>
+      {% elif q.pending %}
         <span class="chip amber">[ GETTING READY ]</span>
         <span class="muted">just ticked; sharing and first file lists are being set up, syncing starts within a minute or two</span>
       {% else %}

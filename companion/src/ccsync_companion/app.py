@@ -3451,12 +3451,21 @@ class CompanionApp:
         except Exception:
             log.exception("removable_projects: selection read failed")
             return []
-        out: list[dict[str, str]] = []
+        out: list[dict[str, Any]] = []
         for entry in entries or []:
             slug = str(entry.get("slug") or "").strip()
             rel = str(entry.get("rel_path") or entry.get("label") or "").strip()
             if slug and rel:
-                out.append({"slug": slug, "rel": rel})
+                out.append({
+                    "slug": slug, "rel": rel,
+                    # docs/UPLOAD_ONLY_TICK.md: the removal gate and the tray
+                    # menu both read it. Only the exact string counts; the
+                    # sequencer's fail-closed reading of an unknown mode
+                    # matters there, not here, where the worst case is a
+                    # question asked of a folder that does not exist.
+                    "upload_only": str(entry.get("sync_mode") or "").strip().lower()
+                                   == "upload_only",
+                })
         return out
 
     def removal_blockers(self, slug: str) -> dict[str, Any]:
@@ -3485,11 +3494,17 @@ class CompanionApp:
             "blocked": False, "reasons": [], "pending_uploads": 0,
             "lane_c": {}, "unknown": False,
         }
-        rel = next((p["rel"] for p in self.removable_projects() if p["slug"] == slug), None)
-        if rel is None:
+        mine = next((p for p in self.removable_projects() if p["slug"] == slug), None)
+        if mine is None:
             out["blocked"] = True
             out["reasons"].append("that project is not selected on this machine")
             return out
+        rel = mine["rel"]
+        # An upload-only project has no shared folder on this machine
+        # (docs/UPLOAD_ONLY_TICK.md): "have my originals reached the server"
+        # is the only honest question, so the lane C half below is skipped
+        # rather than asked of a folder Syncthing may not even have.
+        upload_only = bool(mine.get("upload_only"))
 
         # Borrowed folders (SHARED_FOLDERS_PLAN.md §3.2/§5). Two extra
         # questions, both answered from the cached selection's `includes`:
@@ -3560,7 +3575,7 @@ class CompanionApp:
                     f"{count} video file(s) have not been uploaded yet"
                     + (f" (e.g. {sample})" if sample else "")
                 )
-        if self.syncthing_admin is not None:
+        if self.syncthing_admin is not None and not upload_only:
             try:
                 completion = self.syncthing_admin.folder_completion(slug) or {}
                 status = self.syncthing_admin.folder_status(slug) or {}

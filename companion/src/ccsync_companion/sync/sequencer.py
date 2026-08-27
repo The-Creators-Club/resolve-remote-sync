@@ -136,6 +136,8 @@ def _item_is_valid(item: dict) -> bool:
         return False
     if item.get("active") is False:
         return False
+    if _item_sync_mode(item) is None:
+        return False
     return True
 
 
@@ -145,6 +147,42 @@ def _item_rel(item: dict) -> Optional[str]:
     the string that reaches lane A's `Projects/<rel>` is the same one
     _rel_to_slug and repath.py agreed was safe."""
     return normalized_safe_rel(item.get("rel_path"))
+
+
+# A tick's MODE (docs/UPLOAD_ONLY_TICK.md, dashboard 0.7.13 / companion
+# 0.9.53). `full` is every lane; `upload_only` is lane A alone -- the editor
+# has the footage backed up locally and wants the originals on the server
+# without the project's proxies (lane B) or shared files (lane C) coming
+# down. The server never shares the Syncthing folder with an upload-only
+# machine, so lane C could not run for it even if this side tried.
+SYNC_MODE_FULL = "full"
+SYNC_MODE_UPLOAD_ONLY = "upload_only"
+
+
+def _item_sync_mode(item: dict) -> Optional[str]:
+    """The selection item's mode, or None when the value is not one this
+    build knows. A missing or blank key is `full`: that is what every item
+    meant before the key existed, and what a cached selection.json written
+    by an older companion still carries. An UNKNOWN value fails closed --
+    the item is not synced at all (see _item_is_valid) rather than guessed
+    at: reading a mode this build has never heard of as `full` would start
+    the very download the tick was meant to prevent, and reading it as
+    upload-only would silently stop a project syncing."""
+    raw = item.get("sync_mode")
+    if raw is None:
+        return SYNC_MODE_FULL
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip().lower()
+    if not value:
+        return SYNC_MODE_FULL
+    if value in (SYNC_MODE_FULL, SYNC_MODE_UPLOAD_ONLY):
+        return value
+    return None
+
+
+def _item_upload_only(item: dict) -> bool:
+    return _item_sync_mode(item) == SYNC_MODE_UPLOAD_ONLY
 
 
 def _include_is_valid(entry: object) -> Optional[dict]:
@@ -345,6 +383,11 @@ class Sequencer:
         self._queue_slugs: list[str] = []
         self._rel_to_slug: dict[str, str] = {}
         self._slug_to_item: dict[str, dict] = {}
+        # Slugs ticked upload-only (docs/UPLOAD_ONLY_TICK.md): in
+        # _slug_to_item and rel_to_slug like any other project (lane A, the
+        # express watchdog and the manifest all need them), but never a
+        # Syncthing folder of this machine's.
+        self._upload_only_slugs: set[str] = set()
         # Borrowed folders (SHARED_FOLDERS_PLAN.md §3.1). Kept OUT of
         # _rel_to_slug: rel_to_slug feeds _selected_project_rels (the
         # manifest and proxy-scan scope), which must stay the selection's
@@ -552,7 +595,8 @@ class Sequencer:
         if state == STATE_RUNNING:
             item = slug_to_item.get(current_slug or "", {})
             label = item.get("label") or item.get("rel_path") or current_slug or "?"
-            return f"syncing {label} ({position}/{total})"
+            verb = "uploading" if _item_upload_only(item) else "syncing"
+            return f"{verb} {label} ({position}/{total})"
         if state == STATE_BETWEEN_PASSES:
             return "idle between passes"
         if state == STATE_PAUSED:
@@ -585,9 +629,18 @@ class Sequencer:
         Wired into SyncthingLane as `expected_folder_ids_fn`: lane C had no
         way to learn which folders it was supposed to be syncing, so it
         reported idle/queued=0/last_sync=now unconditionally for every
-        managed editor (AUDIT_2 L-6/UX-3)."""
+        managed editor (AUDIT_2 L-6/UX-3).
+
+        Upload-only projects are NOT folders of this machine's, so they are
+        left out: lane C would otherwise report itself behind on a folder
+        the server never shares with it."""
         with self._lock:
-            return list(self._slug_to_item)
+            return [s for s in self._slug_to_item if s not in self._upload_only_slugs]
+
+    def upload_only_slugs(self) -> set[str]:
+        """The slugs ticked upload-only in the current selection."""
+        with self._lock:
+            return set(self._upload_only_slugs)
 
     def halt_folder_ids(self) -> list[str]:
         """EVERY lane C folder a halt has to pause: the selected projects
@@ -896,7 +949,7 @@ class Sequencer:
                 # clears it.
                 self._latch_unverified(selection[index:])
                 return
-            if not _item_is_valid(item):
+            if not _item_is_valid(item) or _item_upload_only(item):
                 continue
             slug = str(item.get("slug"))
             try:
@@ -948,7 +1001,8 @@ class Sequencer:
         outright (SYNC-2), so latching them would be bookkeeping nothing
         reads. A folder that is not configured locally at all latches too --
         its unpause 404s just as harmlessly as its GET would have."""
-        slugs = {str(item.get("slug")) for item in items if _item_is_valid(item)}
+        slugs = {str(item.get("slug")) for item in items
+                 if _item_is_valid(item) and not _item_upload_only(item)}
         if not slugs:
             return
         log.warning(
@@ -980,6 +1034,7 @@ class Sequencer:
     def _update_known_selection(self, selection: list[dict]) -> None:
         rel_to_slug: dict[str, str] = {}
         slug_to_item: dict[str, dict] = {}
+        upload_only: set[str] = set()
         for item in selection:
             if not _item_is_valid(item):
                 continue
@@ -989,6 +1044,8 @@ class Sequencer:
                 rel_to_slug[rel] = slug
             if slug:
                 slug_to_item[slug] = item
+                if _item_upload_only(item):
+                    upload_only.add(slug)
         borrowed_by_slug, borrowed_rel_to_slug, borrowed_lenders = \
             self._build_borrowed(selection, rel_to_slug, slug_to_item)
         # SYNC-2 (2026-08-11): the ignores latch is pruned against every slug
@@ -1002,10 +1059,15 @@ class Sequencer:
             if isinstance(item.get("slug"), str) and item.get("slug").strip()
         }
         with self._lock:
+            # A mode flip is a change too: full -> upload-only must stop
+            # lane B and the lane C turn on the next pass, and the reverse
+            # must start them, without waiting out the idle backoff.
             changed = (set(slug_to_item) != set(self._slug_to_item)
+                       or upload_only != self._upload_only_slugs
                        or borrowed_by_slug != self._borrowed_by_slug)
             self._rel_to_slug = rel_to_slug
             self._slug_to_item = slug_to_item
+            self._upload_only_slugs = upload_only
             self._borrowed_by_slug = borrowed_by_slug
             self._borrowed_rel_to_slug = borrowed_rel_to_slug
             self._borrowed_lenders = borrowed_lenders
@@ -1199,6 +1261,11 @@ class Sequencer:
                     "sequencer: not releasing %r -- it is not a usable selection item",
                     item.get("slug"),
                 )
+                continue
+            if _item_upload_only(item):
+                # No folder of ours to release: the server does not share it
+                # with this machine. If one is configured locally from an
+                # earlier full tick, it stays exactly as it is.
                 continue
             slug = item.get("slug")
             if self._ignores_unconfirmed_for(slug):
@@ -1399,6 +1466,7 @@ class Sequencer:
             return
         slug = str(item.get("slug"))
         subpath = f"{PROJECTS_PREFIX}{rel_path}"
+        upload_only = _item_upload_only(item)
 
         # A mid-pass selection refresh may have re-ordered/changed rels --
         # re-check this project's local path right before its lanes run.
@@ -1422,8 +1490,17 @@ class Sequencer:
         self._release_paused_folders()
 
         budget = self.project_rotation_seconds if self.project_rotation_seconds > 0 else None
-        self._run_lanes_a_and_b(subpath, budget)
+        self._run_lanes_a_and_b(subpath, budget, upload_only=upload_only)
         if self._stop_event.is_set() or not self._resume_event.is_set():
+            return
+
+        if upload_only:
+            # Lane A was the whole turn (docs/UPLOAD_ONLY_TICK.md). No
+            # borrowed-folder runs -- a borrowed subtree is something this
+            # machine would DOWNLOAD -- and no lane C turn: the server never
+            # shares the folder with an upload-only machine, so there is
+            # nothing to accept, unpause or wait for.
+            self._maybe_scan_orphans(subpath, slug)
             return
 
         # Borrowed folders (SHARED_FOLDERS_PLAN.md D3/§3.1): each ok include
@@ -1446,7 +1523,9 @@ class Sequencer:
         self._maybe_scan_orphans(subpath, slug)
         self._lane_c_turn(item, ordered_selected)
 
-    def _run_lanes_a_and_b(self, subpath: str, budget: Optional[float]) -> None:
+    def _run_lanes_a_and_b(
+        self, subpath: str, budget: Optional[float], upload_only: bool = False,
+    ) -> None:
         """Lane A (up) and lane B (down) for one project.
 
         Concurrent by default: they are opposite directions over disjoint
@@ -1456,8 +1535,13 @@ class Sequencer:
         Both are joined before the caller moves to the next project, so
         "one project at a time" is unchanged, as is the ordering guarantee
         that repath runs first. Two lane A runs on the same project are
-        still impossible: RcloneLane._run_lock covers that."""
-        run_b = self.lane_b_enabled
+        still impossible: RcloneLane._run_lock covers that.
+
+        `upload_only` (docs/UPLOAD_ONLY_TICK.md) is the per-PROJECT switch
+        for lane B, beside the per-machine `lane_b_enabled`: an upload-only
+        tick downloads no proxies. A lone lane A failure is then not
+        offline evidence either (_note_transport)."""
+        run_b = self.lane_b_enabled and not upload_only
         outcomes: dict[str, Any] = {}
 
         def _a() -> None:
@@ -1670,6 +1754,11 @@ class Sequencer:
         rel_path = _item_rel(item) or ""
         if not slug or not rel_path:
             return
+        if _item_upload_only(item):
+            # Belt and braces: _process_project never gets here for an
+            # upload-only project, and accepting the folder would be the one
+            # thing the tick promises not to do.
+            return
 
         with self._lock:
             self._in_lane_c_turn = True
@@ -1738,7 +1827,7 @@ class Sequencer:
                     if self._stop_event.is_set() or not self._resume_event.is_set():
                         return
                     other_slug = other.get("slug")
-                    if not other_slug or other_slug == slug:
+                    if not other_slug or other_slug == slug or _item_upload_only(other):
                         continue
                     self._set_paused(other_slug, True)
 
@@ -1758,7 +1847,7 @@ class Sequencer:
                 self._in_lane_c_turn = False
                 self._lane_c_idle.set()
 
-        base_slugs = [i.get("slug") for i in ordered_selected]
+        base_slugs = [i.get("slug") for i in ordered_selected if not _item_upload_only(i)]
         self._wait_for_folder_sync(slug, base_slugs)
         self._verify_current_folder_unpaused(slug)
 

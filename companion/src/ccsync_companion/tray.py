@@ -2067,7 +2067,10 @@ def _menu_fingerprint(snap: dict) -> tuple:
         snap.get("ytdl_youtube_signin"), snap.get("ytdl_attested"),
         (snap.get("ytdl_cookies_health") or {}).get("status"),
         snap["color"],
-        tuple(sorted(p.get("slug", "") for p in snap.get("removable", []))),
+        # ...with the mode: a tick switched to upload-only relabels its
+        # "Remove…" item without any slug moving.
+        tuple(sorted((p.get("slug", ""), bool(p.get("upload_only")))
+                     for p in snap.get("removable", []))),
         snap.get("p_swap_available"), snap.get("p_mode"),
         # The stray-LUT count decides whether the "N LUTs only on this
         # machine" item exists at all, and on an otherwise-idle machine
@@ -2930,7 +2933,9 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
             *([tray_backend.Menu.SEPARATOR] if snap.get("removable") else []),
             *[
                 tray_backend.MenuItem(
-                    "Remove '" + proj["rel"].split("/")[-1] + "' from this machine…",
+                    "Remove '" + proj["rel"].split("/")[-1] + "'"
+                    + (" (upload only)" if proj.get("upload_only") else "")
+                    + " from this machine…",
                     on_remove_project(proj["slug"], proj["rel"]),
                 )
                 for proj in snap.get("removable", [])

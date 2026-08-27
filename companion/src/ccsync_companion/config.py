@@ -144,7 +144,7 @@ log = logging.getLogger("ccsync.config")
 # sidecar once when the signature says the binary rather than the video. The
 # other half of CR-83 is the dashboard's, 0.7.11: the fleet's yt-dlp floor was
 # 2026.07.04, which is a version that cannot download at all.
-VERSION = "0.9.52"
+VERSION = "0.9.53"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"

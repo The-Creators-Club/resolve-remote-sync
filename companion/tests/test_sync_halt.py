@@ -384,6 +384,26 @@ def test_lane_c_files_not_yet_here_block_the_removal(tmp_path):
     assert app.removal_blockers("p1")["blocked"] is True
 
 
+def test_an_upload_only_project_is_gated_on_its_uploads_alone(tmp_path):
+    """docs/UPLOAD_ONLY_TICK.md: no shared folder on this machine, so the
+    lane C half of the gate is not asked -- a Syncthing that has no such
+    folder (or a stale one from an earlier full tick) must not block, and
+    pending originals still must."""
+    admin = _FakeAdmin()
+    admin.completion = {"completion": 12.0, "needBytes": 999}
+    admin.status = {"needTotalItems": 7, "state": "syncing"}
+    app = _gate_app(tmp_path, {"count": 0, "samples": []}, admin)
+    app.removable_projects = lambda: [
+        {"slug": "p1", "rel": "2026/CCT/Website Highlights", "upload_only": True}]
+    blockers = app.removal_blockers("p1")
+    assert blockers["blocked"] is False and blockers["lane_c"] == {}
+
+    app = _gate_app(tmp_path, {"count": 2, "samples": ["A001.braw"]}, admin)
+    app.removable_projects = lambda: [
+        {"slug": "p1", "rel": "2026/CCT/Website Highlights", "upload_only": True}]
+    assert app.removal_blockers("p1")["blocked"] is True
+
+
 def test_remove_refuses_while_blocked_and_deletes_nothing(tmp_path):
     app = _gate_app(tmp_path, {"count": 3, "samples": ["A001.braw"]}, _FakeAdmin())
     app._managed = True

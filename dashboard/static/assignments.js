@@ -34,19 +34,24 @@
   // an empty machine and writes without the parameter, which the dashboard
   // reads as "every computer this person has" -- for them, none yet, so it
   // lands in the unassigned bucket their first report adopts.
-  function selectionUrl(editor, slug, machine) {
+  function selectionUrl(editor, slug, machine, mode) {
     var url = "/api/v1/selection/" + encodeURIComponent(editor) + "/" + encodeURIComponent(slug);
-    if (machine) url += "?machine=" + encodeURIComponent(machine);
+    var params = [];
+    if (machine) params.push("machine=" + encodeURIComponent(machine));
+    if (mode) params.push("mode=" + encodeURIComponent(mode));
+    if (params.length) url += "?" + params.join("&");
     return url;
   }
 
   // One write, used by both a single click and the column tools. Marks the
   // box "saving" (CSS pulse) and disabled for the round trip so a second
-  // click mid-flight cannot race the first.
-  function writeCell(box, checked) {
+  // click mid-flight cannot race the first. `mode` rides the PUT only
+  // ("full" or "upload_only"); a DELETE is an untick whatever the mode was.
+  function writeCell(box, checked, mode) {
     box.disabled = true;
     box.classList.add("is-saving");
-    return fetch(selectionUrl(box.dataset.editor, box.dataset.slug, box.dataset.machine), {
+    return fetch(selectionUrl(box.dataset.editor, box.dataset.slug, box.dataset.machine,
+                              checked ? mode : ""), {
       method: checked ? "PUT" : "DELETE",
       credentials: "same-origin",
       headers: { "X-CSRF-Token": CSRF },
@@ -63,14 +68,50 @@
     });
   }
 
+  // The two boxes of one cell: the tick and its upload-only qualifier.
+  function siblingBox(box, cls) {
+    var cell = box.closest && box.closest("td");
+    return cell ? cell.querySelector("." + cls) : null;
+  }
+
+  function setUpmode(upBox, on) {
+    if (!upBox) return;
+    upBox.checked = on;
+    var label = upBox.closest && upBox.closest(".assign-upmode");
+    if (label) label.classList.toggle("on", on);
+  }
+
   grid.addEventListener("change", function (evt) {
     var box = evt.target;
-    if (!box.classList || !box.classList.contains("matrix-check")) return;
-    var wanted = box.checked;
-    writeCell(box, wanted).catch(function (err) {
-      box.checked = !wanted;   // rollback: the browser already flipped it
-      toast('could not update "' + box.dataset.editor + '": ' + err.message, "err");
-    });
+    if (!box.classList) return;
+    if (box.classList.contains("matrix-check")) {
+      // The main tick. Ticking is always a FULL tick; unticking clears the
+      // upload-only qualifier with it (the row is gone either way).
+      var wanted = box.checked;
+      var upBox = siblingBox(box, "matrix-upmode");
+      var upWas = upBox ? upBox.checked : false;
+      setUpmode(upBox, false);
+      writeCell(box, wanted, "full").catch(function (err) {
+        box.checked = !wanted;   // rollback: the browser already flipped it
+        setUpmode(upBox, upWas);
+        toast('could not update "' + box.dataset.editor + '": ' + err.message, "err");
+      });
+      return;
+    }
+    if (box.classList.contains("matrix-upmode")) {
+      // The qualifier: on = tick as upload-only (ticking the project if it
+      // was not), off = back to a full tick. Never an untick.
+      var on = box.checked;
+      var mainBox = siblingBox(box, "matrix-check");
+      var mainWas = mainBox ? mainBox.checked : false;
+      if (mainBox) mainBox.checked = true;
+      setUpmode(box, on);
+      writeCell(box, true, on ? "upload_only" : "full").catch(function (err) {
+        setUpmode(box, !on);
+        if (mainBox) mainBox.checked = mainWas;
+        toast('could not update "' + box.dataset.editor + '": ' + err.message, "err");
+      });
+    }
   });
 
   function columnBoxes(editor, machine) {
@@ -103,7 +144,11 @@
       }
       var box = boxes[i++];
       box.checked = wanted;
-      writeCell(box, wanted).catch(function () {
+      // A column tool only ever ADDS full ticks or REMOVES ticks: an
+      // upload-only cell is already checked, so [ ALL ] skips it (the filter
+      // above) and [ NONE ] unticks it like any other.
+      if (!wanted) setUpmode(siblingBox(box, "matrix-upmode"), false);
+      writeCell(box, wanted, "full").catch(function () {
         box.checked = !wanted;
         failed += 1;
       }).then(next);

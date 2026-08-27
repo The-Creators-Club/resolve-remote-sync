@@ -767,6 +767,7 @@ def _render_setup_panel(request: Request, conn, name: str, error, created, brows
 @router.post("/partials/selection/{editor}/{slug}/toggle")
 def partial_toggle(
     editor: str, slug: str, request: Request, machine: str | None = None,
+    mode: str | None = None,
     conn: sqlite3.Connection = Depends(get_conn)
 ):
     """The htmx checkbox. No `?machine=` means the PERSON, exactly like
@@ -777,7 +778,15 @@ def partial_toggle(
     same 404 for a computer this account has never reported and the same 409
     for a WIRED one, which works directly off the NAS tree and would sit under
     a permanent [ GETTING READY ] chip against a tick that can never clear.
+
+    `mode` (docs/UPLOAD_ONLY_TICK.md) turns the toggle into a SET: with
+    `?mode=upload_only` or `?mode=full` the project ends up ticked in that
+    mode whether or not it was ticked before, and nothing is ever unticked
+    by it. Without it the control is the plain toggle it always was, and
+    unticking an upload-only project is the same untick as any other.
     """
+    from .api import _sync_mode_arg
+
     settings = request.app.state.settings
     editor = editor.strip().lower()
     user = auth.get_session_user(request)
@@ -787,8 +796,9 @@ def partial_toggle(
     if target is not None and target not in db.machines_of(conn, editor):
         raise HTTPException(status_code=404,
                             detail=f"{editor} has no computer named {target!r}")
+    wanted = _sync_mode_arg(mode) if (mode or "").strip() else None
     ticked = {s["slug"] for s in db.fetch_selections(conn, editor, machine=target)}
-    if slug in ticked:
+    if slug in ticked and wanted is None:
         db.remove_selection(conn, editor, slug, machine=target)
     else:
         project = conn.execute(
@@ -817,15 +827,17 @@ def partial_toggle(
                 detail=f"{target} is a wired machine: it works directly off the "
                        "NAS and syncs nothing, so projects cannot be ticked for it",
             )
+        sync_mode = wanted or db.SYNC_MODE_FULL
         if target is None:
             # The sidebar checkbox is the PERSON: every computer they use. Its
             # title says so, and the assignments grid is where one machine at a
             # time lives (MULTI_MACHINE_PLAN.md WP5).
             db.add_selection_for_person(conn, editor, slug, created_by=user,
-                                        now=db.utcnow_iso())
+                                        now=db.utcnow_iso(), sync_mode=sync_mode)
         else:
             db.add_selection(conn, editor, slug, created_by=user,
-                             now=db.utcnow_iso(), machine=target)
+                             now=db.utcnow_iso(), machine=target,
+                             sync_mode=sync_mode)
     conn.commit()
     # Reconcile Syncthing sharing promptly -- ticking used to wait out
     # interval_enforce (up to 60s) before anything started (2026-07-26).
@@ -849,6 +861,7 @@ def partial_toggle(
         return _render(request, "partials/project_detail.html",
                        {"project": view,
                         "selected_by": db.fetch_all_selections(conn),
+                        "selected_modes": db.fetch_all_selection_modes(conn),
                         "tick_editor": editor,
                         "as_qs": _as_qs(request, editor)})
     return _render(request, "partials/my_queue.html", {
@@ -868,6 +881,7 @@ def page_project(slug: str, request: Request, conn: sqlite3.Connection = Depends
         "project": view,
         "presence": build_presence_view(conn, slug, editor=scope.editor),
         "selected_by": db.fetch_all_selections(conn),
+        "selected_modes": db.fetch_all_selection_modes(conn),
         "scope_admin": scope.admin,
         "tick_editor": tick_editor,
         # A project page is a page OF the fleet grid, so the drawer keeps
@@ -890,13 +904,22 @@ def _sidebar_context(request: Request, conn, current: str | None,
     the fleet page renders both off one build (DASH-6, 2026-08-14)."""
     toggle_editor = editor or _queue_editor(request)   # session user, or ?as for admins
     selected = set()
+    upload_only: set[str] = set()
     if toggle_editor:
         selected = {s["slug"] for s in db.fetch_selections(conn, toggle_editor)}
+        # Marked, not a separate checkbox: the sidebar box is the person's
+        # "I want this project"; the mode lives on the project page and the
+        # assignments grid (docs/UPLOAD_ONLY_TICK.md).
+        upload_only = {
+            slug for slug, by_editor in db.fetch_all_selection_modes(conn).items()
+            if by_editor.get(toggle_editor) == db.SYNC_MODE_UPLOAD_ONLY
+        }
     return {
         **_switcher_context(request, conn, current, toggle_editor),
         "view": projects_view if projects_view is not None else build_projects_view(conn),
         "current_slug": current or None,
         "selected_slugs": selected,
+        "upload_only_slugs": upload_only,
         "toggle_editor": toggle_editor,
         # CR-28: the base rig's checkboxes are disabled rather than absent --
         # an existing tick still has to be visible (and removable) on the
@@ -989,6 +1012,7 @@ def partial_project(slug: str, request: Request, conn: sqlite3.Connection = Depe
     return _render(request, "partials/project_detail.html", {
         "project": view,
         "selected_by": db.fetch_all_selections(conn),
+        "selected_modes": db.fetch_all_selection_modes(conn),
         "tick_editor": tick_editor,
         "as_qs": _as_qs(request, tick_editor),
     })
@@ -1025,6 +1049,7 @@ async def _partial_project_link_edit(
     return _render(request, "partials/project_detail.html", {
         "project": view,
         "selected_by": db.fetch_all_selections(conn),
+        "selected_modes": db.fetch_all_selection_modes(conn),
         "tick_editor": tick_editor,
         "as_qs": _as_qs(request, tick_editor),
         "link_error": error,

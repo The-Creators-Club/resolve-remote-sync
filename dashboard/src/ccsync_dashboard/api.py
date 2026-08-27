@@ -444,7 +444,13 @@ def build_transfers_view(
     # with a device, and only the machine registry can say which of an
     # editor's computers that device is -- without it, one person's laptop
     # showed the desktop's backlog and vice versa.
-    machine_plans = db.fetch_machine_selections(conn)
+    # FULL ticks only (docs/UPLOAD_ONLY_TICK.md): an upload-only tick has no
+    # Syncthing share, so a lane C backlog against it is impossible, and a
+    # "getting ready" row for it would wait on a completion row that never
+    # comes. Its own preparing row is built further down from the manifest.
+    machine_plans = db.fetch_machine_selections(conn, sync_modes=(db.SYNC_MODE_FULL,))
+    upload_only_plans = db.fetch_machine_selections(
+        conn, sync_modes=(db.SYNC_MODE_UPLOAD_ONLY,))
     # WHOSE device it is comes from the REGISTRY first and the device's label
     # second (data-model-4, 2026-08-21). Two authorities bound a device to an
     # editor: `devices.editor_username`, resolved from the label an admin
@@ -570,6 +576,35 @@ def build_transfers_view(
             "kind": "preparing", "n_files": 0, "bytes": 0, "files": [],
             "truncated": False, "manifest_truncated": False, "pending": True,
         })
+    # An UPLOAD-ONLY tick prepares too, but what ends its preparing is the
+    # machine's first media manifest for the project (an editor_media_project
+    # row) -- from then on the lane A backlog above says exactly what is left
+    # to send, and "nothing left" is a finished upload, not a missing share.
+    for slug, pairs in upload_only_plans.items():
+        if slug not in labels:
+            continue
+        for e, m in pairs:
+            if editor is not None and e != editor:
+                continue
+            if (e, slug) in queued_pairs:
+                continue
+            if (e or "") in base_editors or (e or "", m or "") in base_pairs:
+                continue
+            reported = conn.execute(
+                """SELECT 1 FROM editor_media_project
+                    WHERE editor_username=? AND project_slug=?
+                      AND (? = '' OR machine=?)""",
+                (e, slug, m or "", m or ""),
+            ).fetchone()
+            if reported:
+                continue
+            queues.append({
+                "editor": e, "machine": m, "slug": slug,
+                "label": labels[slug], "lane": "a", "direction": "up",
+                "kind": "preparing", "n_files": 0, "bytes": 0, "files": [],
+                "truncated": False, "manifest_truncated": False, "pending": True,
+                "upload_only": True,
+            })
     queues.sort(key=lambda q: (q["editor"] or "", q["label"], q["lane"]))
 
     # Editors pushing lane C content TO the server (the NAS folder's own
@@ -1256,6 +1291,9 @@ def build_queue_view(conn: sqlite3.Connection, editor: str, now: str | None = No
             "slug": slug,
             "label": sel["label"] or slug,
             "position": sel["position"],
+            "sync_mode": sel.get("sync_mode") or db.SYNC_MODE_FULL,
+            "upload_only": (sel.get("sync_mode") or db.SYNC_MODE_FULL)
+                           == db.SYNC_MODE_UPLOAD_ONLY,
             "missing_project": project is None,
             "is_current": slug == current,
             "completion": best["completion"] if best else None,
@@ -1563,6 +1601,12 @@ def _selection_view(conn: sqlite3.Connection, editor: str,
                 "rel_path": r["label"],   # folder label IS the year/series/project rel path
                 "position": r["position"],
                 "active": bool(r["active"]) if r["active"] is not None else False,
+                # The tick's mode (docs/UPLOAD_ONLY_TICK.md): `full` or
+                # `upload_only`. Additive: a companion older than 0.9.53
+                # ignores it and runs lanes A and B for the project -- lane C
+                # cannot follow, because the enforce cycle never shares the
+                # folder with an upload-only machine.
+                "sync_mode": r["sync_mode"] or db.SYNC_MODE_FULL,
                 # Borrowed folders (SHARED_FOLDERS_PLAN.md §4.2): additive
                 # key, ignored by old companions; `subpath` is spelled like
                 # rel_path so the companion prefixes PROJECTS_PREFIX exactly
@@ -1689,13 +1733,33 @@ def api_get_selection(
     return _selection_view(conn, editor, machine=_machine_arg(machine))
 
 
+def _sync_mode_arg(mode: str | None) -> str:
+    """The `?mode=` query parameter of a tick. Absent means `full` -- what
+    every tick meant before 2026-08-27, and what an old client or a
+    bookmarked URL still means. Anything but the two known modes is a 400:
+    a typo must not quietly become a full sync of a project someone wanted
+    upload-only."""
+    value = (mode or "").strip().lower() or db.SYNC_MODE_FULL
+    if value not in db.SYNC_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown sync mode {value!r}: use 'full' or 'upload_only'",
+        )
+    return value
+
+
 @router.put("/selection/{editor}/{slug}")
 def api_tick(
     editor: str, slug: str, request: Request, machine: str | None = None,
+    mode: str | None = None,
     conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict[str, Any]:
+    """Tick, in a MODE (`?mode=full|upload_only`, docs/UPLOAD_ONLY_TICK.md).
+    A PUT on a project already ticked in the other mode SWITCHES it and
+    answers changed=true; the same mode again is the no-op it always was."""
     editor = editor.strip().lower()
     user = _require_selection_write(request, editor)
+    sync_mode = _sync_mode_arg(mode)
     project = conn.execute(
         "SELECT slug FROM projects WHERE slug=? AND active=1", (slug,)
     ).fetchone()
@@ -1739,10 +1803,11 @@ def api_tick(
         # person-level control in the grid means and what an old client (or a
         # bookmarked URL) can express. An editor with no machine on record
         # yet gets the unassigned bucket, which their first report inherits.
-        added = db.add_selection_for_person(conn, editor, slug, user, now)
+        added = db.add_selection_for_person(conn, editor, slug, user, now,
+                                            sync_mode=sync_mode)
     else:
         added = db.add_selection(conn, editor, slug, created_by=user, now=now,
-                                 machine=target)
+                                 machine=target, sync_mode=sync_mode)
     conn.commit()
     _nudge_collector(request)
     view = _selection_view(conn, editor, machine=target)

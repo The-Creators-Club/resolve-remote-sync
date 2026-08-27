@@ -12,18 +12,36 @@
   The completion figures below are stale until this is fixed.</div>
 {% endif %}
 {% set pickers = selected_by.get(project.slug, []) if selected_by is defined else [] %}
+{% set modes = selected_modes.get(project.slug, {}) if selected_modes is defined else {} %}
 <div class="mono-sm">SELECTED BY:
-  {% for e in pickers %}<span class="who">{{ e }}</span>{{ ", " if not loop.last }}{% else %}<span class="muted">nobody (not syncing to any editor)</span>{% endfor %}
+  {% for e in pickers %}<span class="who">{{ e }}</span>{% if modes.get(e) == "upload_only" %} <span class="chip amber" title="upload only: this editor's computer sends its video originals to the server and downloads nothing">[ UP ]</span>{% elif modes.get(e) == "mixed" %} <span class="chip amber" title="upload only on one of this editor's computers, a full sync on another: see Settings, Assignments">[ UP ON ONE ]</span>{% endif %}{{ ", " if not loop.last }}{% else %}<span class="muted">nobody (not syncing to any editor)</span>{% endfor %}
   {% set tick_for = tick_editor if tick_editor is defined and tick_editor else session_user %}
   {% if tick_for %}
     {# Target ONLY this fragment's own wrapper: swapping "closest main" used to
        replace <main>'s children wholesale, destroying project.html's every-10s
        polling div AND the entire MEDIA PRESENCE panel (page frozen and bins
        gone until a manual reload). #}
+    {% set whom = "ME" if tick_for == session_user else tick_for | upper %}
     <button class="btn {{ 'acting' if tick_for != session_user }}"
             hx-post="/partials/selection/{{ tick_for }}/{{ project.slug }}/toggle?view=project&slug_page={{ project.slug }}{{ as_qs if as_qs is defined }}"
             hx-target="#project-detail" hx-swap="innerHTML">
-      [ {{ "UNTICK" if tick_for in pickers else "TICK" }} FOR {{ "ME" if tick_for == session_user else tick_for | upper }} ]</button>
+      [ {{ "UNTICK" if tick_for in pickers else "TICK" }} FOR {{ whom }} ]</button>
+    {# The upload-only tick (docs/UPLOAD_ONLY_TICK.md): originals go up,
+       nothing comes down. A SET, not a toggle: pressing it on a full tick
+       switches the mode, and the button flips to offer the way back. #}
+    {% if modes.get(tick_for) == "upload_only" %}
+    <button class="btn {{ 'acting' if tick_for != session_user }}"
+            title="download this project's proxies and shared files as well: the normal sync"
+            hx-post="/partials/selection/{{ tick_for }}/{{ project.slug }}/toggle?view=project&mode=full&slug_page={{ project.slug }}{{ as_qs if as_qs is defined }}"
+            hx-target="#project-detail" hx-swap="innerHTML">
+      [ SWITCH TO FULL SYNC ]</button>
+    {% else %}
+    <button class="btn {{ 'acting' if tick_for != session_user }}"
+            title="for footage you already have on this computer: send the video originals to the server and download nothing (no proxies, no shared project files)"
+            hx-post="/partials/selection/{{ tick_for }}/{{ project.slug }}/toggle?view=project&mode=upload_only&slug_page={{ project.slug }}{{ as_qs if as_qs is defined }}"
+            hx-target="#project-detail" hx-swap="innerHTML">
+      [ {{ "SWITCH TO UPLOAD ONLY" if tick_for in pickers else "UPLOAD ONLY FOR " ~ whom }} ]</button>
+    {% endif %}
   {% endif %}
 </div>
 {# Cross-project folder links (SHARED_FOLDERS_PLAN.md §4.3). SHARES FROM

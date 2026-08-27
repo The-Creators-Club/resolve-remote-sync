@@ -82,11 +82,20 @@ def _assignments_view(conn: sqlite3.Connection) -> dict[str, Any]:
     ticked_cells = {
         (slug, e, m) for slug, pairs in machine_ticks.items() for e, m in pairs
     }
+    # The upload-only half of a cell (docs/UPLOAD_ONLY_TICK.md): the same
+    # rows, narrowed to the ticks that run lane A alone.
+    upload_only_cells = {
+        (slug, e, m)
+        for slug, pairs in db.fetch_machine_selections(
+            conn, sync_modes=(db.SYNC_MODE_UPLOAD_ONLY,)).items()
+        for e, m in pairs
+    }
     return {
         "projects": projects,
         "editors": editors,
         "columns": columns,
         "ticked_cells": ticked_cells,
+        "upload_only_cells": upload_only_cells,
         "ticked_pairs": ticked_pairs,
         "presence": _editor_presence(conn),
         # A base rig column is READ-ONLY (CR-28): every one of that account's

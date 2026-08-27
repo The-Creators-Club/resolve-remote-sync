@@ -372,7 +372,7 @@ editor has no business learning that another editor's device id exists.
 | Route | Auth |
 |---|---|
 | `GET /selection/{editor}?machine=` | session (self or admin), **or** a companion token + a matching identity — or a per-editor token, which is itself the identity |
-| `PUT /selection/{editor}/{slug}?machine=` | **session only** (self or admin) |
+| `PUT /selection/{editor}/{slug}?machine=&mode=` | **session only** (self or admin). `mode` is `full` (default) or `upload_only` (docs/UPLOAD_ONLY_TICK.md): the same PUT on a tick in the other mode switches it (`changed: true`); anything else is a 400. Every item of the `GET` carries `sync_mode` |
 | `DELETE /selection/{editor}/{slug}?machine=` | session, **or** the companion credential above |
 | `POST /admin/machines/{editor}/{machine}/copy-plan?source=` | admin session |
 | `POST\|DELETE /admin/machines/{editor}/{machine}/update` | admin session |

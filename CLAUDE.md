@@ -137,6 +137,17 @@ run alongside the tray app — it would hold port 8899.
   untick (under-sharing is the safe direction for a removal). **Deploy the
   dashboard before the companions** -- a per-machine table read by a
   person-level enforce cycle is the B16 unshare-the-fleet shape.
+- **A tick has a MODE** (`docs/UPLOAD_ONLY_TICK.md`, 2026-08-27):
+  `selections.sync_mode` (v28) is `full` or `upload_only`. Upload-only is
+  **lane A alone** for that project on that machine: the companion skips
+  lane B and the lane C turn, and the enforce cycle never shares the
+  Syncthing folder with it - "no share", deliberately NOT a `sendonly`
+  folder, which would read as permanently out of sync everywhere. Every
+  reader of `selections` that decides what comes DOWN must ask for
+  `sync_modes=(db.SYNC_MODE_FULL,)`; a companion reading an unknown mode
+  syncs the project not at all. Only video originals go up (lane A's filter
+  is unchanged). Deploy the dashboard before the companions: a build older
+  than 0.9.53 runs lane B for it too.
 - **A base rig can hold no tick** (CR-28): `machine_state.mode` (v22) records
   the role on the machine's own row, `db.base_only_editors` is the one
   predicate every queue source shares, and the tick itself 409s. It syncs

@@ -955,7 +955,13 @@ table.assign-grid td.assign-project, table.assign-grid th.assign-project-head {
    or the column header (z-index 2) would draw over its own top-left
    corner while the page is mid-scroll. */
 table.assign-grid thead th.assign-project-head { z-index: 3; }
-table.assign-grid td.assign-cell { text-align: center; }
+table.assign-grid td.assign-cell { text-align: center; white-space: nowrap; }
+/* The upload-only half of a cell: a small labelled box beside the tick, dim
+   until it is on so a grid of a hundred cells does not read as two hundred
+   checkboxes. */
+.assign-upmode { font-size: 10px; color: var(--muted); margin-left: 0.25rem; cursor: pointer; }
+.assign-upmode input { vertical-align: middle; margin: 0 0.1rem 0 0; }
+.assign-upmode.on { color: var(--amber); }
 .assign-editor-head { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; }
 .assign-editor-head .name { color: var(--text); font-size: 12px; }
 .assign-colbtns { display: flex; gap: 0.4rem; font-size: 10px; }

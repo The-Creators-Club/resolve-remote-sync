@@ -12,7 +12,11 @@
       computer: a person with a desktop and a laptop gets a column each, and
       the two sync different things. Every cell here is the same write the
       editor switcher's checkboxes make (lane C shares, lane A/B scope, the
-      enforce cycle) - there is no second selection store.
+      enforce cycle) - there is no second selection store. The small
+      <span class="mono-sm">up</span> box beside a tick makes it UPLOAD ONLY:
+      that computer sends its video originals for the project to the server
+      and downloads nothing, for an editor who has the footage backed up
+      locally and does not want the rest of the project coming down.
     </p>
     <div class="assign-toolbar">
       <input class="assign-filter" type="search" id="assign-filter"
@@ -80,6 +84,7 @@
             <td class="assign-project" title="{{ p.label }}">{{ p.label }}</td>
             {% for c in assignments.columns %}
             {% set wired = (c.editor, c.machine) in assignments.base_machine_cells %}
+            {% set up_only = (p.slug, c.editor, c.machine) in assignments.upload_only_cells %}
             <td class="assign-cell">
               <input type="checkbox" class="proj-check matrix-check"
                      data-slug="{{ p.slug }}" data-editor="{{ c.editor }}"
@@ -91,6 +96,18 @@
                      title="sync &quot;{{ p.label }}&quot; to {{ c.sub }}"
                      {% endif %}
                      aria-label="sync {{ p.label }} to {{ c.editor }} on {{ c.sub }}">
+              {# The upload-only half of the tick (docs/UPLOAD_ONLY_TICK.md).
+                 Its own class, not matrix-check: the column tools replay
+                 the main box only, and an [ ALL ] must never turn an
+                 upload-only project into a full download. #}
+              <label class="assign-upmode {{ 'on' if up_only }}"
+                     title="upload only: {{ c.sub }} sends its video originals for &quot;{{ p.label }}&quot; to the server and downloads nothing">
+                <input type="checkbox" class="matrix-upmode"
+                       data-slug="{{ p.slug }}" data-editor="{{ c.editor }}"
+                       data-machine="{{ c.machine }}"
+                       {{ 'checked' if up_only }}
+                       {% if wired %}disabled{% endif %}
+                       aria-label="upload only: {{ p.label }} from {{ c.editor }} on {{ c.sub }}">up</label>
             </td>
             {% endfor %}
           </tr>

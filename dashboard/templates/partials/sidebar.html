@@ -19,6 +19,7 @@
              hx-target="closest .projects" hx-swap="outerHTML"
            {% endif %}
            {{ 'checked' if p.slug in selected_slugs }}>
+    {% if upload_only_slugs is defined and p.slug in upload_only_slugs %}<span class="chip amber" title="upload only: {{ toggle_editor }}'s computer sends its video originals for this project to the server and downloads nothing. Change it on the project page or on Settings, Assignments.">[ UP ]</span>{% endif %}
     {% endif %}
     <a class="proj-name" href="/project/{{ p.slug }}" title="{{ p.label }}">
       <span class="dot {{ p.status }}">●</span>

@@ -102,8 +102,13 @@ def test_the_skipped_exists_line_says_what_will_not_happen():
 
 
 def test_a_tripped_breaker_puts_the_line_and_the_resume_action_in_the_menu():
+    """The full advisory line (_breaker_line's own words, with the reason)
+    moved to Settings -> SYNC LANES (2026-08-27); the reduced tray menu says
+    only the short Sync: summary (_sync_line) plus the RESUME action, which
+    stays top-level -- an editor whose syncing has stopped must not have to
+    go looking for it."""
     labels = _labels(_build_menu(_FakeApp(TRIPPED)))
-    assert any("PROXY DOWNLOAD STOPPED" in text for text in labels)
+    assert "Sync: proxy download stopped (see Settings)" in labels
     assert "► Resume proxy download…" in labels
 
 
@@ -112,21 +117,26 @@ def test_a_healthy_machine_offers_no_resume_action():
     assert not any("Resume proxy download" in text for text in labels)
 
 
-def test_stop_all_syncing_lives_under_advanced_and_flips_to_start():
+def test_stop_all_syncing_lives_in_settings_and_the_tray_only_flips_to_start():
+    """"Stop ALL syncing…" moved wholly into Settings -> ADVANCED
+    (2026-08-27, settings_window.py) -- it is never in the reduced tray menu
+    at all, halted or not. "► Start syncing again" is the one half that
+    stays top-level: an editor staring at a stopped tray must not have to go
+    looking for it."""
     labels = _labels(_build_menu(_FakeApp({})))
-    assert "Stop ALL syncing on this machine…" in labels
+    assert "Stop ALL syncing on this machine…" not in labels
     assert "► Start syncing again" not in labels
 
     labels = _labels(_build_menu(_FakeApp(HALTED_LOCAL)))
-    # Starting again is TOP-LEVEL: an editor staring at a stopped tray must
-    # not have to go looking under Advanced for it.
     assert "► Start syncing again" in labels
     assert "Stop ALL syncing on this machine…" not in labels
 
 
 def test_a_fleet_halt_offers_no_local_start_button():
+    """The full "...for everyone" sentence (_halt_line) moved to Settings;
+    the reduced tray menu's Sync: line says the short version."""
     labels = _labels(_build_menu(_FakeApp(HALTED_FLEET)))
-    assert any("everyone" in text for text in labels)
+    assert "Sync: stopped by your admin" in labels
     assert "► Start syncing again" not in labels
 
 

@@ -189,31 +189,6 @@ def test_menu_omits_dashboard_link_when_url_blank():
     assert "Open dashboard" not in _menu_labels(menu)
 
 
-def test_menu_always_has_scan_whole_project():
-    from ccsync_companion.tray import _build_menu
-
-    # Present regardless of managed/dashboard mode -- not gated on
-    # dashboard_url the way "Open dashboard" is. UX-17 moved it (and
-    # Consolidate) under Advanced: they are the two rarest and most
-    # dangerous actions and used to sit above the common ones.
-    menu = _build_menu(_FakeApp({"dashboard_url": ""}))
-    assert "Scan whole project" in _all_menu_labels(menu)
-
-    menu = _build_menu(_FakeApp({"dashboard_url": "http://192.168.0.10:8480"}))
-    assert "Scan whole project" in _all_menu_labels(menu)
-
-
-def test_menu_always_has_consolidate_under_its_new_name():
-    from ccsync_companion.tray import _build_menu
-
-    # UX-13: "Consolidate" is Resolve's own word for Media Management →
-    # Consolidate, which TRIMS AND DELETES unused media. The audit calls it
-    # the most dangerous single word in the product.
-    labels = _all_menu_labels(_build_menu(_FakeApp({"dashboard_url": ""})))
-    assert "Bring an existing project's media into the synced folder…" in labels
-    assert not any("Consolidate" in label for label in labels)
-
-
 # -- sign in / sign out -----------------------------------------------
 
 
@@ -254,12 +229,14 @@ def test_tooltip_does_not_claim_nothing_syncs_when_login_is_not_required():
     assert "not signed in" in _tooltip_text(_tray_snapshot(app))
 
 
-def test_menu_shows_sign_out_and_status_when_signed_in():
+def test_menu_shows_identity_only_when_signed_in():
+    """Sign out lives in Settings (the approved 2026-08-27 menu); the menu
+    keeps the identity line and, when signed out, the one-click prompt."""
     from ccsync_companion.tray import _build_menu
 
     menu = _build_menu(_FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen")))
     labels = _menu_labels(menu)
-    assert "Sign out" in labels
+    assert "Sign out" not in labels
     assert "Sign in…" not in labels
     assert "Signed in as owen" in labels
 
@@ -376,18 +353,6 @@ def test_menu_shows_setup_item_only_when_unmapped():
     assert not any("Set up" in label for label in _menu_labels(menu))
 
 
-def test_menu_first_item_is_the_signed_in_status():
-    """UX-17: the version string used to be the FIRST thing in the menu --
-    the least actionable item in it. Signed-in status leads now; the version
-    moved under Advanced (it still has to be findable for support)."""
-    from ccsync_companion import config as config_mod
-    from ccsync_companion.tray import _build_menu
-
-    menu = _build_menu(_FakeApp({"dashboard_url": ""}))
-    assert _menu_labels(menu)[0] == "NOT SIGNED IN"
-    assert f"ccsync-companion v{config_mod.VERSION}" in _all_menu_labels(menu)
-
-
 def test_update_item_is_never_adjacent_to_quit():
     """UX-17: `Update available…` sat DIRECTLY above `Quit` -- the one item
     you must never mis-click."""
@@ -422,15 +387,6 @@ def test_pause_label_carries_state():
     assert "⏸ Pause syncing" in _menu_labels(_build_menu(app))
     app.paused = True
     assert "▶ Resume syncing (currently PAUSED)" in _menu_labels(_build_menu(app))
-
-
-def test_menu_offers_copy_diagnostics():
-    """UX-19: the highest-leverage cheap change in the audit -- it converts
-    every unknown failure into a single paste."""
-    from ccsync_companion.tray import _build_menu
-
-    assert "Copy diagnostics for your admin" in _menu_labels(
-        _build_menu(_FakeApp({"dashboard_url": ""})))
 
 
 # -- UX-1 / UX-2 / UX-11 / UX-12: the tray must tell the truth ------------
@@ -845,46 +801,6 @@ def test_marker_missing_becomes_an_instruction_not_a_problem():
     text = classify_lane_error('folder(s) in error: 2026-cct-x (folder marker missing)')
     assert "deleted" in text and "Untick" in text
     assert "Copy diagnostics" not in text
-
-
-def test_menu_lists_removable_projects():
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _FakeApp({"dashboard_url": ""})
-    app.removable_projects = lambda: [
-        {"slug": "2026-cct-website-highlights-website-highlights",
-         "rel": "2026/CCT/Website Highlights/Website Highlights"}]
-    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-    assert "Remove 'Website Highlights' from this machine…" in labels
-
-    # and the fingerprint changes when the removable set changes
-    from ccsync_companion.tray import _menu_fingerprint
-    fp_with = _menu_fingerprint(_tray_snapshot(app))
-    app.removable_projects = lambda: []
-    fp_without = _menu_fingerprint(_tray_snapshot(app))
-    assert fp_with != fp_without
-
-
-
-def test_menu_offers_grade_swap_and_label_flips():
-    from ccsync_companion.tray import _build_menu, _menu_fingerprint, _tray_snapshot
-
-    app = _FakeApp({"dashboard_url": ""})
-    app.p_swap_available = lambda: True
-    app.p_mapping_mode = lambda: "local"
-    labels = _menu_labels(_build_menu(app, _tray_snapshot(app)))
-    assert any("Grade from server originals" in l for l in labels)
-    fp_local = _menu_fingerprint(_tray_snapshot(app))
-
-    app.p_mapping_mode = lambda: "server"
-    labels = _menu_labels(_build_menu(app, _tray_snapshot(app)))
-    assert any("back to local proxies" in l for l in labels)
-    assert _menu_fingerprint(_tray_snapshot(app)) != fp_local
-
-    # hidden entirely when unavailable (base rig / unconfigured)
-    app2 = _FakeApp({"dashboard_url": ""})
-    labels = _menu_labels(_build_menu(app2, _tray_snapshot(app2)))
-    assert not any("Grade" in l for l in labels)
 
 
 def test_the_snapshot_prefers_the_cached_p_mapping_over_a_probe():
@@ -2237,49 +2153,6 @@ def _proxy_app(missing=0, braw=0, left=0, encoding=False, can_generate=True,
     return app
 
 
-def test_the_menu_says_who_cannot_see_the_footage():
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _proxy_app(missing=12)
-    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-    assert "12 clips have no proxy: other editors can't see them" in labels
-
-
-def test_the_one_clip_wording_is_singular():
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _proxy_app(missing=1)
-    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-    assert "1 clip has no proxy: other editors can't see it" in labels
-
-
-def test_the_menu_says_when_it_is_making_them_and_that_it_stops():
-    """"stops when you're back" is the whole promise of the feature, and the
-    answer to the question the line provokes ("is that why my machine is
-    busy?")."""
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _proxy_app(missing=12, left=9, encoding=True)
-    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-    assert "Making proxies… 9 left (stops when you're back)" in labels
-    # ...and it replaces the "have no proxy" line rather than stacking with it.
-    assert not any("have no proxy" in label for label in labels)
-
-
-def test_braw_is_named_because_only_the_editor_can_fix_it():
-    """No ffmpeg build decodes BRAW, so this machine will never fill that
-    gap however long it sits idle -- the line has to name the tool."""
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _proxy_app(missing=4, braw=4)
-    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-    assert "4 BRAW clips need the Blackmagic Proxy Generator" in labels
-
-    app = _proxy_app(missing=1, braw=1)
-    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-    assert "1 BRAW clip needs the Blackmagic Proxy Generator" in labels
-
-
 def test_no_proxy_lines_at_all_when_there_is_no_gap():
     """No ADVISORY line: nothing is missing, nothing is encoding and nothing
     was made today, so there is nothing to say. The "Proxies this machine has
@@ -2297,206 +2170,10 @@ def test_no_proxy_lines_at_all_when_there_is_no_gap():
                    for label in labels)
 
 
-def test_the_actions_live_under_advanced():
-    """"Make them now" costs a full tree walk plus hours of encoding, and
-    neither action is one to hit on the way to Pause."""
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _proxy_app(missing=12)
-    menu = _build_menu(app, _tray_snapshot(app))
-    top = _menu_labels(menu)
-    everything = _all_menu_labels(menu)
-    label = "Make the missing proxies now (don't wait until I'm away)"
-    assert label in everything and label not in top
-
-    app = _proxy_app(missing=12, left=9, encoding=True)
-    everything = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-    assert "Stop making proxies" in everything
-    assert not any("Make the missing proxies now" in l for l in everything)
-
-
-def test_no_make_them_now_on_a_machine_that_cannot_generate():
-    """Notifier-only (an editor, or a machine with no ffmpeg): offering a
-    button that cannot work is worse than offering nothing."""
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _proxy_app(missing=12, can_generate=False)
-    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-    assert any("have no proxy" in l for l in labels)
-    assert not any("Make the missing proxies" in l for l in labels)
-
-
-def test_the_actions_are_spawned_off_the_message_loop(monkeypatch):
-    """Menu callbacks run ON the tray's message loop with the win32 backend,
-    and "make them now" forces a full tree scan -- the whole tray froze once
-    for exactly this reason (2026-07-26)."""
-    from ccsync_companion import tray as tray_mod
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _proxy_app(missing=12)
-    called: list[str] = []
-    app.generate_proxies_now = lambda: called.append("go")
-    spawned: list[str] = []
-    monkeypatch.setattr(tray_mod, "_spawn",
-                        lambda a, label, fn: spawned.append(label) or fn())
-
-    menu = _build_menu(app, _tray_snapshot(app))
-    for item in menu.items:
-        submenu = getattr(item, "submenu", None)
-        if submenu is None:
-            continue
-        for sub in submenu.items:
-            if "Make the missing proxies" in str(sub.text):
-                sub(None)
-    assert called == ["go"]
-    assert spawned == ["Make proxies now"]
-
-
-def test_the_fingerprint_moves_on_the_gap_but_never_on_the_live_count():
-    """`left` ticks down once per finished clip. A rebuild per tick would
-    DestroyMenu() a menu the user has open (freeze) and re-resolve their
-    click against the new callback list (wrong action) -- the live number
-    belongs in the tooltip, which is a plain NIM_MODIFY."""
-    from ccsync_companion.tray import _menu_fingerprint, _tray_snapshot
-
-    encoding = _menu_fingerprint(_tray_snapshot(_proxy_app(missing=12, left=9, encoding=True)))
-    fewer_left = _menu_fingerprint(_tray_snapshot(_proxy_app(missing=12, left=3, encoding=True)))
-    assert encoding == fewer_left
-
-    assert _menu_fingerprint(_tray_snapshot(_proxy_app(missing=11, left=9, encoding=True))) != encoding
-    assert _menu_fingerprint(_tray_snapshot(_proxy_app(missing=12, braw=1, left=9, encoding=True))) != encoding
-    assert _menu_fingerprint(_tray_snapshot(_proxy_app(missing=12, left=9))) != encoding
-    assert _menu_fingerprint(_tray_snapshot(
-        _proxy_app(missing=12, left=9, encoding=True, can_generate=False))) != encoding
-
-
 # -- what this machine has MADE (proxy_history.py) --------------------------
 #
 # The ledger's numbers, on the same split as everything else here: coarse
 # enough for the menu, live in the tooltip.
-
-
-def test_the_menu_says_what_was_made_today():
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _proxy_app(made=528, src_bytes=1_320_000_000_000, proxy_bytes=44_000_000_000)
-    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-    assert "Made 528 proxies today · 1.2 TB → 41.0 GB" in labels
-
-
-def test_a_single_proxy_is_singular_and_a_quiet_day_says_nothing():
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _proxy_app(made=1)
-    assert any("Made 1 proxy today" in label
-               for label in _all_menu_labels(_build_menu(app, _tray_snapshot(app))))
-
-    app = _proxy_app()
-    assert not any("Made" in label and "today" in label
-                   for label in _all_menu_labels(_build_menu(app, _tray_snapshot(app))))
-
-
-def test_failures_are_named_on_the_made_line():
-    """A failure the editor never hears about is one nobody re-shoots,
-    re-downloads or reports."""
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _proxy_app(made=10, failed=2)
-    assert any("2 failed" in label
-               for label in _all_menu_labels(_build_menu(app, _tray_snapshot(app))))
-    # ...and it is the whole line on a day where everything failed.
-    app = _proxy_app(made=0, failed=3)
-    assert any("Made 0 proxies today · 3 failed" in label
-               for label in _all_menu_labels(_build_menu(app, _tray_snapshot(app))))
-
-
-def test_the_eta_line_appears_only_while_encoding_and_only_once_known():
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _proxy_app(missing=300, left=214, encoding=True, eta=9612)
-    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-    assert "About 2h 40m to go at this rate" in labels
-
-    # No rate yet (the first clips of a drain): the line is simply absent
-    # rather than promising something it cannot measure.
-    app = _proxy_app(missing=300, left=214, encoding=True, eta=None)
-    assert not any("to go at this rate" in label
-                   for label in _all_menu_labels(_build_menu(app, _tray_snapshot(app))))
-
-
-def test_the_made_count_moves_the_fingerprint_in_buckets_not_per_clip():
-    """Same trade as _progress_bucket: visible progress on a run of hundreds,
-    ~20 rebuilds a night instead of 500."""
-    from ccsync_companion.tray import _menu_fingerprint, _tray_snapshot
-
-    base = _menu_fingerprint(_tray_snapshot(_proxy_app(made=100, encoding=True, left=9)))
-    nudged = _menu_fingerprint(_tray_snapshot(_proxy_app(made=101, encoding=True, left=9)))
-    jumped = _menu_fingerprint(_tray_snapshot(_proxy_app(made=130, encoding=True, left=9)))
-    assert base == nudged
-    assert base != jumped
-
-    # A failure is NEVER bucketed: the first one of a night is the point.
-    assert _menu_fingerprint(
-        _tray_snapshot(_proxy_app(made=100, failed=1, encoding=True, left=9))) != base
-
-
-def test_the_eta_moves_the_fingerprint_only_in_quarter_hours():
-    from ccsync_companion.tray import _menu_fingerprint, _tray_snapshot
-
-    def _fp(eta):
-        return _menu_fingerprint(
-            _tray_snapshot(_proxy_app(missing=300, left=214, encoding=True, eta=eta)))
-
-    assert _fp(9612) == _fp(9700)
-    assert _fp(9612) != _fp(3600)
-
-
-def test_the_history_item_is_offered_even_with_nothing_missing():
-    """"What did it make overnight?" is asked precisely when the gap is zero
-    and the menu has nothing else to say."""
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _proxy_app(made=528)
-    menu = _build_menu(app, _tray_snapshot(app))
-    assert "Proxies this machine has made…" in _all_menu_labels(menu)
-    # Under Advanced with the other proxy actions, not on the top level.
-    assert "Proxies this machine has made…" not in _menu_labels(menu)
-
-
-def test_the_history_item_opens_what_the_app_rendered(monkeypatch):
-    from ccsync_companion import tray as tray_mod
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _proxy_app(made=1)
-    app.proxy_history_report = lambda: "C:\\state\\proxy_history.txt"
-    opened: list[str] = []
-    monkeypatch.setattr(tray_mod, "_open_log", lambda path: opened.append(str(path)))
-    spawned: list[str] = []
-    monkeypatch.setattr(tray_mod, "_spawn",
-                        lambda a, label, fn: spawned.append(label) or fn())
-
-    for item in _build_menu(app, _tray_snapshot(app)).items:
-        submenu = getattr(item, "submenu", None)
-        if submenu is None:
-            continue
-        for sub in submenu.items:
-            if "Proxies this machine has made" in str(sub.text):
-                sub(None)
-    assert opened == ["C:\\state\\proxy_history.txt"]
-    assert spawned == ["Proxy history"]
-
-
-def test_an_older_generator_with_no_history_block_renders_normally():
-    """A companion whose generator predates the ledger, or whose ledger
-    failed to open, sends no "history" key at all."""
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
-    app.proxy_gap = lambda: {"missing": 12, "braw": 0, "left": 0,
-                             "encoding": False, "can_generate": True}
-    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-    assert "12 clips have no proxy: other editors can't see them" in labels
-    assert not any("Made" in label and "today" in label for label in labels)
 
 
 # -- the live percentage lives in the TOOLTIP, never the menu ---------------
@@ -2697,28 +2374,12 @@ def test_a_broken_scripting_warning_dialog_still_tells_the_editor(monkeypatch):
 # -- YouTube sign-in for the local downloader (2026-08-16) ------------------
 
 
-def test_menu_offers_youtube_sign_in_when_local_downloads_on():
-    from ccsync_companion.tray import _build_menu
-
-    labels = _all_menu_labels(_build_menu(
-        _FakeApp({"dashboard_url": "", "ytdl_local_downloads": True})))
-    assert "Sign in to YouTube (for downloads)…" in labels
-
-
 def test_menu_hides_youtube_sign_in_when_local_downloads_off():
     from ccsync_companion.tray import _build_menu
 
     labels = _all_menu_labels(_build_menu(
         _FakeApp({"dashboard_url": "", "ytdl_local_downloads": False})))
     assert not any("Sign in to YouTube" in label for label in labels)
-
-
-def test_menu_offers_youtube_sign_in_by_default():
-    """Absent means on, ytdlp_manager.local_downloads_enabled's own rule."""
-    from ccsync_companion.tray import _build_menu
-
-    labels = _all_menu_labels(_build_menu(_FakeApp({"dashboard_url": ""})))
-    assert "Sign in to YouTube (for downloads)…" in labels
 
 
 def test_install_youtube_cookies_installs_a_picked_file(tmp_path, monkeypatch):
@@ -2841,102 +2502,6 @@ def _ingest_app(**ingest):
     return app
 
 
-def test_a_crunching_batch_says_what_it_is_doing_and_when_it_stops():
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    labels = _all_menu_labels(_build_menu(_ingest_app(), _tray_snapshot(_ingest_app())))
-
-    assert "Indexing b-roll… 12 of 40 (stops when you're back)" in labels
-
-
-def test_a_foreground_batch_does_not_promise_to_stop():
-    """It runs while the editor works -- that is what they chose."""
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _ingest_app(run_mode="foreground")
-    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-
-    assert "Indexing b-roll… 12 of 40" in labels
-
-
-def test_a_queued_batch_says_it_is_waiting_for_the_editor_to_leave():
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _ingest_app(gate="user-active", done=0)
-    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-
-    assert "B-roll indexing waits until you're away: 40 clips queued" in labels
-    assert ("Index the b-roll batch now (don't wait until I'm away)" in labels)
-
-
-def test_the_model_download_replaces_the_clip_line():
-    """Until it lands nothing else can start, and two progress lines about
-    different things is how a menu stops being read."""
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _ingest_app(gate="no-model", model_download_percent=43)
-    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-
-    assert "Downloading the b-roll indexing model… 43 %" in labels
-    assert not any(label.startswith("Indexing b-roll…") for label in labels)
-
-
-def test_the_vram_refusal_is_the_first_line_and_survives_an_idle_gate():
-    """Owner review (c): the batch the editor asked for is NOT happening, and
-    this is the only thing here they can do something about."""
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    warning = ("Can't index b-roll: Best needs 12 GB VRAM, this GPU has 8 GB "
-               "- choose Good")
-    app = _ingest_app(gate="tier-unfit", warning=warning, batch_uid="", total=0)
-    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-
-    assert warning in labels
-
-
-def test_the_upload_line_counts_what_is_left():
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _ingest_app(uploading=True, upload_left=3)
-    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-
-    assert "Uploading indexed b-roll… 3 clip(s) left" in labels
-
-
-def test_a_paused_upload_says_so_rather_than_looking_stuck():
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _ingest_app(uploading=True, upload_left=3, upload_paused=True)
-    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-
-    assert "Uploading indexed b-roll is paused: 3 left" in labels
-
-
-def test_the_ingest_actions_live_under_advanced():
-    """"Cancel" throws an evening of GPU time away and "index now" commits the
-    machine to hours of it: neither is something to hit on the way to Pause."""
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _ingest_app()
-    menu = _build_menu(app, _tray_snapshot(app))
-
-    assert "Cancel the b-roll batch…" not in _menu_labels(menu)
-    labels = _all_menu_labels(menu)
-    assert "Cancel the b-roll batch…" in labels
-    assert "Show indexing progress…" in labels
-    assert "Pause b-roll indexing" in labels
-
-
-def test_a_paused_batch_offers_resume_and_not_pause():
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _ingest_app(paused=True, gate="paused")
-    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-
-    assert "Resume indexing the b-roll batch" in labels
-    assert "Pause b-roll indexing" not in labels
-
-
 def test_the_menu_does_not_rebuild_while_the_percentage_ticks():
     """_proxy_fingerprint's rule applied to the newer feature: a rebuild per
     finished clip destroys a menu the editor may have open (and on the win32
@@ -2947,19 +2512,6 @@ def test_the_menu_does_not_rebuild_while_the_percentage_ticks():
     after = _tray_snapshot(_ingest_app(percent=95, clip="A002.MP4", done=13))
 
     assert _menu_fingerprint(before) == _menu_fingerprint(after)
-
-
-def test_the_menu_does_rebuild_when_the_gate_changes():
-    """The other half of UI-3: the three ACTIONS appear and disappear with the
-    gate, and nothing else on an idle machine moves when a batch is dropped."""
-    from ccsync_companion.tray import _menu_fingerprint, _tray_snapshot
-
-    waiting = _tray_snapshot(_ingest_app(gate="user-active"))
-    running = _tray_snapshot(_ingest_app(gate="running"))
-    warned = _tray_snapshot(_ingest_app(gate="tier-unfit", warning="no VRAM"))
-
-    assert _menu_fingerprint(waiting) != _menu_fingerprint(running)
-    assert _menu_fingerprint(running) != _menu_fingerprint(warned)
 
 
 def test_the_live_count_is_in_the_tooltip_where_it_is_safe():
@@ -3004,22 +2556,6 @@ def test_an_orchestrator_on_fire_does_not_take_the_menu_with_it():
 
     assert snap["broll_ingest"] == {}
     assert "Sync now" in _all_menu_labels(_build_menu(app, snap))
-
-
-def test_the_proxy_line_says_why_it_is_standing_aside():
-    """The precedence reversal, as an editor sees it: without this the menu
-    says "12 clips have no proxy" for an hour with nothing explaining why
-    nothing is happening about it."""
-    from ccsync_companion.tray import _build_menu, _tray_snapshot
-
-    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
-    app.proxy_gap = lambda: {"missing": 12, "braw": 0, "left": 12,
-                             "encoding": False, "can_generate": True,
-                             "state": "blocked",
-                             "blocked_reason": "indexing b-roll first"}
-    labels = _all_menu_labels(_build_menu(app, _tray_snapshot(app)))
-
-    assert "Proxies waiting: indexing b-roll first" in labels
 
 
 # -- the sync engine is not running (SYNC-17, 2026-08-18) -------------------
@@ -3173,3 +2709,220 @@ def test_the_download_line_has_no_em_dash():
     for line in (ytdl_download_line(_dl()), ytdl_download_line(_dl(total=0)),
                  ytdl_download_line(_dl(bytes_total=None))):
         assert "\u2014" not in line
+
+
+# ===========================================================================
+# The reduced tray menu (2026-08-27): everything the menu no longer shows
+# moved to Settings (settings_window.py). See _build_menu's own docstring.
+# ===========================================================================
+
+
+def test_the_reduced_menu_matches_the_approved_shape_exactly():
+    """A quiet, signed-in, dashboard-configured machine with nothing
+    conditional to say: identity, one separator, an EMPTY conditional block
+    (still bracketed by its own pair of separators), Sync:/Resolve state,
+    another separator, the five action items, a final separator, Quit.
+    Exactly the approved list -- nothing more, nothing less."""
+    from ccsync_companion.tray import _build_menu
+
+    app = _FakeApp({"dashboard_url": "http://dash:8480", "ytdl_local_downloads": False},
+                   identity=_FakeIdentity("alex"))
+    labels = _menu_labels(_build_menu(app))
+    assert labels == [
+        "Signed in as alex",
+        "- - - -",
+        "- - - -",
+        "Sync: up to date",
+        "- - - -",
+        "Sync now",
+        "\u23f8 Pause syncing",
+        "Open my sync drive",
+        "Open dashboard",
+        "Settings\u2026",
+        "- - - -",
+        "Quit CCSync (stops syncing until you next sign in)",
+    ]
+
+
+def test_the_reduced_menu_has_no_settings_only_content():
+    """None of what moved to Settings leaks back into the tray, at ANY
+    nesting depth -- there is no submenu left to hide it in (Advanced is
+    gone), so _all_menu_labels and _menu_labels must now agree."""
+    from ccsync_companion.tray import _build_menu
+
+    app = _ingest_app(uploading=True, upload_left=3)
+    app.removable_projects = lambda: [{"slug": "s", "rel": "a/b/c"}]
+    app.p_swap_available = lambda: True
+    app.stray_lut_count = lambda: 2  # this one DOES stay -- see below
+    menu = _build_menu(app)
+    assert _menu_labels(menu) == _all_menu_labels(menu)
+    labels = _all_menu_labels(menu)
+    for gone in (
+        "Scan whole project", "Bring an existing project's media",
+        "Undo the last clip-path change", "Copy diagnostics for your admin",
+        "Open log", "Advanced", "Grade from server originals",
+        "REMOVE", "ccsync-companion v",
+    ):
+        assert not any(gone in l for l in labels), gone
+
+
+def test_the_conditional_block_items_appear_and_disappear_together():
+    """NOT SET UP, the licence prompt, project setup and the LUT prompt all
+    stay in the tray's conditional block (2026-08-27) -- they are blockers
+    or "something to do" prompts, not advisory state."""
+    from ccsync_companion.tray import _build_menu
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("alex"))
+    assert not any(
+        l.startswith(("\u26a0 NOT SET UP", "\u25ba Accept the licence", "Set up '", "\u25ba 0 LUT"))
+        for l in _menu_labels(_build_menu(app))
+    )
+
+    app.config_problems = ["remote_root is blank"]
+    app.eula_problem = lambda: "not accepted"
+    app.setup_project_available = lambda: "New Doc"
+    app.stray_lut_count = lambda: 5
+    labels = _menu_labels(_build_menu(app))
+    assert any(l.startswith("\u26a0 NOT SET UP") for l in labels)
+    assert "\u25ba Accept the licence agreement to start syncing\u2026" in labels
+    assert "Set up 'New Doc' on the server\u2026" in labels
+    assert any(l.startswith("\u25ba 5 LUTs only on this machine") for l in labels)
+
+
+def test_open_my_project_folder_was_renamed_to_open_my_sync_drive():
+    from ccsync_companion.tray import _build_menu
+
+    labels = _menu_labels(_build_menu(_FakeApp({"dashboard_url": ""})))
+    assert "Open my sync drive" in labels
+    assert not any("project folder" in l for l in labels)
+
+
+def test_open_my_sync_drive_opens_local_root(monkeypatch):
+    from ccsync_companion import tray as tray_mod
+
+    app = _FakeApp({"dashboard_url": "", "local_root": "P:\\Creators_Club"})
+    opened = []
+    monkeypatch.setattr(tray_mod, "_open_log", lambda path: opened.append(str(path)))
+    monkeypatch.setattr(tray_mod, "_spawn", lambda a, label, fn: fn())
+
+    tray_mod.action_open_sync_drive(app)
+    assert opened == ["P:\\Creators_Club"]
+
+
+def test_settings_menu_item_opens_the_settings_window(monkeypatch):
+    from ccsync_companion import tray as tray_mod
+    from ccsync_companion.tray import _build_menu
+
+    app = _FakeApp({"dashboard_url": ""})
+    spawned = []
+    monkeypatch.setattr(tray_mod, "_spawn", lambda a, label, fn: spawned.append(label))
+
+    menu = _build_menu(app)
+    item = next(i for i in menu.items if str(i.text) == "Settings\u2026")
+    item(None)
+    assert spawned == ["Settings"]
+
+
+# -- _sync_line ---------------------------------------------------------
+
+
+def _snap(**over):
+    base = {
+        "sync_guard": {}, "problems": False, "eula_problem": "", "paused": False,
+        "root_absent": False, "statuses": [],
+    }
+    base.update(over)
+    return base
+
+
+def test_sync_line_default_is_up_to_date():
+    from ccsync_companion.tray import _sync_line
+
+    assert _sync_line(_snap()) == "Sync: up to date"
+
+
+def test_sync_line_priority_halt_beats_everything():
+    from ccsync_companion.tray import _sync_line
+
+    snap = _snap(
+        sync_guard={"halt": {"active": True, "scope": "local"},
+                   "lane_b_breaker": {"tripped": True}},
+        problems=True, paused=True, root_absent=True,
+    )
+    assert _sync_line(snap) == "Sync: stopped on this machine"
+
+    snap["sync_guard"]["halt"]["scope"] = "fleet"
+    assert _sync_line(snap) == "Sync: stopped by your admin"
+
+
+def test_sync_line_breaker_beats_not_set_up_and_paused():
+    from ccsync_companion.tray import _sync_line
+
+    snap = _snap(sync_guard={"lane_b_breaker": {"tripped": True}},
+                problems=True, paused=True)
+    assert _sync_line(snap) == "Sync: proxy download stopped (see Settings)"
+
+
+def test_sync_line_not_set_up_covers_problems_and_licence():
+    from ccsync_companion.tray import _sync_line
+
+    assert _sync_line(_snap(problems=True)) == "Sync: not set up yet"
+    assert _sync_line(_snap(eula_problem="not accepted")) == "Sync: not set up yet"
+
+
+def test_sync_line_root_absent_beats_plain_paused():
+    from ccsync_companion.tray import _sync_line
+
+    assert _sync_line(_snap(root_absent=True, paused=True)) == \
+        "Sync: paused (drive disconnected)"
+
+
+def test_sync_line_paused():
+    from ccsync_companion.tray import _sync_line
+
+    assert _sync_line(_snap(paused=True)) == "Sync: paused"
+
+
+def test_sync_line_uploading_only():
+    from ccsync_companion.tray import _sync_line
+
+    statuses = [_status("lane_a_video_up", "syncing")]
+    statuses[0].transferring = 4
+    statuses[0].speed_bps = 2_000_000
+    assert _sync_line(_snap(statuses=statuses)) == "Sync: uploading 4 files \u00b7 2.0 MB/s"
+
+
+def test_sync_line_downloading_only():
+    from ccsync_companion.tray import _sync_line
+
+    statuses = [_status("lane_b_proxy_down", "syncing")]
+    statuses[0].transferring = 1
+    assert _sync_line(_snap(statuses=statuses)) == "Sync: downloading 1 file"
+
+
+def test_sync_line_both_directions_at_once():
+    from ccsync_companion.tray import _sync_line
+
+    up = _status("lane_a_video_up", "syncing")
+    up.transferring = 2
+    down = _status("lane_b_proxy_down", "syncing")
+    down.transferring = 3
+    assert _sync_line(_snap(statuses=[up, down])) == "Sync: up 2 \u00b7 down 3 files"
+
+
+def test_sync_line_lane_c_counts_toward_both_totals():
+    """Lane C is "everything else, both ways" (LANE_LABELS) -- it has no
+    up/down split of its own."""
+    from ccsync_companion.tray import _sync_line
+
+    c = _status("lane_c_syncthing", "syncing")
+    c.transferring = 5
+    assert _sync_line(_snap(statuses=[c])) == "Sync: up 5 \u00b7 down 5 files"
+
+
+def test_sync_line_queued_but_idle():
+    from ccsync_companion.tray import _sync_line
+
+    idle = _status("lane_a_video_up", "idle")
+    idle.queued = 7
+    assert _sync_line(_snap(statuses=[idle])) == "Sync: 7 files waiting"

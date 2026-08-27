@@ -148,7 +148,8 @@ person per day**, each naming the project they have open.
     `app.py:_report_auth_denial` before the body is read, and again in
     `api.api_report`.
   - `X-CCSync-Identity` — a dashboard-signed identity token of the form
-    `v2.identity.<user_b64url>.<expires_epoch>.<hexsig>`. **Required** whenever
+    `v2.identity.<user_b64url>.<expires_epoch>.<hexsig>`, non-expiring since
+    CR-86 (the field remains, stamped a century out). **Required** whenever
     the server has a `DASH_SESSION_SECRET`; the report is rejected 401 if it is
     absent, invalid, or names a different user than `editor_name`
     (`api.api_report`). This is what makes `editor_name` trustworthy rather

@@ -21,7 +21,7 @@ blocked, on the dashboard and on both mounted SPAs.
 | **Session** | `ccsync_session` cookie | a signed-in browser | HMAC token *plus* a server-side row; a cookie with no row is not a session |
 | **Shared report token** | `X-CCSync-Token` | every deployed companion | `DASH_REPORT_TOKEN`. Identifies nobody — that is its weakness. Retire it with `DASH_SHARED_REPORT_TOKEN_ENABLED=0` |
 | **Per-editor report token** | `X-CCSync-Token` | one editor's companion | shape `cce1.<id>.<secret>`, stored hashed, revocable individually, and **bound** to that editor |
-| **Machine identity** | `X-CCSync-Identity` | one editor's companion | 30-day signed token from `POST /verify`. Proves *whose machine this is* |
+| **Machine identity** | `X-CCSync-Identity` | one editor's companion | non-expiring signed token from `POST /verify` (CR-86; 30-day before 2026-08-27). Proves *whose machine this is* |
 | **CSRF** | `X-CSRF-Token` header or a `csrf` form field | browsers | required on cookie-authenticated `POST/PUT/PATCH/DELETE` |
 | **Ingest** | `X-Ingest-Token` | the b-roll indexer | guards `/broll/api/ingest/*` only |
 | **Loopback** | `X-CCSync-Loopback` | non-browser callers of the tray | see [`LOOPBACK_API.md`](LOOPBACK_API.md) |
@@ -374,6 +374,7 @@ editor has no business learning that another editor's device id exists.
 | `GET /selection/{editor}?machine=` | session (self or admin), **or** a companion token + a matching identity — or a per-editor token, which is itself the identity |
 | `PUT /selection/{editor}/{slug}?machine=&mode=` | **session only** (self or admin). `mode` is `full` (default) or `upload_only` (docs/UPLOAD_ONLY_TICK.md): the same PUT on a tick in the other mode switches it (`changed: true`); anything else is a 400. Every item of the `GET` carries `sync_mode` |
 | `DELETE /selection/{editor}/{slug}?machine=` | session, **or** the companion credential above |
+| `POST /projects/{slug}/move` `{path, to_slug?, to_path?}` | admin session. Moves a file or folder on the server (proxies with it) and queues `commands.file_moves` for every machine that has to follow (docs/FILE_MOVES.md); `GET /projects/{slug}/moves` lists the outcomes |
 | `POST /admin/machines/{editor}/{machine}/copy-plan?source=` | admin session |
 | `POST\|DELETE /admin/machines/{editor}/{machine}/update` | admin session |
 | `DELETE /admin/machines/{editor}/{machine}` | admin session. Remove ONE computer (CR-76): its Syncthing device and shares first, then its plan, prefs, status and manifest rows. The unassigned bucket and the person's account and tokens are untouched, so a companion still running there registers it again on its next report (the response `note` says so). `404` unknown machine; `502`, nothing removed, when Syncthing could not be asked |

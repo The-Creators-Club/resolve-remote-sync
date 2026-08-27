@@ -259,8 +259,14 @@ class DashboardReporter:
         get_sync_guard: Optional[Callable[[], dict[str, Any]]] = None,
         get_broll_ingest: Optional[GetBrollIngestFn] = None,
         get_music_ingest: Optional[GetMusicIngestFn] = None,
+        get_file_moves_applied: Optional[Callable[[], list[dict[str, Any]]]] = None,
     ) -> None:
         self._get_statuses = get_statuses
+        # Answers to the dashboard's file-move commands (docs/FILE_MOVES.md).
+        # DRAIN semantics like get_completions, but safe: an unanswered
+        # command is simply redelivered on the next reply and answered again
+        # from the on-disk ledger, so a lost POST costs one report interval.
+        self._get_file_moves_applied = get_file_moves_applied
         self.cfg = cfg
         self._http_post = http_post or default_http_post
         self.timeout = timeout
@@ -552,6 +558,14 @@ class DashboardReporter:
                 guard = None
             if guard:
                 payload["sync_guard"] = guard
+        if self._get_file_moves_applied is not None:
+            try:
+                answers = self._get_file_moves_applied()
+            except Exception:
+                log.exception("get_file_moves_applied() failed")
+                answers = None
+            if answers:
+                payload["file_moves_applied"] = answers
         if self._get_broll_ingest is not None:
             try:
                 ingest = self._get_broll_ingest()

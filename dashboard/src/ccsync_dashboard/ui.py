@@ -862,6 +862,9 @@ def partial_toggle(
                        {"project": view,
                         "selected_by": db.fetch_all_selections(conn),
                         "selected_modes": db.fetch_all_selection_modes(conn),
+                        "moves": db.file_moves_for_project(conn, page_slug),
+                        "move_projects": [dict(r) for r in conn.execute(
+                            "SELECT slug, label FROM projects WHERE active=1 ORDER BY label")],
                         "tick_editor": editor,
                         "as_qs": _as_qs(request, editor)})
     return _render(request, "partials/my_queue.html", {
@@ -882,6 +885,9 @@ def page_project(slug: str, request: Request, conn: sqlite3.Connection = Depends
         "presence": build_presence_view(conn, slug, editor=scope.editor),
         "selected_by": db.fetch_all_selections(conn),
         "selected_modes": db.fetch_all_selection_modes(conn),
+        "moves": db.file_moves_for_project(conn, slug),
+        "move_projects": [dict(r) for r in conn.execute(
+            "SELECT slug, label FROM projects WHERE active=1 ORDER BY label")],
         "scope_admin": scope.admin,
         "tick_editor": tick_editor,
         # A project page is a page OF the fleet grid, so the drawer keeps
@@ -1013,6 +1019,9 @@ def partial_project(slug: str, request: Request, conn: sqlite3.Connection = Depe
         "project": view,
         "selected_by": db.fetch_all_selections(conn),
         "selected_modes": db.fetch_all_selection_modes(conn),
+        "moves": db.file_moves_for_project(conn, slug),
+        "move_projects": [dict(r) for r in conn.execute(
+            "SELECT slug, label FROM projects WHERE active=1 ORDER BY label")],
         "tick_editor": tick_editor,
         "as_qs": _as_qs(request, tick_editor),
     })
@@ -1050,9 +1059,51 @@ async def _partial_project_link_edit(
         "project": view,
         "selected_by": db.fetch_all_selections(conn),
         "selected_modes": db.fetch_all_selection_modes(conn),
+        "moves": db.file_moves_for_project(conn, slug),
         "tick_editor": tick_editor,
         "as_qs": _as_qs(request, tick_editor),
         "link_error": error,
+    })
+
+
+@router.post("/partials/project/{slug}/move")
+async def partial_project_move(slug: str, request: Request,
+                               conn: sqlite3.Connection = Depends(get_conn)):
+    """The [ MOVE ON THE SERVER AND ON EVERY MACHINE ] form (docs/FILE_MOVES.md).
+    Same shape as the link edit: refusals come back as a banner in the
+    re-rendered detail, never a dead htmx swap."""
+    from .api import FileMoveIn, _require_move_write, move_project_files
+
+    settings = request.app.state.settings
+    form = await _form(request)
+    error = None
+    done = None
+    try:
+        user = _require_move_write(request)
+        path = form.get("path", "").strip()
+        if not path:
+            error = "type the file or folder to move, e.g. B-roll/A001_0512.braw"
+        else:
+            body = FileMoveIn(path=path, to_slug=(form.get("to_slug", "").strip() or None),
+                              to_path=form.get("to_path", ""))
+            done = move_project_files(settings, conn, slug, body, user)
+    except HTTPException as exc:
+        error = str(exc.detail)
+    view = build_project_view(conn, slug)
+    if view is None:
+        raise HTTPException(status_code=404, detail=f"unknown project {slug!r}")
+    tick_editor = _queue_editor(request)
+    return _render(request, "partials/project_detail.html", {
+        "project": view,
+        "selected_by": db.fetch_all_selections(conn),
+        "selected_modes": db.fetch_all_selection_modes(conn),
+        "moves": db.file_moves_for_project(conn, slug),
+        "move_projects": [dict(r) for r in conn.execute(
+            "SELECT slug, label FROM projects WHERE active=1 ORDER BY label")],
+        "tick_editor": tick_editor,
+        "as_qs": _as_qs(request, tick_editor),
+        "move_error": error,
+        "move_done": done,
     })
 
 

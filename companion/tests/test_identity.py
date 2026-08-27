@@ -126,6 +126,18 @@ def test_is_valid_malformed_token():
     assert is_valid(identity) is False
 
 
+def test_is_valid_accepts_a_non_expiring_token_decades_later():
+    """CR-86 (2026-08-27): the dashboard stamps identity tokens a century out
+    instead of 30 days, because a companion sign-in that lapses takes an
+    editor's sync lanes down with it and says so only in a tray balloon. The
+    shape is unchanged, so this build must read one as plainly valid -- years
+    from now, without an upgrade."""
+    century = int(time.time()) + identity_mod.NON_EXPIRING_AFTER_SECONDS * 10
+    identity = {"username": "owen", "token": _token(expires_epoch=century)}
+    assert is_valid(identity) is True
+    assert is_valid(identity, now=lambda: time.time() + 40 * 365 * 24 * 3600) is True
+
+
 def test_is_valid_honors_injected_clock():
     identity = {"username": "owen", "token": _token(expires_epoch=1000)}
     assert is_valid(identity, now=lambda: 500) is True

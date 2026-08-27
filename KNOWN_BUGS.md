@@ -3027,9 +3027,161 @@ browser with no confirm(), is exactly the old behaviour: re-attach and the
 loud toast (which now names [ CANCEL SEARCH ]). Harness scenarios in
 `tests/test_static_app.py`. Needs a dashboard deploy.
 
+## The tray menu is ten items, Settings is a window, and the role belongs to the computer (CR-88, 2026-08-27)
+
+### CR-88 - "why does it think Razer is wired?": the role came from the PERSON (admin = base), and the right-click menu had grown to forty lines - BUILT in repo 2026-08-27/28 as companion 0.9.54, NOT YET SHIPPED
+**Seen** (owner, 2026-08-27): the Assignments grid marked the owner's Razer
+laptop `wired`, so it could not be given a sync plan. `/verify` answered
+`role: base` for any ADMIN username (`api.py:1493`) and `effective_mode()`
+took that role as the machine's mode - so every computer the admin signed
+into became a base rig (`MULTI_BASE_RIG_PLAN.md` WP1, the unbuilt half of
+"the role belongs to the computer").
+
+**Fix, role.** `effective_mode()` reads config `mode` only; `identity.role`
+is diagnostics and no longer gates sync (`_apply_identity_role` sets
+`_sync_enabled` from config alone; the base rig's own `mode = "base"` still
+turns its lanes off through MODE_PROFILES). The dashboard still sends the
+admin-derived role for older builds; 0.9.54 ignores it. The switch is in the
+new Settings window, THIS COMPUTER: `[ REMOTE EDITOR ]` /
+`[ WIRED TO THE SERVER ]` writes `mode` with `config.set_value` (line-level
+TOML patch, comments kept); WIRED needs no confirmation, REMOTE on a machine
+that says base needs the typed word `REMOTE` (AUDIT_2 CORE-C1: a wired rig
+switched to remote starts deleting lane B passes against the live share);
+takes effect on restart, `[ RESTART CCSYNC NOW ]` offered
+(`upgrade.restart_self`, gated by the stand-down test).
+
+**Fix, menu** (owner-approved layout, 2026-08-27): identity line (plus the
+sign-in prompt when signed out); ONE bracketed conditional block (NOT SET
+UP, licence, set up project, stray LUTs, resume proxy download, start
+syncing again, update offer); `Sync: <state>` (new `_sync_line`: halted /
+proxy download stopped / not set up / paused / uploading N files · X MB/s /
+N files waiting / up to date) and `Resolve: connected`; `Sync now`, Pause /
+Resume, `Open my sync drive` (was "Open my project folder", which opened
+local_root and never a project), `Open dashboard`, `Settings…`; Quit.
+Everything else moved into `settings_window.py` (red CLI style, scrollable,
+takes the popup lock, refreshes every 2 s; sections THIS COMPUTER, SYNC
+LANES, YOUTUBE, ADVANCED, HELP; every button closes the window and releases
+the lock before spawning its action, so two Tk roots never run). Menu
+actions are module-level `action_*(app)` functions shared by both.
+
+Tests: `tests/test_tray.py` (reduced shape, conditional block, `_sync_line`),
+`tests/test_settings_window.py` (model builder, role switch),
+`tests/test_role.py` (rewritten), `tests/test_config.py` (`set_value`).
+
+## A file moved on the NAS by hand comes straight back (CR-87, 2026-08-27)
+
+### CR-87 - lane A re-uploads whatever an admin moves on the server, from every machine still holding it at the old path - BUILT in repo 2026-08-27 as dashboard 0.7.14 (schema v29) + companion 0.9.54, NOT YET SHIPPED
+**Seen** (owner, 2026-08-27): leso dropped a card into `2026/Base Drone/B-roll`
+and it uploaded; the owner moved the files on the NAS to
+`2026/FF5/Animals/Interviewees/Pangolin/臺北動物園`; the next lane A pass on
+leso's machine uploaded them into `Base Drone/B-roll` again. Not a defect
+in lane A: it is `rclone copy --ignore-existing`, one way, never deletes,
+never mirrors a removal (`SYNC_SAFETY.md` §5), so a server-side move is
+indistinguishable from "new footage the server lacks". Every machine
+holding a copy repeats it after every move, for as long as its copy stays.
+
+**Fix.** The move is made through the dashboard and happens on BOTH ends
+(`docs/FILE_MOVES.md`). Project page, admins only: `MOVE: <path> to
+<project> / <folder> [ MOVE ON THE SERVER AND ON EVERY MACHINE ]`.
+`api.move_project_files` renames the file or folder inside the mounted
+Projects tree (a file's `Proxy/<stem>.*` goes with it), refuses a
+destination that exists, a folder into itself, a `Proxy` folder as either
+end, the marker, or anything escaping the tree; records it (`file_moves` +
+one `file_move_targets` row per computer that syncs the source project in
+either mode, or reported holding the file); and delivers
+`commands.file_moves` in every report reply until the machine answers
+(`file_moves_applied`; seven-day delivery window). The companion
+(`file_moves.py`, `app._apply_file_moves`) moves its copy the same way,
+proxies with it, repoints every media pool clip on the old path through
+`replace_clip` (save point + journal), answers with the outcome, and keeps
+the old path out of lane A for 24 h (`FileMoveLedger.recent_excludes`,
+wired into lane A's filter) whether the move succeeded or was refused -
+which is what closes the race with a pass that runs before the command
+lands. Nothing in the path deletes; a refused move leaves the file where it
+was and says why on the project page, per computer.
+
+**Not done, on purpose:** detecting a move made in Explorer on the NAS
+(rename-plus-copy and same-size same-name cards would be misread); moving
+on a machine with only the destination ticked (nothing there to move).
+Companions < 0.9.54 ignore the command and keep re-uploading: deploy the
+dashboard, then push the companion.
+
+Tests: `dashboard/tests/test_file_moves.py`, `companion/tests/test_file_moves.py`.
+
+## Companion sign-ins no longer expire (CR-86, 2026-08-27)
+
+### CR-86 - a 30-day identity token stopped an editor's sync for two days and nobody could see it - FIXED in repo 2026-08-27, unshipped
+**Symptom** (owner, 2026-08-27): "check why his ccsync hasn't reported in
+ages". The remote editor's machine had been absent from the fleet grid since
+**2026-08-25 23:38**. Everything on it looked healthy - companion running
+(v0.9.47), tray up, config loading, the NAS reachable - and the log said the
+same line every 60 s for two days:
+
+```
+2026-08-25 23:38:43  DEBUG   ccsync.reporter: dashboard report skipped: no verified editor identity
+2026-08-25 23:39:15  WARNING ccsync.app: identity token is no longer valid -- sign in again
+```
+
+His `~/.ccsync/identity.json` was minted 2026-07-26 23:38 and stamped
+`1787672311` = 2026-08-25 23:38:31. Exactly 30 days, exactly the first skip.
+
+**It was not just reporting.** `_identity_watch_loop` calls `_stop_lanes()` on
+that transition, so lanes A/B/C stopped with it: not one `ccsync.sync.*`
+INFO/WARNING line exists in any of his logs after that timestamp. The only
+notice was one tray balloon, on a machine that renders unattended, 23:39 on a
+Tuesday night. This is trust-model-1's second consequence arriving in the
+field verbatim ("every editor in every fleet has their sync silently STOP once
+a month ... on an unattended render rig that is a lost weekend"), deferred by
+decision as CR-66 on 2026-08-21.
+
+**Decision** (owner, 2026-08-27): "let's just get rid of expiring login on
+companions, not needed". A machine identity is not a browser session. It
+answers WHICH machine this is, it changes only when the editor signs in as
+somebody else, and there is no human at the keyboard when it lapses.
+
+**Fix.** `auth.IDENTITY_TTL_SECONDS` 30 days -> 100 years. Kept as a TTL
+rather than a "never" sentinel on purpose: the five-field wire shape
+(`v2.identity.<user_b64url>.<expires_epoch>.<hexsig>`) is what every deployed
+companion parses, so **a build already in the field accepts the new token with
+no upgrade** - which matters, because the editor has to sign in once more
+anyway (his old token really is expired and `read_identity_token` still
+rejects it). Session cookies are untouched: there a human can just sign in
+again.
+
+The companion keeps honouring the expiry field - `is_valid` is unchanged, and
+so is the lane stop behind it. Post-CR-86 tokens never trip it; pre-CR-86
+tokens still do, and a machine whose clock is years fast must still stop
+calling itself verified rather than post reports the server will 401. What did
+change is the diagnostics line, which would otherwise read `876000.0h from
+now`: `identity.NON_EXPIRING_AFTER_SECONDS` (10 years) is the display-only bar
+that makes it print `never (non-expiring token; nominal <date>)`, and a
+pre-CR-86 token still prints its date, because "when did it expire" is the
+question that panel gets read for.
+
+**The trade this accepts.** trust-model-1's other half - identity tokens are
+unrevocable bearers with no server-side row - is now unbounded rather than
+bounded at 30 days. It was always the weaker bound of the two: `/report` needs
+a report token as well, and that IS revoked by disable/delete
+(`_purge_user_credentials`, CR-56), so the way to take an editor's access away
+has not changed. But on a site that still has the shared fleet token enabled
+(`DASH_SHARED_REPORT_TOKEN_ENABLED=1`, the default), a departed editor's
+credential no longer ages out at all. The real fix stays trust-model-1's:
+a row per identity token, revoked by disable/delete, and retiring the shared
+token. Recorded here, not fixed here.
+
+Tests: `dashboard/tests/test_auth.py` (a minted token is >50 years out and
+still reads back 40 years later; the expired-token 401 arm now mints its
+pre-CR-86 token through `_make_token` with an explicit 30-day ttl),
+`companion/tests/test_identity.py` (a century-out token is valid, today and
+in 40 years), `companion/tests/test_app.py` (the diagnostics line says
+`never` for one and a date for the other). Companion suite green (436 in the
+three touched files), dashboard `test_auth.py` 35 green. Needs a dashboard
+deploy; needs no companion build, though the diagnostics polish rides the
+next one.
+
 ## The upload-only tick (CR-85, 2026-08-27)
 
-### CR-85 - a tick could only mean "everything, both ways"; an editor with the footage already on their disk had no way to send the originals without the whole project coming down - BUILT in repo 2026-08-27 as dashboard 0.7.13 (schema v28) + companion 0.9.53, NOT YET SHIPPED
+### CR-85 - a tick could only mean "everything, both ways"; an editor with the footage already on their disk had no way to send the originals without the whole project coming down - BUILT in repo 2026-08-27 as dashboard 0.7.14 (schema v28) + companion 0.9.54, NOT YET SHIPPED
 **Ask** (owner, 2026-08-27): "add an upload only tick for editors who have
 backed up footage locally and want to upload originals to the server but
 don't want to sync all the other project files down."
@@ -3053,7 +3205,7 @@ Design, limits and the deploy order in `docs/UPLOAD_ONLY_TICK.md`.
 
 **Known limits, decided for now.** Only video originals go up (lane A's
 filter is unchanged; separate-recorder audio would need the filter widened,
-owner's call). An old companion (< 0.9.53) runs lanes A and B for it -
+owner's call). An old companion (< 0.9.54) runs lanes A and B for it -
 originals up, proxies down, still no lane C. Deploy the dashboard before
 the companions.
 

@@ -1,10 +1,23 @@
-"""CompanionApp role wiring: a verified sign-in's role ("base"/"editor",
-from the dashboard's DASH_ADMIN_USERS-derived /api/v1/verify response)
-overrides sync_enabled dynamically -- see app.py's _apply_identity_role()
-and effective_mode(). Identity state is injected directly (not via a real
-HTTP round trip) since app.identity is a real IdentityManager instance
-constructed inside CompanionApp.__init__; this mirrors test_identity.py's
-own token-crafting helper for a valid, non-expired identity."""
+"""CompanionApp role wiring, since 2026-08-27 (MULTI_BASE_RIG_PLAN.md
+WP0/WP1's follow-up): the role belongs to the COMPUTER (config.toml's
+`mode`), not to the signed-in person. A verified sign-in's role
+("base"/"editor", from the dashboard's DASH_ADMIN_USERS-derived
+/api/v1/verify response) is READ-ONLY diagnostic data now -- see
+app.py's _apply_identity_role() and effective_mode() -- and never touches
+`_sync_enabled` or what effective_mode() reports, in EITHER direction.
+
+Before this date, a dashboard role of "base" DISABLED sync (monotonically:
+it could only ever disable, never enable) on a machine whose own config
+said mode="editor" -- which is exactly what put an admin's own laptop,
+signed in as the admin account, into the base rig's no-sync state despite
+being an ordinary editor computer (the bug this file used to guard the
+FIX for, CORE-C1, is now guarded from the other side: identity.role must
+have NO effect at all).
+
+Identity state is injected directly (not via a real HTTP round trip) since
+app.identity is a real IdentityManager instance constructed inside
+CompanionApp.__init__; this mirrors test_identity.py's own token-crafting
+helper for a valid, non-expired identity."""
 
 from __future__ import annotations
 
@@ -61,78 +74,70 @@ def _sign_in_with_role(app: CompanionApp, username: str, role: str | None) -> No
     app._apply_identity_role()
 
 
-def test_base_role_disables_sync_even_though_config_says_enabled(tmp_path):
+def test_a_base_role_from_the_dashboard_no_longer_disables_sync(tmp_path):
+    """THE bug this whole file used to guard the disable-behaviour of: an
+    admin's own laptop, signed in as the admin account (role="base" from
+    /verify), is an ordinary editor computer -- config.toml says mode
+    "editor" -- and must keep syncing."""
     app = _make_app(tmp_path, sync_enabled=True)
     assert app._sync_enabled is True  # nobody signed in yet -- static default
     _sign_in_with_role(app, "owen", "base")
-    assert app._sync_enabled is False
-    assert app.effective_mode() == "base"
+    assert app._sync_enabled is True
+    assert app.effective_mode() == "editor"
 
 
-def test_editor_role_keeps_sync_enabled(tmp_path):
+def test_an_editor_role_never_mattered_and_still_does_not(tmp_path):
     app = _make_app(tmp_path, sync_enabled=True)
     _sign_in_with_role(app, "jsmith", "editor")
     assert app._sync_enabled is True
     assert app.effective_mode() == "editor"
 
 
-def test_editor_role_can_never_enable_sync_on_a_base_flagged_config(tmp_path):
-    """INVERTED 2026-07-25 (AUDIT_2 CORE-C1) -- this test previously asserted
-    the opposite, and the behaviour it blessed was the single most dangerous
-    thing in the companion.
-
-    `_apply_identity_role` was `self._sync_enabled = (role != "base")`, so any
-    sign-in by an account outside DASH_ADMIN_USERS force-ENABLED the sync
-    lanes on a machine whose config says mode="base"/sync_enabled=false. On
-    the base rig `local_root` IS the live NAS SMB share (T:\\Creators_Club),
-    and lane B is a deleting `rclone sync` DOWNWARD from that user's empty
-    SFTP home -- i.e. it would delete the NAS's real Proxy/ files under every
-    selected project. With require_login=false and a stale identity.json this
-    needed no user action at all.
-
-    The role is now MONOTONIC: it may only ever disable sync. A machine that
-    says it does not sync stays that way whatever the server says; the fix
-    for a genuinely mis-flagged machine is to correct its config.toml, which
-    is a deliberate local act rather than a side effect of somebody's login.
-    """
+def test_a_role_can_never_move_sync_enabled_off_a_base_flagged_config(tmp_path):
+    """A machine whose config.toml says mode="base"/sync_enabled=false stays
+    that way whatever the dashboard's admin-derived role says -- unchanged
+    from before 2026-08-27, just for a simpler reason now: role is never
+    consulted for sync_enabled at all."""
     app = _make_app(tmp_path, sync_enabled=False, mode="base")
     assert app._sync_enabled is False
     _sign_in_with_role(app, "jsmith", "editor")
     assert app._sync_enabled is False
-    # REVERSED 2026-08-19 (docs/MULTI_BASE_RIG_PLAN.md WP0). This used to
-    # assert "editor" -- the reported mode followed the dashboard so an admin
-    # could SEE the disagreement rather than have it silently resolved. That
-    # reasoning assumed the role was about a machine; it is derived from the
-    # dashboard's ADMIN list, so it is about the PERSON, and it said "editor"
-    # for every wired office machine whose owner is not an admin. The cost of
-    # believing it: `machine_state.mode` is what CR-28's queue exclusion
-    # reads, so such a machine sat in [ QUEUED ] under a GETTING READY chip
-    # that could never clear. Surfacing the disagreement is the dashboard's
-    # job (WP2's chip), not the reported truth's.
     assert app.effective_mode() == "base"
 
 
-def test_no_role_from_dashboard_falls_back_to_static_config(tmp_path):
+def test_a_role_can_never_move_sync_enabled_off_an_editor_flagged_config(tmp_path):
+    """The other direction, mirrored: role="base" from the dashboard must
+    not disable an editor computer's sync either -- see the module
+    docstring for why this is the whole point of the 2026-08-27 change."""
+    app = _make_app(tmp_path, sync_enabled=True, mode="editor")
+    assert app._sync_enabled is True
+    _sign_in_with_role(app, "jsmith", "base")
+    assert app._sync_enabled is True
+    assert app.effective_mode() == "editor"
+
+
+def test_no_role_from_dashboard_changes_nothing(tmp_path):
     app = _make_app(tmp_path, sync_enabled=False)
     _sign_in_with_role(app, "jsmith", None)  # older dashboard, no role field
     assert app._sync_enabled is False  # unchanged: static config still applies
     assert app.effective_mode() == "editor"  # config.toml's mode default
 
 
-def test_sign_out_reverts_to_static_config(tmp_path):
+def test_sign_out_changes_nothing_about_sync_enabled_either(tmp_path):
     app = _make_app(tmp_path, sync_enabled=True)
     _sign_in_with_role(app, "owen", "base")
-    assert app._sync_enabled is False
+    assert app._sync_enabled is True
     app.identity.sign_out()
     app._apply_identity_role()
-    assert app._sync_enabled is True  # back to config.toml's sync_enabled=true
+    assert app._sync_enabled is True  # config.toml's sync_enabled=true, still
 
 
 def test_a_wired_machine_owned_by_a_non_admin_reports_base(tmp_path):
-    """WP0, the case the whole plan exists for: Billy's office desktop works
-    directly off the NAS, and Billy is not a dashboard admin -- so /verify
-    hands his sign-in role="editor" on every one of his three computers. The
-    machine's own file is what knows which one this is."""
+    """WP0's original case still holds, now for a simpler reason: Billy's
+    office desktop works directly off the NAS, and Billy is not a dashboard
+    admin -- so /verify hands his sign-in role="editor" on every one of his
+    three computers. The machine's own config.toml is the ONLY thing
+    effective_mode() reads now, so this was never in doubt."""
     app = _make_app(tmp_path, sync_enabled=False, mode="base")
     _sign_in_with_role(app, "billy", "editor")
     assert app.effective_mode() == "base"
@@ -143,6 +148,18 @@ def test_a_remote_machine_of_the_same_person_still_reports_editor(tmp_path):
     """...and his laptop, same account, same role, is untouched."""
     app = _make_app(tmp_path, sync_enabled=True)
     _sign_in_with_role(app, "billy", "editor")
+    assert app.effective_mode() == "editor"
+    assert app._sync_enabled is True
+
+
+def test_the_admins_own_laptop_is_no_longer_punished_for_who_signed_in(tmp_path):
+    """The bug that motivated this change (2026-08-27): the owner's own
+    laptop, signed into the dashboard as the admin account (role="base"),
+    is an ordinary editor computer with its own local_root. It must report
+    "editor" and keep syncing -- the opposite of what identity.role alone
+    used to decide."""
+    app = _make_app(tmp_path, sync_enabled=True, mode="editor")
+    _sign_in_with_role(app, "alex", "base")
     assert app.effective_mode() == "editor"
     assert app._sync_enabled is True
 

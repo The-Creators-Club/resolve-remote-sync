@@ -6,7 +6,7 @@ Written 2026-08-27, from the owner's ask the same day:
 > locally and want to upload originals to the server but don't want to sync
 > all the other project files down.
 
-Built the same day: dashboard 0.7.13 (schema v28), companion 0.9.53.
+Built the same day: dashboard 0.7.14 (schema v28), companion 0.9.54.
 Related: `docs/MULTI_MACHINE_PLAN.md` (a tick belongs to a computer),
 `docs/SYNC_SAFETY.md` (what stops a lane), `SPEC.md` (the three lanes),
 `KNOWN_BUGS.md` CR-85.
@@ -134,7 +134,7 @@ Companion:
   `rclone_lane.build_filter_rules_up` widened for upload-only runs - and it
   is the owner's call, because it also decides whether a re-tick to full sync
   later finds the audio already on the server (it would).
-- **An old companion (< 0.9.53) treats an upload-only tick as originals up
+- **An old companion (< 0.9.54) treats an upload-only tick as originals up
   AND proxies down.** It ignores `sync_mode`, so lane B runs for the project;
   lane C still cannot, because the server never shares the folder. That is
   the editor's stated goal met with proxies as a side effect, not the

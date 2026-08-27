@@ -348,6 +348,33 @@ def test_selection_client_editor_name_fn_wired_to_editor_identity(tmp_path):
     assert app.selection_client._editor_name_fn() == "verified-user"
 
 
+def test_token_expiry_diagnostic_says_never_for_a_non_expiring_token(tmp_path):
+    """CR-86: post-2026-08-27 tokens are stamped a century out, so the
+    diagnostics line would otherwise read "876000.0h from now" and look like a
+    bug. A pre-CR-86 token still prints its date -- "when did it expire" is
+    what the line is read for."""
+    import time as _t
+
+    app = _make_app(tmp_path, dashboard_url="http://dash.example.com",
+                    require_login=False)
+    user_b64 = "dmVyaWZpZWQtdXNlcg"  # base64url("verified-user"), unpadded
+
+    century = int(_t.time()) + 100 * 365 * 24 * 3600
+    app.identity._identity = {
+        "username": "verified-user",
+        "token": f"v2.identity.{user_b64}.{century}.deadbeef",
+    }
+    assert app._token_expiry_text().startswith("never (non-expiring token")
+
+    soon = int(_t.time()) + 3600
+    app.identity._identity = {
+        "username": "verified-user",
+        "token": f"v2.identity.{user_b64}.{soon}.deadbeef",
+    }
+    text = app._token_expiry_text()
+    assert "never" not in text and "h from now)" in text
+
+
 # -- concurrent-popup guard ------------------------------------------
 
 
@@ -603,10 +630,14 @@ def test_consolidate_project_cancel_does_nothing(tmp_path, monkeypatch):
 # -- upgrade channel / role-reporting wiring ---------------------------------
 
 
-def test_reporter_reports_effective_mode_not_raw_config(tmp_path):
-    """Regression: the reporter used to be wired to the raw config `mode`, so
-    a base-role sign-in behaved as base but *reported* editor. It must use
-    effective_mode() (identity role wins)."""
+def test_reporter_reports_effective_mode_from_config_not_identity_role(tmp_path):
+    """Since 2026-08-27 (MULTI_BASE_RIG_PLAN.md WP0/WP1) the role belongs to
+    the COMPUTER: effective_mode() reads config.toml's own `mode` only, and
+    a dashboard-supplied identity.role -- derived from the signed-in
+    PERSON's admin status, not from this machine -- no longer overrides it.
+    This used to assert the opposite (role="base" flipping an editor
+    machine's reported mode to "base"), which is the exact bug that got an
+    admin's own laptop refused a sync plan (CR-86's sibling fix)."""
     app = _make_app(tmp_path, mode="editor")
     app.identity._identity = {
         "username": "owen",
@@ -615,9 +646,46 @@ def test_reporter_reports_effective_mode_not_raw_config(tmp_path):
         "token": "v2.identity.YWxleA.99999999999.deadbeef",
         "role": "base",
     }
-    assert app.effective_mode() == "base"
+    assert app.effective_mode() == "editor"
     payload = app.reporter._build_payload(editor_name="owen")
-    assert payload["mode"] == "base"
+    assert payload["mode"] == "editor"
+
+
+def test_effective_mode_ignores_identity_role_both_directions(tmp_path):
+    """config.toml's `mode` is the only input, whichever way identity.role
+    points -- a dashboard-reported role of "editor" must not revive sync on
+    a machine whose own config says mode="base" either."""
+    app = _make_app(tmp_path, mode="base")
+    app.identity._identity = {
+        "username": "owen",
+        "token": "v2.identity.YWxleA.99999999999.deadbeef",
+        "role": "editor",
+    }
+    assert app.effective_mode() == "base"
+
+    app2 = _make_app(tmp_path, mode="editor")
+    app2.identity._identity = {
+        "username": "owen",
+        "token": "v2.identity.YWxleA.99999999999.deadbeef",
+        "role": None,
+    }
+    assert app2.effective_mode() == "editor"
+
+
+def test_apply_identity_role_no_longer_disables_sync_from_a_dashboard_role(tmp_path):
+    """_apply_identity_role() used to disable sync when the dashboard's
+    admin-derived role said "base", even on a machine configured as an
+    ordinary editor computer -- exactly what put an admin's own laptop's
+    sync lanes down. It must now track config's own sync_enabled only."""
+    app = _make_app(tmp_path, mode="editor", sync_enabled=True)
+    assert app._sync_enabled is True
+    app.identity._identity = {
+        "username": "owen",
+        "token": "v2.identity.YWxleA.99999999999.deadbeef",
+        "role": "base",
+    }
+    app._apply_identity_role()
+    assert app._sync_enabled is True
 
 
 def test_reporter_response_feeds_upgrade_manager(tmp_path, monkeypatch):

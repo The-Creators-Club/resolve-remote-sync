@@ -58,7 +58,19 @@ log = logging.getLogger("ccsync.dashboard.auth")
 
 COOKIE_NAME = "ccsync_session"
 SESSION_TTL_SECONDS = 7 * 24 * 3600
-IDENTITY_TTL_SECONDS = 30 * 24 * 3600   # companion machine-identity token
+# A companion sign-in does NOT expire (CR-86, 2026-08-27). It used to hold
+# for 30 days, and the day it lapsed the editor's companion stopped its
+# sync lanes and vanished from the fleet grid behind one transient tray
+# balloon -- an editor lost two days of syncing that way and nobody could
+# see it from here. A machine identity is not a browser session: it is a
+# claim about WHICH machine this is, it changes only when the editor signs
+# in as somebody else, and there is no human at the keyboard to re-enter a
+# password when it lapses. Kept as a TTL rather than a sentinel so the
+# five-field wire shape is byte-for-byte what every deployed companion
+# already parses (identity.parse_token) -- a build in the field accepts
+# the new token with no upgrade. Browser SESSION cookies still expire
+# (SESSION_TTL_SECONDS): there a human can just sign in again.
+IDENTITY_TTL_SECONDS = 100 * 365 * 24 * 3600   # companion machine-identity token: never
 LOGIN_FAILURE_LIMIT = sessions.LOGIN_FAILURE_LIMIT   # kept as the public name
 
 _TOKEN_VERSION = "v2"
@@ -296,11 +308,21 @@ def make_session_cookie(secret: str, username: str, now: float | None = None,
 
 
 def make_identity_token(secret: str, username: str, now: float | None = None) -> str:
-    """Long-lived signed token the companion stores to prove which editor's
+    """Non-expiring signed token the companion stores to prove which editor's
     machine it is. Same HMAC scheme as the session cookie but signed with
     purpose="identity" -- read_session_cookie only accepts purpose="session"
     and read_identity_token only accepts purpose="identity", so this token
-    can never be replayed as a browser session (see SEC-1)."""
+    can never be replayed as a browser session (see SEC-1).
+
+    It does not expire -- see IDENTITY_TTL_SECONDS for why. Tokens minted
+    before CR-86 still carry their old 30-day expiry and read_identity_token
+    still rejects them once past it, so those editors sign in one last time.
+    Revocation is unchanged, and a 30-day TTL was never much of one anyway.
+    An identity token has no server-side row to revoke -- it proves WHICH
+    machine, and a report also needs a report token, which is the credential
+    disable/delete actually revoke (`_purge_user_credentials`, dash-core-3).
+    Take an editor's access away by disabling or deleting the account, not by
+    waiting a month."""
     return _make_token(secret, PURPOSE_IDENTITY, username, now=now, ttl=IDENTITY_TTL_SECONDS)
 
 

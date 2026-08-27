@@ -33,6 +33,7 @@ from . import canon
 from . import config as config_mod
 from . import crash_report
 from . import eula as eula_mod
+from . import file_moves as file_moves_mod
 from . import machine as machine_mod
 from . import idle as idle_mod
 from . import luts as luts_mod
@@ -1238,6 +1239,9 @@ class CompanionApp:
             # ones: a tripped breaker and a halted machine are the two states
             # an admin must not learn about a report interval late.
             get_sync_guard=self.sync_guard,
+            # Answers to the dashboard's file-move commands
+            # (docs/FILE_MOVES.md): read lazily, the ledger is built below.
+            get_file_moves_applied=self._file_move_results,
         )
         self.watcher = TimelineWatcher(
             local_root=cfg["local_root"],
@@ -1294,6 +1298,9 @@ class CompanionApp:
         # ...and an admin clearing this machine's lane B breaker (CR-45,
         # 2026-08-20).
         self._apply_resume_lane_b(resp)
+        # ...and files the admin moved on the server, which this machine's
+        # copies have to follow (docs/FILE_MOVES.md, 2026-08-27).
+        self._apply_file_moves(resp)
         # An unattended update that stood down (an open window, a consolidate,
         # a failed download) gets its next go here rather than waiting for a
         # NEW version to be published (comp-app-core-4, 2026-08-21).
@@ -1318,6 +1325,10 @@ class CompanionApp:
         # (AUDIT_3 M-7, the CORE-H2 twin).
         state_dir = config_mod.resolved_log_path(cfg).parent / "state"
         self._state_dir = state_dir
+        # Moves the admin made on the server that this machine has followed,
+        # or refused (docs/FILE_MOVES.md). Before the lanes: lane A reads it.
+        self.file_moves = file_moves_mod.FileMoveLedger(Path(state_dir))
+        self._file_move_answers: list[dict[str, Any]] = []
         # on_change hands per-project file events straight to the sequencer
         # (managed mode only) instead of triggering a debounced whole-tree
         # pass -- RcloneLane never falls back to its own debounced-run
@@ -1351,6 +1362,9 @@ class CompanionApp:
             # capability the editor loses, so it must reach the tray and not
             # only the log.
             on_watch_blocked=self._notify_watch_state,
+            # Old paths of files the server has moved away from stay out of
+            # lane A for a day, or the copy still here re-uploads itself.
+            extra_excludes_fn=self.file_moves.recent_excludes,
         )
         lane_b = RcloneLane(
             direction=DIRECTION_DOWN,
@@ -3195,40 +3209,37 @@ class CompanionApp:
 
     # -- identity / login gating (see identity.py) -----------------------------------------------
     def _apply_identity_role(self) -> None:
-        """Dynamic role from the verified sign-in (identity.py's `role`,
-        sourced from the dashboard's DASH_ADMIN_USERS list) decides
-        sync_enabled when available -- "base" (direct NAS access, e.g. the
-        admin's own rig) means no sync lanes, anything else means normal
-        editor sync. Falls back to config.toml's static sync_enabled/mode
-        when not signed in, require_login is off, or the dashboard didn't
-        send a role (older server).
+        """Set self._sync_enabled from config.toml's own `mode`/`sync_enabled`
+        -- nothing else.
+
+        BEFORE 2026-08-27 this also consulted identity.py's `role`, sourced
+        from the dashboard's /verify (api.py's DASH_ADMIN_USERS list) --
+        i.e. from whether the SIGNED-IN PERSON is an admin, not from what
+        this MACHINE is. That made an admin's own laptop, signed in as the
+        admin account, report itself as "base" and get its sync disabled
+        (and, upstream of this function, refused a sync plan by a dashboard
+        that also derived the role from the person) even though the laptop
+        is an ordinary editor computer with its own local_root
+        (MULTI_BASE_RIG_PLAN.md WP0/WP1: the role belongs to the COMPUTER).
+        config.toml's `mode` -- read by MODE_PROFILES in config.py's
+        load_config(), which already turns sync_enabled/lane_b_enabled off
+        for mode="base" -- is the one thing this function now reads, via
+        self._configured_sync_enabled (set once at __init__ from that same
+        merged config). That MODE_PROFILES path is unchanged: a machine
+        whose config.toml says mode="base" still syncs nothing.
 
         Only touches self._sync_enabled -- popup_enabled deliberately stays
         whatever config.toml says either way (see config.py's MODE_PROFILES
         comment: a careless base-rig editor can still cut in media from
         outside the tree, so the popup should still catch it).
 
-        MONOTONIC: the role may only ever DISABLE sync, never enable it.
-        This used to be a flat `self._sync_enabled = (role != "base")`, which
-        let a dashboard-supplied role="editor" override the machine's own
-        `mode="base"` / `sync_enabled=false` -- so any sign-in by an account
-        outside DASH_ADMIN_USERS started full sync lanes on the base rig,
-        where local_root IS the live NAS share (P:\\, historically
-        T:\\Creators_Club). Lane B is
-        a deleting `rclone sync` DOWNWARD from that user's empty SFTP home,
-        i.e. it would delete the NAS's real Proxy/ files under every selected
-        project (AUDIT_2 CORE-C1). A machine that says it does not sync must
-        stay that way whatever the server says.
-
         Idempotent and cheap to call whenever identity state changes
-        (constructor, sign_in(), sign_out()) rather than threading role
-        through every call site that currently reads self._sync_enabled.
+        (constructor, sign_in(), sign_out()) -- kept as its own method
+        rather than inlined at __init__ because those call sites still need
+        to re-apply it (identity.role remains readable for diagnostics, so a
+        future signal could reuse this hook without callers changing).
         """
-        role = self.identity.role
-        if role is None:
-            self._sync_enabled = self._configured_sync_enabled
-        else:
-            self._sync_enabled = self._configured_sync_enabled and (role != "base")
+        self._sync_enabled = self._configured_sync_enabled
 
     def _pop_lane_completions(self) -> list:
         """Drain every lane's completed-file events for the reporter (the
@@ -3263,31 +3274,30 @@ class CompanionApp:
 
     def effective_mode(self) -> str:
         """"base" or "editor" -- what this MACHINE actually is, for dashboard
-        reporting (get_mode) and every tray/menu question that asks.
+        reporting (get_mode) and every tray/menu/Settings question that asks.
 
-        EITHER source saying "base" makes it base (2026-08-19,
-        docs/MULTI_BASE_RIG_PLAN.md WP0). It used to be the role alone
-        whenever the dashboard sent one, which was the same precedence
-        _apply_identity_role() uses -- but that role is derived from the
-        dashboard's ADMIN list (api.py's /verify), i.e. from the PERSON, and
-        a site can have any number of machines wired straight to the NAS.
-        An office desktop working directly off the share, owned by someone
-        who is not a dashboard admin, therefore reported mode="editor" while
-        its lanes were correctly down: `machine_state.mode` is what CR-28's
-        queue exclusion reads, so that machine sat in [ QUEUED ] under a
-        GETTING READY chip that could never clear -- CR-28 again, one
-        machine at a time.
+        CONFIG ONLY since 2026-08-27 (MULTI_BASE_RIG_PLAN.md WP0/WP1's
+        follow-up): config.toml's own `mode` -> "base" if it says "base",
+        "editor" otherwise. identity.role (the dashboard's /verify, derived
+        from api.py's ADMIN list -- i.e. from the signed-in PERSON, not from
+        this machine) is no longer consulted here at all. It used to win
+        whenever the dashboard sent one, which put the role switch in the
+        wrong hands: the owner's own laptop, signed in as the admin account,
+        reported itself "base" and was refused a sync plan by a dashboard
+        that derives the SAME thing from the SAME admin list -- an ordinary
+        editor computer, punished for who happened to be signed into it. The
+        role now belongs to the computer (config.toml's `mode`, writable from
+        the tray's Settings -> THIS COMPUTER, settings_window.py), the way
+        Resolve's own project/database settings do. Older dashboards still
+        SEND a role in the /verify response; this build ignores it (identity
+        stays readable for diagnostics -- see identity.role's own docstring).
 
-        Same monotonic direction as _apply_identity_role(): a machine that
-        says it does not sync stays that way whatever the server says
-        (AUDIT_2 CORE-C1). Nothing here can start a lane; the reverse
-        precedence could only ever hide a wired machine's true state."""
-        if str(self.config.get("mode", "") or "").strip().lower() == "base":
-            return "base"
-        role = self.identity.role
-        if role is not None:
-            return role
-        return str(self.config.get("mode", "editor")).strip().lower() or "editor"
+        Same monotonic direction as before: a machine whose config says
+        mode="base" stays that way (MODE_PROFILES already turns its lanes
+        off); nothing here can start a lane."""
+        return ("base"
+                if str(self.config.get("mode", "") or "").strip().lower() == "base"
+                else "editor")
 
     # -- P: grade-swap (drive_swap.py) ----------------------------------
 
@@ -4831,6 +4841,129 @@ class CompanionApp:
         except Exception:
             log.exception("could not apply the dashboard's resume-proxy-download request")
 
+    def _apply_file_moves(self, resp: Any) -> None:
+        """Follow the server's file moves (docs/FILE_MOVES.md, 2026-08-27).
+
+        An admin moved a file between project folders on the NAS; this
+        machine holds a copy at the old path, and lane A -- a one-way copy
+        that never deletes -- would otherwise put it straight back on its
+        next pass. So the copy here is moved the same way, its proxies with
+        it, every Resolve clip that pointed at the old path is repointed, and
+        the outcome goes back in the next report.
+
+        Once per move: the on-disk ledger answers a redelivered command with
+        the outcome it already had, so a lost report costs one interval and
+        never a second move. NOTHING here deletes: a refused move leaves the
+        file where it was and says so. Never raises: reporter thread."""
+        try:
+            commands = resp.get("commands") if isinstance(resp, dict) else None
+            raw_moves = commands.get("file_moves") if isinstance(commands, dict) else None
+            if not isinstance(raw_moves, list) or not raw_moves:
+                return
+            local_root = str(self.config.get("local_root", "")).strip()
+            for raw in raw_moves[:file_moves_mod.LEDGER_MAX_ENTRIES]:
+                move = file_moves_mod.parse_command(raw)
+                if move is None:
+                    log.warning("file moves: ignoring a malformed command (%r)", raw)
+                    continue
+                done = self.file_moves.entry(move["id"])
+                if done is not None:
+                    self._queue_file_move_answer(move["id"], done["ok"], done["detail"])
+                    continue
+                if not local_root or self._root_absent:
+                    # Not an answer: the drive may be back next report, and
+                    # "nothing at the old path" would be a lie.
+                    log.info("file moves: #%s waits for the sync drive", move["id"])
+                    continue
+                ok, detail, paths = file_moves_mod.apply_move(move, local_root)
+                if ok and paths is not None:
+                    relinked = self._relink_moved(paths[0], paths[1], move["is_dir"])
+                    if relinked:
+                        detail = f"{detail}; {relinked}"
+                self.file_moves.record(move, ok, detail)
+                self._queue_file_move_answer(move["id"], ok, detail)
+                who = move["requested_by"]
+                name = move["from_rel"].rsplit("/", 1)[-1]
+                where = f"{move['to_project_rel']}/{move['to_rel'].rsplit('/', 1)[0]}".rstrip("/")
+                if ok:
+                    log.info("file move #%s by %s: %s -> %s/%s (%s)", move["id"], who,
+                             move["from_rel"], move["to_project_rel"], move["to_rel"], detail)
+                    if paths is not None:
+                        self._notify_tray(
+                            f"{who} moved '{name}' to {where} on the server. Your copy "
+                            f"followed and Resolve was relinked.",
+                            "ccsync-companion: file moved")
+                else:
+                    log.warning("file move #%s by %s REFUSED here: %s", move["id"], who, detail)
+                    self._notify_tray(
+                        f"{who} moved '{name}' to {where} on the server, but your copy "
+                        f"could not follow: {detail}. Nothing was deleted; ask your admin.",
+                        "ccsync-companion: file move needs attention")
+        except Exception:
+            log.exception("could not apply the dashboard's file moves")
+
+    def _queue_file_move_answer(self, move_id: int, ok: bool, detail: str) -> None:
+        self._file_move_answers = [a for a in self._file_move_answers if a["id"] != move_id]
+        self._file_move_answers.append({"id": int(move_id), "ok": bool(ok),
+                                        "detail": str(detail or "")[:512]})
+
+    def _file_move_results(self) -> list[dict[str, Any]]:
+        """Drained by the reporter: the answers queued since the last report."""
+        answers, self._file_move_answers = self._file_move_answers, []
+        return answers
+
+    def _relink_moved(self, old_local: str, new_local: str, is_dir: bool) -> str:
+        """Repoint every media pool clip under `old_local` to `new_local`,
+        through replace_clip (save point + undo journal, like every other
+        Resolve mutation). Returns a short outcome for the report, "" when
+        there was nothing to do. Never raises: a Resolve that is closed or
+        busy is reported, not treated as a failed move -- the file HAS moved,
+        and the fixer popup will meet the offline clip like any other."""
+        try:
+            from . import canon, resolve_bridge
+
+            result = resolve_bridge.get_media_pool_items()
+            if not result.get("ok"):
+                return f"Resolve not relinked ({result.get('message') or 'not open'})"
+            local_root = str(self.config.get("local_root", ""))
+            prefix = str(self.config.get("canonical_prefix", ""))
+            old_n = os.path.normcase(os.path.normpath(old_local))
+            relinked = failed = 0
+            for item in result.get("items") or []:
+                file_path = str(item.get("file_path") or "")
+                local = canon.canonical_to_local(file_path, local_root, prefix) or file_path
+                local_n = os.path.normcase(os.path.normpath(local))
+                if is_dir:
+                    if not (local_n == old_n or local_n.startswith(old_n.rstrip("\\/") + os.sep)):
+                        continue
+                    target = os.path.join(new_local, os.path.relpath(local, old_local)) \
+                        if local_n != old_n else new_local
+                elif local_n == old_n:
+                    target = new_local
+                else:
+                    continue
+                clip = resolve_bridge.resolve_media_pool_item(item)
+                if clip is None:
+                    failed += 1
+                    continue
+                canonical = canon.local_to_canonical(target, local_root, prefix)
+                outcome = resolve_bridge.replace_clip(clip, canonical, source="file_move")
+                if outcome.get("ok"):
+                    relinked += 1
+                else:
+                    failed += 1
+                    log.warning("file move: could not relink %s -> %s: %s",
+                                file_path, canonical, outcome.get("message"))
+            if not relinked and not failed:
+                return ""
+            text = f"{relinked} Resolve clip(s) relinked"
+            if failed:
+                text += f", {failed} could not be"
+            return text
+        except Exception:
+            log.exception("file move: Resolve relink failed")
+            return "Resolve relink failed (see the log)"
+
     def _apply_fleet_halt(self, resp: Any) -> None:
         """Adopt the dashboard's fleet halt flag from a report reply.
 
@@ -5049,6 +5182,7 @@ class CompanionApp:
         return f"NOT CONNECTED -- {reason} (has connected this session: {ever})"
 
     def _token_expiry_text(self) -> str:
+        from . import identity as identity_mod
         from .identity import parse_token
 
         # Deliberately NOT identity.token (which returns None once expired --
@@ -5059,6 +5193,14 @@ class CompanionApp:
             return "(no token)"
         remaining = expires - time.time()
         stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(expires))
+        # Tokens minted since CR-86 (2026-08-27) do not expire -- the server
+        # still stamps a field, a century out, because the wire shape is fixed
+        # (auth.IDENTITY_TTL_SECONDS). Printing "876000.0h from now" reads
+        # like a bug; say what it means, and keep the date for the pre-CR-86
+        # tokens still in the field, where "when did it expire" is the
+        # question diagnostics are being read to answer.
+        if remaining > identity_mod.NON_EXPIRING_AFTER_SECONDS:
+            return f"never (non-expiring token; nominal {stamp})"
         return f"{stamp} ({remaining / 3600:.1f}h from now)"
 
     def copy_diagnostics(self) -> bool:

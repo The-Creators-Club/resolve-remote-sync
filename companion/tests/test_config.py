@@ -1029,3 +1029,62 @@ def test_selection_ttl_keys_are_documented_and_validated(tmp_path):
         assert any(key in e for e in errors), errors
         errors, _warnings = config_mod.validate_config(_good_cfg(tmp_path, **{key: 0}))
         assert any(key in e for e in errors), errors
+
+
+# -- set_value: the Settings window's role-switch writer (2026-08-27) -------
+
+
+def test_set_value_creates_the_file_and_writes_the_key(tmp_path):
+    path = tmp_path / "config.toml"
+    assert not path.exists()
+    config_mod.set_value(path, "mode", "base")
+    assert path.exists()
+    reloaded = config_mod.load_config(path)
+    assert reloaded["mode"] == "base"
+
+
+def test_set_value_updates_an_existing_key_in_place(tmp_path):
+    path = tmp_path / "config.toml"
+    config_mod.ensure_config_exists(path)
+    before = path.read_text(encoding="utf-8")
+    assert 'editor_name = ""' in before
+
+    config_mod.set_value(path, "mode", "base")
+    after = path.read_text(encoding="utf-8")
+
+    # The key changed...
+    assert config_mod.load_config(path)["mode"] == "base"
+    # ...and every OTHER line survived untouched, comments included.
+    assert 'editor_name = ""' in after
+    assert "# ccsync-companion config" in after
+
+
+def test_set_value_round_trips_and_can_be_flipped_back(tmp_path):
+    path = tmp_path / "config.toml"
+    config_mod.set_value(path, "mode", "base")
+    assert config_mod.load_config(path)["mode"] == "base"
+
+    config_mod.set_value(path, "mode", "editor")
+    assert config_mod.load_config(path)["mode"] == "editor"
+
+
+def test_set_value_appends_a_key_that_is_not_in_the_file(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text("editor_name = \"alex\"\n", encoding="utf-8")
+    config_mod.set_value(path, "mode", "base")
+    reloaded = config_mod.load_config(path)
+    assert reloaded["mode"] == "base"
+    assert reloaded["editor_name"] == "alex"
+
+
+def test_set_value_hardens_a_freshly_created_file(tmp_path, monkeypatch):
+    """Every other path to config.toml goes through ensure_config_exists's
+    owner-only hardening (secretfile.harden) the moment the file is created;
+    set_value must not be a side door around that."""
+    from ccsync_companion import secretfile
+
+    path = tmp_path / "config.toml"
+    hardened = []
+    monkeypatch.setattr(secretfile, "harden", lambda p: hardened.append(p))
+    config_mod.set_value(path, "mode", "base")
+    assert hardened == [path]

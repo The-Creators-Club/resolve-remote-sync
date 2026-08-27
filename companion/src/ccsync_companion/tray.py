@@ -1739,6 +1739,69 @@ def _current_project_line(app: "CompanionApp") -> Optional[str]:
     return None
 
 
+def _sync_line(snap: dict) -> str:
+    """The one line "what is syncing" summary the reduced menu shows in place
+    of the three lane lines + six advisory lines it used to carry
+    (2026-08-27, the Settings-window split -- see settings_window.py). A
+    glance at the tray gets ONE sentence; the detail that used to live in
+    those lines moved to Settings, which is the click away that answers WHY.
+
+    Priority order mirrors compute_overall_color()'s own hierarchy: a halt
+    outranks a tripped breaker, which outranks "not set up", which outranks a
+    disconnected drive, which outranks a plain pause, which outranks actually
+    moving bytes, which outranks files merely queued.
+
+    Takes the SNAPSHOT, not `app`, like _halt_line/_breaker_line beside it --
+    this runs on every render and a snapshot read can never stall the way an
+    app getter can (see _tray_snapshot's own docstring). Always returns a
+    non-empty string -- unlike _sequencer_line/_current_project_line, "Sync:"
+    is not a conditional line, it is the line.
+    """
+    guard = snap.get("sync_guard") or {}
+    halt = guard.get("halt") or {}
+    if halt.get("active"):
+        return ("Sync: stopped by your admin" if halt.get("scope") == "fleet"
+                else "Sync: stopped on this machine")
+    if (guard.get("lane_b_breaker") or {}).get("tripped"):
+        return "Sync: proxy download stopped (see Settings)"
+    if snap.get("problems") or snap.get("eula_problem"):
+        return "Sync: not set up yet"
+    if snap.get("root_absent"):
+        return "Sync: paused (drive disconnected)"
+    if snap.get("paused"):
+        return "Sync: paused"
+
+    up = down = 0
+    speed = 0.0
+    for status in snap.get("statuses") or []:
+        if status.state != STATE_SYNCING:
+            continue
+        count = int(status.transferring or status.queued or 0)
+        # Lane C is "everything else, both ways" (LANE_LABELS) -- it carries
+        # no up/down split of its own, so its activity counts toward BOTH
+        # totals rather than inventing a third phrasing nobody asked for.
+        if not status.name.endswith("_down"):
+            up += count
+        if not status.name.endswith("_up"):
+            down += count
+        if status.speed_bps:
+            speed += float(status.speed_bps)
+
+    if up or down:
+        rate = _mb_per_s(speed) if speed else None
+        suffix = f" · {rate}" if rate else ""
+        if up and down:
+            return f"Sync: up {up} · down {down} files{suffix}"
+        if up:
+            return f"Sync: uploading {up} file{'s' if up != 1 else ''}{suffix}"
+        return f"Sync: downloading {down} file{'s' if down != 1 else ''}{suffix}"
+
+    waiting = sum(int(status.queued or 0) for status in snap.get("statuses") or [])
+    if waiting:
+        return f"Sync: {waiting} file{'s' if waiting != 1 else ''} waiting"
+    return "Sync: up to date"
+
+
 def _mb_per_s(bps: Any) -> Optional[str]:
     """bytes/s -> '4.2 MB/s' (decimal megabytes, what a browser's download
     shelf shows), '0.3 MB/s' below a megabyte; None when yt-dlp said NA."""
@@ -2042,7 +2105,19 @@ def _menu_fingerprint(snap: dict) -> tuple:
     right-click time and destroys it on close, so neither is possible any
     more -- but the fingerprint stays, because rebuilding ~40 menu items and
     their closures twice a second is work nobody needs either. Only on real
-    state changes, not on every byte counted."""
+    state changes, not on every byte counted.
+
+    REDUCED 2026-08-27 alongside the menu itself (the Settings-window split,
+    settings_window.py): everything that used to have its own menu LINE or
+    ACTION and moved wholly into Settings -- the sequencer/current-project/
+    ytdl lines, every YouTube field, the removable-projects list, the
+    grade-swap mode, and the proxy/ingest fingerprints -- came out of this
+    tuple too, because none of it can change what the reduced MENU renders
+    any more. Settings reads those same snapshot fields fresh on its own
+    ~2s refresh instead of through this cache. What is left is exactly what
+    still decides a menu ITEM's presence or label, including the Sync: line
+    (_sync_line), which the guard/problems/paused/root_absent/statuses
+    entries below already cover."""
     lanes = tuple(
         (s.name, s.state, str(s.detail or ""), str(s.last_error or ""),
          str(s.current_project or ""), bool(s.queued), _progress_bucket(s))
@@ -2051,27 +2126,10 @@ def _menu_fingerprint(snap: dict) -> tuple:
     return (
         lanes, snap["identity_label"], snap["signed_in"], snap["paused"],
         snap["problems"], snap.get("root_absent"),
-        snap["sequencer_line"], snap["current_project_line"],
         snap.get("resolve_line"),
-        # The download line changes every update (the rate, the byte count)
-        # and on an otherwise-idle machine nothing else here moves while a
-        # clip comes down -- so without this the menu would show the same
-        # "3/12 (4.2 MB/s)" until something unrelated changed (UI-3's shape).
-        snap.get("ytdl_line"),
         snap["setup_name"], (snap["upgrade_info"] or {}).get("version"),
-        snap["dashboard_url"], snap.get("ytdl_local_downloads"),
-        # Their own entries: the sign-in item appears and disappears on the
-        # site's youtube_unblock flag, and the terms item's label carries a
-        # tick -- either can change without anything else in this tuple
-        # moving (2026-08-17).
-        snap.get("ytdl_youtube_signin"), snap.get("ytdl_attested"),
-        (snap.get("ytdl_cookies_health") or {}).get("status"),
+        snap["dashboard_url"],
         snap["color"],
-        # ...with the mode: a tick switched to upload-only relabels its
-        # "Remove…" item without any slug moving.
-        tuple(sorted((p.get("slug", ""), bool(p.get("upload_only")))
-                     for p in snap.get("removable", []))),
-        snap.get("p_swap_available"), snap.get("p_mode"),
         # The stray-LUT count decides whether the "N LUTs only on this
         # machine" item exists at all, and on an otherwise-idle machine
         # nothing else here moves when a LUT is dropped into Resolve's own
@@ -2079,24 +2137,17 @@ def _menu_fingerprint(snap: dict) -> tuple:
         # unreachable until something unrelated changed, and lingered after
         # share_stray_luts took the count back to 0 (UI-3, 2026-08-11).
         int(snap.get("stray_luts") or 0),
-        _proxy_fingerprint(snap.get("proxy_gap")),
-        # Same rule, same reason (2026-08-18): the b-roll lines and the three
-        # ingest ACTIONS appear and disappear with the gate, and on an
-        # otherwise-idle machine nothing else in this tuple moves when a batch
-        # is dropped on it -- so without this the whole group would be
-        # unreachable until something unrelated changed (UI-3's shape).
-        _ingest_fingerprint(snap.get("broll_ingest")),
-        _ingest_fingerprint(snap.get("music_ingest")),
         # The safety latches decide whether two ACTIONS exist at all
-        # ("Resume proxy download", "Start syncing again"), so they have to
-        # move the fingerprint or the menu keeps offering the wrong one until
-        # something unrelated changes -- the same bug UI-3 was (item 9).
+        # ("Resume proxy download", "Start syncing again") AND what the
+        # Sync: line says, so they have to move the fingerprint or the menu
+        # keeps offering the wrong one until something unrelated changes --
+        # the same bug UI-3 was (item 9).
         _guard_fingerprint(snap.get("sync_guard")),
-        # Same rule as the two latches above: accepting the licence is the
-        # only thing that changes on a machine parked behind that gate, so
+        # Same rule as the latch above: accepting the licence is the only
+        # thing that changes on a machine parked behind that gate, so
         # without it here the accept item would still be in the menu after
-        # the click that cleared it -- and the lane lines would still say
-        # "isn't set up yet" (UI-3's shape again, 2026-08-18).
+        # the click that cleared it -- and the Sync: line would still say
+        # "not set up yet" (UI-3's shape again, 2026-08-18).
         bool(snap.get("eula_problem")),
     )
 
@@ -2168,6 +2219,57 @@ def _proxy_eta_line(gap: Optional[dict]) -> str:
     if not eta:
         return ""
     return f"About {proxy_history.human_duration(eta)} to go at this rate"
+
+
+def proxy_advisory_lines(proxy_gap: Optional[dict]) -> list[str]:
+    """The missing-proxy/encoding/BRAW/made-today lines, in order -- what the
+    menu used to render under "proxy_items" and settings_window.py's SYNC
+    LANES section renders now (2026-08-27). One function so the two callers
+    can never say different things about the same gap."""
+    proxy_gap = proxy_gap or {}
+    proxy_missing = int(proxy_gap.get("missing") or 0)
+    proxy_braw = int(proxy_gap.get("braw") or 0)
+    proxy_encoding = bool(proxy_gap.get("encoding"))
+    proxy_left = int(proxy_gap.get("left") or 0)
+    lines: list[str] = []
+    # Why it is NOT encoding, when the reason is another feature of this same
+    # companion rather than a gap (2026-08-18): without this the menu says
+    # "12 clips have no proxy" for an hour with nothing explaining why nothing
+    # is happening about it.
+    if not proxy_encoding and proxy_gap.get("blocked_reason"):
+        lines.append(f"Proxies waiting: {proxy_gap['blocked_reason']}")
+    if proxy_encoding:
+        # "stops when you're back" is the whole promise of the feature, and
+        # it is the answer to the question this line provokes ("is that why
+        # my machine is busy?"). The count is a bucketed rebuild, not a live
+        # ticker -- see _proxy_fingerprint.
+        lines.append(f"Making proxies… {proxy_left} left (stops when you're back)")
+        eta = _proxy_eta_line(proxy_gap)
+        if eta:
+            lines.append(eta)
+    elif proxy_missing:
+        lines.append(
+            f"{proxy_missing} clips have no proxy: other editors can't see them"
+            if proxy_missing != 1 else
+            "1 clip has no proxy: other editors can't see it"
+        )
+    if proxy_braw:
+        # Named by format because it is the one gap the editor must act on
+        # themselves: no ffmpeg build can decode BRAW, so this machine will
+        # never fill it however long it sits idle.
+        lines.append(
+            f"{proxy_braw} BRAW clips need the Blackmagic Proxy Generator"
+            if proxy_braw != 1 else
+            "1 BRAW clip needs the Blackmagic Proxy Generator"
+        )
+    # What this machine has MADE, from the ledger that survives restarts
+    # (proxy_history.py). Last of the advisory lines because it is the only
+    # one that is not asking for anything: everything above is a gap, this is
+    # the work already done.
+    proxy_made = _proxy_made_line(proxy_gap)
+    if proxy_made:
+        lines.append(proxy_made)
+    return lines
 
 
 def _ingest_lines(ingest: Optional[dict], label: str = "b-roll",
@@ -2423,393 +2525,270 @@ def _tooltip_text(snap: dict) -> str:
     return _with_ingest_suffix(_with_proxy_suffix("CCSync: up to date", snap), snap)
 
 
+# -- shared actions (2026-08-27, the Settings-window split) -----------------
+#
+# Every action the OLD menu could trigger is now a plain function of `app`
+# (plus whatever small extra it needs -- a URL, a slug, a snapshot for a
+# confirm dialog's wording). _build_menu's (icon, item) closures and
+# settings_window.py's button commands both call these directly, so there is
+# exactly ONE place that knows what "Sync now" or "Remove a project" does --
+# see settings_window.py for the other caller. Each one is exactly the body
+# the old inline `on_*` closure had; nothing about WHAT they do changed here,
+# only WHERE they live.
+
+
+def action_sync_now(app: "CompanionApp") -> None:
+    _spawn(app, "Sync now", app.sync_now)
+
+
+def action_scan_whole_project(app: "CompanionApp") -> None:
+    _spawn(app, "Scan whole project", app.scan_whole_project)
+
+
+def action_consolidate_project(app: "CompanionApp") -> None:
+    _spawn(app, "Bring an existing project's media in", app.consolidate_project)
+
+
+def action_undo_last_relink(app: "CompanionApp") -> None:
+    _spawn(app, "Undo the last clip-path change", app.undo_last_relink)
+
+
+def action_share_luts(app: "CompanionApp") -> None:
+    _spawn(app, "Share LUTs", app.share_stray_luts)
+
+
+def action_make_proxies(app: "CompanionApp") -> None:
+    # _spawn like every other action: this one forces a full tree scan on
+    # the generator's thread, and the caller must not wait for it.
+    _spawn(app, "Make proxies now",
+           getattr(app, "generate_proxies_now", None) or (lambda: None))
+
+
+def action_stop_proxies(app: "CompanionApp") -> None:
+    _spawn(app, "Stop making proxies",
+           getattr(app, "stop_proxy_generation", None) or (lambda: None))
+
+
+def action_show_proxy_progress(app: "CompanionApp") -> None:
+    # A WINDOW, not a toast (2026-08-18, at the owner's request): a six-
+    # hour encode behind two lines of text is the "lack of feedback" this
+    # answers. It opens on its own thread and never blocks this one.
+    _spawn(app, "Show proxy progress",
+           getattr(app, "show_proxy_progress", None) or (lambda: None))
+
+
+def action_index_broll_now(app: "CompanionApp") -> None:
+    _spawn(app, "Index b-roll now",
+           getattr(app, "index_broll_now", None) or (lambda: None))
+
+
+def action_pause_broll_ingest(app: "CompanionApp") -> None:
+    _spawn(app, "Pause b-roll indexing",
+           getattr(app, "pause_broll_ingest", None) or (lambda: None))
+
+
+def action_resume_broll_ingest(app: "CompanionApp") -> None:
+    _spawn(app, "Resume b-roll indexing",
+           getattr(app, "resume_broll_ingest", None) or (lambda: None))
+
+
+def action_cancel_broll_ingest(app: "CompanionApp") -> None:
+    # CONFIRMED in the app (it opens a dialog), which is why it goes
+    # through _spawn like every other action rather than running on the
+    # message loop.
+    _spawn(app, "Cancel the b-roll batch",
+           getattr(app, "cancel_broll_ingest", None) or (lambda: None))
+
+
+def action_show_ingest_progress(app: "CompanionApp") -> None:
+    _spawn(app, "Show indexing progress",
+           getattr(app, "show_ingest_progress", None) or (lambda: None))
+
+
+def action_index_music_now(app: "CompanionApp") -> None:
+    _spawn(app, "Index music now",
+           getattr(app, "index_music_now", None) or (lambda: None))
+
+
+def action_pause_music_ingest(app: "CompanionApp") -> None:
+    _spawn(app, "Pause music indexing",
+           getattr(app, "pause_music_ingest", None) or (lambda: None))
+
+
+def action_resume_music_ingest(app: "CompanionApp") -> None:
+    _spawn(app, "Resume music indexing",
+           getattr(app, "resume_music_ingest", None) or (lambda: None))
+
+
+def action_cancel_music_ingest(app: "CompanionApp") -> None:
+    # CONFIRMED in the app (it opens a dialog), which is why it goes
+    # through _spawn like every other action.
+    _spawn(app, "Cancel the music batch",
+           getattr(app, "cancel_music_ingest", None) or (lambda: None))
+
+
+def action_show_music_ingest_progress(app: "CompanionApp") -> None:
+    _spawn(app, "Show music indexing progress",
+           getattr(app, "show_music_ingest_progress", None) or (lambda: None))
+
+
+def action_proxy_history(app: "CompanionApp") -> None:
+    # Rendering the report reads the ledger off disk, so it goes through
+    # _spawn like every other action, and _open_log does the platform launch
+    # (and the sanitized child env) exactly as it does for the log itself.
+    _spawn(app, "Proxy history", lambda: _open_log(
+        (getattr(app, "proxy_history_report", None) or (lambda: ""))()
+    ))
+
+
+def action_toggle_pause(app: "CompanionApp") -> None:
+    # _spawn, not _guarded: this used to run ON the tray's message loop
+    # (win32), and toggle_pause can hold sequencer/Syncthing config writes
+    # for many seconds -- the whole tray froze until it returned (seen live
+    # 2026-07-26). Still true from a Settings button command, which runs on
+    # Tk's event loop.
+    _spawn(app, "Pause/resume", app.toggle_pause)
+
+
+def action_resume_lane_b(app: "CompanionApp", snap: dict) -> None:
+    # Confirm first: resuming is the operator asserting the server is
+    # fine, and the breaker exists precisely because nothing else can
+    # tell (item 9).
+    _spawn(app, "Resume proxy download", lambda: _confirm_resume_lane_b(app, snap))
+
+
+def action_halt_sync(app: "CompanionApp") -> None:
+    _spawn(app, "Stop all syncing", lambda: _confirm_halt(app))
+
+
+def action_release_halt(app: "CompanionApp") -> None:
+    _spawn(app, "Start syncing again", lambda: _release_halt(app))
+
+
+def action_open_dashboard(app: "CompanionApp", url: str) -> None:
+    _spawn(app, "Open dashboard", lambda: _open_dashboard(url, app))
+
+
+def action_open_log(app: "CompanionApp") -> None:
+    _spawn(app, "Open log", lambda: _open_log(app.log_path))
+
+
+def action_copy_diagnostics(app: "CompanionApp") -> None:
+    _spawn(app, "Copy diagnostics for your admin", app.copy_diagnostics)
+
+
+def action_open_sync_drive(app: "CompanionApp") -> None:
+    _spawn(app, "Open my sync drive",
+           lambda: _open_log(str(app.config.get("local_root", ""))))
+
+
+def action_sign_in(app: "CompanionApp") -> None:
+    _spawn(app, "Sign in", lambda: _show_sign_in_dialog(app))
+
+
+def action_youtube_sign_in(app: "CompanionApp") -> None:
+    _spawn(app, "Sign in to YouTube", lambda: _youtube_sign_in(app))
+
+
+def action_youtube_cookies_file(app: "CompanionApp") -> None:
+    _spawn(app, "YouTube cookies file", lambda: _install_youtube_cookies(app))
+
+
+def action_youtube_terms(app: "CompanionApp") -> None:
+    _spawn(app, "Accept YouTube Terms", lambda: _show_youtube_terms_dialog(app))
+
+
+def action_sign_out(app: "CompanionApp") -> None:
+    _spawn(app, "Sign out", lambda: _on_sign_out(app))
+
+
+def action_update_now(app: "CompanionApp") -> None:
+    _spawn(app, "Update now", lambda: _show_update_dialog(app))
+
+
+def action_accept_licence(app: "CompanionApp") -> None:
+    # force=True: this IS the editor asking again after declining or
+    # closing the dialog, and the once-per-run gate must not eat it.
+    _spawn(app, "Accept the licence agreement",
+           lambda: app.prompt_licence_acceptance(force=True))
+
+
+def action_setup_project(app: "CompanionApp") -> None:
+    _spawn(app, "Set up project",
+           lambda: getattr(app, "setup_current_project", lambda: None)())
+
+
+def action_grade_swap(app: "CompanionApp", snap: dict) -> None:
+    to_server = snap.get("p_mode") != "server"
+    _spawn(app, "Grade swap", lambda: _confirm_grade_swap(app, to_server))
+
+
+def action_remove_project(app: "CompanionApp", slug: str, rel: str) -> None:
+    _spawn(app, "Remove project", lambda: _confirm_remove_project(app, slug, rel))
+
+
 def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backend.Menu":
+    """The right-click menu, reduced to what an editor needs WITHOUT opening
+    a window (2026-08-27): who they are, whatever is blocking them, one line
+    of sync state, Resolve's state, the handful of actions used every day,
+    and Settings for everything else. The three lane lines, every advisory
+    line, YouTube, Advanced and its submenu all moved to settings_window.py
+    -- see its module docstring for where each one landed."""
     if snap is None:
         snap = _tray_snapshot(app)
-    statuses = snap["statuses"]
-    lane_items = [
-        tray_backend.MenuItem(
-            _format_lane_line_from(
-                s, paused=snap["paused"], problems=snap["problems"],
-                root_absent=bool(snap.get("root_absent")),
-            ),
-            None, enabled=False,
-        )
-        for s in statuses
-    ]
 
     signed_in = snap["signed_in"]
 
     def on_sync_now(icon, item):
-        _spawn(app, "Sync now", app.sync_now)
-
-    def on_scan_whole_project(icon, item):
-        _spawn(app, "Scan whole project", app.scan_whole_project)
-
-    def on_consolidate_project(icon, item):
-        _spawn(app, "Bring an existing project's media in", app.consolidate_project)
-
-    def on_undo_last_relink(icon, item):
-        _spawn(app, "Undo the last clip-path change", app.undo_last_relink)
-
-    def on_share_luts(icon, item):
-        _spawn(app, "Share LUTs", app.share_stray_luts)
-
-    def on_make_proxies(icon, item):
-        # _spawn like every other action: this one forces a full tree scan on
-        # the generator's thread, and the tray must not wait for it.
-        _spawn(app, "Make proxies now",
-               getattr(app, "generate_proxies_now", None) or (lambda: None))
-
-    def on_stop_proxies(icon, item):
-        _spawn(app, "Stop making proxies",
-               getattr(app, "stop_proxy_generation", None) or (lambda: None))
-
-    def on_show_proxy_progress(icon, item):
-        # A WINDOW, not a toast (2026-08-18, at the owner's request): a six-
-        # hour encode behind two menu lines is the "lack of feedback" this
-        # answers. It opens on its own thread and never blocks this one.
-        _spawn(app, "Show proxy progress",
-               getattr(app, "show_proxy_progress", None) or (lambda: None))
-
-    def on_index_broll_now(icon, item):
-        _spawn(app, "Index b-roll now",
-               getattr(app, "index_broll_now", None) or (lambda: None))
-
-    def on_pause_broll_ingest(icon, item):
-        _spawn(app, "Pause b-roll indexing",
-               getattr(app, "pause_broll_ingest", None) or (lambda: None))
-
-    def on_resume_broll_ingest(icon, item):
-        _spawn(app, "Resume b-roll indexing",
-               getattr(app, "resume_broll_ingest", None) or (lambda: None))
-
-    def on_cancel_broll_ingest(icon, item):
-        # CONFIRMED in the app (it opens a dialog), which is why it goes
-        # through _spawn like every other action rather than running on the
-        # message loop.
-        _spawn(app, "Cancel the b-roll batch",
-               getattr(app, "cancel_broll_ingest", None) or (lambda: None))
-
-    def on_show_ingest_progress(icon, item):
-        _spawn(app, "Show indexing progress",
-               getattr(app, "show_ingest_progress", None) or (lambda: None))
-
-    def on_index_music_now(icon, item):
-        _spawn(app, "Index music now",
-               getattr(app, "index_music_now", None) or (lambda: None))
-
-    def on_pause_music_ingest(icon, item):
-        _spawn(app, "Pause music indexing",
-               getattr(app, "pause_music_ingest", None) or (lambda: None))
-
-    def on_resume_music_ingest(icon, item):
-        _spawn(app, "Resume music indexing",
-               getattr(app, "resume_music_ingest", None) or (lambda: None))
-
-    def on_cancel_music_ingest(icon, item):
-        # CONFIRMED in the app (it opens a dialog), which is why it goes
-        # through _spawn like every other action.
-        _spawn(app, "Cancel the music batch",
-               getattr(app, "cancel_music_ingest", None) or (lambda: None))
-
-    def on_show_music_ingest_progress(icon, item):
-        _spawn(app, "Show music indexing progress",
-               getattr(app, "show_music_ingest_progress", None) or (lambda: None))
-
-    def on_proxy_history(icon, item):
-        # Rendering the report reads the ledger off disk, so it goes through
-        # _spawn like every other action rather than running on the message
-        # loop, and _open_log does the platform launch (and the sanitized
-        # child env) exactly as it does for the log itself.
-        _spawn(app, "Proxy history", lambda: _open_log(
-            (getattr(app, "proxy_history_report", None) or (lambda: ""))()
-        ))
+        action_sync_now(app)
 
     def on_toggle_pause(icon, item):
-        # _spawn, not _guarded: menu callbacks run ON the tray's message
-        # loop (win32), and toggle_pause can hold sequencer/Syncthing config
-        # writes for many seconds -- the whole tray froze until it returned
-        # (seen live 2026-07-26).
-        _spawn(app, "Pause/resume", app.toggle_pause)
+        action_toggle_pause(app)
 
-    def on_resume_lane_b(icon, item):
-        # Confirm first: resuming is the operator asserting the server is
-        # fine, and the breaker exists precisely because nothing else can
-        # tell (item 9).
-        _spawn(app, "Resume proxy download", lambda: _confirm_resume_lane_b(app, snap))
-
-    def on_halt_sync(icon, item):
-        _spawn(app, "Stop all syncing", lambda: _confirm_halt(app))
-
-    def on_release_halt(icon, item):
-        _spawn(app, "Start syncing again", lambda: _release_halt(app))
+    def on_open_sync_drive(icon, item):
+        action_open_sync_drive(app)
 
     def on_open_dashboard(icon, item):
-        url = snap["dashboard_url"]
-        _spawn(app, "Open dashboard", lambda: _open_dashboard(url, app))
+        action_open_dashboard(app, snap["dashboard_url"])
 
-    def on_open_log(icon, item):
-        _spawn(app, "Open log", lambda: _open_log(app.log_path))
-
-    def on_copy_diagnostics(icon, item):
-        _spawn(app, "Copy diagnostics for your admin", app.copy_diagnostics)
-
-    def on_open_project_folder(icon, item):
-        _spawn(app, "Open my project folder",
-               lambda: _open_log(str(app.config.get("local_root", ""))))
+    def on_open_settings(icon, item):
+        from . import settings_window
+        _spawn(app, "Settings", lambda: settings_window.show_settings(app))
 
     def on_quit(icon, item):
         icon.stop()
         _guarded(app, "Quit", app.shutdown)
 
     def on_sign_in(icon, item):
-        _spawn(app, "Sign in", lambda: _show_sign_in_dialog(app))
-
-    def on_youtube_sign_in(icon, item):
-        _spawn(app, "Sign in to YouTube", lambda: _youtube_sign_in(app))
-
-    def on_youtube_cookies_file(icon, item):
-        _spawn(app, "YouTube cookies file", lambda: _install_youtube_cookies(app))
-
-    def on_youtube_terms(icon, item):
-        _spawn(app, "Accept YouTube Terms",
-               lambda: _show_youtube_terms_dialog(app))
+        action_sign_in(app)
 
     def on_sign_out(icon, item):
-        _spawn(app, "Sign out", lambda: _on_sign_out(app))
+        action_sign_out(app)
 
     def on_update_now(icon, item):
-        _spawn(app, "Update now", lambda: _show_update_dialog(app))
+        action_update_now(app)
 
     def on_accept_licence(icon, item):
-        # force=True: this IS the editor asking again after declining or
-        # closing the dialog, and the once-per-run gate must not eat it.
-        _spawn(app, "Accept the licence agreement",
-               lambda: app.prompt_licence_acceptance(force=True))
+        action_accept_licence(app)
 
     def on_setup_project(icon, item):
-        _spawn(app, "Set up project",
-               lambda: getattr(app, "setup_current_project", lambda: None)())
+        action_setup_project(app)
 
-    def on_grade_swap(icon, item):
-        to_server = snap.get("p_mode") != "server"
-        _spawn(app, "Grade swap", lambda: _confirm_grade_swap(app, to_server))
+    def on_share_luts(icon, item):
+        action_share_luts(app)
 
-    def on_remove_project(slug, rel):
-        def handler(icon, item):
-            _spawn(app, "Remove project", lambda: _confirm_remove_project(app, slug, rel))
-        return handler
+    def on_resume_lane_b(icon, item):
+        action_resume_lane_b(app, snap)
+
+    def on_release_halt(icon, item):
+        action_release_halt(app)
 
     dashboard_items = (
         [tray_backend.MenuItem("Open dashboard", on_open_dashboard)]
         if snap["dashboard_url"] else []
     )
-    # Sign in to YouTube for the LOCAL downloader (ytdl_cookies.py): points it
-    # at a cookies.txt so this machine passes the bot check and can fetch
-    # age-restricted clips itself instead of handing them to the server.
-    # Offered only where the site enabled BOTH the downloader and
-    # `youtube_unblock` (2026-08-17) -- with either off nothing here ever runs
-    # yt-dlp signed in, and an item that cannot work is worse than no item.
-    # Under Advanced would hide it from the editor who needs it; it sits by
-    # "Open dashboard" because it is an account action.
-    # The rights/ToS attestation, per MACHINE (ytdl_attestation.py,
-    # COMMERCIAL_READINESS.md item 2). It sits beside the sign-in because it is
-    # the same kind of thing -- something the person, not the software, has to
-    # do before a download runs here -- and the label carries a tick once it is
-    # done so an editor can see the state without opening it.
-    yt_health = (snap.get("ytdl_cookies_health") or {}).get("status")
-    yt_bad = yt_health in (ytdl_cookies.STATUS_STALE, ytdl_cookies.STATUS_EXPIRED)
-    # STATUS_OK means a cookies file is installed and nothing has refused it:
-    # the label says so, or the editor who has just signed in reads the
-    # unchanged "Sign in to YouTube..." as "it did not take" (owner,
-    # 2026-08-18). The item stays clickable so a different account can be
-    # signed in without a sign-out step.
-    yt_signed_in = yt_health == ytdl_cookies.STATUS_OK
-    if yt_bad:
-        yt_label = "Sign in to YouTube again (session expired)…"
-    elif yt_signed_in:
-        yt_label = "YouTube: signed in ✓ (sign in again…)"
-    else:
-        yt_label = "Sign in to YouTube (for downloads)…"
-    youtube_items = (
-        ([tray_backend.MenuItem(
-            ("Accept YouTube Terms ✓" if snap.get("ytdl_attested")
-             else "Accept YouTube Terms…"), on_youtube_terms)]
-         if snap.get("ytdl_local_downloads") else [])
-        + ([tray_backend.MenuItem(_youtube_warning_line(snap), None, enabled=False)]
-           if snap.get("ytdl_youtube_signin") and yt_bad else [])
-        + ([tray_backend.MenuItem(yt_label, on_youtube_sign_in)]
-           if snap.get("ytdl_youtube_signin") else [])
-    )
-    # Present only while the open Resolve project has no server-side root
-    # (see project_setup.py) -- clicking opens the /project-setup deep link.
-    setup_name = snap["setup_name"]
-    setup_items = (
-        [tray_backend.MenuItem(f"Set up '{setup_name}' on the server…", on_setup_project)]
-        if setup_name else []
-    )
-    # Present only while the dashboard advertises a different published
-    # version (see upgrade.py) -- the fingerprint-gated rebuild loop makes
-    # this appear/disappear, same pattern as dashboard_items above.
-    upgrade_info = snap["upgrade_info"]
-    # The label is NOT "Update available" unconditionally: the dashboard
-    # advertises whatever it publishes as `current`, newer or older (see
-    # upgrade.py's "different, not newer"). This rig ran v0.4.5 while the
-    # dashboard still published v0.4.3, and the tray offered "Update
-    # available → v0.4.3 (install)" -- one click from a silent DOWNGRADE
-    # that reintroduced a round of security fixes (seen live 2026-07-25).
-    upgrade_items = (
-        [tray_backend.MenuItem(
-            upgrade_mod.offer_label(upgrade_info["version"]), on_update_now,
-        ), tray_backend.Menu.SEPARATOR]
-        if upgrade_info else []
-    )
-    # THE ONE THING BLOCKING EVERYTHING, so it sits above even the breaker
-    # (2026-08-18). Present only while the licence gate is live: the lane
-    # lines already read "NOT SYNCING (this machine isn't set up yet)", and
-    # until this existed there was nothing in the menu an editor could click
-    # to change that -- the wizard, on a machine that self-upgraded, is a
-    # download away. Vanishes the moment it is accepted, same conditional-item
-    # pattern as the upgrade offer.
-    licence_items = (
-        [tray_backend.MenuItem("► Accept the licence agreement to start syncing…",
-                               on_accept_licence),
-         tray_backend.Menu.SEPARATOR]
-        if snap.get("eula_problem") else []
-    )
-    # Present only while this machine holds LUTs the shared library doesn't.
-    # Same conditional-item pattern as the upgrade offer above: it appears
-    # when there is something to do and vanishes once there isn't.
-    stray_luts = int(snap.get("stray_luts") or 0)
-    lut_items = (
-        [tray_backend.MenuItem(
-            f"► {stray_luts} LUT{'s' if stray_luts != 1 else ''} only on this machine: "
-            f"share with the team", on_share_luts,
-        ), tray_backend.Menu.SEPARATOR]
-        if stray_luts else []
-    )
-    # Missing proxies (proxy_gen.py). ADVISORY lines only -- no icon color,
-    # no pulse (tray.py:78-85's stance): an original with no proxy is not a
-    # fault, it is footage the rest of the fleet cannot see yet, and the
-    # sentence has to say that rather than name a file format.
-    proxy_gap = snap.get("proxy_gap") or {}
-    proxy_missing = int(proxy_gap.get("missing") or 0)
-    proxy_braw = int(proxy_gap.get("braw") or 0)
-    proxy_encoding = bool(proxy_gap.get("encoding"))
-    proxy_left = int(proxy_gap.get("left") or 0)
-    proxy_lines: list[str] = []
-    # Why it is NOT encoding, when the reason is another feature of this same
-    # companion rather than a gap (2026-08-18): without this the menu says
-    # "12 clips have no proxy" for an hour with nothing explaining why nothing
-    # is happening about it.
-    if not proxy_encoding and proxy_gap.get("blocked_reason"):
-        proxy_lines.append(f"Proxies waiting: {proxy_gap['blocked_reason']}")
-    if proxy_encoding:
-        # "stops when you're back" is the whole promise of the feature, and
-        # it is the answer to the question this line provokes ("is that why
-        # my machine is busy?"). The count is a bucketed rebuild, not a live
-        # ticker -- see _proxy_fingerprint.
-        proxy_lines.append(f"Making proxies… {proxy_left} left (stops when you're back)")
-        eta = _proxy_eta_line(proxy_gap)
-        if eta:
-            proxy_lines.append(eta)
-    elif proxy_missing:
-        proxy_lines.append(
-            f"{proxy_missing} clips have no proxy: other editors can't see them"
-            if proxy_missing != 1 else
-            "1 clip has no proxy: other editors can't see it"
-        )
-    if proxy_braw:
-        # Named by format because it is the one gap the editor must act on
-        # themselves: no ffmpeg build can decode BRAW, so this machine will
-        # never fill it however long it sits idle.
-        proxy_lines.append(
-            f"{proxy_braw} BRAW clips need the Blackmagic Proxy Generator"
-            if proxy_braw != 1 else
-            "1 BRAW clip needs the Blackmagic Proxy Generator"
-        )
-    # What this machine has MADE, from the ledger that survives restarts
-    # (proxy_history.py). Last of the advisory lines because it is the only
-    # one that is not asking for anything: everything above is a gap, this is
-    # the work already done.
-    proxy_made = _proxy_made_line(proxy_gap)
-    if proxy_made:
-        proxy_lines.append(proxy_made)
-    proxy_items = [tray_backend.MenuItem(line, None, enabled=False) for line in proxy_lines]
-    # The two ACTIONS live under Advanced: "make them now" costs a full tree
-    # walk plus hours of encoding, and neither is something to hit by accident
-    # on the way to Pause (the same reasoning that moved Consolidate/Scan).
-    proxy_actions = []
-    if proxy_encoding:
-        proxy_actions.append(tray_backend.MenuItem("Stop making proxies", on_stop_proxies))
-        proxy_actions.append(tray_backend.MenuItem(
-            "Show proxy progress…", on_show_proxy_progress))
-    elif proxy_missing and proxy_gap.get("can_generate"):
-        proxy_actions.append(tray_backend.MenuItem(
-            "Make the missing proxies now (don't wait until I'm away)", on_make_proxies,
-        ))
-    # Always offered where this machine can generate at all, gap or no gap:
-    # the question it answers ("what did it make overnight?") is asked
-    # precisely when there is nothing left to do and the menu says nothing.
-    # A STABLE LABEL, so it never moves the menu fingerprint.
-    if proxy_gap.get("can_generate") or _proxy_history(proxy_gap).get("last_at"):
-        proxy_actions.append(tray_backend.MenuItem(
-            "Proxies this machine has made…", on_proxy_history,
-        ))
 
-    # B-roll indexing (broll_ingest.py, 2026-08-18). Advisory lines like the
-    # proxy ones -- no icon colour, no pulse -- with one exception: the VRAM
-    # refusal, which is the only thing here an editor can act on and which
-    # _ingest_lines therefore puts first.
-    ingest = snap.get("broll_ingest") or {}
-    ingest_items = [tray_backend.MenuItem(line, None, enabled=False)
-                    for line in _ingest_lines(ingest)]
-    # The ACTIONS live under Advanced beside the proxy ones, for the same
-    # reason: "index now" commits the machine to hours of GPU work and
-    # "cancel" throws an evening of it away, and neither is something to hit
-    # on the way to Pause.
-    ingest_actions = []
-    if ingest.get("batch_uid"):
-        if ingest.get("paused"):
-            ingest_actions.append(tray_backend.MenuItem(
-                "Resume indexing the b-roll batch", on_resume_broll_ingest))
-        else:
-            if ingest.get("gate") in ("user-active", "resolve-open"):
-                ingest_actions.append(tray_backend.MenuItem(
-                    "Index the b-roll batch now (don't wait until I'm away)",
-                    on_index_broll_now))
-            ingest_actions.append(tray_backend.MenuItem(
-                "Pause b-roll indexing", on_pause_broll_ingest))
-        ingest_actions.append(tray_backend.MenuItem(
-            "Show indexing progress…", on_show_ingest_progress))
-        ingest_actions.append(tray_backend.MenuItem(
-            "Cancel the b-roll batch…", on_cancel_broll_ingest))
-
-    # Music indexing (music_ingest.py, 2026-08-18). The same shape, its own
-    # batch: an editor can be indexing an album and a camera card at once, and
-    # a menu that showed one set of controls for both would pause the wrong
-    # thing.
-    music = snap.get("music_ingest") or {}
-    ingest_items += [tray_backend.MenuItem(line, None, enabled=False)
-                     for line in _ingest_lines(music, "music", "track")]
-    if music.get("batch_uid"):
-        if music.get("paused"):
-            ingest_actions.append(tray_backend.MenuItem(
-                "Resume indexing the music batch", on_resume_music_ingest))
-        else:
-            if music.get("gate") in ("user-active", "resolve-open"):
-                ingest_actions.append(tray_backend.MenuItem(
-                    "Index the music batch now (don't wait until I'm away)",
-                    on_index_music_now))
-            ingest_actions.append(tray_backend.MenuItem(
-                "Pause music indexing", on_pause_music_ingest))
-        ingest_actions.append(tray_backend.MenuItem(
-            "Show music indexing progress…", on_show_music_ingest_progress))
-        ingest_actions.append(tray_backend.MenuItem(
-            "Cancel the music batch…", on_cancel_music_ingest))
-
-        # "nothing syncs until you do" is only TRUE when login is required. With
+    # "nothing syncs until you do" is only TRUE when login is required. With
     # require_login=false the lanes are already running under editor_name, and
     # telling the editor otherwise sends them chasing a sign-in they don't
     # need -- the same check compute_overall_color() already makes.
@@ -2817,12 +2796,19 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
         "► Sign in… (nothing syncs until you do)"
         if snap.get("require_login", True) else "Sign in…"
     )
-    identity_items = [
-        tray_backend.MenuItem(snap["identity_label"], None, enabled=False),
-        tray_backend.MenuItem("Sign out", on_sign_out) if signed_in
-        else tray_backend.MenuItem(sign_in_label, on_sign_in),
-    ]
+    # Signed in: the identity line alone -- Sign out lives in Settings (the
+    # approved 2026-08-27 menu). Signed out: the prompt stays one click away,
+    # because nothing syncs until it is answered.
+    identity_items = [tray_backend.MenuItem(snap["identity_label"], None, enabled=False)]
+    if not signed_in:
+        identity_items.append(tray_backend.MenuItem(sign_in_label, on_sign_in))
 
+    # -- the conditional block: blockers and prompts, in one bracketed group
+    # (2026-08-27). Each of these used to carry its OWN trailing separator so
+    # it could stand alone in the old, longer menu; now they are bracketed by
+    # ONE pair of hard separators (see the Menu(...) call below) whether the
+    # block is empty or full, so the shape never wobbles as items appear and
+    # disappear.
     problem_items = []
     if snap["problems"]:
         problem_items = [tray_backend.MenuItem(
@@ -2830,118 +2816,93 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
             None, enabled=False,
         )]
 
-    # The safety latches go FIRST among the state lines and before every
-    # lane line (COMMERCIAL_READINESS.md item 9, 2026-08-17): "proxy download
-    # is stopped" and "your admin halted syncing" outrank which project is
-    # currently in the rotation, and an editor who reads no further must
-    # still have read those.
-    guard = snap.get("sync_guard") or {}
-    state_items = [
-        tray_backend.MenuItem(line, None, enabled=False)
-        for line in (_halt_line(guard), _breaker_line(guard),
-                     _skipped_exists_line(guard),
-                     snap["sequencer_line"], snap["current_project_line"],
-                     snap.get("resolve_line"), snap.get("ytdl_line"),
-                     _trash_line(guard))
-        if line
-    ]
+    # THE ONE THING BLOCKING EVERYTHING (2026-08-18): present only while the
+    # licence gate is live. Vanishes the moment it is accepted.
+    licence_items = (
+        [tray_backend.MenuItem("► Accept the licence agreement to start syncing…",
+                               on_accept_licence)]
+        if snap.get("eula_problem") else []
+    )
 
-    # Conditional-item pattern, same as the upgrade offer: the RESUME action
-    # exists only while the breaker is tripped, and the halt item flips
-    # between stop and start. Both are top-level rather than under Advanced
-    # -- an editor whose syncing has stopped must not have to go looking
-    # (item 9).
+    # Present only while the open Resolve project has no server-side root
+    # (see project_setup.py) -- clicking opens the /project-setup deep link.
+    # A blocker-ish onboarding prompt, so it stays in this block rather than
+    # moving to Settings with the rest of the project-state lines.
+    setup_name = snap["setup_name"]
+    setup_items = (
+        [tray_backend.MenuItem(f"Set up '{setup_name}' on the server…", on_setup_project)]
+        if setup_name else []
+    )
+
+    # Present only while this machine holds LUTs the shared library doesn't.
+    # A "something to do" prompt, same reasoning as setup_items above.
+    stray_luts = int(snap.get("stray_luts") or 0)
+    lut_items = (
+        [tray_backend.MenuItem(
+            f"► {stray_luts} LUT{'s' if stray_luts != 1 else ''} only on this machine: "
+            f"share with the team", on_share_luts,
+        )]
+        if stray_luts else []
+    )
+
+    # The two safety-latch actions (COMMERCIAL_READINESS.md item 9,
+    # 2026-08-17): the RESUME action exists only while the breaker is
+    # tripped, and the halt-release item only while a LOCAL halt is active
+    # (a FLEET halt offers no local release -- only the dashboard can clear
+    # it, and an item that always answers "your administrator has to do
+    # this" is worse than no item).
+    guard = snap.get("sync_guard") or {}
     breaker_items = (
         [tray_backend.MenuItem("► Resume proxy download…", on_resume_lane_b)]
         if ((guard.get("lane_b_breaker") or {}).get("tripped")) else []
     )
     halt_active = bool((guard.get("halt") or {}).get("active"))
     halt_is_fleet = (guard.get("halt") or {}).get("scope") == "fleet"
-    # RELEASE is top-level, STOP is under Advanced -- the asymmetry is the
-    # point. Stopping everything is a rare, destructive-feeling action that
-    # must not sit next to Pause; starting again is the thing an editor
-    # staring at a stopped tray needs to find immediately. A FLEET halt
-    # offers no local release at all: only the dashboard can clear it, and an
-    # item that always answers "your administrator has to do this" is worse
-    # than no item.
     halt_release_items = (
         [tray_backend.MenuItem("► Start syncing again", on_release_halt)]
         if halt_active and not halt_is_fleet else []
     )
-    halt_stop_items = (
-        [] if halt_active
-        else [tray_backend.MenuItem("Stop ALL syncing on this machine…", on_halt_sync)]
+
+    # The label is NOT "Update available" unconditionally: the dashboard
+    # advertises whatever it publishes as `current`, newer or older (see
+    # upgrade.py's "different, not newer"). This rig ran v0.4.5 while the
+    # dashboard still published v0.4.3, and the tray offered "Update
+    # available → v0.4.3 (install)" -- one click from a silent DOWNGRADE
+    # that reintroduced a round of security fixes (seen live 2026-07-25).
+    upgrade_info = snap["upgrade_info"]
+    upgrade_items = (
+        [tray_backend.MenuItem(upgrade_mod.offer_label(upgrade_info["version"]), on_update_now)]
+        if upgrade_info else []
     )
 
-    # Order per AUDIT_2 UX-17: who you are, then what is happening, then the
-    # things you actually click, and `Update available…` NEVER adjacent to
-    # Quit -- it used to sit directly above the one item you must never
-    # mis-click. Consolidate/Scan are the two rarest and most dangerous
-    # actions, so they move under Advanced.
+    conditional_items = [
+        *problem_items, *licence_items, *setup_items, *lut_items,
+        *breaker_items, *halt_release_items, *upgrade_items,
+    ]
+
+    # One line of sync state plus Resolve's state -- the three lane lines and
+    # every advisory line that used to sit here moved to Settings.
+    state_items = [
+        tray_backend.MenuItem(line, None, enabled=False)
+        for line in (_sync_line(snap), snap.get("resolve_line"))
+        if line
+    ]
+
     return tray_backend.Menu(
         *identity_items,
         tray_backend.Menu.SEPARATOR,
-        *problem_items,
-        *state_items,
-        *lane_items,
+        *conditional_items,
         tray_backend.Menu.SEPARATOR,
-        *licence_items,
-        *breaker_items,
-        *halt_release_items,
+        *state_items,
+        tray_backend.Menu.SEPARATOR,
         tray_backend.MenuItem("Sync now", on_sync_now),
         tray_backend.MenuItem(
             "▶ Resume syncing (currently PAUSED)" if snap["paused"] else "⏸ Pause syncing",
             on_toggle_pause, checked=(lambda paused: lambda item: paused)(snap["paused"]),
         ),
-        tray_backend.MenuItem("Open my project folder", on_open_project_folder),
-        *([
-            tray_backend.MenuItem(
-                "Finish grading: P: back to local proxies"
-                if snap.get("p_mode") == "server"
-                else "Grade from server originals (swap P:)…",
-                on_grade_swap,
-            )
-        ] if snap.get("p_swap_available") else []),
+        tray_backend.MenuItem("Open my sync drive", on_open_sync_drive),
         *dashboard_items,
-        *youtube_items,
-        *setup_items,
-        *lut_items,
-        *proxy_items,
-        *ingest_items,
-        tray_backend.Menu.SEPARATOR,
-        *upgrade_items,
-        tray_backend.MenuItem("Copy diagnostics for your admin", on_copy_diagnostics),
-        tray_backend.MenuItem("Open log", on_open_log),
-        tray_backend.MenuItem("Advanced", tray_backend.Menu(
-            tray_backend.MenuItem("Scan whole project", on_scan_whole_project),
-            tray_backend.MenuItem(
-                "Bring an existing project's media into the synced folder…",
-                on_consolidate_project,
-            ),
-            tray_backend.MenuItem(
-                "Undo the last clip-path change CCSync made…", on_undo_last_relink,
-            ),
-            # The manual half of "Sign in to YouTube": an editor who keeps
-            # their own cookies.txt export can still install it by hand
-            # (2026-08-17). Same gate as the top-level item.
-            *([tray_backend.MenuItem("YouTube: use an exported cookies.txt…",
-                                     on_youtube_cookies_file)]
-              if snap.get("ytdl_youtube_signin") else []),
-            *proxy_actions,
-            *ingest_actions,
-            *halt_stop_items,
-            *([tray_backend.Menu.SEPARATOR] if snap.get("removable") else []),
-            *[
-                tray_backend.MenuItem(
-                    "Remove '" + proj["rel"].split("/")[-1] + "'"
-                    + (" (upload only)" if proj.get("upload_only") else "")
-                    + " from this machine…",
-                    on_remove_project(proj["slug"], proj["rel"]),
-                )
-                for proj in snap.get("removable", [])
-            ],
-            tray_backend.MenuItem(f"ccsync-companion v{config_mod.VERSION}", None, enabled=False),
-        )),
+        tray_backend.MenuItem("Settings…", on_open_settings),
         tray_backend.Menu.SEPARATOR,
         tray_backend.MenuItem("Quit CCSync (stops syncing until you next sign in)", on_quit),
     )

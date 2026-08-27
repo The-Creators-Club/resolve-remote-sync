@@ -149,8 +149,8 @@ def _item_rel(item: dict) -> Optional[str]:
     return normalized_safe_rel(item.get("rel_path"))
 
 
-# A tick's MODE (docs/UPLOAD_ONLY_TICK.md, dashboard 0.7.13 / companion
-# 0.9.53). `full` is every lane; `upload_only` is lane A alone -- the editor
+# A tick's MODE (docs/UPLOAD_ONLY_TICK.md, dashboard 0.7.14 / companion
+# 0.9.54). `full` is every lane; `upload_only` is lane A alone -- the editor
 # has the footage backed up locally and wants the originals on the server
 # without the project's proxies (lane B) or shared files (lane C) coming
 # down. The server never shares the Syncthing folder with an upload-only

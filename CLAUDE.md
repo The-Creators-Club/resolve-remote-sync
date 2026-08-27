@@ -147,7 +147,22 @@ run alongside the tray app — it would hold port 8899.
   `sync_modes=(db.SYNC_MODE_FULL,)`; a companion reading an unknown mode
   syncs the project not at all. Only video originals go up (lane A's filter
   is unchanged). Deploy the dashboard before the companions: a build older
-  than 0.9.53 runs lane B for it too.
+  than 0.9.54 runs lane B for it too.
+- **A file moved on the NAS by hand comes back** (`docs/FILE_MOVES.md`,
+  2026-08-27): lane A never deletes, so every machine still holding the
+  file at the old path re-uploads it. Move through the project page's
+  `[ MOVE ON THE SERVER AND ON EVERY MACHINE ]` instead: the dashboard
+  renames it (proxies with it), records it (`file_moves`, v29) and tells
+  every holding machine through `commands.file_moves`; the companion moves
+  its copy, relinks Resolve, keeps the old path out of lane A for a day,
+  and answers in `file_moves_applied`. Nothing in that path deletes.
+- **Wired or remote is the COMPUTER's own setting** (CR-88, companion
+  0.9.54): `effective_mode()` reads config `mode` only, set from the tray's
+  Settings window (THIS COMPUTER). The `role` the dashboard's `/verify`
+  still sends is admin-derived, i.e. about the person, and is diagnostics
+  only now; never make it gate sync again. The right-click menu is the
+  ten-item layout in KNOWN_BUGS CR-88; everything else lives in
+  `settings_window.py`, and both call the same `action_*(app)` functions.
 - **A base rig can hold no tick** (CR-28): `machine_state.mode` (v22) records
   the role on the machine's own row, `db.base_only_editors` is the one
   predicate every queue source shares, and the tick itself 409s. It syncs

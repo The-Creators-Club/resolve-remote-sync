@@ -1891,9 +1891,15 @@ class RcloneLane(LaneAdapter):
         watch_probe_fn: Optional[Callable[[str], tuple[str, str]]] = None,
         breaker: Optional["lane_guard.LaneBBreaker"] = None,
         remote_list_fn: Optional[Callable[[list[str], float], Optional[str]]] = None,
+        extra_excludes_fn: Optional[Callable[[Optional[str]], list[str]]] = None,
     ) -> None:
         assert direction in (DIRECTION_UP, DIRECTION_DOWN)
         self.direction = direction
+        # Lane A only: run-relative paths the server has MOVED AWAY from
+        # (file_moves.FileMoveLedger.recent_excludes). Without this the copy
+        # still sitting at the old path re-uploads itself on the next pass,
+        # undoing the admin's move (docs/FILE_MOVES.md, 2026-08-27).
+        self.extra_excludes_fn = extra_excludes_fn
         self.name = "lane_a_video_up" if direction == DIRECTION_UP else "lane_b_proxy_down"
         self.local_root = local_root
         self.remote = remote
@@ -2222,6 +2228,22 @@ class RcloneLane(LaneAdapter):
                     "%s: deferring %d path(s) to the in-flight express run",
                     self.name, len(excludes),
                 )
+            if self.extra_excludes_fn is not None:
+                try:
+                    moved_away = [
+                        str(rel).replace("\\", "/").strip("/")
+                        for rel in (self.extra_excludes_fn(subpath) or [])
+                    ]
+                except Exception:
+                    log.exception("%s: extra_excludes_fn failed -- excluding nothing", self.name)
+                    moved_away = []
+                moved_away = [rel for rel in moved_away if rel and rel not in excludes]
+                if moved_away:
+                    log.info(
+                        "%s: keeping %d path(s) the server moved away from out of this run",
+                        self.name, len(moved_away),
+                    )
+                    excludes += moved_away
             filter_file = self._ensure_filter_file(excludes)
             return build_up_command(
                 self.rclone_path, self.local_root, self.remote, self.remote_root,

@@ -23,7 +23,13 @@ Dashboard contract (already built server-side; this module only calls it):
     reuses that helper, so the install gate says the same thing the tray does.
     The token is "v2.identity.<user_b64url>.<expires_epoch>.<hexsig>" --
     OPAQUE to this module except for reading the username (base64url field 2,
-    padding-less) and the expiry (field 3) back out of it (parse_token). The
+    padding-less) and the expiry (field 3) back out of it (parse_token).
+    Since CR-86 (2026-08-27) a sign-in does NOT expire: the dashboard still
+    stamps field 3, a century out, so the shape every deployed build parses
+    is unchanged (auth.IDENTITY_TTL_SECONDS says why). is_valid keeps
+    honouring the field -- tokens minted before that change really do lapse,
+    and a machine whose clock is years fast must still stop calling itself
+    verified rather than report under an identity the server will reject. The
     purpose claim ("identity") and the signature can only be verified
     server-side (no secret here) -- the dashboard does that when a report
     comes in with the token in the X-CCSync-Identity header, and rejects a
@@ -34,12 +40,12 @@ Dashboard contract (already built server-side; this module only calls it):
 
     `role` is trusted the same way `username` already is: read straight off
     the response with no local signature to check (the dashboard is the
-    only party that can forge or verify either). It's not security-critical
-    -- worst case a wrong role just picks the wrong sync profile locally,
-    same blast radius as a hand-edited config.toml `mode` typo. See
-    app.py's _apply_identity_role() for what a role actually changes.
-    Older dashboards (pre-role) simply omit the field; role then reads as
-    None and app.py falls back to the static config `mode`/`sync_enabled`.
+    only party that can forge or verify either). Since 2026-08-27
+    (MULTI_BASE_RIG_PLAN.md WP0/WP1) it is READ-ONLY diagnostic data: the
+    role belongs to the COMPUTER, not the signed-in person, so app.py's
+    effective_mode()/_apply_identity_role() consult config.toml's own `mode`
+    only and never this field. Older dashboards still send it; this build
+    just no longer acts on it. See the `role` property's own docstring.
 
 Never-raise ethos: nothing in this module raises out to callers on network
 or filesystem failure -- see reporter.py's docstring for the same pattern.
@@ -168,6 +174,14 @@ def preferred_report_token(cfg: dict[str, Any],
     return "", "none"
 
 
+# An expiry further out than this means "does not expire" (CR-86): the
+# dashboard mints identity tokens a century ahead rather than adding a
+# sentinel the fleet's installed builds would not understand. Only display
+# code needs to tell the two apart -- is_valid just compares to now() -- so
+# the bar is deliberately far above any real TTL and far below the stamp.
+NON_EXPIRING_AFTER_SECONDS = 10 * 365 * 24 * 3600
+
+
 def parse_token(token: Optional[str]) -> tuple[Optional[str], Optional[int]]:
     """Split the opaque "v2.identity.<user_b64url>.<expires_epoch>.<hexsig>"
     token into (username, expires_epoch). Returns (None, None) for anything
@@ -198,7 +212,10 @@ def parse_token(token: Optional[str]) -> tuple[Optional[str], Optional[int]]:
 def is_valid(identity: Optional[dict[str, Any]], now: Callable[[], float] = time.time) -> bool:
     """True when `identity` has a non-expired, parseable token AND a
     non-empty username. Does NOT verify the token's signature (can't --
-    that's the dashboard's job when the report arrives)."""
+    that's the dashboard's job when the report arrives).
+
+    Post-CR-86 tokens never trip the expiry arm (see the module docstring);
+    it stays for the pre-CR-86 ones and for a badly skewed clock."""
     if not identity:
         return False
     if not str(identity.get("username", "")).strip():
@@ -450,7 +467,16 @@ class IdentityManager:
     def role(self) -> Optional[str]:
         """"base" or "editor" as returned by the dashboard at sign-in, or
         None if not signed in / the dashboard didn't send one (older
-        server). See app.py's _apply_identity_role()."""
+        server).
+
+        NOT consulted by _apply_identity_role() or app.effective_mode()
+        since 2026-08-27 (MULTI_BASE_RIG_PLAN.md WP0/WP1): this value is
+        derived from the signed-in PERSON (the dashboard's admin list), and
+        the role belongs to the COMPUTER (config.toml's `mode`) instead --
+        see effective_mode()'s docstring for why that changed. Kept readable
+        for diagnostics (copy_diagnostics prints it) and in case a future
+        signal wants to reuse the plumbing; it does not gate sync any more.
+        """
         identity = self.snapshot()
         if identity is None:
             return None

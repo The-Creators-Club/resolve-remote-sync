@@ -29,6 +29,20 @@ CR-27/CR-28.
 
 ---
 
+## STATUS - the role is the computer's since 2026-08-27 (CR-88)
+
+The question the product asks changed: `effective_mode()` reads the
+computer's own `mode` in `config.toml` and nothing else, set from the tray's
+Settings window (THIS COMPUTER: `[ REMOTE EDITOR ]` / `[ WIRED TO THE
+SERVER ]`). The admin-derived `role` `/verify` sends is diagnostics only.
+This is WP1's outcome by a different route than the `link.py` detection
+sketched below: an explicit switch the person flips once, rather than a
+probe of whether local_root is the share - the probe is still a reasonable
+future default for the wizard, but the switch is the authority. The wizard
+wording in §2 is still owed.
+
+---
+
 ## STATUS
 
 * **WP0 — DONE 2026-08-19, in repo, unshipped.** `effective_mode()` answers

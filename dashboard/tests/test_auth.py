@@ -370,6 +370,25 @@ def test_identity_token_longer_ttl_than_session():
     assert len(ident.split(".")) == 5 and len(sess.split(".")) == 6
 
 
+def test_identity_token_does_not_expire():
+    """CR-86: a companion sign-in must not lapse. It used to hold 30 days, and
+    the day it lapsed the editor's lanes stopped behind one tray balloon --
+    two days of an editor's syncing went missing that way (2026-08-25). The
+    expiry FIELD stays (the five-field shape is what deployed builds parse),
+    stamped far enough out that no fleet outlives it."""
+    import time as _t
+    now = _t.time()
+    ident = auth.make_identity_token(SECRET, "jsmith", now=now)
+    expires = int(ident.split(".")[-2])
+    assert expires - now > 50 * 365 * 24 * 3600
+    # Still a token this server reads back, decades later.
+    assert auth.read_identity_token(SECRET, ident,
+                                    now=now + 40 * 365 * 24 * 3600) == "jsmith"
+    # Unchanged wire shape: five fields, which is what every companion in the
+    # field parses (companion identity.parse_token).
+    assert len(ident.split(".")) == 5
+
+
 def test_login_throttle_does_not_grow_without_bound(tmp_path):
     """SEC-12, restated for the SQLite budget (2026-08-17): a spray of failed
     logins against throwaway usernames must not accumulate forever. The
@@ -435,8 +454,12 @@ def test_report_requires_a_matching_identity_header(tmp_path):
         assert dbmod.fetch_verified_map(conn) == {("jsmith", "PC"): True}
 
         # An expired identity token is rejected with a "sign in again" message
-        # rather than silently downgrading to an unverified write.
-        expired = auth.make_identity_token(SECRET, "jsmith", now=1000.0)
+        # rather than silently downgrading to an unverified write. Minted the
+        # long way round because make_identity_token no longer expires (CR-86)
+        # -- the tokens this arm defends against are the pre-CR-86 ones still
+        # sitting in editors' identity.json files.
+        expired = auth._make_token(SECRET, auth.PURPOSE_IDENTITY, "jsmith",
+                                   now=1000.0, ttl=30 * 24 * 3600)
         resp = c.post("/api/v1/report", json=payload,
                       headers={"X-CCSync-Token": "tok", "X-CCSync-Identity": expired})
         assert resp.status_code == 401 and "expired" in resp.json()["detail"]

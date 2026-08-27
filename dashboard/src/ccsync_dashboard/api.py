@@ -1602,7 +1602,7 @@ def _selection_view(conn: sqlite3.Connection, editor: str,
                 "position": r["position"],
                 "active": bool(r["active"]) if r["active"] is not None else False,
                 # The tick's mode (docs/UPLOAD_ONLY_TICK.md): `full` or
-                # `upload_only`. Additive: a companion older than 0.9.53
+                # `upload_only`. Additive: a companion older than 0.9.54
                 # ignores it and runs lanes A and B for the project -- lane C
                 # cannot follow, because the enforce cycle never shares the
                 # folder with an upload-only machine.
@@ -1866,6 +1866,177 @@ def _require_link_write(request: Request, conn: sqlite3.Connection, slug: str) -
         status_code=403,
         detail="only an admin or an editor syncing this project can change its shared folders",
     )
+
+
+# ---------------------------------------------- dashboard-driven file moves
+# (docs/FILE_MOVES.md, 2026-08-27). A file uploaded into the wrong project
+# folder cannot be fixed by moving it on the NAS alone: lane A on every
+# machine still holding it at the old path is a one-way copy that never
+# deletes, so the next pass puts it straight back. The move is made HERE, on
+# the mounted Projects tree, and every computer that syncs the source project
+# (or has reported holding the file) is told to move its own copy and relink
+# Resolve, through the same report-reply command channel the halt uses.
+
+class FileMoveIn(BaseModel):
+    path: str = Field(min_length=1, max_length=1024)        # inside the source project
+    to_slug: str | None = Field(default=None, max_length=128)  # default: the same project
+    to_path: str = Field(default="", max_length=1024)        # folder or full path inside it
+
+
+def _require_move_write(request: Request) -> str:
+    """Admins only. A move rewrites the server tree and reaches into every
+    machine that holds the file, so it is an operator action even when the
+    editor who mis-filed the card is the one asking."""
+    settings = request.app.state.settings
+    user = auth.get_session_user(request)
+    if user is None:
+        raise HTTPException(status_code=401, detail="log in first")
+    if not auth.is_admin(settings, user):
+        raise HTTPException(status_code=403, detail="only an admin can move files on the server")
+    return user
+
+
+def _clean_project_rel(raw: str, what: str, *, allow_empty: bool) -> str:
+    """A project-relative posix path from user input: each segment through
+    the tree validator, no `Proxy` segment (a proxy travels with its
+    original, it is never moved on its own), and never the marker."""
+    value = str(raw or "").strip().replace("\\", "/").strip("/")
+    if not value:
+        if allow_empty:
+            return ""
+        raise ProjectSetupError(f"{what} is required")
+    parts = [_validate_tree_part(p, f"{what} segment") for p in value.split("/") if p]
+    if any(p.lower() == "proxy" for p in parts):
+        raise ProjectSetupError(
+            f"{what} must not name a Proxy folder: proxies move with their originals")
+    from . import provision
+
+    if parts[-1] == provision.MARKER_FILENAME:
+        raise ProjectSetupError(f"{what} must not be the project marker")
+    return "/".join(parts)
+
+
+def _active_project_label(conn: sqlite3.Connection, slug: str) -> str:
+    row = conn.execute(
+        "SELECT label FROM projects WHERE slug=? AND active=1", (slug,)
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"unknown or inactive project {slug!r}")
+    return str(row["label"])
+
+
+def _move_proxy_siblings(src: Path, dest: Path) -> int:
+    """A file's proxies live beside it in `Proxy/<stem>.*` (the BPG/Resolve
+    convention every lane is built on). They go where the original goes, or
+    Resolve's auto-link on every other machine breaks the moment lane B
+    delivers the proxy to the OLD folder. Returns how many were moved."""
+    proxy_dir = src.parent / "Proxy"
+    if not proxy_dir.is_dir():
+        return 0
+    moved = 0
+    for candidate in sorted(proxy_dir.iterdir()):
+        if not candidate.is_file() or candidate.stem.lower() != src.stem.lower():
+            continue
+        target_dir = dest.parent / "Proxy"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / candidate.name
+        if target.exists():
+            continue
+        candidate.rename(target)
+        moved += 1
+    return moved
+
+
+def move_project_files(settings, conn: sqlite3.Connection, from_slug: str,
+                       body: FileMoveIn, user: str) -> dict[str, Any]:
+    """Move a file or folder inside the Projects tree, on the server, and
+    record the command for every machine that has to follow. Refuses rather
+    than guesses: a destination that already exists, a move into itself, a
+    path that escapes the tree, a `Proxy` folder as either end."""
+    try:
+        projects_dir = _projects_dir_or_error(settings)
+        from_label = _active_project_label(conn, from_slug)
+        to_slug = (body.to_slug or from_slug).strip()
+        to_label = _active_project_label(conn, to_slug)
+        from_rel = _clean_project_rel(body.path, "the path to move", allow_empty=False)
+        to_rel = _clean_project_rel(body.to_path, "the destination", allow_empty=True)
+        src, _ = _safe_rel(settings, f"{from_label}/{from_rel}")
+        dest, _ = _safe_rel(settings, f"{to_label}/{to_rel}" if to_rel else to_label)
+    except ProjectSetupError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not src.exists():
+        raise HTTPException(
+            status_code=404, detail=f"nothing at {from_label}/{from_rel} on the server")
+    if dest.is_dir():
+        # A folder as the destination means "into it", the way Explorer and
+        # Finder read a drop -- and the way an admin types it.
+        dest = dest / src.name
+        to_rel = f"{to_rel}/{src.name}" if to_rel else src.name
+    if dest.exists():
+        raise HTTPException(
+            status_code=409, detail=f"{to_label}/{to_rel} already exists: nothing was moved")
+    if src.is_dir() and dest.resolve().is_relative_to(src.resolve()):
+        raise HTTPException(status_code=400, detail="a folder cannot be moved into itself")
+    if src == dest:
+        raise HTTPException(status_code=400, detail="that is where it already is")
+    is_dir = src.is_dir()
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        src.rename(dest)
+        proxies_moved = 0 if is_dir else _move_proxy_siblings(src, dest)
+    except OSError as exc:
+        # A rename across two mounts, a permission the container lacks, a
+        # file Resolve holds open on the share: all of them leave the file
+        # where it was, which is the safe outcome, and all of them are the
+        # admin's to read.
+        raise HTTPException(status_code=503, detail=f"the server could not move it: {exc}")
+    # Who has to follow: every computer syncing the source project (either
+    # mode: an upload-only machine is exactly the one holding a card dump at
+    # the old path), plus any computer whose manifest says it holds the file
+    # even though its plan no longer does.
+    targets: set[tuple[str, str]] = set()
+    for editor, machine in db.fetch_machine_selections(conn).get(from_slug, []):
+        if machine:
+            targets.add((editor, machine))
+    for row in conn.execute(
+        """SELECT DISTINCT editor_username, machine FROM editor_media
+            WHERE project_slug=? AND (rel_path=? OR rel_path LIKE ?)""",
+        (from_slug, from_rel, from_rel + "/%"),
+    ):
+        targets.add((row["editor_username"], row["machine"]))
+    now = db.utcnow_iso()
+    move_id = db.record_file_move(
+        conn, from_slug=from_slug, from_project_rel=from_label, from_rel=from_rel,
+        to_slug=to_slug, to_project_rel=to_label, to_rel=to_rel, is_dir=is_dir,
+        proxies_moved=proxies_moved, requested_by=user, now=now, targets=sorted(targets),
+    )
+    conn.commit()
+    log.info("%s moved %s/%s -> %s/%s on the server (%d proxies with it); %d machine(s) to follow",
+             user, from_label, from_rel, to_label, to_rel, proxies_moved, len(targets))
+    return {
+        "ok": True, "move_id": move_id,
+        "from": f"{from_label}/{from_rel}", "to": f"{to_label}/{to_rel}",
+        "is_dir": is_dir, "proxies_moved": proxies_moved,
+        "machines": [{"editor": e, "machine": m} for e, m in sorted(targets)],
+    }
+
+
+@router.post("/projects/{slug}/move")
+def api_move_project_files(
+    slug: str, body: FileMoveIn, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    user = _require_move_write(request)
+    settings = request.app.state.settings
+    return move_project_files(settings, conn, slug, body, user)
+
+
+@router.get("/projects/{slug}/moves")
+def api_project_moves(
+    slug: str, request: Request, conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    _require_move_write(request)
+    return {"slug": slug, "moves": db.file_moves_for_project(conn, slug)}
 
 
 def _link_marker_dir(settings, conn: sqlite3.Connection, slug: str) -> tuple[Path, str, Path]:
@@ -4790,6 +4961,13 @@ def music_cancel_requested(settings: Any, editor: str, machine: str) -> list[str
                 pass
 
 
+class FileMoveResultIn(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: int
+    ok: bool
+    detail: str | None = Field(default=None, max_length=512)
+
+
 class ReportIn(BaseModel):
     editor_name: str = Field(min_length=1, max_length=64)
     machine: str = Field(min_length=1, max_length=128)
@@ -4837,6 +5015,11 @@ class ReportIn(BaseModel):
     # either state looks perfectly healthy on every other field in this
     # model.
     sync_guard: SyncGuardIn | None = None
+    # Answers to `commands.file_moves` (docs/FILE_MOVES.md): one per move
+    # this machine has now applied, or tried to. Absent from every companion
+    # older than 0.9.54, which is fine -- those never receive the command's
+    # effects either way (see the reply builder).
+    file_moves_applied: list[FileMoveResultIn] | None = Field(default=None, max_length=64)
     # The three sections this model used to DROP UNDECLARED. proxy_coverage
     # and youtube_import have ridden every heavy tick since their features
     # shipped and reached nobody; broll_ingest is new (BROLL_INGEST_PLAN.md
@@ -5116,6 +5299,16 @@ def api_report(
             editor, machine, override.rel or override.slug,
             override.pending_uploads, "; ".join(override.reasons or []),
         )
+    # The machine's answers to earlier file-move commands (docs/FILE_MOVES.md).
+    # Recorded before the reply is built below, so a move answered in THIS
+    # report is not re-sent in its own reply.
+    for outcome in payload.file_moves_applied or []:
+        if db.mark_file_move_applied(conn, outcome.id, editor, machine,
+                                     outcome.ok, outcome.detail, received_at):
+            (log.info if outcome.ok else log.warning)(
+                "%s/%s file move #%s: %s%s", editor, machine, outcome.id,
+                "done" if outcome.ok else "FAILED",
+                f" ({outcome.detail})" if outcome.detail else "")
 
     # -- media presence (all optional; absent field ⇒ table untouched) --
     # (`mode` is read above, with the machine_state write that now stores it.)
@@ -5295,6 +5488,29 @@ def api_report(
     music_cancels = music_cancel_requested(settings, editor, machine)
     if music_cancels:
         result["commands"]["music_ingest"] = {"cancel": music_cancels}
+    # FILE MOVES an admin made on the server that this machine has to follow
+    # (docs/FILE_MOVES.md, 2026-08-27). Present only while there is one
+    # outstanding, and it keeps riding every report until the machine
+    # answers through `file_moves_applied` -- a lost reply must not leave a
+    # local copy at the old path re-uploading itself for ever, which is the
+    # whole problem this exists to end. Bounded by db.pending_file_moves.
+    pending_moves = db.pending_file_moves(conn, editor, machine, received_at)
+    if pending_moves:
+        result["commands"]["file_moves"] = [
+            {
+                "id": m["id"],
+                "from_slug": m["from_slug"], "from_project_rel": m["from_project_rel"],
+                "from_rel": m["from_rel"],
+                "to_slug": m["to_slug"], "to_project_rel": m["to_project_rel"],
+                "to_rel": m["to_rel"],
+                "is_dir": bool(m["is_dir"]),
+                "requested_by": m["requested_by"], "requested_at": m["requested_at"],
+            }
+            for m in pending_moves
+        ]
+        db.mark_file_moves_delivered(
+            conn, [m["id"] for m in pending_moves], editor, machine, received_at)
+        conn.commit()
     return result
 
 

@@ -80,6 +80,50 @@
   {% if link_error %}<span class="chip red">[ ! ]</span> <span class="muted">{{ link_error }}</span>{% endif %}
 </div>
 {% endif %}
+{# Dashboard-driven file moves (docs/FILE_MOVES.md, 2026-08-27). A file that
+   landed in the wrong project folder is moved HERE, on the server, and every
+   computer holding it is told to move its copy and relink Resolve - moving
+   it on the NAS by hand is undone by the next lane A pass of any machine
+   still holding it at the old path. Admins only: it rewrites the tree. #}
+{% if session_is_admin %}
+<div class="mono-sm">
+  <form style="display:inline" hx-post="/partials/project/{{ project.slug }}/move"
+        hx-target="#project-detail" hx-swap="innerHTML"
+        hx-confirm="Move it on the server now, and tell every computer that holds it to move its copy and relink Resolve?">
+    MOVE: <input type="text" name="path" size="34"
+           placeholder="file or folder in this project, e.g. B-roll/A001_0512.braw"
+           title="a path inside this project: one file, or a whole folder with everything in it">
+    to <select name="to_slug" title="the project to move it into (this one by default)">
+      {% for p in move_projects if move_projects is defined %}
+      <option value="{{ p.slug }}" {{ 'selected' if p.slug == project.slug }}>{{ p.label }}</option>
+      {% endfor %}
+    </select>
+    / <input type="text" name="to_path" size="30"
+           placeholder="folder in that project, e.g. Interviewees/Pangolin"
+           title="the folder to put it in (its own name is kept); leave blank for the project root">
+    <button class="btn" title="moves the file and its proxies on the server, then every computer that has it moves its own copy and relinks Resolve">[ MOVE ON THE SERVER AND ON EVERY MACHINE ]</button>
+  </form>
+  {% if move_error is defined and move_error %}<span class="chip red">[ ! ]</span> <span class="muted">{{ move_error }}</span>{% endif %}
+  {% if move_done is defined and move_done %}<span class="chip green">[ MOVED ]</span> <span class="muted">{{ move_done.from }} is now {{ move_done.to }} on the server{% if move_done.proxies_moved %} ({{ move_done.proxies_moved }} proxy file{{ 's' if move_done.proxies_moved != 1 }} with it){% endif %}; {{ move_done.machines | length }} computer{{ 's' if (move_done.machines | length) != 1 }} told to follow</span>{% endif %}
+</div>
+{% if moves is defined and moves %}
+<div class="mono-sm">MOVES:
+  {% for m in moves %}
+    <div class="link-row">
+      {% if m.failed %}<span class="chip red">[ {{ m.failed }} FAILED ]</span>
+      {% elif m.waiting %}<span class="chip amber">[ WAITING FOR {{ m.waiting }} ]</span>
+      {% else %}<span class="chip green">[ DONE ]</span>{% endif %}
+      <span class="mono">{{ m.from_project_rel }}/{{ m.from_rel }}</span> to <span class="mono">{{ m.to_project_rel }}/{{ m.to_rel }}</span>
+      <span class="muted">by {{ m.requested_by }} {{ m.requested_at | ago }}</span>
+      {% for t in m.targets %}
+        <div class="muted mono-sm" style="margin-left:1.5rem">{{ t.editor_username }} on {{ t.machine }}:
+          {% if not t.applied_at %}{{ "told, not done yet" if t.delivered_at else "waiting for its next report" }}{% elif t.ok %}moved{% else %}FAILED{% endif %}{% if t.detail %} ({{ t.detail }}){% endif %}</div>
+      {% endfor %}
+    </div>
+  {% endfor %}
+</div>
+{% endif %}
+{% endif %}
 {% if project.borrowers %}
 <div class="mono-sm">SHARED INTO:
   {% for b in project.borrowers %}

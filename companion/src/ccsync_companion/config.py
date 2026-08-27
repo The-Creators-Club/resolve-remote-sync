@@ -144,7 +144,7 @@ log = logging.getLogger("ccsync.config")
 # sidecar once when the signature says the binary rather than the video. The
 # other half of CR-83 is the dashboard's, 0.7.11: the fleet's yt-dlp floor was
 # 2026.07.04, which is a version that cannot download at all.
-VERSION = "0.9.53"
+VERSION = "0.9.54"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -1337,6 +1337,57 @@ def ensure_config_exists(path: Path = CONFIG_PATH) -> None:
 
 # Set by ensure_config_exists; see its "install that predates the rule" branch.
 _CONFIG_HARDENED = False
+
+
+def set_value(path: Path, key: str, value: Any) -> None:
+    """Rewrite ONE key in config.toml in place, preserving every other line
+    (comments included) -- added 2026-08-27 for the Settings window's role
+    switch (MULTI_BASE_RIG_PLAN.md WP0/WP1).
+
+    No TOML-writer dependency exists in this tree (docs/RELEASE.md's
+    lockfile discipline keeps the dependency list small, and
+    tools/check_licenses.py would have to clear a new one), and nothing here
+    has ever needed more than flipping a handful of simple scalars by hand --
+    so this is a line-level patch, not a round-trip parse/serialise. It is
+    NOT a general TOML writer: it only ever touches ONE top-level `key =
+    value` line, matched the same way a human reads the file (a line
+    starting with the key name, ignoring leading whitespace), and everything
+    else in the file -- comments, blank lines, every other key -- passes
+    through byte-for-byte.
+
+    Calls ensure_config_exists first, so a machine with no config.toml yet
+    gets the same DEFAULT_TOML_TEXT + owner-only hardening every other path
+    to this file goes through (secretfile.harden) before this ever touches
+    it.
+    """
+    ensure_config_exists(path)
+    if isinstance(value, bool):
+        literal = "true" if value else "false"
+    elif isinstance(value, (int, float)):
+        literal = str(value)
+    else:
+        # TOML basic string: escape backslash and double-quote. Every value
+        # this function has ever been asked to write ("mode": "base" /
+        # "editor") is one bare word, so a single-line literal is enough --
+        # this is not a general serialiser for arbitrary multiline text.
+        escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+        literal = f'"{escaped}"'
+    new_line = f"{key} = {literal}"
+
+    # utf-8-sig for the same reason load_config() reads that way: Windows
+    # tooling can prepend a BOM even when overwriting a BOM-less file.
+    text = path.read_text(encoding="utf-8-sig")
+    lines = text.splitlines()
+    pattern = re.compile(r"^\s*" + re.escape(key) + r"\s*=")
+    for i, existing in enumerate(lines):
+        if pattern.match(existing):
+            lines[i] = new_line
+            break
+    else:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(new_line)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:

@@ -819,6 +819,47 @@ SCHEMA_V28 = """
 ALTER TABLE selections ADD COLUMN sync_mode TEXT NOT NULL DEFAULT 'full';
 """
 
+# v29: dashboard-driven file moves (docs/FILE_MOVES.md, 2026-08-27). A file
+# uploaded into the wrong project folder used to be un-fixable from the
+# server side: lane A is a one-way copy that never deletes, so a move on the
+# NAS was undone by the next pass of every machine still holding the file at
+# the old path (leso's card dump, 2026-08-27). The move now happens HERE and
+# fans out as a command to each machine that holds (or syncs) the project,
+# which moves its own copy and relinks Resolve. `file_moves` is the record;
+# `file_move_targets` is one row per computer the command must reach, with
+# delivery and outcome. Paths are project-relative and posix; the two
+# `*_project_rel` columns pin the project folders AS THEY WERE, because a
+# project can be renamed on the NAS before a slow machine picks the move up.
+SCHEMA_V29 = """
+CREATE TABLE IF NOT EXISTS file_moves (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  from_slug        TEXT NOT NULL,
+  from_project_rel TEXT NOT NULL,
+  from_rel         TEXT NOT NULL,
+  to_slug          TEXT NOT NULL,
+  to_project_rel   TEXT NOT NULL,
+  to_rel           TEXT NOT NULL,
+  is_dir           INTEGER NOT NULL DEFAULT 0,
+  proxies_moved    INTEGER NOT NULL DEFAULT 0,
+  requested_by     TEXT NOT NULL,
+  requested_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_file_moves_from ON file_moves(from_slug, requested_at);
+CREATE INDEX IF NOT EXISTS ix_file_moves_to ON file_moves(to_slug, requested_at);
+CREATE TABLE IF NOT EXISTS file_move_targets (
+  move_id         INTEGER NOT NULL,
+  editor_username TEXT NOT NULL,
+  machine         TEXT NOT NULL,
+  delivered_at    TEXT,
+  applied_at      TEXT,
+  ok              INTEGER,
+  detail          TEXT,
+  PRIMARY KEY (move_id, editor_username, machine)
+);
+CREATE INDEX IF NOT EXISTS ix_file_move_targets_machine
+  ON file_move_targets(editor_username, machine, applied_at);
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -851,6 +892,7 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (26, SCHEMA_V26),
     (27, SCHEMA_V27),
     (28, SCHEMA_V28),
+    (29, SCHEMA_V29),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -2012,6 +2054,123 @@ def lane_b_resume_request(
     if row is None or not row["at"]:
         return None
     return dict(row)
+
+
+# -- dashboard-driven file moves (v29, docs/FILE_MOVES.md) ------------------
+
+FILE_MOVE_MAX_AGE_DAYS = 7
+FILE_MOVE_COMMAND_LIMIT = 20
+
+
+def record_file_move(
+    conn: sqlite3.Connection, *, from_slug: str, from_project_rel: str, from_rel: str,
+    to_slug: str, to_project_rel: str, to_rel: str, is_dir: bool, proxies_moved: int,
+    requested_by: str, now: str, targets: list[tuple[str, str]],
+) -> int:
+    """The server-side move has already happened; this is the record of it
+    and the list of computers that still have to follow. Returns the id."""
+    cur = conn.execute(
+        """INSERT INTO file_moves
+             (from_slug, from_project_rel, from_rel, to_slug, to_project_rel, to_rel,
+              is_dir, proxies_moved, requested_by, requested_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (from_slug, from_project_rel, from_rel, to_slug, to_project_rel, to_rel,
+         int(bool(is_dir)), int(proxies_moved), requested_by, now),
+    )
+    move_id = int(cur.lastrowid)
+    for editor, machine in sorted(set(targets)):
+        if not editor or not machine:
+            # The unassigned bucket names no computer; nothing can be told.
+            continue
+        conn.execute(
+            """INSERT OR IGNORE INTO file_move_targets (move_id, editor_username, machine)
+               VALUES (?, ?, ?)""",
+            (move_id, editor, machine),
+        )
+    return move_id
+
+
+def _file_move_cutoff(now: str, max_age_days: int) -> str:
+    try:
+        stamp = dt.datetime.fromisoformat(now)
+    except ValueError:
+        stamp = dt.datetime.now(dt.timezone.utc)
+    return (stamp - dt.timedelta(days=max_age_days)).isoformat()
+
+
+def pending_file_moves(
+    conn: sqlite3.Connection, editor: str, machine: str, now: str,
+    max_age_days: int = FILE_MOVE_MAX_AGE_DAYS, limit: int = FILE_MOVE_COMMAND_LIMIT,
+) -> list[dict[str, Any]]:
+    """The moves this computer has not yet reported applying, oldest first.
+
+    Bounded in TIME as well as count: a machine that was off for a month
+    must not come back and shuffle files that have been shuffled again since
+    -- and the companion refuses a move whose source is not where the
+    command says anyway, so an expired one costs nothing but a log line."""
+    cutoff = _file_move_cutoff(now, max_age_days)
+    rows = conn.execute(
+        """SELECT m.id, m.from_slug, m.from_project_rel, m.from_rel,
+                  m.to_slug, m.to_project_rel, m.to_rel, m.is_dir,
+                  m.requested_by, m.requested_at
+             FROM file_move_targets t JOIN file_moves m ON m.id = t.move_id
+            WHERE t.editor_username=? AND t.machine=? AND t.applied_at IS NULL
+              AND m.requested_at >= ?
+            ORDER BY m.id LIMIT ?""",
+        (editor, machine, cutoff, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_file_moves_delivered(
+    conn: sqlite3.Connection, move_ids: list[int], editor: str, machine: str, now: str,
+) -> None:
+    """First delivery only: the stamp says when the machine was first told,
+    and the command keeps riding every report until it is APPLIED."""
+    for move_id in move_ids:
+        conn.execute(
+            """UPDATE file_move_targets SET delivered_at=COALESCE(delivered_at, ?)
+                WHERE move_id=? AND editor_username=? AND machine=?""",
+            (now, move_id, editor, machine),
+        )
+
+
+def mark_file_move_applied(
+    conn: sqlite3.Connection, move_id: int, editor: str, machine: str,
+    ok: bool, detail: str | None, now: str,
+) -> bool:
+    """The machine's answer. A FAILED move is applied too, in the sense that
+    the machine has answered and the command stops: the detail is on the
+    project page for the admin, and the fix is a human's (the local file is
+    still where it was, which is the one outcome that loses nothing)."""
+    cur = conn.execute(
+        """UPDATE file_move_targets SET applied_at=?, ok=?, detail=?
+            WHERE move_id=? AND editor_username=? AND machine=? AND applied_at IS NULL""",
+        (now, int(bool(ok)), (detail or "")[:512] or None, move_id, editor, machine),
+    )
+    return cur.rowcount > 0
+
+
+def file_moves_for_project(
+    conn: sqlite3.Connection, slug: str, limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Moves out of or into this project, newest first, each with its
+    per-computer outcomes -- what the project page draws."""
+    moves = [dict(r) for r in conn.execute(
+        """SELECT * FROM file_moves WHERE from_slug=? OR to_slug=?
+            ORDER BY id DESC LIMIT ?""",
+        (slug, slug, limit),
+    )]
+    for move in moves:
+        move["targets"] = [dict(r) for r in conn.execute(
+            """SELECT editor_username, machine, delivered_at, applied_at, ok, detail
+                 FROM file_move_targets WHERE move_id=?
+                ORDER BY editor_username, machine""",
+            (move["id"],),
+        )]
+        move["waiting"] = sum(1 for t in move["targets"] if not t["applied_at"])
+        move["failed"] = sum(1 for t in move["targets"] if t["applied_at"] and not t["ok"])
+    return moves
 
 
 def copy_machine_plan(

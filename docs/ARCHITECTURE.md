@@ -235,9 +235,18 @@ retires it, and the Users page shows how many machines still authenticate with
 it so an operator knows when that is safe.
 
 **Machine identity tokens.** Signing in from the tray calls `POST /api/v1/verify`
-and gets a 30-day signed token stating *whose machine this is*. `/api/v1/report`
+and gets a signed token stating *whose machine this is*. `/api/v1/report`
 and the selection routes require it alongside the shared token — without it,
 any holder of a shared secret could overwrite any editor's presence rows.
+
+That token **does not expire** (CR-86, 2026-08-27). It used to hold 30 days,
+and the day it lapsed the companion stopped its own sync lanes and dropped off
+the fleet grid, announced by one transient tray balloon on a machine with
+nobody watching it — an editor lost two days of syncing that way. A machine
+identity is not a browser session: nobody is at the keyboard to re-enter a
+password, and taking an editor's access away is disable/delete's job (which
+revokes their report token), not a TTL's. Tokens minted before that change
+still lapse on their own 30-day stamp, so those editors sign in once more.
 
 **Scoping.** `auth.Scope` decides what a viewer sees: non-admins are locked to
 their own editor identity across projects, transfers, editors and presence

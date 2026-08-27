@@ -3126,6 +3126,49 @@ dashboard, then push the companion.
 
 Tests: `dashboard/tests/test_file_moves.py`, `companion/tests/test_file_moves.py`.
 
+## Lane A can sit in `syncing` forever, silently, and starve lane B (CR-91, 2026-08-28) - OPEN
+
+### CR-91 - a lane that never finishes and never errors looks exactly like a lane that is working
+**Seen on leso's MacBook 2026-08-28**, straight after its 0.9.2 -> 0.9.54
+hand-upgrade. Over 2 h 20 m the machine kept reporting (`machine_state.reported_at`
+advanced 20:12 -> 20:29 -> 20:57 -> 21:16 -> 21:34 -> 21:50), and across every one
+of those reports:
+
+```
+lane_a_video_up   state=syncing  transferring=1  last_sync=NULL  last_error=NULL
+lane_b_proxy_down state=idle     transferring=0  last_sync=NULL  last_error=NULL
+```
+
+Nothing was actually moving. No SFTP session from that machine existed on the
+NAS at any point; nothing under `Projects/` changed mtime for 150 minutes; and
+`current_project` was `2026-ff5-animals`, a project where that machine holds
+**0 originals** - so lane A had nothing to upload in the first place. Its
+disk-manifest half stopped too: `editor_media_project.reported_at` froze at
+19:00:42, before the upgrade, while the light reports kept flowing.
+
+**Most likely cause, not confirmed** (the machine refused SSH throughout, so
+this is inference from the reports): the external SSD. Its first 0.9.54 boot
+logged MAC-12 verbatim - `the sync drive's filesystem is not answering -- a
+separate test process could not open /Volumes/SAMDISK/Creators_Club (no answer
+within 5s)`. A blocked read there would hang the lane A pass AND the manifest
+walk while leaving the reporter thread free, which is exactly the shape
+observed. The documented remedy is the editor's: reconnect the drive or
+restart the machine.
+
+**What is a defect regardless of that cause.** A lane that has been `syncing`
+for hours with no bytes and no error is indistinguishable, on the fleet page,
+from a lane that is working - and because the sequencer gives lane A its turn
+first, lane B never runs, so the editor silently downloads NOTHING for as long
+as it lasts. This is the same family as the lane B breaker (`docs/SYNC_SAFETY.md`)
+and CR-86's silent identity stop: the failure is invisible exactly where the
+fleet page is supposed to be the thing that tells you.
+
+Wanted: a per-pass watchdog - a lane in `syncing` past some multiple of its
+normal pass time with zero bytes transferred reports a state the grid can show
+(and the sequencer moves on to the next lane rather than waiting on it
+forever). Design it so a genuinely slow single large file over a thin uplink is
+not mistaken for a hang: bytes moved, not wall clock, is the test.
+
 ## A Mac is permanently behind on files it already holds (CR-90, 2026-08-28)
 
 ### CR-90 - the lane A/B backlog diffs macOS's decomposed filenames against the NAS's composed ones - FIXED and SHIPPED 2026-08-28 as dashboard 0.7.15 (OTA, runtime 869eed1052a8..., live 17:57Z)

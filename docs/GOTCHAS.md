@@ -1171,3 +1171,41 @@ reader is on; a run that cannot finish (project switched, uid map empty)
 returns False and `get_media_pool_items` answers from the API walk instead of
 handing out half-enriched items; `_LIBRARY_LOCK` is never held while
 enriching. `""` in those keys means "nobody reads them", never "unknown".
+
+## 17. A Mac spells filenames differently (Unicode NFD, CR-90, 2026-08-28)
+
+macOS hands filenames back **decomposed**. The NAS, Windows, rclone and
+Syncthing all serve the same name **composed**. Two byte strings, one file:
+
+```
+NFC (NAS, Windows)  Matej Šimalčík   S=U+0160  c=U+010D  i=U+00ED
+NFD (macOS listdir) Matej Šimalčík   S+U+030C  c+U+030C  i+U+0301
+```
+
+`==` says no. Anything that compares a path a Mac reported against a path
+anything else reported must fold the normalisations first. This cost a day of
+a remote editor's fleet page saying they were 12 files / 2.9 GB behind on
+footage that was already on their disk (CR-90): the lane A/B backlog is a
+rel_path diff done in SQL, and SQL cannot normalise. Lane B kept correctly
+reporting `transferred 0 file(s)` throughout, because **rclone folds the
+normalisations when it compares** - as does Syncthing - so the sync engines
+were never wrong; only the view was.
+
+Rules:
+
+* **Compare through a normaliser.** `db.media_rel_key()` for the media
+  presence tables, `links.normalise_declared()` for declared paths,
+  `resolve_bridge._nfc()` for Resolve bin and clip names. Add to that
+  list rather than inlining a `normalize` call.
+* **Normalise on the way IN when the value is only ever compared or
+  displayed** (`nas_media.rel_path`, `editor_media.rel_path`). Then the SQL
+  can stay an exact match, which is the only thing that is fast.
+* **Never normalise a path something opens, renames or deletes.** There the
+  bytes on disk are the truth, and on APFS the truth can be NFD.
+  `file_moves` keeps its own copy of the path for exactly this reason.
+* **CJK will not warn you.** Han characters, kana and Hangul syllables have
+  no decomposed form, so a tree full of Chinese folder names matches
+  perfectly and one accented Latin or Cyrillic name in the same tree does
+  not. A mismatch presents as "most of it synced", never as "nothing works".
+* **Test with a real pair.** `dashboard/tests/test_unicode_paths.py` carries
+  the actual NFC/NFD spellings taken off the NAS and off that MacBook.

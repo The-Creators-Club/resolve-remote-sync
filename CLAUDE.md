@@ -301,6 +301,17 @@ Full runbook, including what each version number means and how to roll back:
   steps, HTTP `detail` messages an editor reads. Use a hyphen with spaces, a
   colon, or two sentences. Comments, docstrings, docs and log lines are not
   covered. Each web/dashboard suite carries a scan test that fails on one.
+- **A path a Mac reported is not `==` a path anything else reported**
+  (CR-90, `docs/GOTCHAS.md` §17): macOS listdir is Unicode NFD, the NAS and
+  Windows are NFC, and `Matej Šimalčík` in the two spellings is two byte
+  strings. Compare through a normaliser - `db.media_rel_key`,
+  `links.normalise_declared`, `resolve_bridge._nfc` - and normalise on the
+  way IN for a value that is only ever compared or shown, so the SQL can
+  stay an exact match. NEVER normalise a path something opens, renames or
+  deletes: there the bytes on disk are the truth. rclone and Syncthing fold
+  it themselves, so a mismatch shows up as a view that disagrees with a lane
+  reporting zero transferred, and CJK names never warn you (no decomposed
+  form).
 - **Comments explain constraints, history, and failure modes** — never what
   the next line does. Most non-obvious decisions cite a date or a bug id;
   keep doing that.

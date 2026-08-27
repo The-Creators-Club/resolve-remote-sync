@@ -500,12 +500,16 @@ def build_transfers_view(
 
     # Subtract in-flight files: rclone transfer names are project-relative
     # like the manifest rel_paths, with a basename fallback for safety.
+    # Both sides go through db.media_rel_key first: a Mac's rclone names a
+    # file the way its filesystem spells it (NFD) and the manifest rows are
+    # stored NFC, so an accented clip mid-download counted as transferring
+    # AND as queued (the CR-90 shape, one layer up).
     active_by_editor: dict[str, set[str]] = {}
     for t in rows:
         if t.get("granularity") != "file":
             continue
         names = active_by_editor.setdefault(str(t["editor"] or ""), set())
-        name = str(t["name"] or "")
+        name = db.media_rel_key(str(t["name"] or ""))
         if name:
             names.add(name)
             names.add(name.rsplit("/", 1)[-1])
@@ -516,7 +520,7 @@ def build_transfers_view(
         kept = []
         removed_bytes = 0
         for f in q["files"]:
-            name = str(f.get("name") or "")
+            name = db.media_rel_key(str(f.get("name") or ""))
             if name in active or name.rsplit("/", 1)[-1] in active:
                 removed_bytes += int(f.get("size") or 0)
                 continue

@@ -17,6 +17,7 @@ import json
 import re
 import secrets
 import sqlite3
+import unicodedata
 from pathlib import Path
 from typing import Any, Container, Iterable, Mapping
 
@@ -3484,6 +3485,31 @@ def purge_nas_media_for_inactive(conn: sqlite3.Connection) -> None:
 
 # ---------------------------------------------------------------- media presence writes
 
+def media_rel_key(rel_path: str) -> str:
+    """The ONE Unicode spelling a media rel_path is stored and compared in.
+
+    macOS hands filenames back DECOMPOSED (NFD): a Mac's disk manifest spells
+    `Matej Simalcik` as S+caron, c+caron, i+acute, while the NAS inventory
+    walk and every Windows machine spell the same directory composed (NFC).
+    `fetch_sync_backlog` diffs those two tables as exact strings, so until
+    CR-90 (2026-08-28) every file with an accented character in its path sat
+    in [ QUEUED ] on a Mac forever: 12 files / 2.9 GB of FF5/Animals proxies
+    that were already on the machine, byte for byte, behind a lane B that
+    correctly reported "transferred 0 file(s)" every pass -- rclone folds the
+    normalisations when it compares, and this diff did not. CJK folders were
+    unaffected (no decomposed form), which is what made it read as a partial
+    sync rather than as a comparison bug.
+
+    Normalising on the way IN rather than in the SQL is safe for these two
+    tables specifically: neither `nas_media.rel_path` nor
+    `editor_media.rel_path` ever drives a filesystem operation -- they feed
+    the backlog diff, the rollup counts, and the name list a human reads.
+    Do not reach for this for a path something opens, renames or deletes;
+    there the bytes on disk are the truth (`file_moves` keeps its own).
+    """
+    return unicodedata.normalize("NFC", str(rel_path or ""))
+
+
 def replace_nas_media(
     conn: sqlite3.Connection,
     project_id: int,
@@ -3499,7 +3525,8 @@ def replace_nas_media(
         """INSERT OR REPLACE INTO nas_media
              (project_id, rel_path, kind, ext, size, mtime_ns, refreshed_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        [(project_id, rel, kind, ext, size, mtime, now) for rel, kind, ext, size, mtime in rows],
+        [(project_id, media_rel_key(rel), kind, ext, size, mtime, now)
+         for rel, kind, ext, size, mtime in rows],
     )
     n_orig = sum(1 for r in rows if r[1] == "original")
     b_orig = sum((r[3] or 0) for r in rows if r[1] == "original")
@@ -3569,7 +3596,7 @@ def replace_editor_media(
         """INSERT OR REPLACE INTO editor_media
              (editor_username, machine, project_slug, rel_path, kind, size, refreshed_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        [(editor, machine, slug, rel, kind, size, now)
+        [(editor, machine, slug, media_rel_key(rel), kind, size, now)
          for rel, kind, size in files[:EDITOR_MEDIA_CAP]],
     )
 

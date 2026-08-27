@@ -3126,6 +3126,77 @@ dashboard, then push the companion.
 
 Tests: `dashboard/tests/test_file_moves.py`, `companion/tests/test_file_moves.py`.
 
+## A Mac is permanently behind on files it already holds (CR-90, 2026-08-28)
+
+### CR-90 - the lane A/B backlog diffs macOS's decomposed filenames against the NAS's composed ones - FIXED in repo 2026-08-28 as dashboard 0.7.15
+**Symptom** (owner, 2026-08-28): "why is leso queued but not moving anything".
+The fleet page showed `leso liaoshaoxuandeMacBook-Pro.local - 2026/FF5/Animals
+: 12 file(s) - 2.9 GB [proxies]` under LIVE TRANSFERS - "nothing transferring
+right now" - and had done for a day.
+
+Everything about the machine was healthy. It had reported 25 s earlier; all
+three lanes `idle`, no `last_error`, breaker not tripped, no halt; and lane B's
+last pass said `transferred 0 file(s)`. rclone was right: **all 12 files were
+already on the disk, byte for byte.**
+
+**Cause.** macOS hands filenames back DECOMPOSED (NFD). The NAS inventory walk
+and every Windows machine spell the same name COMPOSED (NFC).
+`db.fetch_sync_backlog` is a rel_path diff of `nas_media` against
+`editor_media` done as an exact string comparison in SQL, so the two spellings
+never matched:
+
+```
+nas_media     Interviewees/Pangolin/Matej Šimalčík/Proxy/A002_07161726_C048.mp4
+editor_media  Interviewees/Pangolin/Matej Šimalčík/Proxy/A002_07161726_C048.mp4
+              (S+U+030C, c+U+030C, i+U+0301)          same size: 1431853821
+```
+
+All 12 rows had a diacritic somewhere in the path - 9 under `Matej Šimalčík`,
+3 under `Youtube/pangolins in prague` (`Taiwán`, `Mašek`, `китайский`). The CJK
+folders beside them (`臺北動物園`, `民視新聞網`) matched perfectly, because those
+characters have no decomposed form. That is what made it read as a partial
+sync rather than as a comparison bug, and it is why nobody looked at it for a
+day: 9 of 10 things about the machine said "fine", and the tenth said "12
+files short" in the one place the fleet trusts.
+
+There is no clearing state: lane B fetches nothing (correctly), so the
+manifest never changes, so the phantom row is permanent. The diff is
+symmetric, so the same mismatch could invent lane A **uploads** that never
+complete either.
+
+**Fix.** `db.media_rel_key()` - `unicodedata.normalize("NFC", ...)` - applied
+at the two write chokepoints, `replace_editor_media` and `replace_nas_media`.
+Normalising on the way IN rather than in the SQL is safe for these two tables
+*specifically*: neither table's `rel_path` ever drives a filesystem
+operation - they feed the backlog diff, the rollup counts and the name list a
+human reads. Anything that opens, renames or deletes a path must keep using
+the bytes on disk (`file_moves` keeps its own copy for exactly this reason).
+`api.build_transfers_view`'s in-flight subtraction folds both sides too: rclone
+names a file the way the Mac's filesystem spells it, so an accented clip
+mid-download would otherwise count as transferring AND as queued.
+
+**It heals itself.** `editor_media` is replaced wholesale on every heavy
+report (~5 min), so the phantom rows clear on the machine's next report after
+the deploy - no migration, no companion build. `nas_media` was already NFC and
+is rewritten when the tree signature changes.
+
+**Related but not this.** `links.normalise_declared` (2026-08-18) carries the
+comment "the NAS, Windows and macOS all serve these names in NFC". The first
+two are true; the third is not, and this is the bug that proves it. That
+function already normalises, so it is correct code behind a wrong reason.
+
+**Also seen while diagnosing this, not caused by it:** `ruskin
+DESKTOP-LQQ41TC`'s three queued rows (460 files / 13.8 GB) are the last known
+state of a machine that last reported **2026-08-25 15:37Z** - offline, not
+stuck. And leso's machine is on companion **0.9.2** with `machine_id` and
+`syncthing_device_id` both NULL, so it predates `commands.upgrade` (0.9.3) and
+the dashboard's [ UPDATE NOW ] push cannot reach it.
+
+Tests: `dashboard/tests/test_unicode_paths.py` (6, using the real NFC/NFD pair
+off the NAS and off that MacBook: the held file is not queued, a genuinely
+missing one still is, the upload direction too, both tables store the composed
+spelling, and a file mid-download is not double-counted).
+
 ## Companion sign-ins no longer expire (CR-86, 2026-08-27)
 
 ### CR-86 - a 30-day identity token stopped an editor's sync for two days and nobody could see it - FIXED in repo 2026-08-27, unshipped

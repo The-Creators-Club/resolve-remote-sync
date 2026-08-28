@@ -1139,6 +1139,123 @@ UPDATE machine_state SET companion_version_since=COALESCE(received_at, reported_
  WHERE companion_version_since IS NULL AND companion_version IS NOT NULL;
 """
 
+# v36: a file move becomes a two-phase record with a retry and an undo
+# (DASH-1 / DASH-9 / UX-5 / UX-11 / RES-1 / RES-10, resilience sweep
+# 2026-08-28).
+#
+# `state` is the SERVER half. The row used to be written after `src.rename`
+# returned, so a rename that succeeded and then hit anything at all (a proxy
+# sibling held open by a Resolve, a container restart, a full /data) left the
+# original moved with NO record -- and therefore no command to any machine,
+# which is precisely the "lane A never deletes, every holder re-uploads the
+# old path" failure this feature exists to end, now with the original also
+# gone from where the editors' Resolve projects point. The row is written
+# `pending` and COMMITTED before the rename, flipped to `done` after, and
+# `partial` when a proxy sibling could not follow. `pending` rows are
+# reconciled by stat-ing both ends (api.reconcile_file_moves).
+#
+# The target columns are the MACHINE half. `attempts`/`last_error` carry the
+# companion's retry (RES-1: a move Resolve blocked used to latch on the first
+# PermissionError and was never tried again, and 24 h later lane A put the
+# file back). `state` is the shape of that answer -- 'retrying' does not
+# retire the command, 'blocked' does and says why. `expired_at` is UX-5: an
+# UNDELIVERED move must never expire (the laptop was away for the shoot, and
+# it is the one machine still holding the file at the old path), while a
+# delivered-and-unanswered one ages so the project page can say that computer
+# may re-upload the old path. `relink_pending` is RES-10: the copy moved but
+# the project referencing it was not the one open, so nothing has repointed
+# Resolve yet.
+#
+# `undo_of`/`undone_by` link the two rows of an undo (UX-11): the inverse move
+# goes through the same machinery, so it is a file_moves row like any other,
+# and the pair has to be readable from either end.
+SCHEMA_V36 = """
+ALTER TABLE file_moves ADD COLUMN state TEXT NOT NULL DEFAULT 'done';
+ALTER TABLE file_moves ADD COLUMN state_detail TEXT;
+ALTER TABLE file_moves ADD COLUMN undo_of INTEGER;
+ALTER TABLE file_moves ADD COLUMN undone_by INTEGER;
+ALTER TABLE file_move_targets ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE file_move_targets ADD COLUMN last_error TEXT;
+ALTER TABLE file_move_targets ADD COLUMN state TEXT;
+ALTER TABLE file_move_targets ADD COLUMN expired_at TEXT;
+ALTER TABLE file_move_targets ADD COLUMN relink_pending INTEGER NOT NULL DEFAULT 0;
+"""
+
+# v37: the notices ledger (UX-10, resilience sweep 2026-08-28).
+#
+# The dashboard refuses things for good reasons -- a stray marker on a
+# container that hides three real projects, two Syncthing folders over one
+# directory, an enforce pass whose blast radius tripped the brake -- and every
+# one of those diagnoses was written to a container log a non-technical owner
+# will never open. Sixteen already-written sentences reaching nobody.
+#
+# A TABLE rather than more `meta` keys because these have a set (one per
+# subject: per slug, per folder), a first_seen/last_seen life and a DISMISS,
+# none of which a single-value meta row can carry. Keyed (kind, subject) so a
+# condition re-detected every five minutes is one row that ages, not a log.
+# cleared_at is set both by the code that observes the condition gone and by
+# an admin's [ DISMISS ]; a condition still true is written again and reopens,
+# deliberately -- a dismissal must not be able to hide a live problem.
+SCHEMA_V37 = """
+CREATE TABLE IF NOT EXISTS notices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,
+  severity TEXT NOT NULL DEFAULT 'warn',
+  subject TEXT NOT NULL DEFAULT '',
+  body TEXT NOT NULL DEFAULT '',
+  fix TEXT NOT NULL DEFAULT '',
+  first_seen TEXT NOT NULL,
+  last_seen TEXT NOT NULL,
+  cleared_at TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_notices_key ON notices (kind, subject);
+CREATE INDEX IF NOT EXISTS idx_notices_open ON notices (cleared_at, last_seen);
+"""
+
+# v38: the outbound voice's ledger, and the four report sections the
+# companion's Resolve/ingest guards compute and had nowhere to land (SYS-8
+# plus the wave-4 ingest contract, resilience sweep 2026-08-28).
+#
+# `alert_log` is what makes the dedup and the weekly schedule DURABLE rather
+# than a counter in a process that gets replaced every deploy: "have we
+# already told somebody about this breaker today" and "has this week's report
+# gone out" are both answered by a row here, so a container restart at 07:59
+# on Monday does not send the report twice and a flapping breaker does not
+# send forty mails. `ok=0` rows are kept on purpose -- a sink that has been
+# refusing for three days is the thing an admin most needs to see, and a
+# failed send that left no trace is how "we thought alerts were on" happens.
+#
+# The machine_state columns are the ingest half. `resolve_*` is the companion's
+# Resolve health scan (clips the open project references from OUTSIDE the
+# tree, which lane A will never upload and no other editor will ever see);
+# `stray_projects_*` and `moved_project_dirs_count` are project directories
+# that are not where the tree says they should be; `ingest_staging_bytes` is
+# footage sitting in a drop folder that has not been filed yet. Every one of
+# them is a COUNT plus, where it helps, a size: the grid needs a chip and a
+# tooltip, never the list of paths in a column.
+SCHEMA_V38 = """
+CREATE TABLE IF NOT EXISTS alert_log (
+  id      INTEGER PRIMARY KEY AUTOINCREMENT,
+  at      TEXT NOT NULL,
+  kind    TEXT NOT NULL,
+  subject TEXT NOT NULL DEFAULT '',
+  sent_to TEXT NOT NULL DEFAULT '',
+  ok      INTEGER NOT NULL DEFAULT 0,
+  detail  TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS ix_alert_log_at ON alert_log(at);
+CREATE INDEX IF NOT EXISTS ix_alert_log_kind ON alert_log(kind, subject, id);
+ALTER TABLE machine_state ADD COLUMN resolve_out_of_tree INTEGER;
+ALTER TABLE machine_state ADD COLUMN resolve_bad_prefix INTEGER;
+ALTER TABLE machine_state ADD COLUMN resolve_missing INTEGER;
+ALTER TABLE machine_state ADD COLUMN resolve_ignored INTEGER;
+ALTER TABLE machine_state ADD COLUMN resolve_last_scan_at TEXT;
+ALTER TABLE machine_state ADD COLUMN stray_projects_count INTEGER;
+ALTER TABLE machine_state ADD COLUMN stray_projects_bytes INTEGER;
+ALTER TABLE machine_state ADD COLUMN moved_project_dirs_count INTEGER;
+ALTER TABLE machine_state ADD COLUMN ingest_staging_bytes INTEGER;
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -1187,6 +1304,15 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # numbered in advance so two work packages could land without renumbering.
     (34, SCHEMA_V34),
     (35, SCHEMA_V35),
+    # 36 (file moves: state machine + retry/undo linkage), 37 (the notices
+    # ledger) and 38 (alerts + the new report sections) are the fourth group
+    # of the same sweep, each number fixed in advance so three work packages
+    # could land in one commit without renumbering. They must ship TOGETHER:
+    # a database that reached 37 without 36 having been in the list will
+    # never run 36, because migrate() only ever moves forward.
+    (36, SCHEMA_V36),
+    (37, SCHEMA_V37),
+    (38, SCHEMA_V38),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -2080,6 +2206,321 @@ def meta_get_json(conn: sqlite3.Connection, key: str) -> Any | None:
         return json.loads(raw)
     except (ValueError, TypeError):
         return None
+
+
+# ------------------------------------------------------------- notices
+#
+# UX-10 (resilience sweep 2026-08-28). The server's refusals were correct and
+# their messages were excellent, and they went to a Docker log. This is the
+# channel that puts them on the page an owner actually looks at.
+#
+# The severities, spelled once so the template, the writers and the tests
+# agree: "error" is footage not moving or projects not visible, "warn" is a
+# condition that will become that, "info" is a fact worth stating.
+NOTICE_SEVERITIES = ("info", "warn", "error")
+
+# THE REGISTRY (owner's instruction, 2026-08-28: "make the server as
+# self-diagnosing as possible"). Every condition this server knows how to
+# find, with the severity it is written at and one line of what it means.
+#
+# It exists so silence can be read as "checked and fine" rather than
+# "unchecked", which is the difference between a dashboard that is trusted and
+# one that is merely quiet. The PROBLEMS panel renders this list with a tick
+# beside every kind that has no open notice; the alerts sink reads the
+# severity; the tests walk it.
+NOTICE_KINDS: dict[str, dict[str, str]] = {
+    # -- discovery and provisioning (collector.py / provision.py) ----------
+    "project_container_marker": {"severity": "error", "what":
+        "a project marker dropped on a folder that CONTAINS projects, which hides them all"},
+    "project_nested_marker": {"severity": "error", "what":
+        "a project marker inside another project, which projects may not do"},
+    "duplicate_syncthing_folder": {"severity": "error", "what":
+        "two Syncthing folders over one directory, only one of which editors are on"},
+    "duplicate_slug_dirs": {"severity": "error", "what":
+        "one project identity claimed by two directories on the server"},
+    "unreadable_project_marker": {"severity": "warn", "what":
+        "a damaged .ccsync-project marker, so that folder is not a project to anyone"},
+    "provision_failed": {"severity": "error", "what":
+        "a project folder that could not be set up for syncing"},
+    "shared_assets_failed": {"severity": "error", "what":
+        "the shared asset libraries (the LUT library) could not be set up"},
+    "project_links_failed": {"severity": "warn", "what":
+        "a shared-folder link between projects could not be resolved"},
+    # -- the collector itself ----------------------------------------------
+    "collector_cycle_failed": {"severity": "error", "what":
+        "one of the background jobs that keeps the fleet in step is failing"},
+    "collector_db_write_failed": {"severity": "error", "what":
+        "the dashboard could not write to its own database"},
+    "collector_watchdog_restart": {"severity": "warn", "what":
+        "the background job thread died and had to be restarted"},
+    "syncthing_unreachable": {"severity": "error", "what":
+        "the sync engine on this server is not answering"},
+    # -- the tree -----------------------------------------------------------
+    "projects_dir_missing": {"severity": "error", "what":
+        "the projects folder on the server is missing or not mounted"},
+    "inventory_refused": {"severity": "error", "what":
+        "the server's file count collapsed, so the last good one is being kept"},
+    "enforce_refusal": {"severity": "error", "what":
+        "too many share removals in one pass, so none were applied"},
+    "deactivation_refusal": {"severity": "error", "what":
+        "too many projects would have been marked gone at once, so none were"},
+    "ignored_report_sections": {"severity": "warn", "what":
+        "a computer is sending information this dashboard is too old to store"},
+    # -- identity and plans --------------------------------------------------
+    "duplicate_machine_id": {"severity": "error", "what":
+        "one computer identity claimed by two hostnames (a cloned machine)"},
+    "duplicate_device_id": {"severity": "error", "what":
+        "one Syncthing device id claimed by two computers"},
+    "pending_device_approval": {"severity": "warn", "what":
+        "a computer has been waiting to be approved for the sync network"},
+    "plan_without_share": {"severity": "error", "what":
+        "a project is ticked for a computer that is not being sent it"},
+    "share_without_plan": {"severity": "warn", "what":
+        "a computer is being sent a project nobody ticked for it"},
+    "editor_without_machine": {"severity": "info", "what":
+        "an editor account no computer has ever reported for"},
+    # -- space ---------------------------------------------------------------
+    "dashboard_disk_low": {"severity": "error", "what":
+        "the volume this dashboard writes to is nearly full"},
+    "machine_disk_low": {"severity": "warn", "what":
+        "an editor's computer is nearly out of room for footage"},
+    "machine_trash_oversize": {"severity": "warn", "what":
+        "deleted-file safety copies on a computer have grown large"},
+    # -- the release channel ---------------------------------------------------
+    "feed_unreachable": {"severity": "warn", "what":
+        "the vendor release feed cannot be reached, so no new builds arrive"},
+    "feed_runtime_mismatch": {"severity": "warn", "what":
+        "a build on offer was made for a different system than this one"},
+    # -- configuration and faults ---------------------------------------------
+    "insecure_secret": {"severity": "error", "what":
+        "a password or token in this server's configuration has quotes or spaces around it"},
+    "dev_insecure": {"severity": "error", "what":
+        "this server is running with its security checks relaxed"},
+    "server_error": {"severity": "error", "what":
+        "a page or an API call failed with an error"},
+}
+
+
+def notice_kinds() -> list[dict[str, str]]:
+    """Every condition the server checks for, with its severity and meaning.
+
+    Rendered on the PROBLEMS panel as "what the server checks", ticked where
+    nothing is open: an owner has to be able to tell a clean bill of health
+    from a check nobody ever wrote."""
+    return [
+        {"kind": kind, "severity": spec["severity"], "what": spec["what"]}
+        for kind, spec in sorted(NOTICE_KINDS.items())
+    ]
+
+
+def notice_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """Open notices by severity, for /api/v1/health and the topbar."""
+    counts = {sev: 0 for sev in NOTICE_SEVERITIES}
+    for row in conn.execute(
+        "SELECT severity, COUNT(*) AS n FROM notices WHERE cleared_at IS NULL "
+        "GROUP BY severity"
+    ):
+        counts[str(row["severity"])] = int(row["n"])
+    return counts
+# What the home panel shows at most. A fleet that has generated more open
+# notices than this has one underlying fault, not thirty independent ones.
+NOTICE_PANEL_LIMIT = 25
+
+# Finding 1 (resilience sweep 2026-08-28 fix pass). `plan_without_share` sat
+# in NOTICE_KINDS with severity error and no writer, so the WHAT THE SERVER
+# CHECKS panel ticked it [ OK ] every render -- the exact "unchecked rendered
+# as fine" this registry exists to prevent, and true of any future kind
+# registered before its writer lands. `notice`, `clear_notice` and
+# `clear_notices_of_kind` are the only three functions any writer ever calls,
+# each is called EXACTLY ONCE per kind per pass whether or not that pass found
+# anything wrong (see collector.py's provisioning loop and every `_check_*` in
+# notices.py), so stamping evidence inside them, rather than adding a fourth
+# call every writer must remember, covers every kind for free. One meta row,
+# not a table -- the same shape as META_ALERTS_OPEN: a small CURRENT picture
+# with no history worth keeping.
+NOTICE_CHECKS_META = "notice_last_checked"
+
+
+def _mark_notice_checked(conn: sqlite3.Connection, kind: str, now: str) -> None:
+    """Evidence that SOME pass evaluated `kind` this cycle, independent of
+    whether it found anything. Never raises: recording evidence must not be
+    able to break the pass it is evidence for."""
+    try:
+        seen = meta_get_json(conn, NOTICE_CHECKS_META)
+        if not isinstance(seen, dict):
+            seen = {}
+        seen[str(kind)] = now
+        meta_set_json(conn, NOTICE_CHECKS_META, seen)
+    except sqlite3.Error:
+        pass
+
+
+def notice_check_times(conn: sqlite3.Connection) -> dict[str, str]:
+    """{kind: last_checked_iso} for every kind some pass has actually
+    evaluated. A kind absent here has no writer running anywhere in this
+    build -- read by the WHAT THE SERVER CHECKS panel so that renders
+    [ NOT CHECKED ] rather than a false [ OK ]."""
+    seen = meta_get_json(conn, NOTICE_CHECKS_META)
+    return {str(k): str(v) for k, v in seen.items()} if isinstance(seen, dict) else {}
+
+
+def notice(
+    conn: sqlite3.Connection, kind: str, severity: str, subject: str = "",
+    body: str = "", fix: str | None = None, now: str | None = None,
+) -> int:
+    """Record that the server found a problem, or that it is still there.
+
+    Upserts on (kind, subject): first_seen is kept, last_seen is bumped, and
+    cleared_at is NULLed. That last part is deliberate -- a condition an admin
+    dismissed and that is still true must come back, because the alternative
+    is a dashboard that can be told to stop mentioning unsynced footage.
+
+    Never raises on an unknown severity: this is called from inside the
+    collector's per-slug try/except, and a notice that killed the cycle it was
+    describing would be worse than no notice at all."""
+    stamp = now or utcnow_iso()
+    sev = str(severity or "warn").strip().lower()
+    if sev not in NOTICE_SEVERITIES:
+        sev = "warn"
+    cur = conn.execute(
+        """INSERT INTO notices
+             (kind, severity, subject, body, fix, first_seen, last_seen, cleared_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+           ON CONFLICT(kind, subject) DO UPDATE SET
+             severity=excluded.severity,
+             body=excluded.body,
+             fix=excluded.fix,
+             last_seen=excluded.last_seen,
+             cleared_at=NULL""",
+        (str(kind), sev, str(subject or ""), str(body or ""), str(fix or ""),
+         stamp, stamp),
+    )
+    _mark_notice_checked(conn, kind, stamp)
+    if cur.lastrowid:
+        return int(cur.lastrowid)
+    row = conn.execute(
+        "SELECT id FROM notices WHERE kind=? AND subject=?", (str(kind), str(subject or "")),
+    ).fetchone()
+    return int(row["id"]) if row else 0
+
+
+def clear_notice(
+    conn: sqlite3.Connection, kind: str, subject: str = "", now: str | None = None,
+) -> bool:
+    """The condition is gone: close the notice. True when one was open.
+
+    Called from the same pass that would have written it, so a fixed stray
+    marker stops shouting on the next cycle rather than waiting for a human to
+    dismiss something that is no longer true. Stamps notice-check evidence for
+    `kind` UNCONDITIONALLY, even when there was no open row to close: being
+    asked to clear a kind is itself proof the pass that owns it ran (finding
+    1, resilience sweep 2026-08-28 fix pass)."""
+    stamp = now or utcnow_iso()
+    cur = conn.execute(
+        "UPDATE notices SET cleared_at=? WHERE kind=? AND subject=? AND cleared_at IS NULL",
+        (stamp, str(kind), str(subject or "")),
+    )
+    _mark_notice_checked(conn, kind, stamp)
+    return cur.rowcount > 0
+
+
+def clear_notices_of_kind(
+    conn: sqlite3.Connection, kind: str, keep_subjects: Iterable[str] = (),
+    now: str | None = None,
+) -> int:
+    """Close every open notice of `kind` except the subjects still failing.
+
+    For the pass-shaped writers (provisioning walks every slug each cycle): a
+    slug that is no longer in the failing set has stopped failing, and nothing
+    else in the code is in a position to say so.
+
+    Stamps notice-check evidence for `kind` up front, UNCONDITIONALLY: a pass
+    with nothing to close (nothing was ever open, or everything still open is
+    in `keep_subjects`) is still a pass that checked, and the per-row loop
+    below would otherwise never call `clear_notice` at all on a clean cycle
+    (finding 1, resilience sweep 2026-08-28 fix pass)."""
+    stamp = now or utcnow_iso()
+    _mark_notice_checked(conn, kind, stamp)
+    keep = {str(s) for s in keep_subjects}
+    closed = 0
+    for row in conn.execute(
+        "SELECT subject FROM notices WHERE kind=? AND cleared_at IS NULL", (str(kind),),
+    ).fetchall():
+        if row["subject"] not in keep:
+            closed += int(clear_notice(conn, kind, row["subject"], now=stamp))
+    return closed
+
+
+def open_notices(
+    conn: sqlite3.Connection, limit: int = NOTICE_PANEL_LIMIT
+) -> list[dict[str, Any]]:
+    """Open notices, newest first. Read on every home render, so it is one
+    indexed query and nothing else."""
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM notices WHERE cleared_at IS NULL "
+        "ORDER BY last_seen DESC, id DESC LIMIT ?",
+        (int(limit),),
+    )]
+
+
+def dismiss_notice(
+    conn: sqlite3.Connection, notice_id: int, actor: str, now: str | None = None,
+) -> dict[str, Any] | None:
+    """[ DISMISS ]: the admin has read it. Returns the row, or None when the
+    id names nothing open -- a dismissal that matched no notice must read as a
+    failure rather than a silent success (the UX-20 lesson)."""
+    stamp = now or utcnow_iso()
+    row = conn.execute(
+        "SELECT * FROM notices WHERE id=? AND cleared_at IS NULL", (int(notice_id),),
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute("UPDATE notices SET cleared_at=? WHERE id=?", (stamp, int(notice_id)))
+    audit(conn, actor, "notice.dismiss", row["kind"],
+          {"subject": row["subject"], "severity": row["severity"]}, now=stamp)
+    return dict(row)
+
+
+# --------------------------------------------------- site settings history
+#
+# UX-21 (resilience sweep 2026-08-28). [ IMPORT ] pasted a whole site.toml
+# over the live one with no confirmation and no way back, and three of the
+# keys in it (canonical_prefix, remote_root, tree_name) are read by both
+# installers and every companion in the fleet. The values that were about to
+# be overwritten are snapshotted here first, so "put it back" is a button
+# rather than an archaeology exercise.
+SITE_HISTORY_KEY = "site_history"
+SITE_HISTORY_KEEP = 10
+
+
+def record_site_change(
+    conn: sqlite3.Connection, actor: str, action: str,
+    before: Mapping[str, Any], after: Mapping[str, Any], now: str | None = None,
+) -> dict[str, Any]:
+    """Snapshot the values a save/import is ABOUT to replace.
+
+    `before` is only the keys the write touches: an undo restores exactly what
+    this write changed and does not resurrect anything else that has moved on
+    since."""
+    entry = {
+        "at": now or utcnow_iso(),
+        "actor": str(actor or "?"),
+        "action": str(action or "save"),
+        "before": {str(k): before[k] for k in before},
+        "after": {str(k): after[k] for k in after},
+    }
+    entries = site_history(conn)
+    entries.insert(0, entry)
+    meta_set_json(conn, SITE_HISTORY_KEY, entries[:SITE_HISTORY_KEEP])
+    return entry
+
+
+def site_history(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Newest first; never raises (it feeds a page)."""
+    entries = meta_get_json(conn, SITE_HISTORY_KEY)
+    if not isinstance(entries, list):
+        return []
+    return [e for e in entries if isinstance(e, dict)]
 
 
 def record_enforce_refusal(
@@ -3345,21 +3786,38 @@ def diagnostics_stamp_map(
 FILE_MOVE_MAX_AGE_DAYS = 7
 FILE_MOVE_COMMAND_LIMIT = 20
 
+# The four states of the SERVER side of a move (v36, DASH-1).
+FILE_MOVE_PENDING = "pending"      # written and committed; the rename has not returned yet
+FILE_MOVE_DONE = "done"
+FILE_MOVE_PARTIAL = "partial"      # the original moved, at least one proxy did not
+FILE_MOVE_UNDONE = "undone"        # a later move put it back (UX-11)
+# The states a MACHINE can be in beyond applied/not (v36, RES-1).
+FILE_MOVE_TARGET_RETRYING = "retrying"
+FILE_MOVE_TARGET_BLOCKED = "blocked"
+
 
 def record_file_move(
     conn: sqlite3.Connection, *, from_slug: str, from_project_rel: str, from_rel: str,
     to_slug: str, to_project_rel: str, to_rel: str, is_dir: bool, proxies_moved: int,
     requested_by: str, now: str, targets: list[tuple[str, str]],
+    state: str = FILE_MOVE_DONE, undo_of: int | None = None,
 ) -> int:
-    """The server-side move has already happened; this is the record of it
-    and the list of computers that still have to follow. Returns the id."""
+    """The record of a move and the list of computers that have to follow.
+
+    DASH-1 (resilience sweep 2026-08-28): written with `state='pending'` and
+    COMMITTED before the server-side rename, then flipped by
+    `complete_file_move`. A row that exists while the rename is in flight is
+    what makes the crash window recoverable at all -- before this, a rename
+    that succeeded and then died left the file moved and nothing anywhere
+    saying so. Returns the id."""
     cur = conn.execute(
         """INSERT INTO file_moves
              (from_slug, from_project_rel, from_rel, to_slug, to_project_rel, to_rel,
-              is_dir, proxies_moved, requested_by, requested_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+              is_dir, proxies_moved, requested_by, requested_at, state, undo_of)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (from_slug, from_project_rel, from_rel, to_slug, to_project_rel, to_rel,
-         int(bool(is_dir)), int(proxies_moved), requested_by, now),
+         int(bool(is_dir)), int(proxies_moved), requested_by, now, state,
+         int(undo_of) if undo_of else None),
     )
     move_id = int(cur.lastrowid)
     for editor, machine in sorted(set(targets)):
@@ -3389,28 +3847,102 @@ def _file_move_cutoff(now: str, max_age_days: int) -> str:
     return (stamp - dt.timedelta(days=max_age_days)).isoformat()
 
 
+def complete_file_move(
+    conn: sqlite3.Connection, move_id: int, *, state: str, proxies_moved: int = 0,
+    detail: str = "",
+) -> None:
+    """Phase two of DASH-1: the server-side rename has returned. `state` is
+    `done`, `partial` (the original moved, a proxy did not) or `undone`."""
+    conn.execute(
+        "UPDATE file_moves SET state=?, proxies_moved=?, state_detail=? WHERE id=?",
+        (state, int(proxies_moved), (detail or "")[:512] or None, int(move_id)),
+    )
+
+
+def unfinished_file_moves(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Rows still `pending`: the record was committed, the rename may or may
+    not have happened, and nobody has been told either way. Read at boot and
+    once per collector cycle (api.reconcile_file_moves)."""
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM file_moves WHERE state=? ORDER BY id", (FILE_MOVE_PENDING,))]
+
+
 def pending_file_moves(
     conn: sqlite3.Connection, editor: str, machine: str, now: str,
     max_age_days: int = FILE_MOVE_MAX_AGE_DAYS, limit: int = FILE_MOVE_COMMAND_LIMIT,
 ) -> list[dict[str, Any]]:
     """The moves this computer has not yet reported applying, oldest first.
 
-    Bounded in TIME as well as count: a machine that was off for a month
-    must not come back and shuffle files that have been shuffled again since
-    -- and the companion refuses a move whose source is not where the
-    command says anyway, so an expired one costs nothing but a log line."""
-    cutoff = _file_move_cutoff(now, max_age_days)
+    UX-5 (resilience sweep 2026-08-28): bounded by DELIVERY, not by age. The
+    old age cutoff dropped a command the machine had never even heard of --
+    and that machine is exactly the one still holding the file at the old
+    path, so lane A (which never deletes) put it straight back on the NAS the
+    week after: the failure this whole feature exists to prevent. An old
+    command is harmless because the companion refuses a move whose source is
+    not where the command says. What DOES expire is a command that was
+    delivered and never answered (`expired_at`, written by
+    `expire_delivered_file_moves`), and that expiry is loud on the project
+    page rather than silent, with a one-click re-issue.
+
+    A `pending` move is never offered: its rename has not been confirmed, so
+    telling a machine to follow it would be telling it to follow a move that
+    may not have happened."""
+    del max_age_days  # kept for callers; delivery, not age, is the bound now
     rows = conn.execute(
         """SELECT m.id, m.from_slug, m.from_project_rel, m.from_rel,
                   m.to_slug, m.to_project_rel, m.to_rel, m.is_dir,
                   m.requested_by, m.requested_at
              FROM file_move_targets t JOIN file_moves m ON m.id = t.move_id
             WHERE t.editor_username=? AND t.machine=? AND t.applied_at IS NULL
-              AND m.requested_at >= ?
+              AND t.expired_at IS NULL AND m.state IN (?, ?)
             ORDER BY m.id LIMIT ?""",
-        (editor, machine, cutoff, limit),
+        (editor, machine, FILE_MOVE_DONE, FILE_MOVE_PARTIAL, limit),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def expire_delivered_file_moves(
+    conn: sqlite3.Connection, now: str, max_age_days: int = FILE_MOVE_MAX_AGE_DAYS,
+) -> list[dict[str, Any]]:
+    """Age out targets that were TOLD and never answered (UX-5 / DASH-9).
+
+    Returns the rows just expired, so the caller can say so. Undelivered
+    targets are untouched, deliberately: those machines have not had their
+    chance yet."""
+    cutoff = _file_move_cutoff(now, max_age_days)
+    rows = [dict(r) for r in conn.execute(
+        """SELECT move_id, editor_username, machine, delivered_at
+             FROM file_move_targets
+            WHERE applied_at IS NULL AND expired_at IS NULL
+              AND delivered_at IS NOT NULL AND delivered_at < ?""",
+        (cutoff,),
+    )]
+    for row in rows:
+        conn.execute(
+            "UPDATE file_move_targets SET expired_at=? "
+            " WHERE move_id=? AND editor_username=? AND machine=?",
+            (now, row["move_id"], row["editor_username"], row["machine"]),
+        )
+    return rows
+
+
+def reissue_file_move(
+    conn: sqlite3.Connection, move_id: int, editor: str, machine: str, now: str,
+    actor: str = "",
+) -> bool:
+    """Put an expired target back in the queue (DASH-9's one-click re-issue).
+    Clears the delivery stamp too, so the age clock starts again from the
+    machine's next report rather than from the delivery it never answered."""
+    cur = conn.execute(
+        """UPDATE file_move_targets
+              SET expired_at=NULL, delivered_at=NULL, state=NULL
+            WHERE move_id=? AND editor_username=? AND machine=? AND applied_at IS NULL""",
+        (int(move_id), editor, machine),
+    )
+    if cur.rowcount and actor:
+        audit(conn, actor, "file.move.reissue", f"{editor}/{machine}",
+              {"move_id": int(move_id)}, now=now)
+    return cur.rowcount > 0
 
 
 def mark_file_moves_delivered(
@@ -3428,16 +3960,38 @@ def mark_file_moves_delivered(
 
 def mark_file_move_applied(
     conn: sqlite3.Connection, move_id: int, editor: str, machine: str,
-    ok: bool, detail: str | None, now: str,
+    ok: bool, detail: str | None, now: str, state: str | None = None,
+    attempts: int | None = None, relink_pending: bool = False,
 ) -> bool:
-    """The machine's answer. A FAILED move is applied too, in the sense that
-    the machine has answered and the command stops: the detail is on the
-    project page for the admin, and the fix is a human's (the local file is
-    still where it was, which is the one outcome that loses nothing)."""
+    """The machine's answer.
+
+    RES-1 (resilience sweep 2026-08-28): `state='retrying'` records the
+    attempt and its error WITHOUT retiring the command -- a move Resolve is
+    holding open is going to be tried again in ten minutes, and the old
+    behaviour (any failure retires it for ever) is what let lane A put the
+    file back the next day. `state='blocked'` is the companion having run out
+    of attempts: an answer, and one the project page names as such rather
+    than a success-shaped "FAILED" nobody reads. An old companion sends
+    neither and keeps the original meaning: a failure is an answer.
+
+    `relink_pending` (RES-10) means the copy moved but the project that
+    references it was not open, so Resolve has not been repointed yet."""
+    if state == FILE_MOVE_TARGET_RETRYING:
+        cur = conn.execute(
+            """UPDATE file_move_targets SET state=?, attempts=?, last_error=?, detail=?
+                WHERE move_id=? AND editor_username=? AND machine=? AND applied_at IS NULL""",
+            (state, int(attempts or 0), (detail or "")[:512] or None,
+             (detail or "")[:512] or None, move_id, editor, machine),
+        )
+        return cur.rowcount > 0
     cur = conn.execute(
-        """UPDATE file_move_targets SET applied_at=?, ok=?, detail=?
+        """UPDATE file_move_targets
+              SET applied_at=?, ok=?, detail=?, state=?, attempts=?,
+                  last_error=?, relink_pending=?, expired_at=NULL
             WHERE move_id=? AND editor_username=? AND machine=? AND applied_at IS NULL""",
-        (now, int(bool(ok)), (detail or "")[:512] or None, move_id, editor, machine),
+        (now, int(bool(ok)), (detail or "")[:512] or None, state,
+         int(attempts or 0), None if ok else (detail or "")[:512] or None,
+         int(bool(relink_pending)), move_id, editor, machine),
     )
     return cur.rowcount > 0
 
@@ -3453,15 +4007,112 @@ def file_moves_for_project(
         (slug, slug, limit),
     )]
     for move in moves:
-        move["targets"] = [dict(r) for r in conn.execute(
-            """SELECT editor_username, machine, delivered_at, applied_at, ok, detail
-                 FROM file_move_targets WHERE move_id=?
-                ORDER BY editor_username, machine""",
-            (move["id"],),
-        )]
-        move["waiting"] = sum(1 for t in move["targets"] if not t["applied_at"])
-        move["failed"] = sum(1 for t in move["targets"] if t["applied_at"] and not t["ok"])
+        _hydrate_file_move(conn, move)
     return moves
+
+
+def _hydrate_file_move(conn: sqlite3.Connection, move: dict[str, Any]) -> dict[str, Any]:
+    move["targets"] = [dict(r) for r in conn.execute(
+        """SELECT editor_username, machine, delivered_at, applied_at, ok, detail,
+                  attempts, last_error, state, expired_at, relink_pending
+             FROM file_move_targets WHERE move_id=?
+            ORDER BY editor_username, machine""",
+        (move["id"],),
+    )]
+    now = utcnow_iso()
+    for target in move["targets"]:
+        # The age of the WAIT, which is what the project page's amber/red chip
+        # is drawn from (DASH-9). Delivery when there was one, the request
+        # otherwise: a machine that has not been told yet is not late.
+        target["waiting_days"] = (
+            0.0 if target["applied_at"]
+            else _days_between(target["delivered_at"] or move["requested_at"], now))
+    move["waiting"] = sum(1 for t in move["targets"] if not t["applied_at"])
+    move["failed"] = sum(1 for t in move["targets"] if t["applied_at"] and not t["ok"])
+    move["expired"] = sum(1 for t in move["targets"] if t["expired_at"])
+    move["blocked"] = sum(
+        1 for t in move["targets"] if t["state"] == FILE_MOVE_TARGET_BLOCKED)
+    move["relink_pending"] = sum(1 for t in move["targets"] if t["relink_pending"])
+    # UX-11: the undo is offered only while every computer either has it or is
+    # still waiting for it. A machine that FAILED or is BLOCKED has a local
+    # copy at the old path, and moving the server copy back under it would
+    # leave the fleet in a third state nobody asked for.
+    move["undoable"] = (
+        move["state"] in (FILE_MOVE_DONE, FILE_MOVE_PARTIAL)
+        and not move["failed"] and not move["undone_by"]
+    )
+    return move
+
+
+def file_move(conn: sqlite3.Connection, move_id: int) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM file_moves WHERE id=?", (int(move_id),)).fetchone()
+    return _hydrate_file_move(conn, dict(row)) if row is not None else None
+
+
+def add_file_move_targets(
+    conn: sqlite3.Connection, move_id: int, targets: list[tuple[str, str]],
+) -> int:
+    """Add computers to a move's target list (UX-11's undo).
+
+    An undo has to reach the machines the ORIGINAL reached, and the inverse
+    move's own source project is the destination project -- which some of
+    them may not sync at all. Without this the undo would move the server
+    copy back and leave every machine holding it at the other path, i.e. the
+    duplicate the feature exists to prevent, made by the undo button."""
+    added = 0
+    for editor, machine in sorted(set(targets)):
+        if not editor or not machine:
+            continue
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO file_move_targets (move_id, editor_username, machine)
+               VALUES (?, ?, ?)""",
+            (int(move_id), editor, machine),
+        )
+        added += cur.rowcount or 0
+    return added
+
+
+def mark_file_move_undone(
+    conn: sqlite3.Connection, move_id: int, undo_id: int,
+) -> None:
+    conn.execute("UPDATE file_moves SET state=?, undone_by=? WHERE id=?",
+                 (FILE_MOVE_UNDONE, int(undo_id), int(move_id)))
+
+
+def file_moves_awaiting_machines(
+    conn: sqlite3.Connection, now: str, limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Every move some computer still has not applied, oldest first (DASH-9).
+
+    This is the panel that used to not exist: a target with `applied_at IS
+    NULL` was kept for ever and read by nobody, so "a move was never
+    completed and that machine may re-upload the old path" was a question
+    with no page that answered it. `waiting_days` is the age of the WAIT (the
+    delivery when there was one, the request otherwise), which is what the
+    amber/red chip is drawn from."""
+    rows = [dict(r) for r in conn.execute(
+        """SELECT t.move_id, t.editor_username, t.machine, t.delivered_at,
+                  t.expired_at, t.attempts, t.last_error, t.state,
+                  m.from_project_rel, m.from_rel, m.to_project_rel, m.to_rel,
+                  m.from_slug, m.to_slug, m.requested_by, m.requested_at, m.state AS move_state
+             FROM file_move_targets t JOIN file_moves m ON m.id = t.move_id
+            WHERE t.applied_at IS NULL AND m.state IN (?, ?)
+            ORDER BY m.requested_at, t.move_id LIMIT ?""",
+        (FILE_MOVE_DONE, FILE_MOVE_PARTIAL, int(limit)),
+    )]
+    for row in rows:
+        since = row["delivered_at"] or row["requested_at"]
+        row["waiting_days"] = _days_between(since, now)
+    return rows
+
+
+def _days_between(then: str | None, now: str) -> float:
+    if not then:
+        return 0.0
+    try:
+        return max(0.0, (parse_iso(now) - parse_iso(then)).total_seconds() / 86400.0)
+    except (ValueError, TypeError):
+        return 0.0
 
 
 def copy_machine_plan(
@@ -3808,6 +4459,161 @@ def fetch_audit(
 def audit_entry(conn: sqlite3.Connection, audit_id: int) -> dict[str, Any] | None:
     row = conn.execute("SELECT * FROM fleet_audit WHERE id=?", (int(audit_id),)).fetchone()
     return _audit_row(row) if row is not None else None
+
+
+def audit_since(
+    conn: sqlite3.Connection, since: str, limit: int = 200,
+    actions: tuple[str, ...] | None = None,
+) -> list[dict[str, Any]]:
+    """Audit rows at or after `since`, OLDEST first (SYS-8).
+
+    Oldest first because the one consumer is a weekly report a person reads
+    top to bottom as a week's story; every other reader of this table wants
+    newest first and gets it from fetch_audit.
+    """
+    q = "SELECT * FROM fleet_audit WHERE at >= ?"
+    params: list[Any] = [since]
+    if actions:
+        q += " AND action IN (%s)" % ", ".join("?" for _ in actions)
+        params += list(actions)
+    q += " ORDER BY id ASC LIMIT ?"
+    params.append(max(1, min(int(limit), 1000)))
+    return [_audit_row(r) for r in conn.execute(q, params)]
+
+
+# ------------------------------------------------------------------- alerts
+# SYS-8 (resilience sweep 2026-08-28). Every alarm this system raises has been
+# PULL-ONLY: 0 of ~120 ledger entries were discovered by the system telling
+# anybody. These three helpers are the durable half of alerts.py -- the dedup
+# window and the weekly schedule both have to survive a container replacement,
+# or a deploy at 07:59 on Monday sends the week's report twice and a flapping
+# breaker sends forty mails.
+
+ALERT_MAX_AGE_DAYS = 120
+
+# What the LAST alert scan found, so the topbar can show a count without
+# re-running forty checks on every page render. A meta row and not a table:
+# it is one small current picture with no history worth keeping (the history
+# is alert_log).
+META_ALERTS_OPEN = "alerts_open_counts"
+
+# How long one (kind, subject) stays quiet after it has been sent. A day, so a
+# condition that is still true tomorrow says so again (an alert nobody acted
+# on must not go silent for ever) and one that flaps hourly says it once.
+ALERT_DEDUP_SECONDS = 24 * 3600
+
+
+def record_alert(
+    conn: sqlite3.Connection, kind: str, subject: str, sent_to: str,
+    ok: bool, detail: str = "", now: str | None = None,
+) -> int:
+    """Append one row and return its id. FAILURES ARE RECORDED TOO (ok=0):
+    a sink that has been refusing since Tuesday is exactly what an admin needs
+    on the page, and a send that left no trace is how a fleet ends up believing
+    alerts are on."""
+    cur = conn.execute(
+        "INSERT INTO alert_log (at, kind, subject, sent_to, ok, detail) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (now or utcnow_iso(), str(kind or ""), str(subject or "")[:400],
+         str(sent_to or "")[:400], 1 if ok else 0, str(detail or "")[:800]),
+    )
+    return int(cur.lastrowid or 0)
+
+
+def last_alert_at(
+    conn: sqlite3.Connection, kind: str, subject: str | None = None,
+    ok_only: bool = True,
+) -> str | None:
+    """When this (kind, subject) last went out, or None.
+
+    `ok_only` because a send that FAILED has told nobody: suppressing the
+    retry on the strength of it would be the dedup silencing the alert
+    outright. `subject=None` asks about the kind as a whole, which is what the
+    weekly schedule needs.
+    """
+    q = "SELECT at FROM alert_log WHERE kind=?"
+    params: list[Any] = [str(kind or "")]
+    if subject is not None:
+        q += " AND subject=?"
+        params.append(str(subject or ""))
+    if ok_only:
+        q += " AND ok=1"
+    row = conn.execute(q + " ORDER BY id DESC LIMIT 1", params).fetchone()
+    return None if row is None else row["at"]
+
+
+def alert_recently_sent(
+    conn: sqlite3.Connection, kind: str, subject: str, now: str,
+    within_seconds: int = ALERT_DEDUP_SECONDS, ok_only: bool = True,
+) -> bool:
+    """Whether this (kind, subject) has already gone out inside the window.
+
+    An unparseable stored timestamp reads as NOT recently sent: the failure
+    direction of this predicate is "say it again", never "stay quiet".
+
+    `ok_only=False` counts a FAILED attempt as "already said": alerts.send
+    passes it so a site with a misconfigured sink does not re-attempt every
+    open condition every cycle and fill this ledger with failures nobody can
+    read through.
+    """
+    last = last_alert_at(conn, kind, subject, ok_only=ok_only)
+    if not last:
+        return False
+    try:
+        return parse_iso(last) >= parse_iso(_iso_minus(now, within_seconds))
+    except (ValueError, TypeError):
+        return False
+
+
+def fetch_alerts(
+    conn: sqlite3.Connection, limit: int = 50, since: str | None = None,
+) -> list[dict[str, Any]]:
+    """Newest first, for the Alerts settings page and the weekly report."""
+    q = "SELECT * FROM alert_log"
+    params: list[Any] = []
+    if since:
+        q += " WHERE at >= ?"
+        params.append(since)
+    q += " ORDER BY id DESC LIMIT ?"
+    params.append(max(1, min(int(limit), 500)))
+    return [dict(r) for r in conn.execute(q, params)]
+
+
+def store_resolve_health(
+    conn: sqlite3.Connection, editor: str, machine: str,
+    guard: Mapping[str, Any] | None,
+) -> None:
+    """Write the v38 Resolve/stray/staging columns onto the machine's row.
+
+    Its own UPDATE for the reason store_blocked_state gives: the big INSERT in
+    upsert_machine_state is edited by every work package that touches the
+    report, and this group has a rule of its own anyway.
+
+    THE LATCH RULE, not COALESCE: these are written by any report that carried
+    a guard section at all, because an ABSENT sub-section is how the companion
+    spells "there is nothing outside the tree any more" -- and a COALESCE could
+    never express that, so [ 12 CLIPS OUTSIDE THE TREE ] would stay on the grid
+    for ever after the editor relinked them.
+
+    `guard` None (a companion with no sync_guard at all) leaves every column
+    alone: it has no opinion to record.
+    """
+    if guard is None or not guard.get("at"):
+        return
+    conn.execute(
+        """UPDATE machine_state
+              SET resolve_out_of_tree=?, resolve_bad_prefix=?, resolve_missing=?,
+                  resolve_ignored=?, resolve_last_scan_at=?,
+                  stray_projects_count=?, stray_projects_bytes=?,
+                  moved_project_dirs_count=?, ingest_staging_bytes=?
+            WHERE editor_username=? AND machine=?""",
+        (guard.get("resolve_out_of_tree"), guard.get("resolve_bad_prefix"),
+         guard.get("resolve_missing"), guard.get("resolve_ignored"),
+         guard.get("resolve_last_scan_at"),
+         guard.get("stray_projects_count"), guard.get("stray_projects_bytes"),
+         guard.get("moved_project_dirs_count"), guard.get("ingest_staging_bytes"),
+         editor, machine),
+    )
 
 
 def recent_plan_changes(
@@ -4523,6 +5329,20 @@ def fetch_sync_guard_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict
             "upgrade_last_error": r["upgrade_last_error"],
             "upgrade_last_attempt_at": r["upgrade_last_attempt_at"],
             "upgrade_reverted_from": r["upgrade_reverted_from"],
+            # v38 (wave 4's ingest contract, resilience sweep 2026-08-28).
+            # Clips the open Resolve project references from OUTSIDE the tree
+            # are footage lane A will never upload and nobody else on the
+            # fleet will ever see; the stray/moved/staging counters are the
+            # same class of quiet loss one level up, at the directory.
+            "resolve_out_of_tree": r["resolve_out_of_tree"],
+            "resolve_bad_prefix": r["resolve_bad_prefix"],
+            "resolve_missing": r["resolve_missing"],
+            "resolve_ignored": r["resolve_ignored"],
+            "resolve_last_scan_at": r["resolve_last_scan_at"],
+            "stray_projects_count": r["stray_projects_count"],
+            "stray_projects_bytes": r["stray_projects_bytes"],
+            "moved_project_dirs_count": r["moved_project_dirs_count"],
+            "ingest_staging_bytes": r["ingest_staging_bytes"],
         }
         for r in conn.execute(
             """SELECT editor_username, machine, breaker_tripped, breaker_reason,
@@ -4539,7 +5359,11 @@ def fetch_sync_guard_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict
                       blocked_reason, blocked_detail, blocked_since,
                       restarts_count_24h, restarts_last_at, restarts_last_error,
                       arch, upgrade_version, upgrade_attempts, upgrade_last_error,
-                      upgrade_last_attempt_at, upgrade_reverted_from
+                      upgrade_last_attempt_at, upgrade_reverted_from,
+                      resolve_out_of_tree, resolve_bad_prefix, resolve_missing,
+                      resolve_ignored, resolve_last_scan_at,
+                      stray_projects_count, stray_projects_bytes,
+                      moved_project_dirs_count, ingest_staging_bytes
                FROM machine_state"""
         )
     }
@@ -4653,46 +5477,148 @@ def fetch_proxy_coverage_map(conn: sqlite3.Connection) -> dict[tuple[str, str], 
 # set it travel with the flag (COMMERCIAL_READINESS.md item 9, 2026-08-17).
 FLEET_HALT_KEY = "fleet_halt"
 
+# UX-8 (resilience sweep 2026-08-28). The halt had no expiry, so "I will look
+# at this on Monday" was a company that could not work all weekend and a
+# switch nobody was reminded of. It expires by itself now; [ KEEP HALTED ]
+# extends it by another window, which is a decision somebody makes rather than
+# a state that persists because nobody remembered.
+FLEET_HALT_DEFAULT_HOURS = 24
+# Last 20 halts, in `meta`: "who stopped the fleet last month and why" is a
+# question an owner asks, and one JSON value answers it without a table.
+FLEET_HALT_HISTORY_KEY = "fleet_halt_history"
+FLEET_HALT_HISTORY_KEEP = 20
 
-def get_fleet_halt(conn: sqlite3.Connection) -> dict[str, Any]:
-    """{"active", "reason", "set_by", "set_at"} -- never None.
+
+def _halt_state(data: Any, now: str) -> dict[str, Any]:
+    """Normalise a stored halt blob, applying the expiry.
+
+    An expired halt reads as NOT active with `expired` set, which is what
+    makes the report reply release it: the reply always carries
+    `commands.halt.active`, and a companion treats false as "start again"."""
+    if not isinstance(data, dict):
+        data = {}
+    expires_at = str(data.get("expires_at") or "")
+    active = bool(data.get("active"))
+    expired = False
+    if active and expires_at:
+        try:
+            expired = parse_iso(now) >= parse_iso(expires_at)
+        except (TypeError, ValueError):
+            # An unparseable expiry is not evidence that the halt is over.
+            expired = False
+    return {
+        "active": active and not expired,
+        "expired": expired,
+        "reason": str(data.get("reason") or ""),
+        "set_by": str(data.get("set_by") or ""),
+        "set_at": str(data.get("set_at") or ""),
+        "expires_at": expires_at,
+        "extended": int(data.get("extended") or 0),
+    }
+
+
+def get_fleet_halt(conn: sqlite3.Connection, now: str | None = None) -> dict[str, Any]:
+    """{"active", "expired", "reason", "set_by", "set_at", "expires_at",
+    "extended"} -- never None.
 
     A corrupt/absent value reads as NOT halted, deliberately: a dashboard
     that cannot parse its own flag must not silently stop the whole fleet
     from syncing, and an admin can always set it again."""
+    stamp = now or utcnow_iso()
     raw = meta_get(conn, FLEET_HALT_KEY)
     if not raw:
-        return {"active": False, "reason": "", "set_by": "", "set_at": ""}
+        return _halt_state(None, stamp)
     try:
         data = json.loads(raw)
     except (TypeError, ValueError):
-        return {"active": False, "reason": "", "set_by": "", "set_at": ""}
-    if not isinstance(data, dict):
-        return {"active": False, "reason": "", "set_by": "", "set_at": ""}
-    return {
-        "active": bool(data.get("active")),
-        "reason": str(data.get("reason") or ""),
-        "set_by": str(data.get("set_by") or ""),
-        "set_at": str(data.get("set_at") or ""),
-    }
+        return _halt_state(None, stamp)
+    return _halt_state(data, stamp)
+
+
+def fleet_halt_history(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Newest first. Never raises: it feeds a banner."""
+    entries = meta_get_json(conn, FLEET_HALT_HISTORY_KEY)
+    if not isinstance(entries, list):
+        return []
+    return [e for e in entries if isinstance(e, dict)]
+
+
+def _append_halt_history(conn: sqlite3.Connection, entry: dict[str, Any]) -> None:
+    entries = fleet_halt_history(conn)
+    entries.insert(0, entry)
+    meta_set_json(conn, FLEET_HALT_HISTORY_KEY, entries[:FLEET_HALT_HISTORY_KEEP])
 
 
 def set_fleet_halt(
-    conn: sqlite3.Connection, active: bool, reason: str, by: str, now: str | None = None
+    conn: sqlite3.Connection, active: bool, reason: str, by: str, now: str | None = None,
+    hours: float | None = None, extend: bool = False,
 ) -> dict[str, Any]:
-    state = {
-        "active": bool(active),
-        "reason": str(reason or "")[:500],
-        "set_by": str(by or "")[:64],
-        "set_at": now or utcnow_iso(),
-    }
+    """Engage, extend or release the fleet halt.
+
+    `hours` is how long it stands for (default FLEET_HALT_DEFAULT_HOURS);
+    `extend` is [ KEEP HALTED ], which keeps the original reason, who set it
+    and when, and only moves the expiry -- so the banner still says how long
+    the fleet has been stopped, not how long since the last click."""
+    stamp = now or utcnow_iso()
+    window = FLEET_HALT_DEFAULT_HOURS if hours is None else float(hours)
+    prior = get_fleet_halt(conn, now=stamp)
+    if active:
+        if extend and not prior["active"] and len(str(reason or "").strip()) < 3:
+            # UX-8 (resilience sweep 2026-08-28): a browser tab left open
+            # across the halt's own expiry still shows [ KEEP HALTED ], which
+            # submits no reason at all -- it means "keep the CURRENT halt
+            # going", not "start a new one". Carrying that forward once the
+            # halt has already ended would silently re-halt the whole fleet
+            # with a blank reason, exactly the state UX-8 exists to prevent.
+            # A real reason typed alongside extend=1 is treated as starting a
+            # fresh halt, which is fine -- only the BLANK case is the trap.
+            when = prior["expires_at"] or prior["set_at"]
+            if when:
+                raise ValueError(
+                    f"The halt already ended at {when}. Start a new one with a reason."
+                )
+            raise ValueError(
+                "There is no halt to keep going. Start one with a reason."
+            )
+        expires_at = (parse_iso(stamp) + dt.timedelta(hours=window)).isoformat()
+        state = {
+            "active": True,
+            "reason": str(reason or "")[:500],
+            "set_by": str(by or "")[:64],
+            "set_at": stamp,
+            "expires_at": expires_at,
+            "extended": int(prior.get("extended") or 0),
+        }
+        if extend and prior["active"]:
+            state["reason"] = prior["reason"] or state["reason"]
+            state["set_by"] = prior["set_by"] or state["set_by"]
+            state["set_at"] = prior["set_at"] or stamp
+            state["extended"] = int(prior.get("extended") or 0) + 1
+    else:
+        state = {
+            "active": False,
+            "reason": str(reason or "")[:500],
+            "set_by": str(by or "")[:64],
+            "set_at": stamp,
+            "expires_at": "",
+            "extended": 0,
+        }
     meta_set(conn, FLEET_HALT_KEY, json.dumps(state))
+    _append_halt_history(conn, {
+        "at": stamp,
+        "action": ("extend" if (active and extend and prior["active"])
+                   else "halt" if active else "release"),
+        "by": state["set_by"],
+        "reason": state["reason"],
+        "expires_at": state["expires_at"],
+    })
     # Audited HERE rather than at the two call sites (SYS-11, 2026-08-28): the
     # JSON route and the Users page both pass their admin through this one
     # function, and a ledger the second door can skip is worse than none.
     audit(conn, by, "fleet.halt_set" if active else "fleet.halt_clear",
-          "fleet", {"reason": state["reason"]}, now=state["set_at"])
-    return state
+          "fleet", {"reason": state["reason"], "expires_at": state["expires_at"]},
+          now=state["set_at"])
+    return _halt_state(state, stamp)
 
 
 def fetch_transport_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
@@ -5162,6 +6088,12 @@ def prune(conn: sqlite3.Connection, now: str) -> None:
     # is still answerable, bounded so /data cannot grow without limit.
     conn.execute(
         "DELETE FROM fleet_audit WHERE at < ?", (cutoff(days=AUDIT_MAX_AGE_DAYS),),
+    )
+    # The alert ledger (v38, SYS-8). Shorter than the audit's 180 days because
+    # nothing reads it past "did we already say this" and the last few weekly
+    # reports; the dedup window is a single day, so this cannot shorten it.
+    conn.execute(
+        "DELETE FROM alert_log WHERE at < ?", (cutoff(days=ALERT_MAX_AGE_DAYS),),
     )
     # Diagnostics bundles (v33, SYS-7). Bounded at write time to the newest
     # DIAGNOSTICS_KEEP_PER_MACHINE per computer; this is the age bound, on the

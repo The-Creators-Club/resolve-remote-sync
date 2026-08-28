@@ -1097,3 +1097,144 @@ def test_the_coalesced_warning_re_arms_when_the_mapping_recovers(tmp_path, monke
     _subst(monkeypatch, "P:\\", "", local_root)              # and broken again
     watcher.poll_once()
     assert len(warnings) == 2
+
+
+# -- a MISSING clip we moved ourselves is FIXABLE (RES-10, 2026-08-28) -------
+
+
+def test_a_missing_clip_that_a_file_move_took_away_is_offered_for_relink(
+        tmp_path, downloaded):
+    """The clip is offline because an admin moved it on the server and this
+    machine followed. Its path is still in-tree, so it used to classify
+    MISSING and produce a DEBUG line and nothing else -- while the new path
+    was known exactly, in this machine's own file-move ledger."""
+    clip = r"P:\Projects\Energy Transition\a.braw"
+    local = canon.canonical_to_local(clip, str(tmp_path), "P:\\")
+    entry = {"id": 7, "from_rel": "a.braw", "old_local": local,
+             "new_local": str(tmp_path / "Projects" / "FF5" / "a.braw"),
+             "is_dir": False}
+    offered = []
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: _ok_result(make_timeline_item(clip)),
+        moved_lookup=lambda p: entry if os.path.normcase(p) == os.path.normcase(local) else None,
+        on_moved_clip=lambda item, e: offered.append((item, e)),
+    )
+
+    summary = watcher.poll_once()
+    assert summary["missing"] == 1
+    assert len(offered) == 1
+    assert offered[0][0]["file_path"] == clip
+    assert offered[0][1]["id"] == 7
+
+
+def test_a_missing_clip_nothing_moved_offers_nothing(tmp_path, downloaded):
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: _ok_result(
+            make_timeline_item(r"P:\Projects\Energy Transition\a.braw")),
+        moved_lookup=lambda p: None,
+        on_moved_clip=lambda item, e: pytest.fail("nothing moved this clip"),
+    )
+    assert watcher.poll_once()["missing"] == 1
+
+
+def test_a_raising_moved_lookup_costs_the_poll_nothing(tmp_path, downloaded):
+    def boom(_path):
+        raise RuntimeError("ledger exploded")
+
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: _ok_result(
+            make_timeline_item(r"P:\Projects\Energy Transition\a.braw")),
+        moved_lookup=boom,
+        on_moved_clip=lambda item, e: None,
+    )
+    assert watcher.poll_once()["ok"] is True
+
+
+
+# ===========================================================================
+# UX-4 (resilience sweep 2026-08-28): poll_once computed these numbers and
+# threw them away, so the one editor mistake that guarantees unsynced footage
+# reached nobody.
+# ===========================================================================
+
+
+def test_poll_once_publishes_the_totals_and_a_scan_time(tmp_path, monkeypatch):
+    local_root = str(tmp_path / "tree")
+    Path(local_root).mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "desktop.mov").touch()
+
+    watcher = TimelineWatcher(
+        local_root=local_root,
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: _ok_result(
+            make_timeline_item(str(other / "desktop.mov")),
+            make_timeline_item(r"P:\Projects\gone.mov"),
+        ),
+    )
+    assert watcher.last_counts is None
+    assert watcher.last_scan_at is None
+
+    _subst(monkeypatch, "P:\\", "", local_root)   # the mapping is broken
+    summary = watcher.poll_once()
+
+    assert summary["out_of_tree_total"] == 1
+    assert summary["bad_prefix"] == 1
+    assert watcher.last_counts == {"out_of_tree": 1, "bad_prefix": 1, "missing": 0}
+    assert watcher.last_scan_at
+
+
+def test_the_totals_count_clips_the_editor_dismissed(tmp_path):
+    """The delta counters beside them go to zero once a clip is skipped --
+    which is exactly the state an admin needs to be able to see."""
+    local_root = str(tmp_path / "tree")
+    Path(local_root).mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "desktop.mov").touch()
+
+    tracker = IgnoreTracker()
+    tracker.ignore(str(other / "desktop.mov"))
+    watcher = TimelineWatcher(
+        local_root=local_root,
+        canonical_prefix="P:\\",
+        ignore_tracker=tracker,
+        get_timeline_items=lambda: _ok_result(
+            make_timeline_item(str(other / "desktop.mov"))),
+    )
+    summary = watcher.poll_once()
+    assert summary["out_of_tree"] == 0          # nothing new to offer
+    assert summary["out_of_tree_total"] == 1    # ...and one clip still stranded
+    assert watcher.last_counts["out_of_tree"] == 1
+
+
+def test_an_early_return_leaves_the_last_real_answer_standing(tmp_path):
+    """"We could not look" must never render as "nothing is wrong": a poll
+    that returns before the walk leaves last_counts/last_scan_at alone."""
+    local_root = str(tmp_path / "tree")
+    Path(local_root).mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "desktop.mov").touch()
+
+    results = [_ok_result(make_timeline_item(str(other / "desktop.mov"))),
+               {"ok": False, "message": NOT_RUNNING, "items": []}]
+    watcher = TimelineWatcher(
+        local_root=local_root,
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: results.pop(0),
+    )
+    watcher.poll_once()
+    first = watcher.last_scan_at
+    assert watcher.last_counts["out_of_tree"] == 1
+
+    watcher.poll_once()   # Resolve closed
+    assert watcher.last_counts["out_of_tree"] == 1
+    assert watcher.last_scan_at == first

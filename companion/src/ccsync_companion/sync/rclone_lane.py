@@ -2102,6 +2102,107 @@ def read_project_slug(directory) -> Optional[str]:
     return slug
 
 
+# -- project directories: where they were last seen, and what else is there --
+#
+# UX-3 / SYNC-10 (resilience sweep 2026-08-28). Two questions nothing in this
+# system could answer before:
+#   * lane A found no source directory: has it NEVER been here (first run,
+#     lane C has not delivered it yet), or was it here last pass? The first is
+#     ordinary; the second means an editor renamed or moved the folder in
+#     Explorer and everything they put in it from that moment on is invisible
+#     to the fleet, reported as IDLE.
+#   * is there a project directory on this machine that is in no selection at
+#     all? A repath onto an occupied target (repath.py's "re-pointing the
+#     folder anyway"), a half-finished move, a drag in Explorer -- all leave a
+#     tree no lane will ever touch again, counted as this machine's presence.
+# Both are answered from the .ccsync-project marker, which is the only thing
+# about a project that survives being renamed.
+PROJECT_DIRS_FILENAME = "project_dirs.json"
+# The walk is bounded rather than trusted: `Projects/` on a base rig is the
+# whole NAS share, and an unbounded os.walk of it on the orphan cadence would
+# be a stat storm over SMB. A marker directory is never descended into (a
+# project holds no projects), so the cap only bites on a tree with tens of
+# thousands of non-project folders.
+MAX_PROJECT_SCAN_DIRS = 20000
+# Per stray directory, so one enormous orphan cannot make the scan itself the
+# problem it is reporting.
+MAX_STRAY_SIZE_FILES = 20000
+# The wire contract's cap (WAVE4_CONTRACT: `stray_projects.paths` <= 20,
+# `moved_project_dirs` <= 20).
+MAX_REPORTED_PROJECT_DIRS = 20
+
+
+def scan_project_markers(local_root: Any) -> Optional[dict[str, str]]:
+    """Every `.ccsync-project` under `<local_root>/Projects`, as slug -> dir.
+
+    None means "could not look" (no Projects directory, an unreadable tree) --
+    which callers MUST NOT read as "there are none": a scan that cannot run is
+    not evidence that nothing moved. Bounded by MAX_PROJECT_SCAN_DIRS and
+    never raises.
+
+    On a duplicate slug (a copied project directory, which does happen) the
+    FIRST one found wins and the rest are logged: this map is used to offer a
+    move, and guessing between two candidates is exactly the guess a marker
+    exists to avoid.
+    """
+    root = Path(local_root) / "Projects"
+    try:
+        if not root.is_dir():
+            return None
+    except OSError:
+        return None
+    found: dict[str, str] = {}
+    visited = 0
+    try:
+        for dirpath, dirnames, _files in os.walk(str(root)):
+            visited += 1
+            if visited > MAX_PROJECT_SCAN_DIRS:
+                log.warning(
+                    "project marker scan stopped after %d directories under %s -- "
+                    "the answer is incomplete", MAX_PROJECT_SCAN_DIRS, root,
+                )
+                break
+            slug = read_project_slug(dirpath)
+            if not slug:
+                continue
+            # A project directory holds no projects: prune the descent.
+            dirnames[:] = []
+            if slug in found:
+                log.warning(
+                    "two directories carry the project marker %s (%s and %s) -- "
+                    "keeping the first", slug, found[slug], dirpath,
+                )
+                continue
+            found[slug] = dirpath
+    except OSError:
+        log.debug("project marker scan failed under %s", root, exc_info=True)
+        return found or None
+    return found
+
+
+def _dir_size_bytes(directory: Any, max_files: int = MAX_STRAY_SIZE_FILES) -> int:
+    """Bytes under `directory`, bounded and never raising. 0 when unreadable.
+
+    Deliberately an UNDER-count when the cap bites: this number is shown as
+    "how much disk this is costing you", and a bounded truth beats an
+    unbounded walk of a directory that is already the anomaly."""
+    total = 0
+    seen = 0
+    try:
+        for _dirpath, _dirnames, filenames in os.walk(str(directory)):
+            for name in filenames:
+                seen += 1
+                if seen > max_files:
+                    return total
+                try:
+                    total += os.path.getsize(os.path.join(_dirpath, name))
+                except OSError:
+                    continue
+    except OSError:
+        return total
+    return total
+
+
 def _project_rel_for_path(
     local_root: str, path: str, known_rels: Optional[list[str]] = None
 ) -> Optional[str]:
@@ -2260,6 +2361,7 @@ class RcloneLane(LaneAdapter):
 
         self._state_dir = state_dir or (Path.home() / ".ccsync" / "state")
         self._filter_file = self._state_dir / f"filter_{direction}.txt"
+        self._project_dirs_file = self._state_dir / PROJECT_DIRS_FILENAME
 
         # -- lane B circuit breaker (COMMERCIAL_READINESS.md item 9) ------
         # Constructed HERE, not injected-or-nothing, so a lane B built by any
@@ -2305,6 +2407,15 @@ class RcloneLane(LaneAdapter):
         # will never upload (see scan_size_mismatches). Refreshed on the
         # orphan-scan cadence, reported and surfaced -- never acted on.
         self._size_mismatches: Optional[dict] = None
+        # UX-3: project dirs this lane has actually run against, so a source
+        # that vanishes is told apart from one that was never here. On disk
+        # (state_dir/project_dirs.json), not in memory: the restart that
+        # follows an editor's rename would otherwise forget the whole point.
+        self._moved_project_dirs: list[dict] = []
+        # SYNC-10: project dirs in no selection at all. None until the first
+        # scan -- an absent section is "we have not looked", never "there are
+        # none".
+        self._stray_projects: Optional[dict] = None
 
         # ONE EVENT PER THREAD GENERATION. A single long-lived event that
         # start() cleared and stop() set could only ever be right for one of
@@ -2824,6 +2935,14 @@ class RcloneLane(LaneAdapter):
         with self._lock:
             self._orphans = report
         self._refresh_size_mismatches(subpath)
+        # SYNC-10 (sweep 2026-08-28): local-only, so it costs no NAS listing
+        # at all -- but it belongs on this cadence because it is the same kind
+        # of answer (a leftover nobody is going to delete) and a per-pass tree
+        # walk would not be free.
+        try:
+            self._refresh_stray_projects()
+        except Exception:
+            log.exception("%s: stray project scan failed", self.name)
         return report
 
     def _refresh_size_mismatches(self, subpath: Optional[str] = None) -> Optional[dict]:
@@ -2890,6 +3009,201 @@ class RcloneLane(LaneAdapter):
         surface it without re-listing the NAS."""
         with self._lock:
             return dict(self._orphans) if self._orphans else None
+
+    # -- project directories (UX-3 / SYNC-10, sweep 2026-08-28) -----------
+    def _read_project_dirs(self) -> dict[str, dict]:
+        """The persisted "this project dir was here" map. {} when unreadable.
+
+        Never raises: a state file we cannot read costs UX-3's distinction
+        (every absence reads as "never seen"), which is exactly the behaviour
+        that existed before it."""
+        try:
+            raw = json.loads(self._project_dirs_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        seen = raw.get("seen") if isinstance(raw, dict) else None
+        if not isinstance(seen, dict):
+            return {}
+        return {str(k): v for k, v in seen.items() if isinstance(v, dict)}
+
+    def _write_project_dirs(self, seen: dict[str, dict]) -> None:
+        """tmp + os.replace, the same atomic write every other latch here
+        uses. Never raises."""
+        payload = {"version": 1, "seen": seen,
+                   "updated_at": datetime.now(timezone.utc).isoformat()}
+        tmp = self._project_dirs_file.with_name(
+            f"{self._project_dirs_file.name}.{os.getpid()}.tmp")
+        try:
+            self._project_dirs_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            os.replace(str(tmp), str(self._project_dirs_file))
+        except OSError:
+            log.debug("%s: could not write %s", self.name, self._project_dirs_file,
+                      exc_info=True)
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+    def _project_dir_key(self, subpath: Optional[str]) -> str:
+        return str(subpath or "").strip().replace("\\", "/").strip("/")
+
+    def _note_project_dir_seen(self, subpath: Optional[str]) -> None:
+        """Record that this project's directory was here for this pass.
+
+        Also clears any moved-project entry for it: an editor who put the
+        folder back (by hand or with the tray's button) must not keep an
+        alarm that has stopped being true."""
+        key = self._project_dir_key(subpath)
+        if not key:
+            return
+        try:
+            seen = self._read_project_dirs()
+            slug = self._project_slug_for_subpath(key) or ""
+            entry = dict(seen.get(key) or {})
+            entry["last_seen_at"] = datetime.now(timezone.utc).isoformat()
+            entry["path"] = str(Path(self.local_root) / Path(*key.split("/")))
+            if slug:
+                entry["slug"] = slug
+            seen[key] = entry
+            self._write_project_dirs(seen)
+        except Exception:
+            log.debug("%s: could not record the project dir for %s", self.name, key,
+                      exc_info=True)
+        with self._lock:
+            self._moved_project_dirs = [
+                m for m in self._moved_project_dirs
+                if self._project_dir_key(m.get("subpath")) != key
+            ]
+
+    def _project_dir_absent(self, subpath: str) -> LaneStatus:
+        """Lane A has no source directory: IDLE if it was never here, ERROR
+        if it was here last pass and has gone (UX-3).
+
+        The old string ("project dir not yet local") reads like ordinary
+        first-run state on the tray line and the fleet chip, which is why an
+        editor who renamed a folder in Explorer saw nothing wrong while
+        everything they filed in it stopped reaching the fleet."""
+        key = self._project_dir_key(subpath)
+        record = self._read_project_dirs().get(key) or {}
+        if not record.get("last_seen_at"):
+            with self._lock:
+                self._status.state = STATE_IDLE
+                self._status.detail = f"project dir not yet local: {subpath}"
+            return self.status()
+
+        label = key.split("/")[-1] or key
+        slug = str(record.get("slug") or "")
+        expected = str(Path(self.local_root) / Path(*key.split("/")))
+        found = self._find_moved_project_dir(slug) if slug else None
+        sentence = (f"Your project folder for {label} is not where CCSync expects "
+                    "it. Did you rename or move it?")
+        if found:
+            sentence += f" It looks like it is at {found} now."
+        log.error("%s: %s (expected %s)", self.name, sentence, expected)
+        with self._lock:
+            self._status.state = STATE_ERROR
+            self._status.detail = sentence
+            self._status.last_error = sentence
+            entry = {"slug": slug or None, "subpath": key,
+                     "expected": expected, "found": found}
+            self._moved_project_dirs = (
+                [m for m in self._moved_project_dirs
+                 if self._project_dir_key(m.get("subpath")) != key]
+                + [entry]
+            )[-MAX_REPORTED_PROJECT_DIRS:]
+        return self.status()
+
+    def _find_moved_project_dir(self, slug: str) -> Optional[str]:
+        """Where the marker for `slug` is now, or None.
+
+        The self-heal half of UX-3: the marker travels with the directory, so
+        a folder an editor renamed or dragged is still identifiable. None
+        covers "the scan could not run" as well as "it is not on this
+        machine" -- both mean the same thing to the caller (offer nothing),
+        and neither is ever acted on automatically."""
+        if not slug:
+            return None
+        try:
+            markers = scan_project_markers(self.local_root)
+        except Exception:
+            log.debug("%s: marker scan failed", self.name, exc_info=True)
+            return None
+        if not markers:
+            return None
+        return markers.get(slug)
+
+    def moved_project_dirs(self) -> list[dict]:
+        """`sync_guard.moved_project_dirs`: the project dirs that were here
+        and are not (UX-3). Empty list means none, which is how "every
+        selected project is where it should be" is spelled."""
+        with self._lock:
+            return [dict(m) for m in self._moved_project_dirs]
+
+    def stray_projects(self) -> Optional[dict]:
+        """Last stray-project-dir scan (SYNC-10), or None if never run."""
+        with self._lock:
+            return dict(self._stray_projects) if self._stray_projects else None
+
+    def _refresh_stray_projects(self) -> Optional[dict]:
+        """Project directories on this machine that are in NO selection.
+
+        Report-only, on the orphan scan's cadence and with the orphan scan's
+        posture: nothing here removes a byte. A repath onto an occupied
+        target leaves the old tree in place deliberately (repath.py:283), and
+        that tree is then in no lane's scope for ever -- lane B never syncs
+        it, lane A never uploads it, and the manifest still counts its files
+        as this machine's.
+
+        Returns None for "could not tell", which is NOT "there are none": no
+        selection source wired, or a selection that is empty because the
+        dashboard has not answered yet, both mean the whole tree would look
+        stray. Never raises."""
+        if self.known_rels_fn is None:
+            return None
+        try:
+            rels = [str(r) for r in (self.known_rels_fn() or []) if r]
+        except Exception:
+            log.debug("%s: stray scan could not read the selection", self.name,
+                      exc_info=True)
+            return None
+        if not rels:
+            # Empty is ambiguous (before the first fetch, and whenever the
+            # dashboard is unreachable, the sequencer answers []), and the
+            # ambiguous reading here would name every project on the machine.
+            return None
+        markers = scan_project_markers(self.local_root)
+        if markers is None:
+            return None
+        expected = {
+            os.path.normcase(os.path.normpath(
+                str(Path(self.local_root) / "Projects" / Path(*rel.strip("/").split("/")))))
+            for rel in rels
+        }
+        strays: list[dict] = []
+        total = 0
+        for slug, directory in sorted(markers.items(), key=lambda kv: kv[1]):
+            if os.path.normcase(os.path.normpath(directory)) in expected:
+                continue
+            size = _dir_size_bytes(directory)
+            total += size
+            strays.append({"slug": slug, "path": directory, "bytes": size})
+        report = {
+            "count": len(strays),
+            "bytes": total,
+            "paths": [s["path"] for s in strays[:MAX_REPORTED_PROJECT_DIRS]],
+            "slugs": [s["slug"] for s in strays[:MAX_REPORTED_PROJECT_DIRS]],
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if strays:
+            log.warning(
+                "%s: %d project folder(s) on this machine are in no sync plan "
+                "(%.1f GB) -- no lane touches them and nothing here deletes them; "
+                "first: %s", self.name, len(strays), total / 1e9, strays[0]["path"],
+            )
+        with self._lock:
+            self._stray_projects = report
+        return report
 
     # -- the tree has to actually be there --------------------------------
     def _local_root_is_present(self) -> bool:
@@ -3001,10 +3315,11 @@ class RcloneLane(LaneAdapter):
             # source dir, which we don't want treated as a real failure.
             project_dir = Path(self.local_root) / subpath
             if not project_dir.exists():
-                with self._lock:
-                    self._status.state = STATE_IDLE
-                    self._status.detail = f"project dir not yet local: {subpath}"
-                return self.status()
+                return self._project_dir_absent(subpath)
+            # UX-3: seen, with today's date and today's marker slug. Cheap
+            # (one small JSON rewrite per project per pass) and it is the only
+            # record that separates "gone" from "never arrived".
+            self._note_project_dir_seen(subpath)
 
         # PRE-FLIGHT, and it is the only guard that fires before a byte moves:
         # `--max-delete` bounds one pass, this refuses to start the pass at all

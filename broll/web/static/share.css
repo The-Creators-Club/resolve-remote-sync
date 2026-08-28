@@ -69,3 +69,14 @@
   border-top: 1px dotted var(--red-dim);
   display: flex; gap: 18px; flex-wrap: wrap;
 }
+
+/* UX-19 (resilience sweep 2026-08-28): a clip pulled from the folder while
+   the client is looking at it. Amber, not red: nothing is broken, the folder
+   simply changed under them, and the fix is a refresh. */
+#share-clip-gone {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--amber, #d08a2c);
+  color: var(--amber, #d08a2c);
+  line-height: 1.5;
+}

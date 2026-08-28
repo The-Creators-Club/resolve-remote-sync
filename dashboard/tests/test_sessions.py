@@ -11,6 +11,7 @@ in Settings.__post_init__, not at create_app.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,6 +19,8 @@ from fastapi.testclient import TestClient
 from ccsync_dashboard import auth, db, sessions
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
+
+DASHBOARD_ROOT = Path(__file__).resolve().parents[1]
 
 # >= 24 chars, plenty of distinct characters: what broll.check_ingest_token
 # demands, which is now the same rule DASH_SESSION_SECRET and
@@ -234,6 +237,54 @@ def test_admin_can_revoke_another_editors_sessions_from_the_users_page(strict, t
         assert editor.get("/api/v1/me").json()["user"] is None
         # ...and the admin's own session is untouched
         assert admin.get("/api/v1/me").json()["user"] == "owen"
+
+
+def test_the_admins_own_row_is_labelled_sign_me_out_everywhere(strict, tmp_path):
+    """UX-22 (resilience sweep 2026-08-28): [ REVOKE ALL ] next to the row
+    marked (you) used to read exactly like every other editor's row, and
+    clicking it logs the admin out of the machine they are fixing things
+    from. The confirm text differs too (C-9 for your own row)."""
+    settings = _settings(tmp_path, "labels.db")
+    app = _app(settings)
+    with TestClient(app) as admin, TestClient(app) as editor:
+        _login(admin, "owen")
+        _login(editor, "jsmith")
+        panel = admin.get("/partials/admin/sessions")
+        assert panel.status_code == 200
+        assert "[ SIGN ME OUT EVERYWHERE ]" in panel.text
+        assert "[ REVOKE ALL ]" in panel.text
+        # C-9's own-row copy and the generic other-row copy are both present,
+        # and distinct.
+        assert ("Sign yourself out of every browser, including this one? "
+                "You will need to log in again to finish what you are doing."
+                ) in panel.text
+        assert "Their computer's own sync is not affected." in panel.text
+
+
+def test_c9_topbar_logout_all_gets_a_matching_confirm(strict, tmp_path):
+    """The C-9 copy the sessions panel uses for your own row also has to
+    guard the topbar's [ LOGOUT ALL ], which is a PLAIN form (it is injected
+    into three other SPAs with innerHTML, so no listener could survive
+    there) -- hx-confirm cannot reach a plain form, so this is onsubmit +
+    window.confirm instead."""
+    text = (DASHBOARD_ROOT / "templates" / "partials" / "topbar.html").read_text(
+        encoding="utf-8")
+    assert 'action="/logout-everywhere"' in text
+    assert "onsubmit=" in text
+    assert "window.confirm(" in text
+    assert ("Sign yourself out of every browser, including this one? "
+            "You will need to log in again to finish what you are doing."
+            ) in text
+
+    # And it actually round-trips: the endpoint still logs the browser out.
+    settings = _settings(tmp_path, "topbar.db")
+    app = _app(settings)
+    with TestClient(app) as client:
+        _login(client)
+        token = _csrf(client)
+        assert client.post("/logout-everywhere", data={"csrf": token},
+                           follow_redirects=False).status_code == 303
+        assert client.get("/api/v1/me").json()["user"] is None
 
 
 def test_the_json_twin_of_the_sessions_panel(strict, tmp_path):

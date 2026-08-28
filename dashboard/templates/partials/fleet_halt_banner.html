@@ -1,0 +1,26 @@
+{# The standing halt banner (UX-8, resilience sweep 2026-08-28).
+
+   On EVERY page, for everyone signed in, because the halt is why nobody's
+   footage is moving and the switch used to live on one panel of one admin
+   page. It counts hours and machines so "I will look at it on Monday" reads
+   as what it is. Renders as nothing when the fleet is syncing. #}
+{% if halt.active %}
+<div class="banner alarm" id="fleet-halt-banner">
+  &#9940; SYNCING IS HALTED ON EVERY COMPUTER
+  ({{ halt_hours }} hour{{ "s" if halt_hours != 1 }} so far, {{ halt_machines }} computer{{ "s" if halt_machines != 1 }} in the fleet).
+  {% if halt.reason %}<span class="mono-sm">{{ halt.reason }}</span>{% endif %}
+  <span class="mono-sm muted">set by {{ halt.set_by }} {{ halt.set_at | ago }}{% if halt.expires_at %};
+    it releases itself {{ halt.expires_at | ago }} unless somebody keeps it on{% endif %}.</span>
+  {% if session_is_admin %}
+  <span class="mono-sm"><a href="/admin/users#admin-fleet-halt">Start syncing again on Settings, Users.</a></span>
+  {% endif %}
+</div>
+{% elif halt.expired %}
+{# An expiry nobody is told about is the same trap one level down: the fleet
+   started again and the person who stopped it does not know. #}
+<div class="banner" id="fleet-halt-banner">
+  &#9650; THE FLEET HALT HAS EXPIRED and syncing has started again everywhere.
+  {% if halt.reason %}<span class="mono-sm">It was set for: {{ halt.reason }}</span>{% endif %}
+  <span class="mono-sm muted">set by {{ halt.set_by }} {{ halt.set_at | ago }}, expired {{ halt.expires_at | ago }}.</span>
+</div>
+{% endif %}

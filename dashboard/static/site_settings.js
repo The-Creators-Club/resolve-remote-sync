@@ -693,6 +693,77 @@
     return wrap;
   }
 
+  // ------------------------------------------- import diff + change history
+  // UX-21 (resilience sweep 2026-08-28): IMPORT used to overwrite every
+  // recognised key with no confirmation and no way back. The confirm below
+  // is built from the SAME diff the server would apply (GET/POST
+  // /admin/site/import?dry_run=1), never a guess, and [ UNDO LAST IMPORT ]
+  // replays the newest site_history entry through the same apply path.
+
+  function importConfirmMessage(changes) {
+    var n = changes.length;
+    var head = "This will change " + n + " setting" + (n === 1 ? "" : "s") + ", including ";
+    var shown = changes.slice(0, 3).map(function (c) {
+      return c.key + " from " + (c.from || "(blank)") + " to " + (c.to || "(blank)");
+    });
+    var text = head + shown.join(", ");
+    if (n > 3) text += ", and " + (n - 3) + " more";
+    return text + ". Apply it?";
+  }
+
+  function runImport(text) {
+    return api("/api/v1/admin/site/import?dry_run=1", {
+      method: "POST", body: JSON.stringify({text: text}),
+    }).then(function (preview) {
+      if (!preview.count) {
+        showError("");
+        window.alert("Nothing in that text differs from the current settings. Nothing was changed.");
+        return;
+      }
+      if (!window.confirm(importConfirmMessage(preview.changes))) return;
+      return api("/api/v1/admin/site/import", {
+        method: "POST", body: JSON.stringify({text: text}),
+      }).then(function () { window.location.reload(); });
+    });
+  }
+
+  function loadSiteHistory() {
+    var list = document.getElementById("site-history-list");
+    var undoBtn = document.getElementById("site-undo-btn");
+    if (!list) return;
+    api("/api/v1/admin/site/history").then(function (body) {
+      var entries = body.entries || [];
+      list.textContent = "";
+      if (!entries.length) {
+        list.textContent = "No site setting changes recorded yet.";
+        if (undoBtn) undoBtn.style.display = "none";
+        return;
+      }
+      entries.slice(0, 5).forEach(function (e) {
+        var count = e.count || 0;
+        list.appendChild(el("div", "muted",
+          (e.action || "save") + " by " + e.actor + " at " + e.at + " (" +
+            count + " setting" + (count === 1 ? "" : "s") + ")"));
+      });
+      if (undoBtn) {
+        var latest = entries[0];
+        undoBtn.style.display = "";
+        undoBtn.onclick = function () {
+          var count = latest.count || 0;
+          var message = "Put back the " + count + " setting" + (count === 1 ? "" : "s") +
+            " changed by " + latest.actor + " at " + latest.at + "?";
+          if (!window.confirm(message)) return;
+          api("/api/v1/admin/site/undo-last-change", {method: "POST"})
+            .then(function () { window.location.reload(); })
+            .catch(function (err) { showError("could not undo: " + err.message); });
+        };
+      }
+    }).catch(function (err) {
+      list.textContent = "could not load change history: " + err.message;
+      if (undoBtn) undoBtn.style.display = "none";
+    });
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     var form = document.getElementById("settings-form");
     if (form) {
@@ -723,17 +794,14 @@
     }
 
     loadAiProviders();
+    loadSiteHistory();
 
     var importForm = document.getElementById("settings-import-form");
     if (importForm) {
       importForm.addEventListener("submit", function (evt) {
         evt.preventDefault();
-        api("/api/v1/admin/site/import", {
-          method: "POST",
-          body: JSON.stringify({text: importForm.text.value}),
-        }).then(function () {
-          window.location.reload();
-        }).catch(function (err) { showError("could not import: " + err.message); });
+        runImport(importForm.text.value)
+          .catch(function (err) { showError("could not import: " + err.message); });
       });
     }
   });

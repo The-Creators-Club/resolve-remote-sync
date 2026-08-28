@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}CC SYNC: ALERTS{% endblock %}
+{% block layout %}
+  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s" hx-swap="innerHTML">
+    {% include "partials/sidebar.html" %}
+  </aside>
+  <main class="main">
+    {% include "partials/settings_nav.html" %}
+    <div class="detail-head"><h1>[ ALERTS ]</h1></div>
+    <p class="muted" style="margin: 0.4rem 0 0.9rem; max-width: 62ch;">
+      What this server checks about itself and the fleet, what it found, and
+      where it sends it. Every alarm this product raises used to be
+      pull-only: it was on a page, and somebody had to have the page open.
+      This is the same information, pushed, plus a report every Monday
+      morning.
+    </p>
+    {# NOT polled: this page is read, and a swap under the reader would throw
+       away whatever they had typed in the settings form. #}
+    {% include "partials/admin_alerts.html" %}
+  </main>
+{% endblock %}

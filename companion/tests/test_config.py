@@ -203,6 +203,9 @@ def test_default_toml_text_documents_every_default_key():
         "broll_ingest_enabled", "broll_ingest_idle_seconds",
         "broll_ingest_skip_while_resolve", "broll_ingest_free_space_floor_gb",
         "broll_ingest_max_concurrent_ffmpeg", "broll_ingest_staging_dir",
+        # MEDIA-3 (resilience sweep 2026-08-28): seven days is a measured
+        # default a later re-tune has to be able to reach.
+        "broll_ingest_staging_retention_days",
         # The Syncthing supervisor's kill switch (SYNC-17, 2026-08-18). ON is
         # the shipped behaviour and the only one anybody should want; writing
         # `supervise_syncthing = true` into every first-run file would make
@@ -282,6 +285,8 @@ EXAMPLE_COMMENTED_OUT = {
     "broll_ingest_enabled", "broll_ingest_idle_seconds",
     "broll_ingest_skip_while_resolve", "broll_ingest_free_space_floor_gb",
     "broll_ingest_max_concurrent_ffmpeg", "broll_ingest_staging_dir",
+    # MEDIA-3 (resilience sweep 2026-08-28), same class again.
+    "broll_ingest_staging_retention_days",
     # The Syncthing supervisor's kill switch, same class (SYNC-17).
     "supervise_syncthing",
     # The project-library walk (docs/LIBRARY_WALK_PLAN.md, 2026-08-26).

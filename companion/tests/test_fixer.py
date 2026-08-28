@@ -209,6 +209,118 @@ def test_ignore_tracker_clear():
     assert tracker.is_ignored("clip.mov") is False
 
 
+# -- persisted folder ignores + the skip ledger (RES-12 / UX-4) ------------
+
+
+def test_a_folder_ignore_is_honoured_and_survives_a_restart(tmp_path):
+    """RES-12: an editor who keeps a personal stock-footage folder outside
+    the tree was offered the same clips at every start for ever, because the
+    ignore set died with the process."""
+    state = tmp_path / "state"
+    tracker = fixer.IgnoreTracker(state)
+    assert tracker.ignore_folder(str(tmp_path / "stock"), reason="my own library")
+    assert tracker.is_ignored(str(tmp_path / "stock" / "sunset.mov")) is True
+
+    # A "restart": a brand new tracker over the same state dir.
+    restarted = fixer.IgnoreTracker(state)
+    assert restarted.is_ignored(str(tmp_path / "stock" / "sunset.mov")) is True
+    assert restarted.folder_count() == 1
+    assert restarted.folders()[0]["reason"] == "my own library"
+    assert restarted.folders()[0]["when"]
+
+
+def test_a_folder_ignore_does_not_catch_a_sibling_with_the_same_prefix(tmp_path):
+    """canon._is_under's separator rule: "stock_extra" is not inside
+    "stock"."""
+    tracker = fixer.IgnoreTracker(tmp_path / "state")
+    tracker.ignore_folder(str(tmp_path / "stock"))
+    assert tracker.is_ignored(str(tmp_path / "stock_extra" / "clip.mov")) is False
+
+
+def test_forget_folder_brings_the_clips_back(tmp_path):
+    state = tmp_path / "state"
+    tracker = fixer.IgnoreTracker(state)
+    tracker.ignore_folder(str(tmp_path / "stock"))
+    assert tracker.forget_folder(str(tmp_path / "stock")) is True
+    assert tracker.is_ignored(str(tmp_path / "stock" / "sunset.mov")) is False
+    assert fixer.IgnoreTracker(state).folder_count() == 0
+    # A second [ FORGET ] on the same entry says so rather than reporting a
+    # success it did not have.
+    assert tracker.forget_folder(str(tmp_path / "stock")) is False
+
+
+def test_a_folder_ignore_that_cannot_be_persisted_is_refused(tmp_path, monkeypatch):
+    """"Always" that lasts until the next restart is worse than no button:
+    the caller is told, so the editor can be."""
+    tracker = fixer.IgnoreTracker(tmp_path / "state")
+    monkeypatch.setattr(fixer, "_write_json_atomic", lambda *a, **k: False)
+    assert tracker.ignore_folder(str(tmp_path / "stock")) is False
+    assert tracker.folder_count() == 0
+
+
+def test_a_tracker_with_no_state_dir_is_the_old_session_only_behaviour():
+    tracker = fixer.IgnoreTracker()
+    tracker.ignore("clip.mov")
+    assert tracker.is_ignored("clip.mov") is True
+    assert tracker.skipped_count() == 0
+    assert tracker.ignore_folder("anywhere") is False
+
+
+def test_skipped_clips_are_recorded_across_a_restart(tmp_path):
+    """UX-4: the ledger is a RECORD, not a suppression list. A restart offers
+    the clip again (the button says "this session" and means it) -- what
+    survives is the COUNT nobody could see before."""
+    state = tmp_path / "state"
+    tracker = fixer.IgnoreTracker(state)
+    tracker.ignore(r"C:\Users\owen\Desktop\clip.mov")
+    tracker.ignore(r"C:\Users\owen\Desktop\other.mov", how="headless")
+    assert tracker.skipped_count() == 2
+
+    restarted = fixer.IgnoreTracker(state)
+    assert restarted.skipped_count() == 2
+    assert restarted.session_count() == 0
+    assert restarted.is_ignored(r"C:\Users\owen\Desktop\clip.mov") is False
+
+
+def test_the_skip_ledger_records_how_the_clip_was_skipped(tmp_path):
+    state = tmp_path / "state"
+    tracker = fixer.IgnoreTracker(state)
+    tracker.ignore("/raw/a.mov", how="headless")
+    written = fixer._read_json(state / fixer.SKIPPED_CLIPS_FILENAME)["clips"]
+    assert [v["how"] for v in written.values()] == ["headless"]
+
+
+def test_clear_forgets_the_session_but_not_the_folders(tmp_path):
+    """APP-2 clears dismissals; RES-12's standing decisions stay."""
+    tracker = fixer.IgnoreTracker(tmp_path / "state")
+    tracker.ignore("/raw/a.mov")
+    tracker.ignore_folder("/stock")
+    tracker.clear()
+    assert tracker.is_ignored("/raw/a.mov") is False
+    assert tracker.is_ignored("/stock/b.mov") is True
+    assert tracker.session_count() == 0
+    # Cleared from the SESSION, still counted in the ledger: the clip is
+    # still not syncing, whatever the tray now offers.
+    assert tracker.skipped_count() == 1
+
+
+def test_a_corrupt_ignore_file_fails_towards_showing_the_clips(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / fixer.FIXER_IGNORES_FILENAME).write_text("{not json", encoding="utf-8")
+    tracker = fixer.IgnoreTracker(state)
+    assert tracker.folder_count() == 0
+    assert tracker.is_ignored("/anything/clip.mov") is False
+
+
+def test_the_skip_ledger_is_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(fixer, "_MAX_SKIPPED_RECORDED", 3)
+    tracker = fixer.IgnoreTracker(tmp_path / "state")
+    for n in range(6):
+        tracker.ignore(f"/raw/{n}.mov")
+    assert tracker.skipped_count() == 3
+
+
 # -- fix_clip with multiple timeline items sharing one source file ---------
 
 

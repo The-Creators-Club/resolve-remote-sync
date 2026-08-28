@@ -428,6 +428,12 @@ class Settings:
     interval_completion: float = 60.0
     interval_remoteneed: float = 60.0
     interval_prune: float = 3600.0
+    # The self-diagnosis pass (SYS-8, resilience sweep 2026-08-28). Ten
+    # minutes: it walks the whole fleet view and every check, the conditions
+    # it looks for are measured in hours, and the dedup window is a day, so
+    # running it faster would cost CPU on the box that is meant to be moving
+    # lane C bytes and would change nothing an admin sees.
+    interval_alerts: float = 600.0
     # Wall-clock budget for ONE completion pass (ops-efficiency-5,
     # 2026-08-21). The collector is one thread running every due kind in
     # series, so a Syncthing that hangs rather than refuses parks enforce,
@@ -663,6 +669,7 @@ class Settings:
             interval_completion=num("DASH_INTERVAL_COMPLETION", 60.0),
             interval_remoteneed=num("DASH_INTERVAL_REMOTENEED", 60.0),
             interval_prune=num("DASH_INTERVAL_PRUNE", 3600.0),
+            interval_alerts=num("DASH_INTERVAL_ALERTS", 600.0),
             completion_budget_seconds=num("DASH_COMPLETION_BUDGET_SECONDS", 30.0),
             backoff_max=num("DASH_BACKOFF_MAX", 300.0),
             enforce_max_share_removals=int(num("DASH_ENFORCE_MAX_REMOVALS", 3)),

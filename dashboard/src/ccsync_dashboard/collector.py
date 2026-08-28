@@ -18,7 +18,7 @@ from typing import Any, Callable
 
 from pathlib import Path
 
-from . import db, links, provision
+from . import db, links, notices, provision
 from .settings import Settings
 from .syncthing_client import SyncthingClient, SyncthingError
 
@@ -27,7 +27,11 @@ log = logging.getLogger("ccsync.dashboard.collector")
 # provision runs before config so a folder created for a new project dir is
 # hydrated into the DB in the same cycle; enforce runs after config so it
 # reconciles against a fresh device/folder picture.
-KINDS = ("provision", "config", "enforce", "inventory", "connections", "completion", "remoteneed", "prune")
+# `alerts` runs LAST and on the slowest cadence of the lot: it reads the
+# picture every kind above it has just refreshed, and an alert composed from
+# a half-updated cycle is an alert about the cycle rather than about the
+# fleet (SYS-8, resilience sweep 2026-08-28).
+KINDS = ("provision", "config", "enforce", "inventory", "connections", "completion", "remoteneed", "prune", "alerts")
 REMOTENEED_PERPAGE = 200
 REMOTENEED_MAX_PAGES = 3
 BACKOFF_BASE = 15.0
@@ -39,7 +43,11 @@ DB_OPEN_RETRY_SECONDS = 5.0
 # Retention is the ONE cycle that must run even in a Syncthing-less
 # deployment (settings.py fully supports one: reports + login work without
 # it). Everything else needs the Syncthing REST API.
-SYNCTHING_FREE_KINDS = ("prune",)
+# `alerts` belongs here for the same reason `prune` does, and for one more:
+# "this server cannot reach its own sync engine" is one of the things it
+# alerts ON. A kind that only runs when Syncthing is reachable could never
+# report Syncthing being unreachable (SYS-8).
+SYNCTHING_FREE_KINDS = ("prune", "alerts")
 
 # Syncthing's own folder marker. Its presence is proof Syncthing has actually
 # been serving a directory -- and its ABSENCE is Syncthing's only mass-delete
@@ -142,6 +150,13 @@ class Collector:
         # thread that is alive but has not stamped this in minutes is wedged
         # inside one call, which is a different fault from a thread that died.
         self._heartbeat = time.monotonic()
+        # How many times app.CollectorWatchdog has had to put this loop back,
+        # and how many of those the alerts pass has already reported (SYS-8).
+        # The watchdog restarts a DEAD thread, so nothing this object owns
+        # survives to write the event durably; the alert it raises does, in
+        # alert_log.
+        self._restarts = 0
+        self._restarts_alerted = 0
 
     # ------------------------------------------------------------ lifecycle
 
@@ -180,6 +195,11 @@ class Collector:
         thread = self._thread
         if thread is not None and thread.is_alive():
             return False
+        # Counted BEFORE the replacement starts, so the first alerts pass on
+        # the new thread reports it (SYS-8): a collector that has needed
+        # restarting is a fault an admin has to hear about, and today it
+        # exists only as one log line in a container log that rotates.
+        self._restarts += 1
         self.start()
         return True
 
@@ -210,6 +230,7 @@ class Collector:
             "completion": s.interval_completion,
             "remoteneed": s.interval_remoteneed,
             "prune": s.interval_prune,
+            "alerts": s.interval_alerts,
         }[kind]
 
     def _loop(self) -> None:
@@ -281,6 +302,17 @@ class Collector:
         """Run the given kinds in canonical order; returns kind -> ok."""
         kinds = list(kinds)
         self._refresh_shared_folders(conn)
+        # DASH-1 / UX-5 (resilience sweep 2026-08-28): finish or quarantine
+        # any file move whose row was committed and whose rename did not
+        # return, and age out move commands that were delivered and never
+        # answered. Cheap (one indexed read of a table that is normally
+        # empty) and never raises -- see api.reconcile_file_moves.
+        try:
+            from . import api as api_mod
+
+            api_mod.reconcile_file_moves(self.settings, conn)
+        except Exception:  # noqa: BLE001 - a cycle must never die here
+            log.exception("file-move reconciliation failed; continuing")
         # Completion/remoteneed need the config caches; hydrate first if empty.
         if not self._project_ids and any(k in kinds for k in ("completion", "remoteneed")):
             if "config" not in kinds:
@@ -294,6 +326,7 @@ class Collector:
             "completion": self._run_completion,
             "remoteneed": self._run_remoteneed,
             "prune": self._run_prune,
+            "alerts": self._run_alerts,
         }
         results: dict[str, bool] = {}
         for kind in KINDS:
@@ -318,6 +351,28 @@ class Collector:
                 results[kind] = False
                 continue
             results[kind] = self._timed(conn, kind, runners[kind])
+        # THE SELF-DIAGNOSIS PASS (UX-10, resilience sweep 2026-08-28, widened
+        # on the owner's instruction the same day). Read-only, last, and
+        # wrapped: it exists to SAY what this cycle found, and a diagnosis
+        # that could fail the cycle it describes would be a bad trade.
+        try:
+            pending = None
+            if self.settings.syncthing_url:
+                try:
+                    pending = self.client.pending_devices()
+                except Exception:  # noqa: BLE001 - "could not ask" is not "none pending"
+                    pending = None
+            # self._my_id is only ever set once _run_config has actually
+            # completed a pass (it returns early, before touching either, on
+            # an empty myID with none known yet); an unset one means
+            # _folder_devices is still its {} construction default, not a
+            # real "nothing is shared" snapshot -- so None goes in instead,
+            # which _check_plan_without_share reads as "not checked".
+            folder_devices = self._folder_devices if self._my_id else None
+            notices.run_checks(conn, self.settings, self.now_fn(), pending_devices=pending,
+                               folder_devices=folder_devices)
+        except Exception:  # noqa: BLE001
+            log.exception("the self-diagnosis pass failed; continuing")
         return results
 
     def _refresh_shared_folders(self, conn) -> None:
@@ -414,9 +469,33 @@ class Collector:
         # slug it is about to stamp already lives somewhere else in the tree.
         scanned = provision.scan_project_dirs(projects_dir)
         by_slug: dict[str, list[str]] = {}
+        # Subjects still failing this pass, so the ones that stopped failing
+        # can be closed at the end (see db.clear_notices_of_kind).
+        unreadable: list[str] = []
+        failed_slugs: list[str] = []
+        # Filled by _provision_slug / _creatable as they refuse things, and
+        # drained at the end of the pass so a refusal that no longer applies
+        # closes itself.
+        self._notice_open: dict[str, list[str]] = {
+            "duplicate_slug_dirs": [], "duplicate_syncthing_folder": [],
+            "project_container_marker": [], "project_nested_marker": [],
+        }
         for rel, slug in scanned:
             if slug is None:
                 log.warning("unreadable project marker in %s -- skipping", rel)
+                # UX-10 (2026-08-28): a damaged marker means that folder is
+                # not a project to anybody, and the only sign of it was this
+                # line in a container log.
+                unreadable.append(rel)
+                db.notice(
+                    conn, "unreadable_project_marker", "warn", rel,
+                    body=(f"The folder {rel} on the server has a damaged CCSync marker "
+                          "file, so it is not a project as far as this dashboard is "
+                          "concerned: nobody can tick it and nothing in it syncs."),
+                    fix=("Copy a working project's .ccsync-project file into that folder "
+                         "and correct its id, or delete the damaged file and set the "
+                         "project up again from Settings, Projects."),
+                    now=self.now_fn())
                 continue
             by_slug.setdefault(slug, []).append(rel)
 
@@ -463,6 +542,16 @@ class Collector:
             except Exception as exc:
                 log.error("provision failed for %s (%s): %s", slug, ", ".join(rels), exc)
                 failures.append(f"{slug}: {exc}")
+                failed_slugs.append(slug)
+                db.notice(
+                    conn, "provision_failed", "error", slug,
+                    body=(f"The project folder {', '.join(rels)} could not be set up for "
+                          f"syncing: {str(exc)[:200]}. Until this clears, nothing in that "
+                          "project reaches anybody."),
+                    fix=("Look at the other problems listed here first. If there is none, "
+                         "check that Syncthing is running on the server (Settings, "
+                         "Diagnostics)."),
+                    now=self.now_fn())
         # -- 5. shared asset libraries -------------------------------------
         # Deliberately after the project loop and outside its per-slug fault
         # isolation's failure list, but on the same cycle: a broken LUT
@@ -472,6 +561,16 @@ class Collector:
         except Exception as exc:
             log.error("shared asset folder provisioning failed: %s", exc)
             failures.append(f"shared-assets: {exc}")
+            db.notice(
+                conn, "shared_assets_failed", "error", "shared asset libraries",
+                body=(f"The shared asset libraries (the LUT library) could not be set up: "
+                      f"{str(exc)[:200]}. Editors will see their LUTs missing in Resolve."),
+                fix=("Check that Syncthing is running on the server, then look at the "
+                     "shared folders on Settings, Site."),
+                now=self.now_fn())
+        else:
+            db.clear_notice(conn, "shared_assets_failed", "shared asset libraries",
+                            now=self.now_fn())
 
         # -- 6. cross-project folder links (SHARED_FOLDERS_PLAN.md §2.3) ----
         # Same posture as the shared-folder step: a broken declaration must
@@ -482,6 +581,25 @@ class Collector:
         except Exception as exc:
             log.error("cross-project link resolution failed: %s", exc)
             failures.append(f"project-links: {exc}")
+            db.notice(
+                conn, "project_links_failed", "warn", "shared folder links",
+                body=(f"A shared-folder link between projects could not be resolved: "
+                      f"{str(exc)[:200]}. The borrowed folder will not appear in the "
+                      "project that borrows it."),
+                fix="Open the borrowing project's page and check its shared folder links.",
+                now=self.now_fn())
+        else:
+            db.clear_notice(conn, "project_links_failed", "shared folder links",
+                            now=self.now_fn())
+
+        # A subject that is no longer failing has stopped failing, and nothing
+        # else in the code is in a position to say so (UX-10).
+        db.clear_notices_of_kind(conn, "unreadable_project_marker", unreadable,
+                                 now=self.now_fn())
+        db.clear_notices_of_kind(conn, "provision_failed", failed_slugs, now=self.now_fn())
+        for kind, subjects in self._notice_open.items():
+            db.clear_notices_of_kind(conn, kind, subjects, now=self.now_fn())
+        conn.commit()
 
         if failures:
             raise RuntimeError(
@@ -666,6 +784,23 @@ class Collector:
             log.warning("slug %s claimed by %d dirs (%s) -- %s",
                         slug, len(rels), ", ".join(rels),
                         "keeping current" if matching else "skipping all")
+            # UX-10 (2026-08-28): the project simply vanished from the
+            # dashboard, or froze at an old path, and the reason was here.
+            self._notice_open["duplicate_slug_dirs"].append(slug)
+            db.notice(
+                conn, "duplicate_slug_dirs", "error", slug,
+                body=(f"Two folders on the server both claim to be the same project "
+                      f"({', '.join(rels)}). That happens when a project folder is COPIED "
+                      f"rather than moved, because the copy brings the project's identity "
+                      f"file with it. "
+                      + ("The dashboard is working with the one it already knew and "
+                         "ignoring the other."
+                         if matching else
+                         "The dashboard cannot tell which one is real, so it is leaving "
+                         "both alone and this project is not syncing.")),
+                fix=("Delete the .ccsync-project file inside the copy (keep the original's), "
+                     "or delete the copy. The next pass picks it up by itself."),
+                now=self.now_fn())
             if not matching:
                 return
             rels = matching
@@ -673,10 +808,22 @@ class Collector:
         expected_path = f"{prefix}/{rel}"
 
         if existing is None:
-            if not self._creatable(slug, rel, projects_dir):
+            if not self._creatable(conn, slug, rel, projects_dir):
                 return
             other = self._duplicate_path_folder(slug, expected_path, folders_by_id)
             if other is not None:
+                self._notice_open["duplicate_syncthing_folder"].append(slug)
+                db.notice(
+                    conn, "duplicate_syncthing_folder", "error", slug,
+                    body=(f"Two sync folders point at the same directory on the server "
+                          f"({rel}): this project's own ({slug}) and another one "
+                          f"({other}). Only one of them is the folder editors are "
+                          f"connected to, so work saved through the other one goes "
+                          f"nowhere."),
+                    fix=(f"In Syncthing on the server, delete the folder {other} (keep the "
+                         f"one editors are on). Nothing is deleted from disk by removing a "
+                         f"Syncthing folder."),
+                    now=self.now_fn())
                 log.error(
                     "REFUSING to provision folder %s (%s): folder %s is ALREADY serving "
                     "that directory. This is the folder-id divergence: the collector "
@@ -748,8 +895,7 @@ class Collector:
                 return folder_id
         return None
 
-    @staticmethod
-    def _creatable(slug: str, rel: str, projects_dir: Path) -> bool:
+    def _creatable(self, conn, slug: str, rel: str, projects_dir: Path) -> bool:
         """Refuse to provision a folder for a directory that is a CONTAINER
         of projects, or that sits inside one -- the same rule
         create_tree_project/adopt_folder already enforce on the dashboard.
@@ -763,6 +909,18 @@ class Collector:
         target = projects_dir / Path(*[p for p in rel.split("/") if p])
         inside = provision.marked_ancestor(projects_dir, rel, include_self=False)
         if inside is not None:
+            # UX-10 (2026-08-28): this refusal is right and it went to a log
+            # nobody opens, while the folder simply never appeared.
+            self._notice_open.setdefault("project_nested_marker", []).append(slug)
+            db.notice(
+                conn, "project_nested_marker", "error", slug,
+                body=(f"The folder {rel} on the server is marked as a project, but it sits "
+                      f"INSIDE another project ({inside}). Projects cannot be inside each "
+                      f"other, so this one is not being set up and nothing in it syncs on "
+                      f"its own."),
+                fix=(f"Delete the {provision.MARKER_FILENAME} file inside {rel}, or move "
+                     f"that folder out of {inside} and put it beside it."),
+                now=self.now_fn())
             log.error(
                 "REFUSING to provision folder %s (%s): it is inside an existing project "
                 "(%s) -- projects cannot nest. Remove the stray %s marker.",
@@ -770,6 +928,19 @@ class Collector:
             return False
         below = provision.marked_descendants(target)
         if below:
+            # The worst of the sixteen: three real projects disappear from the
+            # dashboard because somebody dropped one file on their parent.
+            self._notice_open.setdefault("project_container_marker", []).append(slug)
+            db.notice(
+                conn, "project_container_marker", "error", slug,
+                body=(f"The folder {rel} on the server is marked as a project, but it "
+                      f"CONTAINS {len(below)} project(s) ({', '.join(below)}). Setting it "
+                      f"up would hide them, so the dashboard has refused, and those "
+                      f"projects are missing from this dashboard until it is sorted out."),
+                fix=(f"Delete the {provision.MARKER_FILENAME} file in {rel} (not the ones "
+                     f"in the projects inside it). Somebody usually copies it in by "
+                     f"copying a project folder."),
+                now=self.now_fn())
             log.error(
                 "REFUSING to provision folder %s (%s): that directory CONTAINS project(s) "
                 "(%s), so it is a container someone dropped a %s marker on -- provisioning "
@@ -1649,6 +1820,30 @@ class Collector:
 
     def _run_prune(self, conn) -> None:
         db.prune(conn, self.now_fn())
+
+    def _run_alerts(self, conn) -> str | None:
+        """The self-diagnosis pass (SYS-8, resilience sweep 2026-08-28).
+
+        Reads every check in `alerts.ALERT_KINDS`, delivers what is new,
+        re-states what is still an error, says what has recovered, and sends
+        the weekly report when Monday 08:00 site-local has come round. The
+        note it returns is what makes a site with NO SINK visible on the
+        collector health panel instead of reading as a clean cycle: "3
+        problem(s) open" is not the same answer as green.
+
+        `_restarts_seen` is the watchdog's event, and it is read here because
+        this is the first thing the REPLACEMENT loop thread runs. It is a
+        counter in memory on purpose: by the time a restart could be written
+        anywhere durable it has already been recovered from, and the alert it
+        raises is itself recorded in `alert_log`, which is durable.
+        """
+        from . import alerts
+
+        restarts = self._restarts - self._restarts_alerted
+        self._restarts_alerted = self._restarts
+        result = alerts.run_cycle(conn, self.settings, self.now_fn(),
+                                  watchdog_restarts=max(0, restarts))
+        return result.get("note")
 
 
 def main(argv: list[str] | None = None) -> int:

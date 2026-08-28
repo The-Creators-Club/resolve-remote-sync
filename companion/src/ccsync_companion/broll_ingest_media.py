@@ -335,32 +335,88 @@ def write_frames_json(sheets_dir: str | Path, timestamps: Iterable[float],
 RUN_TIMEOUT_SECONDS = 900
 
 
-def run_ffmpeg(cmd: Sequence[str], timeout: int = RUN_TIMEOUT_SECONDS) -> tuple[int, str]:
+def run_ffmpeg(cmd: Sequence[str], timeout: int = RUN_TIMEOUT_SECONDS,
+               child_sink: Optional[Any] = None) -> tuple[int, str]:
     """Run one built argv to completion -> (returncode, stderr text).
 
     stderr is DRAINED, never discarded: it is where ffmpeg puts both the
     reason it refused and (for scene detection) the entire result. Left
     unread on a pipe, a chatty filter fills the OS buffer and ffmpeg blocks
-    for ever holding the batch. `capture_output` reads both streams for us.
+    for ever holding the batch. `communicate` reads both streams for us.
 
     Never raises for a media reason: a non-zero exit is returned, because the
     caller counts an attempt and moves to the next clip. A binary that cannot
     be RUN at all, or a timeout, is UnreadableMediaError -- the same single
     exception type ffmpeg_tools chose, for the same reason (the caller has one
     response to all of them).
+
+    `child_sink` is MEDIA-2 (resilience sweep 2026-08-28): the orchestrator's
+    `stop()`/`cancel()` promised for months to kill the ffmpeg child and could
+    not, because nothing ever handed it one -- this ran under
+    `subprocess.run` on a daemon thread, `join(timeout=5)` abandoned that
+    thread, and an orphaned ffmpeg.exe kept running past tray exit holding a
+    handle on the staged file (which then blocked staging cleanup on Windows).
+    Popen, published, and cleared again on the way out; the sink itself is
+    never allowed to fail the run.
     """
+    if child_sink is None:
+        # No sink wired (a test double, a caller with nothing to kill): the
+        # simple, blocking form, which is also what every existing test of
+        # this function patches.
+        try:
+            done = subprocess.run(
+                list(cmd),
+                capture_output=True,
+                timeout=timeout,
+                creationflags=_win_creationflags(),
+                **TEXT_UTF8,
+            )
+        except subprocess.TimeoutExpired:
+            raise UnreadableMediaError(
+                f"ffmpeg timed out after {timeout}s -- unreachable drive, or a file "
+                "still being written")
+        except OSError as exc:
+            raise UnreadableMediaError(f"ffmpeg could not be run ({cmd[0]}): {exc}")
+        return done.returncode, (done.stderr or "")
+
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             list(cmd),
-            capture_output=True,
-            timeout=timeout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             creationflags=_win_creationflags(),
             **TEXT_UTF8,
         )
-    except subprocess.TimeoutExpired:
-        raise UnreadableMediaError(
-            f"ffmpeg timed out after {timeout}s -- unreachable drive, or a file "
-            "still being written")
     except OSError as exc:
         raise UnreadableMediaError(f"ffmpeg could not be run ({cmd[0]}): {exc}")
-    return proc.returncode, (proc.stderr or "")
+    _publish_child(child_sink, proc)
+    try:
+        try:
+            _out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Kill it, then drain: a killed child whose pipes are never read
+            # is the same wedged thread the timeout exists to end.
+            proc.kill()
+            try:
+                proc.communicate(timeout=10)
+            except Exception:  # noqa: BLE001 - already failing; do not mask it
+                pass
+            raise UnreadableMediaError(
+                f"ffmpeg timed out after {timeout}s -- unreachable drive, or a file "
+                "still being written")
+    finally:
+        _publish_child(child_sink, None)
+    return proc.returncode, (err or "")
+
+
+def _publish_child(child_sink: Optional[Any], proc: Optional[Any]) -> None:
+    """Hand the live child to the orchestrator (or take it back).
+
+    Swallows everything: a sink that raises must not turn a finished encode
+    into a failed clip."""
+    if child_sink is None:
+        return
+    try:
+        child_sink(proc)
+    except Exception:  # noqa: BLE001
+        log.debug("could not publish the ffmpeg child", exc_info=True)

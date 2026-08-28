@@ -90,24 +90,35 @@
               <input type="hidden" name="version" value="{{ p.version }}">
               <button class="btn" type="submit">[ MAKE CURRENT ]</button>
             </form>
-            {% if p.soak and not p.soak.ok %}
+            {# The typed override, for the soak gate and (UX-9, 2026-08-28)
+               for an UNSIGNED build: one mechanism, not two. Making an
+               unsigned build current stops every companion upgrading,
+               silently, because they verify the record signature. #}
+            {% if (p.soak and not p.soak.ok) or not p.signature %}
             <form class="inline-form" hx-post="/partials/admin/packages/current"
-                  hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+                  hx-target="closest .admin-packages-box" hx-swap="outerHTML"
+                  {% if not p.signature %}
+                  hx-confirm="This build has no release signature. Companions verify signatures, so making it current stops EVERY machine in the fleet from updating, silently. Republish it through tools\ship.cmd instead. Make it current anyway?"
+                  {% endif %}>
               <input type="hidden" name="kind" value="{{ p.kind }}">
               <input type="hidden" name="platform" value="{{ p.platform }}">
               <input type="hidden" name="version" value="{{ p.version }}">
               <input type="hidden" name="force" value="1">
               <input type="text" name="confirm" placeholder="type {{ p.version }}" size="12">
               <button class="btn" type="submit"
-                      title="hand this build to the whole fleet without waiting for the soak">[ MAKE CURRENT ANYWAY ]</button>
+                      title="{% if not p.signature %}hand this UNSIGNED build to the whole fleet, which stops every machine updating{% else %}hand this build to the whole fleet without waiting for the soak{% endif %}">[ MAKE CURRENT ANYWAY ]</button>
             </form>
             {% endif %}
             {% endif %}
           </td>
           <td>
             {% if not p.is_current %}
+            {# C-5 (UX.md, 2026-08-28): the bytes a rollback needs, deleted on
+               one click to "tidy up". They go to packages/.trash for 30 days
+               now, but the click is still worth spelling out. #}
             <form class="inline-form" hx-post="/partials/admin/packages/delete"
-                  hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+                  hx-target="closest .admin-packages-box" hx-swap="outerHTML"
+                  hx-confirm="Delete {{ p.kind }} {{ p.version }} for {{ p.platform }}? These are the bytes a rollback to that version needs. Once it is gone you cannot put the fleet back on it without rebuilding and republishing.">
               <input type="hidden" name="kind" value="{{ p.kind }}">
               <input type="hidden" name="platform" value="{{ p.platform }}">
               <input type="hidden" name="version" value="{{ p.version }}">
@@ -245,7 +256,10 @@
       policy:
       <form class="inline-form" hx-post="/partials/admin/feed/policy"
             hx-target="closest .admin-packages-box" hx-swap="outerHTML">
-        <select name="policy" onchange="this.form.requestSubmit()">
+        {# C-3 (UX.md, 2026-08-28): one arrow key used to arm unattended
+             fleet-wide upgrades. static/confirms.js owns the change handler
+             now, and puts the select back when the admin cancels. #}
+          <select name="policy" data-previous="{{ feed.policy }}">
           <option value="manual" {% if feed.policy == "manual" %}selected{% endif %}>manual - Check now / Publish only</option>
           <option value="stage" {% if feed.policy == "stage" %}selected{% endif %}>stage - auto-publish, not current</option>
           <option value="current" {% if feed.policy == "current" %}selected{% endif %}>current - auto-publish + make current</option>

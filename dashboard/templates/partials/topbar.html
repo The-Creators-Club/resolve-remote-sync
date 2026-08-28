@@ -38,6 +38,25 @@
    what each owner has to do to come off that list. Publishing it here first
    means the change on their side is one header, not a new endpoint. #}
 <a class="brand" data-dash-topbar data-csrf="{{ csrf_token or '' }}" href="/">{{ brand_org | upper }} <span class="dim">//</span> SYNC STATUS</a>
+{# UX-10 (2026-08-28): the count of problems the server has found, on every
+   page, linked to the panel that names them. Admin-only and full-page only
+   (see ui._render), and absent rather than zero when there is nothing wrong:
+   a bar that permanently reads [ 0 PROBLEMS ] stops being read. #}
+{% if notice_counts is defined and notice_counts and notice_counts.get("error") %}
+<a class="chip red" href="/#server-notices"
+   title="the server has found problems it cannot fix by itself">[ {{ notice_counts.error }} PROBLEM{{ "S" if notice_counts.error != 1 }} ]</a>
+{% endif %}
+{# SYS-8 (finding 3, resilience sweep 2026-08-28 fix pass): the fleet's
+   self-diagnosis scan (alerts.py), which is a wider net than the notices
+   chip above -- a computer's own guard state, not only what this server
+   refused. Read from db.META_ALERTS_OPEN (ui._alert_counts_safe), the LAST
+   scan's counts, so a topbar render never re-runs forty checks. Same
+   absent-at-zero rule: a permanently-present [ 0 ALERTS ] stops being read. #}
+{% set alert_total = (alert_counts.get("error", 0) + alert_counts.get("warn", 0)) if alert_counts is defined and alert_counts else 0 %}
+{% if alert_total %}
+<a class="chip {{ 'red' if alert_counts.get('error') else 'amber' }}" href="/admin/alerts"
+   title="what the fleet's self-diagnosis currently has open">[ {{ alert_total }} ALERT{{ "S" if alert_total != 1 }} ]</a>
+{% endif %}
 
 {# Every page under Settings, so the drawer can light [ SETTINGS ] up for all
    six of them rather than only the site form. Same list as
@@ -103,9 +122,13 @@
       {# LOGOUT ALL lives here rather than in the bar (2026-08-18): it is the
          rare action -- "a machine was lost" -- and the bar is deliberately
          three items wide now. It stays one click from every page for every
-         account, admin or not. #}
+         account, admin or not.
+         C-9 (UX.md, resilience sweep 2026-08-28): a PLAIN form, not htmx, so
+         hx-confirm cannot reach it -- onsubmit + window.confirm is the
+         matching mechanism for a form that submits itself. #}
       <form method="post" action="/logout-everywhere" class="inline-form"
-            title="revoke this account's sessions on every device -- use it if a machine was lost">
+            title="revoke this account's sessions on every device -- use it if a machine was lost"
+            onsubmit="return window.confirm('Sign yourself out of every browser, including this one? You will need to log in again to finish what you are doing.');">
         <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
         <button class="btn" type="submit">[ LOGOUT ALL ]</button></form>
     {% else %}

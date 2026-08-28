@@ -51,7 +51,7 @@ import queue
 import threading
 import webbrowser
 from pathlib import Path
-from tkinter import ttk
+from tkinter import messagebox, ttk
 import tkinter as tk
 from typing import Callable, Optional
 
@@ -163,11 +163,26 @@ class OnboardWizard:
         self.container.pack(fill="both", expand=True)
 
         self.page_frame: Optional[tk.Frame] = None
+
+        # UX-13 / OPS-6 (resilience sweep 2026-08-28). Closing this window is
+        # a supported thing to do everywhere EXCEPT between _clean_slate and
+        # the end of the bootstrap, where it leaves a machine with no
+        # companion, no tree drive and no autostart. The handler is registered
+        # before any page exists so there is no window in which the default
+        # (destroy everything, silently) applies.
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close_request)
+        self._interrupted = steps.read_install_breadcrumb()
+
         # The licence comes before everything, including the welcome text --
         # it is what the editor is agreeing to by installing at all
         # (2026-08-17, COMMERCIAL_READINESS.md item 3). It shows itself only
         # when this machine has not already accepted the bundled version.
-        self.show_eula()
+        # Unless the last run of this wizard never finished, in which case the
+        # editor is told that first (UX-13).
+        if self._interrupted is not None:
+            self.show_interrupted()
+        else:
+            self.show_eula()
 
     # -- page scaffolding -----------------------------------------------
 
@@ -243,6 +258,68 @@ class OnboardWizard:
         runs `fn` is made by the pump, on the main thread.
         """
         self._ui_queue.put(fn)
+
+    # -- page -1: the interrupted install (UX-13 / OPS-6) -------------------
+
+    def show_interrupted(self) -> None:
+        """What the wizard opens on when ~/.ccsync/state/install_in_progress.json
+        is still there: the previous run was closed (or the machine rebooted)
+        between the clean slate and the end of the install, so this computer
+        has no companion and no tree drive and nothing else would have said so.
+        """
+        frame = self._new_page()
+        _heading(frame, "THE LAST INSTALL DID NOT FINISH")
+        started = ""
+        if isinstance(self._interrupted, dict):
+            started = str(self._interrupted.get("started_at") or "")
+        when = f"\n\nIt started at {started}." if started else ""
+        _label(frame,
+               "This computer was part-way through an install when the wizard\n"
+               "closed. Until it is finished, there is no CCSync app and no\n"
+               f"{self._drive_letter()} drive on this machine, so nothing is syncing."
+               f"{when}\n\n"
+               "Finishing the install is safe and is the only thing that fixes\n"
+               "it. You will be asked for your sign-in again.",
+               wraplength=560).pack(anchor="w", pady=(0, 14))
+
+        bar = tk.Frame(frame, bg=theme.BG)
+        bar.pack(side="bottom", fill="x", pady=(16, 0))
+        theme.neon_button(tk, bar, "CLOSE", self.root.destroy,
+                          primary=False).pack(side="left")
+        theme.neon_button(tk, bar, "FINISH THE INSTALL", self._on_finish_the_install,
+                          primary=True).pack(side="right")
+
+    def _on_finish_the_install(self) -> None:
+        # The breadcrumb is NOT cleared here: it is cleared when an install
+        # actually reaches a finish page. Clearing it on the click would lose
+        # the record all over again if this run is closed too.
+        self.show_eula()
+
+    def _on_close_request(self) -> None:
+        """WM_DELETE_WINDOW. Free everywhere except mid-install, where closing
+        is the OPS-6 half-installed machine and the editor is asked first."""
+        if not self._installing:
+            self.root.destroy()
+            return
+        try:
+            close_anyway = messagebox.askyesno(
+                "CCSync onboarding",
+                steps.install_close_warning(self._drive_letter()),
+                default="no", icon="warning", parent=self.root)
+        except Exception:
+            log.exception("could not ask about closing mid-install -- staying open")
+            return
+        if not close_anyway:
+            return
+        # The bootstrap outlives this process otherwise: it is a PowerShell
+        # (or bash) child that keeps mapping drives and writing config into a
+        # machine whose wizard is gone, and races the re-run that fixes it.
+        try:
+            if steps.terminate_bootstrap():
+                log.warning("closed mid-install -- terminated the bootstrap child")
+        except Exception:
+            log.exception("could not terminate the bootstrap child")
+        self.root.destroy()
 
     # -- page 0: the licence ----------------------------------------------
 
@@ -362,6 +439,13 @@ class OnboardWizard:
     # -- page 2: role --------------------------------------------------
 
     def show_role(self) -> None:
+        # OPS-7 (resilience sweep 2026-08-28): before the first page that
+        # decides anything, refuse a run under an account that is not the one
+        # signed in. Everything below installs per-user, and the failure is
+        # silent: the wizard reports success, and the editor logs back into
+        # their own profile to find nothing.
+        if self._wrong_profile_refusal():
+            return
         frame = self._new_page()
         _heading(frame, "STEP 1: HOW IS THIS MACHINE CONNECTED?")
         # NOT "are you THE base rig?" any more (2026-08-19, owner's call): a
@@ -417,6 +501,39 @@ class OnboardWizard:
         self.role_status_lbl.pack(anchor="w", pady=(6, 0))
 
         self._nav_bar(frame, back=self.show_welcome, next_=self._on_role_next, next_label="NEXT")
+
+    def _wrong_profile_refusal(self) -> bool:
+        """True when this page drew a refusal instead of the role question.
+
+        Probed ONCE: the answer cannot change while the wizard is open, and
+        the probe shells out. A probe that fails or cannot tell returns None
+        from steps.default_console_user and nothing is said -- refusing on
+        "could not check" would lock people out of their own install
+        (and macOS has no credential-prompt path that could switch accounts).
+        """
+        if getattr(self, "_profile_checked", False):
+            return bool(getattr(self, "_profile_refusal", ""))
+        self._profile_checked = True
+        try:
+            self._profile_refusal = steps.console_user_mismatch(
+                steps.default_console_user(), steps.current_user()) or ""
+        except Exception:
+            log.exception("could not compare the running account with the signed-in one")
+            self._profile_refusal = ""
+        if not self._profile_refusal:
+            return False
+        log.error("refusing to install: %s", self._profile_refusal)
+        frame = self._new_page()
+        _heading(frame, "WRONG ACCOUNT")
+        _label(frame, self._profile_refusal, fg=theme.RED, wraplength=560).pack(
+            anchor="w", pady=(0, 14))
+        _label(frame, "Nothing on this computer has been changed.",
+               fg=theme.MUTED, font=theme.mono(9), wraplength=560).pack(
+            anchor="w", pady=(0, 10))
+        bar = tk.Frame(frame, bg=theme.BG)
+        bar.pack(side="bottom", fill="x", pady=(16, 0))
+        theme.neon_button(tk, bar, "CLOSE", self.root.destroy, primary=True).pack(side="right")
+        return True
 
     def _site(self) -> Optional[dict]:
         """The fetched manifest, or None so steps falls back to the cached one.
@@ -721,7 +838,15 @@ class OnboardWizard:
         # the working install. Validate before the button is even clickable.
         self.local_root_error_lbl = _label(frame, "", fg=theme.RED, font=theme.mono(9),
                                             wraplength=560)
-        self.local_root_error_lbl.pack(anchor="w", pady=(0, 6))
+        self.local_root_error_lbl.pack(anchor="w", pady=(0, 2))
+
+        # UX-14: a separate, AMBER line -- this one never disables the button.
+        # A nearly-full drive installs perfectly well and fills up days later
+        # during the first proxy pass, which is the whole reason it has to be
+        # said here rather than refused here.
+        self.local_root_space_lbl = _label(frame, "", fg=theme.AMBER, font=theme.mono(9),
+                                           wraplength=560)
+        self.local_root_space_lbl.pack(anchor="w", pady=(0, 6))
 
         self.install_btn = theme.neon_button(tk, frame, "BEGIN INSTALL", self._on_begin_install, primary=True)
         self.install_btn.pack(anchor="w", pady=(0, 10))
@@ -778,6 +903,11 @@ class OnboardWizard:
             else:
                 self.local_root_error_lbl.config(text="")
                 self.install_btn.config(state="normal", fg=theme.RED)
+            # Only when the path is otherwise good: two lines about one empty
+            # or impossible field is noise (UX-14).
+            space = ("" if problem else
+                     (steps.local_root_space_warning(self.local_root_var.get()) or ""))
+            self.local_root_space_lbl.config(text=space)
         except tk.TclError:
             pass  # page swapped out from under the trace
 
@@ -807,6 +937,16 @@ class OnboardWizard:
     def _clean_slate(self, role: str) -> None:
         """Shared clean-slate phase: enumerate + remove every trace of
         previous installs. Warnings are logged, never fatal."""
+        # UX-13 / OPS-6: the breadcrumb goes down BEFORE the first destructive
+        # act, not after it. Everything from here to a finish page is a window
+        # in which a closed wizard leaves no companion and no tree drive.
+        crumb = steps.write_install_breadcrumb(f"clean_slate:{role}")
+        if crumb is None:
+            self._append_log(
+                "WARNING: could not record that an install is in progress "
+                "(~/.ccsync/state is not writable). If this window closes "
+                "before it finishes, nothing will tell you to re-run it."
+            )
         self._append_log("removing traces of previous CCSync versions…")
         if IS_MACOS:
             plan = steps.build_cleanup_plan_macos()
@@ -1018,7 +1158,16 @@ class OnboardWizard:
 
     # -- page 5: finish --------------------------------------------------
 
+    def _install_finished(self) -> None:
+        """Both finish pages, and only them. The install ran to the end, so
+        the machine is whole again even when it carries warnings -- the
+        breadcrumb means "half-installed", not "not perfect" (UX-13)."""
+        self._installing = False
+        self._interrupted = None
+        steps.clear_install_breadcrumb()
+
     def show_finish(self) -> None:
+        self._install_finished()
         frame = self._new_page()
         warnings = list(self.install_warnings)
         if warnings:
@@ -1063,6 +1212,7 @@ class OnboardWizard:
         self._nav_bar(frame, back=None, next_=self.root.destroy, next_label="CLOSE")
 
     def show_finish_base(self) -> None:
+        self._install_finished()
         frame = self._new_page()
         _heading(frame, "DONE: CONNECTED TO THE NAS")
         icon_word = "menu bar" if IS_MACOS else "tray"

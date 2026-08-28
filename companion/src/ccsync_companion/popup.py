@@ -549,9 +549,65 @@ def perform_fix_all(
     return results
 
 
-def perform_ignore_all(rows: list[dict[str, Any]], ignore_tracker: "fixer.IgnoreTracker") -> None:
+def perform_ignore_all(rows: list[dict[str, Any]], ignore_tracker: "fixer.IgnoreTracker",
+                       how: str = "skip") -> None:
+    """SKIP FOR NOW for every row. `how` is recorded in the persisted ledger
+    (UX-4) so "the editor dismissed these" and "no display existed, so we
+    dismissed them for him" are not the same entry."""
     for row in rows:
-        ignore_tracker.ignore(row["file_path"])
+        ignore_tracker.ignore(row["file_path"], how=how)
+
+
+def _folder_button_label(rows: list[dict[str, Any]]) -> str:
+    """The third button's caption, which has to name its own scope: one
+    folder or several is the difference between a safe click and a surprise."""
+    count = len(folders_of(rows))
+    if count > 1:
+        return f"ALWAYS LEAVE THESE {count} FOLDERS ALONE ON THIS COMPUTER"
+    return "ALWAYS LEAVE THIS FOLDER ALONE ON THIS COMPUTER"
+
+
+def folders_of(rows: list[dict[str, Any]]) -> list[str]:
+    """The distinct parent folders of `rows`, first-seen order.
+
+    Pure and separately testable because the dialog that calls it cannot be
+    driven in the suite (no real Tk, per tests/conftest.py)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for row in rows:
+        folder = fixer._folder_of(str(row.get("file_path") or ""))
+        if not folder:
+            continue
+        key = canon.norm(folder)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(folder)
+    return out
+
+
+def perform_ignore_folders(rows: list[dict[str, Any]],
+                           ignore_tracker: "fixer.IgnoreTracker",
+                           reason: str = "") -> tuple[list[str], list[str]]:
+    """"Always leave clips in this folder alone on this machine" (RES-12).
+
+    Returns (persisted, failed). A folder that could not be written is
+    reported rather than swallowed: the editor pressed a button that says
+    "always", and a decision that quietly lasts until the next restart is the
+    thing this finding exists to stop."""
+    persisted: list[str] = []
+    failed: list[str] = []
+    for folder in folders_of(rows):
+        try:
+            ok = ignore_tracker.ignore_folder(folder, reason=reason)
+        except Exception:
+            log.exception("could not record the folder ignore for %s", folder)
+            ok = False
+        (persisted if ok else failed).append(folder)
+    # Whatever happened to the file, the clips in front of the editor go away
+    # now: they pressed a button whose weakest possible meaning is SKIP.
+    perform_ignore_all(rows, ignore_tracker, how="folder")
+    return persisted, failed
 
 
 class PopupDialog:
@@ -704,6 +760,17 @@ class PopupDialog:
         self._ignore_btn = theme.neon_button(
             tk, btn_bar, "SKIP FOR NOW (this session)", self._on_ignore, primary=False)
         self._ignore_btn.pack(side="left", padx=(0, 18))
+        # RES-12 (resilience sweep 2026-08-28): the third answer. An editor
+        # who keeps a personal stock-footage folder outside the tree was
+        # offered the same 300 clips at every start and pressed SKIP every
+        # time, which trains them to dismiss the one dialog that also catches
+        # a genuinely un-synced card dump. Undone from Settings, never from
+        # here -- an "always" you can set by accident and cannot see is worse
+        # than the nagging.
+        self._folder_btn = theme.neon_button(
+            tk, btn_bar, _folder_button_label(rows), self._on_ignore_folder,
+            primary=False)
+        self._folder_btn.pack(side="left", padx=(0, 18))
         self._fix_btn = theme.neon_button(tk, btn_bar, "FIX ALL", self._on_fix_all, primary=True)
         self._fix_btn.pack(side="left")
         # Present only after a run that left failures behind -- a failed file
@@ -1178,6 +1245,28 @@ class PopupDialog:
 
     def _on_ignore(self) -> None:
         perform_ignore_all(self.rows, self.ignore_tracker)
+        if self.on_done is not None:
+            self.on_done([])
+        self.root.destroy()
+
+    def _on_ignore_folder(self) -> None:
+        persisted, failed = perform_ignore_folders(
+            self.rows, self.ignore_tracker, reason="the editor chose it in the fixer")
+        if failed:
+            # Fail in a named direction: the clips are skipped for this
+            # session either way, and the editor is told that the "always"
+            # half did not stick rather than discovering it next Monday.
+            log.error("could not persist the folder ignore for: %s", ", ".join(failed))
+            try:
+                self.status_label.config(
+                    text="CCSync could not save that choice, so these clips are only "
+                         "skipped until you restart. Tray > Settings > COPY DIAGNOSTICS "
+                         "FOR YOUR ADMIN.")
+            except Exception:
+                log.debug("could not update the popup status line", exc_info=True)
+            return
+        log.info("fixer: leaving %d folder(s) alone on this machine: %s",
+                 len(persisted), ", ".join(persisted))
         if self.on_done is not None:
             self.on_done([])
         self.root.destroy()
@@ -1942,7 +2031,12 @@ def show_popup(
             "tray → Scan whole project once a display is available", len(rows),
         )
         try:
-            perform_ignore_all(rows, ignore_tracker)
+            # how="headless" (UX-4, resilience sweep 2026-08-28): this batch
+            # was dismissed by the ABSENCE of a display, not by anybody's
+            # judgement, and the persisted ledger says which -- otherwise a
+            # machine whose Tk is wedged looks exactly like an editor who
+            # keeps pressing SKIP.
+            perform_ignore_all(rows, ignore_tracker, how="headless")
         except Exception:
             log.exception("fallback: could not record the skipped clips")
 

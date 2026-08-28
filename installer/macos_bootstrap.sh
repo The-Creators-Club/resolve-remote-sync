@@ -53,7 +53,7 @@
 #     Finish page without scraping the human-facing summary.
 set -u
 
-INSTALLER_VERSION="1.0.36"
+INSTALLER_VERSION="1.0.37"
 
 # ----------------------------------------------------------------------
 # PINNED DOWNLOADS (2026-08-17, docs/COMMERCIAL_READINESS.md item 13)
@@ -197,6 +197,45 @@ verify_sha256() {
     warn "The download was NOT installed and has been deleted. Either the mirror served something else, or the pin in this installer is stale -- see 'Bumping a pinned download' in installer/README.md."
     rm -f "$file"
     return 1
+}
+
+# UX-14 (resilience sweep 2026-08-28): free space on the sync root.
+# A WARNING, never a refusal -- a nearly-full volume installs perfectly and
+# fills days later during the first lane B pass, which is exactly why nothing
+# on the install path had ever looked. The wizard shows the same sentence
+# beside its local-root field (onboarding/steps.py local_root_space_warning);
+# a hand run of this script got nothing at all.
+#
+# low_space_message is pure (KiB in, text out) so
+# installer/tests/test_macos_site_values.sh can check the threshold and the
+# wording without a volume in any particular state. A negative or empty
+# argument means "could not measure" and prints nothing: this script must not
+# invent a figure.
+LOW_SPACE_WARN_KB=209715200   # 200 GiB, matching steps.LOW_SPACE_WARN_BYTES
+low_space_message() {
+    free_kb="${1:-}"
+    case "$free_kb" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    [ "$free_kb" -lt "$LOW_SPACE_WARN_KB" ] || return 0
+    gb=$(( (free_kb + 524288) / 1048576 ))
+    echo "This drive has ${gb} GB free. Synced proxies for one project are typically 50 to 300 GB."
+}
+
+# Free KiB on the volume $1 lives on, walking up to the first parent that
+# exists (the folder itself is usually about to be created). Prints nothing
+# when df cannot answer.
+free_kb_for_path() {
+    candidate="$1"
+    while [ -n "$candidate" ]; do
+        if [ -e "$candidate" ]; then
+            df -k "$candidate" 2>/dev/null | awk 'NR == 2 { print $4 }'
+            return 0
+        fi
+        parent="$(dirname "$candidate")"
+        [ "$parent" != "$candidate" ] || return 0
+        candidate="$parent"
+    done
 }
 
 # Hard-capability misses (rclone absent, Syncthing absent, no device ID).
@@ -349,6 +388,11 @@ if [ -z "$LOCAL_ROOT" ]; then
     step "no --local-root given -- using $LOCAL_ROOT (pass --local-root to put the tree on an external volume)"
 fi
 CC_ROOT="$LOCAL_ROOT"
+# UX-14: said once, here, where the root is finally known. Never fatal.
+LOW_SPACE_WARNING="$(low_space_message "$(free_kb_for_path "$CC_ROOT")")"
+if [ -n "$LOW_SPACE_WARNING" ]; then
+    warn "$LOW_SPACE_WARNING Sync will still be set up here; keep an eye on the drive, or re-run with --local-root pointing at a bigger one."
+fi
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 RCLONE_CONF_DIR="$HOME/.config/rclone"
 RCLONE_CONF_PATH="$RCLONE_CONF_DIR/rclone.conf"

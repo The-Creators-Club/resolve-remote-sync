@@ -122,6 +122,14 @@ MAX_ITEM_ATTEMPTS = 2
 # fourth attempt would be the fourth identical one.
 MAX_UPLOAD_ATTEMPTS = 3
 
+# How long a FINISHED batch's staging directory is kept before the tick
+# deletes it. docs/BROLL_INGEST_PLAN.md:219,259 has promised seven days since
+# the feature shipped; MEDIA-3 (resilience sweep 2026-08-28) is that nothing
+# ever implemented it. Overridable per kind as
+# `<kind>_ingest_staging_retention_days`; 0 means "as soon as the batch ends",
+# which is also what the tray's CLEAR FINISHED STAGING button asks for.
+DEFAULT_STAGING_RETENTION_DAYS = 7
+
 # The verify gate on a finished proxy: a file that decodes to less than this
 # much of the source's duration is not a proxy, it is the first few seconds of
 # one (proxy_gen.VERIFY_DURATION_RATIO, same number for the same reason).
@@ -481,6 +489,55 @@ class StorageShim:
 
 def _iso_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _iso_epoch(value: str) -> float:
+    """`_iso_now()`'s spelling back to a unix time. 0.0 when unparseable.
+
+    0.0, not "now" (MEDIA-3): an unreadable timestamp on a staging entry
+    makes it look ANCIENT, which the pruner reads as "delete it". That is the
+    right direction only because the pruner never touches the running batch
+    or a drop that has not been run, so the worst case is losing bytes that
+    are already in the archive."""
+    try:
+        from datetime import datetime, timezone  # noqa: PLC0415
+
+        text = str(value or "").strip().replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _accepts_child_sink(runner: Any) -> bool:
+    """Whether this media runner takes MEDIA-2's `child_sink` keyword."""
+    try:
+        import inspect  # noqa: PLC0415 - once per ffmpeg call, and only here
+
+        return "child_sink" in inspect.signature(runner).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _dir_bytes(directory: Any, max_files: int = 200_000) -> int:
+    """Bytes under `directory`, bounded and never raising."""
+    total = 0
+    seen = 0
+    try:
+        for dirpath, _dirnames, filenames in os.walk(str(directory)):
+            for name in filenames:
+                seen += 1
+                if seen > max_files:
+                    return total
+                try:
+                    total += os.path.getsize(os.path.join(dirpath, name))
+                except OSError:
+                    continue
+    except OSError:
+        return total
+    return total
 
 
 class BrollIngestor:
@@ -1117,6 +1174,9 @@ class BrollIngestor:
         if uid:
             self._client().release(uid, "cancelled", {"reason": reason})
             self.log.info("batch %s cancelled (%s)", uid, reason)
+        # Staged files stay for the retention window (plan §6), and this is
+        # what starts that window (MEDIA-3).
+        self._note_staging_ended(batch)
         with self._lock:
             self._batch = None
             self._current = {}
@@ -1262,7 +1322,19 @@ class BrollIngestor:
             return 503, {"ok": False, "message": (
                 "this machine has no synced tree, so there is nowhere to stage "
                 f"the {self.kind.unit}s")}
-        refusal = self._space_refusal(root)
+        # UX-17 (resilience sweep 2026-08-28): the WHOLE drop, before the
+        # first byte. The per-file 507 fired mid-batch, once part of a 200 GB
+        # shoot was already on the disk, and only for the files that had not
+        # been staged yet. Only `upload` items count: a picked path is indexed
+        # where it already is and stages nothing.
+        wanted = 0
+        for raw in raw_items:
+            if not isinstance(raw, dict):
+                continue
+            if str(raw.get("source") or "") == "path":
+                continue
+            wanted += max(0, _int_or_none(raw.get("size")) or 0)
+        refusal = self._space_refusal(root, wanted_bytes=wanted)
         if refusal:
             return 507, {"ok": False, "message": refusal}
 
@@ -1585,8 +1657,14 @@ class BrollIngestor:
         self._thread.start()
 
     def stop(self) -> None:
-        """Told before the rest of teardown: setting this is what kills the
-        ffmpeg (or llama-server) child. Never blocks."""
+        """Told before the rest of teardown. Never blocks.
+
+        This really does end the ffmpeg (or llama-server) child now: until
+        MEDIA-2 (resilience sweep 2026-08-28) `self._child` was never
+        assigned anywhere in the package, so `_kill_child` was a no-op and an
+        orphaned ffmpeg.exe outlived the tray still holding a handle on the
+        staged file. The runner publishes its Popen through
+        `_publish_child`."""
         self._stop_event.set()
         self._wake.set()
         self._kill_child()
@@ -1732,6 +1810,14 @@ class BrollIngestor:
         self._publish_state(state)
         self._pump_uploads()
         self._maybe_finish()
+        # MEDIA-3 (resilience sweep 2026-08-28): LAST, and after the finish,
+        # so a batch that ended this tick has its `ended_at` before the clock
+        # is read. Never fatal -- housekeeping that can end a tick would be
+        # worse than housekeeping that does not happen.
+        try:
+            self.prune_staging()
+        except Exception:
+            self.log.exception("staging retention pass failed")
         return state
 
     def _offer_window(self) -> None:
@@ -2477,6 +2563,9 @@ class BrollIngestor:
         self._client().release(batch["uid"], "failed" if failed == len(items) else "done",
                                summary)
         self.log.info("batch %s finished -- %s", batch["uid"], summary)
+        # MEDIA-3: the retention clock starts HERE, not when the drop was
+        # staged.
+        self._note_staging_ended(batch)
         with self._lock:
             self._batch = None
             self._current = {}
@@ -2490,10 +2579,12 @@ class BrollIngestor:
         batch. Not an error -- the server has taken it back and either another
         machine will finish it or the editor cancelled it."""
         with self._lock:
-            uid = (self._batch or {}).get("uid")
+            batch = dict(self._batch or {})
+            uid = batch.get("uid")
             self._batch = None
             self._current = {}
         self.log.info("batch %s is no longer ours (%s)", uid, why)
+        self._note_staging_ended(batch)
         self._kill_child()
         self._stop_uploads()
         self._stop_model_server()
@@ -2545,20 +2636,59 @@ class BrollIngestor:
     def _run_media(self, cmd: list) -> tuple:
         runner = self._run_media_fn or self.media.run_ffmpeg
         try:
+            # MEDIA-2 (resilience sweep 2026-08-28): the child_sink is what
+            # makes `_kill_child` real. Offered rather than required, because
+            # `run_media_fn` is a test seam and every existing double takes
+            # one argument -- a signature probe, not a bare TypeError catch,
+            # so a genuine TypeError inside the runner still surfaces.
+            if _accepts_child_sink(runner):
+                return runner(cmd, child_sink=self._publish_child)
             return runner(cmd)
         except self.media.UnreadableMediaError as exc:
             self.log.warning("ffmpeg refused (%s)", exc)
             return 1, str(exc)
 
+    def _publish_child(self, child: Optional[Any]) -> None:
+        """The live media child, so stop()/cancel() can end it.
+
+        A child published AFTER the stop has already landed is killed on the
+        spot: the spawn and the shutdown are on different threads, and the
+        window between "stop() ran _kill_child" and "the runner started
+        ffmpeg" is exactly how an orphan outlives the tray."""
+        with self._lock:
+            self._child = child
+        if child is not None and (self._stop_event.is_set() or self._cancel.is_set()):
+            self._kill_child()
+
     def _kill_child(self) -> None:
-        child = self._child
-        self._child = None
+        """End the running ffmpeg (or llama-server) child, if there is one.
+
+        terminate first, then kill: ffmpeg closes its output file on SIGTERM,
+        and a proxy is written to `<stem>.mp4.partial` and renamed only when
+        complete, so either ending leaves nothing half-written in the
+        archive. No Job Object: there is no such helper anywhere in this
+        package today and ffmpeg spawns no grandchildren."""
+        with self._lock:
+            child = self._child
+            self._child = None
         if child is None:
             return
         try:
-            child.kill()
+            if child.poll() is not None:
+                return
         except Exception:
-            self.log.debug("could not kill the media child", exc_info=True)
+            pass
+        try:
+            child.terminate()
+        except Exception:
+            self.log.debug("could not terminate the media child", exc_info=True)
+        try:
+            child.wait(timeout=5)
+        except Exception:
+            try:
+                child.kill()
+            except Exception:
+                self.log.debug("could not kill the media child", exc_info=True)
 
     def _set_current(self, name: str, stage: str, percent: int) -> None:
         with self._lock:
@@ -2619,18 +2749,150 @@ class BrollIngestor:
                 self.log.debug("could not report the failure", exc_info=True)
         self._save()
 
-    def _space_refusal(self, directory: Path) -> Optional[str]:
+    def _space_refusal(self, directory: Path,
+                       wanted_bytes: int = 0) -> Optional[str]:
         """Editor-facing text, or None. A disk we cannot measure is NOT a
         refusal (sidecar_tools' rule): "I could not tell" must never read
-        as "no"."""
+        as "no".
+
+        `wanted_bytes` is UX-17 (resilience sweep 2026-08-28): the whole
+        drop's size, checked before the first byte instead of per file after
+        part of it is already on the disk.
+
+        The sentence names how much of the shortfall is this feature's own
+        staging (MEDIA-3): staging lives in a dot-folder inside the archive
+        that no editor has any UI to see, so "free some space" used to be an
+        instruction nobody could follow.
+        """
         floor = int(max(0.0, float(self.free_space_floor_gb)) * 1_000_000_000)
         free = broll_server._free_bytes_at(directory)
-        if free is None or free >= floor:
+        if free is None:
             return None
-        return (f"Not enough space where the {self.kind.unit}s would be staged "
-                f"({directory}): {free / 1_000_000_000:.1f} GB free, and "
-                f"{floor / 1_000_000_000:.0f} GB is the floor. Free some space "
-                "and it will continue")
+        needed = floor + max(0, int(wanted_bytes or 0))
+        if free >= needed:
+            return None
+        message = (f"Not enough space where the {self.kind.unit}s would be staged "
+                   f"({directory}): {free / 1_000_000_000:.1f} GB free")
+        if wanted_bytes:
+            message += (f", and this drop needs "
+                        f"{int(wanted_bytes) / 1_000_000_000:.1f} GB on top of the "
+                        f"{floor / 1_000_000_000:.0f} GB floor")
+        else:
+            message += f", and {floor / 1_000_000_000:.0f} GB is the floor"
+        held = 0
+        try:
+            held = int(self.staging_report().get("bytes") or 0)
+        except Exception:
+            held = 0
+        if held:
+            message += (f". {held / 1_000_000_000:.1f} GB of that drive is "
+                        f"finished {self.kind.label} staging: open Settings from "
+                        "the tray icon and use CLEAR FINISHED STAGING")
+        else:
+            message += ". Free some space and it will continue"
+        return message
+
+    # -- staging retention (MEDIA-3, resilience sweep 2026-08-28) ----------
+    #
+    # docs/BROLL_INGEST_PLAN.md:219,259 promised "staging retained 7 days"
+    # from the day this feature shipped, and nothing anywhere deleted a
+    # staging directory: every batch left its uploaded originals, proxies,
+    # posters, sprites and frame sheets inside the archive for ever, and
+    # `_staging` kept every entry across every restart. The feature filled
+    # its own disk and then refused the next drop, naming a dot-folder the
+    # editor has no way to see.
+    def _retention_days(self) -> float:
+        try:
+            return max(0.0, float(config_mod.coerce_numeric(
+                self.cfg, self.kind.cfg_key("ingest_staging_retention_days"),
+                DEFAULT_STAGING_RETENTION_DAYS)))
+        except Exception:
+            return float(DEFAULT_STAGING_RETENTION_DAYS)
+
+    def _note_staging_ended(self, batch: Optional[dict]) -> None:
+        """Stamp the staging entry of a batch that is over.
+
+        The retention clock starts when the BATCH ends, not when the drop was
+        staged: a 400-clip batch that takes three days to crunch must not have
+        its inputs deleted underneath it."""
+        staging_id = str((batch or {}).get("staging_id") or "")
+        if not staging_id:
+            return
+        with self._lock:
+            entry = self._staging.get(staging_id)
+            if not isinstance(entry, dict) or entry.get("ended_at"):
+                return
+            entry["ended_at"] = _iso_now()
+
+    def _staging_entries(self) -> list[tuple[str, dict]]:
+        with self._lock:
+            active = str((self._batch or {}).get("staging_id") or "")
+            return [(sid, dict(entry))
+                    for sid, entry in (self._staging or {}).items()
+                    if isinstance(entry, dict) and sid != active]
+
+    def staging_report(self) -> dict[str, Any]:
+        """`sync_guard.ingest_staging` for this kind: bytes, batches,
+        oldest_at. Never raises; an unreadable directory counts as zero."""
+        total, count = 0, 0
+        oldest: Optional[str] = None
+        for _sid, entry in self._staging_entries():
+            directory = str(entry.get("dir") or "")
+            if not directory or not os.path.isdir(directory):
+                continue
+            count += 1
+            total += _dir_bytes(directory)
+            at = str(entry.get("ended_at") or entry.get("at") or "")
+            if at and (oldest is None or at < oldest):
+                oldest = at
+        return {"bytes": total, "batches": count, "oldest_at": oldest}
+
+    def prune_staging(self, max_age_days: Optional[float] = None) -> dict[str, Any]:
+        """Delete finished staging older than the retention, and forget it.
+
+        `max_age_days=0` is the tray's CLEAR FINISHED STAGING button: every
+        finished batch, now. The RUNNING batch's staging is never a
+        candidate (see `_staging_entries`), and neither is a drop that has
+        been staged but not yet run -- an editor who staged 40 clips and went
+        to lunch has not lost them.
+
+        Never raises: this is housekeeping, and housekeeping that can end a
+        tick is worse than housekeeping that does not happen."""
+        age_days = self._retention_days() if max_age_days is None else float(max_age_days)
+        cutoff = time.time() - age_days * 86400.0
+        removed, freed = 0, 0
+        gone: list[str] = []
+        for sid, entry in self._staging_entries():
+            ended = str(entry.get("ended_at") or "")
+            if not ended:
+                # Never run (or ended before this field existed): fall back to
+                # when it was staged, which is the older, safer date.
+                ended = str(entry.get("at") or "")
+                if not entry.get("at"):
+                    continue
+            if _iso_epoch(ended) > cutoff:
+                continue
+            directory = str(entry.get("dir") or "")
+            if directory and os.path.isdir(directory):
+                size = _dir_bytes(directory)
+                try:
+                    shutil.rmtree(directory, ignore_errors=False)
+                except OSError:
+                    # Routine on Windows: an ffmpeg or rclone child still
+                    # holding a handle. Left for the next tick, entry kept.
+                    self.log.debug("could not remove %s", directory, exc_info=True)
+                    continue
+                freed += size
+            removed += 1
+            gone.append(sid)
+        if gone:
+            with self._lock:
+                for sid in gone:
+                    self._staging.pop(sid, None)
+            self._save()
+            self.log.info("removed %d finished staging folder(s), %.1f GB",
+                          removed, freed / 1e9)
+        return {"removed": removed, "bytes": freed}
 
     def _path_refusal(self, path: str) -> str:
         """Why this machine may not index a picked path in place, or "".

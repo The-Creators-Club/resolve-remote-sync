@@ -434,6 +434,10 @@ proxy_gen_min_age_seconds = 120
 # its local_root is the NAS share, so staging there sends every original over
 # SMB twice.
 # broll_ingest_staging_dir = ''
+# How long a finished batch's staging folder is kept before it is deleted.
+# 0 = as soon as the batch ends. The music ingest reads the same key with a
+# music_ prefix and falls back to this one's default.
+# broll_ingest_staging_retention_days = 7
 
 # BRAW / R3D / CRM -- the clips ffmpeg cannot decode at any quality. They are
 # counted and reported but never queued for ffmpeg, because promising a proxy

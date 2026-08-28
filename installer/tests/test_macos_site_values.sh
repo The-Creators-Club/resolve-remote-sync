@@ -38,11 +38,12 @@ slice() {  # slice <start-marker> <end-marker>
     ' "$SCRIPT"
 }
 
+LOW_SPACE_SRC="$(slice 'LOW_SPACE_WARN_KB=' 'free_kb_for_path() {')"
 SITE_VALUE_SRC="$(slice 'site_value() {' 'site_number() {')"
 PREFIX_SRC="$(slice 'canonical_prefix_letter() {' 'CANONICAL_PREFIX="$(site_value')"
 VERIFY_SRC="$(slice 'verify_sha256() {' '# ------')"
 
-for name in SITE_VALUE_SRC PREFIX_SRC VERIFY_SRC; do
+for name in SITE_VALUE_SRC PREFIX_SRC VERIFY_SRC LOW_SPACE_SRC; do
     eval "body=\$$name"
     case "$body" in
         *'}'*) ;;
@@ -56,6 +57,7 @@ warn() { LAST_WARN="$1"; }
 eval "$SITE_VALUE_SRC"
 eval "$PREFIX_SRC"
 eval "$VERIFY_SRC"
+eval "$LOW_SPACE_SRC"
 
 # --- site_value ------------------------------------------------------------
 # One flat JSON object by contract (dashboard api.api_site). sed, not a JSON
@@ -167,6 +169,26 @@ if [ -n "$BAD_LABEL" ]; then
 else
     ok "com.creatorsclub.* appears only as the retired legacy label"
 fi
+
+# --- low_space_message (UX-14, resilience sweep 2026-08-28) ----------------
+# A warning, not a refusal, so the only things that can be wrong are the
+# threshold, the arithmetic and the wording. "could not measure" (an empty or
+# non-numeric argument, which is what free_kb_for_path prints when df fails)
+# must print NOTHING rather than "0 GB free".
+check "plenty of room says nothing"     "" "$(low_space_message 1073741824)"
+check "exactly at the 200 GB floor"     "" "$(low_space_message 209715200)"
+check "an unmeasurable volume says nothing" "" "$(low_space_message '')"
+check "a non-numeric df result says nothing" "" "$(low_space_message 'Filesystem')"
+check "41 GB free" \
+    "This drive has 41 GB free. Synced proxies for one project are typically 50 to 300 GB." \
+    "$(low_space_message 42991616)"
+check "a nearly empty drive still names a figure" \
+    "This drive has 1 GB free. Synced proxies for one project are typically 50 to 300 GB." \
+    "$(low_space_message 1048576)"
+case "$(low_space_message 42991616)" in
+    *—*) bad "low_space_message contains an em dash" ;;
+    *) ok "low_space_message has no em dash" ;;
+esac
 
 echo ""
 if [ "$fail" -gt 0 ]; then

@@ -489,7 +489,15 @@ overlap constraint there before the next ship.
 
 **Wave 4, the human layer:** 15, 24, 25, 27, 35, 38, 41, plus the ten
 confirmation dialogs in `UX.md`. Notices, audit, halt expiry, the "why"
-sentence, the weekly report.
+sentence, the weekly report. **BUILT 2026-08-28** by builder agents (plus
+UX-6/12/13/14/15/19/20/21/22, OPS-6/7, RES-10, DASH-3/4/5/8/9/10/11,
+SYS-3/5/9, SYNC-17 from the same files; C-1 to C-10 are all in, C-1 and
+C-10 having landed earlier under UX-2 and UX-1); ledger section "Resilience sweep, wave
+4" in `KNOWN_BUGS.md`; dashboard schema v36 (two-phase moves), v37
+(`notices`), v38 (`alert_log`); operator docs in `docs/SELF_DIAGNOSIS.md`
+and the rewritten `docs/FILE_MOVES.md`. Deploy the dashboard before the
+companions: a wave 4 companion answers a move in states the old dashboard
+never reads.
 
 **Wave 5, recovery and invariants:** 34, 40, 42, 43. The protection panel and
 invariant checker are what make the system tell the owner what it is *not*

@@ -23,7 +23,18 @@
       <div class="mono-sm" style="margin-top:0.4rem">{{ halt.reason }}</div>
       <div class="mono-sm" style="margin-top:0.4rem">
         set by {{ halt.set_by }} at {{ halt.set_at }}
+        ({{ halt_hours }} hour{{ "s" if halt_hours != 1 }} so far,
+        {{ halt_machines }} computer{{ "s" if halt_machines != 1 }} in the fleet)
       </div>
+      {# UX-8 (2026-08-28): a halt with no expiry is a fleet that cannot work
+         all weekend because somebody went home. It releases itself now, and
+         keeping it on is a decision somebody makes. #}
+      {% if halt.expires_at %}
+      <div class="mono-sm" style="margin-top:0.4rem">
+        releases itself {{ halt.expires_at | ago }} unless you keep it halted{% if halt.extended %}
+        (kept on {{ halt.extended }} time{{ "s" if halt.extended != 1 }}){% endif %}
+      </div>
+      {% endif %}
     </div>
     <div class="muted" style="margin-top:0.6rem">
       Each companion picks this up on its next report (within a minute) and shows the
@@ -36,14 +47,51 @@
       <input type="hidden" name="active" value="0">
       <button class="btn" type="submit">[ START SYNCING AGAIN ]</button>
     </form>
-  {% else %}
     <form class="inline-form" style="margin-top:0.6rem"
           hx-post="/partials/admin/fleet-halt"
-          hx-target="#admin-fleet-halt" hx-swap="outerHTML">
+          hx-target="#admin-fleet-halt" hx-swap="outerHTML"
+          hx-confirm="Keep every computer in the fleet halted for another day? Nobody's uploads, proxy downloads or shared project files move until you start them again here.">
+      <input type="hidden" name="active" value="1">
+      <input type="hidden" name="extend" value="1">
+      <button class="btn" type="submit">[ KEEP HALTED ]</button>
+    </form>
+  {% else %}
+    {% if halt.expired %}
+    <div class="banner">▲ the last halt EXPIRED and syncing started again everywhere
+      {{ halt.expires_at | ago }}. It was set by {{ halt.set_by }} {{ halt.set_at | ago }}{% if halt.reason %}: {{ halt.reason }}{% endif %}.</div>
+    {% endif %}
+    <form class="inline-form" style="margin-top:0.6rem"
+          hx-post="/partials/admin/fleet-halt"
+          hx-target="#admin-fleet-halt" hx-swap="outerHTML"
+          {# C-2 (UX.md, 2026-08-28). One click used to stop every computer in
+             the company with nothing said about what that means. #}
+          hx-confirm="Stop syncing on EVERY computer in the fleet? Uploads, proxy downloads and shared project files stop everywhere until you start them again here. Nothing is deleted. Work done while the halt is on will not reach anyone until you release it.">
       <input type="hidden" name="active" value="1">
       <input type="text" name="reason" required style="min-width:24rem"
              placeholder="why (shown in every editor's tray)">
       <button class="btn" type="submit">[ HALT ALL SYNCING ]</button>
     </form>
+  {% endif %}
+
+  {# The last 20, from `meta` (UX-8): "who stopped the fleet last month and
+     why" is a question an owner asks, and nothing could answer it. #}
+  {% if halt_history %}
+  <details class="proj-group" style="margin-top:0.8rem">
+    <summary><span class="marker">▸</span> PREVIOUS HALTS
+      <span class="muted mono-sm">{{ halt_history | length }}</span></summary>
+    <table class="editors">
+      <thead><tr><th>WHEN</th><th>WHAT</th><th>WHO</th><th>WHY</th></tr></thead>
+      <tbody>
+      {% for h in halt_history %}
+        <tr class="editor-row">
+          <td class="muted">{{ h.at | ago }}</td>
+          <td class="mono-sm">{{ h.action | upper }}</td>
+          <td class="who">{{ h.by }}</td>
+          <td class="mono-sm">{{ h.reason }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </details>
   {% endif %}
 </div>

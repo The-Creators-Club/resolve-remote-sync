@@ -56,6 +56,10 @@
   <div class="detail-layout share-layout">
     <div class="player-col">
       <video id="share-player" controls controlslist="nodownload noremoteplayback" disablepictureinpicture preload="metadata" playsinline></video>
+      <!-- UX-19 (resilience sweep 2026-08-28): a clip removed from the folder
+           while the client has the page open used to give the browser's own
+           broken-video box and no words at all. share.js fills this in. -->
+      <div id="share-clip-gone" class="hidden"></div>
       <div class="keyhelp">
         <b>space</b> play/pause · <b>←/→</b> previous/next clip · <b>Esc</b> back to the folder
       </div>

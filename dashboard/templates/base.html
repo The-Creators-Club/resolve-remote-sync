@@ -60,6 +60,14 @@
     {% include "partials/topbar.html" %}
   </header>
   <div class="rule">{{ "─" * 120 }}</div>
+  {# UX-8 (2026-08-28): the fleet halt on EVERY page. It stops every computer
+     in the company, and it used to be visible only on the Users panel that
+     set it -- so a Friday halt was a fleet that could not work all weekend
+     with nothing on screen saying why. Its own load trigger so a slow read
+     never holds up a page; renders as nothing when the fleet is syncing. #}
+  {% if session_user %}
+  <div hx-get="/partials/fleet-halt-banner" hx-trigger="load, every 60s" hx-swap="innerHTML"></div>
+  {% endif %}
   <div class="layout">
     {% block layout %}{% endblock %}
   </div>

@@ -13,6 +13,14 @@
      now (the live window), what is queued behind it, and where the fixer
      writes. #}
   <main class="main">
+    {# PROBLEMS THE SERVER FOUND (UX-10, 2026-08-28), above the grid: it
+       answers "why is this project not on the dashboard at all", which the
+       grid below cannot, because the projects are missing from it. Its own
+       load trigger and admin-only, like the plan-changes panel; empty when
+       the server has found nothing, so it costs a healthy fleet no space. #}
+    {% if scope_admin %}
+    <div hx-get="/partials/notices" hx-trigger="load, every 60s" hx-swap="innerHTML"></div>
+    {% endif %}
     {# Named so the [ RESUME ] button inside the grid can swap this same
        container (CR-45): the partial itself has no single root element. #}
     <div class="fleet-grid-wrap" hx-get="/partials/fleet" hx-trigger="every 15s" hx-swap="innerHTML">

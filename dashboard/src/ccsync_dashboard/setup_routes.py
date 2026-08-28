@@ -226,10 +226,27 @@ def api_admin_site_put(
     payload: SiteSettingsIn, request: Request, conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict:
     admin = _require_admin(request)
+    settings = request.app.state.settings
+    # UX-21 (resilience sweep 2026-08-28): "The same snapshot belongs on
+    # [ SAVE ] for the three tree keys" -- canonical_prefix, tree_name and
+    # remote_root are read by both installers and every companion, so a save
+    # that changes one of them gets a site_history entry, exactly like an
+    # import does below. Computed BEFORE set_many writes, from the same
+    # validate-then-diff path the import preview uses (site_store.py), so a
+    # save that fails validation leaves no half-taken snapshot.
+    tree_raw = {k: v for k, v in payload.values.items() if k in site_store.TREE_KEYS}
+    tree_changes: list[dict[str, str]] = []
     try:
+        if tree_raw:
+            tree_normalized = site_store.validate_many(tree_raw)
+            tree_changes = site_store.diff_against_current(conn, settings, tree_normalized)
         site_store.set_many(conn, payload.values, updated_by=admin)
     except site_store.SiteValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    if tree_changes:
+        before = {c["key"]: c["from"] for c in tree_changes}
+        after = {c["key"]: c["to"] for c in tree_changes}
+        db.record_site_change(conn, admin, "save", before, after)
     # SYS-11 (resilience sweep 2026-08-28): the KEYS, never the values -- a
     # site setting can be a token, and this table is read by a page.
     db.audit(conn, admin, "site.settings_save", "site",
@@ -240,7 +257,7 @@ def api_admin_site_put(
     # drops that cache in the same breath as its commit.
     site_store.invalidate(request.app)
     log.info("admin %r updated site settings: %s", admin, ", ".join(sorted(payload.values)))
-    manifest = site_store.resolved_manifest(conn, request.app.state.settings)
+    manifest = site_store.resolved_manifest(conn, settings)
     manifest["auto_derived"] = sorted(site_store.AUTO_DERIVED_KEYS)
     return manifest
 
@@ -260,21 +277,107 @@ class SiteImportIn(BaseModel):
 
 @router.post("/admin/site/import")
 def api_admin_site_import(
-    payload: SiteImportIn, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+    payload: SiteImportIn, request: Request, conn: sqlite3.Connection = Depends(get_conn),
+    dry_run: bool = False,
 ) -> dict:
+    """UX-21 (resilience sweep 2026-08-28): pasting an older or another
+    site's config used to overwrite every recognised key with no confirmation
+    and no way back. `dry_run=1` runs the SAME validate-then-diff path the
+    apply below does and writes nothing, so the confirm dialog the UI shows
+    can never disagree with what an apply would actually do."""
     admin = _require_admin(request)
+    settings = request.app.state.settings
     try:
         parsed = site_store.import_toml(payload.text)
         if not parsed:
             raise HTTPException(status_code=422, detail="no recognised [section] keys found in that text")
-        site_store.set_many(conn, parsed, updated_by=admin)
+        normalized = site_store.validate_many(parsed)
     except site_store.SiteValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    changes = site_store.diff_against_current(conn, settings, normalized)
+
+    if dry_run:
+        return {"changes": site_store.mask_changes(changes), "count": len(changes)}
+
+    before = {c["key"]: c["from"] for c in changes}
+    after = {c["key"]: c["to"] for c in changes}
+    site_store.set_many(conn, normalized, updated_by=admin)
+    if changes:
+        # A re-paste of the running config changes nothing, so it leaves no
+        # history entry -- [ UNDO LAST IMPORT ] never offers a no-op.
+        db.record_site_change(conn, admin, "import", before, after)
     db.audit(conn, admin, "site.settings_import", "site",   # keys only, see above
              {"keys": sorted(parsed)})
     conn.commit()
     site_store.invalidate(request.app)          # see api_admin_site_put
     log.info("admin %r imported site settings: %s", admin, ", ".join(sorted(parsed)))
-    manifest = site_store.resolved_manifest(conn, request.app.state.settings)
+    manifest = site_store.resolved_manifest(conn, settings)
     manifest["auto_derived"] = sorted(site_store.AUTO_DERIVED_KEYS)
     return manifest
+
+
+@router.get("/admin/site/history")
+def api_admin_site_history(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -> dict:
+    """UX-21 (resilience sweep 2026-08-28): who changed the site manifest,
+    when and how, for the [ UNDO LAST IMPORT ] button's own display. Never
+    the actual before/after values -- those stay inside site_history's raw
+    storage (needed for a correct undo, see db.record_site_change) and are
+    not put on the wire here."""
+    _require_admin(request)
+    entries = db.site_history(conn)
+    return {
+        "entries": [
+            {
+                "at": e.get("at"),
+                "actor": e.get("actor"),
+                "action": e.get("action"),
+                "count": len(e.get("before") or {}),
+            }
+            for e in entries
+        ],
+    }
+
+
+@router.post("/admin/site/undo-last-change")
+def api_admin_site_undo_last_change(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict:
+    """[ UNDO LAST IMPORT ] (UX-21, resilience sweep 2026-08-28): reapplies
+    the newest site_history entry's BEFORE values through the SAME
+    validate/set_many path a save or an import uses, so validation and every
+    side effect (the manifest cache drop, the audit row) run identically --
+    an undo is not a second, less-checked write path. Records the undo as
+    its own history entry (action="undo"), so undoing an undo is just
+    another undo."""
+    admin = _require_admin(request)
+    settings = request.app.state.settings
+    entries = db.site_history(conn)
+    if not entries:
+        raise HTTPException(status_code=404, detail="no site setting change is recorded to undo")
+    latest = entries[0]
+    restore = {str(k): str(v) for k, v in (latest.get("before") or {}).items()}
+    if not restore:
+        raise HTTPException(status_code=409, detail="that change recorded no values to restore")
+    try:
+        normalized = site_store.validate_many(restore)
+    except site_store.SiteValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    changes = site_store.diff_against_current(conn, settings, normalized)
+    site_store.set_many(conn, normalized, updated_by=admin)
+    if changes:
+        before = {c["key"]: c["from"] for c in changes}
+        after = {c["key"]: c["to"] for c in changes}
+        db.record_site_change(conn, admin, "undo", before, after)
+    db.audit(conn, admin, "site.settings_undo", "site",
+             {"keys": sorted(restore)})
+    conn.commit()
+    site_store.invalidate(request.app)          # see api_admin_site_put
+    log.info("admin %r undid the site setting change made by %r at %s: %s",
+             admin, latest.get("actor"), latest.get("at"), ", ".join(sorted(restore)))
+    manifest = site_store.resolved_manifest(conn, settings)
+    manifest["auto_derived"] = sorted(site_store.AUTO_DERIVED_KEYS)
+    return {
+        "manifest": manifest,
+        "changes": site_store.mask_changes(changes),
+        "count": len(changes),
+    }

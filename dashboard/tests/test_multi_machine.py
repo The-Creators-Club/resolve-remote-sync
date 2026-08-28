@@ -463,6 +463,19 @@ def test_only_an_admin_can_push_an_update(env):
     assert client.post("/api/v1/admin/machines/ruskin/DESKTOP-1/update").status_code == 403
 
 
+def test_the_packages_page_update_button_names_a_computer_it_did_not_find(env):
+    """UX-20 ("Same for partial_admin_machine_update if it has the same
+    shape", resilience sweep 2026-08-28): the Settings -> Packages page's
+    own [ UPDATE NOW ] posts to this htmx partial, not the JSON route
+    above."""
+    client, _conn, _now = env
+    resp = client.post("/partials/admin/machines/update",
+                       data={"editor": "ruskin", "machine": "GHOST"})
+    assert resp.status_code == 200
+    # Jinja autoescapes the quotes in repr() output.
+    assert "no machine" in resp.text and "GHOST" in resp.text and "ruskin" in resp.text
+
+
 # -- resuming proxy download from the dashboard (v26, CR-45) ----------------
 #
 # The lane B breaker could only ever be cleared at the editor's own tray, so
@@ -590,3 +603,25 @@ def test_a_machine_with_no_request_is_told_nothing(env):
     assert "resume_lane_b" not in reply["commands"]
     # ...and the halt, which is always present, still is.
     assert "halt" in reply["commands"]
+
+
+def test_the_fleet_page_resume_button_names_a_computer_it_did_not_find(env):
+    """UX-20 (resilience sweep 2026-08-28): the fleet grid's [ RESUME ]
+    button posts to this htmx partial, not the JSON route above -- and used
+    to re-render looking fine for a machine left open across a rename or a
+    [ FORGET ], queuing nothing and leaving the editor's proxies stopped."""
+    client, _conn, _now = env
+    resp = client.post("/partials/admin/machines/resume-lane-b",
+                       data={"editor": "ruskin", "machine": "GHOST"})
+    assert resp.status_code == 200
+    assert "no longer in the fleet" in resp.text
+    assert "Reload the page" in resp.text
+
+    # ...and a real, parked machine still resumes from the same route.
+    report(client, "ruskin", "DESKTOP-1", sync_guard=_guard(True))
+    resp = client.post("/partials/admin/machines/resume-lane-b",
+                       data={"editor": "ruskin", "machine": "DESKTOP-1"})
+    assert resp.status_code == 200
+    assert "no longer in the fleet" not in resp.text
+    reply = report(client, "ruskin", "DESKTOP-1", sync_guard=_guard(True))
+    assert reply["commands"]["resume_lane_b"]["apply"] is True

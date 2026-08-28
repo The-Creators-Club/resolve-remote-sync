@@ -49,7 +49,27 @@
             hx-confirm="{{ tick_warning }} Sync it there anyway?"
             {% endif %}
             hx-target="#project-detail" hx-swap="innerHTML">
-      [ {{ "UNTICK" if tick_for in pickers else "TICK" }} FOR {{ whom }} ]</button>
+      {# UX-12 (2026-08-28): a tick with no machine means EVERY computer that
+         person owns, and the button said only their name. The only place it
+         was ever stated was a title attribute on the sidebar checkbox. #}
+      {%- set owned = toggle_editor_machines if toggle_editor_machines is defined and toggle_editor_machines else [] -%}
+      {%- if tick_for not in pickers and owned | length > 1 -%}
+      [ TICK FOR ALL OF {{ "MY" if tick_for == session_user else (tick_for | upper ~ "'S") }} COMPUTERS ({{ owned | length }}) ]
+      {%- else -%}
+      [ {{ "UNTICK" if tick_for in pickers else "TICK" }} FOR {{ whom }} ]
+      {%- endif -%}</button>
+    {# ...and the per-computer buttons beside it, so "his desktop, not his
+       laptop" is one click rather than a trip to Settings, Assignments. #}
+    {% if tick_for not in pickers and toggle_editor_machines is defined and toggle_editor_machines | length > 1 %}
+    <div class="mono-sm muted" style="margin-top:0.3rem">or one computer at a time:
+      {% for m in toggle_editor_machines %}
+      <button class="btn {{ 'acting' if tick_for != session_user }}"
+              title="sync this project to {{ m }} only"
+              hx-post="/partials/selection/{{ tick_for }}/{{ project.slug }}/toggle?view=project&machine={{ m | urlencode }}&slug_page={{ project.slug }}{{ as_qs if as_qs is defined }}"
+              hx-target="#project-detail" hx-swap="innerHTML">[ {{ m | upper }} ]</button>
+      {% endfor %}
+    </div>
+    {% endif %}
     {# The upload-only tick (docs/UPLOAD_ONLY_TICK.md): originals go up,
        nothing comes down. A SET, not a toggle: pressing it on a full tick
        switches the mode, and the button flips to offer the way back. #}
@@ -111,9 +131,30 @@
    still holding it at the old path. Admins only: it rewrites the tree. #}
 {% if session_is_admin %}
 <div class="mono-sm">
+  {# UX-11 / C-6 (resilience sweep 2026-08-28): the confirm is built from what
+     is actually in the form. It used to be one fixed sentence saying "move it
+     there" whatever "it" and wherever "there" was, in front of a free-text
+     path and a destination select that keeps the last project you looked at.
+     htmx:confirm rather than hx-confirm because hx-confirm is a static
+     string; issueRequest(true) is what lets the request through afterwards. #}
   <form style="display:inline" hx-post="/partials/project/{{ project.slug }}/move"
         hx-target="#project-detail" hx-swap="innerHTML"
-        hx-confirm="Move it on the server now, and tell every computer that holds it to move its copy and relink Resolve?">
+        hx-on::confirm="event.preventDefault();
+          var f = this;
+          var path = (f.querySelector('[name=path]').value || '').trim();
+          var sel = f.querySelector('[name=to_slug]');
+          var dest = sel.options[sel.selectedIndex].text;
+          var into = (f.querySelector('[name=to_path]').value || '').trim();
+          var n = {{ project.editors | length }};
+          {# An empty box goes through: the server's own "type the file or
+             folder to move" banner is the answer, not a silent no-op. #}
+          if (!path) { event.detail.issueRequest(true); return; }
+          var msg = &quot;Move '&quot; + path + &quot;' from {{ project.label }} to &quot; + dest
+            + (into ? '/' + into : '') + ' on the server, and tell ' + n + ' computer'
+            + (n === 1 ? '' : 's') + ' to move their copy and relink Resolve?'
+            + ' Proxies move with it. You can put it back with UNDO while every computer'
+            + ' has either applied it or is still waiting for it.';
+          if (window.confirm(msg)) { event.detail.issueRequest(true); }">
     MOVE: <input type="text" name="path" size="34"
            placeholder="file or folder in this project, e.g. B-roll/A001_0512.braw"
            title="a path inside this project: one file, or a whole folder with everything in it">
@@ -128,20 +169,71 @@
     <button class="btn" title="moves the file and its proxies on the server, then every computer that has it moves its own copy and relinks Resolve">[ MOVE ON THE SERVER AND ON EVERY MACHINE ]</button>
   </form>
   {% if move_error is defined and move_error %}<span class="chip red">[ ! ]</span> <span class="muted">{{ move_error }}</span>{% endif %}
-  {% if move_done is defined and move_done %}<span class="chip green">[ MOVED ]</span> <span class="muted">{{ move_done.from }} is now {{ move_done.to }} on the server{% if move_done.proxies_moved %} ({{ move_done.proxies_moved }} proxy file{{ 's' if move_done.proxies_moved != 1 }} with it){% endif %}; {{ move_done.machines | length }} computer{{ 's' if (move_done.machines | length) != 1 }} told to follow</span>{% endif %}
+  {% if move_done is defined and move_done and move_done.proxies_failed %}
+  {# DASH-1: the original moved. Saying so, and naming exactly what did not
+     follow, is the one thing this must never round off. #}
+  <span class="chip amber">[ MOVED, SOME PROXIES STAYED ]</span> <span class="muted">{{ move_done.from }} is now {{ move_done.to }} on the server, but these proxy files did not move: {{ move_done.proxies_failed | join('; ') }}. Move them by hand or run the move again once whatever is holding them has let go.</span>
+  {% elif move_done is defined and move_done %}<span class="chip green">[ MOVED ]</span> <span class="muted">{{ move_done.from }} is now {{ move_done.to }} on the server{% if move_done.proxies_moved %} ({{ move_done.proxies_moved }} proxy file{{ 's' if move_done.proxies_moved != 1 }} with it){% endif %}; {{ move_done.machines | length }} computer{{ 's' if (move_done.machines | length) != 1 }} told to follow</span>{% endif %}
 </div>
 {% if moves is defined and moves %}
+{# The moves-awaiting-machines panel (DASH-9, resilience sweep 2026-08-28).
+   A target with no answer used to be kept for ever and read by nobody, so
+   "one computer never applied this and may re-upload the old path" was a
+   question with no page that answered it. #}
+{% set awaiting = [] %}
+{% for m in moves if m.state != "pending" %}{% for t in m.targets if not t.applied_at %}
+  {% set _ = awaiting.append((m, t)) %}
+{% endfor %}{% endfor %}
+{% if awaiting %}
+<div class="mono-sm">MOVES AWAITING MACHINES:
+  {% for m, t in awaiting %}
+    <div class="link-row">
+      {% if t.expired_at %}<span class="chip red">[ NOT APPLIED - THIS COMPUTER MAY RE-UPLOAD THE OLD PATH ]</span>
+      {% elif t.waiting_days >= 2 %}<span class="chip amber">[ WAITING {{ t.waiting_days | round | int }} DAYS ]</span>
+      {% else %}<span class="chip amber">[ WAITING ]</span>{% endif %}
+      <span class="who">{{ t.editor_username }}</span> on <span class="mono">{{ t.machine }}</span>
+      <span class="muted">{{ m.from_project_rel }}/{{ m.from_rel }}, asked {{ m.requested_at | ago }}{% if t.state == "retrying" %}, this computer is still trying ({{ t.attempts }} attempt{{ 's' if t.attempts != 1 }}){% endif %}{% if t.last_error %}: {{ t.last_error }}{% endif %}</span>
+      {% if t.expired_at %}
+      <form style="display:inline" hx-post="/partials/project/{{ project.slug }}/moves/{{ m.id }}/reissue"
+            hx-target="#project-detail" hx-swap="innerHTML">
+        <input type="hidden" name="editor" value="{{ t.editor_username }}">
+        <input type="hidden" name="machine" value="{{ t.machine }}">
+        <button class="btn" title="offer this move to that computer again on its next report">[ ASK THAT COMPUTER AGAIN ]</button>
+      </form>
+      {% endif %}
+    </div>
+  {% endfor %}
+</div>
+{% endif %}
 <div class="mono-sm">MOVES:
   {% for m in moves %}
     <div class="link-row">
-      {% if m.failed %}<span class="chip red">[ {{ m.failed }} FAILED ]</span>
+      {% if m.state == "pending" %}<span class="chip red">[ UNFINISHED ON THE SERVER ]</span>
+      {% elif m.state == "undone" %}<span class="chip">[ PUT BACK ]</span>
+      {% elif m.blocked %}<span class="chip red">[ {{ m.blocked }} BLOCKED ]</span>
+      {% elif m.failed %}<span class="chip red">[ {{ m.failed }} FAILED ]</span>
+      {% elif m.expired %}<span class="chip red">[ {{ m.expired }} NOT APPLIED ]</span>
       {% elif m.waiting %}<span class="chip amber">[ WAITING FOR {{ m.waiting }} ]</span>
       {% else %}<span class="chip green">[ DONE ]</span>{% endif %}
+      {% if m.state == "partial" %}<span class="chip amber">[ SOME PROXIES STAYED ]</span>{% endif %}
       <span class="mono">{{ m.from_project_rel }}/{{ m.from_rel }}</span> to <span class="mono">{{ m.to_project_rel }}/{{ m.to_rel }}</span>
-      <span class="muted">by {{ m.requested_by }} {{ m.requested_at | ago }}</span>
+      <span class="muted">by {{ m.requested_by }} {{ m.requested_at | ago }}{% if m.undo_of %}, putting move {{ m.undo_of }} back{% endif %}</span>
+      {% if m.state == "pending" %}
+      <div class="muted mono-sm" style="margin-left:1.5rem">This move was interrupted part-way through on the server. Nothing has been sent to any computer. Check both paths on the NAS; the dashboard re-checks them every cycle and finishes it by itself once only one of them exists.</div>
+      {% endif %}
+      {% if m.state_detail %}<div class="muted mono-sm" style="margin-left:1.5rem">{{ m.state_detail }}</div>{% endif %}
+      {% if m.undoable %}
+      {# UX-11: the inverse move, through the same machinery. Offered only
+         while every computer has applied it or is still waiting. #}
+      <form style="display:inline" hx-post="/partials/project/{{ project.slug }}/moves/{{ m.id }}/undo"
+            hx-target="#project-detail" hx-swap="innerHTML"
+            hx-confirm="Move {{ m.to_project_rel }}/{{ m.to_rel }} back to {{ m.from_project_rel }}/{{ m.from_rel }} on the server, and tell every computer that holds it to move its copy back and relink Resolve? Proxies go back with it.">
+        <button class="btn" title="put this move back: the same move in reverse, on the server and on every computer">[ UNDO THIS MOVE ]</button>
+      </form>
+      {% endif %}
       {% for t in m.targets %}
         <div class="muted mono-sm" style="margin-left:1.5rem">{{ t.editor_username }} on {{ t.machine }}:
-          {% if not t.applied_at %}{{ "told, not done yet" if t.delivered_at else "waiting for its next report" }}{% elif t.ok %}moved{% else %}FAILED{% endif %}{% if t.detail %} ({{ t.detail }}){% endif %}</div>
+          {% if t.expired_at %}NOT APPLIED, this computer may re-upload the old path{% elif not t.applied_at %}{% if t.state == "retrying" %}still trying here ({{ t.attempts }} attempt{{ 's' if t.attempts != 1 }}){% else %}{{ "told, not done yet" if t.delivered_at else "waiting for its next report" }}{% endif %}{% elif t.state == "blocked" %}BLOCKED here after {{ t.attempts }} attempts{% elif t.ok %}moved{% if t.relink_pending %}, Resolve not repointed yet{% endif %}{% else %}FAILED{% endif %}{% if t.detail %} ({{ t.detail }}){% endif %}</div>
       {% endfor %}
     </div>
   {% endfor %}

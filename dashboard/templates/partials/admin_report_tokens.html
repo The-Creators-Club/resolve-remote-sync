@@ -52,8 +52,11 @@
         <td class="mono-sm muted">{{ t.created_at }}</td>
         <td class="mono-sm muted">{{ t.last_used_at or "never" }}</td>
         <td>
+          {# C-8 (UX.md, 2026-08-28): one click takes an editor's companion off
+             the fleet, and the token cannot be shown again. #}
           <form class="inline-form" hx-post="/partials/admin/report-tokens/revoke"
-                hx-target="#admin-report-tokens" hx-swap="outerHTML">
+                hx-target="#admin-report-tokens" hx-swap="outerHTML"
+                hx-confirm="Revoke {{ t.editor_username }}'s report token? Their companion stops reporting and stops syncing until you issue a new token and they enter it. The old token cannot be shown again.">
             <input type="hidden" name="token_id" value="{{ t.token_id }}">
             <button class="btn" type="submit">[ REVOKE ]</button>
           </form>

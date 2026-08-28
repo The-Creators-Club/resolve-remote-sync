@@ -133,20 +133,61 @@ def test_scan_whole_project_shows_popup_for_out_of_tree_items(tmp_path, monkeypa
     assert captured["local_root"] == str(root)
 
 
-def test_scan_whole_project_skips_ignored_paths(tmp_path, monkeypatch):
+def test_scan_whole_project_clears_the_session_skips(tmp_path, monkeypatch):
+    """APP-2 (resilience sweep 2026-08-28). This test asserted the OPPOSITE
+    until the sweep: the scan filtered through the ignore tracker, so an
+    editor who pressed IGNORE ALL on 65 clips at nine o'clock was told at
+    noon that all their media was in the tree, and nothing short of
+    restarting the tray could undo it. "Scan whole project" is the explicit
+    "show me everything", so it clears the session set first."""
     other = tmp_path / "other"
     other.mkdir()
-    ignored_path = other / "ignored.mov"
-    ignored_path.touch()
+    skipped_path = other / "skipped.mov"
+    skipped_path.touch()
     fresh_path = other / "fresh.mov"
     fresh_path.touch()
 
     app = _make_app(tmp_path)
-    app.ignore_tracker.ignore(str(ignored_path))
+    app.ignore_tracker.ignore(str(skipped_path))
 
     monkeypatch.setattr(
         resolve_bridge, "get_media_pool_items",
-        lambda: _mp_result(_item(str(ignored_path)), _item(str(fresh_path))),
+        lambda: _mp_result(_item(str(skipped_path)), _item(str(fresh_path))),
+    )
+
+    captured = {}
+    monkeypatch.setattr(
+        popup, "show_popup",
+        lambda items, *a, **kw: captured.__setitem__("items", items),
+    )
+
+    app.scan_whole_project()
+    paths = [item["file_path"] for item in captured["items"]]
+    assert paths == [str(skipped_path), str(fresh_path)]
+    assert app.ignore_tracker.session_count() == 0
+
+
+def test_scan_whole_project_still_honours_a_persisted_folder_ignore(
+        tmp_path, monkeypatch):
+    """RES-12: the scan clears DISMISSALS, not standing decisions. The
+    editor who said "always leave my stock folder alone" is not asking to be
+    shown it again every time they run a scan -- that is what the Settings
+    window's [ FORGET ] is for."""
+    stock = tmp_path / "stock"
+    stock.mkdir()
+    stock_clip = stock / "stock.mov"
+    stock_clip.touch()
+    other = tmp_path / "other"
+    other.mkdir()
+    fresh_path = other / "fresh.mov"
+    fresh_path.touch()
+
+    app = _make_app(tmp_path)
+    assert app.ignore_tracker.ignore_folder(str(stock), reason="personal library")
+
+    monkeypatch.setattr(
+        resolve_bridge, "get_media_pool_items",
+        lambda: _mp_result(_item(str(stock_clip)), _item(str(fresh_path))),
     )
 
     captured = {}
@@ -6648,3 +6689,317 @@ def test_diagnostics_name_the_architecture_and_the_update_state(tmp_path):
     assert "-- updates --" in text
     assert "last attempted build: 9.9.9" in text
     assert "exec-failed" in text
+
+
+# -- UX-13 / OPS-6: an install that never finished (resilience sweep 2026-08-28)
+
+def _breadcrumb(tmp_path, monkeypatch):
+    """Point the companion's config dir at tmp_path and leave an interrupted
+    install behind, exactly as onboarding/steps.write_install_breadcrumb does."""
+    from ccsync_companion import app as app_mod
+    from ccsync_companion import config as config_mod
+
+    home = tmp_path / "fakehome" / ".ccsync"
+    (home / "state").mkdir(parents=True, exist_ok=True)
+    (home / "state" / app_mod.INSTALL_BREADCRUMB_FILENAME).write_text(
+        '{"phase": "clean_slate:editor", "started_at": "2026-08-28T10:00:00"}',
+        encoding="utf-8")
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", home)
+    return home
+
+
+def test_no_breadcrumb_is_not_a_problem(tmp_path):
+    from ccsync_companion import app as app_mod
+
+    assert app_mod.install_in_progress_problem({}, config_dir=tmp_path) == ""
+
+
+def test_the_breadcrumb_names_this_sites_drive(tmp_path, monkeypatch):
+    from ccsync_companion import app as app_mod
+
+    home = _breadcrumb(tmp_path, monkeypatch)
+    problem = app_mod.install_in_progress_problem({"canonical_prefix": "Q:\\"},
+                                                  config_dir=home)
+    assert "no Q: drive" in problem
+    assert "FINISH THE INSTALL" in problem
+    assert "\u2014" not in problem
+    # No customer's letter compiled in: a site with no prefix gets a phrase,
+    # never a guessed P:.
+    assert "P:" not in app_mod.install_in_progress_problem({}, config_dir=home)
+
+
+def test_an_interrupted_install_stops_the_companion_syncing(tmp_path, monkeypatch):
+    """The wizard's worker is a daemon thread; a closed window leaves the
+    machine with no tree drive and no autostart. A companion that starts
+    afterwards must say so rather than sync against a half-written config."""
+    _breadcrumb(tmp_path, monkeypatch)
+    app = _make_app(tmp_path)
+    assert any("did not finish" in p for p in app.config_problems)
+    # config_problems is THE gate every lane, the popup, FIX ALL and
+    # Consolidate already obey (DEL-3), so nothing else has to be taught.
+    assert app.config_problems
+
+
+def test_a_finished_install_leaves_no_problem(tmp_path, monkeypatch):
+    from ccsync_companion import config as config_mod
+
+    home = tmp_path / "fakehome" / ".ccsync"
+    (home / "state").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", home)
+    app = _make_app(tmp_path)
+    assert not any("did not finish" in p for p in app.config_problems)
+
+
+# -- UX-3 / SYNC-10 / MEDIA-3 in the report (resilience sweep 2026-08-28) ----
+
+
+def test_a_moved_project_folder_reaches_the_report_and_the_one_sentence(tmp_path):
+    """UX-3: lane A now knows the difference between "never here" and "was
+    here last pass"; this is the half an admin reads."""
+    app = _unblocked_app(tmp_path)
+    app._lane_a.moved_project_dirs = lambda: [
+        {"slug": "nuclear-2026", "subpath": "Projects/2026/FF5/Nuclear",
+         "expected": "P:/Projects/2026/FF5/Nuclear",
+         "found": "P:/Projects/2026/FF5/Nuclear FINAL"}]
+    guard = app.sync_guard()
+    assert guard["moved_project_dirs"][0]["slug"] == "nuclear-2026"
+    blocked = guard["blocked"]
+    assert blocked["reason"] == "project_dir_moved"
+    assert "Nuclear is not where CCSync expects it" in blocked["detail"]
+    assert "-" not in blocked["detail"].replace("CCSync", "") or True   # no em dash
+    assert "\u2014" not in blocked["detail"]
+
+
+def test_no_moved_folders_means_no_key_and_no_reason(tmp_path):
+    app = _unblocked_app(tmp_path)
+    guard = app.sync_guard()
+    assert "moved_project_dirs" not in guard
+    assert "blocked" not in guard
+
+
+def test_stray_project_dirs_ride_the_report_when_there_are_any(tmp_path):
+    app = _unblocked_app(tmp_path)
+    app._lane_a.stray_projects = lambda: {
+        "count": 2, "bytes": 40 * 10 ** 9, "paths": ["P:/Projects/2026/Old"],
+        "slugs": ["old"], "checked_at": "now"}
+    assert app.sync_guard()["stray_projects"]["count"] == 2
+    # A scan that has not run yet must not render as "there are none".
+    app._lane_a.stray_projects = lambda: None
+    assert "stray_projects" not in app.sync_guard()
+
+
+def test_ingest_staging_is_attributable_in_the_report(tmp_path):
+    """MEDIA-3: staging lives in a dot-folder inside the archive, so without
+    this the disk it fills is unattributable from anywhere."""
+    app = _unblocked_app(tmp_path)
+
+    class _Ingestor:
+        def staging_report(self):
+            return {"bytes": 12 * 10 ** 9, "batches": 3,
+                    "oldest_at": "2026-08-01T00:00:00Z"}
+
+    app.broll_ingestor = _Ingestor()
+    app.music_ingestor = None
+    staging = app.sync_guard()["ingest_staging"]
+    assert staging == {"bytes": 12 * 10 ** 9, "batches": 3,
+                       "oldest_at": "2026-08-01T00:00:00Z"}
+
+
+def test_clear_finished_staging_reports_what_it_freed(tmp_path):
+    app = _unblocked_app(tmp_path)
+
+    class _Ingestor:
+        def __init__(self):
+            self.asked = []
+
+        def prune_staging(self, max_age_days=None):
+            self.asked.append(max_age_days)
+            return {"removed": 2, "bytes": 3 * 10 ** 9}
+
+    ingestor = _Ingestor()
+    app.broll_ingestor = ingestor
+    app.music_ingestor = None
+    message = app.clear_finished_ingest_staging()
+    assert ingestor.asked == [0]          # everything finished, now
+    assert "2 finished staging folder(s)" in message
+    assert "3.0 GB" in message
+
+
+def test_nothing_to_clear_says_so_rather_than_claiming_success(tmp_path):
+    app = _unblocked_app(tmp_path)
+    app.broll_ingestor = None
+    app.music_ingestor = None
+    assert "no finished staging" in app.clear_finished_ingest_staging()
+
+
+def test_putting_a_project_folder_back_goes_through_the_repath_move(tmp_path):
+    """UX-3's self-heal: the same move the server-side repath uses, which
+    refuses on an occupied target and never deletes."""
+    app = _unblocked_app(tmp_path)
+    app._lane_a.moved_project_dirs = lambda: [
+        {"slug": "nuclear-2026", "subpath": "Projects/2026/FF5/Nuclear",
+         "expected": str(tmp_path / "want"), "found": str(tmp_path / "have")}]
+    moves: list = []
+
+    class _Repather:
+        def _move_dir(self, slug, actual, expected):
+            moves.append((slug, actual, expected))
+            return True
+
+    app.sequencer = type("S", (), {"repather": _Repather()})()
+    message = app.put_project_dir_back("Projects/2026/FF5/Nuclear")
+    assert moves == [("nuclear-2026", str(tmp_path / "have"), str(tmp_path / "want"))]
+    assert "put back" in message
+
+
+def test_a_folder_we_cannot_find_is_not_offered_as_a_move(tmp_path):
+    app = _unblocked_app(tmp_path)
+    app._lane_a.moved_project_dirs = lambda: [
+        {"slug": "nuclear-2026", "subpath": "Projects/2026/FF5/Nuclear",
+         "expected": str(tmp_path / "want"), "found": None}]
+    assert "cannot find" in app.put_project_dir_back("Projects/2026/FF5/Nuclear")
+
+
+
+# ===========================================================================
+# UX-4 / UX-15 / APP-2 (resilience sweep 2026-08-28): what Resolve can see,
+# reported; and the broken-mapping toast that told the editor something untrue
+# ===========================================================================
+
+
+def test_resolve_health_rides_the_report(tmp_path):
+    """UX-4: no field in the report carried out-of-tree counts, so an editor
+    with 40 timeline clips that will never reach anyone looked exactly like
+    an editor with none."""
+    app = _make_app(tmp_path)
+    app.watcher.last_counts = {"out_of_tree": 3, "bad_prefix": 1, "missing": 2}
+    app.watcher.last_scan_at = "2026-08-28T09:00:00+00:00"
+    app.watcher.last_resolve_project = "FF4 Nuclear"
+    app.ignore_tracker.ignore(r"C:\Users\owen\Desktop\clip.mov")
+    app.ignore_tracker.ignore_folder(r"C:\Stock")
+
+    health = app.sync_guard()["resolve_health"]
+    assert health["out_of_tree"] == 3
+    assert health["bad_prefix"] == 1
+    assert health["missing"] == 2
+    assert health["ignored_this_session"] == 1
+    assert health["ignored_folders"] == 1
+    assert health["last_scan_at"] == "2026-08-28T09:00:00+00:00"
+    assert health["open_project"] == "FF4 Nuclear"
+
+
+def test_resolve_health_before_any_scan_says_so(tmp_path):
+    """A zero that means "we have not looked" must not read as "nothing is
+    wrong" -- last_scan_at is what tells the two apart."""
+    app = _make_app(tmp_path)
+    health = app.resolve_health()
+    assert health["out_of_tree"] == 0
+    assert health["last_scan_at"] is None
+    assert "no timeline scan has completed yet" in app._resolve_health_text()
+
+
+def test_diagnostics_names_the_clips_somebody_dismissed(tmp_path):
+    """APP-2 (c): a machine where somebody pressed IGNORE ALL at nine o'clock
+    was identical, in every artefact support ever sees, to a healthy one."""
+    app = _make_app(tmp_path)
+    app.watcher.last_counts = {"out_of_tree": 65, "bad_prefix": 0, "missing": 0}
+    app.watcher.last_scan_at = "2026-08-28T09:00:00+00:00"
+    app.ignore_tracker.ignore(r"C:\Users\owen\Desktop\clip.mov")
+    text = app.build_diagnostics()
+    assert "resolve media:" in text
+    assert "65 clip(s) outside the tree" in text
+    assert "1 skipped this session" in text
+
+
+def test_the_mapping_toast_tells_the_editor_the_truth(tmp_path, monkeypatch):
+    """UX-15: the old copy said "Nothing will sync until this is fixed" (lanes
+    A and B run off local_root and are unaffected) and sent an editor to a
+    document they do not have."""
+    app = _make_app(tmp_path)
+    tray = _FakeTray()
+    app._tray_icon = tray
+    monkeypatch.setattr(app, "p_mapping_mode", lambda: "none")
+
+    app._handle_mapping_warning({"file_path": r"P:\Projects\clip.mov"})
+
+    message = tray.notifications[0][0]
+    assert "Your uploads and downloads are still running." in message
+    assert "REPAIR P: NOW" in message
+    assert "EDITOR_SETUP" not in message
+    assert "Nothing will sync" not in message
+    assert "\u2014" not in message
+
+
+def test_the_toast_names_the_site_drive_not_a_hardcoded_p(tmp_path, monkeypatch):
+    """The prefix is site data (COMMERCIAL_READINESS item 11): a customer on
+    Q: must not be told to repair P:."""
+    app = _make_app(tmp_path, canonical_prefix="Q:\\")
+    tray = _FakeTray()
+    app._tray_icon = tray
+    monkeypatch.setattr(app, "p_mapping_mode", lambda: "none")
+    app._handle_mapping_warning({"file_path": r"Q:\Projects\clip.mov"})
+    message = tray.notifications[0][0]
+    assert "REPAIR Q: NOW" in message
+    assert "P:" not in message
+
+
+def test_repair_refuses_a_mapping_ccsync_did_not_create(tmp_path, monkeypatch):
+    """UX-6's ownership check, kept: swap_to_local's first act is an
+    unconditional unmap that cannot put a foreign mapping back."""
+    from ccsync_companion import drive_swap
+
+    app = _make_app(tmp_path)
+    monkeypatch.setattr(app, "p_repair_available", lambda: True)
+    monkeypatch.setattr(app, "p_mapping_mode", lambda: "other")
+    monkeypatch.setattr(drive_swap, "current_p_target", lambda *a, **k: r"\\nas\someone_else")
+    swapped = []
+    monkeypatch.setattr(app, "swap_p_to_local", lambda: swapped.append(True) or (True, ""))
+
+    ok, message = app.repair_p_mapping()
+    assert ok is False
+    assert swapped == []
+    assert "someone_else" in message
+    assert "Nothing was changed" in message
+
+
+def test_repair_refuses_while_the_editor_is_grading_from_the_server(tmp_path, monkeypatch):
+    app = _make_app(tmp_path)
+    monkeypatch.setattr(app, "p_repair_available", lambda: True)
+    monkeypatch.setattr(app, "p_mapping_mode", lambda: "server")
+    ok, message = app.repair_p_mapping()
+    assert ok is False
+    assert "FINISH GRADING" in message
+
+
+def test_repair_maps_the_drive_back_when_it_points_at_nothing(tmp_path, monkeypatch):
+    """"none" is the state the toast actually fires for, and the one this
+    button exists to fix."""
+    app = _make_app(tmp_path)
+    monkeypatch.setattr(app, "p_repair_available", lambda: True)
+    monkeypatch.setattr(app, "p_mapping_mode", lambda: "none")
+    monkeypatch.setattr(app, "swap_p_to_local", lambda: (True, "P: is back to your local copy"))
+    ok, message = app.repair_p_mapping()
+    assert ok is True
+    assert "back to your local copy" in message
+
+
+def test_repair_is_a_no_op_when_the_drive_is_already_right(tmp_path, monkeypatch):
+    app = _make_app(tmp_path)
+    monkeypatch.setattr(app, "p_repair_available", lambda: True)
+    monkeypatch.setattr(app, "p_mapping_mode", lambda: "local")
+    ok, message = app.repair_p_mapping()
+    assert ok is True
+    assert "already pointing at your synced folder" in message
+
+
+def test_skipped_clips_survive_a_tray_restart(tmp_path, monkeypatch):
+    """UX-4: the record is what makes "14 clips of yours are not syncing"
+    answerable after the process that heard the click has gone."""
+    app = _make_app(tmp_path)
+    app.ignore_tracker.ignore(r"C:\Users\owen\Desktop\clip.mov")
+    assert app.ignore_tracker.skipped_count() == 1
+
+    restarted = _make_app(tmp_path)
+    assert restarted.resolve_health()["skipped_ever"] == 1
+    # ...and the session set is genuinely empty, so the clip is offered again.
+    assert restarted.resolve_health()["ignored_this_session"] == 0

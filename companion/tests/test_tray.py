@@ -2966,3 +2966,35 @@ def test_the_tooltip_names_what_is_owed_and_stays_short():
     text = _tooltip_text(_tray_snapshot(app))
     assert text.startswith("CCSync: PAUSED (drive disconnected, 2 uploads")
     assert len(text) <= 127
+
+
+
+# -- APP-2 / UX-4: the clips somebody dismissed ----------------------------
+
+
+def test_ignored_line_names_the_way_back():
+    from ccsync_companion.tray import _ignored_line
+
+    line = _ignored_line({"resolve_health": {"ignored_this_session": 14,
+                                             "ignored_folders": 0}})
+    assert line.startswith("\u26a0 14 clip(s) skipped this session")
+    assert "SCAN WHOLE PROJECT" in line
+    assert "\u2014" not in line
+
+
+def test_ignored_line_mentions_the_folders_left_alone_on_purpose():
+    from ccsync_companion.tray import _ignored_line
+
+    line = _ignored_line({"resolve_health": {"ignored_this_session": 0,
+                                             "ignored_folders": 2}})
+    assert "2 folder(s) are set to be left alone" in line
+    assert "skipped this session" not in line
+
+
+def test_ignored_line_is_silent_on_a_healthy_machine():
+    from ccsync_companion.tray import _ignored_line
+
+    assert _ignored_line({}) is None
+    assert _ignored_line({"resolve_health": {"ignored_this_session": 0,
+                                             "ignored_folders": 0}}) is None
+    assert _ignored_line({"resolve_health": {"ignored_this_session": "x"}}) is None

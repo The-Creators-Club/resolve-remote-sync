@@ -1515,3 +1515,178 @@ def test_the_picked_folders_survive_a_tray_restart(tmp_path):
          "path": str(clip)}]})
 
     assert body["items"][0]["accepted"] is True
+
+
+# -- MEDIA-2 / MEDIA-3 (resilience sweep 2026-08-28) -------------------------
+
+
+class FakeChild:
+    """A Popen the runner publishes and the orchestrator has to be able to
+    end."""
+
+    def __init__(self):
+        self.terminated = False
+        self.killed = False
+        self._alive = True
+
+    def poll(self):
+        return None if self._alive else 0
+
+    def terminate(self):
+        self.terminated = True
+        self._alive = False
+
+    def kill(self):
+        self.killed = True
+        self._alive = False
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def test_the_media_runner_publishes_its_child_and_stop_kills_it(tmp_path):
+    """MEDIA-2: `self._child` was never assigned anywhere in the package, so
+    stop()'s documented kill was a no-op and an ffmpeg outlived the tray."""
+    child = FakeChild()
+
+    def runner(cmd, child_sink=None):
+        child_sink(child)
+        return 0, ""
+
+    ingestor = make_ingestor(tmp_path, run_media_fn=runner)
+    assert ingestor._run_media(["proxy", "x"]) == (0, "")
+    # Published and taken back by the runner itself; publish one by hand to
+    # stand in for a child that is still running when stop() lands.
+    ingestor._publish_child(child)
+    ingestor.stop()
+    assert child.terminated is True
+
+
+def test_a_child_published_after_stop_is_killed_at_once(tmp_path):
+    """The spawn and the shutdown are on different threads: a child born in
+    the window between them is exactly how an orphan outlives the tray."""
+    ingestor = make_ingestor(tmp_path)
+    ingestor.stop()
+    child = FakeChild()
+    ingestor._publish_child(child)
+    assert child.terminated is True
+
+
+def test_a_runner_without_the_keyword_is_still_called(tmp_path):
+    """Every existing `run_media_fn` double takes one argument."""
+    seen = []
+
+    def runner(cmd):
+        seen.append(cmd)
+        return 0, ""
+
+    ingestor = make_ingestor(tmp_path, run_media_fn=runner)
+    assert ingestor._run_media(["poster"]) == (0, "")
+    assert seen == [["poster"]]
+
+
+def _finished_staging(ingestor, tmp_path, *, ended_at, name="A001.MP4"):
+    status, body = ingestor.prepare({"items": [
+        {"local_id": "c1", "name": name, "size": 4, "source": "upload"}]})
+    assert status == 202
+    sid = body["staging_id"]
+    directory = ingestor.staging_dir(sid)
+    (directory / "big.bin").write_bytes(b"x" * 2048)
+    ingestor._staging[sid]["ended_at"] = ended_at
+    return sid, directory
+
+
+def test_finished_staging_older_than_the_retention_is_deleted(tmp_path):
+    """MEDIA-3: nothing anywhere deleted a staging directory, and the plan
+    has promised seven days since the feature shipped."""
+    ingestor = make_ingestor(tmp_path)
+    sid, directory = _finished_staging(ingestor, tmp_path,
+                                       ended_at="2020-01-01T00:00:00Z")
+    result = ingestor.prune_staging()
+    assert result["removed"] == 1
+    assert result["bytes"] >= 2048
+    assert not directory.exists()
+    assert sid not in ingestor._staging
+
+
+def test_a_recent_batch_and_an_unfinished_drop_are_left_alone(tmp_path):
+    ingestor = make_ingestor(tmp_path)
+    sid, directory = _finished_staging(ingestor, tmp_path, ended_at=_iso_now_utc())
+    assert ingestor.prune_staging()["removed"] == 0
+    assert directory.exists()
+
+    # A drop that has been staged but never run has no ended_at at all.
+    del ingestor._staging[sid]["ended_at"]
+    ingestor._staging[sid]["at"] = _iso_now_utc()
+    assert ingestor.prune_staging()["removed"] == 0
+    assert directory.exists()
+
+
+def test_the_running_batch_staging_is_never_a_candidate(tmp_path):
+    ingestor = make_ingestor(tmp_path)
+    sid, directory = _finished_staging(ingestor, tmp_path,
+                                       ended_at="2020-01-01T00:00:00Z")
+    ingestor._batch = {"uid": "b1", "staging_id": sid}
+    assert ingestor.prune_staging()["removed"] == 0
+    assert directory.exists()
+
+
+def test_clear_finished_staging_takes_everything_now(tmp_path):
+    """max_age_days=0 is the tray's CLEAR FINISHED STAGING button."""
+    ingestor = make_ingestor(tmp_path)
+    _sid, directory = _finished_staging(ingestor, tmp_path, ended_at=_iso_now_utc())
+    assert ingestor.prune_staging(max_age_days=0)["removed"] == 1
+    assert not directory.exists()
+
+
+def test_staging_report_counts_the_bytes_the_space_refusal_blames(tmp_path):
+    ingestor = make_ingestor(tmp_path)
+    _finished_staging(ingestor, tmp_path, ended_at=_iso_now_utc())
+    report = ingestor.staging_report()
+    assert report["batches"] == 1
+    assert report["bytes"] >= 2048
+    assert report["oldest_at"]
+
+
+def _iso_now_utc():
+    import time as _time
+
+    return _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())
+
+
+def test_a_batch_that_ends_starts_the_retention_clock(tmp_path):
+    ingestor = make_ingestor(tmp_path)
+    status, body = ingestor.prepare({"items": [
+        {"local_id": "c1", "name": "A.MP4", "size": 4, "source": "upload"}]})
+    sid = body["staging_id"]
+    ingestor._note_staging_ended({"staging_id": sid})
+    assert ingestor._staging[sid]["ended_at"]
+
+
+# -- UX-17: the whole drop, before the first byte ---------------------------
+
+
+def test_a_drop_bigger_than_the_free_space_is_refused_whole(tmp_path, monkeypatch):
+    """The per-file 507 fired mid-batch, once part of a 200 GB shoot was
+    already on the disk."""
+    from ccsync_companion import broll_server as _bs
+
+    monkeypatch.setattr(_bs, "_free_bytes_at", lambda _d: 30 * 10 ** 9)
+    ingestor = make_ingestor(tmp_path)
+    status, body = ingestor.prepare({"items": [
+        {"local_id": f"c{i}", "name": f"A{i}.MP4", "size": 5 * 10 ** 9,
+         "source": "upload"} for i in range(10)]})
+    assert status == 507
+    assert "50.0 GB" in body["message"]
+    assert not body["ok"]
+
+
+def test_a_drop_that_fits_is_still_accepted(tmp_path, monkeypatch):
+    from ccsync_companion import broll_server as _bs
+
+    monkeypatch.setattr(_bs, "_free_bytes_at", lambda _d: 100 * 10 ** 9)
+    ingestor = make_ingestor(tmp_path)
+    status, _body = ingestor.prepare({"items": [
+        {"local_id": "c1", "name": "A.MP4", "size": 5 * 10 ** 9,
+         "source": "upload"}]})
+    assert status == 202

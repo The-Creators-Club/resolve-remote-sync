@@ -122,7 +122,7 @@ from ccsync_companion import site as site_mod
 # this ONE computer reaches the footage. The stored values ("editor"/"base")
 # and every branch keyed on them are unchanged. Published as 1.0.34 or
 # earlier -- 1.0.35 was bumped but never built, so this copy rides it.
-INSTALLER_VERSION = "1.0.36"
+INSTALLER_VERSION = "1.0.37"
 
 # NO DEFAULT since 2026-08-17 (WP0, docs/SYNOLOGY_PORT_PLAN.md). These used
 # to be one deployment's tailnet and LAN addresses compiled into every
@@ -1022,6 +1022,72 @@ def install_companion(dest_dir: Optional[Path] = None, src: Optional[Path] = Non
     return dest
 
 
+# -- OPS-6 (resilience sweep 2026-08-28): the bootstrap child ------------------
+# subprocess.run gives no handle on the child, so closing the wizard mid-install
+# left the bootstrap PowerShell running UNPARENTED -- still mapping drives and
+# writing config into a machine whose wizard is gone, and racing the second run
+# the editor starts a minute later. The default runner below is subprocess.run
+# with two additions: the child is started in its own process GROUP, and the
+# Popen is published so the WM_DELETE_WINDOW handler can take the group down
+# before the window closes. A test that injects its own `run` is unaffected.
+_bootstrap_child: Optional[subprocess.Popen] = None
+
+
+def default_bootstrap_run(cmd: list[str], timeout: Optional[float] = None,
+                          env: Optional[dict] = None,
+                          **kwargs: Any) -> "subprocess.CompletedProcess":
+    global _bootstrap_child
+    popen_kwargs: dict[str, Any] = dict(kwargs)
+    popen_kwargs.pop("capture_output", None)
+    popen_kwargs.setdefault("stdout", subprocess.PIPE)
+    popen_kwargs.setdefault("stderr", subprocess.PIPE)
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = (
+            popen_kwargs.get("creationflags", 0)
+            | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    else:
+        popen_kwargs["start_new_session"] = True
+    proc = subprocess.Popen(cmd, env=env, **popen_kwargs)
+    _bootstrap_child = proc
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        terminate_bootstrap()
+        raise
+    finally:
+        if _bootstrap_child is proc:
+            _bootstrap_child = None
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
+def terminate_bootstrap() -> bool:
+    """Kill the running bootstrap and everything it started. True when there
+    was one to kill. Never raises -- it is called from a window-close handler,
+    where an exception means the window does not close."""
+    global _bootstrap_child
+    proc = _bootstrap_child
+    if proc is None or proc.poll() is not None:
+        _bootstrap_child = None
+        return False
+    try:
+        if os.name == "nt":
+            # taskkill /T, not proc.kill(): the .ps1 spawns winget, an
+            # elevated helper and Syncthing, and killing only powershell.exe
+            # leaves those running against a machine nobody is installing.
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                           timeout=30, **CAPTURE_TEXT_KWARGS)
+        else:
+            os.killpg(os.getpgid(proc.pid), 15)
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            return False
+    finally:
+        _bootstrap_child = None
+    return True
+
+
 def run_bootstrap(
     editor_name: str,
     dashboard_token: str,
@@ -1029,7 +1095,7 @@ def run_bootstrap(
     local_root: Optional[str] = None,
     dashboard_url: str = DEFAULT_DASHBOARD_URL,
     companion_exe_source: Optional[Path] = None,
-    run: RunFn = subprocess.run,
+    run: RunFn = default_bootstrap_run,
     script_path: Optional[Path] = None,
     platform: Optional[str] = None,
     site: Optional[dict[str, Any]] = None,
@@ -1407,6 +1473,221 @@ def validate_local_root(
 
 def _default_drive_exists(letter: str) -> bool:
     return Path(f"{letter}:\\").exists()
+
+
+# -- UX-14 (resilience sweep 2026-08-28): free space ---------------------------
+# validate_local_root REFUSES; this only WARNS, and the two must stay apart.
+# A nearly-full drive is a perfectly valid local_root -- the install works, and
+# the first lane B pass is what fills the disk days later -- so blocking BEGIN
+# INSTALL on it would be wrong. Nothing on the install path looked at free
+# space at all before this, though the wizard's own copy has always said
+# "leave room".
+LOW_SPACE_WARN_BYTES = 200 * 1024 ** 3
+# Quoted in the warning so the number means something to somebody who has
+# never seen a proxy tree. Kept as one string so the .ps1 and the .sh can be
+# checked against it by eye.
+LOW_SPACE_TYPICAL_TEXT = "Synced proxies for one project are typically 50 to 300 GB."
+
+
+def _default_free_bytes(path: str) -> Optional[int]:
+    """Free bytes on the volume `path` lives on, walking up to the first
+    parent that exists -- the folder itself is usually about to be created.
+    None when nothing in the chain can be stat'd, which must read as "could
+    not check", never as "fine"."""
+    import shutil
+    candidate = Path(str(path or "").strip())
+    seen: set[str] = set()
+    while True:
+        key = str(candidate)
+        if key in seen:
+            return None
+        seen.add(key)
+        try:
+            if candidate.exists():
+                return int(shutil.disk_usage(str(candidate)).free)
+        except OSError:
+            return None
+        parent = candidate.parent
+        if parent == candidate:
+            return None
+        candidate = parent
+
+
+def local_root_space_warning(
+    value: str,
+    free_bytes: Optional[Callable[[str], Optional[int]]] = None,
+) -> Optional[str]:
+    """A one-line warning to show BESIDE the local-root field, or None.
+
+    None means either "there is room" or "the drive is not there yet" -- the
+    second is already validate_local_root's refusal, and saying two things
+    about one empty field helps nobody.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    probe = free_bytes or _default_free_bytes
+    try:
+        free = probe(raw)
+    except Exception:
+        free = None
+    if free is None or free >= LOW_SPACE_WARN_BYTES:
+        return None
+    gb = int(round(free / (1024 ** 3)))
+    return f"This drive has {gb} GB free. {LOW_SPACE_TYPICAL_TEXT}"
+
+
+# -- UX-13 / OPS-6 (resilience sweep 2026-08-28): the install breadcrumb -------
+# The wizard's worker is a daemon thread: closing the window kills it wherever
+# it happens to be, and _clean_slate has by then unmapped the tree drive,
+# killed the companion and deleted every autostart entry. Nothing on disk said
+# an install had been interrupted, so the editor believed they still had
+# CCSync. This file is that record: written before the destructive phase,
+# deleted on Finish, read by the wizard at startup AND by the companion, which
+# refuses to sync while it is there rather than pretending a half-installed
+# machine is a working one.
+INSTALL_BREADCRUMB_FILENAME = "install_in_progress.json"
+
+
+def install_state_dir(home: Optional[Path] = None) -> Path:
+    """~/.ccsync/state -- the same directory the companion derives from its
+    log path, which is where every other latch in this system lives."""
+    base = Path(home) if home is not None else Path.home()
+    return base / ".ccsync" / "state"
+
+
+def install_breadcrumb_path(home: Optional[Path] = None) -> Path:
+    return install_state_dir(home) / INSTALL_BREADCRUMB_FILENAME
+
+
+def write_install_breadcrumb(phase: str, home: Optional[Path] = None) -> Optional[Path]:
+    """Record that an install is part-way through. Never raises: a wizard that
+    cannot write this must still install."""
+    target = install_breadcrumb_path(home)
+    payload = {
+        "phase": str(phase or "install"),
+        "started_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "installer_version": INSTALLER_VERSION,
+    }
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # tmp + os.replace, like identity.py: a half-written breadcrumb read
+        # by the companion is indistinguishable from a corrupt install.
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        os.replace(str(tmp), str(target))
+        return target
+    except OSError:
+        return None
+
+
+def read_install_breadcrumb(home: Optional[Path] = None) -> Optional[dict]:
+    """The record, or None when there is no interrupted install. An
+    unreadable or malformed file counts as PRESENT but unparsed ({}): the
+    file existing at all is the signal, and losing that to a JSON error is
+    exactly the "could not check reads as fine" failure."""
+    target = install_breadcrumb_path(home)
+    try:
+        text = target.read_text(encoding="utf-8-sig")
+    except OSError:
+        return None
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def install_close_warning(drive_letter: str) -> str:
+    """What the WM_DELETE_WINDOW dialog asks mid-install. Here rather than in
+    onboard.py so it is testable at all (the wizard has no automated tests)
+    and so the drive letter comes from the site manifest -- a literal P: in
+    this sentence is exactly the "no customer's name in code" rule one level
+    down (2026-08-17, COMMERCIAL_READINESS.md item 11)."""
+    letter = str(drive_letter or "").strip().rstrip(":\\/") or site_drive_letter(None)
+    return (
+        "The install is part-way through. Closing now leaves this computer "
+        f"with no CCSync and no {letter} drive. Close anyway?"
+    )
+
+
+def clear_install_breadcrumb(home: Optional[Path] = None) -> None:
+    """Called on Finish and on nothing else. Never raises."""
+    try:
+        install_breadcrumb_path(home).unlink()
+    except OSError:
+        pass
+
+
+# -- OPS-7 (resilience sweep 2026-08-28): the wrong-profile install ------------
+# Everything this installer creates is per-user: the bin dir under
+# %LOCALAPPDATA%, ~/.ccsync, the HKCU Run entries, the scheduled task
+# principal, the loopback share's FullAccess grant. Run under a different
+# account -- a UAC CREDENTIAL prompt answered with the machine's admin login
+# is how it happens -- every one of them lands in that profile, the script
+# reports success and prints a device ID, and the editor logs back into their
+# own account to find nothing at all.
+def console_user_mismatch(console_user: Optional[str],
+                          running_user: Optional[str]) -> Optional[str]:
+    """The refusal message when `running_user` is not the signed-in one, else
+    None. Pure string comparison so both bootstraps and this wizard share one
+    rule and one wording.
+
+    An unknown console user is NOT a refusal: the probe is a best effort (a
+    locked session, a service context, a Mac), and refusing on "could not
+    check" would lock people out of their own install. The caller says which
+    of the two it got instead.
+    """
+    signed_in = _bare_account(console_user)
+    running = _bare_account(running_user)
+    if not signed_in or not running:
+        return None
+    if signed_in.casefold() == running.casefold():
+        return None
+    return (
+        f"You are running as {running} but {signed_in} is signed in. "
+        f"Everything this installs is per-user, so {signed_in} would get "
+        f"nothing. Sign in as {signed_in} and run it again (it does not need "
+        f"administrator rights)."
+    )
+
+
+def _bare_account(value: Optional[str]) -> str:
+    """DOMAIN\\alex / alex@corp / alex -> alex. The two probes report the name
+    in different shapes and a domain prefix is not a difference."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "\\" in text:
+        text = text.rsplit("\\", 1)[-1]
+    if "@" in text:
+        text = text.split("@", 1)[0]
+    return text.strip()
+
+
+def default_console_user(run: RunFn = subprocess.run,
+                         platform: Optional[str] = None) -> Optional[str]:
+    """Who is signed in at the physical console, or None when it cannot be
+    determined cheaply. Windows only in practice: on macOS the wizard is
+    opened from the Finder by the person sitting there, and there is no
+    credential-prompt path that could switch accounts under it."""
+    plat = platform or sys.platform
+    if _is_mac(platform) or plat.startswith("linux"):
+        return None
+    try:
+        result = run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "(Get-CimInstance Win32_ComputerSystem).UserName"],
+            timeout=20, **CAPTURE_TEXT_KWARGS)
+    except Exception:
+        return None
+    name = _first_line(result).strip()
+    return name or None
+
+
+def current_user() -> str:
+    """The account this process is running as."""
+    return (os.environ.get("USERNAME") or os.environ.get("USER") or "").strip()
 
 
 def _default_is_mount(path: str) -> bool:

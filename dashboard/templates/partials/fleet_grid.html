@@ -4,6 +4,14 @@
 </div>
 <div class="rule">{{ "─" * 100 }}</div>
 
+{# UX-20 (resilience sweep 2026-08-28): a button on this grid that acted on
+   nothing. [ RESUME ] used to re-render the whole grid looking fine after
+   naming a computer that had been renamed or forgotten, so the proxies it
+   was meant to restart stayed stopped. #}
+{% if error is defined and error %}
+<div class="banner">▲ {{ error }}</div>
+{% endif %}
+
 <div class="cards">
   {% for p in view.projects %}
     <a class="card" href="/project/{{ p.slug }}">
@@ -202,6 +210,15 @@
         {% if e.guard.upgrade_reverted_from %}<span class="chip amber" title="this computer installed {{ e.guard.upgrade_reverted_from }}, could not start it, and put itself back on {{ e.companion_version }}. That build should not be made current for the fleet.">[ REVERTED FROM {{ e.guard.upgrade_reverted_from }} ]</span>{% endif %}
         {% if e.guard.folders_unfiltered %}<span class="chip amber" title="{{ e.guard.folders_unfiltered }} Syncthing folder(s) on this computer have no ignore filter written{% if e.guard.folders_unfiltered_names %}: {{ e.guard.folders_unfiltered_names }}{% endif %}. Without it, lane C carries camera originals both ways.">[ UNFILTERED FOLDERS: {{ e.guard.folders_unfiltered }} ]</span>{% endif %}
         {% if e.guard.sync_conflicts %}<span class="chip amber" title="{{ e.guard.sync_conflicts }} Syncthing sync-conflict file(s) in this machine's tree. Two people saved one project file; nothing was lost, but somebody's edit is sitting in a renamed copy.">[ CONFLICTS: {{ e.guard.sync_conflicts }} ]</span>{% endif %}
+        {# v38 (wave 4's ingest contract, resilience sweep 2026-08-28): footage
+           that is on ONE computer and nowhere else. Every one of these looks
+           like a perfectly green machine on every other signal here, because
+           as far as the lanes are concerned there is nothing to move. Amber
+           rather than red: nothing is broken, something is unprotected. #}
+        {% if e.guard.resolve_out_of_tree %}<span class="chip amber" title="the project open on this computer references {{ e.guard.resolve_out_of_tree }} clip(s) from outside the sync tree{% if e.guard.resolve_bad_prefix %}, {{ e.guard.resolve_bad_prefix }} of them under the wrong drive letter{% endif %}. They will never upload, so the timeline opens with red media on every other computer. Scanned {{ e.guard.resolve_last_scan_at | ago }}.">[ {{ e.guard.resolve_out_of_tree }} CLIPS OUTSIDE THE TREE ]</span>{% endif %}
+        {% if e.guard.stray_projects_count %}<span class="chip amber" title="{{ e.guard.stray_projects_count }} project folder(s) on this computer's disk are not in the sync tree, holding {{ e.guard.stray_projects_bytes | human_bytes }}. Nothing in them is on the server or visible to anybody else.">[ {{ e.guard.stray_projects_count }} STRAY PROJECT DIRS ]</span>{% endif %}
+        {% if e.guard.moved_project_dirs_count %}<span class="chip amber" title="{{ e.guard.moved_project_dirs_count }} project folder(s) on this computer are not where the tree expects them. Syncing for those projects looks busy and moves nothing. Move it back, or use MOVE ON THE SERVER AND ON EVERY MACHINE on the project page.">[ PROJECT FOLDER MOVED ]</span>{% endif %}
+        {% if e.guard.ingest_staging_bytes %}<span class="chip amber" title="{{ e.guard.ingest_staging_bytes | human_bytes }} of footage is in this computer's drop folder and has not been filed into a project yet. It is on one disk.">[ INGEST STAGING {{ e.guard.ingest_staging_bytes | human_bytes }} ]</span>{% endif %}
         {# SYS-5 (resilience sweep 2026-08-28): a full drive used to show as
            red dots with no cause, and "why?" had no answer on any page. No
            chip at all for a machine that has not reported a disk section:

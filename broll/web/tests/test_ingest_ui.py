@@ -460,3 +460,54 @@ def test_the_pages_shoot_name_sanitiser_matches_the_servers(tmp_path):
         ["node", str(harness), str(INGEST_JS), json.dumps(_SAFE_NAME_CASES)],
         capture_output=True, text=True, encoding="utf-8", check=True)
     assert json.loads(done.stdout) == [safe_name(c) for c in _SAFE_NAME_CASES]
+
+
+# -- UX-17 (resilience sweep 2026-08-28) ------------------------------------
+#
+# Source scans, like everything else in this module: there is no test runner
+# for this frontend, and pinning the intent beats not pinning it. Each of
+# these is a thing that HAPPENED, not a style rule.
+
+INGEST_SRC = INGEST_JS.read_text(encoding="utf-8")
+
+
+def test_the_drop_is_measured_against_free_space_before_anything_is_staged():
+    """ING_MAX_ITEMS is a COUNT cap: dropping a 200 GB shoot started staging
+    it, and the space refusal fired per file, mid-batch, once part of the
+    drop was already on the disk."""
+    assert "function ingestSpaceRefusal(" in INGEST_SRC
+    assert "free_bytes" in INGEST_SRC
+    refusal_call = INGEST_SRC.index("const refusal = ingestSpaceRefusal(")
+    push = INGEST_SRC.index("ing.items.push(...items);")
+    assert refusal_call < push, "the refusal must come before the items are taken"
+
+
+def test_a_companion_that_could_not_measure_the_drive_refuses_nothing():
+    """"I could not tell" must never read as "no" -- the same rule the
+    companion's own _space_refusal follows."""
+    body = INGEST_SRC[INGEST_SRC.index("function ingestSpaceRefusal("):]
+    body = body[:body.index("\n}\n")]
+    assert 'typeof staging.free_bytes !== "number"' in body
+    assert body.count('return "";') >= 2
+
+
+def test_a_large_drop_is_confirmed_with_the_figures():
+    """C-7's copy: size, clip count, free space and roughly how long."""
+    assert "ING_CONFIRM_BYTES" in INGEST_SRC
+    assert "Indexing will run for about" in INGEST_SRC
+    assert "Staging it needs" in INGEST_SRC
+
+
+def test_leaving_the_page_mid_upload_is_warned_about():
+    """Only a DISPATCHED batch is re-attached on reload; the un-run drop and
+    the bytes already streamed into staging go with the tab."""
+    assert 'window.addEventListener("beforeunload"' in INGEST_SRC
+    assert "function ingestUploadsInFlight(" in INGEST_SRC
+
+
+def test_a_mixed_drop_says_what_it_left_out():
+    """It used to discard its non-video half with no message at all."""
+    assert "files were not video and were left out" in INGEST_SRC
+    # The no-entry-API branch pushed EVERY file, video or not.
+    flat = INGEST_SRC[INGEST_SRC.index("for (const file of plainFiles)"):]
+    assert "ingestIsVideo(file.name)" in flat[:400]

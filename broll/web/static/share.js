@@ -87,6 +87,38 @@ function describeVideo(v) {
   return bits.join(" · ");
 }
 
+/* UX-19 (resilience sweep 2026-08-28): the two sentences a client gets when
+ * the folder changed under them. Membership is checked per request, so a clip
+ * the editor removed while this page was open 404s on its next fetch and the
+ * browser's own broken-video box was all there was to see. Kept as constants
+ * because the same two are reachable from three places (the poster, the
+ * player, the detail fetch). */
+const CLIP_GONE_TEXT = "This clip is no longer in this folder. Refresh the page to see what is.";
+const CLIP_UNPLAYABLE_TEXT = "This clip could not be played just now. Refresh the page to see what is in this folder.";
+
+/** Show (or clear, with "") the message under the player. */
+function shareClipGone(text) {
+  const box = $("#share-clip-gone");
+  if (!box) return;
+  box.textContent = text || "";
+  box.classList.toggle("hidden", !text);
+}
+
+/** The <video> element reports "it broke" and never why -- no status, no body.
+ * Ask the API about the same clip: a 404 there is the removal, anything else
+ * is a network or codec problem, and the two must not read as one thing. */
+async function shareExplainPlaybackFailure(videoId) {
+  try {
+    await fetchJson(`api/videos/${videoId}`);
+  } catch (e) {
+    if (e && e.status === 404) {
+      shareClipGone(CLIP_GONE_TEXT);
+      return;
+    }
+  }
+  shareClipGone(CLIP_UNPLAYABLE_TEXT);
+}
+
 function contactNode(contact) {
   const text = (contact || "").trim();
   if (!text) return null;
@@ -113,6 +145,12 @@ document.addEventListener("DOMContentLoaded", shareInit);
 
 async function shareInit() {
   $("#share-back").addEventListener("click", shareBack);
+  // UX-19: one listener for the page's lifetime, reading the clip that is
+  // open right now -- the player element is reused for every clip.
+  $("#share-player").addEventListener("error", () => {
+    const video = share.items[share.currentIdx];
+    if (video) shareExplainPlaybackFailure(video.id);
+  });
   $("#share-prev").addEventListener("click", () => shareStep(-1));
   $("#share-next").addEventListener("click", () => shareStep(+1));
   window.addEventListener("popstate", shareApplyHash);
@@ -236,6 +274,7 @@ async function shareOpen(idx, nav) {
   $("#share-next").disabled = idx === share.items.length - 1;
 
   const player = $("#share-player");
+  shareClipGone("");
   player.src = `media/proxy/${video.id}.mp4`;
   player.load();
 
@@ -253,7 +292,14 @@ async function shareOpen(idx, nav) {
     detail = await fetchJson(`api/videos/${video.id}`);
   } catch (e) {
     list.innerHTML = "";
-    list.appendChild(el("div", { className: "muted small", text: "No description available." }));
+    if (e && e.status === 404) {
+      // UX-19: membership is re-checked per request, so a clip the editor
+      // removed a moment ago 404s here while the page still shows it. Say
+      // what happened instead of leaving a silent, empty panel.
+      shareClipGone(CLIP_GONE_TEXT);
+    } else {
+      list.appendChild(el("div", { className: "muted small", text: "No description available." }));
+    }
     return;
   }
   if (share.currentIdx !== idx) return; // the client moved on while we fetched
@@ -280,6 +326,7 @@ function shareClose(push) {
   player.removeAttribute("src");
   player.load();
   share.currentIdx = -1;
+  shareClipGone("");
   $("#share-detail").classList.add("hidden");
   $("#share-grid-view").classList.remove("hidden");
   if (push) history.pushState(null, "", location.pathname);

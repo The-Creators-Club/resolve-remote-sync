@@ -44,6 +44,29 @@ LEDGER_MAX_ENTRIES = 200
 EXCLUDE_WINDOW_SECONDS = 24 * 3600
 PROJECTS_PREFIX = "Projects/"
 
+# RES-1 (resilience sweep 2026-08-28). A move Resolve was holding open used
+# to be refused ONCE and never tried again: the ledger answered every later
+# report with the same old failure, the 24 h exclusion expired, and lane A
+# put the file straight back on the NAS at the path the admin had cleared.
+# The first retry is soon (Resolve gets closed at the end of a take), then
+# hourly, and the whole thing gives up after a week rather than trying for
+# ever -- an exhausted move is a `blocked` answer, which is a thing the
+# dashboard shows, not a silence.
+RETRY_FIRST_SECONDS = 10 * 60
+RETRY_INTERVAL_SECONDS = 3600
+RETRY_MAX_ATTEMPTS = 20
+RETRY_MAX_SECONDS = 7 * 24 * 3600
+# States an entry can be in. `retryable` and `blocked` both mean the local
+# copy is still at the OLD path, which is why both hold the lane A exclusion
+# open regardless of age.
+STATE_DONE = "done"
+STATE_RETRYABLE = "retryable"
+STATE_BLOCKED = "blocked"
+# RES-10: how long an applied move keeps asking to be relinked. The editor
+# may not open that project for weeks, and the clip is offline in it until
+# they do; after this the fixer meets it like any other offline clip.
+RELINK_WINDOW_SECONDS = 30 * 24 * 3600
+
 _BAD_SEGMENT = re.compile(r"^\.\.?$")
 
 
@@ -176,17 +199,105 @@ class FileMoveLedger:
                 return e
         return None
 
-    def record(self, move: dict[str, Any], ok: bool, detail: str) -> dict[str, Any]:
+    def record(self, move: dict[str, Any], ok: bool, detail: str,
+               state: Optional[str] = None, paths: Optional[tuple[str, str]] = None,
+               relink_pending: bool = False) -> dict[str, Any]:
+        previous = self.entry(move["id"]) or {}
         entry = {
             "id": move["id"],
             "from_project_rel": move["from_project_rel"], "from_rel": move["from_rel"],
             "to_project_rel": move["to_project_rel"], "to_rel": move["to_rel"],
+            "is_dir": bool(move.get("is_dir")),
             "ok": bool(ok), "detail": detail[:512], "at": float(self._now()),
+            "state": state or (STATE_DONE if ok else STATE_BLOCKED),
+            "attempts": int(previous.get("attempts") or 0),
+            "first_attempt_at": float(previous.get("first_attempt_at")
+                                      or previous.get("at") or self._now()),
+            "relink_pending": bool(relink_pending),
         }
+        if paths:
+            entry["old_local"], entry["new_local"] = paths[0], paths[1]
+        elif previous.get("old_local"):
+            entry["old_local"] = previous["old_local"]
+            entry["new_local"] = previous.get("new_local", "")
         self._entries = [e for e in self._entries if e.get("id") != move["id"]] + [entry]
         self._entries = self._entries[-LEDGER_MAX_ENTRIES:]
         self._save()
         return entry
+
+    def record_attempt_failed(self, move: dict[str, Any], detail: str) -> dict[str, Any]:
+        """A move that could not be applied THIS time (RES-1).
+
+        Returns the entry: `state` is `retryable` with a `next_attempt_at`
+        until the attempt cap or the week runs out, and `blocked` after that.
+        Blocked is an answer the dashboard shows; it is never a silence, and
+        the local copy is still exactly where it was either way."""
+        previous = self.entry(move["id"]) or {}
+        now = float(self._now())
+        attempts = int(previous.get("attempts") or 0) + 1
+        first = float(previous.get("first_attempt_at") or now)
+        exhausted = attempts >= RETRY_MAX_ATTEMPTS or (now - first) >= RETRY_MAX_SECONDS
+        entry = self.record(move, ok=False, detail=detail,
+                            state=STATE_BLOCKED if exhausted else STATE_RETRYABLE)
+        entry["attempts"] = attempts
+        entry["first_attempt_at"] = first
+        entry["next_attempt_at"] = (
+            None if exhausted
+            else now + (RETRY_FIRST_SECONDS if attempts == 1 else RETRY_INTERVAL_SECONDS))
+        self._entries = [e for e in self._entries if e.get("id") != move["id"]] + [entry]
+        self._save()
+        return entry
+
+    def retry_due(self, entry: dict[str, Any]) -> bool:
+        """Is this failed move ready to be tried again? A missing stamp (an
+        entry written by an older build) is due: trying once more costs a
+        filesystem call and the alternative is the file re-uploading itself."""
+        if entry.get("state") != STATE_RETRYABLE:
+            return False
+        due = entry.get("next_attempt_at")
+        try:
+            return due is None or float(self._now()) >= float(due)
+        except (TypeError, ValueError):
+            return True
+
+    def pending_relinks(self) -> list[dict[str, Any]]:
+        """Applied moves whose Resolve clips have not been repointed yet
+        (RES-10). The media pool that references them was not the one open
+        when the move landed, so the clip is offline in a project the editor
+        has not looked at yet."""
+        cutoff = float(self._now()) - RELINK_WINDOW_SECONDS
+        return [e for e in self._entries
+                if e.get("relink_pending") and e.get("old_local")
+                and float(e.get("at") or 0) >= cutoff]
+
+    def clear_relink_pending(self, move_id: int) -> None:
+        for entry in self._entries:
+            if entry.get("id") == move_id and entry.get("relink_pending"):
+                entry["relink_pending"] = False
+                self._save()
+                return
+
+    def moved_to(self, local_path: str) -> Optional[dict[str, Any]]:
+        """The move that took `local_path` away, or None (RES-10).
+
+        The watcher asks this about every clip whose file is MISSING: a path
+        this machine moved on the server's instruction is not a mystery, it
+        is a one-click relink to a destination we know exactly."""
+        wanted = os.path.normcase(os.path.normpath(str(local_path or "")))
+        if not wanted:
+            return None
+        cutoff = float(self._now()) - RELINK_WINDOW_SECONDS
+        for entry in reversed(self._entries):
+            old = entry.get("old_local")
+            if not old or not entry.get("new_local"):
+                continue
+            if float(entry.get("at") or 0) < cutoff:
+                continue
+            old_n = os.path.normcase(os.path.normpath(str(old)))
+            if wanted == old_n or (entry.get("is_dir")
+                                   and wanted.startswith(old_n.rstrip("\\/") + os.sep)):
+                return entry
+        return None
 
     def recent_excludes(self, subpath: Optional[str]) -> list[str]:
         """Old paths, relative to `subpath` (a lane A run root such as
@@ -212,7 +323,14 @@ class FileMoveLedger:
         cutoff = float(self._now()) - EXCLUDE_WINDOW_SECONDS
         out: list[str] = []
         for e in self._entries:
-            if float(e.get("at") or 0) < cutoff:
+            # RES-1 (2026-08-28): a move that has NOT been applied here keeps
+            # its exclusion for as long as it is unresolved, not for a day.
+            # The old path still holds the file (that is why the move failed),
+            # so letting the window lapse is letting lane A -- which never
+            # deletes -- put the file back on the NAS at the path the admin
+            # cleared, which is the failure this feature exists to prevent.
+            unresolved = e.get("state") in (STATE_RETRYABLE, STATE_BLOCKED)
+            if not unresolved and float(e.get("at") or 0) < cutoff:
                 continue
             if str(e.get("from_project_rel", "")).lower() != wanted.lower():
                 continue

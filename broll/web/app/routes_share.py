@@ -44,9 +44,10 @@ any header's reach; revoke stops the NEXT fetch, not this second of playback.
 from __future__ import annotations
 
 import sqlite3
+from html import escape
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.responses import FileResponse, RedirectResponse, Response
 
 from app import client_folders as cf
@@ -110,10 +111,31 @@ def _member_id(conn: sqlite3.Connection, index: sqlite3.Connection,
     raise _gone()
 
 
-def _gone_page() -> Response:
+def _gone_page(folder: sqlite3.Row | None = None) -> Response:
     """The two PAGE routes answer a dead link with a page a person can read,
     not the JSON `detail` every API route (rightly) gives a script. Same 404,
-    same headers; only the body knows it is talking to a human."""
+    same headers; only the body knows it is talking to a human.
+
+    UX-19 (resilience sweep 2026-08-28): when the token is one we still
+    recognise (revoked or expired, as opposed to never issued) the page names
+    the editor who curated the folder and how to reach them. That is the whole
+    difference between a client who can ask for a new link and a client
+    holding the only page they have with nobody on it.
+
+    Nothing else about the folder leaks: no title, no clip, no count. A
+    revoked link is still a link the caller was not given -- an UNKNOWN token
+    gets the unchanged generic page, and the two are the same 404.
+    """
+    sentence = cf.gone_contact_sentence(folder)
+    if sentence:
+        try:
+            html = (config.STATIC_DIR / "share_gone.html").read_text(encoding="utf-8")
+        except OSError:
+            html = ""
+        if cf.GONE_FALLBACK_SENTENCE in html:
+            html = html.replace(cf.GONE_FALLBACK_SENTENCE, escape(sentence), 1)
+            return _with_public_headers(
+                HTMLResponse(html, status_code=404), "private, no-store")
     return _with_public_headers(
         FileResponse(config.STATIC_DIR / "share_gone.html", media_type="text/html",
                      status_code=404),
@@ -131,7 +153,7 @@ def share_root(token: str, conn: sqlite3.Connection = Depends(cf.get_shares_db))
     """
     folder = cf.get_folder_by_token(conn, token)
     if folder is None or not cf.is_live(folder):
-        return _gone_page()
+        return _gone_page(folder)
     return _with_public_headers(
         RedirectResponse(url=f"{token}/", status_code=303), "no-store")
 
@@ -140,7 +162,7 @@ def share_root(token: str, conn: sqlite3.Connection = Depends(cf.get_shares_db))
 def share_page(token: str, conn: sqlite3.Connection = Depends(cf.get_shares_db)) -> Response:
     folder = cf.get_folder_by_token(conn, token)
     if folder is None or not cf.is_live(folder):
-        return _gone_page()
+        return _gone_page(folder)
     return _with_public_headers(
         FileResponse(config.STATIC_DIR / "share.html", media_type="text/html"),
         "private, no-store")

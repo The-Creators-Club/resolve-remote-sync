@@ -258,7 +258,7 @@ $env:CCSYNC_DASHBOARD_TOKEN = $null
 # 1.0.16: macOS caught up (SSD-aware bootstrap, Resolve Mapped Mount helper,
 # macos_uninstall.sh). Nothing changed on the Windows side; the number is
 # shared, so it moves when either platform's installer does.
-$InstallerVersion = "1.0.36"
+$InstallerVersion = "1.0.37"
 
 # When our stdout is a pipe (onboard.exe captures it), PS 5.1 encodes it with
 # the console OEM codepage -- so the wizard, which decodes UTF-8, would see
@@ -334,6 +334,109 @@ function Write-Skip {
 function Write-Warn2 {
     param([string]$Message)
     Write-Host "[ccsync] WARNING: $Message" -ForegroundColor Yellow
+}
+
+# --------------------------------------------------------------------
+# OPS-7 (resilience sweep 2026-08-28): the wrong-profile install
+# --------------------------------------------------------------------
+# Everything this script creates is per-user: $env:LOCALAPPDATA\ccsync\bin,
+# $env:USERPROFILE\.ccsync, the HKCU Run entries, the scheduled task principal
+# ($env:USERDOMAIN\$env:USERNAME), the loopback share's FullAccess grant. When
+# a standard user right-clicks "Run as administrator", Windows prompts for
+# CREDENTIALS, not consent -- they type the machine's admin account, and every
+# artefact above is created for THAT profile. The run reports success and
+# prints a device ID; the editor logs back into their own account to find no
+# tray icon, no tree drive and no config, and the dashboard shows a machine
+# that reported once and never again. Nothing compared the two identities.
+#
+# Get-ConsoleUser is best effort by design and the mismatch test treats an
+# unknown console user as "say nothing": a locked session, an RDP session or a
+# hardened WMI service must not lock somebody out of their own install.
+function Get-BareAccountName {
+    param([string]$Name)
+    $text = "$Name".Trim()
+    if (-not $text) { return "" }
+    if ($text.Contains("\")) { $text = $text.Substring($text.LastIndexOf("\") + 1) }
+    if ($text.Contains("@")) { $text = $text.Split("@")[0] }
+    return $text.Trim()
+}
+
+function Test-ConsoleUserMismatch {
+    <#  The refusal message, or "" when there is nothing to say. Pure string
+        in / string out so installer\tests\Test-ConsoleUser.ps1 can check the
+        wording and the domain-prefix folding without a second account. #>
+    param([string]$ConsoleUser, [string]$RunningUser)
+    $signedIn = Get-BareAccountName $ConsoleUser
+    $running = Get-BareAccountName $RunningUser
+    if (-not $signedIn -or -not $running) { return "" }
+    if ([string]::Equals($signedIn, $running, [System.StringComparison]::OrdinalIgnoreCase)) { return "" }
+    return "You are running as $running but $signedIn is signed in. Everything this installs is per-user, so $signedIn would get nothing. Sign in as $signedIn and run it again (it does not need administrator rights)."
+}
+
+function Get-ConsoleUser {
+    <#  Win32_ComputerSystem.UserName is the interactive console user and is
+        blank on a locked/RDP-only session; explorer.exe's owner is the
+        fallback, because the shell always runs as the person who is there. #>
+    try {
+        $name = (Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).UserName
+        if ($name) { return "$name" }
+    }
+    catch {}
+    try {
+        $explorer = Get-CimInstance Win32_Process -Filter "Name = 'explorer.exe'" -ErrorAction Stop |
+            Select-Object -First 1
+        if ($explorer) {
+            $owner = Invoke-CimMethod -InputObject $explorer -MethodName GetOwner -ErrorAction Stop
+            if ($owner -and $owner.User) { return "$($owner.Domain)\$($owner.User)" }
+        }
+    }
+    catch {}
+    return ""
+}
+
+# --------------------------------------------------------------------
+# UX-14 (resilience sweep 2026-08-28): free space on the sync root
+# --------------------------------------------------------------------
+# A WARNING, never a refusal: a nearly-full drive installs perfectly and the
+# disk fills days later during the first lane B pass, which is why nothing on
+# the install path had ever noticed. The wizard shows the same sentence beside
+# its local-root field (onboarding/steps.py local_root_space_warning); a hand
+# run of this script got nothing at all.
+$LowSpaceWarnBytes = 200GB
+
+function Get-LowSpaceWarning {
+    <#  The warning text for a volume with $FreeBytes free, or "" when there
+        is room. A NEGATIVE $FreeBytes means "could not measure" and says
+        nothing -- this script must not invent a figure. #>
+    param([long]$FreeBytes)
+    if ($FreeBytes -lt 0) { return "" }
+    if ($FreeBytes -ge $LowSpaceWarnBytes) { return "" }
+    $gb = [int][math]::Round($FreeBytes / 1GB)
+    return "This drive has $gb GB free. Synced proxies for one project are typically 50 to 300 GB."
+}
+
+function Get-FreeBytesForPath {
+    <#  Free bytes on the volume $Path lives on, walking up to the first
+        parent that exists (the folder itself is usually about to be
+        created). -1 when it cannot be measured. #>
+    param([string]$Path)
+    $candidate = "$Path".Trim()
+    while ($candidate) {
+        try {
+            if (Test-Path -LiteralPath $candidate) {
+                $item = Get-Item -LiteralPath $candidate -ErrorAction Stop
+                $qualifier = Split-Path -Qualifier $item.FullName
+                $drive = Get-PSDrive -Name $qualifier.TrimEnd(":") -ErrorAction Stop
+                if ($null -ne $drive.Free) { return [long]$drive.Free }
+                return -1
+            }
+        }
+        catch { return -1 }
+        $parent = Split-Path -Parent $candidate
+        if ($parent -eq $candidate) { return -1 }
+        $candidate = $parent
+    }
+    return -1
 }
 
 function Test-CommandExists {
@@ -517,6 +620,20 @@ catch {
 # --------------------------------------------------------------------
 # 0. Normalize / echo inputs
 # --------------------------------------------------------------------
+# OPS-7: before anything is read, fetched or created. A run under the wrong
+# account cannot be salvaged later -- every artefact would already be in the
+# wrong profile -- so this is a refusal, not a warning, and it is the first
+# thing that happens.
+$ConsoleUserName = Get-ConsoleUser
+$ProfileRefusal = Test-ConsoleUserMismatch -ConsoleUser $ConsoleUserName -RunningUser $env:USERNAME
+if ($ProfileRefusal) {
+    Write-Host "[ccsync] ERROR: $ProfileRefusal" -ForegroundColor Red
+    Write-Host "[ccsync] Nothing on this computer has been changed."
+    exit 2
+}
+if (-not $ConsoleUserName) {
+    Write-Warn2 "could not tell which account is signed in at this console, so this run is not checked against it. If you reached this window through a 'run as' prompt, close it and run the installer from your OWN signed-in account -- everything it installs is per-user."
+}
 # WHO IS THIS DEPLOYMENT? (2026-08-17, WP0 of docs/SYNOLOGY_PORT_PLAN.md)
 #
 # Every tenant-shaped value this script used to have compiled in -- the NAS
@@ -634,6 +751,13 @@ if ($LocalRoot -match '"') {
     Write-Host "[ccsync] The logon remap runs 'subst $DriveRoot `"<LocalRoot>`"' through cmd, which a quote breaks irrecoverably."
     Write-Host "[ccsync] Rename the folder (or pick a different one) and re-run."
     exit 2
+}
+
+# UX-14: said once, here, where the root is finally known. Never fatal.
+$LocalRootFreeBytes = Get-FreeBytesForPath -Path $LocalRoot
+$LowSpaceWarning = Get-LowSpaceWarning -FreeBytes $LocalRootFreeBytes
+if ($LowSpaceWarning) {
+    Write-Warn2 "$LowSpaceWarning Sync will still be set up here; keep an eye on the drive, or re-run with -LocalRoot pointing at a bigger one."
 }
 
 $EditorNameRaw = $EditorName

@@ -21,10 +21,18 @@
           <td class="mono-sm muted">{{ s.last_seen | ago }}</td>
           <td class="mono-sm muted">{{ s.client }}</td>
           <td>
+            {# C-9 / UX-22 (UX.md, 2026-08-28): the row marked (you) signs the
+               admin out of the machine they are fixing things from, and the
+               button used to read exactly like everybody else's. #}
             <form class="inline-form" hx-post="/partials/admin/sessions/revoke"
-                  hx-target="#admin-sessions" hx-swap="outerHTML">
+                  hx-target="#admin-sessions" hx-swap="outerHTML"
+                  {% if s.username == session_user %}
+                  hx-confirm="Sign yourself out of every browser, including this one? You will need to log in again to finish what you are doing."
+                  {% else %}
+                  hx-confirm="Sign {{ s.username }} out of every browser? They will need to log in again. Their computer's own sync is not affected."
+                  {% endif %}>
               <input type="hidden" name="username" value="{{ s.username }}">
-              <button class="btn" type="submit">[ REVOKE ALL ]</button>
+              <button class="btn" type="submit">[ {{ "SIGN ME OUT EVERYWHERE" if s.username == session_user else "REVOKE ALL" }} ]</button>
             </form>
           </td>
         </tr>

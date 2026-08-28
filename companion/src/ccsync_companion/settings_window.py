@@ -75,6 +75,19 @@ class Section:
     items: list  # list[Line | Button]
 
 
+def _ignored_folders(app: "CompanionApp") -> list[dict]:
+    """The persisted "always leave this folder alone" entries (RES-12).
+
+    Read through the app rather than the file so the window shows what the
+    running tracker is actually honouring. Never raises: an unreadable
+    ignore list must cost the [ FORGET ] buttons, not the whole window."""
+    try:
+        return list(app.ignore_tracker.folders())
+    except Exception:
+        log.exception("settings: could not read the leave-alone folder list")
+        return []
+
+
 def _role_label(role: str) -> str:
     return "WIRED TO THE SERVER" if role == "base" else "REMOTE EDITOR"
 
@@ -208,6 +221,102 @@ def action_restart_now(app: "CompanionApp") -> None:
     tray_mod._spawn(app, "Restart CCSync", _do)
 
 
+def action_repair_p_mapping(app: "CompanionApp") -> None:
+    """[ REPAIR P: NOW ] (UX-15, resilience sweep 2026-08-28).
+
+    The broken-mapping toast has always described this repair and never
+    offered it. app.repair_p_mapping keeps UX-6's ownership check, so a P:
+    somebody else created is refused with what it points at, not replaced.
+    """
+    def _do() -> None:
+        try:
+            ok, message = app.repair_p_mapping()
+        except Exception:
+            log.exception("settings: repair of the media drive mapping failed")
+            tray_mod._notify(app, "CCSync could not repair the drive mapping. Tray > "
+                                  "Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.")
+            return
+        tray_mod._notify(app, message)
+        if ok:
+            log.info("settings: media drive mapping repaired")
+    tray_mod._spawn(app, "Repair drive mapping", _do)
+
+
+def action_forget_ignored_folder(app: "CompanionApp", folder: str) -> None:
+    """[ FORGET ] one persisted folder ignore (RES-12). The clips in it are
+    offered again from the next poll, which is the point of the button."""
+    def _do() -> None:
+        try:
+            forgotten = app.ignore_tracker.forget_folder(folder)
+        except Exception:
+            log.exception("settings: could not forget the folder ignore %s", folder)
+            tray_mod._notify(app, "CCSync could not undo that. Tray > Settings > COPY "
+                                  "DIAGNOSTICS FOR YOUR ADMIN.")
+            return
+        if forgotten:
+            tray_mod._notify(app, f"CCSync will offer clips in {folder} again.")
+        else:
+            # "Could not check" must never render as "done": the entry was
+            # already gone, and saying so is cheaper than a second click.
+            tray_mod._notify(app, f"{folder} was not on the leave-alone list.")
+    tray_mod._spawn(app, "Forget folder ignore", _do)
+
+
+def _needs_p_repair(snap: dict, app: "CompanionApp", guard: dict) -> bool:
+    """Whether to offer [ REPAIR P: NOW ] (UX-15).
+
+    Two independent signals, because either alone misses a real case: the
+    CACHED classification of the drive (the tray's own read, never a probe),
+    and Resolve telling us it cannot resolve a canonical path this poll.
+    """
+    try:
+        if not app.p_repair_available():
+            return False
+    except Exception:
+        log.exception("settings: could not tell whether the drive can be repaired")
+        return False
+    if snap.get("p_mode") in ("other", "none"):
+        return True
+    try:
+        return int(((guard or {}).get("resolve_health") or {}).get("bad_prefix") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def action_put_project_back(app: "CompanionApp", subpath: str = "") -> None:
+    """UX-3 (resilience sweep 2026-08-28): move a project folder the editor
+    renamed or dragged back to where CCSync expects it.
+
+    A click, never automatic: the folder in the wrong place is the one they
+    have been working in. The move itself is `repath._move_dir`, which
+    refuses when the target already exists and deletes nothing."""
+    def _do() -> None:
+        try:
+            message = app.put_project_dir_back(subpath)
+        except Exception:
+            log.exception("settings: put_project_dir_back failed")
+            message = "CCSync could not move that folder back. See the log."
+        tray_mod._notify(app, message)
+    tray_mod._spawn(app, "Put the project folder back", _do)
+
+
+def action_clear_ingest_staging(app: "CompanionApp") -> None:
+    """MEDIA-3: delete every finished ingest staging folder now.
+
+    The answer to a space refusal that names a dot-folder inside the archive
+    the editor has no other way to see. Only FINISHED batches: a running
+    batch's staging, and a drop that has been staged but not run, are never
+    candidates."""
+    def _do() -> None:
+        try:
+            message = app.clear_finished_ingest_staging()
+        except Exception:
+            log.exception("settings: clear_finished_ingest_staging failed")
+            message = "CCSync could not clear the staging folders. See the log."
+        tray_mod._notify(app, message)
+    tray_mod._spawn(app, "Clear finished staging", _do)
+
+
 def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
     """Pure: snapshot + app -> the sections the window renders. No tkinter."""
     sections: list[Section] = []
@@ -264,6 +373,9 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
                  # machine they were happening on. Above the trash line
                  # because each one is something that has stopped working.
                  tray_mod._reporter_line(guard), tray_mod._clock_skew_line(guard),
+                 # APP-2 / UX-4 (same sweep): the clips the editor dismissed,
+                 # which were visible in no artefact anybody ever sees.
+                 tray_mod._ignored_line(guard),
                  tray_mod._crashes_line(guard),
                  # SYS-2 (same sweep): the watchdog restarting one thread over
                  # and over is a self-healing machine that still needs a human.
@@ -296,6 +408,42 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
             or (guard.get("disk_floor") or {}).get("parked")):
         lane_items.append(Button(
             "RESUME PROXY DOWNLOAD", lambda: tray_mod.action_resume_lane_b(app, snap)))
+    # UX-3 (resilience sweep 2026-08-28): a project folder that was here last
+    # pass and has gone. The button is offered only when the marker was
+    # actually found somewhere on this machine -- an offer to move a folder we
+    # cannot see would be a button that can only fail.
+    moved = [m for m in (guard.get("moved_project_dirs") or []) if isinstance(m, dict)]
+    for entry in moved[:5]:
+        label = str(entry.get("subpath") or "").rstrip("/").split("/")[-1] \
+            or str(entry.get("slug") or "a project")
+        lane_items.append(Line(
+            f"'{label}' is not where CCSync expects it - nothing in it is "
+            "reaching the server", style="warning"))
+        if entry.get("found"):
+            lane_items.append(Line(f"  found at {entry['found']}", style="muted"))
+            lane_items.append(Button(
+                f"PUT '{label}' BACK WHERE CCSYNC EXPECTS IT",
+                (lambda sub=str(entry.get("subpath") or ""):
+                 action_put_project_back(app, sub))))
+    strays = guard.get("stray_projects") or {}
+    if strays.get("count"):
+        # SYNC-10: reported, never deleted -- the same posture as the orphan
+        # .partial scan. No button on purpose.
+        lane_items.append(Line(
+            f"{strays['count']} project folder(s) on this computer are in no "
+            f"sync plan ({int(strays.get('bytes') or 0) / 1e9:.1f} GB). Nothing "
+            "syncs them and CCSync will not delete them", style="warning"))
+    staging = guard.get("ingest_staging") or {}
+    if staging.get("bytes"):
+        # MEDIA-3: staging lives in a dot-folder inside the archive, so
+        # without this line the disk it fills is unattributable.
+        lane_items.append(Line(
+            f"Finished indexing staging is holding "
+            f"{int(staging['bytes']) / 1e9:.1f} GB on this computer",
+            style="warning"))
+        lane_items.append(Button(
+            "CLEAR FINISHED STAGING", lambda: action_clear_ingest_staging(app)))
+
     halt_active = bool((guard.get("halt") or {}).get("active"))
     halt_is_fleet = (guard.get("halt") or {}).get("scope") == "fleet"
     if halt_active and not halt_is_fleet:
@@ -396,6 +544,25 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
         Button("UNDO THE LAST CLIP-PATH CHANGE CCSYNC MADE…",
                lambda: tray_mod.action_undo_last_relink(app)),
     ]
+    if _needs_p_repair(snap, app, guard):
+        # UX-15: above the grade swap on purpose. This is the broken state
+        # the toast fires about; the swap below is a thing the editor chose.
+        letter = app.canonical_prefix_label()
+        advanced_items.append(Line(
+            f"Resolve is looking for your media on {letter} but {letter} is not "
+            "pointing at your synced folder, so clips will show offline. Your "
+            "uploads and downloads are still running.", style="warning"))
+        advanced_items.append(Button(
+            f"REPAIR {letter} NOW", lambda: action_repair_p_mapping(app)))
+    for entry in _ignored_folders(app):
+        folder = str(entry.get("folder") or "")
+        reason = str(entry.get("reason") or "")
+        advanced_items.append(Line(
+            f"Leaving clips in {folder} alone"
+            + (f" ({reason})" if reason else ""), style="muted"))
+        advanced_items.append(Button(
+            f"FORGET: {folder}",
+            (lambda folder=folder: action_forget_ignored_folder(app, folder))))
     if snap.get("p_swap_available"):
         advanced_items.append(Button(
             "FINISH GRADING: P: BACK TO LOCAL PROXIES"

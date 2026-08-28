@@ -113,6 +113,20 @@ MODEL_TIERS = ("good", "best")
 # WP B/C simply never greys them out.
 AUTO_DERIVED_KEYS = frozenset({"dashboard_url", "sftp_host", "nas_syncthing_id"})
 
+# UX-21 (resilience sweep 2026-08-28): the three keys both installers and
+# every companion read out of the manifest, per that finding's own wording --
+# a SAVE that changes one of these gets the same site_history snapshot an
+# IMPORT does, not just an import.
+TREE_KEYS = ("canonical_prefix", "tree_name", "remote_root")
+
+# Substrings that make a key name look secret-shaped. None of KEYS matches
+# today -- a report/session secret or an AI provider key never lives in this
+# table, by design (see this module's docstring) -- but the import diff and
+# the undo response (UX-21, resilience sweep 2026-08-28) put arbitrary
+# site_settings values on the wire, so a key added later that LOOKS like one
+# is masked here rather than trusted to stay off this table forever.
+_SECRET_KEY_HINTS = ("password", "secret", "token", "api_key", "apikey", "private_key")
+
 _CANONICAL_PREFIX_WINDOWS_RE = None  # set below, after re import
 
 
@@ -252,6 +266,18 @@ def table_is_empty(conn: sqlite3.Connection) -> bool:
     return conn.execute(f"SELECT 1 FROM {TABLE} LIMIT 1").fetchone() is None
 
 
+def validate_many(values: Mapping[str, str]) -> dict[str, str]:
+    """`set_many`'s validate-first half, split out (UX-21, resilience sweep
+    2026-08-28) so a caller can validate a would-be write -- and diff it
+    against the current values -- WITHOUT performing it. Raises on the first
+    bad field, same as `set_many`, so a preview can never approve something
+    the apply would then refuse."""
+    normalized: dict[str, str] = {}
+    for key, raw in values.items():
+        normalized[key] = validate(key, raw)
+    return normalized
+
+
 def set_many(
     conn: sqlite3.Connection, values: Mapping[str, str], updated_by: str
 ) -> dict[str, str]:
@@ -260,9 +286,7 @@ def set_many(
     transaction. Returns the normalised values actually stored. Caller
     commits (matches every other write helper in this codebase, e.g.
     db.upsert_project) -- api routes commit after calling this."""
-    normalized: dict[str, str] = {}
-    for key, raw in values.items():
-        normalized[key] = validate(key, raw)
+    normalized = validate_many(values)
     now = None
     from . import db as dbmod
 
@@ -275,6 +299,56 @@ def set_many(
             (key, value, now, updated_by),
         )
     return normalized
+
+
+def _looks_secret(key: str) -> bool:
+    lowered = key.lower()
+    return any(hint in lowered for hint in _SECRET_KEY_HINTS)
+
+
+def _display(key: str, value: str) -> str:
+    """UX-21 (resilience sweep 2026-08-28): the value a diff response is
+    allowed to show. Masks whole rather than partial -- a short value mostly
+    unmasked defeats the point (see ai_providers.mask's own reasoning) -- and
+    only for a key that looks secret-shaped; every KEYS entry today does not,
+    so this is a no-op in the shipped product."""
+    if _looks_secret(key) and value:
+        return "********"
+    return value
+
+
+def diff_against_current(
+    conn: sqlite3.Connection, settings: Any, normalized: Mapping[str, str],
+) -> list[dict[str, str]]:
+    """What applying `normalized` (already-validated site_settings values,
+    e.g. `validate_many`'s return) would CHANGE, compared against what is
+    stored or falls through right now. Raw values, unmasked -- this is the
+    building block `db.record_site_change` snapshots so an undo can actually
+    restore them; a caller putting this on the wire (the import preview, the
+    undo response) must run it through `mask_changes` first (UX-21,
+    resilience sweep 2026-08-28).
+
+    Read BEFORE the caller writes: `set_many` upserts in place, so a diff
+    computed after the write would compare the new values against
+    themselves."""
+    db_values = get_all(conn)
+    changes: list[dict[str, str]] = []
+    for key in normalized:                        # dict order = TOML/form order
+        new_value = normalized[key]
+        current = db_values.get(key, _settings_fallback(key, settings))
+        if current == new_value:
+            continue
+        changes.append({"key": key, "from": current, "to": new_value})
+    return changes
+
+
+def mask_changes(changes: Iterable[Mapping[str, str]]) -> list[dict[str, str]]:
+    """The masked copy of a `diff_against_current` list that is safe to
+    return over HTTP (UX-21, resilience sweep 2026-08-28) -- see `_display`."""
+    return [
+        {"key": c["key"], "from": _display(c["key"], c["from"]), "to": _display(c["key"], c["to"])}
+        for c in changes
+    ]
 
 
 def seed_from_env_once(conn: sqlite3.Connection, settings: Any) -> bool:

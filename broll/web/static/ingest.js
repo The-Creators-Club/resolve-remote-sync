@@ -37,6 +37,18 @@ const ING_VIDEO_EXTS_FALLBACK = [
 // schemas.MAX_BATCH_ITEMS. Enforced here too so a dropped card of 6,000 files
 // is refused before 6,000 thumbnails are decoded, not after the server 422s.
 const ING_MAX_ITEMS = 2000;
+/* UX-17 (resilience sweep 2026-08-28). ING_MAX_ITEMS is a COUNT cap and was
+   the only ceiling this panel had: dropping a 200 GB shoot started staging it,
+   and the space refusal fired per file, mid-batch, once part of the drop was
+   already on the disk. These two are the size half - a hard refusal against
+   the companion's own free_bytes, and a confirmation (C-7) above a threshold
+   where the honest answer is "this will run for hours". */
+const ING_CONFIRM_BYTES = 50e9;
+/* Rough, and deliberately so: the number exists to say "hours, not minutes"
+   before an editor commits an evening to it. Measured throughput on the base
+   rig is ~1.5 minutes per clip at Good on a 4090; a slower machine is worse.
+*/
+const ING_MINUTES_PER_CLIP = 1.5;
 
 // archive_names.safe_name, character for character: exactly what Windows
 // forbids and nothing else, so CJK shoot names survive. The server re-validates
@@ -171,6 +183,16 @@ function ingestInit() {
   // anyone not using a mouse. app.js's player shortcuts cannot collide --
   // they return early unless a clip detail is open and the target is not an
   // input.
+  // UX-17: closing the tab mid-upload loses the un-run drop entirely (only a
+  // DISPATCHED batch is re-attached on reload), and the bytes already streamed
+  // into staging go with it. The browser shows its own wording; the string is
+  // required for older engines and shown by none of them.
+  window.addEventListener("beforeunload", (e) => {
+    if (!ingestUploadsInFlight()) return undefined;
+    e.preventDefault();
+    e.returnValue = "Clips are still being copied to this computer.";
+    return e.returnValue;
+  });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && ing.open) ingestClose();
   });
@@ -256,32 +278,60 @@ async function ingestCollect(dt) {
   const plainFiles = Array.from(dt.files || []);
 
   const out = [];
+  // UX-17: a mixed drop used to discard its non-video half with no message at
+  // all, so an editor who dropped a card folder saw "40 clips" where they had
+  // dropped 60 files and never learned why.
+  const skipped = { n: 0 };
   if (roots.length) {
     // A single dropped folder IS the shoot, so its own name is stripped from
     // rel_dir and offered as the shoot name instead. Two folders dropped
     // together are two shelves of one shoot, so their names stay in rel_dir -
     // stripping both would merge `Day1/A001` and `Day2/A001` into one folder.
     const onlyFolder = roots.length === 1 && roots[0].isDirectory ? roots[0].name : "";
-    for (const entry of roots) await ingestWalkEntry(entry, onlyFolder, out);
+    for (const entry of roots) await ingestWalkEntry(entry, onlyFolder, out, skipped);
     if (onlyFolder) ingestSuggestShare(onlyFolder);
   } else {
     // No entry API (Firefox pre-50, or a synthetic drop): flat files only.
     for (const file of plainFiles) {
+      if (!ingestIsVideo(file.name)) { skipped.n++; continue; }
       const rel = (file.webkitRelativePath || "").split("/").slice(0, -1).join("/");
       out.push(ingestMakeItem(file.name, file.size, rel, "upload", null, file));
     }
   }
+  if (skipped.n) {
+    const total = out.length + skipped.n;
+    toast(`${skipped.n} of ${total} files were not video and were left out.`, "warn");
+  }
   ingestAddItems(out);
+}
+
+/** UX-17: the whole drop measured against the companion's own free space,
+ *  BEFORE the first byte. Returns a refusal sentence, or "" to go ahead.
+ *  A companion that has not answered yet, or one that could not measure the
+ *  drive, refuses NOTHING: "I could not tell" must never read as "no". */
+function ingestSpaceRefusal(items) {
+  const staging = (ing.caps && ing.caps.staging) || null;
+  if (!staging || typeof staging.free_bytes !== "number") return "";
+  // Only uploads consume staging: a picked path is indexed where it is.
+  const wanted = items.reduce(
+    (sum, i) => sum + (i.source === "upload" ? (i.size || 0) : 0), 0);
+  if (!wanted) return "";
+  const floor = Number(staging.floor_bytes) || 0;
+  if (staging.free_bytes >= wanted + floor) return "";
+  return `That drop is ${ingestBytes(wanted)} and this computer has ` +
+         `${ingestBytes(staging.free_bytes)} free where clips are staged` +
+         (floor ? `, of which ${ingestBytes(floor)} is kept clear` : "") +
+         ". Nothing was staged. Free some space, or drop fewer clips at a time.";
 }
 
 /* readEntries is documented to return AT MOST 100 entries per call in Chrome
    and to signal the end of the directory with an empty array - not with the
    first short read. Calling it once silently dropped every clip past the
    hundredth of a camera card. */
-async function ingestWalkEntry(entry, stripTop, out) {
+async function ingestWalkEntry(entry, stripTop, out, skipped) {
   if (out.length >= ING_MAX_ITEMS) return;
   if (entry.isFile) {
-    if (!ingestIsVideo(entry.name)) return;
+    if (!ingestIsVideo(entry.name)) { if (skipped) skipped.n++; return; }
     const file = await new Promise((res) => entry.file(res, () => res(null)));
     if (!file) return;
     out.push(ingestMakeItem(entry.name, file.size,
@@ -294,7 +344,7 @@ async function ingestWalkEntry(entry, stripTop, out) {
     const chunk = await new Promise((res) => reader.readEntries(res, () => res([])));
     if (!chunk.length) break;
     for (const child of chunk) {
-      await ingestWalkEntry(child, stripTop, out);
+      await ingestWalkEntry(child, stripTop, out, skipped);
       if (out.length >= ING_MAX_ITEMS) return;
     }
   }
@@ -359,6 +409,15 @@ function ingestAddItems(items) {
     toast(`Only the first ${room} clips were taken: a batch holds ` +
           `${ING_MAX_ITEMS}.`, "warn");
     items = items.slice(0, room);
+  }
+  // UX-17: the WHOLE drop, refused before anything is staged. Deliberately
+  // measured against what is already held plus what arrived: two 100 GB drops
+  // in a row are the same 200 GB.
+  const refusal = ingestSpaceRefusal([...ing.items, ...items]);
+  if (refusal) {
+    ingestSetNotice(refusal);
+    toast(refusal, "error");
+    return;
   }
   ing.items.push(...items);
   ing.staged = false;
@@ -1077,6 +1136,20 @@ async function ingestRun() {
   const chosen = ing.items.filter((i) => i.include);
   if (!chosen.length) return;
   const share = $("#ingest-share").value;
+  // UX-17 / C-7 (resilience sweep 2026-08-28): the consequence spelled out
+  // before an evening of this machine's GPU is committed to it. Above the
+  // threshold only: a four-clip drop does not need a dialog.
+  const bytes = chosen.reduce((sum, i) => sum + (i.size || 0), 0);
+  if (bytes >= ING_CONFIRM_BYTES) {
+    const staging = (ing.caps && ing.caps.staging) || {};
+    const free = typeof staging.free_bytes === "number"
+      ? ingestBytes(staging.free_bytes) : "an unknown amount";
+    const hours = Math.max(1, Math.round(chosen.length * ING_MINUTES_PER_CLIP / 60));
+    if (!window.confirm(
+      `This drop is ${ingestBytes(bytes)} across ${chosen.length} clips. ` +
+      `Staging it needs ${ingestBytes(bytes)} free on this computer and it has ` +
+      `${free}. Indexing will run for about ${hours} hours. Start it?`)) return;
+  }
   const info = ingestTierInfo(ing.tier);
   if (info && info.cached === false) {
     // Plan §9 decision 6: consent for the download, with the byte count, BEFORE
@@ -1450,6 +1523,14 @@ async function ingestExpand(uid) {
 /* ---------------------------------------------------------------------- */
 /* Formatting                                                              */
 /* ---------------------------------------------------------------------- */
+
+/** UX-17: is anything mid-flight that a reload would throw away? */
+function ingestUploadsInFlight() {
+  return ing.items.some((i) => i.uploading) ||
+         (!ing.running && ing.items.some(
+           (i) => i.source === "upload" && i.include && i.accepted !== false &&
+                  !i.uploaded));
+}
 
 function ingestBytes(n) {
   const bytes = Number(n) || 0;

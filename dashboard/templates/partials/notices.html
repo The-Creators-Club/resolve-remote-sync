@@ -1,0 +1,47 @@
+{# PROBLEMS THE SERVER FOUND (UX-10, resilience sweep 2026-08-28).
+
+   The dashboard refuses things for good reasons and used to tell only the
+   container log: a stray marker on a container hides three real projects,
+   two Syncthing folders over one directory each pull it independently, an
+   enforce pass whose blast radius tripped the brake leaves every genuine
+   untick unapplied. Sixteen already-written diagnoses reaching nobody. This
+   is where they land.
+
+   Renders as NOTHING when there is nothing open, so a healthy fleet does not
+   pay a panel for it. #}
+{% if notices %}
+<section class="admin-users-box" id="server-notices" style="margin-bottom:1rem">
+  <div class="side-head">[ PROBLEMS THE SERVER FOUND ]
+    <span class="muted">things this server refused to do, and what to do about them.
+      Each one comes back by itself if it is still true after you dismiss it.</span></div>
+  {% if notice_error %}
+    <div class="banner">▲ {{ notice_error }}</div>
+  {% endif %}
+  {% for n in notices %}
+    <div class="banner {{ 'alarm' if n.severity == 'error' }}" style="margin-top:0.5rem">
+      <span class="chip {{ 'red' if n.severity == 'error' else ('amber' if n.severity == 'warn' else '') }}">[ {{ n.severity | upper }} ]</span>
+      <span class="mono-sm">{{ n.subject }}</span>
+      <div style="margin-top:0.35rem">{{ n.body }}</div>
+      {% if n.fix %}<div class="mono-sm" style="margin-top:0.35rem">WHAT TO DO: {{ n.fix }}</div>{% endif %}
+      <div class="muted mono-sm" style="margin-top:0.35rem">
+        first seen {{ n.first_seen | ago }} · last seen {{ n.last_seen | ago }}
+        <form class="inline-form" hx-post="/partials/notices/{{ n.id }}/dismiss"
+              hx-target="#server-notices" hx-swap="outerHTML"
+              hx-confirm="Dismiss this? It is only hidden. If the server finds the same problem again it comes straight back, so dismissing it is not a fix.">
+          <button class="btn" type="submit">[ DISMISS ]</button>
+        </form>
+      </div>
+    </div>
+  {% endfor %}
+  {% include "partials/notice_checks.html" %}
+</section>
+{% else %}
+<section class="admin-users-box" id="server-notices" style="margin-bottom:1rem">
+  <div class="side-head">[ PROBLEMS THE SERVER FOUND ]
+    <span class="muted">nothing. Every check below ran and found nothing wrong.</span></div>
+  {% if notice_error %}
+    <div class="banner">▲ {{ notice_error }}</div>
+  {% endif %}
+  {% include "partials/notice_checks.html" %}
+</section>
+{% endif %}

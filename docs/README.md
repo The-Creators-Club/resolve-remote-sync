@@ -46,6 +46,7 @@ Index written 2026-08-17 (`COMMERCIAL_READINESS.md` item 13).
 | Doc | What it is |
 |---|---|
 | [`SYNC_SAFETY.md`](SYNC_SAFETY.md) | The lane B circuit breaker, `.ccsync-trash` retention, the remove-project gate, and the halt |
+| [`SELF_DIAGNOSIS.md`](SELF_DIAGNOSIS.md) | The server's own diagnosis: the `notices` panel, the alert registry and its sink (none/smtp/webhook), the weekly report, and how to add a check |
 | [`BACKUP_RESTORE.md`](BACKUP_RESTORE.md) | Snapshots, restoring a file / a project / the fleet database, and publishing a search index safely |
 | [`RESOLVE_EDIT_SAFETY.md`](RESOLVE_EDIT_SAFETY.md) | Undoing a clip-path change CC Sync made |
 | [`delete-protection-ignoredelete.md`](delete-protection-ignoredelete.md) | Why Syncthing runs with `ignoreDelete` on the server side |

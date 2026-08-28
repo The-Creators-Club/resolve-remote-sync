@@ -493,6 +493,14 @@ DEFAULTS: dict[str, Any] = {
     # its local_root IS the NAS share, so staging there pushes every original
     # over SMB twice.
     "broll_ingest_staging_dir": "",
+    # How long a FINISHED batch's staging directory is kept before the ingest
+    # tick deletes it (MEDIA-3, resilience sweep 2026-08-28). Seven days is
+    # what docs/BROLL_INGEST_PLAN.md has promised since the feature shipped,
+    # and nothing implemented it: every batch left its originals, proxies,
+    # posters and frame sheets inside the archive for ever until the drive's
+    # own free-space floor refused the next drop. The music kind reads
+    # `music_ingest_staging_retention_days` and falls back to this number.
+    "broll_ingest_staging_retention_days": 7,
     # Hand the BRAW/R3D/CRM gap to the Blackmagic Proxy Generator once the
     # ffmpeg queue is empty (see bpg.py). Tri-state like proxy_gen_enabled:
     # None derives "wherever this machine generates proxies AND has BPG
@@ -1138,6 +1146,10 @@ proxy_gen_min_age_seconds = 120
 # its local_root is the NAS share, so staging there sends every original over
 # SMB twice.
 # broll_ingest_staging_dir = ''
+# How long a finished batch's staging folder is kept before it is deleted.
+# 0 = as soon as the batch ends. The music ingest reads the same key with a
+# music_ prefix and falls back to this one's default.
+# broll_ingest_staging_retention_days = 7
 
 # Let the Blackmagic Proxy Generator make the proxies ffmpeg cannot: BRAW, R3D
 # and CRM are counted and reported but never queued here, because ffmpeg cannot

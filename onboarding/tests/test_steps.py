@@ -987,3 +987,149 @@ def test_install_companion_copies_into_bin(tmp_path):
     assert dest == dest_dir / "ccsync-companion.exe"
     assert dest_dir.is_dir()               # created
     assert calls and calls[0][0] == src    # copied from the bundled source
+
+
+# -- UX-13 / OPS-6 / UX-14 / OPS-7 (resilience sweep 2026-08-28) --------------
+
+def test_low_space_warning_names_the_figure_and_the_typical_size():
+    warning = steps.local_root_space_warning(
+        r"D:\CCSync", free_bytes=lambda _p: 41 * 1024 ** 3)
+    assert warning == ("This drive has 41 GB free. Synced proxies for one "
+                       "project are typically 50 to 300 GB.")
+
+
+def test_low_space_warning_is_silent_when_there_is_room():
+    assert steps.local_root_space_warning(
+        r"D:\CCSync", free_bytes=lambda _p: 2 * 1024 ** 4) is None
+    assert steps.local_root_space_warning(
+        r"D:\CCSync", free_bytes=lambda _p: steps.LOW_SPACE_WARN_BYTES) is None
+
+
+def test_low_space_warning_says_nothing_when_it_cannot_measure():
+    # "could not check" must never render as a figure -- and must never
+    # render as a refusal either (UX-14 is a warning by design).
+    assert steps.local_root_space_warning(r"D:\CCSync", free_bytes=lambda _p: None) is None
+
+    def _boom(_path):
+        raise OSError("no such volume")
+
+    assert steps.local_root_space_warning(r"D:\CCSync", free_bytes=_boom) is None
+    assert steps.local_root_space_warning("") is None
+
+
+def test_low_space_warning_never_refuses_what_validate_accepts():
+    # The tenth check is deliberately NOT part of validate_local_root's
+    # refusal contract: a full drive still installs.
+    assert steps.validate_local_root(r"D:\CCSync", "editor", drive_exists=lambda _d: True,
+                                     platform="win32") is None
+
+
+def test_install_breadcrumb_round_trip(tmp_path):
+    assert steps.read_install_breadcrumb(home=tmp_path) is None
+    path = steps.write_install_breadcrumb("clean_slate:editor", home=tmp_path)
+    assert path == tmp_path / ".ccsync" / "state" / "install_in_progress.json"
+    record = steps.read_install_breadcrumb(home=tmp_path)
+    assert record["phase"] == "clean_slate:editor"
+    assert record["started_at"]
+    steps.clear_install_breadcrumb(home=tmp_path)
+    assert steps.read_install_breadcrumb(home=tmp_path) is None
+    steps.clear_install_breadcrumb(home=tmp_path)  # idempotent
+
+
+def test_a_corrupt_breadcrumb_still_counts_as_present(tmp_path):
+    target = steps.install_breadcrumb_path(home=tmp_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("{not json", encoding="utf-8")
+    # {} not None: the file existing at all is the signal, and losing that to
+    # a JSON error is the "could not check reads as fine" failure.
+    assert steps.read_install_breadcrumb(home=tmp_path) == {}
+
+
+def test_install_close_warning_uses_the_sites_drive_letter():
+    text = steps.install_close_warning("Q")
+    assert text == ("The install is part-way through. Closing now leaves this "
+                    "computer with no CCSync and no Q drive. Close anyway?")
+    assert "P drive" not in text
+    assert "\u2014" not in text
+    assert steps.install_close_warning("W:\\").startswith(
+        "The install is part-way through.")
+    assert " W drive" in steps.install_close_warning("W:\\")
+
+
+def test_console_user_mismatch_refuses_and_names_both_accounts():
+    message = steps.console_user_mismatch("STUDIO\\leso", "administrator")
+    assert message == (
+        "You are running as administrator but leso is signed in. Everything "
+        "this installs is per-user, so leso would get nothing. Sign in as "
+        "leso and run it again (it does not need administrator rights)."
+    )
+
+
+def test_console_user_mismatch_folds_domain_and_case():
+    assert steps.console_user_mismatch("STUDIO\\alex", "alex") is None
+    assert steps.console_user_mismatch("STUDIO\\Alex", "alex") is None
+    assert steps.console_user_mismatch("alex@studio.local", "alex") is None
+
+
+def test_console_user_mismatch_says_nothing_when_it_cannot_tell():
+    # A locked session, an RDP session or a hardened WMI: refusing on "could
+    # not check" would lock somebody out of their own install (OPS-7).
+    assert steps.console_user_mismatch("", "alex") is None
+    assert steps.console_user_mismatch(None, "alex") is None
+    assert steps.console_user_mismatch("STUDIO\\alex", "") is None
+
+
+def test_default_console_user_is_none_on_darwin():
+    assert steps.default_console_user(run=_never_called, platform="darwin") is None
+
+
+def _never_called(*_a, **_kw):
+    raise AssertionError("no subprocess should run here")
+
+
+def test_default_console_user_reads_the_first_line():
+    calls = []
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "STUDIO\\alex\n", "")
+
+    assert steps.default_console_user(run=_fake_run, platform="win32") == "STUDIO\\alex"
+    assert "powershell" in calls[0][0]
+
+
+def test_default_console_user_survives_a_broken_probe():
+    def _boom(*_a, **_kw):
+        raise OSError("wmi is not having it")
+
+    assert steps.default_console_user(run=_boom, platform="win32") is None
+
+
+def test_terminate_bootstrap_is_false_with_no_child():
+    steps._bootstrap_child = None
+    assert steps.terminate_bootstrap() is False
+
+
+def test_terminate_bootstrap_kills_the_group(monkeypatch):
+    class _FakeProc:
+        pid = 4242
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            raise AssertionError("the group kill should have been used")
+
+    killed = []
+    monkeypatch.setattr(steps.subprocess, "run",
+                        lambda cmd, **kw: killed.append(cmd) or
+                        subprocess.CompletedProcess(cmd, 0, "", ""))
+    monkeypatch.setattr(steps.os, "name", "nt", raising=False)
+    steps._bootstrap_child = _FakeProc()
+    try:
+        assert steps.terminate_bootstrap() is True
+    finally:
+        steps._bootstrap_child = None
+    # /T, not just the powershell pid: the .ps1 spawns winget, an elevated
+    # helper and Syncthing, and those must go with it.
+    assert killed and "/T" in killed[0] and "4242" in killed[0]

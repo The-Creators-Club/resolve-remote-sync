@@ -2346,6 +2346,40 @@ def _clock_skew_line(guard: dict) -> Optional[str]:
             "correctly until it is fixed")
 
 
+def _ignored_line(guard: dict) -> Optional[str]:
+    """"14 clip(s) skipped this session and still not syncing" (APP-2 / UX-4,
+    resilience sweep 2026-08-28).
+
+    IGNORE ALL / SKIP FOR NOW was permanent for the session, invisible, and
+    honoured even by "Scan whole project" -- so an editor who cleared the
+    dialog to get on with a cut had no way left to find out that 65 clips of
+    theirs were never going to reach anyone. The line names the way back
+    (the scan now clears the session set first, which is what makes that
+    sentence true).
+
+    The persisted folder ignores get a clause of their own rather than a
+    line: they are a decision somebody made on purpose, not a warning.
+    """
+    health = (guard or {}).get("resolve_health") or {}
+    if not isinstance(health, dict):
+        return None
+    try:
+        session = int(health.get("ignored_this_session") or 0)
+        folders = int(health.get("ignored_folders") or 0)
+    except (TypeError, ValueError):
+        return None
+    parts: list[str] = []
+    if session:
+        parts.append(
+            f"⚠ {session} clip(s) skipped this session and still not syncing - "
+            "Settings > SCAN WHOLE PROJECT offers them again")
+    if folders:
+        parts.append(
+            f"{folders} folder(s) are set to be left alone on this computer - "
+            "Settings can undo that")
+    return ". ".join(parts) if parts else None
+
+
 def _crashes_line(guard: dict) -> Optional[str]:
     """"A background task failed" (APP-6).
 

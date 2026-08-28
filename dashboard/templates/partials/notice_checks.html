@@ -1,0 +1,31 @@
+{# "What the server checks" (owner's instruction, 2026-08-28).
+
+   Silence has to read as "checked and fine", never as "nobody wrote a check".
+   Every kind in db.notice_kinds() is listed with a tick when nothing is open
+   against it, so an owner looking at an empty panel can see WHAT was looked
+   at. Collapsed by default: it is reassurance, not news.
+
+   [ OK ] requires EVIDENCE (`checked_kinds`, from db.notice_check_times) that
+   some pass actually evaluated the kind, not merely that the registry names
+   it: a kind registered with no writer behind it renders [ NOT CHECKED ]
+   instead (finding 1, resilience sweep 2026-08-28 fix pass -- this is
+   exactly the "unchecked rendered as fine" bug plan_without_share sat in
+   before it had a writer). #}
+<details class="proj-group" data-key="notice-checks" style="margin-top:0.8rem">
+  <summary><span class="marker">▸</span> WHAT THE SERVER CHECKS
+    <span class="muted mono-sm">{{ notice_kinds | length }} checks</span></summary>
+  <table class="editors">
+    <tbody>
+    {% for k in notice_kinds %}
+      <tr class="editor-row">
+        <td class="mono-sm">
+          {% if k.kind in open_kinds %}<span class="chip {{ 'red' if k.severity == 'error' else 'amber' }}">[ FOUND ]</span>
+          {% elif k.kind in checked_kinds %}<span class="chip green">[ OK ]</span>
+          {% else %}<span class="chip" title="registered but nothing in this build has ever evaluated it">[ NOT CHECKED ]</span>{% endif %}
+        </td>
+        <td class="mono-sm">{{ k.what }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</details>

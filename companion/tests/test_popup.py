@@ -325,6 +325,75 @@ def test_perform_fix_all_continues_past_failures():
 
 
 # ===========================================================================
+# RES-12 / UX-4 (resilience sweep 2026-08-28): the third answer, and what the
+# headless path records
+# ===========================================================================
+
+
+def test_perform_ignore_folders_persists_one_entry_per_distinct_folder(tmp_path):
+    from ccsync_companion.popup import folders_of, perform_ignore_folders
+
+    tracker = fixer.IgnoreTracker(tmp_path / "state")
+    rows = [
+        {"file_path": r"C:\Stock\a.mov"},
+        {"file_path": r"C:\Stock\b.mov"},
+        {"file_path": r"D:\Other\c.mov"},
+    ]
+    assert folders_of(rows) == [r"C:\Stock", r"D:\Other"]
+    persisted, failed = perform_ignore_folders(rows, tracker, reason="chosen in the fixer")
+    assert failed == []
+    assert sorted(persisted) == [r"C:\Stock", r"D:\Other"]
+    assert tracker.folder_count() == 2
+    # The clips in front of the editor go away either way.
+    assert tracker.is_ignored(r"C:\Stock\a.mov") is True
+    # ...and a clip they have never seen, in the same folder, does too.
+    assert tracker.is_ignored(r"C:\Stock\never_seen.mov") is True
+
+
+def test_perform_ignore_folders_reports_what_it_could_not_save(tmp_path, monkeypatch):
+    from ccsync_companion.popup import perform_ignore_folders
+
+    tracker = fixer.IgnoreTracker(tmp_path / "state")
+    monkeypatch.setattr(fixer, "_write_json_atomic", lambda *a, **k: False)
+    persisted, failed = perform_ignore_folders([{"file_path": r"C:\Stock\a.mov"}], tracker)
+    assert persisted == []
+    assert failed == [r"C:\Stock"]
+    # Weakest meaning of the button still honoured: skipped for this session.
+    assert tracker.is_ignored(r"C:\Stock\a.mov") is True
+
+
+def test_the_folder_button_names_its_own_scope():
+    from ccsync_companion.popup import _folder_button_label
+
+    one = _folder_button_label([{"file_path": r"C:\Stock\a.mov"}])
+    assert one == "ALWAYS LEAVE THIS FOLDER ALONE ON THIS COMPUTER"
+    two = _folder_button_label([{"file_path": r"C:\Stock\a.mov"},
+                                {"file_path": r"D:\Other\b.mov"}])
+    assert two == "ALWAYS LEAVE THESE 2 FOLDERS ALONE ON THIS COMPUTER"
+
+
+def test_the_headless_fallback_records_that_nobody_chose_this(monkeypatch, tmp_path):
+    """UX-4: a machine whose Tk is wedged used to be indistinguishable, in
+    every artefact anyone ever sees, from an editor who keeps pressing SKIP."""
+    from ccsync_companion import popup
+
+    tracker = fixer.IgnoreTracker(tmp_path / "state")
+
+    def no_display(*a, **k):
+        raise RuntimeError("no display name and no $DISPLAY environment variable")
+
+    monkeypatch.setattr(popup, "PopupDialog", no_display)
+    popup.show_popup(
+        [{"file_path": r"G:\raw\A001.braw", "media_pool_item": object(),
+          "clip_name": "A001", "resolve_project_name": ""}],
+        r"C:\Creators_Club", "owen", tracker,
+    )
+    assert tracker.skipped_count() == 1
+    written = fixer._read_json(tracker.skipped_path)["clips"]
+    assert [v["how"] for v in written.values()] == ["headless"]
+
+
+# ===========================================================================
 # AUDIT_2 round-2 regressions
 # ===========================================================================
 

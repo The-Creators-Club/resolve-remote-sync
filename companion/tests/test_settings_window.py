@@ -561,3 +561,147 @@ def test_the_stall_line_appears_in_sync_lanes():
         "at": datetime.now(timezone.utc).isoformat()}}
     lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
     assert any("Proxy download stopped moving" in l for l in lines)
+
+
+# -- UX-3 / SYNC-10 / MEDIA-3 (resilience sweep 2026-08-28) -----------------
+
+
+def test_a_moved_project_folder_is_readable_with_a_button_to_put_it_back():
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    app.sync_guard = lambda: {"moved_project_dirs": [
+        {"slug": "nuclear-2026", "subpath": "Projects/2026/FF5/Nuclear",
+         "expected": "P:/Projects/2026/FF5/Nuclear",
+         "found": "P:/Projects/2026/FF5/Nuclear FINAL"}]}
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    assert any("'Nuclear' is not where CCSync expects it" in l for l in lines)
+    assert any("PUT 'Nuclear' BACK WHERE CCSYNC EXPECTS IT" in l for l in lines)
+
+
+def test_a_folder_we_cannot_find_gets_the_warning_but_no_button():
+    """A button that can only fail is worse than no button."""
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    app.sync_guard = lambda: {"moved_project_dirs": [
+        {"slug": "nuclear-2026", "subpath": "Projects/2026/FF5/Nuclear",
+         "expected": "P:/Projects/2026/FF5/Nuclear", "found": None}]}
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    assert any("is not where CCSync expects it" in l for l in lines)
+    assert not any("PUT " in l for l in lines)
+
+
+def test_stray_project_folders_are_reported_with_no_delete_button():
+    """SYNC-10 keeps the orphan scan's posture: reported, never acted on."""
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    app.sync_guard = lambda: {"stray_projects": {
+        "count": 3, "bytes": 40 * 10 ** 9, "paths": [], "slugs": []}}
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    assert any("3 project folder(s) on this computer are in no sync plan" in l
+               for l in lines)
+    assert not any("DELETE" in l for l in lines)
+
+
+def test_finished_staging_has_a_line_and_a_clear_button():
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    app.sync_guard = lambda: {"ingest_staging": {
+        "bytes": 42 * 10 ** 9, "batches": 6, "oldest_at": "2026-08-01T00:00:00Z"}}
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    assert any("42.0 GB" in l for l in lines)
+    assert any("CLEAR FINISHED STAGING" in l for l in lines)
+
+
+def test_none_of_the_three_appear_when_nothing_is_wrong():
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    app.sync_guard = lambda: {}
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    assert not any("CLEAR FINISHED STAGING" in l or "no sync plan" in l
+                   or "is not where CCSync expects it" in l for l in lines)
+
+
+
+# -- APP-2 / RES-12 / UX-15 (resilience sweep 2026-08-28) ------------------
+
+
+class _FakeTracker:
+    def __init__(self, folders=()):
+        self._folders = [dict(f) for f in folders]
+        self.forgotten = []
+
+    def folders(self):
+        return [dict(f) for f in self._folders]
+
+    def forget_folder(self, folder):
+        self.forgotten.append(folder)
+        return True
+
+
+def _resolve_app(**health):
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    app.sync_guard = lambda: {"resolve_health": health}
+    return app
+
+
+def test_the_skipped_clip_line_appears_in_sync_lanes():
+    app = _resolve_app(ignored_this_session=14, ignored_folders=0)
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    assert any("14 clip(s) skipped this session" in l for l in lines)
+
+
+def test_each_leave_alone_folder_gets_a_forget_button(monkeypatch):
+    """RES-12: a decision that says "always" has to be undoable from the
+    product, or it is a trap."""
+    app = _resolve_app()
+    app.ignore_tracker = _FakeTracker([
+        {"folder": r"C:\Stock", "reason": "my own library", "when": ""}])
+    advanced = _section(build_settings_model(_tray_snapshot(app), app), "ADVANCED")
+    labels = _labels(advanced)
+    assert any(l.startswith("Leaving clips in C:\\Stock alone") for l in labels)
+    assert r"FORGET: C:\Stock" in labels
+
+    button = next(i for i in advanced.items
+                  if isinstance(i, Button) and i.label.startswith("FORGET:"))
+    spawned = []
+    monkeypatch.setattr(sw.tray_mod, "_spawn",
+                        lambda app, label, fn: spawned.append(label) or fn())
+    button.on_click()
+    assert app.ignore_tracker.forgotten == [r"C:\Stock"]
+
+
+def test_no_forget_buttons_when_nothing_is_left_alone():
+    app = _resolve_app()
+    labels = _flat_labels(build_settings_model(_tray_snapshot(app), app))
+    assert not any(l.startswith("FORGET:") for l in labels)
+
+
+def test_the_repair_button_appears_only_when_the_mapping_is_broken():
+    """UX-15: the toast described this repair for a year and never offered
+    it."""
+    app = _resolve_app(bad_prefix=3)
+    app.p_repair_available = lambda: True
+    app.canonical_prefix_label = lambda: "P:"
+    labels = _flat_labels(build_settings_model(_tray_snapshot(app), app))
+    assert "REPAIR P: NOW" in labels
+    assert any("clips will show offline" in l for l in labels)
+    assert any("uploads and downloads are still running" in l for l in labels)
+
+    healthy = _resolve_app(bad_prefix=0)
+    healthy.p_repair_available = lambda: True
+    healthy.canonical_prefix_label = lambda: "P:"
+    healthy.p_mapping_mode_cached = lambda: "local"
+    assert "REPAIR P: NOW" not in _flat_labels(
+        build_settings_model(_tray_snapshot(healthy), healthy))
+
+
+def test_the_repair_button_is_absent_where_it_could_do_nothing():
+    """No drive namespace to repair on a Mac."""
+    app = _resolve_app(bad_prefix=3)
+    app.p_repair_available = lambda: False
+    app.canonical_prefix_label = lambda: "P:"
+    assert "REPAIR P: NOW" not in _flat_labels(
+        build_settings_model(_tray_snapshot(app), app))
+
+
+def test_the_repair_button_names_the_site_drive():
+    app = _resolve_app(bad_prefix=1)
+    app.p_repair_available = lambda: True
+    app.canonical_prefix_label = lambda: "Q:"
+    labels = _flat_labels(build_settings_model(_tray_snapshot(app), app))
+    assert "REPAIR Q: NOW" in labels

@@ -166,7 +166,45 @@ def _render(request: Request, name: str, context: dict) -> HTMLResponse:
     # ...and for the YouTube downloader (ytdl.MOUNTED only). Same rule a third
     # time: absent tree or unusable YTDL_DATA_ROOT means no nav link.
     context.setdefault("ytdl_mounted", getattr(request.app.state, "ytdl_mounted", False))
+    # UX-10 (2026-08-28): how many problems the server has found, in the bar
+    # that is on every page. FULL PAGES ONLY -- the partials re-render on 2 s
+    # and 15 s timers, and a count on each of those would be one extra
+    # connection per poll per open tab for a number nobody is reading in a
+    # fragment. Best-effort: a topbar that cannot count must still render.
+    if not name.startswith("partials/") and context.get("session_is_admin"):
+        context.setdefault("notice_counts", _notice_counts_safe(settings))
+        # SYS-8: the same idea for the alert scan, read from the LAST SCAN'S
+        # stored counts rather than by scanning here. A scan walks the whole
+        # fleet view and forty checks; doing that per page render would put
+        # the cost of the diagnosis on every click, and the number a topbar
+        # shows does not need to be fresher than the collector's cadence.
+        context.setdefault("alert_counts", _alert_counts_safe(settings))
     return templates.TemplateResponse(request=request, name=name, context=context)
+
+
+def _alert_counts_safe(settings) -> dict[str, int]:
+    try:
+        conn = db.connect(settings.db_path)
+        try:
+            stored = db.meta_get_json(conn, db.META_ALERTS_OPEN) or {}
+        finally:
+            conn.close()
+        return {k: int(v) for k, v in stored.items() if k in ("error", "warn")}
+    except Exception:  # noqa: BLE001
+        log.exception("could not read the open-alert counts for the topbar")
+        return {}
+
+
+def _notice_counts_safe(settings) -> dict[str, int]:
+    try:
+        conn = db.connect(settings.db_path)
+        try:
+            return db.notice_counts(conn)
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001
+        log.exception("could not count open notices for the topbar")
+        return {}
 
 
 def _queue_editor(request: Request) -> str | None:
@@ -1040,6 +1078,51 @@ def partial_transfers(request: Request, conn: sqlite3.Connection = Depends(get_c
 # an undo, it is a second decision taken with less information than the first.
 
 
+# ------------------------------------------------------- server notices
+#
+# UX-10 (resilience sweep 2026-08-28). db.notice() is written beside the
+# collector's and provision's own log lines; this is the half a
+# non-technical owner can read. Admin-only: every one of these is a fact
+# about the SERVER, and an editor can do nothing with it.
+
+def _notices_context(conn, error: str | None = None) -> dict:
+    open_rows = db.open_notices(conn)
+    return {
+        "notices": open_rows,
+        "notice_error": error,
+        # The registry, so an empty panel says WHAT was checked (owner,
+        # 2026-08-28): silence must read as "checked and fine".
+        "notice_kinds": db.notice_kinds(),
+        "open_kinds": {row["kind"] for row in open_rows},
+        # Finding 1 (resilience sweep 2026-08-28 fix pass): a registry entry
+        # with no writer must render NOT CHECKED, never a false OK. Evidence,
+        # not the registry itself -- see db.notice_check_times.
+        "checked_kinds": set(db.notice_check_times(conn)),
+    }
+
+
+@router.get("/partials/notices")
+def partial_notices(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    _require_admin_page(request)
+    return _render(request, "partials/notices.html", _notices_context(conn))
+
+
+@router.post("/partials/notices/{notice_id}/dismiss")
+def partial_notice_dismiss(
+    notice_id: int, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    """[ DISMISS ]: hide one notice until the condition is found again.
+
+    Deliberately not a suppression: db.notice() reopens it on the next cycle
+    that still sees the problem, so this clears a diagnosis that has been
+    acted on and cannot silence a live one."""
+    admin = _require_admin_page(request)
+    row = db.dismiss_notice(conn, notice_id, admin)
+    conn.commit()
+    error = None if row else "that notice is already gone. Reload the page."
+    return _render(request, "partials/notices.html", _notices_context(conn, error))
+
+
 def _plan_changes_context(request: Request, conn, error: str | None = None,
                           notice: str | None = None) -> dict:
     return {
@@ -1156,6 +1239,128 @@ def partial_admin_audit(request: Request, q: str = "",
                    _audit_context(request, conn, q.strip()))
 
 
+# ------------------------------------------------------------------- alerts
+# SYS-8 (resilience sweep 2026-08-28). The page half of alerts.py: the same
+# functions the JSON routes in api.py call, so a test send from here and one
+# from a script behave identically. No secret is rendered by any of these:
+# alerts.settings_view returns a mask and the value's source, never the value.
+
+
+def _alerts_context(request: Request, conn, error: str = "",
+                    notice: str = "") -> dict:
+    from . import alerts
+
+    settings = request.app.state.settings
+    findings = alerts.scan(conn, settings, db.utcnow_iso())
+    return {
+        "alerts_settings": alerts.settings_view(conn, settings),
+        "alerts_open": findings,
+        "alerts_counts": alerts.open_counts(findings),
+        "alerts_kinds": [{"kind": k.kind, "severity": k.severity,
+                          "title": k.title, "what": k.what}
+                         for k in alerts.ALERT_KINDS],
+        "alerts_log": db.fetch_alerts(conn, limit=200),
+        "alerts_interval_minutes": int(
+            max(1.0, getattr(settings, "interval_alerts", 600.0)) // 60),
+        "error": error,
+        "notice": notice,
+    }
+
+
+@router.get("/admin/alerts")
+def page_admin_alerts(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    _require_admin_page(request)
+    return _render(request, "admin_alerts.html", {
+        **_sidebar_context(request, conn, None),
+        **_alerts_context(request, conn),
+        "nav_current": "alerts",
+    })
+
+
+@router.get("/admin/alerts/preview", response_class=PlainTextResponse)
+def page_admin_alerts_preview(request: Request,
+                              conn: sqlite3.Connection = Depends(get_conn)):
+    """This week's report exactly as it would be sent. Text, not a rendered
+    page: the thing being previewed IS the text."""
+    _require_admin_page(request)
+    from . import alerts
+
+    subject, text = alerts.compose_weekly(conn, db.utcnow_iso(),
+                                          request.app.state.settings)
+    return PlainTextResponse(f"Subject: {subject}\n\n{text}")
+
+
+@router.post("/partials/admin/alerts/save")
+async def partial_admin_alerts_save(request: Request,
+                                    conn: sqlite3.Connection = Depends(get_conn)):
+    user = _require_admin_page(request)
+    from . import alerts
+
+    form = await _form(request)
+    values = {k: v for k, v in form.items() if k in alerts.SETTING_KEYS}
+    error = ""
+    notice = ""
+    try:
+        alerts.set_settings(conn, values, user)
+        db.audit(conn, user, "alerts.settings", "alerts",
+                 {"sink": values.get("alerts_sink", "")})
+        conn.commit()
+        notice = "saved."
+    except alerts.AlertError as exc:
+        conn.rollback()
+        error = str(exc)
+    return _render(request, "partials/admin_alerts.html",
+                   _alerts_context(request, conn, error, notice))
+
+
+@router.post("/partials/admin/alerts/password")
+async def partial_admin_alerts_password(request: Request,
+                                        conn: sqlite3.Connection = Depends(get_conn)):
+    _require_admin_page(request)
+    from . import alerts
+
+    form = await _form(request)
+    settings = request.app.state.settings
+    error = ""
+    notice = ""
+    try:
+        if form.get("clear") == "1":
+            notice = ("password cleared." if alerts.clear_password(settings)
+                      else "there was no stored password.")
+        else:
+            alerts.set_password(settings, form.get("password", ""))
+            notice = "password stored."
+    except alerts.AlertError as exc:
+        error = str(exc)
+    return _render(request, "partials/admin_alerts.html",
+                   _alerts_context(request, conn, error, notice))
+
+
+@router.post("/partials/admin/alerts/test")
+def partial_admin_alerts_test(request: Request,
+                              conn: sqlite3.Connection = Depends(get_conn)):
+    _require_admin_page(request)
+    from . import alerts
+
+    subject, text = alerts.compose_alert(
+        alerts.KIND_TEST, "test",
+        "This is a test of the CC Sync alert channel. Nothing is wrong.")
+    # dedup OFF: an admin pressing the button twice is asking twice, and a
+    # silent "already sent today" is exactly the answer that makes somebody
+    # believe a broken sink works.
+    result = alerts.send(conn, request.app.state.settings, subject, text,
+                         kind=alerts.KIND_TEST, dedup=False)
+    conn.commit()
+    if result["ok"]:
+        notice = f"test sent to {result['sent_to'] or 'the configured sink'}."
+        error = ""
+    else:
+        notice = ""
+        error = f"the test could not be sent: {result['detail']}"
+    return _render(request, "partials/admin_alerts.html",
+                   _alerts_context(request, conn, error, notice))
+
+
 @router.get("/partials/project/{slug}/bins")
 def partial_bins(slug: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     scope = auth.scope_for(request)
@@ -1188,6 +1393,10 @@ def partial_project(slug: str, request: Request, conn: sqlite3.Connection = Depe
         "move_projects": [dict(r) for r in conn.execute(
             "SELECT slug, label FROM projects WHERE active=1 ORDER BY label")],
         "tick_editor": tick_editor,
+        # UX-12 / DASH-8 (2026-08-28): the person's computers, so this render
+        # carries the same person-level untick confirm and the same
+        # [ TICK FOR ALL OF ...'S COMPUTERS (N) ] label as the full page.
+        "toggle_editor_machines": db.machines_of(conn, tick_editor) if tick_editor else [],
         "as_qs": _as_qs(request, tick_editor),
     })
 
@@ -1270,6 +1479,68 @@ async def partial_project_move(slug: str, request: Request,
         "move_error": error,
         "move_done": done,
     })
+
+
+def _rendered_project_detail(request, conn, slug: str, *, error=None, done=None):
+    """The project detail fragment, the way partial_project_move renders it.
+    Shared by the two move buttons below so a refusal is a banner in the page
+    rather than a dead htmx swap."""
+    view = build_project_view(conn, slug)
+    if view is None:
+        raise HTTPException(status_code=404, detail=f"unknown project {slug!r}")
+    tick_editor = _queue_editor(request)
+    return _render(request, "partials/project_detail.html", {
+        "project": view,
+        "selected_by": db.fetch_all_selections(conn),
+        "selected_modes": db.fetch_all_selection_modes(conn),
+        "moves": db.file_moves_for_project(conn, slug),
+        "move_projects": [dict(r) for r in conn.execute(
+            "SELECT slug, label FROM projects WHERE active=1 ORDER BY label")],
+        "tick_editor": tick_editor,
+        "as_qs": _as_qs(request, tick_editor),
+        "move_error": error,
+        "move_done": done,
+    })
+
+
+@router.post("/partials/project/{slug}/moves/{move_id}/undo")
+async def partial_project_move_undo(slug: str, move_id: int, request: Request,
+                                    conn: sqlite3.Connection = Depends(get_conn)):
+    """[ UNDO THIS MOVE ] (UX-11, resilience sweep 2026-08-28): the inverse
+    move through the same machinery that made the original."""
+    from .api import _require_move_write, undo_file_move
+
+    error = None
+    done = None
+    try:
+        user = _require_move_write(request)
+        done = undo_file_move(request.app.state.settings, conn, slug, move_id, user)
+    except HTTPException as exc:
+        error = str(exc.detail)
+    return _rendered_project_detail(request, conn, slug, error=error, done=done)
+
+
+@router.post("/partials/project/{slug}/moves/{move_id}/reissue")
+async def partial_project_move_reissue(slug: str, move_id: int, request: Request,
+                                       conn: sqlite3.Connection = Depends(get_conn)):
+    """[ ASK THAT COMPUTER AGAIN ] (DASH-9): put an expired move back in that
+    machine's queue, instead of the silence that let it re-upload the old
+    path."""
+    from .api import _require_move_write
+
+    form = await _form(request)
+    error = None
+    try:
+        user = _require_move_write(request)
+        ok = db.reissue_file_move(conn, move_id, form.get("editor", "").strip().lower(),
+                                  form.get("machine", "").strip(), db.utcnow_iso(),
+                                  actor=user)
+        conn.commit()
+        if not ok:
+            error = "that computer has already answered this move"
+    except HTTPException as exc:
+        error = str(exc.detail)
+    return _rendered_project_detail(request, conn, slug, error=error)
 
 
 @router.post("/partials/project/{slug}/links")
@@ -1815,11 +2086,44 @@ async def partial_admin_revoke_report_token(
 # The route is a thin wrapper over the same db helpers /api/v1/fleet/halt
 # uses, so the button and the API can never disagree about what is stored.
 
+def _halt_banner_context(conn) -> dict:
+    """The standing banner's numbers: how long, and how many computers.
+
+    "Machines in the fleet" is the registry count, not the ones reporting
+    right now: a halt reaches a machine on its NEXT report, so one that is
+    switched off is affected too."""
+    now = db.utcnow_iso()
+    halt = db.get_fleet_halt(conn, now=now)
+    hours = 0
+    if halt["set_at"]:
+        try:
+            hours = max(0, int(db.age_seconds(halt["set_at"], now) // 3600))
+        except (TypeError, ValueError):
+            hours = 0
+    row = conn.execute("SELECT COUNT(*) AS n FROM machines").fetchone()
+    return {"halt": halt, "halt_hours": hours,
+            "halt_machines": int(row["n"] if row else 0)}
+
+
+@router.get("/partials/fleet-halt-banner")
+def partial_fleet_halt_banner(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    """The every-page banner (UX-8, 2026-08-28). Any signed-in user: an
+    editor whose sync has stopped is exactly who needs to read it."""
+    if auth.get_session_user(request) is None:
+        raise HTTPException(status_code=401, detail="log in first")
+    return _render(request, "partials/fleet_halt_banner.html",
+                   _halt_banner_context(conn))
+
+
 def _fleet_halt_render(request, conn, *, error: str | None = None):
-    return _render(request, "partials/fleet_halt.html", {
-        "halt": db.get_fleet_halt(conn),
-        "error": error,
-    })
+    context = _halt_banner_context(conn)
+    context["error"] = error
+    # UX-8: "who stopped the fleet last month and why", answered under the
+    # switch that answers it.
+    context["halt_history"] = db.fleet_halt_history(conn)
+    return _render(request, "partials/fleet_halt.html", context)
 
 
 @router.get("/partials/admin/fleet-halt")
@@ -1838,12 +2142,22 @@ async def partial_admin_set_fleet_halt(
     form = await _form(request)
     active = form.get("active", "") == "1"
     reason = form.get("reason", "").strip()
-    if active and not reason:
+    # [ KEEP HALTED ] (UX-8, 2026-08-28): the same POST, keeping the original
+    # reason and start time and moving only the expiry, so the banner still
+    # counts from when the fleet actually stopped.
+    extend = form.get("extend", "") == "1"
+    if active and not extend and len(reason) < 3:
         # The reason is shown in EVERY editor's tray. A halt with no reason
         # produces a fleet of people who cannot work and cannot find out why.
         return _fleet_halt_render(
             request, conn, error="say why -- every editor's tray will show this")
-    db.set_fleet_halt(conn, active, reason, admin)
+    try:
+        db.set_fleet_halt(conn, active, reason, admin, extend=extend)
+    except ValueError as exc:
+        # UX-8 (resilience sweep 2026-08-28): a stale [ KEEP HALTED ] click,
+        # submitted after the halt it meant to extend already expired, must
+        # not re-halt the fleet with a blank reason -- see db.set_fleet_halt.
+        return _fleet_halt_render(request, conn, error=str(exc))
     conn.commit()
     log.warning(
         "FLEET HALT %s from the Users page by %s: %s",
@@ -2179,12 +2493,19 @@ async def partial_admin_resume_lane_b(
     form = await _form(request)
     editor = form.get("editor", "").strip().lower()
     machine = form.get("machine", "").strip()
-    db.request_lane_b_resume(conn, editor, machine, admin, db.utcnow_iso())
+    # UX-20 (resilience sweep 2026-08-28): the return value used to be thrown
+    # away, so RESUME on a fleet page left open across a rename or a
+    # [ FORGET ] re-rendered looking fine and queued nothing -- and the
+    # editor's proxies stayed stopped until somebody noticed.
+    resumed = db.request_lane_b_resume(conn, editor, machine, admin, db.utcnow_iso())
     conn.commit()
     scope = auth.scope_for(request)
     return _render(request, "partials/fleet_grid.html", {
         "view": api_scope_projects_view(build_projects_view(conn), scope),
         "fleet": api_scope_editors_view(build_editors_view(conn), scope),
+        "error": None if resumed else (
+            "That computer is no longer in the fleet, so nothing was resumed. "
+            "Reload the page."),
     })
 
 
@@ -2285,6 +2606,15 @@ async def partial_admin_machine_update_cancel(
                    _packages_and_feed(conn, request, None))
 
 
+# How long a deleted package's bytes stay recoverable (UX-9, 2026-08-28).
+# A rollback that has to reach for one is a bad day already; 30 days is long
+# enough to be there and short enough that the volume the whole dashboard
+# writes to does not fill with builds nobody wants.
+# UX-9 (resilience sweep 2026-08-28): the trash helpers live in api.py so the
+# JSON DELETE route and this partial share ONE delete mechanism.
+from .api import PACKAGE_TRASH_DAYS, _prune_package_trash, _trash_package_file  # noqa: E402
+
+
 @router.post("/partials/admin/packages/delete")
 async def partial_admin_package_delete(
     request: Request, conn: sqlite3.Connection = Depends(get_conn)
@@ -2303,14 +2633,22 @@ async def partial_admin_package_delete(
     elif row["is_current"]:
         error = "cannot delete the current version; make another version current first"
     else:
-        db.delete_companion_package(conn, platform, version, kind)
-        db.audit(conn, admin, "package.delete", version,
-                 {"kind": kind, "platform": platform, "version": version})
-        conn.commit()
-        try:
-            (settings.packages_path() / row["platform"] / row["filename"]).unlink(missing_ok=True)
-        except OSError:
-            pass
+        # UX-9 (resilience sweep 2026-08-28): these are the bytes a rollback
+        # needs. They go to <data>/packages/.trash/ for 30 days instead of
+        # being unlinked, and a failure to move them is SAID rather than
+        # swallowed -- the old code passed on OSError, so a read-only or full
+        # volume dropped the row and kept the file, which is the one
+        # combination that makes the package permanently unrecoverable AND
+        # invisible.
+        moved, move_error = _trash_package_file(settings, row)
+        if move_error is not None:
+            error = move_error
+        else:
+            db.delete_companion_package(conn, platform, version, kind)
+            db.audit(conn, admin, "package.delete", version,
+                     {"kind": kind, "platform": platform, "version": version,
+                      "trashed": moved})
+            conn.commit()
 
     return _render(request, "partials/admin_packages.html", _packages_and_feed(conn, request, error))
 

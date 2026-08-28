@@ -22,6 +22,14 @@
 <div class="wrap">
   <h1>THIS LINK IS NOT AVAILABLE</h1>
   <p>The footage preview you were sent has been closed, has expired, or the address is not quite right.</p>
+  <!-- UX-19 (resilience sweep 2026-08-28): routes_share._gone_page replaces
+       the sentence below, verbatim and once, with the curating editor's name
+       and contact when the token is one we still recognise (revoked or
+       expired). It stays here as the wording for a token we know nothing
+       about, which is the only case where there is genuinely nobody to name.
+       If you edit it, edit client_folders.GONE_FALLBACK_SENTENCE too -- the
+       substitution is an exact string match and a silent miss would leave
+       every client at the same dead end this finding is about. -->
   <p>Please contact whoever sent it to you for a fresh link.</p>
 </div>
 </body>

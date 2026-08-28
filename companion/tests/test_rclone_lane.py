@@ -1799,3 +1799,125 @@ def test_the_progress_token_is_bounded_for_the_dashboards_field():
     assert len(token) <= rclone_lane.MAX_PROGRESS_TOKEN_CHARS <= 256
     # The numeric head is what changes, so it is what survives the trim.
     assert token.startswith("1:2:")
+
+
+# -- UX-3 / SYNC-10: project directories (resilience sweep 2026-08-28) -------
+
+
+def _marker(directory: Path, slug: str) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / rclone_lane.MARKER_FILENAME).write_text(
+        json.dumps({"slug": slug}), encoding="utf-8")
+
+
+def test_a_project_dir_that_was_never_here_is_still_idle(tmp_path):
+    """First run, or a project lane C has not delivered yet: unchanged."""
+    lane = _make_lane(tmp_path)
+    status = lane.run_once(subpath="Projects/2026/FF5/Nuclear")
+    assert status.state == STATE_IDLE
+    assert "not yet local" in (status.detail or "")
+    assert lane.moved_project_dirs() == []
+
+
+def test_a_project_dir_that_vanishes_is_an_error_naming_the_folder(tmp_path):
+    """UX-3: lane A used to report a renamed folder as ordinary first-run
+    IDLE, so everything filed in it after the rename stopped reaching the
+    fleet with nothing on the tray or the grid to say so."""
+    factory = _make_popen_factory(STATS_LINES, returncode=0, calls=[])
+    lane = _make_lane(tmp_path, popen_factory=factory)
+    subpath = "Projects/2026/FF5/Nuclear"
+    project_dir = Path(lane.local_root) / subpath
+    _marker(project_dir, "nuclear-2026")
+
+    assert lane.run_once(subpath=subpath).state != STATE_ERROR
+
+    # The editor renames it in Explorer.
+    renamed = project_dir.parent / "Nuclear FINAL"
+    project_dir.rename(renamed)
+
+    status = lane.run_once(subpath=subpath)
+    assert status.state == STATE_ERROR
+    assert "Nuclear is not where CCSync expects it" in (status.detail or "")
+    assert "rename or move" in (status.detail or "")
+    moved = lane.moved_project_dirs()
+    assert len(moved) == 1
+    assert moved[0]["slug"] == "nuclear-2026"
+    assert Path(moved[0]["found"]) == renamed
+    assert Path(moved[0]["expected"]) == project_dir
+
+
+def test_putting_the_folder_back_clears_the_alarm(tmp_path):
+    factory = _make_popen_factory(STATS_LINES, returncode=0, calls=[])
+    lane = _make_lane(tmp_path, popen_factory=factory)
+    subpath = "Projects/2026/FF5/Nuclear"
+    project_dir = Path(lane.local_root) / subpath
+    _marker(project_dir, "nuclear-2026")
+    lane.run_once(subpath=subpath)
+    renamed = project_dir.parent / "Nuclear FINAL"
+    project_dir.rename(renamed)
+    assert lane.run_once(subpath=subpath).state == STATE_ERROR
+
+    renamed.rename(project_dir)
+    assert lane.run_once(subpath=subpath).state != STATE_ERROR
+    assert lane.moved_project_dirs() == []
+
+
+def test_the_last_seen_record_survives_a_restart(tmp_path):
+    """The whole point is a distinction that outlives the process: a
+    companion restarted after the rename must not read it as first-run."""
+    factory = _make_popen_factory(STATS_LINES, returncode=0, calls=[])
+    lane = _make_lane(tmp_path, popen_factory=factory)
+    subpath = "Projects/2026/FF5/Nuclear"
+    project_dir = Path(lane.local_root) / subpath
+    _marker(project_dir, "nuclear-2026")
+    lane.run_once(subpath=subpath)
+    (project_dir.parent / "Elsewhere").mkdir()
+    for child in project_dir.iterdir():
+        child.rename(project_dir.parent / "Elsewhere" / child.name)
+    project_dir.rmdir()
+
+    fresh = _make_lane(tmp_path, popen_factory=_make_popen_factory(STATS_LINES, 0, []))
+    assert fresh.run_once(subpath=subpath).state == STATE_ERROR
+
+
+def test_stray_project_dirs_are_reported_never_deleted(tmp_path):
+    """SYNC-10: a repath onto an occupied target leaves a whole project
+    directory in no selection, which no lane ever touches again."""
+    lane = _make_lane(tmp_path)
+    lane.known_rels_fn = lambda: ["2026/FF5/Nuclear"]
+    selected = Path(lane.local_root) / "Projects" / "2026" / "FF5" / "Nuclear"
+    _marker(selected, "nuclear-2026")
+    stray = Path(lane.local_root) / "Projects" / "2026" / "FF5" / "Nuclear OLD"
+    _marker(stray, "nuclear-old")
+    (stray / "clip.mov").write_bytes(b"x" * 1024)
+
+    report = lane._refresh_stray_projects()
+    assert report["count"] == 1
+    assert report["slugs"] == ["nuclear-old"]
+    assert report["bytes"] >= 1024
+    assert stray.is_dir()                      # never deleted
+    assert lane.stray_projects()["count"] == 1
+
+
+def test_an_empty_selection_is_not_evidence_that_everything_is_stray(tmp_path):
+    """The sequencer answers [] before its first fetch and whenever the
+    dashboard is unreachable; naming every project on the machine then would
+    be the alarm that trains people to ignore alarms."""
+    lane = _make_lane(tmp_path)
+    lane.known_rels_fn = lambda: []
+    _marker(Path(lane.local_root) / "Projects" / "2026" / "X", "x")
+    assert lane._refresh_stray_projects() is None
+    assert lane.stray_projects() is None
+
+
+def test_scan_project_markers_does_not_descend_into_a_project(tmp_path):
+    root = tmp_path / "root"
+    project = root / "Projects" / "2026" / "Show"
+    _marker(project, "show")
+    _marker(project / "Archive" / "Old", "old-nested")
+    found = rclone_lane.scan_project_markers(root)
+    assert found == {"show": str(project)}
+
+
+def test_scan_project_markers_says_could_not_look_rather_than_none(tmp_path):
+    assert rclone_lane.scan_project_markers(tmp_path / "nothing") is None

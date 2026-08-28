@@ -96,6 +96,43 @@ LOG_BACKUP_COUNT = 10
 DIAGNOSTICS_STATE_FILENAME = "diagnostics_sent.json"
 DIAGNOSTICS_LANE_ERROR_INTERVAL_SECONDS = 3600.0
 
+# UX-13 / OPS-6 (resilience sweep 2026-08-28). The onboarding wizard writes
+# this file before its clean-slate phase and deletes it on Finish. It is the
+# ONLY record that an install was interrupted: the wizard's worker is a daemon
+# thread, so closing the window kills it wherever it happens to be -- after
+# the tree drive was unmapped, after the autostart entries were deleted,
+# possibly with a config.toml from either side of the wipe. This companion
+# finding the file means it is the leftover of a half-installed machine.
+INSTALL_BREADCRUMB_FILENAME = "install_in_progress.json"
+
+
+def install_in_progress_problem(cfg: Optional[dict[str, Any]] = None,
+                                config_dir: Optional[Path] = None) -> str:
+    """The config-problem sentence when an install never finished, else "".
+
+    Reads ~/.ccsync/state, not the configured log directory's state dir: the
+    wizard cannot know a log_path that a config it is about to overwrite might
+    name, so the two halves agree on one fixed location
+    (onboarding/steps.py install_breadcrumb_path).
+
+    Never raises. An unreadable directory means "no breadcrumb": this is a
+    refusal to sync, and a permissions hiccup must not manufacture one.
+    """
+    try:
+        base = Path(config_dir) if config_dir is not None else config_mod.CONFIG_DIR
+        if not (Path(base) / "state" / INSTALL_BREADCRUMB_FILENAME).exists():
+            return ""
+    except OSError:
+        return ""
+    prefix = str((cfg or {}).get("canonical_prefix", "") or "").strip()
+    letter = prefix.rstrip("\\/") or "your media drive"
+    return (
+        "The last install of CCSync on this computer did not finish, so this "
+        f"machine may have no {letter} drive and a half-written setup. Nothing "
+        "will sync until it is finished. Run the CCSync installer again and "
+        "choose FINISH THE INSTALL."
+    )
+
 
 class RotatingLogHandler(logging.handlers.RotatingFileHandler):
     """RotatingFileHandler that records its own rotations.
@@ -1027,7 +1064,14 @@ class CompanionApp:
         self.log_path = config_mod.resolved_log_path(cfg)
         # Injectable for tests -- see get_media_tree()/_refresh_media_tree_once().
         self._exists_fn = exists_fn
-        self.ignore_tracker = IgnoreTracker()
+        # RES-12 / UX-4 (resilience sweep 2026-08-28): the tracker now has a
+        # persisted half -- the folders an editor said to leave alone for
+        # good, and the ledger of everything ever skipped. Both live under
+        # <log dir>/state/ (see fixer's note on why NOT beside config.toml,
+        # unlike the two safety latches APP-3 moved). self.log_path is
+        # resolved_log_path(cfg), so a `log_path = ""` config cannot put this
+        # in C:\Windows\system32 the way AUDIT_3 M-7 describes.
+        self.ignore_tracker = IgnoreTracker(self.log_path.parent / "state")
         # Paths recently shown in a popup the user closed without acting:
         # snoozed so the dialog doesn't re-pop every poll cycle forever.
         # GUARDED BY _popup_snooze_lock: the WATCHER thread prunes/reads this
@@ -1119,6 +1163,19 @@ class CompanionApp:
         except Exception:
             log.exception("validate_config() failed")
             self.config_problems, self.config_warnings = [], []
+        # UX-13 / OPS-6 (resilience sweep 2026-08-28): an install that never
+        # finished. The onboarding wizard writes the breadcrumb before its
+        # clean-slate phase (which unmaps the tree drive, kills this app and
+        # deletes every autostart entry) and clears it on Finish. Finding it
+        # here means we are the leftover of a half-installed machine -- the
+        # config on disk may be from either side of the wipe, and syncing
+        # against it is how an editor spends a week believing they are set up.
+        # A config PROBLEM, deliberately: that is the one gate every lane,
+        # the popup, FIX ALL and Consolidate already obey (DEL-3).
+        interrupted = install_in_progress_problem(cfg)
+        if interrupted:
+            self.config_problems = list(self.config_problems or []) + [interrupted]
+            log.error("%s", interrupted)
 
         # -- external-SSD root state (root_guard.py) ----------------------
         # An editor's tree lives on a drive that gets unplugged. That is a
@@ -1666,6 +1723,10 @@ class CompanionApp:
             # names the actual problem. The watcher stands down instead.
             root_present_fn=self.root_is_present,
             on_bridge_state=self._handle_bridge_state,
+            # RES-10 (2026-08-28): a MISSING clip we ourselves moved on the
+            # server's instruction is a one-click relink, not a DEBUG line.
+            moved_lookup=self.file_moves.moved_to,
+            on_moved_clip=self._on_moved_clip_missing,
         )
 
     def _on_report_response(self, resp: Any) -> None:
@@ -1734,6 +1795,9 @@ class CompanionApp:
                 self.project_setup.note_project_changed(name)
             except Exception:
                 log.exception("project_setup.note_project_changed failed")
+        # RES-10 (2026-08-28): the media pool that had to be walked to finish
+        # a move may only have opened now. Nothing else ever revisited them.
+        self._relink_pending_moves()
 
     def _build_lanes(self) -> list[LaneAdapter]:
         cfg = self.config
@@ -1751,6 +1815,10 @@ class CompanionApp:
         # or refused (docs/FILE_MOVES.md). Before the lanes: lane A reads it.
         self.file_moves = file_moves_mod.FileMoveLedger(Path(state_dir))
         self._file_move_answers: list[dict[str, Any]] = []
+        # RES-10: one relink offer per move per process. The watcher re-reports
+        # the same MISSING clip every poll (3 s), and a dialog per poll is the
+        # popup-storm shape comp-resolve-5 fixed one layer up.
+        self._moved_clip_offered: set[Any] = set()
         # on_change hands per-project file events straight to the sequencer
         # (managed mode only) instead of triggering a debounced whole-tree
         # pass -- RcloneLane never falls back to its own debounced-run
@@ -2413,10 +2481,19 @@ class CompanionApp:
             "clip on canonical prefix (%s) doesn't resolve under local_root (%s): %s",
             self.config.get("canonical_prefix"), self.config.get("local_root"), path,
         )
+        # UX-15 (resilience sweep 2026-08-28). Both halves of the old
+        # sentence were wrong for the person reading it: lanes A and B run
+        # off local_root and are entirely unaffected (what is broken is
+        # RESOLVE's view of the media), and an editor has no EDITOR_SETUP to
+        # look step 6 up in. It also offered no way out, though
+        # drive_swap.swap_to_local is exactly the repair -- which is now a
+        # button in Settings.
+        letter = self.canonical_prefix_label()
         self._notify_tray(
-            f"Resolve is looking for media on {self.config.get('canonical_prefix')} but that "
-            "path doesn't land in your sync folder. Your P: drive (Windows) or Mapped Mount "
-            "(Mac) is wrong. See EDITOR_SETUP step 6. Nothing will sync until this is fixed.",
+            f"Resolve is looking for your media on {letter} but {letter} is not "
+            "pointing at your synced folder, so clips will show offline. Your "
+            f"uploads and downloads are still running. Tray > Settings > REPAIR "
+            f"{letter} NOW.",
             "ccsync-companion: mapping warning",
         )
 
@@ -2835,8 +2912,17 @@ class CompanionApp:
         one-off ask -- it must work even on a base rig with popups
         suppressed) and does NOT apply the passive popup's snooze filter
         (the user wants to see everything right now, including clips
-        recently dismissed). Still respects ignore_tracker. Safe to call
-        from the tray thread; blocks until any resulting popup is closed.
+        recently dismissed). Since APP-2 (resilience sweep 2026-08-28) it
+        also CLEARS the session skip set first, for the same reason: an
+        editor who pressed SKIP FOR NOW / IGNORE ALL this morning got "all
+        media is in the tree" from this scan at noon, with 65 clips hidden
+        behind an in-memory set that had no clear() caller anywhere in the
+        product -- the only cure was restarting the tray, which nobody knew.
+        The persisted FOLDER ignores (RES-12) survive: those are a standing
+        decision with a [ FORGET ] in Settings, not a dismissal.
+
+        Safe to call from the tray thread; blocks until any resulting popup
+        is closed.
         """
         if self._root_absent:
             log.warning("scan whole project refused: the sync drive is disconnected")
@@ -2857,6 +2943,14 @@ class CompanionApp:
             log.warning("scan whole project: %s", message)
             self._notify_tray(f"Whole-project scan failed: {message}", "ccsync-companion")
             return
+
+        # AFTER the Resolve call and its refusals: a scan that could not run
+        # must not silently spend the editor's skip decisions.
+        cleared = self.ignore_tracker.session_count()
+        if cleared:
+            log.info("whole-project scan: clearing %d clip(s) skipped this session "
+                     "-- this scan shows everything (APP-2)", cleared)
+        self.ignore_tracker.clear()
 
         local_root = self.config.get("local_root", "")
         canonical_prefix = self.config.get("canonical_prefix", "")
@@ -2885,8 +2979,16 @@ class CompanionApp:
         self._drain_held_relinks()
 
         if not out_of_tree:
-            log.info("whole-project scan: all media is in the tree")
-            self._notify_tray("Whole-project scan: all media is in the tree", "ccsync-companion")
+            # The folder ignores are named here because "all media is in the
+            # tree" is not true of a machine that has been told to look past
+            # a folder, and this is the one screen where the editor asked.
+            folders = self.ignore_tracker.folder_count()
+            extra = (f" ({folders} folder(s) are set to be left alone - "
+                     f"Settings shows them)" if folders else "")
+            log.info("whole-project scan: all media is in the tree%s", extra)
+            self._notify_tray(
+                f"Whole-project scan: all media is in the tree{extra}",
+                "ccsync-companion")
             return
 
         log.info("whole-project scan: %d clip(s) outside %s", len(out_of_tree), local_root)
@@ -3949,6 +4051,98 @@ class CompanionApp:
         log.info("grade-swap to server: ok=%s (%s)", ok, message)
         return ok, message
 
+    def canonical_prefix_label(self) -> str:
+        """"P:" -- the drive as the editor's copy names it (UX-15).
+
+        SITE DATA, never a literal (COMMERCIAL_READINESS item 11): the
+        canonical prefix comes from the site manifest, and a second customer
+        on Q: must not read a sentence about P:. Falls back to a phrase
+        rather than to a guessed letter, because a wrong letter in a repair
+        instruction is worse than no letter.
+        """
+        prefix = str(self.config.get("canonical_prefix", "") or "").strip()
+        return prefix.rstrip("\\/") or "your media drive"
+
+    def p_repair_available(self) -> bool:
+        """Whether [ REPAIR P: NOW ] can do anything on this machine.
+
+        Windows only: there is no drive namespace to repair on macOS (the
+        equivalent is Resolve's own Mapped Mount preference, which is not
+        machine-inspectable), and drive_swap's runner would try to spawn
+        `net`/`subst` there.
+        """
+        if os.name != "nt":
+            return False
+        return bool(str(self.config.get("local_root", "") or "").strip())
+
+    def repair_p_mapping(self) -> tuple[bool, str]:
+        """Point the canonical prefix back at THIS machine's synced folder.
+
+        UX-15 (resilience sweep 2026-08-28): the repair the broken-mapping
+        toast has always described and never offered.
+
+        Keeps UX-6's ownership check, which lives in swap_to_server and not
+        in swap_to_local: a P: that CCSync did not create is somebody else's
+        mapping, and swap_to_local's first act is an unconditional unmap
+        that cannot put it back. So a foreign target is REFUSED here, before
+        anything is unmapped, and the editor is told what it is pointing at.
+        `none` -- P: mapped to nothing that could be read -- is the state the
+        toast actually fires for, and is the one this button exists to fix.
+        """
+        from . import drive_swap
+
+        letter = self.canonical_prefix_label()
+        if not self.p_repair_available():
+            return False, (f"{letter} cannot be repaired from here on this computer. "
+                           "Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.")
+        mode = self.p_mapping_mode()
+        if mode == "local":
+            return True, f"{letter} is already pointing at your synced folder."
+        if mode == "server":
+            return False, (
+                f"{letter} is showing the server originals because you asked for a "
+                "grade swap. Use FINISH GRADING to put it back.")
+        if mode == "other":
+            target = ""
+            try:
+                target = drive_swap.current_p_target()
+            except Exception:
+                log.debug("could not re-read the P: target for the refusal", exc_info=True)
+            return False, (
+                f"{letter} is mapped to {target or 'something else'}, which CCSync did "
+                "not create. Nothing was changed. Ask your admin before removing it.")
+        ok, message = self.swap_p_to_local()
+        log.info("repair %s: ok=%s (%s)", letter, ok, message)
+        return ok, message
+
+    def resolve_health(self) -> dict[str, Any]:
+        """`sync_guard.resolve_health` (UX-4 / RES-12 / APP-2).
+
+        The one editor mistake that guarantees unsynced footage -- media cut
+        in from the Desktop -- used to be visible to nobody but the editor
+        dismissing the dialog about it: poll_once computed these numbers and
+        threw them away, and no field in the report carried them.
+
+        `last_scan_at` is None until a full poll has completed, and that is
+        load-bearing: with Resolve closed every count here is zero, and a
+        zero that means "we have not looked" must not render as "nothing is
+        wrong". The reader shows the counts only alongside a scan time.
+        """
+        counts = getattr(self.watcher, "last_counts", None) or {}
+        return {
+            "out_of_tree": int(counts.get("out_of_tree") or 0),
+            "bad_prefix": int(counts.get("bad_prefix") or 0),
+            "missing": int(counts.get("missing") or 0),
+            "ignored_this_session": self.ignore_tracker.session_count(),
+            "ignored_folders": self.ignore_tracker.folder_count(),
+            # Not in the reported contract (the dashboard drops what it does
+            # not declare) -- it is the tray's own line: how many clips this
+            # machine has EVER been told to leave un-synced, across restarts.
+            "skipped_ever": self.ignore_tracker.skipped_count(),
+            "last_scan_at": getattr(self.watcher, "last_scan_at", None),
+            "open_project": getattr(self.watcher, "last_resolve_project", None),
+        }
+
     def swap_p_to_local(self) -> tuple[bool, str]:
         from . import drive_swap
 
@@ -4924,6 +5118,33 @@ class CompanionApp:
         except Exception:
             log.exception("size_mismatch_report() failed")
         try:
+            # UX-3 (resilience sweep 2026-08-28): a project folder that was
+            # here last pass and has gone. Absent while every selected project
+            # is where it should be -- an absent key is how "nothing has been
+            # renamed under us" is spelled, and it is what clears the chip.
+            moved = getattr(self._lane_a, "moved_project_dirs", lambda: [])()
+            if moved:
+                guard["moved_project_dirs"] = list(moved)[:20]
+        except Exception:
+            log.exception("moved_project_dirs() failed")
+        try:
+            # SYNC-10: project folders in no sync plan at all. Absent until
+            # the first scan has run, because "we have not looked" and "there
+            # are none" must not render the same.
+            strays = getattr(self._lane_a, "stray_projects", lambda: None)()
+            if strays and strays.get("count"):
+                guard["stray_projects"] = strays
+        except Exception:
+            log.exception("stray_projects() failed")
+        try:
+            # MEDIA-3: how much staging the ingest feature is holding, so the
+            # disk it fills is attributable before it refuses the next drop.
+            staging = self.ingest_staging_report()
+            if staging and staging.get("bytes"):
+                guard["ingest_staging"] = staging
+        except Exception:
+            log.exception("ingest_staging_report() failed")
+        try:
             guard["halt"] = self.halt.report()
         except Exception:
             log.exception("halt.report() failed")
@@ -5061,6 +5282,15 @@ class CompanionApp:
         except Exception:
             log.exception("disk snapshot failed")
         try:
+            # UX-4 / RES-12 / APP-2 (resilience sweep 2026-08-28): what
+            # Resolve can and cannot see on this machine. ALWAYS present,
+            # including the all-zero shape -- an absent section could only
+            # mean "a companion too old to send one", and `last_scan_at`
+            # carries the difference between zero and never-looked.
+            guard["resolve_health"] = self.resolve_health()
+        except Exception:
+            log.exception("resolve_health() failed")
+        try:
             # SYNC-15, and it is LAST on purpose: it is derived from the keys
             # above (and from the lane/latch state), so assembling it here
             # means one place reads one already-built picture.
@@ -5094,6 +5324,105 @@ class CompanionApp:
         self._disk_snapshot_at = now
         return dict(snapshot)
 
+    # -- a project folder that moved (UX-3, resilience sweep 2026-08-28) ---
+    def put_project_dir_back(self, subpath: str = "") -> str:
+        """Move a renamed/moved project folder back where CCSync expects it.
+
+        The self-heal half of UX-3, and it is DELIBERATELY a click rather
+        than something lane A does on its own: the folder in the wrong place
+        is the one the editor has been working in, and moving an editor's
+        directory without asking is not a thing this system does. Goes
+        through `repath._move_dir`, the same move the server-side repath
+        uses -- which refuses when the target already exists and never
+        deletes anything.
+
+        Returns the sentence to show. Never raises."""
+        try:
+            moved = list(self._lane_a.moved_project_dirs())
+        except Exception:
+            log.exception("put_project_dir_back: could not read the moved list")
+            return "CCSync could not check where that folder is. See the log."
+        key = str(subpath or "").strip().replace("\\", "/").strip("/")
+        if key:
+            moved = [m for m in moved
+                     if str(m.get("subpath") or "").strip("/") == key]
+        candidates = [m for m in moved if m.get("found") and m.get("expected")]
+        if not candidates:
+            return ("CCSync cannot find that project folder anywhere on this "
+                    "computer. If you moved it to another drive, move it back by "
+                    "hand.")
+        repather = None
+        try:
+            repather = self.sequencer.repather if self.sequencer else None
+        except Exception:
+            repather = None
+        if repather is None:
+            return "CCSync is still starting up. Try again in a moment."
+        done, failed = [], []
+        for entry in candidates:
+            slug = str(entry.get("slug") or "")
+            found = str(entry.get("found") or "")
+            expected = str(entry.get("expected") or "")
+            try:
+                ok = repather._move_dir(slug or "a project", found, expected)
+            except Exception:
+                log.exception("put_project_dir_back: move failed for %s", slug)
+                ok = False
+            (done if ok else failed).append(expected)
+        if failed and not done:
+            return ("CCSync could not move that folder back. Close Resolve and "
+                    "Explorer on it and try again.")
+        if failed:
+            return (f"{len(done)} folder(s) put back; {len(failed)} could not be "
+                    "moved. Close Resolve and Explorer on them and try again.")
+        return (f"{len(done)} project folder(s) put back where CCSync expects "
+                "them. Syncing starts again on the next pass.")
+
+    # -- ingest staging (MEDIA-3, resilience sweep 2026-08-28) -------------
+    def _ingestors(self) -> list[Any]:
+        return [i for i in (self.broll_ingestor, self.music_ingestor) if i is not None]
+
+    def ingest_staging_report(self) -> dict[str, Any]:
+        """`sync_guard.ingest_staging`: bytes/batches/oldest across both
+        ingest kinds. {} when neither is wired. Never raises."""
+        total, batches = 0, 0
+        oldest: Optional[str] = None
+        for ingestor in self._ingestors():
+            try:
+                one = ingestor.staging_report()
+            except Exception:
+                log.debug("staging_report() failed", exc_info=True)
+                continue
+            total += int(one.get("bytes") or 0)
+            batches += int(one.get("batches") or 0)
+            at = one.get("oldest_at")
+            if at and (oldest is None or str(at) < oldest):
+                oldest = str(at)
+        if not batches and not total:
+            return {}
+        return {"bytes": total, "batches": batches, "oldest_at": oldest}
+
+    def clear_finished_ingest_staging(self) -> str:
+        """Delete every staging directory whose batch is over, now.
+
+        The button behind MEDIA-3's space refusal: the feature filled its own
+        disk with a dot-folder no editor has any UI to see, and then blamed
+        the editor for it. Only FINISHED batches -- the running one is never
+        touched."""
+        removed, freed = 0, 0
+        for ingestor in self._ingestors():
+            try:
+                one = ingestor.prune_staging(max_age_days=0)
+            except Exception:
+                log.exception("prune_staging() failed")
+                continue
+            removed += int(one.get("removed") or 0)
+            freed += int(one.get("bytes") or 0)
+        if not removed:
+            return "There is no finished staging to clear on this computer."
+        return (f"Cleared {removed} finished staging folder(s), "
+                f"{freed / 1e9:.1f} GB.")
+
     # -- the one sentence: why is this machine not syncing? (SYNC-15) -------
     #
     # Each of these latches already had its own state, its own file and its
@@ -5109,6 +5438,11 @@ class CompanionApp:
         "not_signed_in", "licence_pending", "clock_skew", "root_absent",
         "root_not_answering", "root_misplaced", "disk_full", "fleet_halt",
         "local_halt", "paused", "breaker_tripped", "no_selection",
+        # UX-3 (sweep 2026-08-28): after no_selection, because a machine with
+        # no plan at all is the bigger fact -- but ahead of the filter/stall
+        # reasons, since a folder that is not where we expect it is a thing
+        # the editor themselves can put back in a minute.
+        "project_dir_moved",
         "folders_unfiltered", "lane_stalled", "syncthing_down",
         "transport_offline",
     )
@@ -5218,6 +5552,19 @@ class CompanionApp:
                 return None
             return ("No projects are ticked for this computer"
                     + (f" ({detail})" if detail else ""), None)
+        if reason == "project_dir_moved":
+            moved = [m for m in (guard.get("moved_project_dirs") or [])
+                     if isinstance(m, dict)]
+            if not moved:
+                return None
+            first = moved[0]
+            label = str(first.get("subpath") or "").rstrip("/").split("/")[-1] \
+                or str(first.get("slug") or "a project")
+            sentence = (f"Your project folder for {label} is not where CCSync "
+                        "expects it. Did you rename or move it?")
+            if len(moved) > 1:
+                sentence += f" ({len(moved)} project folders are missing)"
+            return (sentence, None)
         if reason == "folders_unfiltered":
             slugs = [str(s) for s in (guard.get("folders_unfiltered") or []) if s]
             if not slugs:
@@ -5818,8 +6165,23 @@ class CompanionApp:
                     log.warning("file moves: ignoring a malformed command (%r)", raw)
                     continue
                 done = self.file_moves.entry(move["id"])
-                if done is not None:
-                    self._queue_file_move_answer(move["id"], done["ok"], done["detail"])
+                if done is not None and not self.file_moves.retry_due(done):
+                    # RES-1 (2026-08-28): a failure is no longer final. An
+                    # entry still in `retryable` re-answers as "retrying" --
+                    # which the dashboard records WITHOUT retiring the
+                    # command -- until its next attempt is due.
+                    state = done.get("state")
+                    if state == file_moves_mod.STATE_RETRYABLE:
+                        self._queue_file_move_answer(
+                            move["id"], False, done["detail"], state="retrying",
+                            attempts=int(done.get("attempts") or 0))
+                    else:
+                        self._queue_file_move_answer(
+                            move["id"], done["ok"], done["detail"],
+                            state=("blocked" if state == file_moves_mod.STATE_BLOCKED
+                                   else None),
+                            attempts=int(done.get("attempts") or 0),
+                            relink_pending=bool(done.get("relink_pending")))
                     continue
                 if not local_root or self._root_absent:
                     # Not an answer: the drive may be back next report, and
@@ -5827,12 +6189,32 @@ class CompanionApp:
                     log.info("file moves: #%s waits for the sync drive", move["id"])
                     continue
                 ok, detail, paths = file_moves_mod.apply_move(move, local_root)
+                relink_pending = False
                 if ok and paths is not None:
-                    relinked = self._relink_moved(paths[0], paths[1], move["is_dir"])
+                    matched, relinked = self._relink_moved_result(
+                        paths[0], paths[1], move["is_dir"])
+                    # RES-10 (2026-08-28): "Resolve was not open" is not
+                    # "there was nothing to relink". The move stays on the
+                    # books as a pending relink until a media pool walk has
+                    # actually matched it, and every project change re-runs
+                    # it -- otherwise the clip is simply offline the next
+                    # time the editor opens THAT project, with a DEBUG line
+                    # as the only trace anywhere.
+                    relink_pending = not matched
                     if relinked:
                         detail = f"{detail}; {relinked}"
-                self.file_moves.record(move, ok, detail)
-                self._queue_file_move_answer(move["id"], ok, detail)
+                if ok:
+                    self.file_moves.record(move, True, detail, paths=paths,
+                                           relink_pending=relink_pending)
+                    self._queue_file_move_answer(move["id"], True, detail,
+                                                 relink_pending=relink_pending)
+                else:
+                    entry = self.file_moves.record_attempt_failed(move, detail)
+                    blocked = entry.get("state") == file_moves_mod.STATE_BLOCKED
+                    self._queue_file_move_answer(
+                        move["id"], False, detail,
+                        state="blocked" if blocked else "retrying",
+                        attempts=int(entry.get("attempts") or 0))
                 who = move["requested_by"]
                 name = move["from_rel"].rsplit("/", 1)[-1]
                 where = f"{move['to_project_rel']}/{move['to_rel'].rsplit('/', 1)[0]}".rstrip("/")
@@ -5845,23 +6227,132 @@ class CompanionApp:
                             f"followed and Resolve was relinked.",
                             "ccsync-companion: file moved")
                 else:
-                    log.warning("file move #%s by %s REFUSED here: %s", move["id"], who, detail)
-                    self._notify_tray(
-                        f"{who} moved '{name}' to {where} on the server, but your copy "
-                        f"could not follow: {detail}. Nothing was deleted; ask your admin.",
-                        "ccsync-companion: file move needs attention")
+                    log.warning("file move #%s by %s could not be applied here "
+                                "(attempt %s): %s", move["id"],
+                                who, entry.get("attempts"), detail)
+                    # One toast on the FIRST attempt and one when it gives up.
+                    # The retries in between are the companion's business, not
+                    # an hourly notification (RES-1, 2026-08-28).
+                    if int(entry.get("attempts") or 0) == 1:
+                        self._notify_tray(
+                            f"{who} moved '{name}' to {where} on the server, but your copy "
+                            f"could not follow yet: {detail}. Nothing was deleted and "
+                            f"CCSync will keep trying.",
+                            "ccsync-companion: file move needs attention")
+                    elif entry.get("state") == file_moves_mod.STATE_BLOCKED:
+                        self._notify_tray(
+                            f"Your copy of '{name}' still could not be moved to {where} "
+                            f"after a week of trying: {detail}. Nothing was deleted; ask "
+                            f"your admin.",
+                            "ccsync-companion: file move blocked")
         except Exception:
             log.exception("could not apply the dashboard's file moves")
 
-    def _queue_file_move_answer(self, move_id: int, ok: bool, detail: str) -> None:
+    def _queue_file_move_answer(self, move_id: int, ok: bool, detail: str,
+                                state: str | None = None, attempts: int = 0,
+                                relink_pending: bool = False) -> None:
         self._file_move_answers = [a for a in self._file_move_answers if a["id"] != move_id]
-        self._file_move_answers.append({"id": int(move_id), "ok": bool(ok),
-                                        "detail": str(detail or "")[:512]})
+        answer: dict[str, Any] = {"id": int(move_id), "ok": bool(ok),
+                                  "detail": str(detail or "")[:512]}
+        # RES-1 / RES-10: the extra fields a dashboard below the same sweep
+        # ignores (`extra="ignore"` on FileMoveResultIn), and which tell a
+        # newer one the difference between "still trying", "given up" and
+        # "moved, but Resolve has not been repointed yet".
+        if state:
+            answer["state"] = state
+        if attempts:
+            answer["attempts"] = int(attempts)
+        if relink_pending:
+            answer["relink_pending"] = True
+        self._file_move_answers.append(answer)
 
     def _file_move_results(self) -> list[dict[str, Any]]:
         """Drained by the reporter: the answers queued since the last report."""
         answers, self._file_move_answers = self._file_move_answers, []
         return answers
+
+    def _relink_moved_result(self, old_local: str, new_local: str,
+                             is_dir: bool) -> tuple[bool, str]:
+        """(matched, text). `matched` is "a media pool walk actually found
+        clips at the old path", which is the only thing that retires a
+        pending relink (RES-10): a Resolve that is closed, or open on another
+        project, has not answered the question."""
+        text = self._relink_moved(old_local, new_local, is_dir)
+        matched = bool(text) and not text.startswith(("Resolve not relinked",
+                                                      "Resolve relink failed"))
+        return matched, text
+
+    def _relink_pending_moves(self) -> None:
+        """Re-run the relink for every applied move that has not matched yet.
+
+        RES-10 (2026-08-28): `_relink_moved` only ever walked the media pool
+        that happened to be open when the move landed. A move of project B's
+        footage while project A was open reported "Resolve not relinked (not
+        open)", the ledger called it done, and the clip was simply offline the
+        next time anyone opened B. Called on every project change; never
+        raises (watcher thread)."""
+        try:
+            for entry in self.file_moves.pending_relinks():
+                matched, text = self._relink_moved_result(
+                    entry.get("old_local", ""), entry.get("new_local", ""),
+                    bool(entry.get("is_dir")))
+                if matched:
+                    self.file_moves.clear_relink_pending(entry["id"])
+                    log.info("file move #%s: %s after the project changed",
+                             entry["id"], text)
+                    self._queue_file_move_answer(
+                        entry["id"], True, f"{entry.get('detail', 'moved')}; {text}")
+        except Exception:
+            log.exception("could not re-run the pending file-move relinks")
+
+    def _on_moved_clip_missing(self, item: dict[str, Any], entry: dict[str, Any]) -> None:
+        """A clip whose file is gone is not a mystery when WE moved it
+        (RES-10): the new path is known exactly, so this offers the repoint
+        rather than leaving a DEBUG line as the only trace. One dialog per
+        move per process, under the popup lock like every other Tk root
+        here."""
+        move_id = entry.get("id")
+        if move_id in self._moved_clip_offered:
+            return
+        self._moved_clip_offered.add(move_id)
+        name = str(entry.get("from_rel", "")).rsplit("/", 1)[-1] or "a clip"
+        self._notify_tray(
+            f"'{name}' moved on the server. CCSync can repoint Resolve to where it is now.",
+            "ccsync-companion: this clip moved")
+        threading.Thread(
+            target=self._show_moved_clip_dialog, args=(entry, name),
+            name="ccsync-moved-clip", daemon=True,
+        ).start()
+
+    def _show_moved_clip_dialog(self, entry: dict[str, Any], name: str) -> None:
+        if not self._popup_active_lock.acquire(blocking=False):
+            log.info("moved-clip dialog: another CCSync window is open -- the tray "
+                     "notification carried the message instead")
+            return
+        try:
+            body = (
+                f"'{name}' is offline in this project because it was moved on the "
+                f"server.\n\n"
+                f"It is now at:\n  {entry.get('new_local', '')}\n\n"
+                f"Your copy has already been moved to match. CCSync can point this "
+                f"project's clips at the new location for you. Nothing is deleted and "
+                f"the change is journalled, so it can be undone."
+            )
+            if not popup.confirm_dialog("CCSYNC.EXE: this clip moved on the server",
+                                        body, ok_label="RELINK IT"):
+                return
+            matched, text = self._relink_moved_result(
+                entry.get("old_local", ""), entry.get("new_local", ""),
+                bool(entry.get("is_dir")))
+            if matched:
+                self.file_moves.clear_relink_pending(entry["id"])
+            self._notify_tray(
+                text or "Nothing in this project pointed at the old location.",
+                "ccsync-companion: relink")
+        except Exception:
+            log.exception("could not offer the moved-clip relink")
+        finally:
+            self._popup_active_lock.release()
 
     def _relink_moved(self, old_local: str, new_local: str, is_dir: bool) -> str:
         """Repoint every media pool clip under `old_local` to `new_local`,
@@ -6173,6 +6664,26 @@ class CompanionApp:
         except Exception:
             log.exception("could not apply the dashboard's diagnostics request")
 
+    def _resolve_health_text(self) -> str:
+        """One diagnostics line for what Resolve can see (APP-2 (c) / UX-4).
+
+        The count an admin most needs is the one the editor dismissed: a
+        machine where somebody pressed IGNORE ALL at nine o'clock looked
+        identical, in every artefact support ever sees, to one with nothing
+        wrong at all."""
+        health = self.resolve_health()
+        if not health.get("last_scan_at"):
+            return "no timeline scan has completed yet (is Resolve open?)"
+        parts = [
+            f"{health['out_of_tree']} clip(s) outside the tree",
+            f"{health['bad_prefix']} on a broken {self.canonical_prefix_label()} mapping",
+            f"{health['missing']} missing on disk",
+            f"{health['ignored_this_session']} skipped this session",
+            f"{health['skipped_ever']} skipped ever",
+            f"{health['ignored_folders']} folder(s) left alone on purpose",
+        ]
+        return ", ".join(parts) + f" (last scan {health['last_scan_at']})"
+
     def build_diagnostics(self) -> str:
         """Everything an admin needs to diagnose this machine, as one block of
         text for the clipboard (AUDIT_2 UX-19).
@@ -6226,6 +6737,7 @@ class CompanionApp:
             str(self.config.get("rclone_path", "rclone"))))
         section("resolve project", lambda: getattr(self.watcher, "last_resolve_project", None))
         section("resolve bridge", self._resolve_bridge_text)
+        section("resolve media", self._resolve_health_text)
 
         out.append("")
         out.append("-- updates --")
@@ -7763,7 +8275,9 @@ class CompanionApp:
             except Exception:
                 log.exception("failed to stop the %s guard", label)
         # Right behind the power guards, before the lanes: this is what kills
-        # a running ffmpeg child, and it is the one thing in this teardown
+        # a running ffmpeg child (really, since MEDIA-2, resilience sweep
+        # 2026-08-28 -- the claim predates the code by months), and it is the
+        # one thing in this teardown
         # that is still burning the machine's CPU while we work through the
         # rest. Its thread is joined in the bounded loop below.
         # BEFORE the proxy generator, because it owns more: an ffmpeg child,

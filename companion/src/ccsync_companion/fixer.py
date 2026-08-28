@@ -13,12 +13,15 @@ Contract, per SPEC.md:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import shutil
+import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -34,25 +37,249 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 _YEAR_RE = re.compile(r"^(19|20)\d{2}$")
 
 
-class IgnoreTracker:
-    """Per-session suppression, keyed by normalized path.
+# Both files live under <log dir>/state/. Deliberately NOT beside config.toml
+# where APP-3 moved the two safety latches: deleting either of these costs the
+# editor nothing worse than being re-offered clips they had dismissed, which is
+# the safe direction, and neither is a latch only a human may clear.
+FIXER_IGNORES_FILENAME = "fixer_ignores.json"
+SKIPPED_CLIPS_FILENAME = "skipped_clips.json"
 
-    Shared between the watcher (so an ignored path isn't re-popped) and the
-    popup's "Ignore" button. Intentionally in-memory only — SPEC.md calls
-    this out as per-session, not persisted.
+# Ceiling on the persisted skip ledger. It is a RECORD, not a suppression list
+# (see IgnoreTracker.ignore), so losing the oldest entries costs a count, never
+# a decision -- and an editor cutting from a 40 000-file stock library must not
+# be able to grow a JSON file in ~/.ccsync without bound.
+_MAX_SKIPPED_RECORDED = 5000
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    """Whatever is on disk, or {}. A corrupt or unreadable file is not worth
+    a failed poll: the cost of answering {} is that some dismissed clips are
+    offered again, and that is the direction this has to fail in."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        log.warning("could not read %s -- starting from empty", path, exc_info=True)
+        return {}
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> bool:
+    """tmp + os.replace, the identity.py shape. Never raises: a machine that
+    cannot write its state dir still has a working session-level tracker."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        log.warning("could not write %s", path, exc_info=True)
+        return False
+
+
+def _folder_of(path: str) -> str:
+    r"""The directory part, in the spelling THIS path is written in (CR-90 /
+    canon.plat_for: a canonical `P:\...` string reaching a Mac must not be
+    dirname'd by posixpath, which would answer the whole string)."""
+    return canon.plat_for(path).dirname(str(path or ""))
+
+
+class IgnoreTracker:
+    """Suppression for out-of-tree clips, in two layers.
+
+    Layer 1 is the per-SESSION set SPEC.md describes: SKIP FOR NOW, keyed by
+    normalized path, gone when the process is. Layer 2 (RES-12, resilience
+    sweep 2026-08-28) is the persisted FOLDER list an editor who keeps a
+    personal stock library outside the tree can set once instead of dismissing
+    the same 300 clips at every start; it is undone from the Settings window's
+    [ FORGET ] and nowhere else.
+
+    Alongside both, a persisted LEDGER of what has been skipped
+    (`skipped_clips.json`, UX-4). That ledger suppresses nothing -- the button
+    still says "this session" and still means it. It exists so a tray restart
+    does not erase the fact that 40 clips on this machine are not syncing, and
+    so `sync_guard.resolve_health` and the tray line can say so.
+
+    Thread-safe: the watcher thread reads `is_ignored` on every poll while a
+    popup thread writes through `ignore`/`ignore_folder`.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, state_dir: Optional[Any] = None) -> None:
         self._ignored: set[str] = set()
+        self._lock = threading.RLock()
+        self._state_dir = Path(state_dir) if state_dir else None
+        self._folders: list[dict[str, Any]] = []
+        self._skipped: dict[str, dict[str, Any]] = {}
+        self._load()
 
+    # -- persistence ---------------------------------------------------
+    @property
+    def folders_path(self) -> Optional[Path]:
+        return None if self._state_dir is None else self._state_dir / FIXER_IGNORES_FILENAME
+
+    @property
+    def skipped_path(self) -> Optional[Path]:
+        return None if self._state_dir is None else self._state_dir / SKIPPED_CLIPS_FILENAME
+
+    def _load(self) -> None:
+        if self._state_dir is None:
+            return
+        folders = _read_json(self.folders_path).get("folders")
+        if isinstance(folders, list):
+            self._folders = [
+                {
+                    "folder": str(entry.get("folder") or ""),
+                    "reason": str(entry.get("reason") or ""),
+                    "when": str(entry.get("when") or ""),
+                }
+                for entry in folders
+                if isinstance(entry, dict) and str(entry.get("folder") or "").strip()
+            ]
+        clips = _read_json(self.skipped_path).get("clips")
+        if isinstance(clips, dict):
+            self._skipped = {
+                str(key): {
+                    "path": str((value or {}).get("path") or ""),
+                    "when": str((value or {}).get("when") or ""),
+                    "how": str((value or {}).get("how") or "skip"),
+                }
+                for key, value in clips.items()
+                if isinstance(value, dict)
+            }
+
+    def _save_folders(self) -> bool:
+        path = self.folders_path
+        if path is None:
+            return False
+        return _write_json_atomic(path, {"folders": self._folders})
+
+    def _save_skipped(self) -> bool:
+        path = self.skipped_path
+        if path is None:
+            return False
+        return _write_json_atomic(path, {"clips": self._skipped})
+
+    # -- session layer -------------------------------------------------
     def is_ignored(self, path: str) -> bool:
-        return resolve_bridge._norm_path(path) in self._ignored
+        with self._lock:
+            if resolve_bridge._norm_path(path) in self._ignored:
+                return True
+            return self._folder_ignored_locked(path)
 
-    def ignore(self, path: str) -> None:
-        self._ignored.add(resolve_bridge._norm_path(path))
+    def ignore(self, path: str, how: str = "skip") -> None:
+        """SKIP FOR NOW: suppress for THIS session, and record it for ever.
+
+        The record is not the suppression (UX-4): an editor who restarts the
+        tray is offered the clip again, exactly as the button's label
+        promises. What survives is the COUNT, which is the only way anyone --
+        the editor at the tray line, the owner on the fleet grid -- learns
+        that this machine holds media that will never reach the server.
+        """
+        key = resolve_bridge._norm_path(path)
+        with self._lock:
+            self._ignored.add(key)
+            if self._state_dir is None or not str(path or "").strip():
+                return
+            record = self._skipped.get(key)
+            if record is not None:
+                record["when"] = _now_iso()
+                record["how"] = str(how or "skip")
+            else:
+                if len(self._skipped) >= _MAX_SKIPPED_RECORDED:
+                    oldest = min(self._skipped,
+                                 key=lambda k: self._skipped[k].get("when") or "")
+                    self._skipped.pop(oldest, None)
+                self._skipped[key] = {"path": str(path), "when": _now_iso(),
+                                      "how": str(how or "skip")}
+            self._save_skipped()
 
     def clear(self) -> None:
-        self._ignored.clear()
+        """Forget the SESSION skips. Nothing persisted is touched.
+
+        APP-2 (resilience sweep 2026-08-28): "Scan whole project" is the
+        explicit "show me everything", so it calls this first -- an editor who
+        pressed SKIP FOR NOW at nine o'clock used to get "all media is in the
+        tree" from the scan at noon, with 65 clips hidden behind a set nothing
+        in the product could clear short of restarting the tray. The persisted
+        FOLDER ignores are deliberately NOT cleared here: those are a standing
+        decision with a [ FORGET ] of their own, not a dismissal.
+        """
+        with self._lock:
+            self._ignored.clear()
+
+    def session_count(self) -> int:
+        with self._lock:
+            return len(self._ignored)
+
+    def skipped_count(self) -> int:
+        """How many distinct clips have EVER been skipped on this machine."""
+        with self._lock:
+            return len(self._skipped)
+
+    # -- folder layer (RES-12) -----------------------------------------
+    def _folder_ignored_locked(self, path: str) -> bool:
+        text = str(path or "")
+        if not text:
+            return False
+        for entry in self._folders:
+            folder = entry.get("folder") or ""
+            if folder and canon._is_under(text, folder, canon.plat_for(text)):
+                return True
+        return False
+
+    def folders(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(entry) for entry in self._folders]
+
+    def folder_count(self) -> int:
+        with self._lock:
+            return len(self._folders)
+
+    def ignore_folder(self, folder: str, reason: str = "") -> bool:
+        """"Always leave clips in this folder alone on this machine."
+
+        Returns False when there is nowhere to persist it: a decision that
+        says "always" and survives only until the next restart is worse than
+        no button at all, so the caller is told rather than the editor being
+        left to find out in a month.
+        """
+        text = str(folder or "").strip()
+        if not text:
+            return False
+        with self._lock:
+            key = canon.norm(text)
+            if any(canon.norm(e.get("folder") or "") == key for e in self._folders):
+                return True
+            self._folders.append({"folder": text, "reason": str(reason or ""),
+                                  "when": _now_iso()})
+            if not self._save_folders():
+                self._folders = [e for e in self._folders
+                                 if canon.norm(e.get("folder") or "") != key]
+                return False
+        return True
+
+    def forget_folder(self, folder: str) -> bool:
+        """Undo one [ ALWAYS LEAVE THIS FOLDER ALONE ]. The clips come back on
+        the next poll, which is the whole point of the button."""
+        key = canon.norm(str(folder or ""))
+        with self._lock:
+            before = len(self._folders)
+            self._folders = [e for e in self._folders
+                             if canon.norm(e.get("folder") or "") != key]
+            if len(self._folders) == before:
+                return False
+            self._save_folders()
+        return True
 
 
 def classify_ext(path: str) -> str:

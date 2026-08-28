@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 import sys
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -20,6 +22,7 @@ from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
 
 SECRET = "test-secret"
+DASHBOARD_ROOT = Path(__file__).resolve().parents[1]
 
 # The release key this suite signs with (item 4, 2026-08-17). Fixed seed, not
 # random: a signature test that fails should fail identically twice.
@@ -209,6 +212,214 @@ def test_delete_rules(env):
     assert dbmod.get_package(conn, "windows", "0.3.0") is None
     assert not (settings.packages_path() / "windows" / "ccsync-companion-0.3.0.exe").exists()
     assert client.delete("/api/v1/admin/packages/windows/0.3.0").status_code == 404
+
+
+# -- UX-9 (resilience sweep 2026-08-28): the release controls guarded -------
+
+
+def insert_unsigned_package(conn, settings, platform, version, kind="companion",
+                            body=b"unsigned-bytes"):
+    """A row and a file that predate release signing (same shape as
+    test_migration_v14_keeps_pre_signing_rows_and_marks_them_unsigned), since
+    2026-08-17's publish route refuses to create one -- an unsigned row only
+    exists on a database that has been around since before signing did."""
+    filename = package_filename(kind, platform, version, body[:4])
+    path = settings.packages_path() / platform / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(body)
+    conn.execute(
+        """INSERT INTO companion_packages
+             (kind, version, platform, filename, sha256, size_bytes,
+              published_at, published_by, is_current)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+        (kind, version, platform, filename, hashlib.sha256(body).hexdigest(),
+         len(body), "2026-08-01T00:00:00Z", "owen"),
+    )
+    conn.commit()
+    return filename
+
+
+def test_make_current_refuses_an_unsigned_build_then_force_and_confirm_succeeds(env):
+    from ccsync_dashboard.api import make_current_refusal
+
+    client, conn, settings = env
+    as_user(client, "owen")
+    insert_unsigned_package(conn, settings, "windows", "9.9.9")
+
+    # The route's refusal is THE sentence make_current_refusal produces, not
+    # a hand-duplicated copy of it.
+    refusal = make_current_refusal(conn, settings, kind="companion",
+                                   platform="windows", version="9.9.9")
+    assert refusal is not None
+    status, detail = refusal
+    assert status == 409
+    assert "no release signature" in detail
+    assert "tools\\ship.cmd" in detail
+
+    r = client.post("/api/v1/admin/packages/windows/9.9.9/current")
+    assert r.status_code == 409
+    assert r.json()["detail"] == detail
+    assert dbmod.get_current_package(conn, "windows") is None
+
+    # A wrong typed version does not bypass the gate.
+    r = client.post("/api/v1/admin/packages/windows/9.9.9/current?force=1&confirm=0.0.0")
+    assert r.status_code == 409
+    assert "no release signature" in r.json()["detail"]
+    assert dbmod.get_current_package(conn, "windows") is None
+
+    # force=1 with the version actually typed succeeds.
+    r = client.post("/api/v1/admin/packages/windows/9.9.9/current?force=1&confirm=9.9.9")
+    assert r.status_code == 200, r.text
+    assert dbmod.get_current_package(conn, "windows")["version"] == "9.9.9"
+
+
+def test_the_packages_page_partial_carries_the_same_unsigned_refusal(env):
+    """The htmx twin (admin_packages.html's [ MAKE CURRENT ]) goes through
+    the identical gate, not a second copy of it."""
+    client, conn, settings = env
+    as_user(client, "owen")
+    insert_unsigned_package(conn, settings, "windows", "9.9.9")
+
+    resp = client.post("/partials/admin/packages/current",
+                       data={"kind": "companion", "platform": "windows", "version": "9.9.9"})
+    assert resp.status_code == 200
+    assert "no release signature" in resp.text
+    assert dbmod.get_current_package(conn, "windows") is None
+
+    resp = client.post("/partials/admin/packages/current",
+                       data={"kind": "companion", "platform": "windows", "version": "9.9.9",
+                             "force": "1", "confirm": "9.9.9"})
+    assert resp.status_code == 200
+    assert dbmod.get_current_package(conn, "windows")["version"] == "9.9.9"
+
+
+def test_delete_moves_the_file_to_dot_trash_rather_than_unlinking(env):
+    """The htmx delete route (UX-9): the bytes a rollback needs survive the
+    click, moved rather than removed."""
+    client, conn, settings = env
+    as_user(client, "owen")
+    publish(client, "0.2.0", body=b"v2", make_current=1)
+    publish(client, "0.3.0", body=b"v3")
+
+    resp = client.post("/partials/admin/packages/delete",
+                       data={"kind": "companion", "platform": "windows", "version": "0.3.0"})
+    assert resp.status_code == 200
+    assert dbmod.get_package(conn, "windows", "0.3.0") is None
+
+    original = settings.packages_path() / "windows" / "ccsync-companion-0.3.0.exe"
+    assert not original.exists()
+    trashed = list((settings.packages_path() / ".trash" / "windows").glob("*0.3.0.exe"))
+    assert len(trashed) == 1
+    # The bytes themselves, not just a row saying they once existed.
+    assert trashed[0].read_bytes() == b"v3"
+
+
+def test_json_delete_uses_the_same_trash_as_the_partial(env):
+    """UX-9, the JSON twin: a script calling DELETE /api/v1/admin/packages
+    gets the same move-to-.trash as the button, not the old silent unlink -
+    one mechanism, so an API caller can never throw away the rollback bytes."""
+    client, conn, settings = env
+    as_user(client, "owen")
+    publish(client, "0.2.0", body=b"v2", make_current=1)
+    publish(client, "0.3.0", body=b"v3")
+
+    resp = client.delete("/api/v1/admin/packages/windows/0.3.0")
+    assert resp.status_code == 200, resp.text
+    assert dbmod.get_package(conn, "windows", "0.3.0") is None
+    assert not (settings.packages_path() / "windows" / "ccsync-companion-0.3.0.exe").exists()
+    trashed = list((settings.packages_path() / ".trash" / "windows").glob("*0.3.0.exe"))
+    assert len(trashed) == 1
+    assert trashed[0].read_bytes() == b"v3"
+    assert resp.json()["trashed_to"] == str(trashed[0])
+
+
+def test_delete_prunes_only_trash_older_than_the_configured_age(env):
+    from ccsync_dashboard import ui as ui_mod
+
+    client, conn, settings = env
+    as_user(client, "owen")
+    publish(client, "0.2.0", body=b"v2", make_current=1)
+    publish(client, "0.3.0", body=b"v3")
+    publish(client, "0.4.0", body=b"v4")
+
+    client.post("/partials/admin/packages/delete",
+               data={"kind": "companion", "platform": "windows", "version": "0.3.0"})
+    old_trash = list((settings.packages_path() / ".trash" / "windows").glob("*0.3.0.exe"))
+    assert len(old_trash) == 1
+    old_stamp = time.time() - (ui_mod.PACKAGE_TRASH_DAYS + 1) * 86400
+    os.utime(old_trash[0], (old_stamp, old_stamp))
+
+    # A second delete runs the prune again; it must drop only what aged out.
+    client.post("/partials/admin/packages/delete",
+               data={"kind": "companion", "platform": "windows", "version": "0.4.0"})
+    remaining = {p.name for p in (settings.packages_path() / ".trash" / "windows").glob("*")}
+    assert not any(n.endswith("0.3.0.exe") for n in remaining)
+    assert any(n.endswith("0.4.0.exe") for n in remaining)
+
+
+def test_delete_surfaces_a_move_failure_instead_of_swallowing_it(env, monkeypatch):
+    """The old code passed on OSError, dropping the row while leaving the
+    file behind -- unrecoverable AND invisible. It has to come back as
+    something the admin reads, and the row/file must both survive."""
+    client, conn, settings = env
+    as_user(client, "owen")
+    publish(client, "0.2.0", body=b"v2", make_current=1)
+    publish(client, "0.3.0", body=b"v3")
+
+    real_replace = Path.replace
+
+    def boom(self, target):
+        if self.name == "ccsync-companion-0.3.0.exe":
+            raise OSError(28, "No space left on device")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", boom)
+    resp = client.post("/partials/admin/packages/delete",
+                       data={"kind": "companion", "platform": "windows", "version": "0.3.0"})
+    assert resp.status_code == 200          # the htmx partial always 200s
+    assert "could not move" in resp.text
+    assert "Nothing was deleted" in resp.text
+
+    # Neither the row nor the bytes are gone.
+    assert dbmod.get_package(conn, "windows", "0.3.0") is not None
+    assert (settings.packages_path() / "windows" / "ccsync-companion-0.3.0.exe").exists()
+
+
+def test_feed_policy_current_still_works_through_the_json_route(env):
+    """C-3 (UX.md) is a CLIENT-SIDE confirm (static/confirms.js): the server
+    route it protects must still take the write when posted directly."""
+    client, conn, _settings = env
+    as_user(client, "owen")
+    r = client.post("/api/v1/admin/feed/policy", json={"policy": "current"})
+    assert r.status_code == 200
+    assert r.json()["policy"] == "current"
+    assert dbmod.get_feed_state(conn)["policy_override"] == "current"
+
+
+def test_c3_confirm_copy_is_pinned_in_confirms_js():
+    text = (DASHBOARD_ROOT / "static" / "confirms.js").read_text(encoding="utf-8")
+    assert "Publish new builds automatically AND make them current?" in text
+    assert "Every editor's machine will take each new build from the vendor feed" in text
+    assert "without anyone approving it first." in text
+    assert "Choose 'stage' if you want to test a build before the fleet gets it." in text
+
+
+def test_c4_unsigned_make_current_confirm_copy_is_pinned():
+    text = (DASHBOARD_ROOT / "templates" / "partials" / "admin_packages.html").read_text(
+        encoding="utf-8")
+    assert ("This build has no release signature. Companions verify signatures, "
+            "so making it current stops EVERY machine in the fleet from updating, "
+            "silently. Republish it through tools\\ship.cmd instead. "
+            "Make it current anyway?") in text
+
+
+def test_c5_delete_confirm_copy_is_pinned():
+    text = (DASHBOARD_ROOT / "templates" / "partials" / "admin_packages.html").read_text(
+        encoding="utf-8")
+    assert ("Delete {{ p.kind }} {{ p.version }} for {{ p.platform }}? "
+            "These are the bytes a rollback to that version needs. Once it is gone "
+            "you cannot put the fleet back on it without rebuilding and "
+            "republishing.") in text
 
 
 def test_prune_can_be_opted_out_of(env):

@@ -627,17 +627,66 @@ def extractor(key: str = ""):
 # audio
 # ---------------------------------------------------------------------------
 
-def _run(cmd: list[str], timeout: int, capture_stdout: bool = True):
+def _run(cmd: list[str], timeout: int, capture_stdout: bool = True,
+         child_sink: Optional[Any] = None):
     """One child, windowless, with its output on pipes. Never inherits a
     console: the tray is a windowed build and a visible ffmpeg window on an
-    editor's desktop is a support call."""
-    return subprocess.run(
+    editor's desktop is a support call.
+
+    `child_sink` is MEDIA-2 (resilience sweep 2026-08-28): the ingest
+    orchestrator's stop()/cancel() promised to kill this child and could not,
+    because subprocess.run never hands one out. An editor who quits the tray
+    four minutes into a 90-minute mix left a decode running past tray exit,
+    holding a handle on the staged file. Popen, published, taken back on the
+    way out; a sink that raises never fails the run.
+    """
+    if child_sink is None:
+        return subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE if capture_stdout else subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            creationflags=_win_creationflags(),
+        )
+    proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE if capture_stdout else subprocess.DEVNULL,
         stderr=subprocess.PIPE,
-        timeout=timeout,
         creationflags=_win_creationflags(),
     )
+    _publish_child(child_sink, proc)
+    try:
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.communicate(timeout=10)
+            except Exception:  # noqa: BLE001 - already failing
+                pass
+            raise
+    finally:
+        _publish_child(child_sink, None)
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def _sink_kwargs(child_sink: Optional[Any]) -> dict:
+    """`{"child_sink": ...}` only when there is one.
+
+    `_run` is a monkeypatch seam in this suite and its doubles take the
+    arguments the call site passed before MEDIA-2; an unconditional keyword
+    would break every one of them for a value they would ignore."""
+    return {"child_sink": child_sink} if child_sink is not None else {}
+
+
+def _publish_child(child_sink: Optional[Any], proc: Optional[Any]) -> None:
+    """Hand the live child to the orchestrator (or take it back)."""
+    if child_sink is None:
+        return
+    try:
+        child_sink(proc)
+    except Exception:  # noqa: BLE001
+        log.debug("music clap: could not publish the ffmpeg child", exc_info=True)
 
 
 def probe(ffmpeg_path: str, path: Any) -> dict[str, Any]:
@@ -678,7 +727,8 @@ def probe(ffmpeg_path: str, path: Any) -> dict[str, Any]:
     }
 
 
-def transcode_to_mp3(ffmpeg_path: str, src: Any, dest_dir: Any) -> Path:
+def transcode_to_mp3(ffmpeg_path: str, src: Any, dest_dir: Any,
+                     child_sink: Optional[Any] = None) -> Path:
     """`.ogg` -> 320k mp3, the container's command exactly.
 
     Raises RuntimeError if ffmpeg produced nothing usable, INCLUDING the case
@@ -694,7 +744,8 @@ def transcode_to_mp3(ffmpeg_path: str, src: Any, dest_dir: Any) -> Path:
         proc = _run([binary, "-v", "error", "-y", "-i", str(src),
                      "-c:a", "libmp3lame", "-b:a", MP3_BITRATE,
                      "-map_metadata", "0", str(dest)],
-                    timeout=TRANSCODE_TIMEOUT_SECONDS, capture_stdout=False)
+                    timeout=TRANSCODE_TIMEOUT_SECONDS, capture_stdout=False,
+                    **_sink_kwargs(child_sink))
     except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeError(f"transcode failed: {exc}") from exc
     if proc.returncode != 0 or not dest.is_file() or dest.stat().st_size == 0:
@@ -707,7 +758,8 @@ def transcode_to_mp3(ffmpeg_path: str, src: Any, dest_dir: Any) -> Path:
 
 
 def decode(ffmpeg_path: str, path: Any, sample_rate: int = 48000,
-           max_seconds: Optional[int] = MAX_DECODE_SECONDS):
+           max_seconds: Optional[int] = MAX_DECODE_SECONDS,
+           child_sink: Optional[Any] = None):
     """Whole file -> mono float32 numpy array at `sample_rate`.
 
     Through a PIPE, never a temp WAV (module docstring). `music_index.audio.
@@ -726,7 +778,8 @@ def decode(ffmpeg_path: str, path: Any, sample_rate: int = 48000,
     cmd += ["-f", "f32le", "-acodec", "pcm_f32le", "-ac", "1",
             "-ar", str(int(sample_rate)), "-"]
     try:
-        out = _run(cmd, timeout=DECODE_TIMEOUT_SECONDS).stdout or b""
+        out = _run(cmd, timeout=DECODE_TIMEOUT_SECONDS,
+                   **_sink_kwargs(child_sink)).stdout or b""
     except (OSError, subprocess.SubprocessError) as exc:
         raise SidecarError(f"this file could not be decoded ({exc})") from exc
     samples = np.frombuffer(out, dtype=np.float32)
@@ -827,7 +880,8 @@ def embed_windows(chunks, key: str = ""):
 
 
 def embed_file(path: Any, ffmpeg_path: str = "ffmpeg", key: str = "",
-               stop_event: Optional[threading.Event] = None) -> dict[str, Any]:
+               stop_event: Optional[threading.Event] = None,
+               child_sink: Optional[Any] = None) -> dict[str, Any]:
     """One audio file -> everything the fleet `result` route wants.
 
     {embedding: [float]*dim, dim, duration, n_windows, peaks: bytes,
@@ -853,7 +907,7 @@ def embed_file(path: Any, ffmpeg_path: str = "ffmpeg", key: str = "",
     max_windows = int(embedding_params.get("max_windows") or 12)
     trim = float(embedding_params.get("window_trim_fraction") or 0.02)
 
-    samples = decode(ffmpeg_path, path, sample_rate)
+    samples = decode(ffmpeg_path, path, sample_rate, child_sink=child_sink)
     if samples.size == 0:
         raise SidecarError("this file has no audio this machine could decode")
     if stop_event is not None and stop_event.is_set():

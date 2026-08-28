@@ -282,8 +282,12 @@ class MusicIngestor(broll_ingest.BrollIngestor):
                 return
             self._stage(item, ITEM_TRANSCODING, 10)
             try:
+                # MEDIA-2 (resilience sweep 2026-08-28): the child_sink is
+                # what makes the orchestrator's stop()/cancel() able to end
+                # this ffmpeg instead of leaving it running past tray exit.
                 audio = str(self.sidecar.transcode_to_mp3(
-                    self.ffmpeg_path, source, self._out_dir(item)))
+                    self.ffmpeg_path, source, self._out_dir(item),
+                    child_sink=self._publish_child))
             except Exception as exc:  # noqa: BLE001 - one track, not the batch
                 self._fail_item(item, f"this file could not be converted to mp3: {exc}")
                 return
@@ -308,7 +312,8 @@ class MusicIngestor(broll_ingest.BrollIngestor):
             try:
                 analysis = self.sidecar.embed_file(
                     outputs["audio"], ffmpeg_path=self.ffmpeg_path,
-                    stop_event=self._stop_event)
+                    stop_event=self._stop_event,
+                    child_sink=self._publish_child)
             except music_clap_sidecar.ModelUnavailable as exc:
                 # The MODEL, not the file: this machine cannot embed anything,
                 # so the track is uploaded and left for the base rig rather

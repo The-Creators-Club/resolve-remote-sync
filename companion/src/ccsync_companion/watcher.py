@@ -20,6 +20,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from . import canon
@@ -80,6 +81,8 @@ class TimelineWatcher:
         ignored_projects: Optional[list[str]] = None,
         root_present_fn: Optional[Callable[[], bool]] = None,
         on_bridge_state: Optional[Callable[[bool, str], None]] = None,
+        moved_lookup: Optional[Callable[[str], Optional[dict[str, Any]]]] = None,
+        on_moved_clip: Optional[Callable[[dict[str, Any], dict[str, Any]], None]] = None,
     ) -> None:
         self.local_root = local_root
         self.canonical_prefix = canonical_prefix
@@ -93,6 +96,13 @@ class TimelineWatcher:
         # logs: app._handle_bridge_state times a recurring warning off it, and
         # "how long has this been broken" cannot be measured from an edge.
         self._on_bridge_state = on_bridge_state
+        # RES-10 (resilience sweep 2026-08-28): a MISSING clip whose path this
+        # machine moved on the server's instruction is not a mystery. The
+        # lookup is file_moves.FileMoveLedger.moved_to; None means the whole
+        # question is off (an app built without a ledger, and every test that
+        # does not care), and a MISSING clip is the DEBUG line it always was.
+        self._moved_lookup = moved_lookup
+        self._on_moved_clip = on_moved_clip
         # Last NON-None project name seen -- deliberately NOT cleared when
         # the bridge flaps to None (Resolve restarting, transient failure),
         # so name -> None -> same name never refires on_project_changed.
@@ -160,6 +170,11 @@ class TimelineWatcher:
         # owning any Resolve-bridge concerns themselves. None when Resolve
         # is closed/unreachable or the bridge result didn't carry a name.
         self.last_resolve_project: Optional[str] = None
+        # The last FULL poll's totals and when it finished (UX-4). None until
+        # one has completed: "we have not looked yet" is not "nothing is
+        # wrong", and app.resolve_health() renders the two differently.
+        self.last_counts: Optional[dict[str, int]] = None
+        self.last_scan_at: Optional[str] = None
         # Bridge connection state as of the last poll, for _note_bridge_state
         # below. None = startup, i.e. the first poll always announces itself.
         self._bridge_connected: Optional[bool] = None
@@ -215,6 +230,14 @@ class TimelineWatcher:
             log.debug("timeline poll: %s", result.get("message"))
             return {"ok": False, "message": result.get("message", ""), "out_of_tree": 0, "mapping_warnings": 0}
 
+        # UX-4 / RES-12 (resilience sweep 2026-08-28). These three ride
+        # `sync_guard.resolve_health` and are deliberately TOTALS for this
+        # poll, where the four counters beside them are per-poll deltas
+        # (warn-once, offer-once). An out-of-tree clip the editor skipped is
+        # still an out-of-tree clip, and the whole point of reporting it is
+        # that nobody was going to hear about it otherwise.
+        total_out_of_tree = 0
+        total_bad_prefix = 0
         new_out_of_tree: list[dict[str, Any]] = []
         new_non_canonical: list[dict[str, Any]] = []
         new_mapping_warnings = 0
@@ -255,6 +278,7 @@ class TimelineWatcher:
                     prefix_broken = True
 
             if cls == OUT_OF_TREE:
+                total_out_of_tree += 1
                 if self.ignore_tracker.is_ignored(path):
                     continue
                 # Copy rather than mutate: `item` may be a shared/reused
@@ -273,6 +297,7 @@ class TimelineWatcher:
                 item["resolve_project_name"] = resolve_project_name
                 new_non_canonical.append(item)
             elif cls == BAD_PREFIX:
+                total_bad_prefix += 1
                 if key in self._warned_mapping:
                     continue
                 self._warned_mapping.add(key)
@@ -307,6 +332,19 @@ class TimelineWatcher:
                 if key not in self._missing_logged:
                     new_missing += 1
                     log.debug("clip path missing on disk, not under local_root/prefix: %s", path)
+                # RES-10: FIXABLE, not merely missing -- we know exactly where
+                # the file went, because this machine is the one that moved
+                # it. Asked on every poll while the clip is missing; the
+                # consumer offers the repoint once per move.
+                if self._moved_lookup is not None and self._on_moved_clip is not None:
+                    try:
+                        local = canon.canonical_to_local(
+                            path, self.local_root, self.canonical_prefix) or path
+                        entry = self._moved_lookup(local)
+                        if entry is not None:
+                            self._on_moved_clip(dict(item), entry)
+                    except Exception:
+                        log.exception("moved-clip lookup failed")
             # OK -> nothing to do
 
         if missing_now:
@@ -349,6 +387,7 @@ class TimelineWatcher:
             except Exception:
                 log.exception("on_non_canonical callback failed")
 
+        self._note_scan(total_out_of_tree, total_bad_prefix, len(missing_now))
         return {
             "ok": True,
             "message": "",
@@ -358,7 +397,29 @@ class TimelineWatcher:
             "foreign_warnings": new_foreign_warnings,
             "missing": len(missing_now),
             "missing_new": new_missing,
+            # ADDED keys, never replacing the ones above: the totals this
+            # poll saw, whatever anybody has dismissed (UX-4).
+            "out_of_tree_total": total_out_of_tree,
+            "bad_prefix": total_bad_prefix,
         }
+
+    def _note_scan(self, out_of_tree: int, bad_prefix: int, missing: int) -> None:
+        """Publish the poll's totals for `app.resolve_health()` (UX-4).
+
+        poll_once has computed exactly these numbers since the watcher
+        existed and returned them into a caller that only ever looked at
+        `ok` -- so the one editor mistake that guarantees unsynced footage
+        was invisible to everyone but the editor making it. Written only at
+        the END of a FULL pass: an early return (drive out, Resolve closed,
+        ignored project) must leave the last real answer standing rather than
+        report a reassuring zero.
+        """
+        self.last_counts = {
+            "out_of_tree": int(out_of_tree),
+            "bad_prefix": int(bad_prefix),
+            "missing": int(missing),
+        }
+        self.last_scan_at = datetime.now(timezone.utc).isoformat()
 
     def _note_bridge_state(self, connected: bool, reason: str = "") -> None:
         """Say at INFO, ONCE, when the Resolve bridge comes or goes.

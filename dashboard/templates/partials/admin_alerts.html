@@ -1,0 +1,136 @@
+{# The Alerts panel (SYS-8, resilience sweep 2026-08-28).
+
+   CURRENTLY OPEN comes first and is computed LIVE from alerts.scan, not from
+   what was delivered: the page has to be useful on a site whose sink is
+   "none", which is the vendor build's shape and the state most fleets will
+   sit in until somebody configures a mailbox. A dashboard that only showed
+   the send log would show an empty page on exactly the site that most needs
+   the diagnosis.
+
+   THE PASSWORD IS NEVER RENDERED. `alerts.settings_view` returns a mask and
+   where the value came from; there is no field on this page that echoes it
+   back, not even as a value= on a blanked input. #}
+<div id="admin-alerts">
+
+  {% if error %}<div class="banner">▲ {{ error }}</div>{% endif %}
+  {% if notice %}<div class="muted" style="margin:0.4rem 0">{{ notice }}</div>{% endif %}
+
+  <div class="side-head">[ CURRENTLY OPEN ]
+    <span class="muted">What this server believes is wrong right now.
+      {{ alerts_counts.error or 0 }} problem(s), {{ alerts_counts.warn or 0 }} to look at,
+      checked against {{ alerts_kinds | length }} things every
+      {{ alerts_interval_minutes }} minutes.</span></div>
+
+  {% if not alerts_open %}
+    <p class="muted" style="margin:0.6rem 0">
+      Nothing is wrong that this server can see. All
+      {{ alerts_kinds | length }} checks ran and found nothing.
+    </p>
+  {% else %}
+    <table class="editors" style="margin-top:0.6rem">
+      <thead><tr><th>SEVERITY</th><th>WHAT</th><th>WHERE</th><th>WHAT TO DO</th></tr></thead>
+      <tbody>
+      {% for f in alerts_open %}
+        <tr class="editor-row">
+          <td><span class="chip {{ 'red' if f.severity == 'error' else 'amber' }}">[ {{ f.severity | upper }} ]</span></td>
+          <td>{{ f.title }}<div class="muted">{{ f.diagnosis }}</div></td>
+          <td class="mono-sm">{{ f.subject }}{% if f.detail %}<div class="muted mono-sm">{{ f.detail }}</div>{% endif %}</td>
+          <td class="muted">{{ f.fix }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+
+  <div class="side-head" style="margin-top:1.2rem">[ WHERE ALERTS GO ]
+    <span class="muted">Off by default. Nothing here ever leaves this NAS
+      unless you set a sink.</span></div>
+
+  <form class="inline-form" style="display:block; margin-top:0.6rem"
+        hx-post="/partials/admin/alerts/save" hx-target="#admin-alerts" hx-swap="outerHTML">
+    <label>SEND ALERTS BY<br>
+      <select name="alerts_sink">
+        {% for sink in alerts_settings.sinks %}
+          <option value="{{ sink }}" {% if alerts_settings.alerts_sink == sink %}selected{% endif %}>{{ sink }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label title="An IANA name such as Europe/London. The weekly report goes out at 08:00 on Monday in this zone.">TIME ZONE<br>
+      <input type="text" name="alerts_timezone" value="{{ alerts_settings.alerts_timezone }}" placeholder="UTC"></label>
+    <label>WEEKLY REPORT<br>
+      <select name="alerts_weekly">
+        <option value="1" {% if alerts_settings.alerts_weekly == "1" %}selected{% endif %}>on (Monday 08:00)</option>
+        <option value="0" {% if alerts_settings.alerts_weekly != "1" %}selected{% endif %}>off</option>
+      </select>
+    </label>
+
+    <div class="side-head" style="margin-top:0.8rem">[ MAIL ]</div>
+    <label>SMTP HOST<br><input type="text" name="alerts_smtp_host" value="{{ alerts_settings.alerts_smtp_host }}"></label>
+    <label>SMTP PORT<br><input type="text" name="alerts_smtp_port" value="{{ alerts_settings.alerts_smtp_port }}"></label>
+    <label>SMTP USER<br><input type="text" name="alerts_smtp_user" value="{{ alerts_settings.alerts_smtp_user }}"></label>
+    <label>FROM<br><input type="text" name="alerts_smtp_from" value="{{ alerts_settings.alerts_smtp_from }}"></label>
+    <label title="One or more addresses, separated by commas.">TO<br><input type="text" name="alerts_smtp_to" value="{{ alerts_settings.alerts_smtp_to }}"></label>
+    <label>STARTTLS<br>
+      <select name="alerts_smtp_tls">
+        <option value="1" {% if alerts_settings.alerts_smtp_tls == "1" %}selected{% endif %}>on</option>
+        <option value="0" {% if alerts_settings.alerts_smtp_tls != "1" %}selected{% endif %}>off</option>
+      </select>
+    </label>
+
+    <div class="side-head" style="margin-top:0.8rem">[ WEBHOOK ]</div>
+    <label title="https only. The body is {subject, text} as JSON.">WEBHOOK URL<br>
+      <input type="text" name="alerts_webhook_url" value="{{ alerts_settings.alerts_webhook_url }}" placeholder="https://"></label>
+
+    <div style="margin-top:0.6rem"><button class="btn" type="submit">[ SAVE ]</button></div>
+  </form>
+
+  {# The password has its own form because it has its own store: a file under
+     <data>/secrets/, 0600, never in the database and never in a response. #}
+  <form class="inline-form" style="display:block; margin-top:0.8rem"
+        hx-post="/partials/admin/alerts/password" hx-target="#admin-alerts" hx-swap="outerHTML">
+    <label>SMTP PASSWORD<br>
+      <input type="password" name="password" value="" autocomplete="new-password"
+             placeholder="{{ 'stored: ' ~ alerts_settings.password_mask if alerts_settings.password_set else 'not set' }}"></label>
+    <button class="btn" type="submit">[ SET PASSWORD ]</button>
+    <button class="btn" type="submit" name="clear" value="1">[ CLEAR ]</button>
+    {% if alerts_settings.password_source == "env" %}
+      <div class="muted">This password comes from the deployment's own environment, so
+        it cannot be changed here.</div>
+    {% endif %}
+  </form>
+
+  <div style="margin-top:1rem">
+    <form class="inline-form" hx-post="/partials/admin/alerts/test"
+          hx-target="#admin-alerts" hx-swap="outerHTML">
+      <button class="btn" type="submit">[ SEND A TEST ]</button>
+    </form>
+    <a class="btn" href="/admin/alerts/preview" target="_blank" rel="noopener">[ PREVIEW THIS WEEK'S REPORT ]</a>
+  </div>
+
+  <div class="side-head" style="margin-top:1.2rem">[ WHAT WAS SENT ]
+    <span class="muted">Newest first. A failed send is kept: a channel that has
+      been refusing since Tuesday is worse than no channel, because you believe
+      you have one.</span></div>
+  <table class="editors" style="margin-top:0.6rem">
+    <thead><tr><th>WHEN</th><th>KIND</th><th>SUBJECT</th><th>TO</th><th>RESULT</th></tr></thead>
+    <tbody>
+    {% for row in alerts_log %}
+      <tr class="editor-row">
+        <td class="mono-sm muted">{{ row.at }}</td>
+        <td class="mono-sm">{{ row.kind }}</td>
+        <td>{{ row.subject }}</td>
+        <td class="mono-sm muted">{{ row.sent_to or "-" }}</td>
+        <td>{% if row.ok %}<span class="chip lane green">sent</span>{% else %}<span class="chip red">[ {{ row.detail or "failed" }} ]</span>{% endif %}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="muted">Nothing has been sent yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  <div class="side-head" style="margin-top:1.2rem">[ WHAT THIS SERVER CHECKS ]
+    <span class="muted">So that silence is provably checked, not unchecked.</span></div>
+  <ul class="muted" style="margin-top:0.4rem; columns:2">
+    {% for k in alerts_kinds %}<li>{{ k.what }}</li>{% endfor %}
+  </ul>
+</div>

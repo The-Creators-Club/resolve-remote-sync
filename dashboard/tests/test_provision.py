@@ -462,7 +462,7 @@ def test_provision_refuses_a_marker_inside_an_existing_project(conn, fake, tmp_p
     collector = collector_for(fake, tmp_path)
     collector.run_cycle(conn, ["provision"])
     assert collector._creatable(
-        "2026-ff5-energy-transition-ae",
+        conn, "2026-ff5-energy-transition-ae",
         "2026/FF5/Energy Transition/AE", tmp_path) is False
     assert "2026-ff5-energy-transition-ae" not in {f["id"] for f in fake.state["folders"]}
 

@@ -30,7 +30,8 @@ from starlette.requests import ClientDisconnect
 
 from . import (
     ai_providers, api, assignments, auth, broll, cli_tools, crash_report,
-    dashboard_update, db, internal_sftp, local_users, music, oidc, release_feed,
+    dashboard_update, db, internal_sftp, local_users, music, notices, oidc,
+    release_feed,
     secrets_boot, sessions, setup_api, setup_routes, site_store, ui, ytdl,
 )
 from .collector import Collector
@@ -294,6 +295,26 @@ class CollectorWatchdog:
                 return self._exit()
             log.error("the collector thread is DEAD; restarting it (%d of %d)",
                       self.restarts, self.restart_limit)
+            # UX-10 (2026-08-28): a background thread that keeps dying is a
+            # fault, not a detail. Best effort and on its own connection: the
+            # watchdog holds none, and a notice must never be able to stop a
+            # restart.
+            try:
+                conn = db.connect(self.collector.settings.db_path)
+                try:
+                    db.notice(
+                        conn, "collector_watchdog_restart", "warn", "collector",
+                        body=(f"The background job thread stopped and had to be restarted "
+                              f"({self.restarts} time(s) since this server last started). "
+                              f"While it was down, nothing about the fleet was being "
+                              f"updated."),
+                        fix=("If this keeps happening, restart the dashboard and send the "
+                             "server log to support."))
+                    conn.commit()
+                finally:
+                    conn.close()
+            except Exception:  # noqa: BLE001
+                log.exception("could not record the collector restart notice")
             try:
                 if not collector.restart():
                     raise RuntimeError("restart() refused")
@@ -477,6 +498,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             site_store.seed_from_env_once(conn, settings)
         except Exception:  # noqa: BLE001 - never block boot over the manifest
             log.exception("site_settings seed-from-env failed")
+        # UX-10 (2026-08-28): configuration this server was STARTED with. A
+        # quoted or space-padded secret is the failure that looks like a wrong
+        # password on every machine at once, and nothing anywhere said so.
+        # Checked here because this is when the values were read.
+        try:
+            notices.check_settings(conn, settings)
+        except Exception:  # noqa: BLE001 - never block boot over a diagnosis
+            log.exception("boot-time configuration check failed")
+        # DASH-1 (resilience sweep 2026-08-28): a file move whose row was
+        # committed and whose rename was cut off by this container going down
+        # is finished (or quarantined) HERE, before anything else reads the
+        # tree. The window it covers is exactly the one a restart opens, so
+        # boot is where it has to be checked; the collector repeats it every
+        # cycle for the crash that does not restart the process.
+        try:
+            api.reconcile_file_moves(settings, conn)
+        except Exception:  # noqa: BLE001 - never block boot over a move
+            log.exception("could not reconcile unfinished file moves")
         conn.close()
         session_store.prune()
         session_store.prune_attempts()
@@ -941,6 +980,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """
         log.exception("unhandled error serving %s %s", request.method,
                       request.url.path)
+        # UX-10, widened 2026-08-28 ("make the server as self-diagnosing as
+        # possible"): a 500 an editor met at 2 am is on the home page in the
+        # morning. Deduped per (path, exception class), and NOTHING derived
+        # from the exception's message is stored -- the same rule the response
+        # body follows, for the same reason.
+        try:
+            conn = db.connect(settings.db_path)
+            try:
+                notices.record_server_error(conn, request.url.path, exc)
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 - never fail a request over its own record
+            log.exception("could not record a server-error notice")
         return JSONResponse({"detail": "internal error"}, status_code=500)
 
     app.include_router(api.router)

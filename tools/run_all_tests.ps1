@@ -173,7 +173,13 @@ $licenceExit = $LASTEXITCODE
 # machine on the previous one or with no companion at all (REL-12, 2026-08-28).
 $global:LASTEXITCODE = 9999
 powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\installer\tests\Test-PrevRollback.ps1"
-$installerExit = @($driveMapExit, $licenceExit, $LASTEXITCODE) |
+$prevRollbackExit = $LASTEXITCODE
+# The wrong-profile refusal and the low-space warning (OPS-7 / UX-14,
+# 2026-08-28). Both are pure helpers inside windows_bootstrap.ps1, extracted
+# with the PowerShell parser rather than dot-sourced.
+$global:LASTEXITCODE = 9999
+powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\installer\tests\Test-ConsoleUser.ps1"
+$installerExit = @($driveMapExit, $licenceExit, $prevRollbackExit, $LASTEXITCODE) |
     Where-Object { $_ -ne 0 } | Select-Object -First 1
 if ($null -eq $installerExit) { $installerExit = 0 }
 $results += @{ Name = "installer"; Outcome = $(if ($installerExit -eq 0) { "PASS" } else { "FAIL (exit $installerExit)" }) }

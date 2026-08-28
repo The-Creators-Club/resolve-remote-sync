@@ -700,3 +700,89 @@ def test_the_new_scripts_parse():
     for name in ("sprite.js", "share.js", "clientfolders.js"):
         subprocess.run(["node", "--check", str(STATIC / name)], check=True,
                        capture_output=True, text=True)
+
+
+# --- 6. UX-19: the client's dead end (resilience sweep 2026-08-28) ------------
+
+def test_a_revoked_link_names_the_editor_and_how_to_reach_them(as_editor, seeded):
+    """"Please contact whoever sent it to you" was the whole of what a client
+    got, from the only page they have. The record already carried both halves;
+    they just never reached the page."""
+    folder = _create(as_editor, contact="sales@example.com")
+    _add(as_editor, folder["id"], seeded["harbor"])
+    tok = folder["token"]
+    as_editor.post(f"api/client-folders/{folder['id']}/revoke")
+
+    anon = TestClient(broll_app)
+    page = anon.get(f"/share/{tok}/")
+    assert page.status_code == 404
+    assert "Please ask jsmith at sales@example.com for a fresh link." in page.text
+    assert cf.GONE_FALLBACK_SENTENCE not in page.text
+    # Still the same 404 with the same headers, and still nothing else about
+    # the folder: no title, no clip, no count.
+    assert "noindex" in page.headers["x-robots-tag"]
+    assert page.headers["referrer-policy"] == "no-referrer"
+    assert "For Acme" not in page.text and "harbor" not in page.text
+    # The bare form (no trailing slash) is the same page, not a redirect.
+    bare = anon.get(f"/share/{tok}", follow_redirects=False)
+    assert bare.status_code == 404
+    assert "Please ask jsmith at sales@example.com" in bare.text
+
+
+def test_an_unknown_token_still_gets_the_generic_page(seeded):
+    """A token we were never given must reveal nothing -- including whether it
+    ever existed, which naming somebody would."""
+    anon = TestClient(broll_app)
+    page = anon.get("/share/AAAAAAAAAAAAAAAAAAAAAA/")
+    assert page.status_code == 404
+    assert cf.GONE_FALLBACK_SENTENCE in page.text
+    assert "Please ask" not in page.text
+
+
+def test_a_folder_with_no_contact_still_names_the_editor(as_editor, seeded):
+    folder = _create(as_editor)
+    _add(as_editor, folder["id"], seeded["harbor"])
+    as_editor.post(f"api/client-folders/{folder['id']}/revoke")
+    page = TestClient(broll_app).get(f"/share/{folder['token']}/")
+    assert "Please ask jsmith for a fresh link." in page.text
+
+
+def test_the_contact_sentence_is_escaped_into_the_page(as_editor, seeded):
+    """Both halves are editor-entered free text landing in a public page."""
+    folder = _create(as_editor, contact="<script>alert(1)</script>")
+    as_editor.post(f"api/client-folders/{folder['id']}/revoke")
+    page = TestClient(broll_app).get(f"/share/{folder['token']}/")
+    assert "<script>alert(1)</script>" not in page.text
+    assert "&lt;script&gt;" in page.text
+
+
+def test_gone_contact_sentence_handles_a_record_with_nobody_on_it():
+    assert cf.gone_contact_sentence(None) == ""
+    assert cf.gone_contact_sentence({"created_by": "", "contact": ""}) == ""
+    assert cf.gone_contact_sentence({"created_by": "", "contact": "call us"}) == (
+        "Please contact call us for a fresh link.")
+
+
+def test_the_gone_page_and_the_code_agree_on_the_sentence_to_replace():
+    """An exact string match: change one without the other and every client is
+    back at the dead end, silently."""
+    html = (STATIC / "share_gone.html").read_text(encoding="utf-8")
+    assert html.count(cf.GONE_FALLBACK_SENTENCE) == 1
+
+
+def test_the_viewer_says_when_a_clip_left_the_folder_mid_session():
+    """Membership is re-checked per request, so a clip removed while the page
+    is open 404s on its next fetch. That used to be the browser's own broken
+    video box and no words at all."""
+    js = (STATIC / "share.js").read_text(encoding="utf-8")
+    assert "This clip is no longer in this folder. Refresh the page to see what is." in js
+    # Both doors: the <video> element's error (which carries no status) and
+    # the detail fetch's 404.
+    assert 'addEventListener("error"' in js
+    assert "shareExplainPlaybackFailure" in js
+    assert "e.status === 404" in js
+    html = (STATIC / "share.html").read_text(encoding="utf-8")
+    assert 'id="share-clip-gone"' in html
+    # Document-relative, like everything else the viewer fetches
+    # (test_mounted_prefix.py pins the rule).
+    assert "/api/videos/" not in js.replace("`api/videos/", "")

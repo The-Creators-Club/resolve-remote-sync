@@ -73,13 +73,14 @@ class FakeSidecar:
     def content_hash(self, path):
         return "b1a5e" + Path(path).stem[:3]
 
-    def transcode_to_mp3(self, ffmpeg, src, dest_dir):
+    def transcode_to_mp3(self, ffmpeg, src, dest_dir, child_sink=None):
         dest = Path(dest_dir) / (Path(src).stem + ".mp3")
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(b"mp3" * 100)
         return dest
 
-    def embed_file(self, path, ffmpeg_path="ffmpeg", key="", stop_event=None):
+    def embed_file(self, path, ffmpeg_path="ffmpeg", key="", stop_event=None,
+                   child_sink=None):
         if self.raise_on_embed is not None:
             raise self.raise_on_embed
         self.embedded.append(str(path))

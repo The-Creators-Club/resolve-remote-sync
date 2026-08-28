@@ -162,6 +162,20 @@
       <textarea name="text" rows="8" style="width:100%" placeholder="paste a site.toml here"></textarea>
       <div style="margin-top:0.4rem"><button class="btn" type="submit">[ IMPORT ]</button></div>
     </form>
+
+    {# UX-21 (resilience sweep 2026-08-28): what a save or an import changed
+       last, and a way to put it back. Rendered from GET /admin/site/history
+       by static/site_settings.js (loadSiteHistory), the same way the AI
+       providers panel above draws itself -- so this page never blocks on a
+       second query for an admin who came here to rename their studio. #}
+    <div class="side-head" style="margin-top:1.4rem">[ CHANGE HISTORY ]
+      <span class="muted">The last few times a save or an import changed
+        these settings. Undo puts back the values from just before the most
+        recent one.</span></div>
+    <div id="site-history-list" class="muted" style="margin-top:0.4rem">loading…</div>
+    <div style="margin-top:0.4rem">
+      <button id="site-undo-btn" class="btn" type="button" style="display:none">[ UNDO LAST IMPORT ]</button>
+    </div>
   </main>
   <script src="/static/site_settings.js" defer></script>
 {% endblock %}

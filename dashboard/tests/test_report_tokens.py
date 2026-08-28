@@ -245,6 +245,20 @@ def test_the_users_page_panel_renders_and_mints(env):
     assert dbmod.fetch_editor_report_tokens(conn) == []
 
 
+def test_c8_revoke_confirm_names_the_editor_and_the_consequence(env):
+    """C-8 (UX.md, resilience sweep 2026-08-28): one click used to take an
+    editor's companion off the fleet with no confirm at all, and the token
+    it revokes cannot be shown again."""
+    client, conn = env
+    admin_client(client)
+    client.post("/partials/admin/report-tokens/create",
+               data={"username": "jsmith", "label": "laptop"})
+    panel = client.get("/partials/admin/report-tokens").text
+    assert ("Revoke jsmith's report token? Their companion stops reporting "
+            "and stops syncing until you issue a new token and they enter "
+            "it. The old token cannot be shown again.") in panel
+
+
 # ------------------------------------------------------------ migration log
 
 def test_boot_log_names_the_machines_still_on_the_shared_token(env, caplog):

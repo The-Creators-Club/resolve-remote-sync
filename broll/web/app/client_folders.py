@@ -352,6 +352,42 @@ def status_of(folder: sqlite3.Row | dict) -> str:
     return "live"
 
 
+# UX-19 (resilience sweep 2026-08-28): the dead end.
+# "Please contact whoever sent it to you for a fresh link" is the whole of
+# what a client got, from the only page they have -- no name, no company, no
+# address, and no way to reach the person who sent it. The record already
+# carries both halves (`created_by`, the curating editor; `contact`, the free
+# text the live page renders as a mailto), so the gone page can name them.
+# The exact sentence in static/share_gone.html that is swapped out; a change
+# to either without the other is a silent miss, which is why the HTML says so
+# too.
+GONE_FALLBACK_SENTENCE = "Please contact whoever sent it to you for a fresh link."
+
+
+def gone_contact_sentence(folder: sqlite3.Row | dict | None) -> str:
+    """"Please ask leso at leso@studio.com for a fresh link.", or "" when the
+    record names nobody (or there is no record at all: an unknown token is a
+    token we were never given, and nothing about it can be revealed).
+
+    PLAIN TEXT. The caller escapes it -- both halves are editor-entered free
+    text that lands in a public HTML page.
+    """
+    if folder is None:
+        return ""
+    try:
+        name = str(folder["created_by"] or "").strip()
+        contact = str(folder["contact"] or "").strip()
+    except (KeyError, IndexError, TypeError):
+        return ""
+    if name and contact:
+        return f"Please ask {name} at {contact} for a fresh link."
+    if name:
+        return f"Please ask {name} for a fresh link."
+    if contact:
+        return f"Please contact {contact} for a fresh link."
+    return ""
+
+
 def folder_dict(row: sqlite3.Row) -> dict:
     d = dict(row)
     d["status"] = status_of(row)

@@ -205,7 +205,8 @@ cd music\web;     .venv\Scripts\python.exe -m pytest tests -q                # o
 cd music\indexer; python -m pytest tests -q                                  # system python; the path/config half, torch-free on purpose
 cd ytdl\web;      ..\..\dashboard\.venv\Scripts\python.exe -m pytest tests -q # no venv of its own -- the deployed reality is the dashboard's
 cd tools;         ..\dashboard\.venv\Scripts\python.exe -m pytest tests -q   # stdlib-only by design; the dashboard venv has pytest + packaging
-powershell -NoProfile -ExecutionPolicy Bypass -File installer\tests\Test-DriveMapParser.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File installer\tests\Test-DriveMapParser.ps1   # the "installer" row is FOUR scripts: this,
+#   Test-LicenceGate.ps1, Test-PrevRollback.ps1 (wave 3) and Test-ConsoleUser.ps1 (wave 4, OPS-7), each run the same way
 bash installer/tests/test_macos_site_values.sh                               # Git Bash; macos_bootstrap.sh's string helpers, no Mac needed
 ```
 
@@ -391,6 +392,28 @@ Full runbook, including what each version number means and how to roll back:
   restarts and only the drive coming back clears it. `drive_reminder_minutes`
   (0 = first warning only). A drive pulled with nothing owed keeps the one
   calm "Sync paused" balloon.
+- **The server diagnoses itself, and an unverified check is NOT CHECKED, never
+  OK** (wave 4 of the resilience sweep, 2026-08-28, `docs/SELF_DIAGNOSIS.md`):
+  a diagnosis the collector used to `log.error` into a log nobody opens goes
+  into `notices` (v37, keyed `(kind, subject)`, every row carrying the exact
+  next action) and shows on the home page as PROBLEMS THE SERVER FOUND; forty
+  alert kinds in `alerts.ALERT_KINDS` (data, not a chain of ifs) are evaluated
+  every collector cycle from state the dashboard already holds, logged
+  (`alert_log`, v38) and delivered through `alerts_sink` (none in the vendor
+  build / smtp / https webhook), with a Monday weekly report. Adding a check
+  is adding a registry row. A check that raises is its own `check_failed`
+  finding; a kind nothing evaluates renders `[ NOT CHECKED ]` on the checks
+  panel (evidence in `NOTICE_CHECKS_META`). Register a notice kind WITH its
+  writer - a registered kind with no writer was the first build's own bug.
+  Nothing here formats a secret; the smtp password lives in
+  `<data>/secrets/alerts/smtp_password`.
+- **A fleet halt expires** (24 h default, `[ KEEP HALTED ]` extends, history in
+  `meta.fleet_halt_history`) and a package delete goes to
+  `<data>/packages/.trash/` for 30 days through ONE helper
+  (`api._trash_package_file`, both routes). A file move is two-phase (v36):
+  the companion answers `retrying` and is re-sent the command until done or
+  blocked, so deploy the dashboard BEFORE companion 0.9.55 or the retry
+  never happens (`docs/FILE_MOVES.md`).
 - **Never call `scriptapp("Resolve")` outside `resolve_bridge.connect()`**
   (CR-68, 2026-08-21). Resolve's script server (`fuscript.exe`, TCP 1144)
   exits when its last client leaves, and a client that connects before

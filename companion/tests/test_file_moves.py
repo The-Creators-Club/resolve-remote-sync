@@ -108,17 +108,85 @@ def test_the_ledger_survives_a_restart_and_keeps_the_old_path_out_of_lane_a(tmp_
     clock = [1000.0]
     ledger = file_moves.FileMoveLedger(tmp_path / "state", now=lambda: clock[0])
     move = file_moves.parse_command(_cmd())
-    ledger.record(move, ok=False, detail="destination exists")
+    ledger.record(move, ok=True, detail="moved")
     again = file_moves.FileMoveLedger(tmp_path / "state", now=lambda: clock[0])
-    assert again.entry(1)["ok"] is False
-    # Applied or refused, the old path is excluded for a day...
+    assert again.entry(1)["ok"] is True
+    # The old path is excluded for a day after an applied move...
     assert again.recent_excludes(f"Projects/{DRONE}") == ["B-roll/A001_0512.braw"]
     assert again.recent_excludes(f"projects/{DRONE.lower()}") == ["B-roll/A001_0512.braw"]
     assert again.recent_excludes(f"Projects/{ANIMALS}") == []
     assert again.recent_excludes(None) == []
-    # ...and not longer.
+    # ...and not longer: the file is no longer there to be re-uploaded.
     clock[0] += file_moves.EXCLUDE_WINDOW_SECONDS + 1
     assert again.recent_excludes(f"Projects/{DRONE}") == []
+
+
+def test_an_unapplied_move_holds_its_exclusion_open(tmp_path):
+    """RES-1 (resilience sweep 2026-08-28): the copy is still AT the old path
+    (that is why the move failed), so letting the 24 h window lapse is letting
+    lane A -- which never deletes -- put it back on the NAS at the path the
+    admin cleared."""
+    clock = [1000.0]
+    ledger = file_moves.FileMoveLedger(tmp_path / "state", now=lambda: clock[0])
+    move = file_moves.parse_command(_cmd())
+    ledger.record_attempt_failed(move, "open in Resolve")
+    clock[0] += file_moves.EXCLUDE_WINDOW_SECONDS * 10
+    assert ledger.recent_excludes(f"Projects/{DRONE}") == ["B-roll/A001_0512.braw"]
+
+
+def test_a_failure_is_retried_on_a_schedule_and_then_blocked(tmp_path):
+    clock = [1000.0]
+    ledger = file_moves.FileMoveLedger(tmp_path / "state", now=lambda: clock[0])
+    move = file_moves.parse_command(_cmd())
+    entry = ledger.record_attempt_failed(move, "open in Resolve")
+    assert entry["state"] == file_moves.STATE_RETRYABLE and entry["attempts"] == 1
+    # Not due yet, due after ten minutes, then hourly.
+    assert ledger.retry_due(entry) is False
+    clock[0] += file_moves.RETRY_FIRST_SECONDS + 1
+    assert ledger.retry_due(ledger.entry(1)) is True
+    entry = ledger.record_attempt_failed(move, "open in Resolve")
+    assert ledger.retry_due(entry) is False
+    clock[0] += file_moves.RETRY_INTERVAL_SECONDS + 1
+    assert ledger.retry_due(ledger.entry(1)) is True
+    # The cap: it gives up rather than trying for ever, and says so.
+    for _ in range(file_moves.RETRY_MAX_ATTEMPTS):
+        clock[0] += file_moves.RETRY_INTERVAL_SECONDS + 1
+        entry = ledger.record_attempt_failed(move, "open in Resolve")
+    assert entry["state"] == file_moves.STATE_BLOCKED
+    assert entry["next_attempt_at"] is None
+    assert ledger.retry_due(entry) is False
+    # Blocked still holds the old path out of lane A: the copy is still there.
+    assert ledger.recent_excludes(f"Projects/{DRONE}") == ["B-roll/A001_0512.braw"]
+
+
+def test_the_week_long_ceiling_also_gives_up(tmp_path):
+    clock = [1000.0]
+    ledger = file_moves.FileMoveLedger(tmp_path / "state", now=lambda: clock[0])
+    move = file_moves.parse_command(_cmd())
+    ledger.record_attempt_failed(move, "open in Resolve")
+    clock[0] += file_moves.RETRY_MAX_SECONDS + 1
+    entry = ledger.record_attempt_failed(move, "open in Resolve")
+    assert entry["state"] == file_moves.STATE_BLOCKED and entry["attempts"] == 2
+
+
+def test_the_ledger_knows_which_move_took_a_path_away(tmp_path):
+    """RES-10: what turns a MISSING clip into a one-click relink."""
+    clock = [1000.0]
+    ledger = file_moves.FileMoveLedger(tmp_path / "state", now=lambda: clock[0])
+    move = file_moves.parse_command(_cmd())
+    ledger.record(move, ok=True, detail="moved",
+                  paths=(r"D:\CC\Projects\old\clip.braw", r"D:\CC\Projects\new\clip.braw"),
+                  relink_pending=True)
+    assert ledger.moved_to(r"d:\cc\projects\OLD\clip.braw")["id"] == 1
+    assert ledger.moved_to(r"D:\CC\Projects\other\clip.braw") is None
+    assert [e["id"] for e in ledger.pending_relinks()] == [1]
+    ledger.clear_relink_pending(1)
+    assert ledger.pending_relinks() == []
+    # ...and it stops being offered after a month.
+    ledger.record(move, ok=True, detail="moved",
+                  paths=(r"D:\CC\Projects\old\clip.braw", r"D:\CC\Projects\new\clip.braw"))
+    clock[0] += file_moves.RELINK_WINDOW_SECONDS + 1
+    assert ledger.moved_to(r"D:\CC\Projects\old\clip.braw") is None
 
 
 def test_lane_a_keeps_a_moved_away_path_out_of_its_run(tmp_path):
@@ -149,16 +217,26 @@ class _Stub:
         self._file_move_answers = []
         self.toasts = []
         self.relinks = []
+        self.relink_text = "2 Resolve clip(s) relinked"
 
     def _notify_tray(self, msg, title="x"):
         self.toasts.append((title, msg))
 
     def _relink_moved(self, old, new, is_dir):
         self.relinks.append((old, new, is_dir))
-        return "2 Resolve clip(s) relinked"
+        return self.relink_text
 
-    def _queue_file_move_answer(self, move_id, ok, detail):
-        CompanionApp._queue_file_move_answer(self, move_id, ok, detail)
+    def _relink_moved_result(self, old, new, is_dir):
+        return CompanionApp._relink_moved_result(self, old, new, is_dir)
+
+    def _relink_pending_moves(self):
+        CompanionApp._relink_pending_moves(self)
+
+    def _queue_file_move_answer(self, move_id, ok, detail, state=None, attempts=0,
+                                relink_pending=False):
+        CompanionApp._queue_file_move_answer(self, move_id, ok, detail, state=state,
+                                             attempts=attempts,
+                                             relink_pending=relink_pending)
 
     def _file_move_results(self):
         return CompanionApp._file_move_results(self)
@@ -195,11 +273,76 @@ def test_the_app_reports_a_refusal_and_deletes_nothing(tmp_path):
     stub.apply({"commands": {"file_moves": [_cmd()]}})
     (answer,) = stub._file_move_results()
     assert answer["ok"] is False and "already exists" in answer["detail"]
+    # RES-1: an answer that does NOT retire the command server-side.
+    assert answer["state"] == "retrying" and answer["attempts"] == 1
     assert stub.relinks == []
     assert clash.read_bytes() == b"mine"
     assert "needs attention" in stub.toasts[-1][0]
     # The old path is still kept out of lane A while the admin sorts it out.
     assert stub.file_moves.recent_excludes(f"Projects/{DRONE}") == ["B-roll/A001_0512.braw"]
+
+
+def test_a_blocked_move_is_retried_until_it_works_then_answered_as_blocked(tmp_path):
+    """RES-1 (resilience sweep 2026-08-28): a move Resolve was holding used to
+    latch on the first PermissionError and re-answer the same failure for
+    ever. It is retried on a schedule now, and it succeeds the moment the
+    obstruction goes."""
+    clock = [1000.0]
+    stub = _Stub(tmp_path)
+    stub.file_moves = file_moves.FileMoveLedger(tmp_path / "state2", now=lambda: clock[0])
+    clash = stub.root / "Projects" / ANIMALS / "Interviewees" / "Pangolin" / "A001_0512.braw"
+    clash.parent.mkdir(parents=True)
+    clash.write_bytes(b"mine")
+    resp = {"commands": {"file_moves": [_cmd()]}}
+    stub.apply(resp)
+    assert stub._file_move_results()[0]["state"] == "retrying"
+
+    # Asked again before the retry is due: answered, not re-attempted.
+    stub.apply(resp)
+    (answer,) = stub._file_move_results()
+    assert answer["state"] == "retrying" and answer["attempts"] == 1
+
+    # The obstruction goes and the retry falls due: it moves.
+    clash.unlink()
+    clock[0] += file_moves.RETRY_FIRST_SECONDS + 1
+    stub.apply(resp)
+    (answer,) = stub._file_move_results()
+    assert answer["ok"] is True
+    assert (stub.root / "Projects" / ANIMALS / "Interviewees" / "Pangolin"
+            / "A001_0512.braw").read_bytes() == b"braw"
+
+    # And one that never clears is answered `blocked`, not silence.
+    blocked = _Stub(tmp_path / "second")
+    blocked.file_moves = file_moves.FileMoveLedger(tmp_path / "state3", now=lambda: clock[0])
+    other = blocked.root / "Projects" / ANIMALS / "Interviewees" / "Pangolin" / "A001_0512.braw"
+    other.parent.mkdir(parents=True)
+    other.write_bytes(b"mine")
+    for _ in range(file_moves.RETRY_MAX_ATTEMPTS):
+        clock[0] += file_moves.RETRY_INTERVAL_SECONDS + 1
+        blocked.apply(resp)
+    (answer,) = blocked._file_move_results()
+    assert answer["ok"] is False and answer["state"] == "blocked"
+    assert any("blocked" in t[0] for t in blocked.toasts)
+
+
+def test_a_move_applied_with_no_project_open_stays_a_pending_relink(tmp_path):
+    """RES-10: "Resolve not relinked (not open)" is not "there was nothing to
+    relink". The move is revisited on every project change until a media pool
+    walk actually matches."""
+    stub = _Stub(tmp_path)
+    stub.relink_text = "Resolve not relinked (not open)"
+    stub.apply({"commands": {"file_moves": [_cmd()]}})
+    (answer,) = stub._file_move_results()
+    assert answer["ok"] is True and answer["relink_pending"] is True
+    assert [e["id"] for e in stub.file_moves.pending_relinks()] == [1]
+
+    # The editor opens the project the clips are in: it matches and retires.
+    stub.relink_text = "2 Resolve clip(s) relinked"
+    stub._relink_pending_moves()
+    assert stub.file_moves.pending_relinks() == []
+    assert len(stub.relinks) == 2
+    (answer,) = stub._file_move_results()
+    assert answer["ok"] is True and "relinked" in answer["detail"]
 
 
 def test_a_missing_drive_defers_rather_than_answers(tmp_path):

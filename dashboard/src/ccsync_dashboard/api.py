@@ -22,7 +22,7 @@ from typing import Any, Iterator, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from . import VERSION, auth, db, health, links, local_users, package_store, release_trust
@@ -870,6 +870,22 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
                 # it red is what would send an admin chasing it.
                 "informational": why[0] in health.WHY_INFORMATIONAL,
             }
+        # v38 (wave 4's ingest contract): clips the open project references
+        # from outside the tree are appended to the sentence rather than being
+        # a reason of their own. They are INFORMATIONAL: that machine may be
+        # syncing perfectly, and the footage still is not going anywhere.
+        # Composed here and not in health.why_not_syncing so that function
+        # stays the answer to one question ("why is nothing moving").
+        out_of_tree = entry["guard"].get("resolve_out_of_tree")
+        if out_of_tree:
+            note = (f"{out_of_tree} clip(s) in the open project are outside "
+                    f"the tree and will never upload")
+            if entry["why"] is None:
+                entry["why"] = {"reason": "out_of_tree", "sentence": note.capitalize(),
+                                "informational": True}
+            else:
+                entry["why"]["sentence"] = f"{entry['why']['sentence']}. Also: {note}"
+            entry["why"]["out_of_tree"] = out_of_tree
         entry["ingest"] = ingest.get(key) or {}
         entry["music_ingest"] = music_ingest.get(key) or {}
         entry["proxy"] = proxies.get(key) or {}
@@ -1231,7 +1247,45 @@ def api_health(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -
         # included, into a disk I/O error. Both are best-effort blocks: a
         # health route that cannot answer them still has to answer.
         **_feed_and_space_block(request, conn),
+        # SYS-8: how many things this server currently believes are wrong,
+        # counted live from alerts.scan rather than from what was DELIVERED,
+        # so the number is the same on a site whose sink is "none".
+        "open_alerts": _open_alerts_block(request, conn),
+        # UX-10 (2026-08-28): how many diagnoses this server has written and
+        # nobody has acted on. Beside open_alerts on purpose -- one is what we
+        # would send, the other is what we found.
+        "notices": _open_notices_block(conn),
     }
+
+
+def _open_notices_block(conn: sqlite3.Connection) -> dict[str, int]:
+    """{"error": n, "warn": n}, best-effort.
+
+    A count that cannot be read is reported as one `error`, on the same rule
+    as open_alerts: "we could not check" must never render as "nothing
+    wrong"."""
+    try:
+        counts = db.notice_counts(conn)
+    except Exception:  # noqa: BLE001
+        log.exception("could not count open notices for /health")
+        return {"error": 1, "warn": 0}
+    return {"error": int(counts.get("error", 0)), "warn": int(counts.get("warn", 0))}
+
+
+def _open_alerts_block(request: Request, conn: sqlite3.Connection) -> dict[str, Any]:
+    """{"error": n, "warn": n}, best-effort.
+
+    A scan that cannot run is reported as one `error` rather than as zero:
+    "we could not check" must never render as "nothing wrong" (SYS-8).
+    """
+    from . import alerts
+
+    try:
+        findings = alerts.scan(conn, request.app.state.settings, db.utcnow_iso())
+        return alerts.open_counts(findings)
+    except Exception:  # noqa: BLE001
+        log.exception("could not scan for open alerts")
+        return {"error": 1, "warn": 0, "scan_failed": True}
 
 
 def _feed_and_space_block(request: Request, conn: sqlite3.Connection) -> dict[str, Any]:
@@ -2284,30 +2338,48 @@ def _active_project_label(conn: sqlite3.Connection, slug: str) -> str:
     return str(row["label"])
 
 
-def _move_proxy_siblings(src: Path, dest: Path) -> int:
+def _move_proxy_siblings(src: Path, dest: Path) -> tuple[int, list[str]]:
     """A file's proxies live beside it in `Proxy/<stem>.*` (the BPG/Resolve
     convention every lane is built on). They go where the original goes, or
     Resolve's auto-link on every other machine breaks the moment lane B
-    delivers the proxy to the OLD folder. Returns how many were moved."""
+    delivers the proxy to the OLD folder.
+
+    Returns (moved, names that could not move). It never raises: DASH-1
+    (2026-08-28) -- this used to run inside the caller's fatal try, so one
+    proxy held open by a Resolve on a wired rig turned a completed move into
+    a 503 reading "the server could not move it", with the original already
+    gone and no record written at all."""
     proxy_dir = src.parent / "Proxy"
-    if not proxy_dir.is_dir():
-        return 0
+    try:
+        if not proxy_dir.is_dir():
+            return 0, []
+        candidates = sorted(proxy_dir.iterdir())
+    except OSError as exc:
+        log.warning("file move: could not read %s (%s)", proxy_dir, exc)
+        return 0, [f"{proxy_dir.name} (could not be read: {exc})"]
     moved = 0
-    for candidate in sorted(proxy_dir.iterdir()):
-        if not candidate.is_file() or candidate.stem.lower() != src.stem.lower():
-            continue
-        target_dir = dest.parent / "Proxy"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target = target_dir / candidate.name
-        if target.exists():
-            continue
-        candidate.rename(target)
-        moved += 1
-    return moved
+    failed: list[str] = []
+    for candidate in candidates:
+        try:
+            if not candidate.is_file() or candidate.stem.lower() != src.stem.lower():
+                continue
+            target_dir = dest.parent / "Proxy"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            target = target_dir / candidate.name
+            if target.exists():
+                failed.append(f"{candidate.name} (something is already at the destination)")
+                continue
+            candidate.rename(target)
+            moved += 1
+        except OSError as exc:
+            log.warning("file move: proxy %s did not follow (%s)", candidate, exc)
+            failed.append(f"{candidate.name} ({exc})")
+    return moved, failed
 
 
 def move_project_files(settings, conn: sqlite3.Connection, from_slug: str,
-                       body: FileMoveIn, user: str) -> dict[str, Any]:
+                       body: FileMoveIn, user: str,
+                       undo_of: int | None = None) -> dict[str, Any]:
     """Move a file or folder inside the Projects tree, on the server, and
     record the command for every machine that has to follow. Refuses rather
     than guesses: a destination that already exists, a move into itself, a
@@ -2339,16 +2411,6 @@ def move_project_files(settings, conn: sqlite3.Connection, from_slug: str,
     if src == dest:
         raise HTTPException(status_code=400, detail="that is where it already is")
     is_dir = src.is_dir()
-    try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        src.rename(dest)
-        proxies_moved = 0 if is_dir else _move_proxy_siblings(src, dest)
-    except OSError as exc:
-        # A rename across two mounts, a permission the container lacks, a
-        # file Resolve holds open on the share: all of them leave the file
-        # where it was, which is the safe outcome, and all of them are the
-        # admin's to read.
-        raise HTTPException(status_code=503, detail=f"the server could not move it: {exc}")
     # Who has to follow: every computer syncing the source project (either
     # mode: an upload-only machine is exactly the one holding a card dump at
     # the old path), plus any computer whose manifest says it holds the file
@@ -2364,18 +2426,58 @@ def move_project_files(settings, conn: sqlite3.Connection, from_slug: str,
     ):
         targets.add((row["editor_username"], row["machine"]))
     now = db.utcnow_iso()
+    # DASH-1 (resilience sweep 2026-08-28): the record FIRST, committed, and
+    # only then the rename. It used to be the other way round, so a rename
+    # that succeeded and then met anything at all -- a proxy sibling held open
+    # by a Resolve, a container restart, a full /data -- moved the original
+    # with no row anywhere saying so. No row means no command to any machine,
+    # which means every machine still holding it re-uploads the old path
+    # (lane A never deletes) while the editors' Resolve projects point at a
+    # file that is no longer there. A `pending` row is offered to nobody
+    # (db.pending_file_moves) and is reconciled by stat-ing both ends.
     move_id = db.record_file_move(
         conn, from_slug=from_slug, from_project_rel=from_label, from_rel=from_rel,
         to_slug=to_slug, to_project_rel=to_label, to_rel=to_rel, is_dir=is_dir,
-        proxies_moved=proxies_moved, requested_by=user, now=now, targets=sorted(targets),
+        proxies_moved=0, requested_by=user, now=now, targets=sorted(targets),
+        state=db.FILE_MOVE_PENDING, undo_of=undo_of,
     )
     conn.commit()
-    log.info("%s moved %s/%s -> %s/%s on the server (%d proxies with it); %d machine(s) to follow",
-             user, from_label, from_rel, to_label, to_rel, proxies_moved, len(targets))
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        src.rename(dest)
+    except OSError as exc:
+        # A rename across two mounts, a permission the container lacks, a
+        # file Resolve holds open on the share: all of them leave the file
+        # where it was, which is the safe outcome, and all of them are the
+        # admin's to read. The reservation goes with it -- nothing moved, so
+        # there is nothing for any machine to follow.
+        conn.execute("DELETE FROM file_move_targets WHERE move_id=?", (move_id,))
+        conn.execute("DELETE FROM file_moves WHERE id=?", (move_id,))
+        db.audit(conn, user, "file.move.refused", from_slug,
+                 {"move_id": move_id, "from": f"{from_label}/{from_rel}",
+                  "to": f"{to_label}/{to_rel}", "error": str(exc)[:300]}, now=now)
+        conn.commit()
+        raise HTTPException(status_code=503, detail=f"the server could not move it: {exc}")
+    # OUTSIDE the fatal try, because by here the original HAS moved: a proxy
+    # that could not follow is a partial result to be named, never a 503 that
+    # claims nothing happened (DASH-1).
+    proxies_moved = 0
+    proxies_failed: list[str] = []
+    if not is_dir:
+        proxies_moved, proxies_failed = _move_proxy_siblings(src, dest)
+    state = db.FILE_MOVE_PARTIAL if proxies_failed else db.FILE_MOVE_DONE
+    detail = ("these proxies did not move: " + ", ".join(proxies_failed)) if proxies_failed else ""
+    db.complete_file_move(conn, move_id, state=state, proxies_moved=proxies_moved,
+                          detail=detail)
+    conn.commit()
+    log.info("%s moved %s/%s -> %s/%s on the server (%d proxies with it, %d could not); "
+             "%d machine(s) to follow", user, from_label, from_rel, to_label, to_rel,
+             proxies_moved, len(proxies_failed), len(targets))
     return {
-        "ok": True, "move_id": move_id,
+        "ok": True, "move_id": move_id, "state": state,
         "from": f"{from_label}/{from_rel}", "to": f"{to_label}/{to_rel}",
         "is_dir": is_dir, "proxies_moved": proxies_moved,
+        "proxies_failed": proxies_failed,
         "machines": [{"editor": e, "machine": m} for e, m in sorted(targets)],
     }
 
@@ -2387,7 +2489,14 @@ def api_move_project_files(
 ) -> dict[str, Any]:
     user = _require_move_write(request)
     settings = request.app.state.settings
-    return move_project_files(settings, conn, slug, body, user)
+    result = move_project_files(settings, conn, slug, body, user)
+    if result.get("proxies_failed"):
+        # 207: the original moved and the machines have been told, but this
+        # answer must never read as "everything moved" (DASH-1).
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(status_code=207, content=result)
+    return result
 
 
 @router.get("/projects/{slug}/moves")
@@ -2395,7 +2504,196 @@ def api_project_moves(
     slug: str, request: Request, conn: sqlite3.Connection = Depends(get_conn),
 ) -> dict[str, Any]:
     _require_move_write(request)
-    return {"slug": slug, "moves": db.file_moves_for_project(conn, slug)}
+    return {"slug": slug, "moves": db.file_moves_for_project(conn, slug),
+            "awaiting": db.file_moves_awaiting_machines(conn, db.utcnow_iso())}
+
+
+def undo_file_move(settings, conn: sqlite3.Connection, slug: str, move_id: int,
+                   user: str) -> dict[str, Any]:
+    """Put a move back (UX-11), through the same machinery that made it.
+
+    The inverse is a file_moves row like any other -- the same server rename,
+    the same per-machine commands, the same journal -- because a second
+    mechanism for putting a file back is a second mechanism that can be wrong
+    about which machines hold it. Refused while any computer FAILED or is
+    BLOCKED: that machine still has its copy at the old path, and moving the
+    server copy back under it leaves the fleet in a third state nobody asked
+    for."""
+    move = db.file_move(conn, move_id)
+    if move is None or slug not in (move["from_slug"], move["to_slug"]):
+        raise HTTPException(status_code=404, detail=f"no move {move_id} on this project")
+    if move["state"] == db.FILE_MOVE_UNDONE:
+        raise HTTPException(status_code=409, detail="that move has already been put back")
+    if not move["undoable"]:
+        raise HTTPException(
+            status_code=409,
+            detail="one of the computers could not apply this move, so its copy is still "
+                   "at the old path. Sort that computer out first, then put it back.")
+    if move["is_dir"]:
+        # The repo's rule for anything privileged and recursive (CLAUDE.md,
+        # server/common.snapshot_before). Best-effort: a NAS that cannot take
+        # a snapshot is not a NAS where an admin loses the undo button.
+        try:
+            from . import dashboard_update
+
+            snap = dashboard_update.snapshot_before(settings, f"file-move-undo-{move_id}")
+            if not snap.get("ok"):
+                log.warning("undo of move %s: no snapshot (%s)", move_id,
+                            snap.get("reason") or snap.get("detail") or "")
+        except Exception:  # noqa: BLE001 - never block the undo over a snapshot
+            log.exception("undo of move %s: snapshot attempt failed", move_id)
+    to_dir = move["from_rel"].rsplit("/", 1)[0] if "/" in move["from_rel"] else ""
+    body = FileMoveIn(path=move["to_rel"], to_slug=move["from_slug"], to_path=to_dir)
+    result = move_project_files(settings, conn, move["to_slug"], body, user,
+                                undo_of=move_id)
+    # Every computer the ORIGINAL reached, whether or not it syncs the project
+    # the file is currently in: those are the machines with a copy to put
+    # back. Without this an undo out of a project only one editor syncs moves
+    # the server copy and leaves the fleet's copies where they were.
+    added = db.add_file_move_targets(
+        conn, int(result["move_id"]),
+        [(t["editor_username"], t["machine"]) for t in move["targets"]])
+    if added:
+        result["machines"] = sorted(
+            result["machines"] + [{"editor": t["editor_username"], "machine": t["machine"]}
+                                  for t in move["targets"]],
+            key=lambda m: (m["editor"], m["machine"]))
+        seen: set[tuple[str, str]] = set()
+        result["machines"] = [m for m in result["machines"]
+                              if not ((m["editor"], m["machine"]) in seen
+                                      or seen.add((m["editor"], m["machine"])))]
+    db.mark_file_move_undone(conn, move_id, int(result["move_id"]))
+    db.audit(conn, user, "file.move.undo", move["from_slug"],
+             {"move_id": move_id, "undo_move_id": result["move_id"],
+              "from": f"{move['to_project_rel']}/{move['to_rel']}",
+              "to": f"{move['from_project_rel']}/{move['from_rel']}"})
+    conn.commit()
+    result["undo_of"] = move_id
+    return result
+
+
+@router.post("/projects/{slug}/moves/{move_id}/undo")
+def api_undo_project_move(
+    slug: str, move_id: int, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    user = _require_move_write(request)
+    return undo_file_move(request.app.state.settings, conn, slug, move_id, user)
+
+
+@router.post("/projects/{slug}/moves/{move_id}/reissue")
+def api_reissue_project_move(
+    slug: str, move_id: int, request: Request, editor: str, machine: str,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """Offer an expired move to that computer again (DASH-9). The alternative
+    used to be silence: the command simply stopped being offered and the
+    machine went on holding the file at the old path."""
+    user = _require_move_write(request)
+    move = db.file_move(conn, move_id)
+    if move is None or slug not in (move["from_slug"], move["to_slug"]):
+        raise HTTPException(status_code=404, detail=f"no move {move_id} on this project")
+    ok = db.reissue_file_move(conn, move_id, editor.strip().lower(), machine.strip(),
+                              db.utcnow_iso(), actor=user)
+    conn.commit()
+    if not ok:
+        raise HTTPException(status_code=409,
+                            detail="that computer has already answered this move")
+    return {"ok": True, "move_id": move_id, "editor": editor, "machine": machine}
+
+
+def reconcile_file_moves(settings, conn: sqlite3.Connection) -> dict[str, int]:
+    """Finish (or quarantine) every move whose row is still `pending`.
+
+    DASH-1: the row is committed before the rename, so a container that died
+    between the two leaves a `pending` row and a tree that is in one of three
+    states. Only the destination exists: the rename DID happen, so the record
+    is completed and the commands go out. Only the source: it did not, so the
+    reservation is dropped. Both, or neither: something else is going on and
+    guessing would be the expensive kind of wrong -- the row stays pending
+    (offered to nobody) and an alarm goes on the project page.
+
+    Run at boot and once per collector cycle. Never raises."""
+    counts = {"completed": 0, "dropped": 0, "quarantined": 0}
+    try:
+        rows = db.unfinished_file_moves(conn)
+    except sqlite3.Error:
+        log.exception("could not read unfinished file moves")
+        return counts
+    quarantined: list[dict[str, Any]] = []
+    for move in rows:
+        try:
+            src, _ = _safe_rel(settings, f"{move['from_project_rel']}/{move['from_rel']}")
+            dest, _ = _safe_rel(settings, f"{move['to_project_rel']}/{move['to_rel']}")
+        except (ProjectSetupError, HTTPException):
+            log.warning("file move %s: cannot resolve its paths to reconcile it", move["id"])
+            continue
+        src_here, dest_here = src.exists(), dest.exists()
+        if dest_here and not src_here:
+            db.complete_file_move(conn, move["id"], state=db.FILE_MOVE_DONE,
+                                  proxies_moved=int(move["proxies_moved"] or 0),
+                                  detail="completed after an interrupted move")
+            counts["completed"] += 1
+            log.warning("file move %s was interrupted after the rename; completed it and "
+                        "the machines are being told", move["id"])
+        elif src_here and not dest_here:
+            conn.execute("DELETE FROM file_move_targets WHERE move_id=?", (move["id"],))
+            conn.execute("DELETE FROM file_moves WHERE id=?", (move["id"],))
+            counts["dropped"] += 1
+            log.warning("file move %s never happened (the file is still at the old path); "
+                        "dropped the record", move["id"])
+        else:
+            counts["quarantined"] += 1
+            quarantined.append({
+                "id": move["id"],
+                "from": f"{move['from_project_rel']}/{move['from_rel']}",
+                "to": f"{move['to_project_rel']}/{move['to_rel']}",
+                "both": bool(src_here and dest_here),
+                "slugs": [move["from_slug"], move["to_slug"]],
+            })
+            log.error(
+                "file move %s is in an ambiguous state on the server (source present: %s, "
+                "destination present: %s); no computer will be told until an admin sorts "
+                "it out", move["id"], src_here, dest_here)
+    try:
+        if quarantined:
+            db.meta_set_json(conn, FILE_MOVE_ALARM_KEY, quarantined)
+        else:
+            db.meta_delete(conn, FILE_MOVE_ALARM_KEY)
+        # UX-5 / DASH-9, in the same pass: a command that was DELIVERED and
+        # never answered ages out and says so on the project page. An
+        # UNDELIVERED one never expires -- that machine has not had its
+        # chance yet, and it is the one still holding the file at the old
+        # path for lane A to re-upload.
+        for row in db.expire_delivered_file_moves(conn, db.utcnow_iso()):
+            counts["expired"] = counts.get("expired", 0) + 1
+            log.warning(
+                "file move %s was told to %s/%s and never answered; that computer may "
+                "re-upload the old path until it is re-issued",
+                row["move_id"], row["editor_username"], row["machine"])
+        conn.commit()
+    except sqlite3.Error:
+        log.exception("could not write the file-move reconciliation result")
+    return counts
+
+
+# The `meta` key the ambiguous-move alarm lives under. `meta` rather than the
+# notices table because that table is another work package of the same sweep
+# (v37) and this alarm must not wait on it; the project page reads it.
+FILE_MOVE_ALARM_KEY = "file_move_quarantine"
+
+
+def file_move_alarms(conn: sqlite3.Connection, slug: str = "") -> list[dict[str, Any]]:
+    """The quarantined moves, optionally only the ones touching one project."""
+    try:
+        rows = db.meta_get_json(conn, FILE_MOVE_ALARM_KEY) or []
+    except sqlite3.Error:
+        return []
+    if not isinstance(rows, list):
+        return []
+    if not slug:
+        return [r for r in rows if isinstance(r, dict)]
+    return [r for r in rows if isinstance(r, dict) and slug in (r.get("slugs") or [])]
 
 
 def _link_marker_dir(settings, conn: sqlite3.Connection, slug: str) -> tuple[Path, str, Path]:
@@ -3894,9 +4192,18 @@ def build_report_tokens_view(conn: sqlite3.Connection) -> dict[str, Any]:
 
 class FleetHaltIn(BaseModel):
     """Body of POST /fleet/halt. `reason` is shown in EVERY editor's tray, so
-    it is the one field an admin must actually fill in when halting."""
+    it is the one field an admin must actually fill in when halting.
+
+    UX-8 (resilience sweep 2026-08-28): the Users page has always required a
+    reason and this model did not, so the JSON twin could stop the whole fleet
+    with a blank one -- and then nobody's tray said why. min_length applies to
+    a HALT only, which is why the check is in the route rather than on the
+    field: releasing a halt needs no reason. `hours` is how long the halt
+    stands before it expires by itself; `extend` is [ KEEP HALTED ]."""
     active: bool
     reason: str = Field(default="", max_length=500)
+    hours: float | None = Field(default=None, gt=0, le=24 * 30)
+    extend: bool = False
 
 
 @router.get("/fleet/halt")
@@ -3939,7 +4246,22 @@ def api_set_fleet_halt(
     "something is destroying files and I do not yet know which machine" --
     one switch, one reason, everybody stops."""
     admin = _require_admin(request)
-    state = db.set_fleet_halt(conn, payload.active, payload.reason, admin)
+    if payload.active and len(payload.reason.strip()) < 3:
+        # UX-8: the same rule the Users page has always applied, on the door
+        # that did not apply it. Every editor's tray shows this sentence.
+        raise HTTPException(
+            status_code=422,
+            detail="say why: the reason is shown in every editor's tray "
+                   "(at least 3 characters)",
+        )
+    try:
+        state = db.set_fleet_halt(conn, payload.active, payload.reason, admin,
+                                  hours=payload.hours, extend=payload.extend)
+    except ValueError as exc:
+        # UX-8 (resilience sweep 2026-08-28): extend=true on a halt that has
+        # already ended (see db.set_fleet_halt) must not silently start a
+        # fresh, blank-reason halt.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     conn.commit()
     log.warning(
         "FLEET HALT %s by %s: %s",
@@ -4189,11 +4511,56 @@ def _package_file(settings, row: sqlite3.Row | dict[str, Any]) -> Path:
     return settings.packages_path() / row["platform"] / row["filename"]
 
 
-def _unlink_package_file(settings, row: sqlite3.Row | dict[str, Any]) -> None:
+# UX-9 (resilience sweep 2026-08-28). A deleted package used to be unlinked
+# on the spot inside a bare `except OSError: pass`; those are the bytes a
+# rollback to that version needs, and the swallow meant "deleted" could mean
+# "still there". The file now goes to <data>/packages/.trash/<platform>/ for
+# PACKAGE_TRASH_DAYS, and a move that fails is an ANSWER, not a pass: the row
+# stays so the bytes can still be found. Shared by the JSON DELETE route here
+# and the htmx partial in ui.py - one mechanism, not two.
+PACKAGE_TRASH_DAYS = 30
+
+
+def _trash_package_file(settings, row) -> tuple[str, str | None]:
+    """Move one package's file into <data>/packages/.trash/<platform>/.
+
+    Returns (where it went, error). A file that is ALREADY gone is not an
+    error -- the row is what is being deleted -- but a file that could not be
+    moved is, and the caller keeps the row so the bytes can still be found."""
+    packages = settings.packages_path()
+    source = packages / str(row["platform"]) / str(row["filename"])
+    trash = packages / ".trash" / str(row["platform"])
     try:
-        _package_file(settings, row).unlink(missing_ok=True)
+        if not source.exists():
+            _prune_package_trash(packages)
+            return "", None
+        trash.mkdir(parents=True, exist_ok=True)
+        target = trash / f"{db.utcnow_iso().replace(':', '')}-{source.name}"
+        source.replace(target)
+        _prune_package_trash(packages)
+        return str(target), None
+    except OSError as exc:
+        return "", (
+            f"could not move {source.name} to the trash folder ({exc}). Nothing was "
+            f"deleted: the package row is still here and so are its bytes."
+        )
+
+
+def _prune_package_trash(packages: Path) -> None:
+    """Drop trashed packages older than PACKAGE_TRASH_DAYS. Best effort: a
+    prune that cannot read the directory must never fail the delete that
+    triggered it."""
+    import datetime as _dt
+    cutoff = _dt.datetime.now(_dt.timezone.utc).timestamp() - PACKAGE_TRASH_DAYS * 86400
+    try:
+        for path in (packages / ".trash").rglob("*"):
+            try:
+                if path.is_file() and path.stat().st_mtime < cutoff:
+                    path.unlink()
+            except OSError:
+                continue
     except OSError:
-        pass  # a stray file is harmless; the DB row is the source of truth
+        return
 
 
 # Old enough that no publish still in flight can own it: the request would
@@ -4821,6 +5188,22 @@ def make_current_refusal(
             f"{kind} {version} needs dashboard {requires} and this dashboard is "
             f"{VERSION}. Update the dashboard first, then make this build current."
         )
+    if not _row_str(row, "signature") and not (
+        force and str(confirm or "").strip() == str(version).strip()
+    ):
+        # UX-9 (resilience sweep 2026-08-28). An UNSIGNED build made current
+        # stops every companion upgrading, silently: they verify the record
+        # signature and refuse the offer, and the only signal anywhere was a
+        # chip on this page. A judgement about evidence rather than a fact
+        # about the build, so it goes through the SAME typed override the soak
+        # gate uses -- one mechanism, not two.
+        return 409, (
+            f"{kind} {version} has no release signature. Companions verify "
+            f"signatures, so making it current stops EVERY machine in the fleet "
+            f"from updating, silently. Republish it through tools\\ship.cmd "
+            f"instead. To make it current anyway, type the version number "
+            f"({version}) into the confirmation box."
+        )
     if _row_value(row, "ever_current"):
         # A ROLLBACK, not a rollout: this build has been what the fleet was
         # offered before, so the evidence the soak gate asks for already
@@ -4994,12 +5377,17 @@ def api_delete_package(
             status_code=409,
             detail="cannot delete the current version -- make another version current first",
         )
+    # UX-9: bytes first, row second. A move that fails keeps the row, and says
+    # so, rather than leaving a record-less file nobody can find again.
+    trashed_to, error = _trash_package_file(settings, row)
+    if error:
+        raise HTTPException(status_code=500, detail=error)
     db.delete_companion_package(conn, platform, version, kind)
     db.audit(conn, admin, "package.delete", version,
-             {"kind": kind, "platform": platform, "version": version})
+             {"kind": kind, "platform": platform, "version": version,
+              "trashed_to": trashed_to})
     conn.commit()
-    _unlink_package_file(settings, row)
-    return {"ok": True, "view": build_packages_view(conn, settings)}
+    return {"ok": True, "trashed_to": trashed_to, "view": build_packages_view(conn, settings)}
 
 
 def _require_package_read(request: Request,
@@ -5627,6 +6015,53 @@ class DiskFloorIn(_BoundedSectionIn):
     floor_bytes: int | None = Field(default=None, ge=0)
 
 
+class ResolveHealthIn(_BoundedSectionIn):
+    """The companion's Resolve media scan (wave 4's ingest contract, 2026-08-28).
+
+    Clips the OPEN project references from outside the sync tree are footage
+    lane A will never upload and no other editor will ever see: the timeline
+    opens with red media everywhere else and the machine reports a perfectly
+    green sync, because as far as every lane is concerned there is nothing to
+    move. Declared here BEFORE the companion half ships, which is SYS-3's
+    lesson: the loss is invisible in the direction where the sender is newer
+    than the reader.
+    """
+    out_of_tree: int | None = Field(default=None, ge=0)
+    bad_prefix: int | None = Field(default=None, ge=0)
+    missing: int | None = Field(default=None, ge=0)
+    ignored_this_session: int | None = Field(default=None, ge=0)
+    ignored_folders: int | None = Field(default=None, ge=0)
+    last_scan_at: str | None = Field(default=None, max_length=64)
+    open_project: str | None = Field(default=None, max_length=400)
+
+
+class StrayProjectsIn(_BoundedSectionIn):
+    """Project directories on the editor's disk that are not in the tree.
+
+    A COUNT plus a size plus a bounded sample: what the grid needs is "this
+    machine has 3 project folders nobody else can see", not the list in a
+    column.
+    """
+    count: int | None = Field(default=None, ge=0)
+    bytes: int | None = Field(default=None, ge=0)
+    paths: list[str] | None = Field(default=None, max_length=20)
+
+
+class MovedProjectDirIn(_BoundedSectionIn):
+    """One project directory that is not where the tree says it should be."""
+    slug: str | None = Field(default=None, max_length=200)
+    expected: str | None = Field(default=None, max_length=1000)
+    found: str | None = Field(default=None, max_length=1000)
+
+
+class IngestStagingIn(_BoundedSectionIn):
+    """Footage dropped but not yet filed into a project. It is on ONE
+    computer, so it is one disk failure from gone."""
+    bytes: int | None = Field(default=None, ge=0)
+    batches: int | None = Field(default=None, ge=0)
+    oldest_at: str | None = Field(default=None, max_length=64)
+
+
 class SyncGuardIn(BaseModel):
     """The companion's `sync_guard` section (item 9, 2026-08-17).
 
@@ -5681,6 +6116,14 @@ class SyncGuardIn(BaseModel):
     # `unknown` is "we could not tell" and must never be rendered as
     # `present`. Stored by the v33 step, declared here.
     root_state: str | None = Field(default=None, max_length=32)
+    # v38 (wave 4's ingest contract, resilience sweep 2026-08-28): the four
+    # sections that answer "is this editor's footage anywhere but their own
+    # disk", none of which any lane state can see.
+    resolve_health: ResolveHealthIn | None = None
+    stray_projects: StrayProjectsIn | None = None
+    moved_project_dirs: list[MovedProjectDirIn] | None = Field(
+        default=None, max_length=20)
+    ingest_staging: IngestStagingIn | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -5716,6 +6159,9 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
     blocked = guard.blocked
     restarts = guard.restarts
     upgrade = guard.upgrade
+    rh = guard.resolve_health
+    stray = guard.stray_projects
+    staging = guard.ingest_staging
     restart_records = [] if restarts is None else [
         r for r in (restarts.sequencer, restarts.watcher, restarts.media_tree)
         if r is not None
@@ -5804,6 +6250,31 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
             upgrade.last_attempt_at if upgrade is not None else None),
         "upgrade_reverted_from": (
             upgrade.reverted_from if upgrade is not None else None),
+        # v38 (wave 4's ingest contract). db.store_resolve_health writes these,
+        # not the upsert's INSERT -- same shape and the same reasoning as
+        # blocked_* and upgrade_*, and the same LATCH rule: an absent
+        # sub-section is how the companion spells "there is nothing outside
+        # the tree any more", which a COALESCE could never express.
+        "resolve_out_of_tree": rh.out_of_tree if rh is not None else None,
+        "resolve_bad_prefix": rh.bad_prefix if rh is not None else None,
+        "resolve_missing": rh.missing if rh is not None else None,
+        # The two "ignored" counters are SUMMED into one column: what the grid
+        # needs is "this editor has dismissed N of these", and which half was
+        # a folder is in the diagnostics bundle beside it.
+        "resolve_ignored": (
+            None if rh is None
+            or (rh.ignored_this_session is None and rh.ignored_folders is None)
+            else int(rh.ignored_this_session or 0) + int(rh.ignored_folders or 0)),
+        "resolve_last_scan_at": rh.last_scan_at if rh is not None else None,
+        "stray_projects_count": stray.count if stray is not None else None,
+        "stray_projects_bytes": stray.bytes if stray is not None else None,
+        # A LIST is flattened to its length: an absent list is "nothing moved",
+        # an empty one is the same answer, and both must be able to clear
+        # yesterday's chip.
+        "moved_project_dirs_count": (
+            None if guard.moved_project_dirs is None
+            else len(guard.moved_project_dirs)),
+        "ingest_staging_bytes": staging.bytes if staging is not None else None,
     }
 
 
@@ -6143,6 +6614,17 @@ class FileMoveResultIn(BaseModel):
     id: int
     ok: bool
     detail: str | None = Field(default=None, max_length=512)
+    # RES-1 (resilience sweep 2026-08-28). Absent from every companion below
+    # 0.9.55, where a failure meant "answered, stop asking" -- so absent keeps
+    # exactly that meaning. "retrying" records the attempt WITHOUT retiring
+    # the command (the file is open in Resolve; it will be tried again),
+    # "blocked" is the companion having run out of attempts and is a distinct
+    # thing on the project page from a one-off failure.
+    state: Literal["done", "failed", "retrying", "blocked"] | None = None
+    attempts: int | None = Field(default=None, ge=0, le=1000)
+    # RES-10: moved on disk, but no media pool has been walked yet that
+    # references it, so Resolve is not repointed.
+    relink_pending: bool = False
 
 
 # SYS-3 (resilience sweep 2026-08-28): one WARNING per (machine, section) per
@@ -6595,6 +7077,10 @@ def api_report(
         conn, editor, machine, flatten_sync_guard(payload.sync_guard, received_at),
         (payload.arch or "").strip().lower() or None,
         running_version=(payload.companion_version or "").strip() or None)
+    # v38 (wave 4's ingest contract): is this editor's footage anywhere but
+    # their own disk. Same shape and the same reasoning as the two above.
+    db.store_resolve_health(
+        conn, editor, machine, flatten_sync_guard(payload.sync_guard, received_at))
     # An overridden "Remove from this machine" destroyed a local copy the
     # gate said was not caught up. There is nowhere on the grid for a
     # one-off event, so it goes in the dashboard's log -- which is the only
@@ -6611,10 +7097,12 @@ def api_report(
     # report is not re-sent in its own reply.
     for outcome in payload.file_moves_applied or []:
         if db.mark_file_move_applied(conn, outcome.id, editor, machine,
-                                     outcome.ok, outcome.detail, received_at):
+                                     outcome.ok, outcome.detail, received_at,
+                                     state=outcome.state, attempts=outcome.attempts,
+                                     relink_pending=outcome.relink_pending):
             (log.info if outcome.ok else log.warning)(
                 "%s/%s file move #%s: %s%s", editor, machine, outcome.id,
-                "done" if outcome.ok else "FAILED",
+                "done" if outcome.ok else (outcome.state or "failed").upper(),
                 f" ({outcome.detail})" if outcome.detail else "")
 
     # -- media presence (all optional; absent field ⇒ table untouched) --
@@ -7062,3 +7550,66 @@ def _slug_for_resolve_name(conn: sqlite3.Connection, resolve_name: str) -> str |
         "SELECT project_slug FROM project_roots WHERE resolve_project = ?", (name,)
     ).fetchone()
     return row["project_slug"] if row is not None else None
+
+
+# ------------------------------------------------------------------- alerts
+# SYS-8 (resilience sweep 2026-08-28). The JSON twins of the Settings, Alerts
+# page's three buttons, so "send a test" and "what would this week's report
+# say" behave IDENTICALLY from a script and from the page: both call
+# alerts.py, neither carries its own copy of the logic.
+#
+# NO SECRET IS EVER IN A RESPONSE HERE. `alerts.settings_view` returns whether
+# a password is set and where it came from, never the value, and the sink's
+# refusals are composed by alerts.py for exactly that reason.
+
+
+@router.get("/admin/alerts")
+def api_alerts(request: Request, conn: sqlite3.Connection = Depends(get_conn)
+               ) -> dict[str, Any]:
+    _require_admin(request)
+    from . import alerts
+
+    now = db.utcnow_iso()
+    findings = alerts.scan(conn, request.app.state.settings, now)
+    return {
+        "settings": alerts.settings_view(conn, request.app.state.settings),
+        "open": findings,
+        "counts": alerts.open_counts(findings),
+        "kinds": [{"kind": k.kind, "severity": k.severity, "title": k.title,
+                   "what": k.what} for k in alerts.ALERT_KINDS],
+        "log": db.fetch_alerts(conn, limit=200),
+    }
+
+
+@router.post("/admin/alerts/test")
+def api_alerts_test(request: Request, conn: sqlite3.Connection = Depends(get_conn)
+                    ) -> dict[str, Any]:
+    """Send one message through the configured sink, now.
+
+    dedup OFF: an admin pressing the button twice is asking twice, and a
+    silent "already sent today" is exactly the answer that makes somebody
+    believe a broken sink works.
+    """
+    _require_admin(request)
+    from . import alerts
+
+    subject, text = alerts.compose_alert(
+        alerts.KIND_TEST, "test",
+        "This is a test of the CC Sync alert channel. Nothing is wrong.")
+    result = alerts.send(conn, request.app.state.settings, subject, text,
+                         kind=alerts.KIND_TEST, dedup=False)
+    conn.commit()
+    return result
+
+
+@router.get("/admin/alerts/preview", response_class=PlainTextResponse)
+def api_alerts_preview(request: Request, conn: sqlite3.Connection = Depends(get_conn)
+                       ) -> str:
+    """This week's report as it would be sent. Text, not JSON: the thing being
+    previewed IS the text."""
+    _require_admin(request)
+    from . import alerts
+
+    subject, text = alerts.compose_weekly(conn, db.utcnow_iso(),
+                                          request.app.state.settings)
+    return f"Subject: {subject}\n\n{text}"

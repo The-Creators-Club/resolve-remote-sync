@@ -1577,3 +1577,39 @@ def test_a_lane_past_the_ceiling_does_not_re_arm_while_it_churns():
             [LaneStatus(name="lane_a", state=STATE_SYNCING, queued=tick)])
         clock.advance(60)
     assert reason is None
+
+
+# --- CR-92: live_busy() is describe() before the sentence ------------------------
+
+
+def test_live_busy_returns_the_lanes_describe_would_name():
+    from ccsync_companion.sync.base import LaneStatus
+
+    tracker, clock = _tracker(stale_seconds=60)
+    moving = LaneStatus(name="lane_a_video_up", state="syncing", transferring=1,
+                        bytes_total=100, bytes_done=10)
+    idle = LaneStatus(name="lane_b_proxy_down", state="idle")
+    stuck = LaneStatus(name="lane_c_syncthing", state="syncing", queued=5)
+
+    first = tracker.live_busy([moving, idle, stuck])
+    assert [s.name for s in first] == ["lane_a_video_up", "lane_c_syncthing"]
+
+    # Lane A moves, lane C does not: past the bound only A is alive, and
+    # describe() says exactly what live_busy() returns.
+    clock.advance(120)
+    moving.bytes_done = 50
+    alive = tracker.live_busy([moving, idle, stuck])
+    assert [s.name for s in alive] == ["lane_a_video_up"]
+    assert tracker.describe([moving, idle, stuck]) is not None
+
+    clock.advance(120)
+    assert tracker.live_busy([moving, idle, stuck]) == []
+    assert tracker.describe([moving, idle, stuck]) is None
+
+
+def test_live_busy_never_raises():
+    def boom():
+        raise RuntimeError("clock")
+
+    tracker = PendingTracker(clock=boom)
+    assert tracker.live_busy([object()]) == []

@@ -3027,6 +3027,74 @@ browser with no confirm(), is exactly the old behaviour: re-attach and the
 loud toast (which now names [ CANCEL SEARCH ]). Harness scenarios in
 `tests/test_static_app.py`. Needs a dashboard deploy.
 
+## Pulling the sync drive mid-upload looked exactly like pulling it after a finished day (CR-92, 2026-08-28)
+
+### CR-92 - the unplug balloon never said whether anything was still owed, and nothing ever reminded the editor - FIXED in repo 2026-08-28 as companion 0.9.55, NOT YET SHIPPED
+**Asked for** by the owner 2026-08-28, with leso's Mac in mind (the tree on an
+external SSD at `/Volumes/SAMDISK/Creators_Club`): a warning when the drive
+is removed but syncing has not completed, and then a reminder every half
+hour, for as long as the drive stays out, telling the editor to plug it back
+in to finish syncing.
+
+**What it did before.** `root_guard.py` noticed the volume going and
+`app._on_root_absent` paused the lanes with ONE balloon, "Sync paused: your
+Creators Club drive is disconnected", the same sentence whether the machine
+was up to date or three camera originals were part-uploaded. rclone has no
+resume for SFTP uploads, so those files start from zero when the drive comes
+back - IF it comes back before the project is needed. In between, the fleet
+page shows the machine behind and the only person who can fix it is looking
+at a menu-bar icon that reads "paused", which is what they asked for. Nothing
+repeated, and a companion restart with the drive out forgot there had ever
+been anything owed.
+
+**What it does now** (`companion/src/ccsync_companion/drive_reminder.py`):
+
+- At the moment the drive goes, BEFORE the lanes are paused (pausing rewrites
+  every status to `paused`, which `busy_lanes()` rightly ignores), the app
+  asks what was still in flight. If anything was, the balloon is "Your
+  Creators Club drive was disconnected before syncing finished: 2 uploads and
+  14 other files (1.9 GB left) still to go. Plug it back in to finish
+  syncing." (title `ccsync-companion: sync unfinished`). Otherwise the calm
+  one-liner stands, unchanged - the common case must stay calm.
+- Then every `drive_reminder_minutes` (new config key, default 30, 0 = first
+  warning only, a bad value warns and uses the default): "Your Creators Club
+  drive is still disconnected and syncing is unfinished: ... still to go. Plug
+  it back in to finish syncing." The tray `Sync:` line reads `paused (drive
+  disconnected, 2 uploads (1.9 GB left) still to go)`, the tooltip and the
+  Settings window's SYNC LANES section carry the same figure, so the balloon
+  is not the only place the sentence exists.
+- The episode is recorded in `~/.ccsync/state/drive_unfinished.json`. A
+  companion that quits (self-upgrade, reboot) with the drive out owing work
+  restarts with the drive out owing work: `root_guard` fires `on_absent` at
+  startup, nothing is in flight, and the record is what says the reminders
+  carry on - one goes out at once, then the cadence. The drive coming back
+  is the only thing that clears it (also on the first healthy sighting after
+  a restart, which retires a stale record). Not a safety latch: losing the
+  file costs a reminder, never data.
+- **What counts as "unfinished" is the power guards' verdict, not
+  `busy_lanes()`.** `shutdown_guard.PendingTracker` grew `live_busy()`
+  (`describe()` before it is rendered into a sentence), and the reminder
+  reads that, so a lane sitting in `syncing` for hours with nothing moving -
+  CR-91's exact shape, on the same machine this was asked for - is NOT
+  reported as an upload the editor must plug the drive back in for every
+  half hour. Cry-wolf is the failure that gets the real warning ignored.
+
+**Where it cannot help.** The verdict is taken from the lanes' own status at
+the moment of the unplug; a transfer that had already failed for another
+reason (`error`) or one the editor had paused from the tray is not "owed",
+and a lane that had not yet started its pass (nothing in flight, backlog
+unknown to the companion) is not either - the dashboard's queue is the
+authority for THAT. Also Mac notifications go through `osascript display
+notification`, so a user who has silenced notifications for Script Editor
+sees only the tray line.
+
+Tests: `companion/tests/test_drive_reminder.py` (the module), CR-92 blocks in
+`test_app.py` (the four sentences, the CR-91 guard, the restart carry-on,
+shutdown keeping the record), `test_tray.py` (Sync: line, snapshot
+fingerprint, tooltip length), `test_shutdown_guard.py` (`live_busy`),
+`test_config.py` (the key is documented commented-out, like the keep-awake
+pair). Ships as companion 0.9.55; no dashboard change.
+
 ## Approving a computer under its own name mints a phantom editor (CR-91, 2026-08-28)
 
 ### CR-91 - "one user, many devices" read as "assign a NEW username per device", and typing the machine name is the B16 unshare - FIXED in repo 2026-08-28 as dashboard 0.7.16, NOT YET DEPLOYED

@@ -158,6 +158,9 @@ def test_default_toml_text_documents_every_default_key():
         # numbers are measured defaults -- pinning them in every first-run file
         # is how a later re-tune reaches nobody.
         "keep_awake_stale_seconds", "keep_awake_max_hold_seconds",
+        # The sync-drive reminder cadence (CR-92): same class, a field knob
+        # whose shipped value must stay re-tunable.
+        "drive_reminder_minutes",
         # The proxy generator's tuning, same class again -- plus
         # proxy_gen_enabled, which CANNOT be written live at all: its default
         # is None ("derive it from lane_b_enabled"), TOML has no null, and an
@@ -249,6 +252,7 @@ def test_default_toml_text_documents_every_default_key():
 EXAMPLE_COMMENTED_OUT = {
     "sync_enabled", "lane_b_enabled", "server_p_unc",
     "keep_awake_stale_seconds", "keep_awake_max_hold_seconds",
+    "drive_reminder_minutes",
     "proxy_gen_enabled", "proxy_gen_max_height", "proxy_gen_bitrate",
     "proxy_gen_max_failures", "proxy_notify_cooldown_seconds",
     "proxy_gen_skip_while_resolve_running",

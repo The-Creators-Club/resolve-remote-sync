@@ -3407,6 +3407,155 @@ def test_on_absent_pauses_the_sequencer_and_toasts_once(tmp_path, monkeypatch):
     assert "Sync paused" in toasts[0]
 
 
+class _FakeLane:
+    """A lane whose status() is whatever the test says (CR-92 tests)."""
+
+    def __init__(self, status):
+        self.name = status.name
+        self._status = status
+
+    def status(self):
+        return self._status
+
+
+def _drive_record_path(app) -> Path:
+    from ccsync_companion import config as config_mod
+    from ccsync_companion import drive_reminder as dr
+
+    return config_mod.resolved_log_path(app.config).parent / "state" / dr.STATE_FILENAME
+
+
+def test_on_absent_with_work_in_flight_warns_what_is_owed_and_starts_reminders(tmp_path, monkeypatch):
+    """CR-92: a drive pulled mid-upload used to get the same calm "Sync
+    paused" balloon as a drive taken away at the end of a finished day.
+    The first balloon now names what was still to go, the tray line carries
+    it, and a record survives for the reminders."""
+    from ccsync_companion.sync.base import LaneStatus
+
+    app = _make_app(tmp_path, dashboard_url="http://dash.example.com", sync_enabled=True)
+    app._tray_icon = _FakeTray()
+    monkeypatch.setattr(app.sequencer, "pause", lambda: None)
+    monkeypatch.setattr(app, "_set_express_paused", lambda paused: None)
+    app.lanes = [
+        _FakeLane(LaneStatus(name="lane_a_video_up", state="syncing", transferring=2,
+                             bytes_total=3_000_000_000, bytes_done=1_000_000_000)),
+        _FakeLane(LaneStatus(name="lane_c_syncthing", state="idle", queued=14)),
+    ]
+
+    app._on_root_absent("absent")
+    app._on_root_absent("absent")
+
+    messages = [m for m, _t in app._tray_icon.notifications]
+    assert len(messages) == 1
+    assert "was disconnected before syncing finished: 2 uploads and 14 other files (1.9 GB left) still to go" in messages[0]
+    assert messages[0].endswith("Plug it back in to finish syncing.")
+    assert not any("Sync paused" in m for m in messages)
+    assert app.drive_unfinished_summary() == "2 uploads and 14 other files (1.9 GB left)"
+    assert _drive_record_path(app).exists()
+    assert app._drive_reminder.active
+
+    # The drive comes back: reminders end, the record goes, the tray line
+    # returns to nothing owed.
+    from ccsync_companion import root_guard as root_guard_mod
+    monkeypatch.setattr(root_guard_mod, "refresh_volume_record", lambda root: None)
+    monkeypatch.setattr(app, "_root_resume_lanes", lambda: None)
+    app._on_root_present()
+
+    assert not app._drive_reminder.active
+    assert app.drive_unfinished_summary() == ""
+    assert not _drive_record_path(app).exists()
+    assert any("reconnected" in m for m, _t in app._tray_icon.notifications)
+
+
+def test_on_absent_with_nothing_owed_keeps_the_calm_balloon_and_no_reminder(tmp_path, monkeypatch):
+    from ccsync_companion.sync.base import LaneStatus
+
+    app = _make_app(tmp_path, dashboard_url="http://dash.example.com", sync_enabled=True)
+    app._tray_icon = _FakeTray()
+    monkeypatch.setattr(app.sequencer, "pause", lambda: None)
+    monkeypatch.setattr(app, "_set_express_paused", lambda paused: None)
+    app.lanes = [_FakeLane(LaneStatus(name="lane_a_video_up", state="idle"))]
+
+    app._on_root_absent("absent")
+
+    messages = [m for m, _t in app._tray_icon.notifications]
+    assert messages == [f"Sync paused: {messages[0].split('Sync paused: ')[1]}"]
+    assert "disconnected" in messages[0]
+    assert not app._drive_reminder.active
+    assert app.drive_unfinished_summary() == ""
+    assert not _drive_record_path(app).exists()
+
+
+def test_a_stalled_lane_is_not_reported_as_unfinished_work(tmp_path, monkeypatch):
+    """CR-91's shape: lane A in `syncing` for hours with nothing moving.
+    Pull the drive and the editor must NOT be told every half hour to plug
+    it back in for an upload that was never real -- the verdict goes
+    through the power guards' liveness bound, not busy_lanes()."""
+    from ccsync_companion import shutdown_guard as sg
+    from ccsync_companion.sync.base import LaneStatus
+
+    app = _make_app(tmp_path, dashboard_url="http://dash.example.com", sync_enabled=True)
+    app._tray_icon = _FakeTray()
+    monkeypatch.setattr(app.sequencer, "pause", lambda: None)
+    monkeypatch.setattr(app, "_set_express_paused", lambda paused: None)
+    stuck = LaneStatus(name="lane_a_video_up", state="syncing", transferring=1)
+    app.lanes = [_FakeLane(stuck)]
+    now = [1000.0]
+    app._pending_tracker = sg.PendingTracker(stale_seconds=60, clock=lambda: now[0])
+    # The keep-awake loop's samples: same fingerprint, well past the bound.
+    app._pending_tracker.describe([stuck])
+    now[0] += 600
+
+    app._on_root_absent("absent")
+
+    messages = [m for m, _t in app._tray_icon.notifications]
+    assert len(messages) == 1 and messages[0].startswith("Sync paused:")
+    assert not app._drive_reminder.active
+
+
+def test_on_absent_at_startup_carries_on_a_remembered_episode(tmp_path, monkeypatch):
+    """The companion restarted (self-upgrade, reboot) with the drive still
+    out: nothing is in flight, but the previous run recorded what was owed,
+    so the reminder goes straight out and the cadence carries on."""
+    import json
+
+    from ccsync_companion import drive_reminder as dr
+
+    app = _make_app(tmp_path, dashboard_url="http://dash.example.com", sync_enabled=True)
+    record = _drive_record_path(app)
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps({"summary": "3 uploads (12.0 GB left)"}), encoding="utf-8")
+    app._tray_icon = _FakeTray()
+    monkeypatch.setattr(app.sequencer, "pause", lambda: None)
+    monkeypatch.setattr(app, "_set_express_paused", lambda paused: None)
+
+    app._on_root_absent("absent")
+
+    messages = [m for m, _t in app._tray_icon.notifications]
+    assert len(messages) == 1
+    assert "still disconnected" in messages[0]
+    assert "3 uploads (12.0 GB left) still to go" in messages[0]
+    assert not any("Sync paused" in m for m in messages)
+    assert app.drive_unfinished_summary() == "3 uploads (12.0 GB left)"
+
+
+def test_shutdown_keeps_the_drive_record_for_the_next_start(tmp_path, monkeypatch):
+    from ccsync_companion.sync.base import LaneStatus
+
+    app = _make_app(tmp_path, dashboard_url="http://dash.example.com", sync_enabled=True)
+    app._tray_icon = _FakeTray()
+    monkeypatch.setattr(app.sequencer, "pause", lambda: None)
+    monkeypatch.setattr(app, "_set_express_paused", lambda paused: None)
+    app.lanes = [_FakeLane(LaneStatus(name="lane_b_proxy_down", state="syncing", transferring=1))]
+    app._on_root_absent("absent")
+    assert _drive_record_path(app).exists()
+
+    app.shutdown()
+
+    assert _drive_record_path(app).exists()
+    assert app._drive_reminder._thread is None
+
+
 def test_on_absent_does_not_touch_the_editors_own_pause_toggle(tmp_path, monkeypatch):
     """self._paused is the tray's checkbox. Flipping it from a poll thread
     would leave "Resume syncing" ticked with nobody having clicked it."""

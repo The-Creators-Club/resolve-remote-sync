@@ -2926,3 +2926,43 @@ def test_sync_line_queued_but_idle():
     idle = _status("lane_a_video_up", "idle")
     idle.queued = 7
     assert _sync_line(_snap(statuses=[idle])) == "Sync: 7 files waiting"
+
+
+# -- CR-92: the drive went out with work owed ---------------------------------
+
+
+def test_sync_line_names_what_the_drive_went_out_owing():
+    from ccsync_companion.tray import _sync_line
+
+    assert _sync_line(_snap(root_absent=True)) == "Sync: paused (drive disconnected)"
+    assert _sync_line(_snap(root_absent=True, root_unfinished="2 uploads (1.9 GB left)")) == (
+        "Sync: paused (drive disconnected, 2 uploads (1.9 GB left) still to go)")
+    # Only while the drive is out: the summary alone changes nothing.
+    assert _sync_line(_snap(root_unfinished="2 uploads")) == "Sync: up to date"
+
+
+def test_the_snapshot_carries_root_unfinished_and_the_fingerprint_changes():
+    from ccsync_companion.tray import _menu_fingerprint, _tray_snapshot
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    app._root_absent = True
+    before = _tray_snapshot(app)
+    assert before["root_unfinished"] == ""
+    fp_before = _menu_fingerprint(before)
+
+    app.drive_unfinished_summary = lambda: "2 uploads"
+    after = _tray_snapshot(app)
+
+    assert after["root_unfinished"] == "2 uploads"
+    assert _menu_fingerprint(after) != fp_before
+
+
+def test_the_tooltip_names_what_is_owed_and_stays_short():
+    from ccsync_companion.tray import _tooltip_text, _tray_snapshot
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    app._root_absent = True
+    app.drive_unfinished_summary = lambda: "2 uploads, 3 proxy downloads and 14 other files (123.4 GB left)"
+    text = _tooltip_text(_tray_snapshot(app))
+    assert text.startswith("CCSync: PAUSED (drive disconnected, 2 uploads")
+    assert len(text) <= 127

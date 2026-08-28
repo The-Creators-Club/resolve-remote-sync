@@ -396,6 +396,17 @@ menu says `PAUSED — drive disconnected`. Plug it back in and syncing
 resumes on its own -- there is nothing to click, and nothing is lost beyond
 the transfer that was in flight (files restart, they do not corrupt).
 
+**But if something was still uploading or downloading when you pulled it,
+the companion tells you** (companion 0.9.55+): the notification reads
+"Your <studio> drive was disconnected before syncing finished: 2 uploads
+(1.9 GB left) still to go. Plug it back in to finish syncing.", the `Sync:`
+line in the menu carries the same figure, and the reminder repeats every
+half hour for as long as the drive stays out -- through a restart of the
+companion, too. Plugging the drive back in is what ends it; nothing else
+does. A drive pulled with nothing owed gets the one calm "Sync paused"
+notification and no reminders. (An admin can change the half hour with
+`drive_reminder_minutes` in `config.toml`; 0 keeps the first warning only.)
+
 **macOS will ask for permission to read the drive, once.** The first time
 the companion (or rclone) touches a removable volume, macOS shows a
 "…would like to access files on a removable volume" prompt. **Allow it.**

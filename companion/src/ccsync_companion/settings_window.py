@@ -221,6 +221,12 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
                  tray_mod._skipped_exists_line(guard), tray_mod._trash_line(guard)):
         if text:
             lane_items.append(Line(text, style="warning"))
+    if snap.get("root_unfinished"):
+        # CR-92: the drive went out with work owed. The balloon says it
+        # every half hour; this is where it stays readable in between.
+        lane_items.append(Line(
+            f"Your drive was disconnected with {snap['root_unfinished']} still to "
+            f"go - plug it back in to finish syncing", style="warning"))
     if snap.get("ytdl_line"):
         lane_items.append(Line(snap["ytdl_line"]))
 

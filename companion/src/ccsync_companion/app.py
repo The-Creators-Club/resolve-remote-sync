@@ -47,6 +47,7 @@ from . import resolve_bridge
 from . import resolve_journal
 from . import resolve_prefs as resolve_prefs_mod
 from . import root_guard as root_guard_mod
+from . import drive_reminder as drive_reminder_mod
 from . import shutdown_guard as shutdown_guard_mod
 from . import stills as stills_mod
 from . import theme
@@ -799,6 +800,19 @@ class CompanionApp:
         # and the guard is free to re-fire (absent -> misplaced) within one.
         self._root_absent_announced = False
         self._root_misplaced_announced = False
+        # The drive went with work still to go (CR-92, drive_reminder.py):
+        # the first balloon names what was owed and a reminder repeats every
+        # drive_reminder_minutes until it is back. Built here, before any
+        # lane exists, for the same reason the breaker is: the guard's first
+        # probe can fire on_absent before _start_lanes() ever runs, and that
+        # is exactly when a remembered episode has to be picked back up.
+        self._drive_reminder = drive_reminder_mod.DriveReminder(
+            notify_fn=self._notify_tray,
+            drive_phrase_fn=lambda: site_mod.drive_phrase(capitalised=True),
+            interval=drive_reminder_mod.interval_seconds(cfg),
+            state_path=(config_mod.resolved_log_path(cfg).parent / "state"
+                        / drive_reminder_mod.STATE_FILENAME),
+        )
         # The licence dialog is offered ONCE per run, on the same reasoning:
         # an unaccepted licence is a state the tray already shows, and a modal
         # that keeps coming back is how an editor learns to dismiss it without
@@ -1476,6 +1490,34 @@ class CompanionApp:
         a probe that has not answered must not switch anything off."""
         return not self._root_absent
 
+    def drive_unfinished_summary(self) -> str:
+        """"2 uploads (2.3 GB left)" while the drive is out with work owed,
+        else "". Read by the tray snapshot on every render: two attribute
+        reads, no I/O."""
+        reminder = getattr(self, "_drive_reminder", None)
+        if reminder is None or not self._root_absent:
+            return ""
+        return str(reminder.summary or "")
+
+    def _unfinished_before_pause(self) -> Optional[str]:
+        """What was still to go at the moment the drive went, or None.
+
+        Asked BEFORE _root_pause_lanes(): pausing rewrites every status to
+        `paused`, which busy_lanes() rightly ignores. Through the power
+        guards' PendingTracker, not busy_lanes() directly, so a lane stuck
+        in `syncing` with nothing moving (CR-91) is not reported as an
+        upload the editor must plug the drive back in for. Never raises: a
+        failure here costs the detail, and the plain "Sync paused" balloon
+        still goes out."""
+        try:
+            statuses = [lane.status() for lane in self.lanes]
+            busy = self._pending_tracker.live_busy(statuses, self._lane_peer_states())
+            work = drive_reminder_mod.unfinished_work(busy)
+            return work.summary() if work is not None else None
+        except Exception:
+            log.exception("root guard: could not tell what was still syncing")
+            return None
+
     def _start_root_guard(self) -> None:
         """Watch for the sync drive coming and going.
 
@@ -1505,6 +1547,10 @@ class CompanionApp:
         anything -- and would then be un-resumed by the drive coming back."""
         try:
             self._root_state = str(state)
+            # Judged before the pause below, and before _root_absent flips
+            # (nothing here reads it, but the order is the point).
+            unfinished = (self._unfinished_before_pause()
+                          if not self._root_absent_announced else None)
             self._root_absent = True
             if not self._root_absent_announced:
                 self._root_absent_announced = True
@@ -1512,10 +1558,19 @@ class CompanionApp:
                     "sync paused: local_root %s is not available (%s)",
                     self.config.get("local_root"), state,
                 )
-                self._notify_tray(
-                    f"Sync paused: {site_mod.drive_phrase()} is disconnected.",
-                    "ccsync-companion",
-                )
+                # Three sentences for one event (CR-92): work was owed at
+                # the moment it went -> the warning that names it, and the
+                # half-hourly reminders after; nothing was owed but a
+                # previous run recorded that something still is -> those
+                # reminders carry on; otherwise the calm one-liner, which is
+                # the common case and must stay calm.
+                if unfinished:
+                    self._drive_reminder.begin(unfinished)
+                elif not self._drive_reminder.resume_remembered():
+                    self._notify_tray(
+                        f"Sync paused: {site_mod.drive_phrase()} is disconnected.",
+                        "ccsync-companion",
+                    )
             self._root_pause_lanes()
             if state == root_guard_mod.ROOT_MISPLACED:
                 self._warn_root_misplaced()
@@ -1530,6 +1585,11 @@ class CompanionApp:
             self._root_state = root_guard_mod.ROOT_PRESENT
             self._root_absent_announced = False
             self._root_misplaced_announced = False
+            # The drive is back, so whatever it went out owing is about to
+            # be synced: end the reminders and forget the record. Also on
+            # the first healthy sighting, which is what retires a record
+            # left by a run that ended with the drive out.
+            self._drive_reminder.clear()
             # Best effort, and only ever a no-op on Windows: this is what
             # keeps the recorded UUID/mount point true after a reformat or a
             # rename, which is what makes `misplaced` detectable next time.
@@ -6413,6 +6473,13 @@ class CompanionApp:
         # firing during teardown would leave a sequencer and an rclone child
         # running in a process that is exiting.
         root, self._root_guard = self._root_guard, None
+        # The drive reminder's thread goes too, but its RECORD stays: a
+        # companion that quits with the drive out owing work restarts with
+        # the drive out owing work (drive_reminder.resume_remembered).
+        try:
+            self._drive_reminder.suspend()
+        except Exception:
+            log.exception("failed to stop the sync-drive reminder")
         for power_guard, label in ((guard, "shutdown"), (awake, "keep-awake"),
                                    (root, "sync-drive")):
             if power_guard is None:

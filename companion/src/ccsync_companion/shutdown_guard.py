@@ -384,6 +384,27 @@ class PendingTracker:
         with no connected Syncthing device); None/absent means unknown, which
         never vetoes -- "can't tell" must not silence a real warning.
         """
+        return _render_pending(self.live_busy(statuses, peer_states))
+
+    def live_busy(
+        self,
+        statuses: Iterable,
+        peer_states: Optional[dict] = None,
+    ) -> list:
+        """The lanes that are busy AND alive AND under the hold ceiling --
+        describe() before it is rendered into a sentence.
+
+        Its own method since CR-92 (2026-08-28): the sync-drive reminder
+        needs the same verdict as the power guards, per lane, to say WHAT
+        was still to go when the drive went -- and it must be this verdict,
+        not busy_lanes(), because a lane stuck in `syncing` with nothing
+        moving (CR-91) would otherwise be reported as an unfinished upload
+        every half hour for as long as the drive stayed out. Same sampling
+        contract: each call is a sample, so a caller that only ever calls
+        this ONCE sees every busy lane as alive (first sighting).
+
+        Never raises; an empty list is the not-blocking answer.
+        """
         try:
             now = self._clock()
             busy = busy_lanes(statuses)
@@ -395,7 +416,7 @@ class PendingTracker:
                 return self._apply_ceiling(alive, now)
         except Exception:
             log.exception("shutdown guard: liveness check failed -- not blocking")
-            return None
+            return []
 
     # -- internals ----------------------------------------------------------
 
@@ -454,7 +475,7 @@ class PendingTracker:
             self._seen.pop(name, None)
             self._stale_logged.discard(name)
 
-    def _apply_ceiling(self, alive: list, now: float) -> Optional[str]:
+    def _apply_ceiling(self, alive: list, now: float) -> list:
         # SYNC-16 (2026-08-11): the hold clock is PER LANE. It used to be one
         # clock for the tracker, so a lane that churns for eight hours without
         # settling (lane C's need count ticking over a huge library, rclone
@@ -480,9 +501,7 @@ class PendingTracker:
                     "account until it does",
                     name or "a lane", (now - since) / 3600.0,
                 )
-        if not holding:
-            return None
-        return _render_pending(holding)
+        return holding
 
     def _log_once(self, key: str, message: str, *args: Any) -> None:
         if key in self._stale_logged:

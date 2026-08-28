@@ -1767,6 +1767,9 @@ def _sync_line(snap: dict) -> str:
     if snap.get("problems") or snap.get("eula_problem"):
         return "Sync: not set up yet"
     if snap.get("root_absent"):
+        owed = str(snap.get("root_unfinished") or "")
+        if owed:
+            return f"Sync: paused (drive disconnected, {owed} still to go)"
         return "Sync: paused (drive disconnected)"
     if snap.get("paused"):
         return "Sync: paused"
@@ -1925,6 +1928,12 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     # tray reports "PROBLEM ... a project folder was deleted on this machine"
     # for a project sitting safely on a drive in the editor's bag.
     _get("root_absent", lambda: bool(getattr(app, "_root_absent", False)), False)
+    # What the drive went out still owing ("2 uploads (2.3 GB left)"), or ""
+    # (CR-92). Two attribute reads on the app; the tray shows it on the
+    # Sync: line and the tooltip so the reminder balloon is not the only
+    # place the sentence exists.
+    _get("root_unfinished",
+         lambda: str(getattr(app, "drive_unfinished_summary", lambda: "")() or ""), "")
     _get("dashboard_url", lambda: _dashboard_url(app), "")
     # Whether the "Sign in to YouTube (for downloads)…" item is offered at
     # all. TWO gates since 2026-08-17 (COMMERCIAL_READINESS.md items 2 + 3):
@@ -2125,7 +2134,7 @@ def _menu_fingerprint(snap: dict) -> tuple:
     )
     return (
         lanes, snap["identity_label"], snap["signed_in"], snap["paused"],
-        snap["problems"], snap.get("root_absent"),
+        snap["problems"], snap.get("root_absent"), snap.get("root_unfinished"),
         snap.get("resolve_line"),
         snap["setup_name"], (snap["upgrade_info"] or {}).get("version"),
         snap["dashboard_url"],
@@ -2501,6 +2510,11 @@ def _tooltip_text(snap: dict) -> str:
     if snap["problems"]:
         return "CCSync: NOT SET UP (nothing syncs)"
     if snap.get("root_absent"):
+        owed = str(snap.get("root_unfinished") or "")
+        if owed:
+            # Windows truncates the tooltip at ~127 chars; the summary is
+            # bounded (three lanes, one byte figure) but not short.
+            return f"CCSync: PAUSED (drive disconnected, {owed} still to go)"[:120]
         return "CCSync: PAUSED (your drive is disconnected)"
     if not snap["signed_in"] and snap.get("require_login", True):
         return "CCSync: not signed in (nothing syncs)"

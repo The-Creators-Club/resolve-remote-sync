@@ -144,7 +144,7 @@ log = logging.getLogger("ccsync.config")
 # sidecar once when the signature says the binary rather than the video. The
 # other half of CR-83 is the dashboard's, 0.7.11: the fleet's yt-dlp floor was
 # 2026.07.04, which is a version that cannot download at all.
-VERSION = "0.9.54"
+VERSION = "0.9.55"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -631,6 +631,12 @@ DEFAULTS: dict[str, Any] = {
     # until the lanes actually settle. Raise it on a machine that genuinely
     # uploads for longer than this in one unbroken run.
     "keep_awake_max_hold_seconds": 8 * 3600.0,
+    # How often to remind an editor whose external sync drive was unplugged
+    # with work still to go (CR-92, drive_reminder.py). The first warning
+    # at the moment the drive goes is unconditional; this is the cadence of
+    # the "still disconnected, plug it back in to finish syncing" balloons
+    # after it, for as long as the drive stays out. 0 = first warning only.
+    "drive_reminder_minutes": 30.0,
     # False = no sync lanes at all: the machine works directly off the NAS
     # share (base rig). The companion still runs the timeline watcher, popup
     # fixer, and dashboard reporter; lanes report idle with a "disabled"
@@ -1230,6 +1236,12 @@ keep_awake_while_syncing = true
 # keep_awake_stale_seconds = 180.0
 # keep_awake_max_hold_seconds = 28800.0
 
+# If the sync drive is an external SSD and it is unplugged while something
+# was still uploading or downloading, the companion warns at once and then
+# reminds you this often (minutes) until it is plugged back in. 0 keeps the
+# first warning and drops the reminders. The default is the shipped value.
+# drive_reminder_minutes = 30
+
 # Set false when this machine works entirely off the NAS share and should
 # never sync anything locally (base rig). Timeline watcher, popup fixer and
 # dashboard reporting keep working; all sync lanes stay off. Left commented
@@ -1749,6 +1761,17 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
                 f"{key} must be a positive number, got {cfg.get(key)!r} -- "
                 f"using the default ({DEFAULTS[key]})"
             )
+    # Same class, but 0 is legal (it means "first warning only").
+    try:
+        value = float(cfg.get("drive_reminder_minutes", DEFAULTS["drive_reminder_minutes"]))
+        if value < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        warnings.append(
+            f"drive_reminder_minutes must be a number >= 0 (0 disables the "
+            f"reminders), got {cfg.get('drive_reminder_minutes')!r} -- using the "
+            f"default ({DEFAULTS['drive_reminder_minutes']})"
+        )
 
     # A WARNING, and it must never become an error. Errors stop every sync
     # lane (DEL-3), and a machine with no ffmpeg is a machine that syncs

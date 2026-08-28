@@ -627,6 +627,16 @@ keep_awake_while_syncing = true
 # keep_awake_stale_seconds = 180.0
 # keep_awake_max_hold_seconds = 28800.0
 
+# If the sync tree lives on an external SSD and the drive is unplugged while
+# something was still uploading or downloading, the companion warns at once
+# ("...was disconnected before syncing finished: 2 uploads still to go") and
+# then repeats the reminder this often, in minutes, until the drive is back.
+# 0 keeps the first warning and drops the repeats. What counts as "still to
+# go" is the same liveness verdict the two guards above use, so a lane that
+# was merely stuck (CR-91) does not earn a reminder every half hour. The
+# value shown IS the default, commented out for the reason given above.
+# drive_reminder_minutes = 30
+
 # Set false when this machine works entirely off the NAS share and should
 # never sync anything locally (base rig). Timeline watcher, popup fixer and
 # dashboard reporting keep working; all sync lanes stay off.

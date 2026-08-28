@@ -290,7 +290,10 @@ What a new editor goes through, from an empty computer to a playing timeline.
 never will be; Resolve's mapped mount translates `P:\` to your sync folder,
 and the wizard sets it while Resolve is quit. Unplugging the SSD is fine: the
 companion pauses every lane, the icon goes orange, and syncing resumes on its
-own when the drive returns.
+own when the drive returns. Unplug it while something was still uploading or
+downloading and the companion says so at once ("...was disconnected before
+syncing finished: 2 uploads still to go. Plug it back in to finish syncing.")
+and repeats the reminder every half hour until the drive is back.
 
 **Do not map any NAS share to a drive letter of your own.** If a letter you
 map collides with a path stored in the shared project database, Resolve will
@@ -776,6 +779,7 @@ click in the NAS's own interface instead.
 | Playback is strangely slow and the tray shows little activity | Resolve is streaming originals over the network, usually because a NAS share is mapped to a colliding drive letter | Check your mapped drives and remove any NAS mapping you made yourself |
 | "Sync engine will not start: <why>" | The both-ways engine could not be restarted after three tries | Send the admin diagnostics (tray > *Copy diagnostics for your admin*) |
 | "PAUSED, drive disconnected" (Mac) | The SSD holding your tree is unplugged | Plug it back in; syncing resumes by itself. If macOS mounts it as "Name 1", see the Mac notes the admin has |
+| "...was disconnected before syncing finished: N uploads still to go", repeating every half hour | The SSD was unplugged with a transfer still running; what it names is still owed | Plug it back in and leave the companion running until the `Sync:` line reads up to date. The reminders stop by themselves when the drive is back |
 | The scripting warning dialog keeps appearing | Resolve's scripting server is not answering | Restart the companion, then Resolve; check *External scripting using* is set to Local |
 | "Send to Resolve" does nothing | Companion not running, too old, or the dashboard address in it does not match the one you are browsing | Open the self-test link the page offers; if it answers, tell the admin the addresses differ |
 | The b-roll page says your GPU cannot fit the model | Local indexing needs more video memory than this machine has | Pick a smaller model tier, or leave the batch for another of your machines |

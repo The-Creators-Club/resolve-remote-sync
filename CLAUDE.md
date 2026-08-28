@@ -382,6 +382,15 @@ Full runbook, including what each version number means and how to roll back:
   "lane B isn't downloading", check `~/.ccsync/state/lane_b_breaker.json`,
   the tray line, or the grid chip. Same for `sync_halt.json`. Never make a
   safety latch in-memory-only. `docs/SYNC_SAFETY.md`.
+- **An external sync drive pulled mid-transfer gets a warning that names what
+  is owed, then a reminder every half hour until it is back** (CR-92,
+  companion 0.9.55, `drive_reminder.py`): the verdict is
+  `PendingTracker.live_busy()` - the power guards' liveness bound, never
+  `busy_lanes()` - so a lane stuck in `syncing` (CR-91) earns no reminder;
+  the episode lives in `~/.ccsync/state/drive_unfinished.json` across
+  restarts and only the drive coming back clears it. `drive_reminder_minutes`
+  (0 = first warning only). A drive pulled with nothing owed keeps the one
+  calm "Sync paused" balloon.
 - **Never call `scriptapp("Resolve")` outside `resolve_bridge.connect()`**
   (CR-68, 2026-08-21). Resolve's script server (`fuscript.exe`, TCP 1144)
   exits when its last client leaves, and a client that connects before

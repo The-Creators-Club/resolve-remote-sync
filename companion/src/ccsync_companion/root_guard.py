@@ -30,6 +30,13 @@ So one question, asked in one place, answered honestly:
              Only detectable when a volume UUID was recorded; without one,
              `absent` covers it (and says the same thing to the user, just
              with less detail).
+  not_answering
+             the drive IS there and its filesystem has stopped answering
+             opens (SYNC-2, 2026-08-28). Nothing in-process can detect this,
+             because the detection is itself the call that blocks -- so a
+             short-lived subprocess does the opening. Paused like `absent`,
+             with its own sentence, because "check the cable" is the wrong
+             advice for a drive that is plugged in.
   unknown    the PROBE failed -- not the drive. Callers treat this as "no
              new information" and change nothing, because a bug in here must
              never be able to pause an editor's sync indefinitely.
@@ -75,6 +82,17 @@ ROOT_PRESENT = "present"
 ROOT_ABSENT = "absent"
 ROOT_MISPLACED = "misplaced"
 ROOT_UNKNOWN = "unknown"
+# SYNC-2 (resilience sweep 2026-08-28). The drive is not out and it is not a
+# ghost: the FILESYSTEM has stopped answering opens. MAC-12's FSEvents wedge
+# on an external exFAT SSD, an SMB share whose server slept, a `subst`ed
+# mapping over a dropped tailnet. Every check in this module was an
+# in-process os.path.isdir, so on exactly that failure they all BLOCK -- the
+# poll loop stops, _on_root_absent never fires, the lanes are never paused,
+# and the one machine-visible signal this module exists to produce is the one
+# it cannot produce. Answered by an OUT-OF-PROCESS probe (see
+# _filesystem_answers) and treated like `absent` for lane pausing, with its
+# own sentence: reconnecting a drive that is plugged in is not the advice.
+ROOT_NOT_ANSWERING = "not_answering"
 
 VOLUME_RECORD_FILENAME = "volume.json"
 
@@ -94,6 +112,45 @@ DISKUTIL_CACHE_SECONDS = 30.0
 # How often the guard asks. Cheap (one isdir, one ismount) in the steady
 # state, and fast enough that "I plugged it back in" feels immediate.
 POLL_SECONDS = 5.0
+
+# -- the out-of-process probe's cadence (SYNC-2, 2026-08-28) ---------------
+#
+# The probe costs one short-lived process, so it cannot ride every 5 s poll
+# for the life of a session. Two triggers instead, and the FIRST poll is one
+# of them: a companion that starts with the volume already wedged has no
+# previous timing to learn from, and its very first in-process isdir is the
+# call that would never return.
+PROBE_EVERY_N_POLLS = 12
+# An isdir that took this long already answered -- but a filesystem that
+# needs seconds to say "yes, it is a directory" is the one about to stop
+# answering at all, so the next poll asks out of process instead of betting
+# the poll thread on it.
+SLOW_PROBE_SECONDS = 2.0
+
+_probe_watch_root: Optional[Callable[..., tuple[str, str]]] = None
+
+
+def _out_of_process_probe() -> Optional[Callable[..., tuple[str, str]]]:
+    """`rclone_lane.probe_watch_root`, imported LAZILY. None if unavailable.
+
+    Lazy because root_guard is imported by app.py before the sync package and
+    must never gain a hard dependency on it: a probe that cannot be imported
+    has to degrade to today's behaviour (the in-process isdir), not to an
+    import error at startup. The function itself is stdlib-only, capped at
+    WATCH_PROBE_TIMEOUT_SECONDS, and never raises -- it was written for
+    MAC-12, which is this failure by another name, and used in exactly one
+    place until now.
+    """
+    global _probe_watch_root
+    if _probe_watch_root is None:
+        try:
+            from .sync.rclone_lane import probe_watch_root
+        except Exception:
+            log.debug("root guard: no out-of-process root probe available",
+                      exc_info=True)
+            return None
+        _probe_watch_root = probe_watch_root
+    return _probe_watch_root
 
 
 # --- volume record (~/.ccsync/volume.json) ---------------------------------
@@ -566,8 +623,28 @@ def refresh_volume_record(
 # --- the guard --------------------------------------------------------------
 
 def state_is_absent(state: Any) -> bool:
-    """Does this state mean "do not touch the tree"? (absent OR misplaced.)"""
-    return str(state) in (ROOT_ABSENT, ROOT_MISPLACED)
+    """Does this state mean "do not touch the tree"?
+
+    absent, misplaced OR not_answering (SYNC-2, 2026-08-28). The third one is
+    grouped here deliberately: a filesystem that does not answer opens is one
+    an rclone `sync` must not be pointed at, and the lane gates, the watcher
+    gate and the shutdown-reason suppressor all want the same answer for it
+    as for an unplugged drive. Only the SENTENCE differs."""
+    return str(state) in (ROOT_ABSENT, ROOT_MISPLACED, ROOT_NOT_ANSWERING)
+
+
+def state_sentence(state: Any) -> str:
+    """The one sentence an editor reads for a non-present root.
+
+    Lives here rather than in tray.py so the tray line, the balloon, the lane
+    detail and the dashboard's `blocked.detail` cannot drift apart. No em
+    dashes: this is user-visible copy (owner's rule, 2026-08-18)."""
+    text = str(state)
+    if text == ROOT_NOT_ANSWERING:
+        return "the sync drive is not answering - reconnect it or restart"
+    if text == ROOT_MISPLACED:
+        return "the sync drive is mounted at the wrong place - eject it and plug it back in"
+    return "the sync drive is disconnected"
 
 
 class RootGuard:
@@ -601,6 +678,8 @@ class RootGuard:
         run_fn: Optional[Callable[..., Any]] = None,
         clock: Callable[[], float] = time.monotonic,
         record_path: Optional[Path] = None,
+        probe_fn: Optional[Callable[..., tuple[str, str]]] = None,
+        probe_every_n_polls: int = PROBE_EVERY_N_POLLS,
     ) -> None:
         self.local_root = local_root
         self._on_present = on_present
@@ -623,6 +702,18 @@ class RootGuard:
         # mount point -> (stamp, uuid). Owned here so the TTL survives across
         # polls; see volume_uuid().
         self._diskutil_cache: dict = {}
+        # SYNC-2: the out-of-process probe, its cadence, and how long the
+        # last in-process probe took. Injectable for the same reason every
+        # other platform call here is -- a wedged volume is not something a
+        # test can produce.
+        self._probe_fn = probe_fn
+        try:
+            self._probe_every = max(1, int(probe_every_n_polls))
+        except (TypeError, ValueError):
+            self._probe_every = PROBE_EVERY_N_POLLS
+        self._poll_count = 0
+        self._last_probe_seconds = 0.0
+        self._not_answering_logged = False
         self._state: Optional[str] = None
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -662,17 +753,7 @@ class RootGuard:
         """
         if self._stop_event.is_set():
             return self.state
-        state = probe_root(
-            self.local_root,
-            is_darwin=self._is_darwin,
-            isdir_fn=self._isdir_fn,
-            ismount_fn=self._ismount_fn,
-            listdir_fn=self._listdir_fn,
-            run_fn=self._run_fn,
-            clock=self._clock,
-            record_path=self._record_path,
-            cache=self._diskutil_cache,
-        )
+        state = self._sample()
         if state == ROOT_UNKNOWN:
             # No new information. Deliberately does not become the current
             # state: a flapping probe would otherwise pause and resume an
@@ -690,6 +771,84 @@ class RootGuard:
         log.info("root guard: %s -> %s (%s)", previous or "startup", state, self.local_root)
         self._fire(state)
         return state
+
+    # -- one poll's worth of evidence (SYNC-2, 2026-08-28) ------------------
+
+    def _sample(self) -> str:
+        """What this poll saw: one of the four states (or ROOT_UNKNOWN).
+
+        Order matters. The out-of-process probe runs FIRST when it is due,
+        because the whole point is not to enter an isdir() that may never
+        return; probe_root only runs when the filesystem has just proved it
+        answers. When the probe says nothing useful (it answered, or it could
+        not be run at all) this falls through to the in-process probe, which
+        is the behaviour that predates this and must remain the default."""
+        self._poll_count += 1
+        if self._filesystem_probe_due():
+            answer = self._filesystem_answers()
+            if answer is not None:
+                return answer
+        started = 0.0
+        try:
+            started = float(self._clock())
+        except Exception:
+            log.debug("root guard: clock read failed", exc_info=True)
+        try:
+            return probe_root(
+                self.local_root,
+                is_darwin=self._is_darwin,
+                isdir_fn=self._isdir_fn,
+                ismount_fn=self._ismount_fn,
+                listdir_fn=self._listdir_fn,
+                run_fn=self._run_fn,
+                clock=self._clock,
+                record_path=self._record_path,
+                cache=self._diskutil_cache,
+            )
+        finally:
+            try:
+                self._last_probe_seconds = max(0.0, float(self._clock()) - started)
+            except Exception:
+                self._last_probe_seconds = 0.0
+
+    def _filesystem_probe_due(self) -> bool:
+        """Every Nth poll (the first included), or right after a slow one."""
+        if ((self._poll_count - 1) % self._probe_every) == 0:
+            return True
+        return self._last_probe_seconds >= SLOW_PROBE_SECONDS
+
+    def _filesystem_answers(self) -> Optional[str]:
+        """ROOT_NOT_ANSWERING, or None for "no opinion".
+
+        Only BLOCKED is an answer. A probe that came back promptly says
+        nothing about whether the root exists, is a ghost or is mounted
+        somewhere else -- probe_root owns all three -- and a probe that could
+        not be RUN fails open, because refusing to trust the tree because our
+        own subprocess did not start would be a self-inflicted outage (the
+        same rule _watch_root_answers applies)."""
+        probe = self._probe_fn if self._probe_fn is not None else _out_of_process_probe()
+        if probe is None:
+            return None
+        root = str(self.local_root or "").strip()
+        if not root:
+            return None
+        try:
+            status, detail = probe(root)
+        except Exception:
+            log.debug("root guard: the out-of-process root probe failed", exc_info=True)
+            return None
+        if str(status) != "blocked":
+            self._not_answering_logged = False
+            return None
+        if not self._not_answering_logged:
+            self._not_answering_logged = True
+            log.warning(
+                "root guard: %s did not answer an open() from a separate process (%s). "
+                "The drive is not out -- its filesystem has stopped responding, so "
+                "every lane is paused until it does. Reconnect it or restart.",
+                root, detail,
+            )
+        return ROOT_NOT_ANSWERING
 
     def _fire(self, state: str) -> None:
         if self._stop_event.is_set():

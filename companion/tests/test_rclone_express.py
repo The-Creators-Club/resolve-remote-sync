@@ -87,6 +87,12 @@ class _FakeStderr:
     def read(self) -> str:
         return self._text
 
+    def __iter__(self):
+        # SYNC-13: the express reader streams the pipe on a daemon thread
+        # now (a real pipe is iterable) instead of read()ing it to EOF,
+        # which never returns while a grandchild holds the write handle.
+        return iter(self._text.splitlines(keepends=True))
+
 
 DEFAULT_STDERR = '{"level":"info","msg":"clip.mov: Copied (new)"}\n'
 
@@ -1071,3 +1077,12 @@ def test_write_in_a_borrowed_dir_attributes_to_the_borrowed_rel(tmp_path):
     # a write elsewhere in the lender is NOT in scope on this machine
     other = str(tmp_path / "Projects/2026/FF5/Civil Defence/B-roll/clip.mov")
     assert _project_rel_for_path(root, other, known) is None
+
+
+def test_an_express_batch_is_counted_in_full_not_just_its_tail(tmp_path, monkeypatch):
+    """SYNC-13's reader keeps a bounded tail, and the caller re-parses that
+    text for the upload counts -- so the cap has to cover a whole batch or
+    the dashboard's history loses the files that landed first."""
+    from ccsync_companion.sync import rclone_lane
+
+    assert rclone_lane.EXPRESS_STDERR_TAIL_LINES >= 4 * rclone_lane.EXPRESS_DEFAULT_MAX_BATCH

@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from ccsync_companion.sync.base import STATE_ERROR, STATE_IDLE, STATE_SYNCING
+from ccsync_companion.sync import rclone_lane
 from ccsync_companion.sync.rclone_lane import DIRECTION_DOWN, DIRECTION_UP, RcloneLane
 
 
@@ -70,7 +71,9 @@ class _FakeProc:
         self.stderr = iter(lines)
         self._returncode = returncode
 
-    def wait(self) -> int:
+    # SYNC-1/SYS-17: the runner polls proc.wait(timeout=...) now, so a
+    # stand-in that does not take the keyword is not a stand-in for Popen.
+    def wait(self, timeout=None) -> int:
         return self._returncode
 
 
@@ -345,7 +348,9 @@ class _FakeProcRaisesMidStream:
 
         return _gen()
 
-    def wait(self) -> int:
+    # SYNC-1/SYS-17: the runner polls proc.wait(timeout=...) now, so a
+    # stand-in that does not take the keyword is not a stand-in for Popen.
+    def wait(self, timeout=None) -> int:
         return self._returncode
 
     def kill(self) -> None:
@@ -1054,7 +1059,9 @@ class _SnapshottingProc:
                 self._snapshots.append(list(self._lane.status().transfers))
         return gen()
 
-    def wait(self) -> int:
+    # SYNC-1/SYS-17: the runner polls proc.wait(timeout=...) now, so a
+    # stand-in that does not take the keyword is not a stand-in for Popen.
+    def wait(self, timeout=None) -> int:
         return 0
 
 
@@ -1418,3 +1425,377 @@ def test_relocation_probe_still_counts_a_real_deletion_as_a_deletion(tmp_path):
         remote_lines=["5;Interviewees/Somebody Else/Proxy/other.mp4"],
     )
     assert lane._count_relocations("Projects/2026/FF5/Alpha") == 0
+
+
+# -- the stall watchdog (SYNC-1 / SYS-17, CR-91) -----------------------------
+#
+# CR-91: lane A sat in `state=syncing, transferring=1, last_error=NULL` for
+# 2 h 20 m on a Mac whose external SSD had stopped answering, and because
+# lane A takes its turn first the editor downloaded nothing for the whole
+# period. `proc.wait()` had no timeout, so nothing on the machine could
+# notice. Every test below drives an INJECTED clock: none of them sleeps.
+
+
+class _StalledProc:
+    """A child that never exits. `stderr` ends immediately, so the reader
+    thread is not what is being tested here -- the wait is."""
+
+    def __init__(self, lines=(), moves=None) -> None:
+        self.stderr = iter(list(lines))
+        self.killed = False
+        self.terminated = False
+        self.waits = 0
+        # A callable the wait can use to make progress happen, so a
+        # "slow but moving" run can be scripted.
+        self._moves = moves
+
+    def wait(self, timeout=None) -> int:
+        self.waits += 1
+        if self._moves is not None:
+            self._moves(self.waits)
+        raise subprocess.TimeoutExpired(cmd="rclone", timeout=timeout)
+
+    def poll(self):
+        return None
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+def _fake_clock(step: float = 60.0):
+    """A monotonic clock that advances `step` seconds per read."""
+    state = {"now": 0.0}
+
+    def clock() -> float:
+        state["now"] += step
+        return state["now"]
+
+    return clock
+
+
+def _watchdog_lane(tmp_path, proc, direction=DIRECTION_UP, step=60.0):
+    lane = _make_lane(tmp_path, direction=direction,
+                      popen_factory=lambda cmd, **kw: proc)
+    # Poll immediately (the fake raises TimeoutExpired regardless) and give
+    # the loop a clock that covers hours in milliseconds.
+    lane._wait_poll_seconds = 0.01
+    lane._monotonic = _fake_clock(step)
+    return lane
+
+
+def test_a_child_that_never_exits_and_moves_nothing_is_killed_and_reported(tmp_path):
+    """THE CR-91 case. The lane must end up RED with a sentence, not sit in
+    `syncing` forever with no error."""
+    proc = _StalledProc()
+    lane = _watchdog_lane(tmp_path, proc)
+    subpath = "Projects/2026/FF5/Animals"
+    (Path(lane.local_root) / subpath).mkdir(parents=True)
+
+    status = lane.run_once(subpath=subpath, max_duration_seconds=600)
+
+    assert proc.terminated or proc.killed, "the wedged child must be ended"
+    assert status.state == STATE_ERROR
+    assert "killed" in (status.last_error or "")
+    assert "rclone" in (status.last_error or "")
+    # transferring/current_project cleared: a killed pass is not still running.
+    assert status.transferring == 0
+    assert status.current_project is None
+
+
+def test_a_stall_is_persisted_so_a_restart_does_not_erase_the_evidence(tmp_path):
+    proc = _StalledProc()
+    lane = _watchdog_lane(tmp_path, proc)
+    subpath = "Projects/2026/FF5/Animals"
+    (Path(lane.local_root) / subpath).mkdir(parents=True)
+
+    lane.run_once(subpath=subpath, max_duration_seconds=600)
+
+    path = tmp_path / "state" / rclone_lane.LANE_STALL_FILENAME
+    assert path.exists(), "the stall record must be on disk, not in memory only"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    assert record["lane"] == "A"
+    assert record["killed"] is True
+    assert record["seconds"] > 0
+    assert record["at"]
+    # ...and it is what the report carries, through the ONE guard section
+    # app.py asks a lane for.
+    fresh = _make_lane(tmp_path, direction=DIRECTION_DOWN,
+                       popen_factory=_make_popen_factory([], 0, []))
+    stalled = fresh.sync_guard_report().get("stalled")
+    assert stalled and stalled["lane"] == "A" and stalled["killed"] is True
+    assert "detail" not in stalled, "the wire carries the four contract keys"
+
+
+def test_a_slow_but_progressing_run_is_never_killed(tmp_path):
+    """CR-91's own requirement: bytes moved, not wall clock. A 40 GB original
+    crawling over a thin uplink must outlive every ceiling -- SFTP uploads do
+    not resume, so killing it would restart it from byte 0 forever."""
+    bytes_moved = {"n": 0}
+
+    def _moves(wait_count):
+        # One --stats tick's worth of progress per poll, for far longer than
+        # either ceiling.
+        bytes_moved["n"] += 1_000_000
+        lane._handle_stderr_line(
+            '{"level":"notice","msg":"","stats":{"bytes":%d,"totalBytes":9e12,'
+            '"speed":1.0,"eta":99}}' % bytes_moved["n"],
+            tally,
+        )
+
+    proc = _StalledProc(moves=_moves)
+    lane = _watchdog_lane(tmp_path, proc)
+    tally = rclone_lane.RcloneRunTally()
+
+    # 200 polls x 60 s = 3 h 20 m of wall clock, well past both ceilings.
+    with pytest.raises(_StopWatchdog):
+        lane._monotonic = _bounded_clock(200)
+        lane._wait_with_watchdog(["rclone"], proc, tally, 600)
+
+    assert not proc.killed and not proc.terminated, (
+        "a run that is still moving bytes must never be killed")
+    assert lane.stall_record() is None
+
+
+class _StopWatchdog(Exception):
+    """Ends the watchdog loop from the clock, so a test that proves nothing
+    is killed does not have to run forever."""
+
+
+def _bounded_clock(reads: int, step: float = 60.0):
+    state = {"now": 0.0, "reads": 0}
+
+    def clock() -> float:
+        state["reads"] += 1
+        if state["reads"] > reads:
+            raise _StopWatchdog()
+        state["now"] += step
+        return state["now"]
+
+    return clock
+
+
+def test_the_hard_ceiling_kills_a_run_that_moved_once_and_then_wedged(tmp_path):
+    """The SYS-17 half: a child past `max_duration * 2 + 300` that is no
+    longer moving is killed even though it DID move earlier in the pass."""
+    tally = rclone_lane.RcloneRunTally()
+    tally.transferred = 3  # it moved three files, then stopped
+
+    proc = _StalledProc()
+    lane = _watchdog_lane(tmp_path, proc)
+    returncode = lane._wait_with_watchdog(["rclone", "copy"], proc, tally, 600)
+
+    assert proc.terminated or proc.killed
+    assert returncode != 0
+    record = lane.stall_record()
+    assert record is not None
+    assert "did not exit" in record["detail"] or "no progress" in record["detail"]
+
+
+def test_the_watchdog_ceilings_are_derived_from_the_budget(tmp_path):
+    """Both formulas, pinned: 4x the budget (floor 900 s) with no progress,
+    and 2x + 300 s regardless."""
+    assert rclone_lane.zero_progress_limit_seconds(600) == 2400
+    assert rclone_lane.hard_ceiling_seconds(600) == 1500
+    # A tiny budget still gets the 15-minute floor...
+    assert rclone_lane.zero_progress_limit_seconds(10) == 900
+    # ...and a missing or hand-zeroed budget falls back to the rotation
+    # default rather than disabling the watchdog.
+    assert rclone_lane.hard_ceiling_seconds(None) == rclone_lane.hard_ceiling_seconds(600)
+    assert rclone_lane.hard_ceiling_seconds(0) == rclone_lane.hard_ceiling_seconds(600)
+
+
+def test_abort_run_kills_the_child_without_latching_the_lane_off(tmp_path):
+    """The sequencer's bounded join calls this. stop() would set _stop_event
+    for the whole thread generation and leave lane B refusing every later
+    pass -- which is worse than the stall it was clearing."""
+    proc = _StalledProc()
+    lane = _make_lane(tmp_path, direction=DIRECTION_DOWN,
+                      popen_factory=lambda cmd, **kw: proc)
+    assert lane.abort_run("lane B did not finish") is False, "no child yet"
+
+    lane._proc = proc
+    assert lane.abort_run("lane B did not finish within 3000s") is True
+    assert proc.terminated or proc.killed
+    assert not lane._stop_event.is_set(), "the lane must still be able to run"
+    assert lane.stall_record()["lane"] == "B"
+
+
+def test_a_stall_record_survives_into_a_new_lane_object(tmp_path):
+    path = tmp_path / "state" / rclone_lane.LANE_STALL_FILENAME
+    rclone_lane.write_stall_record(
+        path, {"lane": "B", "seconds": 1800, "killed": True, "at": "2026-08-28T10:00:00+00:00"})
+    lane = _make_lane(tmp_path, popen_factory=_make_popen_factory([], 0, []))
+    assert lane.stall_record()["seconds"] == 1800
+    # A corrupt record is ignored rather than raised out of the report path.
+    path.write_text("{not json", encoding="utf-8")
+    assert rclone_lane.read_stall_record(path) is None
+
+
+# -- SYNC-12: a "bounded" listing that is actually bounded -------------------
+
+
+class _IgnoresTheKill:
+    """A child that ignores terminate/kill and whose pipes never close --
+    subprocess.run(timeout=) would sit in communicate() forever here."""
+
+    def __init__(self) -> None:
+        self.stdout = _never_ending()
+        self.stderr = _never_ending()
+        self.kills = 0
+
+    def wait(self, timeout=None):
+        raise subprocess.TimeoutExpired(cmd="rclone", timeout=timeout)
+
+    def poll(self):
+        return None
+
+    def terminate(self) -> None:
+        self.kills += 1
+
+    def kill(self) -> None:
+        self.kills += 1
+
+
+def _never_ending():
+    ended = threading.Event()
+
+    class _Stream:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            # Blocks like a real pipe with a grandchild holding the write
+            # handle. The daemon reader is abandoned; nothing joins it.
+            ended.wait(30)
+            raise StopIteration
+
+    return _Stream()
+
+
+def test_run_lsf_returns_promptly_when_the_child_ignores_the_kill(tmp_path, monkeypatch):
+    """SYNC-12: `list_remote_files`' documented ten-minute cap could be
+    infinite, inside _run_lock, at the moment the breaker is deciding
+    whether to stop lane B."""
+    proc = _IgnoresTheKill()
+    monkeypatch.setattr(rclone_lane.subprocess, "Popen", lambda cmd, **kw: proc)
+    started = time.time()
+    out = rclone_lane._run_lsf(["rclone", "lsf", "nas:x"], timeout=0.05)
+    assert out is None, "an unfinished listing is a FAILED listing, never an empty one"
+    assert time.time() - started < 10
+    assert proc.kills >= 1
+
+
+def test_run_bounded_kills_and_reports_none_on_a_timeout(tmp_path):
+    proc = _IgnoresTheKill()
+    code, out, err = rclone_lane._run_bounded(
+        ["rclone", "lsf"], timeout=0.05, popen_factory=lambda cmd, **kw: proc)
+    assert code is None, "None means 'nothing it printed is a complete answer'"
+    assert proc.kills >= 1
+    assert out == "" and err == ""
+
+
+def test_run_capture_reports_a_timeout_as_a_failed_probe(tmp_path, monkeypatch):
+    """`scan_pending_uploads` gates the one destructive action with no undo:
+    'I could not tell' must never read as 'nothing is pending'."""
+    proc = _IgnoresTheKill()
+    monkeypatch.setattr(rclone_lane.subprocess, "Popen",
+                        lambda cmd, **kw: proc)
+    code, err = rclone_lane._run_capture(["rclone", "copy", "--dry-run"], timeout=0.05)
+    assert code == rclone_lane.PROBE_TIMEOUT_RETURNCODE
+    assert code != 0
+
+
+# -- SYNC-13: the express lane has a duration bound now ---------------------
+
+
+def test_the_express_command_carries_a_max_duration(tmp_path):
+    cmd = rclone_lane.build_express_command(
+        "rclone", str(tmp_path), "nas", "Creators_Club", tmp_path / "list.txt",
+        max_duration_seconds=600,
+    )
+    assert "--max-duration" in cmd
+    assert cmd[cmd.index("--max-duration") + 1] == "600s"
+    # SOFT, like every other lane: a HARD cutoff aborts the in-flight
+    # transfer, and an SFTP upload does not resume.
+    assert "--cutoff-mode" in cmd and "SOFT" in cmd
+    # And it is still the upload-only shape express has to be.
+    assert "copy" in cmd and "--ignore-existing" in cmd
+
+
+def test_the_lane_gives_the_express_command_the_rotation_budget(tmp_path):
+    lane = _make_lane(tmp_path, popen_factory=_make_popen_factory([], 0, []))
+    assert lane._express_max_duration >= 60
+    fast = RcloneLane(
+        direction=DIRECTION_UP, local_root=str(tmp_path / "local"), remote="nas",
+        remote_root="Creators_Club", state_dir=tmp_path / "state",
+        popen_factory=_make_popen_factory([], 0, []),
+        cfg={"project_rotation_seconds": 900},
+    )
+    assert fast._express_max_duration == 900
+
+
+def test_express_report_carries_the_age_of_the_last_run(tmp_path):
+    """A dead express lane is invisible otherwise: its counters simply stop
+    advancing and nothing checks that they are stale (SYNC-13)."""
+    lane = _make_lane(tmp_path, popen_factory=_make_popen_factory([], 0, []))
+    assert lane.express_report()["last_run_age_seconds"] is None
+    lane._express_record(2, None)
+    assert lane.express_report()["last_run_age_seconds"] == 0
+
+
+# -- SYS-1: the liveness contract on the lane's own status ------------------
+
+
+def test_a_pass_publishes_a_progress_token_from_its_first_moment(tmp_path):
+    """The run that has moved NOTHING is the one the dashboard has to be able
+    to red, so the token exists before the first --stats tick."""
+    tokens: list = []
+
+    class _Snapshotting:
+        def __init__(self) -> None:
+            self.stderr = self._gen()
+
+        def _gen(self):
+            tokens.append(lane.status().progress_token)
+            yield ('{"level":"notice","msg":"","stats":{"bytes":4096,'
+                   '"totalBytes":8192,"speed":1.0,"eta":1}}\n')
+            tokens.append(lane.status().progress_token)
+
+        def wait(self, timeout=None) -> int:
+            return 0
+
+    lane = _make_lane(tmp_path, popen_factory=lambda cmd, **kw: _Snapshotting())
+    subpath = "Projects/2026/FF5/Animals"
+    (Path(lane.local_root) / subpath).mkdir(parents=True)
+    lane.run_once(subpath=subpath)
+
+    assert tokens[0] == f"0:0:{subpath}"
+    assert tokens[1] != tokens[0], "real bytes must move the token"
+    assert tokens[1].startswith("4096:")
+
+
+def test_state_since_moves_only_when_the_state_changes(tmp_path):
+    lane = _make_lane(tmp_path, popen_factory=_make_popen_factory(STATS_LINES, 0, []))
+    subpath = "Projects/2026/FF5/Animals"
+    (Path(lane.local_root) / subpath).mkdir(parents=True)
+    first = lane.run_once(subpath=subpath)
+    assert first.state == STATE_IDLE and first.state_since is not None
+    # A snapshot copy must not re-date a state it merely copied.
+    assert lane.status().state_since == first.state_since
+    second = lane.run_once(subpath=subpath)
+    # idle -> syncing -> idle: the second idle is a new one, and its stamp is
+    # what tells the dashboard how long THIS state has held.
+    assert second.state_since > first.state_since
+
+
+def test_the_progress_token_is_bounded_for_the_dashboards_field():
+    """The dashboard declares max_length=256 and pydantic rejects the WHOLE
+    report body on a violation -- lane status, presence and the upgrade offer
+    with it, for a liveness field (the MAX_PROJECT_SLUG_CHARS lesson)."""
+    token = rclone_lane.progress_token(1, 2, "Projects/" + ("x" * 900))
+    assert len(token) <= rclone_lane.MAX_PROGRESS_TOKEN_CHARS <= 256
+    # The numeric head is what changes, so it is what survives the trim.
+    assert token.startswith("1:2:")

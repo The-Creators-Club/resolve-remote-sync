@@ -673,3 +673,144 @@ def test_a_raising_ismount_never_escapes():
         raise RuntimeError("no")
 
     assert _blocked(ismount_fn=_boom) is False
+
+
+# -- the fourth answer: the filesystem stopped answering (SYNC-2) ------------
+#
+# The failure this closes: every root check in the area was an in-process
+# os.path.isdir, so on a wedged mount they ALL block. The poll loop stops,
+# _on_root_absent never fires, the lanes are never paused, and the one
+# machine-visible signal (ROOT_ABSENT) is exactly what cannot be produced.
+
+
+def _blocked_probe(seen=None):
+    def probe(root, *args, **kwargs):
+        if seen is not None:
+            seen.append(root)
+        return ("blocked", "no answer within 5s")
+    return probe
+
+
+def test_a_wedged_filesystem_is_not_answering_not_absent(monkeypatch):
+    rec = _Recorder()
+    guard = rg.RootGuard(
+        ROOT, on_present=rec.on_present, on_absent=rec.on_absent,
+        is_darwin=True, probe_fn=_blocked_probe(),
+    )
+    # probe_root would have said PRESENT -- and on a real wedged volume it
+    # would never have returned at all, which is the point.
+    monkeypatch.setattr(rg, "probe_root", lambda *a, **kw: rg.ROOT_PRESENT)
+    assert guard.probe_once() == rg.ROOT_NOT_ANSWERING
+    assert rec.absent == [rg.ROOT_NOT_ANSWERING]
+    assert rec.present == 0
+
+
+def test_not_answering_pauses_the_lanes_like_an_absent_drive():
+    assert rg.state_is_absent(rg.ROOT_NOT_ANSWERING) is True
+    guard = rg.RootGuard(ROOT, is_darwin=True, probe_fn=_blocked_probe())
+    guard.probe_once()
+    assert guard.present() is False
+
+
+def test_not_answering_has_its_own_sentence():
+    sentence = rg.state_sentence(rg.ROOT_NOT_ANSWERING)
+    assert "not answering" in sentence
+    assert "disconnected" not in sentence, (
+        "telling the editor to check a cable on a drive that IS plugged in was "
+        "the dead end MAC-10's 'DaVinci Resolve is not running' was"
+    )
+    assert "-" in sentence and "—" not in sentence
+    assert rg.state_sentence(rg.ROOT_ABSENT) != sentence
+    assert rg.state_sentence(rg.ROOT_MISPLACED) != sentence
+
+
+def test_a_probe_that_answers_promptly_leaves_probe_root_in_charge(monkeypatch):
+    guard = rg.RootGuard(ROOT, is_darwin=True,
+                         probe_fn=lambda root, *a, **kw: ("ok", "exit 0"))
+    monkeypatch.setattr(rg, "probe_root", lambda *a, **kw: rg.ROOT_MISPLACED)
+    assert guard.probe_once() == rg.ROOT_MISPLACED
+
+
+def test_a_probe_that_could_not_be_run_fails_open(monkeypatch):
+    """"unavailable" is our own subprocess failing, not the volume: refusing
+    to trust the tree over that would be a self-inflicted outage."""
+    guard = rg.RootGuard(ROOT, is_darwin=True,
+                         probe_fn=lambda root, *a, **kw: ("unavailable", "no python"))
+    monkeypatch.setattr(rg, "probe_root", lambda *a, **kw: rg.ROOT_PRESENT)
+    assert guard.probe_once() == rg.ROOT_PRESENT
+
+
+def test_a_probe_that_raises_fails_open_too(monkeypatch):
+    def boom(root, *a, **kw):
+        raise RuntimeError("popen said no")
+
+    guard = rg.RootGuard(ROOT, is_darwin=True, probe_fn=boom)
+    monkeypatch.setattr(rg, "probe_root", lambda *a, **kw: rg.ROOT_PRESENT)
+    assert guard.probe_once() == rg.ROOT_PRESENT
+
+
+def test_the_out_of_process_probe_runs_on_the_first_poll_and_then_every_nth(monkeypatch):
+    """The FIRST poll is one of the trigger points on purpose: a companion
+    that starts with the volume already wedged has no previous timing to learn
+    from, and its very first in-process isdir is the call that never returns."""
+    seen: list[str] = []
+    guard = rg.RootGuard(
+        ROOT, is_darwin=True, probe_every_n_polls=3,
+        probe_fn=lambda root, *a, **kw: (seen.append(root), ("ok", "exit 0"))[1],
+    )
+    monkeypatch.setattr(rg, "probe_root", lambda *a, **kw: rg.ROOT_PRESENT)
+    for _ in range(7):
+        guard.probe_once()
+    assert len(seen) == 3, "polls 1, 4 and 7 -- not all seven, and not none"
+
+
+def test_a_slow_isdir_makes_the_next_poll_ask_out_of_process(monkeypatch):
+    seen: list[str] = []
+    clock = _Clock()
+    guard = rg.RootGuard(
+        ROOT, is_darwin=True, probe_every_n_polls=1000, clock=clock,
+        probe_fn=lambda root, *a, **kw: (seen.append(root), ("ok", "exit 0"))[1],
+    )
+
+    def slow_probe(*args, **kwargs):
+        clock.advance(rg.SLOW_PROBE_SECONDS + 1)
+        return rg.ROOT_PRESENT
+
+    monkeypatch.setattr(rg, "probe_root", slow_probe)
+    guard.probe_once()          # poll 1 probes anyway (the Nth rule)
+    assert len(seen) == 1
+    guard.probe_once()          # ...and again, because poll 1 took 3s
+    assert len(seen) == 2
+
+
+def test_a_fast_isdir_does_not_spend_a_process_every_poll(monkeypatch):
+    seen: list[str] = []
+    guard = rg.RootGuard(
+        ROOT, is_darwin=True, probe_every_n_polls=1000,
+        probe_fn=lambda root, *a, **kw: (seen.append(root), ("ok", "exit 0"))[1],
+    )
+    monkeypatch.setattr(rg, "probe_root", lambda *a, **kw: rg.ROOT_PRESENT)
+    for _ in range(5):
+        guard.probe_once()
+    assert len(seen) == 1
+
+
+def test_the_drive_coming_back_from_not_answering_fires_on_present(monkeypatch):
+    rec = _Recorder()
+    answers = [("blocked", "no answer within 5s"), ("ok", "exit 0")]
+    guard = rg.RootGuard(
+        ROOT, on_present=rec.on_present, on_absent=rec.on_absent,
+        is_darwin=True, probe_every_n_polls=1,
+        probe_fn=lambda root, *a, **kw: answers.pop(0) if answers else ("ok", "exit 0"),
+    )
+    monkeypatch.setattr(rg, "probe_root", lambda *a, **kw: rg.ROOT_PRESENT)
+    assert guard.probe_once() == rg.ROOT_NOT_ANSWERING
+    assert guard.probe_once() == rg.ROOT_PRESENT
+    assert rec.present == 1
+
+
+def test_a_blank_local_root_never_spends_a_probe():
+    seen: list[str] = []
+    guard = rg.RootGuard("", is_darwin=True, probe_fn=_blocked_probe(seen))
+    assert guard.probe_once() == rg.ROOT_UNKNOWN
+    assert seen == []

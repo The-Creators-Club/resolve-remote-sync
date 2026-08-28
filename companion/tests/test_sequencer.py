@@ -12,7 +12,12 @@ from pathlib import Path
 
 import pytest
 
-from ccsync_companion.sync.sequencer import STATE_NO_SELECTION, STATE_PAUSED, Sequencer
+from ccsync_companion.sync.sequencer import (
+    STATE_NO_SELECTION,
+    STATE_PAUSED,
+    STATE_STOPPED,
+    Sequencer,
+)
 from ccsync_companion.sync.syncthing_admin import PARTIAL_IGNORE_LINES, STIGNORE_LINES
 
 
@@ -1935,3 +1940,224 @@ def test_unconfirmed_slugs_never_raises_when_the_predicate_fails():
 
     admin.ignores_confirmed = _boom
     assert seq.unconfirmed_slugs() == []
+
+
+# -- SYS-2: the loop survives a bad pass, and says when it does not --------
+
+
+def test_a_failing_pass_costs_one_pass_not_the_thread():
+    """The whole of SYS-2's first half: before the sweep an OSError out of a
+    pass (a mapped P: dropping mid-run) killed the thread with _state frozen
+    at its last value, the reporter kept posting that state every 30 s, and
+    the fleet grid showed a healthy machine that had not synced since."""
+    items = [_item("s-a", "2026/FF5/Alpha", 0)]
+    selection = FakeSelectionClient(selection=items)
+    admin = FakeAdmin()
+    seq, lane_a, lane_b, events = _build(selection, admin)
+
+    real = seq._run_pass
+    calls: list[int] = []
+
+    def flaky(sel):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("P:\\ went away mid-pass")
+        return real(sel)
+
+    seq._run_pass = flaky
+
+    seq.start()
+    assert _wait_until(lambda: len(calls) >= 2, timeout=5.0)
+    assert seq._thread.is_alive()
+    seq.stop()
+
+    assert lane_a.calls, "the pass after the failure never ran"
+    assert seq.loop_failures() == 1
+    assert seq.last_error() == "OSError: P:\\ went away mid-pass"
+
+
+def test_the_heartbeat_advances_while_the_loop_runs():
+    items = [_item("s-a", "2026/FF5/Alpha", 0)]
+    seq, lane_a, _b, _e = _build(FakeSelectionClient(selection=items), FakeAdmin())
+
+    seq.start()
+    first = seq._heartbeat
+    assert _wait_until(lambda: seq._heartbeat > first, timeout=5.0)
+    seq.stop()
+
+    # A stopped sequencer is not a wedged one: the watchdog must read 0.0 for
+    # it, or every sign-out would look like the fault it exists to recover.
+    assert seq.seconds_since_heartbeat() == 0.0
+    assert seq.thread_died() is False
+
+
+def test_a_paused_sequencer_reads_as_no_heartbeat_question_at_all():
+    """_park_paused blocks for as long as the editor leaves sync paused;
+    restarting it over that would be the watchdog inventing an outage."""
+    items = [_item("s-a", "2026/FF5/Alpha", 0)]
+    seq, _a, _b, _e = _build(FakeSelectionClient(selection=items), FakeAdmin())
+
+    seq.start()
+    seq.pause()
+    assert _wait_until(lambda: seq.state == STATE_PAUSED, timeout=5.0)
+    assert seq.seconds_since_heartbeat() == 0.0
+    assert seq.thread_died() is False
+    seq.stop()
+
+
+def test_a_thread_that_dies_anyway_says_why_and_leaves_state_stopped():
+    """The scaffolding around the loop can still fail. When it does, _state
+    must reach STOPPED (it is in a finally now, not after the while) and the
+    exception must be readable -- "restarted for no stated reason" is the
+    shape this sweep exists to stop shipping."""
+    seq, _a, _b, _e = _build(FakeSelectionClient(selection=[]), FakeAdmin())
+
+    def boom():
+        raise RuntimeError("startup unpause exploded")
+
+    seq._startup_unpause = boom
+
+    seq.start()
+    assert _wait_until(lambda: not seq._thread.is_alive(), timeout=5.0)
+
+    assert seq.state == STATE_STOPPED
+    assert seq.thread_died() is True
+    assert seq.last_error() == "RuntimeError: startup unpause exploded"
+
+
+def test_a_failing_pass_writes_a_crash_report(monkeypatch):
+    """A swallowed exception never reaches threading.excepthook, so the local
+    crash file crash_report.py exists to write would not be written at all."""
+    from ccsync_companion import crash_report
+
+    seen: list[str] = []
+    monkeypatch.setattr(crash_report, "handle",
+                        lambda *a, **kw: seen.append(kw.get("thread", "?")))
+
+    seq, _a, _b, _e = _build(FakeSelectionClient(selection=[]), FakeAdmin())
+
+    def boom(*_a, **_k):
+        raise OSError("selection read failed")
+
+    seq._selection_get = boom
+
+    seq.start()
+    assert _wait_until(lambda: seen, timeout=5.0)
+    seq.stop()
+
+    assert seen[0] == "ccsync-sequencer"
+
+
+# -- the bounded lane B join (SYNC-1, resilience sweep 2026-08-28, CR-91) ---
+
+
+class _WedgedLaneB:
+    """A lane B whose rclone hangs on a local read (the MAC-12 condition).
+    It only ends when something aborts it."""
+
+    def __init__(self) -> None:
+        self.name = "lane_b"
+        self.released = threading.Event()
+        self.aborts: list = []
+        self.stopped = False
+
+    def run_once(self, subpath=None, max_duration_seconds=None):
+        self.released.wait(10)
+
+    def abort_run(self, why, seconds=0):
+        self.aborts.append(why)
+        self.seconds = seconds
+        self.released.set()
+        return True
+
+    def stop(self):
+        # Recorded so the test can prove the sequencer does NOT reach for it:
+        # stop() latches the lane off for its whole thread generation.
+        self.stopped = True
+
+    def last_run_moved(self):
+        return 0
+
+
+def _lanes_ab_sequencer(lane_b, **cfg_overrides):
+    admin = FakeAdmin()
+    return Sequencer(
+        FakeLane("lane_a", admin.events), lane_b, admin,
+        FakeSelectionClient([]), _cfg(**cfg_overrides),
+        folder_status_poll_seconds=0.02,
+    )
+
+
+def test_a_wedged_lane_b_does_not_freeze_the_project_rotation(monkeypatch):
+    """CR-91: `thread.join()` had no timeout, for the stated (correct) reason
+    that an un-joined lane B would write into a directory the next project's
+    repath moves. A lane B whose child wedged therefore held the rotation
+    forever -- lane A finishing released nothing."""
+    from ccsync_companion.sync import sequencer as sequencer_mod
+
+    monkeypatch.setattr(sequencer_mod, "lane_b_join_timeout", lambda budget: 0.05)
+    monkeypatch.setattr(sequencer_mod, "LANE_B_ABORT_JOIN_SECONDS", 1.0)
+
+    lane_b = _WedgedLaneB()
+    seq = _lanes_ab_sequencer(lane_b)
+    started = time.monotonic()
+    seq._run_lanes_a_and_b("Projects/2026/FF5/Alpha", 5.0)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5.0, "the rotation must not wait on a wedged lane B"
+    assert lane_b.aborts, "the lane's rclone child must be ended"
+    assert "did not finish" in lane_b.aborts[0]
+    assert "Projects/2026/FF5/Alpha" in lane_b.aborts[0]
+    assert lane_b.stopped is False, (
+        "stop() would latch lane B off for the whole thread generation")
+    assert lane_b.seconds >= 0, "the stall record gets the join timeout"
+
+
+def test_the_bounded_join_names_the_wedged_lane_in_the_log(monkeypatch, caplog):
+    from ccsync_companion.sync import sequencer as sequencer_mod
+
+    monkeypatch.setattr(sequencer_mod, "lane_b_join_timeout", lambda budget: 0.05)
+    monkeypatch.setattr(sequencer_mod, "LANE_B_ABORT_JOIN_SECONDS", 1.0)
+    lane_b = _WedgedLaneB()
+    seq = _lanes_ab_sequencer(lane_b)
+
+    with caplog.at_level("WARNING", logger="ccsync.sync.sequencer"):
+        seq._run_lanes_a_and_b("Projects/2026/FF5/Alpha", 5.0)
+
+    assert any("lane B did not finish" in r.getMessage() for r in caplog.records)
+
+
+def test_a_healthy_lane_b_is_joined_exactly_as_before(monkeypatch):
+    """The bound must not change the normal path: both lanes run, both are
+    joined, and nothing is aborted."""
+    from ccsync_companion.sync import sequencer as sequencer_mod
+
+    aborts: list = []
+
+    class _QuickLaneB(FakeLane):
+        def abort_run(self, why, seconds=0):
+            aborts.append(why)
+            return True
+
+    admin = FakeAdmin()
+    lane_b = _QuickLaneB("lane_b", admin.events)
+    seq = Sequencer(
+        FakeLane("lane_a", admin.events), lane_b, admin,
+        FakeSelectionClient([]), _cfg(), folder_status_poll_seconds=0.02,
+    )
+    seq._run_lanes_a_and_b("Projects/2026/FF5/Alpha", 5.0)
+
+    assert lane_b.calls == ["Projects/2026/FF5/Alpha"]
+    assert not aborts
+
+
+def test_the_join_timeout_sits_above_the_lanes_own_stall_ceiling():
+    """Ordering matters: the lane kills its own wedged child first, and this
+    join is the backstop. A timeout BELOW the lane's ceiling would cut short
+    the legitimate case -- a SOFT cutoff letting a 40 GB original land."""
+    from ccsync_companion.sync import rclone_lane
+    from ccsync_companion.sync.sequencer import lane_b_join_timeout
+
+    assert lane_b_join_timeout(600) > rclone_lane.hard_ceiling_seconds(600)
+    # A missing budget still yields a real bound, never zero or infinity.
+    assert lane_b_join_timeout(None) > 0

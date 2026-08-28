@@ -27,13 +27,15 @@ import subprocess
 import sys
 import threading
 import time
-from typing import TYPE_CHECKING, Optional
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Optional
 
 from PIL import Image, ImageDraw  # noqa: F401  (ImportError here is by design)
 
 from . import config as config_mod
 from . import proxy_history
 from . import reporter as reporter_mod
+from . import root_guard as root_guard_mod
 from . import resolve_bridge
 from . import site as site_mod
 from . import ui_dispatch
@@ -1458,6 +1460,40 @@ def _build_typed_confirmation(
     return result["ok"]
 
 
+def _confirm_resume_disk_floor(app: "CompanionApp", reason: str) -> None:
+    """Confirm, then clear the free-space park (SYS-5 / SYNC-7, resilience
+    sweep 2026-08-28).
+
+    Still a confirmation and not a bare action: the park exists because the
+    drive is nearly full, and resuming without making room means rclone
+    failing per file with ENOSPC, which is the noisy state the park replaced.
+    It says what the automatic clear is, so an editor who has already deleted
+    something knows they need not click at all."""
+    from . import popup
+
+    lock = getattr(app, "_popup_active_lock", None)
+    if lock is not None and not lock.acquire(blocking=False):
+        _notify(app, "Another CCSync window is already open. Close it first.")
+        return
+    try:
+        confirmed = popup.confirm_dialog(
+            "CCSYNC.EXE: resume proxy download",
+            "CCSync stopped downloading proxies because:\n\n"
+            f"  {reason}\n\n"
+            "Your uploads never stopped. Proxy download starts again on its own as "
+            "soon as there is enough room, so you only need this if you have just "
+            "made space and do not want to wait.",
+            ok_label="RESUME PROXY DOWNLOAD",
+        )
+    finally:
+        if lock is not None:
+            lock.release()
+    if not confirmed:
+        return
+    ok, message = app.resume_lane_b()
+    _notify(app, message if ok else f"Nothing to resume: {message}")
+
+
 def _confirm_resume_lane_b(app: "CompanionApp", snap: dict) -> None:
     """Confirm, then clear the lane B breaker (item 9, 2026-08-17).
 
@@ -1466,8 +1502,17 @@ def _confirm_resume_lane_b(app: "CompanionApp", snap: dict) -> None:
     judgement the breaker could not make itself."""
     from . import popup
 
-    reason = str(((snap.get("sync_guard") or {}).get("lane_b_breaker") or {})
-                 .get("reason") or "a safety check failed")
+    guard = snap.get("sync_guard") or {}
+    breaker = guard.get("lane_b_breaker") or {}
+    floor = guard.get("disk_floor") or {}
+    # The same button clears either park (SYS-5 / SYNC-7, resilience sweep
+    # 2026-08-28), and the two need different words: the breaker's dialog asks
+    # the editor to assert something about the SERVER, which is exactly the
+    # wrong question to put in front of somebody whose disk is full.
+    if not breaker.get("tripped") and floor.get("parked"):
+        _confirm_resume_disk_floor(app, str(floor.get("reason") or "this drive is nearly full"))
+        return
+    reason = str(breaker.get("reason") or "a safety check failed")
     lock = getattr(app, "_popup_active_lock", None)
     if lock is not None and not lock.acquire(blocking=False):
         _notify(app, "Another CCSync window is already open. Close it first.")
@@ -1768,12 +1813,23 @@ def _sync_line(snap: dict) -> str:
     if snap.get("problems") or snap.get("eula_problem"):
         return "Sync: not set up yet"
     if snap.get("root_absent"):
+        # SYNC-2 (resilience sweep 2026-08-28): a drive that is plugged in and
+        # not answering is not "disconnected", and telling the editor it is
+        # sends them to check a cable that is fine.
+        if snap.get("root_state") == root_guard_mod.ROOT_NOT_ANSWERING:
+            return "Sync: paused (the drive is not answering)"
         owed = str(snap.get("root_unfinished") or "")
         if owed:
             return f"Sync: paused (drive disconnected, {owed} still to go)"
         return "Sync: paused (drive disconnected)"
     if snap.get("paused"):
         return "Sync: paused"
+    # SYNC-15: anything the five branches above do not cover, in the words
+    # the fleet grid uses. Every reason here is one an editor could otherwise
+    # only find by reading their own log.
+    blocked = guard.get("blocked") or {}
+    if isinstance(blocked, dict) and blocked.get("detail"):
+        return f"Sync: {blocked['detail']}"
 
     up = down = 0
     speed = 0.0
@@ -1929,6 +1985,12 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     # tray reports "PROBLEM ... a project folder was deleted on this machine"
     # for a project sitting safely on a drive in the editor's bag.
     _get("root_absent", lambda: bool(getattr(app, "_root_absent", False)), False)
+    # ...and WHICH of the four answers it is (SYNC-2, resilience sweep
+    # 2026-08-28): `absent` and `not_answering` both pause the lanes and need
+    # different sentences, so the snapshot carries the state, not just a bool.
+    _get("root_state",
+         lambda: str(getattr(app, "_root_state", root_guard_mod.ROOT_UNKNOWN)),
+         root_guard_mod.ROOT_UNKNOWN)
     # What the drive went out still owing ("2 uploads (2.3 GB left)"), or ""
     # (CR-92). Two attribute reads on the app; the tray shows it on the
     # Sync: line and the tooltip so the reminder balloon is not the only
@@ -2045,6 +2107,50 @@ def _breaker_line(guard: dict) -> Optional[str]:
     return f"⛔ PROXY DOWNLOAD STOPPED (safety): {reason}"
 
 
+def _disk_line(guard: dict) -> Optional[str]:
+    """"Not downloading proxies: this drive has 8 GB free", or None
+    (SYS-5 / SYNC-7, resilience sweep 2026-08-28).
+
+    Its own sentence rather than a suffix on lane B's line, for the breaker's
+    reason: the two facts that stop the support call -- your uploads are still
+    running, and it starts again by itself -- do not fit on a lane line."""
+    floor = (guard or {}).get("disk_floor") or {}
+    if not isinstance(floor, dict) or not floor.get("parked"):
+        return None
+    reason = str(floor.get("reason") or "this drive is nearly full")
+    return (f"⚠ Not downloading proxies: {reason}. Uploads are still running; free "
+            "up space and it starts again on its own")
+
+
+def _blocked_line(guard: dict) -> Optional[str]:
+    """The one sentence that answers "why is nothing syncing" (SYNC-15).
+
+    Deliberately the LAST line rendered and often a repeat of one above it:
+    the point of `sync_guard.blocked` is that the tray, the fleet grid and the
+    "why isn't it syncing" question all read ONE ordered answer, so an editor
+    on the phone to their admin is reading the same words. Suppressed when the
+    reason is one the lane lines already carry unambiguously."""
+    blocked = (guard or {}).get("blocked") or {}
+    if not isinstance(blocked, dict):
+        return None
+    detail = str(blocked.get("detail") or "").strip()
+    reason = str(blocked.get("reason") or "").strip()
+    if not detail or not reason:
+        return None
+    if reason in _BLOCKED_REASONS_WITH_THEIR_OWN_LINE:
+        return None
+    return f"⚠ {detail}"
+
+
+# Reasons whose sentence is already on a line of its own above (the halt, the
+# breaker, the disk park, the unfiltered folders). Repeating them would make
+# the Settings window say the same thing twice.
+_BLOCKED_REASONS_WITH_THEIR_OWN_LINE = frozenset({
+    "fleet_halt", "local_halt", "breaker_tripped", "disk_full",
+    "folders_unfiltered", "clock_skew",
+})
+
+
 def _halt_line(guard: dict) -> Optional[str]:
     halt = (guard or {}).get("halt") or {}
     if not halt.get("active"):
@@ -2088,6 +2194,58 @@ def _skipped_exists_line(guard: dict) -> Optional[str]:
     return (f"⚠ {count} file{'s' if count != 1 else ''} on the server "
             f"{'have' if count != 1 else 'has'} the same name but a different size. "
             "Your newer version will NOT upload")
+
+
+# A stall older than this is history, not news: the lane has had many
+# healthy passes since, and the record is kept on disk for diagnostics
+# rather than for the menu.
+STALL_LINE_MAX_AGE_SECONDS = 24 * 3600
+
+
+def _stalled_line(guard: dict) -> Optional[str]:
+    """"Proxy download was stuck and had to be restarted" (SYNC-1, CR-91).
+
+    The tray half of the stall watchdog. Until this, a lane whose rclone had
+    wedged on a drive that stopped answering reported `syncing` forever and
+    said nothing at all on the machine it was happening on -- the editor's
+    own computer held no record that anything had been killed. Named as a
+    drive problem because that is what it has always been in the field
+    (a Mac's external SSD, a dropped network mapping)."""
+    stalled = (guard or {}).get("stalled") or {}
+    when = stalled.get("at")
+    if not when:
+        return None
+    try:
+        seconds = int(stalled.get("seconds") or 0)
+    except (TypeError, ValueError):
+        seconds = 0
+    age = _stamp_age_seconds(when)
+    if age is not None and age > STALL_LINE_MAX_AGE_SECONDS:
+        return None
+    lane = str(stalled.get("lane") or "").strip()
+    what = {
+        "A": "Uploading",
+        "B": "Proxy download",
+        "express": "The fast upload of new clips",
+    }.get(lane, "Syncing")
+    return (f"⚠ {what} stopped moving for {max(1, seconds // 60)} min and was "
+            "restarted. If it keeps happening, check the drive is connected")
+
+
+def _stamp_age_seconds(stamp: Any) -> Optional[int]:
+    """Seconds since an ISO-8601 stamp, or None when it cannot be read.
+
+    None, never 0: "could not tell" must not render as "just now" (CR-89)."""
+    try:
+        when = datetime.fromisoformat(str(stamp))
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    try:
+        return max(0, int((datetime.now(timezone.utc) - when).total_seconds()))
+    except Exception:
+        return None
 
 
 def _unfiltered_line(guard: dict) -> Optional[str]:
@@ -2208,6 +2366,40 @@ def _crashes_line(guard: dict) -> Optional[str]:
             "for your admin")
 
 
+# Restarts of ONE background thread inside an hour that earn a tray line.
+# The mirror of app.LANE_WATCHDOG_ADVISORY_RESTARTS, kept here as its own name
+# so tray.py stays importable without app.py.
+RESTART_ADVISORY_COUNT = 3
+
+
+def _restarts_line(guard: dict) -> Optional[str]:
+    """"CCSync keeps restarting its sync engine" (SYS-2).
+
+    The watchdog self-heals a dead sequencer, which is the right behaviour and
+    also exactly how a machine syncing in fits and starts stays invisible. One
+    restart is not news; three inside an hour is a fault the editor should be
+    able to hand to their admin without anyone noticing it by accident."""
+    restarts = (guard or {}).get("restarts") or {}
+    if not isinstance(restarts, dict):
+        return None
+    worst = 0
+    for entry in restarts.values():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            # count_1h absent (an older companion's record) reads as 0: "we
+            # could not tell" must not render as an alarm either way round.
+            count = int(entry.get("count_1h") or 0)
+        except (TypeError, ValueError):
+            continue
+        worst = max(worst, count)
+    if worst < RESTART_ADVISORY_COUNT:
+        return None
+    return (f"⚠ CCSync keeps restarting its sync engine ({worst} times in the "
+            "last hour), so syncing is stopping and starting. Copy diagnostics "
+            "for your admin")
+
+
 def _progress_bucket(status: LaneStatus) -> Optional[int]:
     """Tenths of progress for a syncing lane -- the granularity at which a
     menu rebuild is worth the (small) risk of touching a menu the user has
@@ -2298,6 +2490,16 @@ def _guard_fingerprint(guard: Optional[dict]) -> tuple:
         bool(halt.get("active")), str(halt.get("scope") or ""),
         str(halt.get("reason") or ""), trash_gb,
         int(skipped.get("count") or 0),
+        # SYNC-1: the stall line appears and disappears on its own (the
+        # record ages out of the menu after a day), so without its stamp
+        # here the line would linger, or never show, until something
+        # unrelated moved the fingerprint -- UI-3's shape again.
+        str((guard.get("stalled") or {}).get("at") or ""),
+        # SYS-5/SYNC-7 and SYNC-15: the disk park adds the RESUME action (and
+        # a line), and the blocked reason is a line -- a change in either has
+        # to rebuild the menu or the item never appears.
+        bool((guard.get("disk_floor") or {}).get("parked")),
+        str((guard.get("blocked") or {}).get("reason") or ""),
     )
 
 
@@ -2987,7 +3189,11 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
     guard = snap.get("sync_guard") or {}
     breaker_items = (
         [tray_backend.MenuItem("► Resume proxy download…", on_resume_lane_b)]
-        if ((guard.get("lane_b_breaker") or {}).get("tripped")) else []
+        if ((guard.get("lane_b_breaker") or {}).get("tripped")
+            # ...and for a free-space park, through the SAME action (SYS-5 /
+            # SYNC-7): from the editor's side both are "proxy download is
+            # stopped and I have done something about it".
+            or (guard.get("disk_floor") or {}).get("parked")) else []
     )
     halt_active = bool((guard.get("halt") or {}).get("active"))
     halt_is_fleet = (guard.get("halt") or {}).get("scope") == "fleet"

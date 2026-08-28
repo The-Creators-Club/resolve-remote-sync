@@ -420,6 +420,18 @@ def test_the_ingest_actions_are_present():
     assert any(l == "PAUSE B-ROLL INDEXING" for l in lines)
 
 
+def test_the_restart_advisory_appears_in_sync_lanes():
+    """SYS-2 (resilience sweep 2026-08-28): the watchdog self-heals a dead
+    sequencer, which is also how a machine syncing in fits and starts stays
+    invisible. Three restarts in an hour has to be readable ON the machine."""
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    app.sync_guard = lambda: {"restarts": {
+        "sequencer": {"count_24h": 7, "count_1h": 3, "last_at": None,
+                      "last_error": "OSError: P: is gone"}}}
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    assert any("keeps restarting its sync engine" in l for l in lines)
+
+
 def test_breaker_and_halt_actions_appear_in_sync_lanes():
     app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     app.sync_guard = lambda: {"lane_b_breaker": {"tripped": True, "reason": "x"}}
@@ -535,3 +547,17 @@ def test_every_button_on_click_is_callable_with_no_arguments():
         for item in section.items:
             if isinstance(item, Button):
                 assert callable(item.on_click)
+
+
+def test_the_stall_line_appears_in_sync_lanes():
+    """SYNC-1 (resilience sweep 2026-08-28, CR-91): the companion killed a
+    wedged rclone. That has to be readable on the machine it happened on, not
+    only on the fleet page the failure was invisible on for 2 h 20 m."""
+    from datetime import datetime, timezone
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    app.sync_guard = lambda: {"stalled": {
+        "lane": "B", "seconds": 1500, "killed": True,
+        "at": datetime.now(timezone.utc).isoformat()}}
+    lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "SYNC LANES"))
+    assert any("Proxy download stopped moving" in l for l in lines)

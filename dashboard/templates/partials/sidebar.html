@@ -23,6 +23,10 @@
                 because CR-49 was an untick on the wrong row. Ticking needs no
                 confirm, hence the `checked` condition. #}
              hx-confirm="This removes {{ p.short if p.short is defined else p.label }} from {{ toggle_editor }}'s {{ toggle_editor_machines | length }} computer{{ 's' if toggle_editor_machines | length != 1 }} ({{ toggle_editor_machines | join(', ') }}). Their copies stay on disk; nothing new comes down and proxy sync stops for it."
+             {% elif p.slug == current_slug and tick_warning is defined and tick_warning %}
+             {# UX-1 (2026-08-28): the tick's consequence, for the one project
+                whose figures this page holds (see ui._sidebar_context). #}
+             hx-confirm="{{ tick_warning }} Sync it there anyway?"
              {% endif %}
            {% endif %}
            {{ 'checked' if p.slug in selected_slugs }}>

@@ -101,8 +101,27 @@
       </td>
       <td class="mono-sm">{{ e.machine }}</td>
       <td>
+        {# SYS-7 (resilience sweep 2026-08-28). THE FIRST LINE OF THE ROW: one
+           plain sentence for why this computer is not syncing, composed by
+           health.why_not_syncing from states every one of which was already
+           computed somewhere and never composed into words. Before this, the
+           owner opened this page, read amber, and messaged the editor whose
+           machine was the broken one.
+
+           An informational sentence (an upload-only tick, whose lane B is
+           MEANT to be idle) is muted, not red: colouring that one as a fault
+           is what would send an admin chasing a machine working exactly as
+           ticked (CR-85). #}
+        {% if e.why %}
+        <div class="why-line {{ "muted" if e.why.informational else "red" }}"
+             title="reason code: {{ e.why.reason }}">{{ e.why.sentence }}</div>
+        {% endif %}
         {% for lane in e.lanes %}
-          <span class="chip lane {{ lane.chip }}" title="{{ lane.lane }}: {{ lane.state }}{% if lane.last_error %} ({{ lane.last_error }}){% endif %}">{{ lane.label }}:{{ lane.state }}</span>
+          {# SYS-1 (resilience sweep 2026-08-28): a lane in `syncing` used to be
+             amber for as long as it liked. chip_reason is the sentence behind a
+             red one -- a stall ("no progress for 47 min"), 15 minutes of
+             silence, or the lane's own error. #}
+          <span class="chip lane {{ lane.chip }}" title="{{ lane.lane }}: {{ lane.state }}{% if lane.chip_reason %} - {{ lane.chip_reason }}{% elif lane.last_error %} ({{ lane.last_error }}){% endif %}">{{ lane.label }}:{{ lane.state }}{% if lane.chip_reason and "no progress" in lane.chip_reason %} STALLED{% endif %}</span>
         {% endfor %}
         {# Transport health (B17): the companion computes this every heavy
            tick and the server used to drop it, so a lane C riding the public
@@ -137,6 +156,15 @@
         {% if e.guard.crash_count %}<span class="chip amber" title="{{ e.guard.crash_count }} background task(s) on this computer have crashed and written a report{% if e.guard.crash_newest %} (newest: {{ e.guard.crash_newest }}){% endif %}. The tray stays up and the lanes look normal, so ask the editor for Copy diagnostics.">[ CRASHES: {{ e.guard.crash_count }} ]</span>{% endif %}
         {% if e.guard.folders_unfiltered %}<span class="chip amber" title="{{ e.guard.folders_unfiltered }} Syncthing folder(s) on this computer have no ignore filter written{% if e.guard.folders_unfiltered_names %}: {{ e.guard.folders_unfiltered_names }}{% endif %}. Without it, lane C carries camera originals both ways.">[ UNFILTERED FOLDERS: {{ e.guard.folders_unfiltered }} ]</span>{% endif %}
         {% if e.guard.sync_conflicts %}<span class="chip amber" title="{{ e.guard.sync_conflicts }} Syncthing sync-conflict file(s) in this machine's tree. Two people saved one project file; nothing was lost, but somebody's edit is sitting in a renamed copy.">[ CONFLICTS: {{ e.guard.sync_conflicts }} ]</span>{% endif %}
+        {# SYS-5 (resilience sweep 2026-08-28): a full drive used to show as
+           red dots with no cause, and "why?" had no answer on any page. No
+           chip at all for a machine that has not reported a disk section:
+           "could not check" must never render as a green reassurance. #}
+        {% if e.guard.disk_percent is not none and e.guard.disk_status != "green" %}<span class="chip {{ e.guard.disk_status }}" title="this computer's sync drive has {{ e.guard.disk_root_free_bytes | human_bytes }} free of {{ e.guard.disk_root_total_bytes | human_bytes }}{% if e.guard.disk_system_free_bytes is not none %}; its system drive has {{ e.guard.disk_system_free_bytes | human_bytes }} free{% endif %}. Measured {{ e.guard.disk_at | ago }}. Proxy download fills a drive file by file, and .ccsync-trash cannot prune while the breaker is tripped.">[ DISK {{ "%.0f" | format(e.guard.disk_percent) }}% ]</span>{% endif %}
+        {# SYNC-1 / SYS-17: the stall the COMPANION found and killed, which is
+           the machine that had the evidence. The server's own detector is the
+           lane chip beside it. #}
+        {% if e.guard.stalled_lane %}<span class="chip red" title="lane {{ e.guard.stalled_lane }} on this computer made no progress for {{ e.guard.stalled_seconds }} second(s){% if e.guard.stalled_killed %} and was killed{% else %} and was reported without being killed{% endif %}, {{ e.guard.stalled_at | ago }}. A local drive that stops answering reads exactly like this.">[ STALLED {{ e.guard.stalled_lane | upper }}{{ ", KILLED" if e.guard.stalled_killed }} ]</span>{% endif %}
         {% if e.guard.halt_active %}<span class="chip red" title="{{ e.guard.halt_reason }}">[ SYNC HALTED{{ " (FLEET)" if e.guard.halt_scope == "fleet" }} ]</span>{% endif %}
         {% if e.guard.skipped_exists %}<span class="chip amber" title="{{ e.guard.skipped_exists }} file(s) exist on the NAS under the same name at a different size. Lane A is copy --ignore-existing, so this machine's newer versions will never upload.">[ WON'T UPLOAD: {{ e.guard.skipped_exists }} ]</span>{% endif %}
         {% if e.guard.trash_bytes and e.guard.trash_bytes > 5000000000 %}<span class="chip amber" title="{{ e.guard.trash_count }} recoverable file(s) in this machine's .ccsync-trash. Pruned automatically after 14 days.">[ TRASH: {{ e.guard.trash_bytes | human_bytes }} ]</span>{% endif %}
@@ -157,6 +185,23 @@
         {% if e.music_ingest.active %}<span class="chip {{ "amber" if e.music_ingest.warning else "green" }}" title="music batch {{ e.music_ingest.batch[:8] if e.music_ingest.batch else "?" }}{% if e.music_ingest.track %} - {{ e.music_ingest.track }}{% endif %}{% if e.music_ingest.state %} ({{ e.music_ingest.state }}{% if e.music_ingest.gate %}: {{ e.music_ingest.gate }}{% endif %}){% endif %}{% if e.music_ingest.percent %} · {{ e.music_ingest.percent }}% of this track{% endif %}{% if e.music_ingest.failed %} · {{ e.music_ingest.failed }} failed{% endif %} · reported {{ e.music_ingest.at | ago }}">[ INDEXING MUSIC: {{ e.music_ingest.done }}/{{ e.music_ingest.total }} ]</span>{% endif %}
         {% if e.music_ingest.warning %}<span class="chip amber" title="{{ e.music_ingest.warning }}">[ MUSIC MODEL ]</span>{% endif %}
         {% if e.proxy.missing %}<span class="chip amber" title="{{ e.proxy.missing }} clip(s) on this machine have no proxy yet, so nobody else on the fleet can see that footage{% if e.proxy.state %} (proxy generator: {{ e.proxy.state }}){% endif %}{% if e.proxy.left %}; {{ e.proxy.left }} queued to encode{% endif %}.">[ {{ e.proxy.missing }} NEED PROXIES ]</span>{% endif %}
+        {# SYS-7: the bundle that answers the question, without an inbound
+           connection to an editor's PC and without asking a non-technical
+           person to click anything on the machine that is broken. The request
+           rides the next report reply; the answer arrives one report interval
+           later. Admin only -- a bundle names an editor's paths and their
+           Resolve project. #}
+        {% if session_is_admin %}
+          {% if e.guard.diagnostics_requested %}<span class="chip amber" title="waiting for {{ e.machine }} to report in and send its diagnostics">[ ASKED WHY ]</span>
+          {% else %}<form class="inline-form" hx-post="/partials/admin/machines/ask-why" hx-target="closest .fleet-grid-wrap" hx-swap="innerHTML">
+            <input type="hidden" name="editor" value="{{ e.editor_username }}">
+            <input type="hidden" name="machine" value="{{ e.machine }}">
+            <button class="btn" type="submit" title="ask this computer to upload its own diagnostics on its next report. It answers within a report interval; nothing connects to the machine.">[ ASK THIS MACHINE WHY ]</button>
+          </form>{% endif %}
+          {% if e.diagnostics.id %}<button class="btn" hx-get="/partials/admin/diagnostics?editor={{ e.editor_username }}&machine={{ e.machine }}"
+                  hx-target="#fleet-diagnostics" hx-swap="innerHTML"
+                  title="what this computer said, {{ e.diagnostics.received_at | ago }}">[ READ THE ANSWER ]</button>{% endif %}
+        {% endif %}
         {% if e.transport.express_last_error %}<span class="chip amber" title="last express-lane failure: {{ e.transport.express_last_error }}">[ EXPRESS FAILED ]</span>
         {% elif e.transport.express_dropped %}<span class="chip amber" title="{{ e.transport.express_dropped }} file(s) dropped by the express lane's batch cap -- they still go up on the next periodic pass.">[ EXPRESS DROPPED: {{ e.transport.express_dropped }} ]</span>{% endif %}
       </td>

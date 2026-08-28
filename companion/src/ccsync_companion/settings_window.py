@@ -265,6 +265,17 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
                  # because each one is something that has stopped working.
                  tray_mod._reporter_line(guard), tray_mod._clock_skew_line(guard),
                  tray_mod._crashes_line(guard),
+                 # SYS-2 (same sweep): the watchdog restarting one thread over
+                 # and over is a self-healing machine that still needs a human.
+                 tray_mod._restarts_line(guard),
+                 # SYNC-1 (same sweep, CR-91): a wedged rclone the companion
+                 # had to kill. The machine it happened ON said nothing at
+                 # all about it before this line existed.
+                 tray_mod._stalled_line(guard),
+                 # SYS-5/SYNC-7 then SYNC-15 (same sweep): the free-space
+                 # park, then the ONE ordered sentence the fleet grid shows
+                 # for this machine -- last, because it summarises the rest.
+                 tray_mod._disk_line(guard), tray_mod._blocked_line(guard),
                  tray_mod._trash_line(guard)):
         if text:
             lane_items.append(Line(text, style="warning"))
@@ -277,7 +288,9 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
     if snap.get("ytdl_line"):
         lane_items.append(Line(snap["ytdl_line"]))
 
-    if (guard.get("lane_b_breaker") or {}).get("tripped"):
+    if ((guard.get("lane_b_breaker") or {}).get("tripped")
+            # The same button clears a free-space park (SYS-5 / SYNC-7).
+            or (guard.get("disk_floor") or {}).get("parked")):
         lane_items.append(Button(
             "RESUME PROXY DOWNLOAD", lambda: tray_mod.action_resume_lane_b(app, snap)))
     halt_active = bool((guard.get("halt") or {}).get("active"))

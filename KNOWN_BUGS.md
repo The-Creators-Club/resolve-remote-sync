@@ -4188,6 +4188,571 @@ the old code.
 
 **Tests.** `installer/tests/Test-DriveMapParser.ps1` dot-sources the real library instead of slicing functions out of the bootstrap by string index, asserts all six functions exist, and adds thirteen source cases: both scripts dot-source it, neither redefines the parsers, the uninstaller no longer mentions `Get-PSDrive`/`DisplayRoot`, `$null` is foreign, the unmap goes through `Invoke-MappingCommand`, no raw `cmd /c net use /delete` survives, the share is gated on `$unmapSettled`, the two commands are printed, the bootstrap refuses without the library, and both packagers ship it. 41 cases pass, plus the live probe (which on this base rig correctly reports P: as a foreign netuse mapping).
 
+## Resilience sweep, wave 2: "green while dead" (2026-08-28) - FIXED in repo, unshipped
+
+Wave 2 of `docs/RESILIENCE_SWEEP_2026-08-28.md` (items 1, 2, 3, 16, 17, 28 of
+its ranked list), built by five builder agents to one wire contract
+(`sync_guard.disk / blocked / restarts / stalled / rotation_seconds /
+root_state`, per-lane `progress_token` + `state_since`). This is the class
+the ledger has paid for most often: SYNC-17, CR-27a, CR-86, CR-91 were all a
+machine reporting green or amber while nothing moved. After this wave a lane
+is RED on the grid with "syncing, no progress for N min" (server-side, from
+a progress token, so the wedged thread is not the one asked to notice), the
+companion kills an rclone that has stopped moving bytes and keeps the
+evidence, a dead sequencer/watcher thread is restarted and the restarts are
+reported, a wedged drive is `not_answering` rather than `present`, free disk
+is in the report and lane B parks under a floor, and every machine's row
+carries one sentence answering "why is this computer not syncing", with
+[ ASK THIS MACHINE WHY ] fetching its diagnostics over the report channel.
+
+Ships as: dashboard first (schema v32 + v33), then companion 0.9.55 (the same
+unshipped build as CR-92 and wave 1). Companion-side new state files:
+`~/.ccsync/state/watchdog.json`, `lane_stall.json`, `diagnostics_sent.json`,
+`~/.ccsync/lane_b_disk_floor.json`. New config keys: `lane_b_min_free_bytes`
+(20 GB). Deliberate judgements recorded in the entries below: a slow-but-
+moving rclone is never killed at either ceiling; the disk-floor resume grants
+no grace; `transport_offline` is the weakest evidence in the `blocked` list.
+
+### SYS-2 - the sequencer thread could die and the machine kept reporting its frozen state as healthy - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** An editor's machine sat on the fleet grid green, online and
+reporting every 30 s, with a lane state that never changed and no log line
+after one traceback. Nothing synced until somebody thought to restart the
+tray. The dashboard, whose job is to say whether footage is syncing, could not
+tell this apart from a quiet machine - the "green while dead" class the ledger
+is full of.
+
+**Cause.** `Sequencer._run` had no try/except around its loop body and the
+`self._state = STATE_STOPPED` assignment sat *after* the `while`, so any
+exception the inner handlers did not cover (an OSError out of
+`_reconcile_paths` when a mapped `P:` drops mid-pass is the observed one)
+killed the thread with `_state` frozen at `STATE_RUNNING` or
+`STATE_BETWEEN_PASSES`. `start()` was never called again, and the reporter
+cheerfully posted that frozen state forever. The timeline watcher and the
+media-tree cache thread were unsupervised in exactly the same way. The
+dashboard had already solved this on its own side
+(`collector.thread_died`/`seconds_since_heartbeat`/`restart` driven by
+`app.CollectorWatchdog`); the pattern simply had not been applied to the side
+where the failure actually happens.
+
+**Fix.** Three parts. (1) `sequencer.py:846-975`: the loop body is wrapped in
+a log-and-continue try/except - one bad pass costs one pass, logged at ERROR
+with the traceback and handed to `crash_report.handle` explicitly (a swallowed
+exception never reaches `threading.excepthook`, so the local crash file would
+otherwise not be written), then the normal between-passes wait
+(`_sleep_after_failure`) before the next pass. `STATE_STOPPED` is now reached
+in a `finally`, and an exception that ends the thread anyway is recorded in
+`_thread_error` and re-raised so the hook still sees it. The loop stamps
+`self._heartbeat` at the top of every iteration and at every project turn
+(`sequencer.py:1617`), and exposes `thread_died()`,
+`seconds_since_heartbeat()` (0.0 for a stopped or deliberately PAUSED
+sequencer), `last_error()` and `loop_failures()` on the collector's contract.
+(2) `app.py:700-1000` adds `LaneWatchdog`, started last in `start()`
+(`_start_lane_watchdog`) and stopped first in `shutdown()`: every 60 s it
+checks the sequencer, the watcher thread and the media-tree thread, restarting
+a dead one through its existing start method (`_start_watcher_thread` /
+`_start_media_tree_thread`, now the single start path for both) when it died
+or when its heartbeat is older than its bound - `max(3 x
+project_rotation_seconds, 30 min)` for the sequencer, 30 min for the others.
+It never restarts during shutdown or while the popup/consolidate stand-down
+predicate says no, and a state it cannot read is never treated as a fault.
+Every restart is recorded atomically in `~/.ccsync/state/watchdog.json`
+(per-thread event list, so the count survives a companion restart) and
+reported as `sync_guard.restarts` (`count_24h`, `count_1h`, `last_at`,
+`last_error`). (3) The visible half: three or more restarts of one thread
+inside an hour gets a tray/Settings advisory line (`tray._restarts_line`,
+`settings_window` SYNC LANES), and `build_diagnostics()` gained a "background
+thread restarts" section naming the counts, the last error and the record
+file. `watcher.py:420` stamps the watcher's own heartbeat (two lines, the
+only file touched outside this finding's list).
+
+**Tests.** `companion/tests/test_sequencer.py`: a pass that raises costs one
+pass and not the thread (the next pass really runs, `loop_failures()==1`,
+`last_error()` names it), the heartbeat advances, a stopped or paused
+sequencer reads as no heartbeat question at all, a thread that dies anyway
+leaves `STATE_STOPPED` and says why, and a failed pass writes a crash report.
+`companion/tests/test_lane_watchdog.py` (new, 23 tests, no real threads and an
+injected clock): a dead sequencer is restarted, recorded and reported; the
+record outlives the process; events age out of the 24 h and 1 h windows; the
+bound really is three rotations; nothing is restarted during shutdown or
+mid-popup/consolidate; a sequencer that cannot answer is assumed fine; a
+failed restart is recorded rather than raised; dead and wedged
+watcher/media-tree threads are restarted while a deliberately stopped one is
+not; the tray line appears only at three restarts in an hour; and the app's
+`sync_guard`/`build_diagnostics` halves, including "could not check" never
+rendering as "nothing has happened".
+
+### SYNC-1 / SYS-17 - a hung rclone froze the lane, the run lock and the whole rotation, with no timer anywhere - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** CR-91, verbatim: on leso's MacBook lane A reported
+`state=syncing, transferring=1, last_sync=NULL, last_error=NULL` for 2 h 20 m
+while nothing moved, and because lane A takes its turn first, lane B never ran
+- the editor downloaded nothing at all for the whole period. On the fleet page
+that is indistinguishable from a lane that is working.
+
+**Cause.** `RcloneLane._run_popen` called `proc.wait()` with no timeout, and
+none of rclone's own timers covers the failure: `--timeout` governs REMOTE IO,
+`--cutoff-mode SOFT` deliberately lets the in-flight transfer land, and a local
+read wedged in the kernel (a Mac's external SSD that stopped answering, a
+dropped SMB mapping) never reaches rclone's scheduler at all, so
+`--max-duration` is inert. The wait held `_run_lock`, and
+`sequencer._run_lanes_a_and_b` joined the lane B thread with no timeout for the
+(correct) reason that an un-joined lane B writes into a directory the next
+project's repath moves. Both individually right, jointly unbounded.
+
+**Fix.** `_run_popen` now polls `proc.wait(timeout=30)` through
+`_wait_with_watchdog` (rclone_lane.py:3712) with two ceilings derived from the
+pass budget: no bytes AND no files for `max(4 x budget, 900 s)`, or
+`budget x 2 + 300 s` outright, then `_terminate_child` and `state=error` with
+"rclone made no progress for Ns - killed" / "rclone did not exit after Ns -
+killed" (rclone_lane.py:3138). Bytes and files, not wall clock, exactly as
+CR-91 asks - and with one exemption CR-91's own text demands: a run still
+moving bytes is never killed at either ceiling, because SFTP uploads do not
+resume and killing a slow 40 GB original would restart it from byte 0 forever.
+Every stall is written atomically to `~/.ccsync/state/lane_stall.json`
+(`write_stall_record`, rclone_lane.py:272) so a restart cannot erase the
+evidence, reaches the report as `sync_guard.stalled` (`stall_report`,
+rclone_lane.py:3844, carried by lane B's `sync_guard_report` because both lanes
+share the state dir and the wire has one slot) and reaches the editor as a tray
+/ Settings line (`tray._stalled_line`). The lane B join is bounded to
+`lane_b_join_timeout(budget)` (sequencer.py:83) - above the lane's own ceiling,
+so the lane kills its own child first and this is the backstop - and on timeout
+calls `RcloneLane.abort_run`, which ends the child WITHOUT setting `_stop_event`
+(that would latch lane B off for its whole thread generation) and logs a named
+WARNING before the rotation proceeds. `project_rotation_seconds <= 0` was
+already refused by `config.validate_config`'s positive-number loop; that is now
+pinned by a test, and `_stall_budget_seconds` falls back to the packaged
+default rather than letting a zero disable the watchdog.
+
+**Tests.** `companion/tests/test_rclone_lane.py` (a child that never exits and
+moves nothing is killed and reported; the stall is persisted and reaches
+`sync_guard`; a slow-but-progressing run is never killed, driven by an injected
+clock over 3 h 20 m of simulated time; the hard ceiling; both formulas;
+`abort_run` does not latch the lane off; a record survives into a new lane
+object), `test_sequencer.py` (a wedged lane B does not freeze the rotation, the
+named WARNING, a healthy lane B is joined exactly as before, and the join
+timeout sits above the lane's ceiling), `test_config.py` (the rotation
+refusal), `test_tray_guard.py` + `test_settings_window.py` (the stall line).
+
+### SYS-1 (companion half) - a lane state with no evidence behind it - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** The same CR-91 report: `syncing` with `last_error=NULL` is
+unconditionally amber on the fleet page forever, and `lane_chip_status` reddens
+only on REPORT staleness - and the reports were flowing.
+
+**Cause.** Nothing in the report said whether a non-terminal lane state was
+moving, or how long it had held.
+
+**Fix.** `LaneStatus` gains `progress_token` and `state_since`
+(`companion/src/ccsync_companion/sync/base.py:42`). `state_since` is stamped by
+`__post_init__`/`__setattr__` rather than at the ~30 places that assign
+`state`, and a snapshot copy (`LaneStatus(**vars(...))`, which every `status()`
+returns) keeps the stamp it copied instead of re-dating it. `progress_token` is
+`bytes:files:project` (`rclone_lane.progress_token`), published at the START of
+a pass - the run that has moved nothing is the one the dashboard must be able
+to red - and refreshed on every `--stats` tick in `_handle_stderr_line`. The
+reporter serialises both per lane (`reporter._lane_liveness`, reporter.py:245);
+both are OMITTED rather than sent as null when a lane cannot supply them, so
+absent means "older companion" and never "claims to be moving", and the token
+is omitted while a lane is idle. Neither is touched by `_fit_payload`, which
+sheds only the heavy sections.
+
+**Tests.** `companion/tests/test_reporter.py` (a running lane reports both, an
+idle lane reports no token, a bare adapter omits both without 422ing, and both
+survive `_fit_payload` on a 15.8 MB payload; the exact-shape contract test now
+pins them), `test_rclone_lane.py` (the token exists before the first stats tick
+and moves when bytes move; `state_since` moves only on a state change).
+
+### SYNC-12 - "bounded" remote listings were not bounded - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** None observed yet; the mechanism is the same one `_end_probe`'s
+docstring already describes, one call layer up.
+
+**Cause.** `_run_lsf` and `_run_capture` used `subprocess.run(timeout=)`, which
+kills the child on expiry and then sits in `communicate()` waiting for the
+pipes to close. On Windows an rclone whose grandchild inherited the write
+handle - or a child in an uninterruptible kernel wait - leaves that call
+blocked forever. `list_remote_files` runs inside `_run_lock` with a documented
+600 s cap that could therefore be infinite, at the exact moment the breaker is
+deciding whether to stop lane B.
+
+**Fix.** Both go through `_run_bounded` (rclone_lane.py:947): Popen, two daemon
+readers with `_run_popen`'s `abandoned` flag, `wait(timeout)`, then
+`_end_probe`'s kill + one-second wait. A killed child answers `None`, which
+`_run_lsf` reports as a FAILED listing (never an empty one) and `_run_capture`
+as `PROBE_TIMEOUT_RETURNCODE` - i.e. "I could not tell", which is what makes
+`scan_pending_uploads` refuse a removal.
+
+**Tests.** `companion/tests/test_rclone_lane.py` (a child that ignores the
+kill and whose pipes never close: `_run_lsf` returns None promptly, the
+`_run_bounded` contract, and `_run_capture`'s non-zero code).
+`test_rclone_filters.py`'s two decoding/no-console-window tests now stand in a
+Popen instead of a CompletedProcess.
+
+### SYNC-13 - the express lane had no duration bound and no abandoned-reader escape - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** Express dies permanently and silently: the only sign is that new
+clips take a full rotation to reach the NAS instead of ~10 s, and
+`express_report()`'s counters simply stop advancing.
+
+**Cause.** `_express_spawn` read stderr to EOF and then waited, both unbounded,
+and `build_express_command` carried no `--max-duration`. A wedged express run
+holds `_express_run_lock` for the life of the process.
+
+**Fix.** `build_express_command` takes `max_duration_seconds` and emits the
+usual `--max-duration ... --cutoff-mode SOFT` pair (not a filter flag, so
+`--files-from-raw` still accepts it); the lane passes
+`project_rotation_seconds` (floor 60 s, `_express_max_duration`).
+`_express_spawn` now uses the same daemon reader + `_wait_with_watchdog` shape
+as the periodic path, with the stall recorded as lane `"express"` and progress
+measured from ITS OWN tally rather than the shared status bytes (which belong
+to the periodic run). `express_report()` carries `last_run_age_seconds`, so a
+dead express lane is visible instead of merely quiet.
+
+**Tests.** `companion/tests/test_rclone_lane.py` (the flag and its SOFT
+cutoff, the lane's budget from cfg, and the reported age), plus the existing
+`test_rclone_express.py` suite, whose stderr stand-in is now iterable like a
+real pipe.
+
+### SYNC-2 - the root guard's own probe can block on the wedged mount it exists to detect - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** A Mac editor's external SSD (or a Windows editor's SMB/`subst`
+mapping over a dropped tailnet) stops answering opens. The drive is plugged
+in, the directory is right there, and nothing anywhere says a word: the tray
+keeps saying the drive is fine, the lanes are never paused, `RootGuard.state`
+keeps returning its last good answer, and the fleet grid shows a healthy
+machine that has not moved a byte. MAC-12's shape, and half of CR-91's.
+
+**Cause.** Every root check in the area was an in-process `os.path.isdir` --
+`root_guard.probe_root:369`, `rclone_lane._local_root_is_present`,
+`sequencer._local_root_is_present`, `manifest`. On a wedged filesystem they
+all block in the kernel, so `RootGuard._loop` stops polling and
+`_on_root_absent` never fires. The one detector that would have named the
+cause is the one thing that cannot answer, and `probe_once`'s own docstring
+already said so.
+
+**Fix.** A fourth answer, `ROOT_NOT_ANSWERING`
+(`companion/src/ccsync_companion/root_guard.py:76`), produced by
+`rclone_lane.probe_watch_root` -- already stdlib-only, out-of-process, 5 s
+capped and never raising -- run *instead of* the in-process probe on the first
+poll, then every `PROBE_EVERY_N_POLLS` (12, i.e. once a minute) and again
+whenever the previous in-process probe took over `SLOW_PROBE_SECONDS`
+(`root_guard._sample`/`_filesystem_probe_due`/`_filesystem_answers`, ~:790).
+`state_is_absent` groups it with `absent`/`misplaced`, so the existing
+`_on_root_absent` path pauses the lanes with no new wiring; `state_sentence`
+gives it its own words ("the sync drive is not answering - reconnect it or
+restart") because telling an editor to check a cable on a drive that is
+plugged in is the MAC-10 dead end. It reaches the fleet grid as
+`sync_guard.root_state` (`app.sync_guard`), the tray's Sync: line
+(`tray._sync_line`) and the balloon (`app._on_root_absent`). A probe that
+answers, that cannot be run, or that raises all fail OPEN to today's
+behaviour -- refusing to trust the tree because our own subprocess did not
+start would be a self-inflicted outage.
+
+**Tests.** `companion/tests/test_root_guard.py` (12 new): a blocked probe
+answers `not_answering` where `probe_root` would have said `present`; it
+pauses the lanes and carries its own sentence; ok/unavailable/raising probes
+all leave `probe_root` in charge; the cadence (first poll, then every Nth, and
+the extra poll after a slow one); the drive coming back fires `on_present`; a
+blank `local_root` spends no probe. `companion/tests/conftest.py` stubs the
+out-of-process probe suite-wide so no test spawns one.
+
+### SYS-5 / SYNC-7 - no lane checked free disk space, and nothing told the dashboard - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** An editor ticks a big project and lane B pulls proxies onto a
+laptop SSD at 40 GB free, with up to 50 GB of `.ccsync-trash` recovery copies
+on the same volume. rclone fails per file with ENOSPC, the lane goes red with
+a raw rclone string, and the grid shows a red dot with no cause. Nothing
+warned before the wall, and no page anywhere could answer the owner's first
+question.
+
+**Cause.** Nothing in `sync/*` ever called `shutil.disk_usage`, though the
+pattern exists in four other subsystems (`proxy_gen`, `broll_vlm_sidecar`,
+`music_clap_sidecar`, `broll_server._free_bytes_at`) -- it was simply never
+applied to the three lanes that move the actual footage, nor to anything the
+dashboard can see.
+
+**Fix.** `lane_guard.disk_report`/`free_bytes_at`/`system_drive_path`
+(`companion/src/ccsync_companion/sync/lane_guard.py:~340`) and
+`app.disk_snapshot` put `sync_guard.disk` = {root_free_bytes,
+root_total_bytes, system_free_bytes, at} on the report, measured once per
+HEAVY tick (`dashboard_report_interval`) and memoised, because the guard
+section rides every light tick too. A drive that could not be measured reports
+`None`, never 0. `lane_guard.DiskFloorLatch` parks lane B in `paused` -- never
+`error`, the breaker's shape exactly, so lanes A and C keep running -- below
+`lane_b_min_free_bytes` (new config key, default 20 GB, documented commented
+out in `config.py`'s `DEFAULT_TOML_TEXT` and `companion/config.example.toml`).
+The preflight is `RcloneLane._check_disk_floor`, at the top of
+`_run_once_locked` beside the breaker check, and `_disk_stand_down` carries
+the sentence. The park is persisted in `CONFIG_DIR/lane_b_disk_floor.json`
+(never in-memory only), clears ITSELF at twice the floor, and is clearable by
+the SAME [ RESUME PROXY DOWNLOAD ] the breaker uses (`app.resume_lane_b`,
+`tray._confirm_resume_disk_floor` with its own dialog copy, and the button
+condition in `tray.py`/`settings_window.py`). Tray lines: `tray._disk_line`
+("Not downloading proxies: this drive has 8 GB free ..."). A measurement that
+FAILS parks nothing and releases nothing.
+
+**Tests.** `companion/tests/test_lane_guard.py` (13 new): the floor parks and
+the park is `paused` with no rclone spawned; it clears itself only at 2x; a
+failed measurement changes nothing either way; a park survives a restart; the
+tray clears it; a floor of 0 disables it; `disk_report` names both volumes and
+reports `None` on failure; a raising probe never parks the lane.
+`companion/tests/test_app.py`: the `disk` section's shape, and that it is
+measured once per heavy tick. `companion/tests/conftest.py` pins free space
+suite-wide so no test outcome depends on how full the developer's C: is.
+
+### SYNC-16 - the trash prune could only run on the code path a sick machine never reaches - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** A machine that errors every lane B pass (NAS unreachable, disk
+full, a filter file that will not validate) keeps up to 50 GB of recovery
+copies forever -- and disk-full is precisely the state in which that matters.
+Separately, the size rule could delete a batch created seconds ago before one
+created a fortnight back.
+
+**Cause.** `_maybe_prune_trash()` was the LAST statement of a lane B pass that
+did not trip, was not stopped mid-transfer and did not error
+(`rclone_lane.py:~2930`). "Nothing is pruned while the breaker is tripped" is
+deliberate; "nothing is pruned while the lane is failing" was an accident of
+placement. And `trash_entries` yielded `0.0` for a batch whose every stat
+failed (lane_guard.py:~560), which sorted it as the OLDEST thing in the trash.
+
+**Fix.** `Sequencer._prune_trash` (`sync/sequencer.py`, called once per pass
+right after `_run_pass`, fault-isolated exactly like `_check_remote_root`);
+the breaker gate stays inside `prune_trash` where it belongs, and the
+interval gate stays inside `_maybe_prune_trash`. `prune_trash` gains a third
+trigger, `min_free_bytes` + `free_bytes_fn` (wired to the same
+`lane_b_min_free_bytes` the floor uses), so disk pressure prunes oldest-first
+and never the last batch standing even when age and size have nothing to say.
+`lane_guard.batch_stamp` parses the `%Y%m%d-%H%M%S` directory name as the
+fallback timestamp -- `_backup_dir`'s own record of when the batch was made,
+needing no filesystem at all.
+
+**Tests.** `companion/tests/test_lane_guard.py` (7 new): disk pressure prunes
+what age and size would have kept, and nothing when the drive has room or the
+measurement failed; the breaker still gates it; a batch with no usable
+timestamp sorts by its name and is not the first one dropped; `batch_stamp`
+refuses anything that is not that format; the sequencer prunes on a lane whose
+every pass fails, and swallows a prune that raises.
+
+### SYNC-15 - nothing aggregated the sixteen independent reasons this machine is not syncing - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** "Why isn't this machine syncing?" had no answer on any page. Each
+latch had its own state, its own file and its own (or no) report field, and
+the fleet page had to infer the reason from a lane state that SYNC-1/5/9 all
+show can be wrong. `build_diagnostics()` was local, manual and clipboard-only.
+
+**Cause.** No aggregation, not missing data: every value was already in
+memory.
+
+**Fix.** One derived, report-only field, `sync_guard.blocked` = {reason,
+detail, since}, assembled LAST in `app.sync_guard()` from the picture already
+built (`app.blocked_report`/`_blocked_candidate`/`_BLOCKED_ORDER`,
+`companion/src/ccsync_companion/app.py:~4990`). Sixteen reasons in one
+priority order -- not_signed_in, licence_pending, clock_skew, root_absent,
+root_not_answering, root_misplaced, disk_full, fleet_halt, local_halt, paused,
+breaker_tripped, no_selection, folders_unfiltered, lane_stalled,
+syncthing_down, transport_offline -- first match wins, absent when nothing
+blocks (an absent key is the ONLY thing that means "this machine is
+syncing"). Ordered by what the reader can act on: the editor's own sign-in
+before the admin's halt, a wedged drive before a tripped breaker. Every
+candidate is isolated, so a broken getter cannot hide a lower-priority
+reason, and `since` prefers the latch's own stamp and otherwise remembers the
+first report that named it. The stall record another wave-2 change writes to
+`~/.ccsync/state/lane_stall.json` is read if present. The tray shows the same
+sentence (`tray._sync_line`'s fall-through and `tray._blocked_line`, rendered
+in the Settings window) so the tray and the grid cannot disagree.
+
+**Tests.** `companion/tests/test_app.py` (11 new): nothing blocking means no
+key at all; each reason reaches the report on its own (parametrised over ten);
+the priority order under four simultaneous blockages; the disk park's
+sentence; a stall record; a raising candidate never hides a lower reason; the
+`since` stamp holds still while the reason stands; the tray line and the
+report detail are the same words.
+
+### SYS-1 - a lane in `syncing` was green-or-amber for ever, fleet wide - FIXED in repo 2026-08-28 (dashboard half), unshipped
+
+**Symptom.** leso's MacBook, 2026-08-28: lane A reported `state=syncing,
+transferring=1, last_sync=NULL, last_error=NULL` for 2 h 20 m. Nothing moved,
+no SFTP session ever existed on the NAS, and because lane A takes its turn
+first lane B never ran, so the editor downloaded nothing for the whole period.
+The fleet grid showed an amber chip on a healthy-looking row (CR-91b).
+
+**Cause.** `health.lane_chip_status` reddened only on REPORT staleness, and
+the reports were flowing. A lane in `syncing` was unconditionally AMBER, with
+no notion of whether anything had moved; there was no field on the wire that
+could have said. The same shape produced SYNC-17 (lane C green 18 h), CR-27a
+and CR-86.
+
+**Fix.** One contract, evidence-based: a state may not be green or amber
+without a monotonic progress token and the time it last changed.
+`LaneReportIn` gains `progress_token` and `state_since`
+(`dashboard/src/ccsync_dashboard/api.py:4566`); v32 adds
+`lane_report_current.progress_token / progress_token_since / state_since` and
+`machine_state.rotation_seconds` (`db.py:999`). The time a stall is judged on
+is the SERVER's: `db.upsert_lane_report` stamps `progress_token_since` with
+the `received_at` of the first report carrying the CURRENT token and leaves it
+alone while the token repeats, so a companion re-sending the same token every
+30 s cannot reset the clock on its own stall, and a wrong client clock cannot
+hide one. `health.lane_stall()` (pure) returns the seconds past
+`max(3 x rotation_seconds, 30 min)`, `health.lane_chip()` turns that into RED
+plus the sentence "syncing, no progress for 47 min", and
+`api.build_editors_view` folds it into each row's `worst()` exactly as wave 1
+folded `report_freshness` (`api.py:770`). An absent token is NO VERDICT, not
+"fine": every machine in the field is one until the companion ships, and an
+upgrade window must not redden the fleet. The companion's own kill record
+(`sync_guard.stalled`, SYNC-1/SYS-17) is stored beside it and chipped
+`[ STALLED A, KILLED ]`.
+
+**Tests.** `dashboard/tests/test_health.py` (the budget, the floor, the
+three-rotation stretch, terminal states, an old companion, an unreadable
+stamp, silence outranking a stall) and
+`dashboard/tests/test_report_ingest_health.py` (stored, stamped only on a
+CHANGE, cleared by a token-less report, and the whole thing end to end
+reddening a fleet row that keeps reporting). `server/tests/test_cross_component.py`
+gains a parity gate over the per-LANE dict keys, which the section-level gates
+could not see (the lanes are a comprehension over a dict literal).
+
+### SYS-5 - free disk space was invisible to every page - FIXED in repo 2026-08-28 (dashboard half), unshipped
+
+**Symptom.** An editor's project drive fills. Lane B thrashes per-file ENOSPC,
+lane C goes out of sync, lane A keeps trying; the grid shows red dots with no
+cause and the owner's first question ("why?") has no answer anywhere.
+
+**Cause.** `ReportIn` had no disk field and nothing in `sync/` ever called
+`shutil.disk_usage`, although the ingest and proxy paths have had free-space
+floors for months (ledger class E: a guard on only some of N call sites).
+
+**Fix.** `sync_guard.disk` is declared (`DiskIn`, `api.py`), flattened by
+`flatten_sync_guard` and stored in v32's `machine_state.disk_root_free_bytes /
+disk_root_total_bytes / disk_system_free_bytes / disk_at`. `disk_at` is the
+section's own upsert marker rather than `guard_at`, because the measurement
+rides HEAVY ticks only and a light report in between must not blank the last
+known free space. `health.disk_status()` is the pure rule - amber under 10 %
+or 50 GB free, red under 5 % or 20 GB, both a percentage and an absolute floor
+because 8 % of 8 TB is still 640 GB - and the fleet grid renders `[ DISK 4% ]`
+with the figures in its tooltip. A machine that has reported no disk section
+gets NO chip rather than a green one: "could not check" must never render as
+"fine". `sync_guard.disk_floor` and `sync_guard.root_state` (the companion
+halves of SYNC-7 and SYNC-2, which landed in the same wave) are declared too
+so they are not counted as ignored sections; their columns belong to the v33
+step.
+
+**Tests.** `test_health.py` (the two thresholds, and no-verdict on an absent
+figure); `test_report_ingest_health.py` (flattened, chipped, and not blanked
+by the light report that follows).
+
+### UX-1 - ticking a project had no capacity preflight - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** The owner opens Assignments, sees a new editor's column empty and
+clicks `[ ALL ]` to give them everything: twelve projects, 4 TB of proxies,
+onto a 500 GB MacBook. Every tick succeeds. rclone fills the drive,
+`.ccsync-trash` cannot prune while the breaker is tripped, and the machine
+becomes unusable for Resolve too.
+
+**Cause.** `api_tick` validated the project, the base rig and the machine name
+and never the size, and the dashboard held only one of the two numbers it
+needed (the NAS proxy bytes; the machine's free space was not on the wire).
+
+**Fix.** With SYS-5's disk columns in place, `api.tick_capacity_warning()`
+answers one sentence per computer - "2026/FF5/Animals is 620 GB of proxies.
+LESO-MBP has 180 GB free." - built by the pure `health.capacity_warning()`
+(silent when either figure is unknown, or when it fits with room to spare; an
+un-walked project reads as "cannot say", never as 0 GB). `api_tick` returns it
+as `warning`, and BOTH UIs confirm before the write: the assignments grid
+renders the two figures into each cell and `assignments.js` mirrors the
+server's rule in the browser, so `[ ALL ]` confirms the COLUMN TOTAL before it
+writes the first cell, and the sidebar checkbox and the project page's
+`[ TICK FOR ... ]` carry an `hx-confirm` built from
+`ui._sidebar_context`'s `tick_warning` - the same mechanism DASH-8's
+person-level untick confirm uses. It REFUSES NOTHING by design (the owner may
+know something the dashboard does not); it just may not be silent.
+
+**Tests.** `test_health.py` (the sentence, the fits-with-room silence, the
+unknown figure) and `test_report_ingest_health.py` (the route's `warning`, a
+never-walked project, and that the tick still lands).
+
+### SYS-7 - "why is my footage not syncing" had an answer on the machine and no route to the person asking - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** An editor's proxies stop arriving. They message the owner. The
+owner opens the fleet grid, which says amber, and has nothing else to read. The
+one artefact that answers the question, `build_diagnostics()`, is genuinely good
+(identity, token expiry, root state, config problems, sequencer state, rclone,
+the Resolve bridge, every section fault-isolated) and went to the CLIPBOARD,
+with the instruction "Paste them to your admin in a message" - and silently to
+the log instead if any CCSync window happened to be open. So it existed only if
+a non-technical editor performed a manual step at the right moment, on the
+machine that was broken. Meanwhile every state that would have explained the
+outage was already computed somewhere and never composed into a sentence: the
+breaker in `lane_guard`, the halt in a latch file, the root guard's answer, the
+plan in `selections`, the skew in v30's column, the disk in v32's.
+
+**Cause.** Two gaps, not one. There was no CHANNEL for the bundle (nothing on
+the report reply could ask for it, and nothing accepted one), and there was no
+FUNCTION that turned the dashboard's own held state into words - `editor_status`
+and `lane_chip_status` answered in colours only, which is how CR-91b rendered
+2 h 20 m of a wedged lane A as amber.
+
+**Fix.** `health.why_not_syncing(row, now) -> (reason_code, sentence) | None`
+(`dashboard/src/ccsync_dashboard/health.py:337-596`), pure, ordered exactly as
+the wire contract's `sync_guard.blocked.reason` list (`health.WHY_ORDER`) with
+`upload_only` inserted where SYS-7's tree puts it. It PREFERS the companion's
+own `blocked` (SYNC-15) - the only end that can see the root guard's fourth
+answer, the licence park and its own transport - and falls back to a deliberate
+SUBSET derived here: not signed in, clock skew, a red disk (`disk_status`'s own
+threshold, not a second one), fleet/local halt, the breaker, no tick (never on a
+base rig - CR-28), unfiltered folders, an upload-only plan, a stall from either
+detector, a dead sync engine. `WHY_INFORMATIONAL` marks the one entry that is
+not a fault, so an upload-only machine is EXPLAINED rather than accused (CR-85).
+An unknown reason code from a newer companion is named, never swallowed.
+
+Schema v33 (`db.py:998-1044`) stores `blocked_reason` / `blocked_detail` /
+`blocked_since` and the LaneWatchdog's `restarts_count_24h` /
+`restarts_last_at` / `restarts_last_error`, flattened in `api.flatten_sync_guard`
+and written by `db.store_blocked_state` (`db.py:2598+`) - its own UPDATE rather
+than six more columns in `upsert_machine_state`'s INSERT, and on the LATCH rule
+(any guard-bearing report writes them), because an ABSENT `blocked` is how the
+companion spells "nothing is blocking me now". The sentence is the first line of
+each machine's row on the fleet grid, which is also the editor's own home view
+(`templates/partials/fleet_grid.html`, `api.build_editors_view`), muted for an
+informational reason and red otherwise.
+
+The channel: `POST /api/v1/diagnostics` (`api.py`, `api_diagnostics`) with the
+same auth as `/report` check for check, a 256 KB body ceiling through
+`app._BODY_LIMITS`, and a v33 `diagnostics` table keeping the newest 5 per
+(editor, machine) at write time plus a 30-day prune. `[ ASK THIS MACHINE WHY ]`
+on the fleet grid writes a one-shot request (`db.request_diagnostics`, modelled
+on `request_lane_b_resume` down to the `requested_at` stamp) that rides the
+reply as `commands.diagnostics` and clears when a bundle with trigger
+`admin_request` ARRIVES - the opposite of `resume_lane_b`, which is dropped as
+the reply goes out, because a standing resume re-armed a breaker every cycle
+whereas a standing ask costs one text upload. `[ READ THE ANSWER ]` opens
+`partials/admin_diagnostics.html` outside the grid's 15 s poll. Both halves are
+audited (`diagnostics.request`, `diagnostics.received`).
+
+Companion side: `reporter.post_diagnostics(text, trigger)` on the report
+channel with post_once's own headers and its "never without a verified
+identity" rule; three triggers in `app.py` - Copy diagnostics (which still
+fills the clipboard, and now also uploads on both of its fallback paths),
+any lane entering `error` from a non-error state (one per lane per hour,
+persisted in `~/.ccsync/state/diagnostics_sent.json`, tmp + os.replace), and
+`commands.diagnostics` with the `requested_at` comparison so a redelivered
+command is not re-run.
+
+**Tests.** `dashboard/tests/test_health.py` (25 new: every reason in the
+contract's order, the order itself, the companion's answer winning, an
+appended-not-substituted detail, an unknown code named, the base-rig carve-out,
+upload-only informational, both stall detectors, junk input raising nothing);
+`dashboard/tests/test_diagnostics.py` (18: route auth including a mismatched
+identity, the 413 and the truncate-not-drop cap, keep-5 per machine, the 30-day
+prune, the request/ack round trip including "a button bundle does not answer an
+admin's ask", audit rows, the sentence rendering on the fleet grid, the admin
+partial, the ASKED chip); `companion/tests/test_diagnostics_upload.py` (20:
+post_diagnostics' URL/headers/identity/cap, all three triggers, the rate limit
+including its survival across a restart, the requested_at idempotency and its
+persistence, and every failure path being a log line rather than a traceback on
+the reporter thread). `test_hardening.py`'s `_BODY_LIMITS` assertion was widened
+to name the new route.
+
 ## Approving a computer under its own name mints a phantom editor (CR-91, 2026-08-28)
 
 ### CR-91 - "one user, many devices" read as "assign a NEW username per device", and typing the machine name is the B16 unshare - FIXED in repo 2026-08-28 as dashboard 0.7.16, NOT YET DEPLOYED
@@ -4346,6 +4911,18 @@ dashboard, then push the companion.
 Tests: `dashboard/tests/test_file_moves.py`, `companion/tests/test_file_moves.py`.
 
 ## Lane A can sit in `syncing` forever, silently, and starve lane B (CR-91, 2026-08-28) - OPEN
+
+**2026-08-28, later the same day: the mechanism was verified and closed by
+the resilience sweep's wave 2** (`SYNC-1 / SYS-17`, `SYS-1`, `SYNC-2` in the
+"Resilience sweep, wave 2" section): `_run_popen`'s `proc.wait()` and the
+sequencer's lane B `thread.join()` were both unbounded and `--max-duration`
+is SOFT, so a local read blocked in the kernel held `_run_lock` forever.
+Now the companion kills an rclone that has moved nothing for
+max(4 x budget, 15 min) and reports `sync_guard.stalled`, the root guard can
+answer `not_answering` from an out-of-process probe, and the DASHBOARD turns
+the lane RED from a per-lane progress token after three rotations with no
+movement, on the reasoning that the wedged thread is the wrong one to ask.
+Unshipped; the entry below is kept as the incident record.
 
 ### CR-91 - a lane that never finishes and never errors looks exactly like a lane that is working
 **Seen on leso's MacBook 2026-08-28**, straight after its 0.9.2 -> 0.9.54

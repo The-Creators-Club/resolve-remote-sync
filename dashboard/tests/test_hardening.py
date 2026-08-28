@@ -499,7 +499,10 @@ def test_the_package_route_is_not_buffered_by_the_gate():
     buffered."""
     from ccsync_dashboard import app as appmod
 
-    assert set(appmod._BODY_LIMITS) == {"/api/v1/report"}
+    # /api/v1/diagnostics joined it with v33 (SYS-7, 2026-08-28): a bundle is
+    # buffered downstream by pydantic exactly as a report is, so it belongs on
+    # the exact-match (counted, not merely declared) side of the gate.
+    assert set(appmod._BODY_LIMITS) == {"/api/v1/report", "/api/v1/diagnostics"}
     assert appmod._BODY_LIMIT_PREFIXES[0][0] == "/api/v1/admin/packages/"
 
 

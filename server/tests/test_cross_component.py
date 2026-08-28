@@ -1356,3 +1356,71 @@ def test_the_dashboard_accepts_extras_rather_than_dropping_them_silently():
             "api_report NAME an undeclared section in the log and on the fleet "
             "page instead of throwing it away in silence (SYS-3)."
         )
+
+
+def _lane_dict_keys(path) -> set[str]:
+    """The keys of the per-LANE dict the reporter builds inside _build_payload.
+
+    SYS-1 (resilience sweep 2026-08-28): the lane entries are a list
+    comprehension over a dict LITERAL, not a variable the other extractor can
+    follow, so this one recognises the dict by its two mandatory keys. The
+    liveness contract lives on those entries (progress_token / state_since),
+    and an undeclared key there is dropped exactly as the three section-level
+    losses were -- with the extra sting that a stall detector reading a field
+    pydantic threw away would report "no verdict" for ever and look correct.
+    """
+    import ast
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name != "_build_payload":
+            continue
+        for inner in ast.walk(node):
+            if not isinstance(inner, ast.Dict):
+                continue
+            keys = {k.value for k in inner.keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+            if {"name", "state"} <= keys:
+                return keys
+    raise AssertionError(
+        "found no per-lane dict in _build_payload() of reporter.py -- the "
+        "payload is built some other way now and this parity gate is silently "
+        "passing"
+    )
+
+
+def test_every_lane_field_the_companion_sends_is_declared_on_LaneReportIn():
+    from ccsync_dashboard.api import LaneReportIn
+
+    sent = _lane_dict_keys(COMPANION_REPORTER_SRC)
+    undeclared = sent - set(LaneReportIn.model_fields)
+    assert not undeclared, (
+        "the companion's per-lane report entries carry field(s) that "
+        f"LaneReportIn does not declare: {sorted(undeclared)}. LaneReportIn is "
+        "extra='ignore' by default, so pydantic drops them silently -- and the "
+        "server-side stall detector reading a dropped progress_token answers "
+        "'no verdict' for ever while looking perfectly healthy (SYS-1/SYS-3)."
+    )
+
+
+def test_the_liveness_contract_fields_are_on_the_lane_model():
+    """The contract itself, not just parity: a state may not be green or amber
+    without a monotonic progress token and the time it last changed (SYS-1).
+    Both halves have to survive the wire for health.lane_stall to mean
+    anything, and db.upsert_lane_report owns the third (server-clock) half."""
+    from ccsync_dashboard.api import LaneReportIn
+
+    for field in ("progress_token", "state_since"):
+        assert field in LaneReportIn.model_fields, field
+
+
+def test_the_disk_and_stall_guard_sections_are_declared():
+    """SYS-5 / SYNC-1: declared BEFORE the companion half ships, which is the
+    whole lesson of SYS-3 -- the loss is invisible in the direction where the
+    sender is newer than the reader."""
+    from ccsync_dashboard.api import SyncGuardIn
+
+    for field in ("disk", "stalled", "restarts", "rotation_seconds"):
+        assert field in SyncGuardIn.model_fields, field

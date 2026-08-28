@@ -308,6 +308,49 @@ def _no_real_work_windows(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_root_probe_subprocess(monkeypatch):
+    """The root guard's out-of-process probe answers "ok" without spawning.
+
+    SYNC-2 (resilience sweep 2026-08-28) put a short-lived subprocess on the
+    guard's poll cadence -- the first poll included -- and the suite builds a
+    lot of RootGuards. Same rule as every other fixture here: no test spawns a
+    real process, and a probe that opens `/Volumes/T7/...` from Windows would
+    be answering a question about the developer's machine anyway.
+
+    Tests that exercise the wedged-volume path pass their own `probe_fn`,
+    which takes precedence over this by construction.
+    """
+    from ccsync_companion import root_guard as root_guard_mod
+
+    monkeypatch.setattr(
+        root_guard_mod, "_out_of_process_probe",
+        lambda: (lambda root, *a, **kw: ("ok", "stubbed")),
+    )
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _the_dev_machine_has_room(monkeypatch):
+    """Pretend the disk holding tmp_path has plenty of free space.
+
+    Same class of hazard as _single_instance_slot_is_free below: the answer
+    comes from the DEVELOPER'S OWN MACHINE, so without this the outcome of
+    every lane B test depends on how full the C: drive happens to be that
+    afternoon. Lane B's free-space floor (SYS-5 / SYNC-7, resilience sweep
+    2026-08-28) is 20 GB by default, and a rig sitting under it parks lane B
+    in `paused` before the breaker, the remote listing or rclone is reached --
+    which is correct behaviour and useless as a test condition.
+
+    Tests that exercise the floor set `lane._free_bytes_fn` (or pass their
+    own) themselves; a test-level assignment applies after this and wins.
+    """
+    from ccsync_companion.sync import lane_guard
+
+    monkeypatch.setattr(lane_guard, "free_bytes_at", lambda path: 4 * 1024**4)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _single_instance_slot_is_free(monkeypatch):
     """Pretend no other companion holds the single-instance slot.
 

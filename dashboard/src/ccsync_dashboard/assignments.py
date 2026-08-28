@@ -103,6 +103,14 @@ def _assignments_view(conn: sqlite3.Connection) -> dict[str, Any]:
         # nothing and could never clear. The write endpoint refuses it; the
         # grid says so before anyone clicks.
         "base_editors": db.base_only_editors(conn),
+        # UX-1 (resilience sweep 2026-08-28): the capacity preflight's two
+        # numbers, rendered into the grid so a click can confirm the
+        # consequence WITHOUT a round trip -- and so [ ALL ] can add a whole
+        # column up before it starts writing. A project the collector has
+        # never walked is absent from the map, which the browser reads as
+        # "cannot say" rather than as 0 GB.
+        "proxy_bytes": db.project_proxy_bytes_map(conn),
+        "disk": db.machine_disk_map(conn),
         # ...and the per-COLUMN answer (dash-admin-8, 2026-08-21). base_editors
         # is true only when EVERY one of a person's machines is wired, so a
         # mixed account (wired desktop + remote laptop, which f27c181 made a

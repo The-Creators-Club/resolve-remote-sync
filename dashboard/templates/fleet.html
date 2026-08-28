@@ -26,6 +26,12 @@
        all when the last hour holds no plan change. #}
     {% if scope_admin %}
     <div hx-get="/partials/plan-changes" hx-trigger="load, every 60s" hx-swap="innerHTML"></div>
+    {# SYS-7 (2026-08-28): where a diagnostics bundle lands when an admin
+       clicks [ READ THE ANSWER ] on a row above. OUTSIDE the fleet-grid
+       wrapper on purpose -- the grid re-renders every 15 s, and swapping an
+       open bundle out from under whoever is reading it would make the panel
+       unusable. Empty until asked for: it is a page of text, not a chip. #}
+    <div id="fleet-diagnostics"></div>
     {% endif %}
 
     {# The /transfers page, windowed (2026-08-18). The panel is the scroll

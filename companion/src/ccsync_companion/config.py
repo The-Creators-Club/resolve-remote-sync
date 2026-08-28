@@ -203,6 +203,11 @@ DEFAULTS: dict[str, Any] = {
     "lane_b_max_deletes_per_pass": 50,
     "lane_b_max_delete_fraction": 0.25,
     "lane_b_remote_shrink_fraction": 0.5,
+    # Lane B stands down (PAUSED, never error) while the sync drive has less
+    # than this much free (SYS-5 / SYNC-7, resilience sweep 2026-08-28). It
+    # starts again on its own at twice the floor, or when someone uses the
+    # tray's "Resume proxy download". 0 disables the floor entirely.
+    "lane_b_min_free_bytes": 20 * 1024**3,
     # The `.ccsync-trash` window. Its own reversal of an older decision (the
     # trash used to be kept forever); the breaker is what makes a bounded
     # window safe -- and prune_trash refuses to run at all while it is
@@ -839,9 +844,13 @@ lane_b_min_age_seconds = 120
 #                                   whichever is smaller (small projects)
 #   lane_b_remote_shrink_fraction   trip when the NAS listing shrinks past
 #                                   this share of what it held last pass
+#   lane_b_min_free_bytes           free space below which lane B stands down
+#                                   rather than fill the drive; it starts
+#                                   again by itself at twice this
 # lane_b_max_deletes_per_pass = 50
 # lane_b_max_delete_fraction = 0.25
 # lane_b_remote_shrink_fraction = 0.5
+# lane_b_min_free_bytes = 21474836480
 #
 # How long recovery copies are kept in <local_root>/.ccsync-trash, and how
 # big that directory may get before the OLDEST batches are dropped. The

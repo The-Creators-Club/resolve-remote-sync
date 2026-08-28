@@ -14,6 +14,7 @@ from __future__ import annotations
 # encoding: idna" until restart. Seen live 2026-07-25 on the v0.3.0 build.
 import encodings.idna  # noqa: F401
 
+import json
 import logging
 import logging.handlers
 import os
@@ -66,9 +67,9 @@ from .project_setup import ProjectSetupPrompter
 from .reporter import DashboardReporter
 from .selection import SelectionClient
 from .sync import lane_guard
-from .sync.base import LaneAdapter, LaneStatus
+from .sync.base import STATE_ERROR, LaneAdapter, LaneStatus
 from .sync.rclone_lane import DIRECTION_DOWN, DIRECTION_UP, VIDEO_EXTS, RcloneLane
-from .sync.sequencer import PROJECTS_PREFIX, Sequencer
+from .sync.sequencer import PROJECTS_PREFIX, STATE_NO_SELECTION, Sequencer
 from .sync.syncthing_admin import SyncthingAdmin
 from .sync.syncthing_lane import SyncthingLane
 from .sync.syncthing_supervisor import STATE_FILENAME as SUPERVISOR_STATE_FILENAME
@@ -86,6 +87,14 @@ log = logging.getLogger("ccsync.app")
 # disk on a machine that holds terabytes of video.
 LOG_MAX_BYTES = 5_000_000
 LOG_BACKUP_COUNT = 10
+
+# The diagnostics channel's own state (SYS-7, resilience sweep 2026-08-28):
+# one upload per lane per hour, and which admin request has already been
+# answered. ON DISK beside the breaker and halt latches, because the machine
+# this rate limit protects the dashboard from is a machine that keeps
+# restarting -- an in-memory limiter would upload a bundle per restart.
+DIAGNOSTICS_STATE_FILENAME = "diagnostics_sent.json"
+DIAGNOSTICS_LANE_ERROR_INTERVAL_SECONDS = 3600.0
 
 
 class RotatingLogHandler(logging.handlers.RotatingFileHandler):
@@ -681,6 +690,329 @@ def _proxy_state_note(state: str) -> str:
     }.get(state, "")
 
 
+# -- thread supervision (SYS-2, resilience sweep 2026-08-28) ---------------
+#
+# The companion runs its own unsupervised loop threads: the sequencer, the
+# timeline watcher and the media-tree cache. Until this sweep NOTHING watched
+# any of them. A sequencer that died on one OSError left the machine online,
+# reporting, and frozen on its last lane state forever -- "green while dead",
+# the ledger class the fleet dashboard has never once been the discoverer of.
+# The dashboard solved exactly this on its own side (collector.thread_died /
+# seconds_since_heartbeat / restart, driven by app.CollectorWatchdog); this is
+# the same pattern applied to the side where the failure was actually
+# observed, with one addition: every restart is RECORDED and REPORTED, because
+# a machine that needs restarting three times an hour is a fault to see and
+# not a fault to quietly paper over.
+WATCHDOG_STATE_FILENAME = "watchdog.json"
+LANE_WATCHDOG_INTERVAL_SECONDS = 60.0
+# How long a thread may be inside one iteration before it counts as wedged.
+# The sequencer gets max(3 x project_rotation_seconds, this): one project turn
+# is budgeted project_rotation_seconds per rclone lane, so a heartbeat older
+# than three of them is a turn that overran its own budget, not a big upload.
+LANE_WATCHDOG_WEDGED_SECONDS = 30.0 * 60.0
+# Restarts of ONE thread within an hour that earn the editor a tray line. Two
+# is a machine that recovered; three is a machine that needs a human.
+LANE_WATCHDOG_ADVISORY_RESTARTS = 3
+_WATCHDOG_EVENTS_KEPT = 50
+_WATCHDOG_DAY_SECONDS = 24.0 * 3600.0
+_WATCHDOG_HOUR_SECONDS = 3600.0
+
+
+def _watchdog_iso(when: float) -> str:
+    return datetime.fromtimestamp(when, timezone.utc).isoformat()
+
+
+class _SupervisedThread:
+    """One thread the watchdog owns, as answers rather than objects: whether
+    it is gone, how long it has been silent, how long silence is allowed, what
+    killed it, and how to start a replacement.
+
+    A plain value object on purpose -- the whole restart policy is then
+    testable with no threads, no clock and no CompanionApp."""
+
+    __slots__ = ("name", "died", "silent_for", "bound", "error", "restart")
+
+    def __init__(self, name: str, *, died: bool, silent_for: float,
+                 bound: float, error: Optional[str],
+                 restart: Callable[[], Any]) -> None:
+        self.name = name
+        self.died = died
+        self.silent_for = silent_for
+        self.bound = bound
+        self.error = error
+        self.restart = restart
+
+
+class LaneWatchdog:
+    """Watches the companion's own loop threads and restarts the dead ones.
+
+    `check()` is the whole policy and is deliberately callable on its own, so
+    the decision can be tested without a thread and without a clock (the same
+    hatch CollectorWatchdog.check() is). It never raises: a state it cannot
+    read is not evidence of a fault, and spawning a second sequencer over a
+    misread is worse than the outage it would be answering.
+    """
+
+    def __init__(self, app: Any, *,
+                 interval: float = LANE_WATCHDOG_INTERVAL_SECONDS,
+                 wedged_after: float = LANE_WATCHDOG_WEDGED_SECONDS,
+                 state_path: Optional[Path] = None,
+                 monotonic: Callable[[], float] = time.monotonic,
+                 now: Callable[[], float] = time.time) -> None:
+        self.app = app
+        self.interval = float(interval)
+        self.wedged_after = float(wedged_after)
+        self._state_path = state_path
+        self._monotonic = monotonic
+        self._now = now
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        # name -> [epoch seconds of each restart]. Loaded from disk at
+        # construction: a crash loop that restarts the whole companion must
+        # not reset the counter that is the evidence of the crash loop
+        # (never make a safety latch in-memory-only).
+        self._events: dict[str, list[float]] = {}
+        self._last_error: dict[str, Optional[str]] = {}
+        self._load_record()
+
+    # -- lifecycle ---------------------------------------------------------
+    def start(self) -> None:
+        if self.interval <= 0:
+            log.info("thread watchdog disabled (interval=%s)", self.interval)
+            return
+        self._thread = threading.Thread(target=self._loop,
+                                        name="ccsync-thread-watchdog", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=5)
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.interval):
+            try:
+                self.check()
+            except Exception:  # noqa: BLE001 - a watchdog that dies is worse
+                log.exception("thread watchdog: the check failed; continuing")
+
+    # -- policy ------------------------------------------------------------
+    def check(self) -> list[str]:
+        """One tick. Returns the names restarted, in check order."""
+        blocked = self._must_not_restart()
+        if blocked:
+            log.debug("thread watchdog: standing down (%s)", blocked)
+            return []
+        restarted: list[str] = []
+        for target in self._targets():
+            if target is None:
+                continue
+            if target.died:
+                reason = ("the thread is gone: "
+                          f"{target.error or 'no exception was recorded'}")
+            elif target.bound > 0 and target.silent_for > target.bound:
+                reason = (f"no heartbeat for {target.silent_for:.0f}s "
+                          f"(the bound is {target.bound:.0f}s)")
+            else:
+                continue
+            log.error("thread watchdog: restarting the %s -- %s", target.name, reason)
+            if self._restart(target):
+                restarted.append(target.name)
+        return restarted
+
+    def _must_not_restart(self) -> str:
+        """"" when a restart is allowed, else why not.
+
+        Two stand-downs, both about spawning work into a process that is about
+        to end or is mid-operation: shutdown (a restarted sequencer would
+        outlive the teardown that already stopped it) and the upgrade/popup
+        stand-down predicate every caller of restart_self shares -- a
+        consolidate or an open popup is exactly when a fresh lane pass must
+        not start underneath it."""
+        app = self.app
+        if getattr(app, "_shutdown_started", False):
+            return "the companion is shutting down"
+        stop_event = getattr(app, "_stop_event", None)
+        if stop_event is not None and stop_event.is_set():
+            return "the companion is shutting down"
+        try:
+            blocker = app._standing_down_would_kill_work()
+        except Exception:  # noqa: BLE001
+            log.debug("thread watchdog: could not read the stand-down state",
+                      exc_info=True)
+            blocker = ""
+        if blocker:
+            return f"a {blocker} is in flight"
+        return ""
+
+    def _targets(self) -> tuple[Optional[_SupervisedThread], ...]:
+        return (self._sequencer_target(), self._watcher_target(),
+                self._media_tree_target())
+
+    def _sequencer_target(self) -> Optional[_SupervisedThread]:
+        seq = getattr(self.app, "sequencer", None)
+        if seq is None or getattr(seq, "thread_died", None) is None:
+            # No sequencer at all (unmanaged mode), or a build/double whose
+            # liveness contract predates SYS-2. Absent evidence, not a fault.
+            return None
+        try:
+            died = bool(seq.thread_died())
+            silent = 0.0 if died else float(seq.seconds_since_heartbeat())
+            error = seq.last_error() if died else None
+        except Exception:  # noqa: BLE001
+            log.exception("thread watchdog: could not read the sequencer's "
+                          "state; assuming it is fine")
+            return None
+        try:
+            rotation = float(getattr(seq, "project_rotation_seconds", 0) or 0)
+        except (TypeError, ValueError):
+            rotation = 0.0
+        bound = max(3.0 * rotation, self.wedged_after)
+        return _SupervisedThread("sequencer", died=died, silent_for=silent,
+                                 bound=bound, error=error, restart=seq.start)
+
+    def _watcher_target(self) -> Optional[_SupervisedThread]:
+        app = self.app
+        thread = getattr(app, "_watcher_thread", None)
+        stopping = getattr(app, "_stop_event", None)
+        if thread is None or (stopping is not None and stopping.is_set()):
+            return None
+        died = not thread.is_alive()
+        silent = 0.0
+        if not died:
+            silent = self._silence(getattr(app, "watcher", None), "_heartbeat")
+        return _SupervisedThread(
+            "watcher", died=died, silent_for=silent, bound=self.wedged_after,
+            error=getattr(app, "_watcher_thread_error", None),
+            restart=app._start_watcher_thread)
+
+    def _media_tree_target(self) -> Optional[_SupervisedThread]:
+        app = self.app
+        thread = getattr(app, "_media_tree_thread", None)
+        stopping = getattr(app, "_media_tree_stop_event", None)
+        if thread is None or (stopping is not None and stopping.is_set()):
+            return None
+        died = not thread.is_alive()
+        silent = 0.0
+        if not died:
+            silent = self._silence(app, "_media_tree_heartbeat")
+        return _SupervisedThread(
+            "media_tree", died=died, silent_for=silent, bound=self.wedged_after,
+            error=getattr(app, "_media_tree_thread_error", None),
+            restart=app._start_media_tree_thread)
+
+    def _silence(self, owner: Any, attribute: str) -> float:
+        """Seconds since `owner.<attribute>` was stamped, or 0.0 when there is
+        no stamp to read. A missing heartbeat is a thread whose loop does not
+        publish one, which must never be restarted on that basis alone."""
+        beat = getattr(owner, attribute, None) if owner is not None else None
+        if not isinstance(beat, (int, float)) or isinstance(beat, bool):
+            return 0.0
+        return max(0.0, self._monotonic() - float(beat))
+
+    def _restart(self, target: _SupervisedThread) -> bool:
+        error = target.error
+        try:
+            target.restart()
+        except Exception as exc:  # noqa: BLE001
+            log.exception("thread watchdog: could not restart the %s", target.name)
+            error = f"restart failed: {type(exc).__name__}: {exc}"
+            self._record(target.name, error)
+            return False
+        self._record(target.name, error)
+        return True
+
+    # -- the record --------------------------------------------------------
+    def _record(self, name: str, error: Optional[str]) -> None:
+        when = float(self._now())
+        with self._lock:
+            events = [t for t in self._events.get(name, [])
+                      if when - t <= _WATCHDOG_DAY_SECONDS]
+            events.append(when)
+            self._events[name] = events[-_WATCHDOG_EVENTS_KEPT:]
+            self._last_error[name] = error or None
+        self._write_record()
+
+    def report(self) -> dict[str, dict[str, Any]]:
+        """The `sync_guard.restarts` section: per thread, count_24h, count_1h,
+        last_at and last_error.
+
+        {} when no thread has ever been restarted, so an absent key is how
+        "nothing has needed restarting" is spelled -- which is also what
+        clears the chip. Never raises."""
+        now = float(self._now())
+        out: dict[str, dict[str, Any]] = {}
+        with self._lock:
+            items = [(name, list(events)) for name, events in self._events.items()]
+            errors = dict(self._last_error)
+        for name, events in items:
+            day = [t for t in events if now - t <= _WATCHDOG_DAY_SECONDS]
+            if not day:
+                continue
+            out[name] = {
+                "count_24h": len(day),
+                # NOT in the wire contract's three keys, and additive on
+                # purpose: the tray advisory is "3 restarts in an HOUR", and
+                # the alternative is every reader re-deriving it from a
+                # timestamp list nobody else needs.
+                "count_1h": len([t for t in day if now - t <= _WATCHDOG_HOUR_SECONDS]),
+                "last_at": _watchdog_iso(max(day)),
+                "last_error": errors.get(name),
+            }
+        return out
+
+    def _write_record(self) -> None:
+        path = self._state_path
+        if path is None:
+            return
+        with self._lock:
+            payload = {
+                "written_at": _watchdog_iso(float(self._now())),
+                "threads": {
+                    name: {"events": list(events),
+                           "last_error": self._last_error.get(name)}
+                    for name, events in self._events.items()
+                },
+            }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            os.replace(tmp, path)
+        except Exception:  # noqa: BLE001
+            log.debug("thread watchdog: could not write %s", path, exc_info=True)
+
+    def _load_record(self) -> None:
+        path = self._state_path
+        if path is None:
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            return
+        except Exception:  # noqa: BLE001
+            log.debug("thread watchdog: unreadable record", exc_info=True)
+            return
+        if not isinstance(data, dict):
+            return
+        threads = data.get("threads")
+        if not isinstance(threads, dict):
+            return
+        now = float(self._now())
+        for name, entry in threads.items():
+            if not isinstance(name, str) or not isinstance(entry, dict):
+                continue
+            events = [float(t) for t in (entry.get("events") or [])
+                      if isinstance(t, (int, float))
+                      and 0 < now - float(t) <= _WATCHDOG_DAY_SECONDS]
+            if events:
+                self._events[name] = sorted(events)[-_WATCHDOG_EVENTS_KEPT:]
+            error = entry.get("last_error")
+            self._last_error[name] = error if isinstance(error, str) else None
+
+
 class CompanionApp:
     """Owns the timeline watcher, all three sync lanes, and (optionally) the
     tray icon. Every public method is safe to call from any thread (the
@@ -744,6 +1076,8 @@ class CompanionApp:
         self._paused = False
         self._stop_event = threading.Event()
         self._watcher_thread: Optional[threading.Thread] = None
+        # What killed the watcher thread, for LaneWatchdog's record (SYS-2).
+        self._watcher_thread_error: Optional[str] = None
         # Token-expiry watcher (CORE-M11) -- see _identity_watch_loop().
         self.identity_check_interval = config_mod.coerce_numeric(cfg, "identity_check_interval", 60)
         self._identity_stop_event = threading.Event()
@@ -796,6 +1130,10 @@ class CompanionApp:
         # bool assignment is the one thing that needs no lock.
         self._root_absent = False
         self._root_state = root_guard_mod.ROOT_UNKNOWN
+        # When it last CHANGED (SYNC-15): `blocked.since` for the three root
+        # reasons, and the one number that says whether a wedged mount has
+        # been wedged for a minute or since last night.
+        self._root_state_since = ""
         self._root_guard: Optional[root_guard_mod.RootGuard] = None
         # Once-per-episode gates: an unplugged drive is a state, not an event,
         # and the guard is free to re-fire (absent -> misplaced) within one.
@@ -926,6 +1264,24 @@ class CompanionApp:
             latch_dir / lane_guard.HALT_STATE_FILENAME,
             guard_state_dir / lane_guard.HALT_STATE_FILENAME,
         ))
+        # ...and the third latch (SYS-5 / SYNC-7, resilience sweep
+        # 2026-08-28): lane B stands down when the sync drive is nearly full.
+        # Here, beside the other two, for the same reason and with the same
+        # file-in-CONFIG_DIR discipline -- a park an editor clears by
+        # restarting the tray would let the lane fill the disk on every
+        # restart. No adopt_legacy_latch: this file has never existed
+        # anywhere else.
+        self.disk_floor = lane_guard.DiskFloorLatch(
+            latch_dir / lane_guard.DISK_FLOOR_STATE_FILENAME,
+            cfg,
+            on_park=self._notify_disk_floor_park,
+        )
+        # Memoised `sync_guard.disk` (measured once per heavy report tick, not
+        # once per light one) and the reason string the tray and the grid both
+        # read -- see disk_report()/blocked_report().
+        self._disk_snapshot: dict[str, Any] = {}
+        self._disk_snapshot_at = 0.0
+        self._blocked_since: dict[str, str] = {}
         # -- the sync engine's own supervisor (SYNC-17, 2026-08-18) ---------
         # Built here, beside the latches, for the same reason they are: its
         # incident state has to be in hand before lane C's first poll, or a
@@ -995,6 +1351,13 @@ class CompanionApp:
         self._media_tree_lock = threading.Lock()
         self._media_tree_stop_event = threading.Event()
         self._media_tree_thread: Optional[threading.Thread] = None
+        self._media_tree_thread_error: Optional[str] = None
+        # Stamped at the top of every media-tree iteration, for the same
+        # reason the sequencer stamps one (SYS-2): a thread that is alive but
+        # wedged inside one call is a different fault from a thread that died.
+        self._media_tree_heartbeat = time.monotonic()
+        # Built in start(), once the threads it supervises exist.
+        self._lane_watchdog: Optional[LaneWatchdog] = None
         # Once-per-process latches for _classify_pool_once, mirroring the
         # watcher's own pair (see TimelineWatcher._offered_non_canonical) --
         # separate sets because the two loops have different lifecycles and
@@ -1330,6 +1693,16 @@ class CompanionApp:
         # ...and an admin clearing this machine's lane B breaker (CR-45,
         # 2026-08-20).
         self._apply_resume_lane_b(resp)
+        # ...and an admin asking this computer WHY it is not syncing (SYS-7,
+        # resilience sweep 2026-08-28): the answer is build_diagnostics()'s
+        # bundle, uploaded on the report channel, with no inbound connection
+        # to this PC and nobody having to click anything on it.
+        self._apply_diagnostics_request(resp)
+        # A lane that has just fallen into `error` uploads its own bundle,
+        # once per lane per hour (SYS-7). Here rather than in the lane because
+        # this is the one place that runs on every report cycle and holds the
+        # whole set of lane states at once.
+        self._note_lane_error_diagnostics()
         # ...and files the admin moved on the server, which this machine's
         # copies have to follow (docs/FILE_MOVES.md, 2026-08-27).
         self._apply_file_moves(resp)
@@ -1419,6 +1792,11 @@ class CompanionApp:
             # lane all read one object -- and so its state file sits beside
             # every other piece of persisted companion state.
             breaker=self.lane_b_breaker,
+            # The free-space floor, on the same terms as the breaker above
+            # (SYS-5 / SYNC-7, resilience sweep 2026-08-28): one object, so
+            # the tray line, the report field and the lane's own preflight
+            # cannot disagree about whether proxy download is parked.
+            disk_floor=self.disk_floor,
         )
         lane_c = SyncthingLane(
             base_url=cfg.get("syncthing_url", "http://127.0.0.1:8384"),
@@ -1572,6 +1950,8 @@ class CompanionApp:
         would leave "Resume syncing" ticked with nobody having clicked
         anything -- and would then be un-resumed by the drive coming back."""
         try:
+            if str(state) != self._root_state:
+                self._root_state_since = datetime.now(timezone.utc).isoformat()
             self._root_state = str(state)
             # Judged before the pause below, and before _root_absent flips
             # (nothing here reads it, but the order is the point).
@@ -1593,10 +1973,21 @@ class CompanionApp:
                 if unfinished:
                     self._drive_reminder.begin(unfinished)
                 elif not self._drive_reminder.resume_remembered():
-                    self._notify_tray(
-                        f"Sync paused: {site_mod.drive_phrase()} is disconnected.",
-                        "ccsync-companion",
-                    )
+                    # SYNC-2: a wedged filesystem gets its OWN sentence. The
+                    # drive is plugged in, so "is disconnected" sends the
+                    # editor to check a cable that is fine and leaves the one
+                    # thing that does fix it (a restart) unsaid.
+                    if state == root_guard_mod.ROOT_NOT_ANSWERING:
+                        self._notify_tray(
+                            f"Sync paused: {site_mod.drive_phrase(capitalised=True)} is "
+                            "not answering - reconnect it or restart this computer.",
+                            "ccsync-companion",
+                        )
+                    else:
+                        self._notify_tray(
+                            f"Sync paused: {site_mod.drive_phrase()} is disconnected.",
+                            "ccsync-companion",
+                        )
             self._root_pause_lanes()
             if state == root_guard_mod.ROOT_MISPLACED:
                 self._warn_root_misplaced()
@@ -1608,6 +1999,8 @@ class CompanionApp:
         try:
             was_absent = self._root_absent
             self._root_absent = False
+            if self._root_state != root_guard_mod.ROOT_PRESENT:
+                self._root_state_since = datetime.now(timezone.utc).isoformat()
             self._root_state = root_guard_mod.ROOT_PRESENT
             self._root_absent_announced = False
             self._root_misplaced_announced = False
@@ -1915,6 +2308,22 @@ class CompanionApp:
             "Your uploads are still running and nothing has been deleted. When your "
             'admin says the server is fine, use the tray\'s "Resume proxy download".',
             "ccsync-companion: proxy download stopped",
+        )
+
+    def _notify_disk_floor_park(self, reason: str) -> None:
+        """One toast on the EDGE of a free-space park (SYS-5 / SYNC-7,
+        resilience sweep 2026-08-28).
+
+        The three things this one has to say are different from the breaker's:
+        which lane stopped, that uploads did not, and that it starts again by
+        itself once there is room -- so nobody goes looking for a button that
+        they do not need."""
+        self._notify_tray(
+            "CCSync is not downloading proxies:\n"
+            f"{reason}\n"
+            "Your uploads are still running. Free up some space and it starts again "
+            "on its own.",
+            "ccsync-companion: proxy download paused",
         )
 
     def _syncthing_supervision_suppressed(self) -> str:
@@ -3281,6 +3690,7 @@ class CompanionApp:
 
     def _media_tree_loop(self) -> None:
         while not self._media_tree_stop_event.is_set():
+            self._media_tree_heartbeat = time.monotonic()
             try:
                 self._refresh_media_tree_once()
             except Exception:
@@ -4500,12 +4910,268 @@ class CompanionApp:
                 guard["syncthing_supervisor"] = supervisor
         except Exception:
             log.exception("syncthing supervisor report() failed")
+        try:
+            # SYS-2 (resilience sweep 2026-08-28): the loop threads the
+            # watchdog has had to restart. Absent while it has never had to,
+            # which is the normal state and the thing that clears the chip.
+            # Reported rather than only self-healed on purpose: a machine that
+            # needs its sequencer restarted three times an hour is syncing in
+            # fits and starts, and self-healing silently is how that stays
+            # invisible for a month.
+            watchdog = self._lane_watchdog
+            restarts = watchdog.report() if watchdog is not None else {}
+            if restarts:
+                guard["restarts"] = restarts
+        except Exception:
+            log.exception("thread watchdog report() failed")
         if self._removal_overrides:
             # Not drained: an overridden removal is small and must survive a
             # failed POST, unlike the completed-file feed (which is a
             # history and can afford to lose a tick).
             guard["removal_overrides"] = list(self._removal_overrides)[-5:]
+        try:
+            # SYS-1 (resilience sweep 2026-08-28): the server's stall rule is
+            # THREE ROTATIONS, so it needs this machine's rotation. Absent
+            # (older build) leaves health.lane_stall on its 30 min floor.
+            rotation = float(self.config.get("project_rotation_seconds", 0) or 0)
+            if rotation > 0:
+                guard["rotation_seconds"] = rotation
+        except Exception:
+            log.exception("rotation_seconds report failed")
+        try:
+            # SYNC-2: the root guard's answer as a plain string, so the grid
+            # can tell "the drive is out" from "the drive is wedged" without
+            # parsing a lane detail. Always present -- including `unknown`,
+            # which is "we could not tell" and must not read as `present`.
+            guard["root_state"] = str(self._root_state)
+        except Exception:
+            log.exception("root_state read failed")
+        try:
+            # SYS-5 / SYNC-7: free space on the sync drive and the OS drive.
+            # Measured once per HEAVY tick and memoised, because the guard
+            # section rides every light tick too.
+            disk = self.disk_snapshot()
+            if disk:
+                guard["disk"] = disk
+        except Exception:
+            log.exception("disk snapshot failed")
+        try:
+            # SYNC-15, and it is LAST on purpose: it is derived from the keys
+            # above (and from the lane/latch state), so assembling it here
+            # means one place reads one already-built picture.
+            blocked = self.blocked_report(guard)
+            if blocked:
+                guard["blocked"] = blocked
+        except Exception:
+            log.exception("blocked_report() failed")
         return guard
+
+    # -- free space (SYS-5 / SYNC-7, resilience sweep 2026-08-28) ----------
+    def disk_snapshot(self) -> dict[str, Any]:
+        """`sync_guard.disk`, at most once per heavy report interval.
+
+        Two `shutil.disk_usage` calls is nothing, but the sync_guard section
+        is rebuilt on every LIGHT tick as well (every 5 s while a lane is
+        active), and two stat-family syscalls against a drive that has just
+        stopped answering is exactly the hot path SYNC-2 is about. The heavy
+        cadence is `dashboard_report_interval`, the same one the manifest
+        refresh runs on. Never raises."""
+        try:
+            ttl = max(30.0, float(config_mod.coerce_numeric(
+                self.config, "dashboard_report_interval", 60)))
+        except Exception:
+            ttl = 60.0
+        now = time.monotonic()
+        if self._disk_snapshot and (now - self._disk_snapshot_at) < ttl:
+            return dict(self._disk_snapshot)
+        snapshot = lane_guard.disk_report(self.config.get("local_root", ""))
+        self._disk_snapshot = snapshot
+        self._disk_snapshot_at = now
+        return dict(snapshot)
+
+    # -- the one sentence: why is this machine not syncing? (SYNC-15) -------
+    #
+    # Each of these latches already had its own state, its own file and its
+    # own (or no) report field, and the fleet page had to infer "why is this
+    # machine doing nothing" from a lane state that SYNC-1/5/9 all show can
+    # be wrong. Nothing new is computed here: every value is already in
+    # memory, and the whole point is that ONE ordered list decides which of
+    # them an admin is shown first. The order is the contract the dashboard's
+    # health.why_not_syncing mirrors, and it is ordered by what the reader can
+    # ACT on: the editor's own sign-in before the admin's halt, a wedged
+    # drive before a tripped breaker, a real blockage before a mere pause.
+    _BLOCKED_ORDER = (
+        "not_signed_in", "licence_pending", "clock_skew", "root_absent",
+        "root_not_answering", "root_misplaced", "disk_full", "fleet_halt",
+        "local_halt", "paused", "breaker_tripped", "no_selection",
+        "folders_unfiltered", "lane_stalled", "syncthing_down",
+        "transport_offline",
+    )
+
+    def blocked_report(self, guard: Optional[dict] = None) -> Optional[dict[str, Any]]:
+        """`sync_guard.blocked` = {reason, detail, since}, or None.
+
+        None means nothing is blocking, and it is the ONLY thing that means
+        that: an absent key is how "this machine is syncing" is spelled, the
+        same shape `crashes` and `folders_unfiltered` use. Never raises -- a
+        diagnostic that can fail the report cycle would take the alarm down
+        with it, and every candidate is isolated so one broken getter cannot
+        hide a lower-priority reason.
+        """
+        found: dict[str, tuple[str, Optional[str]]] = {}
+        for reason in self._BLOCKED_ORDER:
+            try:
+                answer = self._blocked_candidate(reason, guard or {})
+            except Exception:
+                log.exception("blocked_report: the %s check failed", reason)
+                continue
+            if answer is not None:
+                found[reason] = answer
+        for reason in self._BLOCKED_ORDER:
+            if reason not in found:
+                continue
+            detail, since = found[reason]
+            # `since` for a reason that carries no timestamp of its own: the
+            # first report that named it. Kept in memory only -- it is a
+            # display nicety, not a latch, and a restart honestly resets it.
+            if not since:
+                since = self._blocked_since.get(reason) or ""
+                if not since:
+                    since = datetime.now(timezone.utc).isoformat()
+            self._blocked_since = {reason: since}
+            return {"reason": reason, "detail": detail, "since": since or None}
+        self._blocked_since = {}
+        return None
+
+    def _blocked_candidate(
+        self, reason: str, guard: dict
+    ) -> Optional[tuple[str, Optional[str]]]:
+        """(detail, since) when `reason` applies right now, else None.
+
+        One function rather than sixteen so the order above is the only place
+        priority lives. Every `detail` is a sentence an editor can read: it is
+        what the tray shows and what the dashboard renders at the top of the
+        machine's row."""
+        if reason == "not_signed_in":
+            if self._login_gate_blocks_sync():
+                return ("Nobody is signed in to CCSync on this computer, so nothing "
+                        "is syncing", None)
+            return None
+        if reason == "licence_pending":
+            problem = self.eula_problem()
+            if problem:
+                return (str(problem), None)
+            return None
+        if reason == "clock_skew":
+            skew = getattr(self.reporter, "clock_skew_seconds", None)
+            if skew is None:
+                return None
+            if abs(float(skew)) < reporter_mod.CLOCK_SKEW_WARN_SECONDS:
+                return None
+            return (f"This computer's clock is "
+                    f"{reporter_mod.skew_phrase(float(skew))} the server's, so proxy "
+                    "download will not transfer anything", None)
+        if reason in ("root_absent", "root_not_answering", "root_misplaced"):
+            wanted = {
+                "root_absent": root_guard_mod.ROOT_ABSENT,
+                "root_not_answering": root_guard_mod.ROOT_NOT_ANSWERING,
+                "root_misplaced": root_guard_mod.ROOT_MISPLACED,
+            }[reason]
+            if self._root_state != wanted:
+                return None
+            return (root_guard_mod.state_sentence(wanted),
+                    self._root_state_since or None)
+        if reason == "disk_full":
+            floor = (guard.get("disk_floor") or {})
+            if not floor.get("parked"):
+                return None
+            return (f"Not downloading proxies: "
+                    f"{floor.get('reason') or 'this drive is nearly full'}",
+                    str(floor.get("at") or "") or None)
+        if reason in ("fleet_halt", "local_halt"):
+            halt = guard.get("halt") or {}
+            if not halt.get("active"):
+                return None
+            is_fleet = str(halt.get("scope") or "") == lane_guard.HALT_SCOPE_FLEET
+            if is_fleet != (reason == "fleet_halt"):
+                return None
+            return (self._halt_detail(), str(halt.get("at") or "") or None)
+        if reason == "paused":
+            if not self._paused:
+                return None
+            return ("Syncing is paused from this computer's tray", None)
+        if reason == "breaker_tripped":
+            breaker = guard.get("lane_b_breaker") or {}
+            if not breaker.get("tripped"):
+                return None
+            return (f"Proxy download is stopped as a safety measure: "
+                    f"{breaker.get('reason') or 'a safety check failed'}",
+                    str(breaker.get("tripped_at") or "") or None)
+        if reason == "no_selection":
+            state, detail = self.sequencer_state()
+            if state != STATE_NO_SELECTION:
+                return None
+            return ("No projects are ticked for this computer"
+                    + (f" ({detail})" if detail else ""), None)
+        if reason == "folders_unfiltered":
+            slugs = [str(s) for s in (guard.get("folders_unfiltered") or []) if s]
+            if not slugs:
+                return None
+            return (f"{len(slugs)} project(s) are not sharing yet - waiting for their "
+                    f"filter list: {', '.join(slugs[:3])}", None)
+        if reason == "lane_stalled":
+            stalled = guard.get("stalled") or self._lane_stall_record()
+            if not isinstance(stalled, dict) or not stalled.get("lane"):
+                return None
+            try:
+                minutes = max(1, int(float(stalled.get("seconds") or 0) // 60))
+            except (TypeError, ValueError):
+                minutes = 1
+            return (f"Lane {stalled.get('lane')} stopped making progress for "
+                    f"{minutes} minute(s) and was restarted",
+                    str(stalled.get("at") or "") or None)
+        if reason == "syncthing_down":
+            supervisor = guard.get("syncthing_supervisor") or {}
+            since = str(supervisor.get("down_since") or "")
+            if not since:
+                return None
+            return ("The sync engine (Syncthing) is not running on this computer, so "
+                    "project files are not being shared", since)
+        if reason == "transport_offline":
+            # LAST, and deliberately the weakest evidence in the list: both
+            # rclone lanes failing at once is what "the NAS is unreachable"
+            # looks like from here, and it is only ever reported when nothing
+            # more specific applies.
+            states = {}
+            for lane in (self._lane_a, self._lane_b):
+                try:
+                    status = lane.status()
+                except Exception:
+                    return None
+                states[status.name] = status
+            errors = [s for s in states.values() if s.state == STATE_ERROR]
+            if len(errors) < 2:
+                return None
+            return ("This computer cannot reach the server: "
+                    + str(errors[-1].last_error or "both sync lanes are failing"), None)
+        return None
+
+    # The stall record another agent's watchdog writes (wave 2, SYNC-1).
+    # Read, never written, here: a file that does not exist is simply a
+    # companion that has never killed a stalled lane.
+    _LANE_STALL_FILENAME = "lane_stall.json"
+
+    def _lane_stall_record(self) -> dict[str, Any]:
+        try:
+            path = (config_mod.resolved_log_path(self.config).parent / "state"
+                    / self._LANE_STALL_FILENAME)
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        except Exception:
+            log.debug("could not read the lane stall record", exc_info=True)
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def resume_lane_b(self, by: str = "tray",
                       request_id: Optional[str] = None) -> tuple[bool, str]:
@@ -4528,8 +5194,22 @@ class CompanionApp:
         latch that lives only in memory is cleared by the tray restart an
         editor tries first (the breaker's own state file, beside the latch
         it clears -- see LaneBBreaker.resume)."""
+        # The SAME button clears the free-space park (SYS-5 / SYNC-7,
+        # resilience sweep 2026-08-28). One [ RESUME ] rather than a second
+        # one beside it: from the editor's side both are "proxy download is
+        # stopped and I have done something about it", and a second button
+        # that is dark most of the time is a button nobody finds. The park is
+        # cleared FIRST so a machine parked for space and not tripped at all
+        # still gets its pass.
+        disk_cleared = False
         try:
-            if not self._resume_lane_b_breaker(by, request_id):
+            latch = getattr(self, "disk_floor", None)
+            if latch is not None:
+                disk_cleared = bool(latch.resume(by))
+        except Exception:
+            log.exception("resume_lane_b: could not clear the free-space park")
+        try:
+            if not self._resume_lane_b_breaker(by, request_id) and not disk_cleared:
                 # Not tripped, or this request has already been applied here.
                 return False, "proxy download is not stopped"
         except Exception:
@@ -5182,6 +5862,191 @@ class CompanionApp:
         except Exception as exc:
             return [f"(could not read {self.log_path}: {exc})"]
 
+    # -- the diagnostics channel (SYS-7, resilience sweep 2026-08-28) ------
+    #
+    # build_diagnostics() is genuinely good and went to the CLIPBOARD, with
+    # the instruction "Paste them to your admin in a message" -- and to the
+    # LOG instead, silently, if any CCSync window happened to be open. So the
+    # one artefact that answers "why is my footage not syncing" existed only
+    # if a non-technical editor performed a manual step at the right moment,
+    # on the machine that was broken. Three triggers now put it on the
+    # dashboard instead: the button (which still fills the clipboard), a lane
+    # falling into `error`, and an admin's [ ASK THIS MACHINE WHY ].
+
+    def _diagnostics_state_path(self) -> Optional[Path]:
+        state_dir = getattr(self, "_state_dir", None)
+        if state_dir is None:
+            return None
+        return Path(state_dir) / DIAGNOSTICS_STATE_FILENAME
+
+    def _read_diagnostics_state(self) -> dict:
+        """The rate-limit stamps and the last applied admin request.
+
+        ON DISK, not in memory (the sweep's rule for every latch): the
+        lane-error trigger fires on a machine that fails every pass, and a
+        companion that restarts on every crash would upload a bundle per
+        restart from an in-memory limiter. An unreadable file is an empty
+        state, which costs at most one extra upload."""
+        path = self._diagnostics_state_path()
+        if path is None:
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except Exception:
+            log.debug("could not read %s", path, exc_info=True)
+            return {}
+
+    def _write_diagnostics_state(self, state: dict) -> None:
+        """tmp + os.replace, like identity.save_identity: a half-written
+        limiter is what turns a broken machine into an upload loop."""
+        path = self._diagnostics_state_path()
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(state, fh, indent=2, sort_keys=True)
+            os.replace(tmp, path)
+        except Exception:
+            log.debug("could not write %s", path, exc_info=True)
+
+    def _upload_diagnostics(self, trigger: str) -> bool:
+        """Build the bundle and post it. Never raises.
+
+        NEVER WITHOUT A VERIFIED IDENTITY: a bundle names this machine's
+        paths, its Resolve project and its editor's tree, so posting one while
+        signed out would file it under whatever name happened to be in
+        config.toml. The reporter refuses too (post_diagnostics); this is the
+        cheap check that also saves building the bundle at all.
+        """
+        try:
+            if self.editor_identity() is None:
+                log.debug("diagnostics upload skipped (%s): not signed in", trigger)
+                return False
+            poster = getattr(self.reporter, "post_diagnostics", None)
+            if poster is None:
+                # A lane double or a reporter stub in a test. Discoverable
+                # from the log rather than a traceback on the reporter thread.
+                log.debug("this reporter cannot upload diagnostics")
+                return False
+            return bool(poster(self.build_diagnostics(), trigger))
+        except Exception:
+            # A diagnostics upload must never be the reason anything else
+            # stops: the dashboard being unreachable is one of the states this
+            # bundle exists to describe.
+            log.debug("diagnostics upload (%s) failed", trigger, exc_info=True)
+            return False
+
+    def _upload_diagnostics_async(self, trigger: str) -> None:
+        """...on a thread of its own, for _report_off_cycle's reason: every
+        caller here is either the reporter thread inside on_report_response or
+        a tray callback, and neither may block on an upload over an editor's
+        home uplink."""
+        threading.Thread(
+            target=self._upload_diagnostics, args=(trigger,),
+            name="ccsync-diagnostics-upload", daemon=True,
+        ).start()
+
+    def _note_lane_error_diagnostics(self) -> None:
+        """Upload a bundle when a lane FALLS INTO `error`. Never raises.
+
+        The transition, not the state: a machine that has been in error since
+        Tuesday would otherwise upload one bundle per report interval for
+        ever. And at most one per lane per hour on top of that, persisted, for
+        the flapping case -- a lane that errors, retries, errors again inside a
+        pass is one incident, not forty.
+
+        Called from _on_report_response, i.e. once per report cycle on the
+        reporter thread: the same cadence the dashboard learns the lane state
+        on, so the bundle and the red chip arrive together.
+        """
+        try:
+            statuses = self.lane_statuses()
+        except Exception:
+            log.debug("could not read lane states for diagnostics", exc_info=True)
+            return
+        state = self._read_diagnostics_state()
+        lanes = state.get("lanes")
+        if not isinstance(lanes, dict):
+            lanes = {}
+        now = time.time()
+        changed = False
+        fire: list[str] = []
+        for status in statuses:
+            name = str(getattr(status, "name", "") or "")
+            if not name:
+                continue
+            current = str(getattr(status, "state", "") or "")
+            record = lanes.get(name)
+            if not isinstance(record, dict):
+                record = {}
+            was = str(record.get("state") or "")
+            if current != was:
+                record["state"] = current
+                changed = True
+            if current == STATE_ERROR and was != STATE_ERROR:
+                last_sent = record.get("sent_at")
+                try:
+                    quiet = now - float(last_sent) if last_sent is not None else None
+                except (TypeError, ValueError):
+                    quiet = None
+                if quiet is None or quiet >= DIAGNOSTICS_LANE_ERROR_INTERVAL_SECONDS:
+                    record["sent_at"] = now
+                    changed = True
+                    fire.append(name)
+                else:
+                    log.debug("lane %s errored again inside the diagnostics "
+                              "rate limit (%.0f s ago)", name, quiet)
+            lanes[name] = record
+        if changed:
+            state["lanes"] = lanes
+            # BEFORE the upload, not after: a crash between the two costs one
+            # missed bundle, whereas the other order costs an upload per
+            # restart from the machine least able to afford it.
+            self._write_diagnostics_state(state)
+        for name in fire:
+            log.info("lane %s entered error -- uploading diagnostics", name)
+            self._upload_diagnostics_async("lane_error")
+
+    def _apply_diagnostics_request(self, resp: Any) -> None:
+        """An admin clicked [ ASK THIS MACHINE WHY ] (v33, SYS-7).
+
+        The dashboard keeps this command standing on every reply until the
+        BUNDLE ARRIVES (unlike resume_lane_b, which it drops as soon as the
+        reply goes out) -- because a lost reply there costs one more admin
+        click and here would cost an unanswerable question. Which means the
+        `requested_at` comparison is what stops one click becoming an upload
+        every 30 seconds: each ask is applied exactly once, and the record is
+        on disk beside the rate-limit stamps, because a companion that
+        restarted mid-ask must not answer it twice.
+
+        Never raises: this runs on the reporter thread."""
+        try:
+            command = None
+            if isinstance(resp, dict):
+                commands = resp.get("commands")
+                if isinstance(commands, dict):
+                    command = commands.get("diagnostics")
+            if not isinstance(command, dict):
+                return
+            request_id = str(command.get("requested_at") or "").strip()
+            state = self._read_diagnostics_state()
+            if request_id and str(state.get("applied_request") or "") == request_id:
+                return
+            by = str(command.get("requested_by") or "your administrator").strip()
+            state["applied_request"] = request_id
+            self._write_diagnostics_state(state)
+            log.warning("%s asked this computer for its diagnostics from the "
+                        "dashboard", by)
+            self._upload_diagnostics_async("admin_request")
+        except Exception:
+            log.exception("could not apply the dashboard's diagnostics request")
+
     def build_diagnostics(self) -> str:
         """Everything an admin needs to diagnose this machine, as one block of
         text for the clipboard (AUDIT_2 UX-19).
@@ -5335,6 +6200,30 @@ class CompanionApp:
             out.append(f"  <failed: {exc}>")
 
         out.append("")
+        out.append("-- background thread restarts (the watchdog) --")
+        # SYS-2: the counter that separates "it recovered on its own" from
+        # "this machine has needed a human since Tuesday". The record outlives
+        # the process (~/.ccsync/state/watchdog.json), so a companion that has
+        # itself been restarted still shows the last 24 hours.
+        try:
+            watchdog = self._lane_watchdog
+            if watchdog is None:
+                out.append("  the thread watchdog is not running")
+            else:
+                out.append(f"  record: {watchdog._state_path}")
+                report = watchdog.report()
+                if not report:
+                    out.append("  none: no background thread has needed restarting")
+                for name, entry in sorted(report.items()):
+                    out.append(
+                        f"  {name}: {entry.get('count_24h')} restart(s) in 24h, "
+                        f"{entry.get('count_1h')} in the last hour, last at "
+                        f"{entry.get('last_at')} "
+                        f"({entry.get('last_error') or 'no exception was recorded'})")
+        except Exception as exc:
+            out.append(f"  <failed: {exc}>")
+
+        out.append("")
         out.append(f"-- last 40 log lines ({self.log_path}) --")
         out.extend(f"  {line}" for line in self._diagnostic_log_tail(40))
         return "\n".join(out)
@@ -5405,10 +6294,15 @@ class CompanionApp:
         if not self._popup_active_lock.acquire(blocking=False):
             log.info("copy diagnostics: another CCSync window is open -- logging instead")
             log.info("DIAGNOSTICS:\n%s", text)
+            # The UPLOAD needs no Tk root, so this path still gets the bundle
+            # to the admin (SYS-7): "if any CCSync window is open it silently
+            # goes to the log instead" was the worst of the three ways this
+            # artefact used to reach nobody.
+            self._upload_diagnostics_async("button")
             self._notify_tray(
                 "Another CCSync window is open, so the diagnostics went to the log "
-                "instead (tray → Open log). Close it and try again to get them on the "
-                "clipboard.", "ccsync-companion")
+                "and to your admin's dashboard instead of the clipboard.",
+                "ccsync-companion")
             return False
         try:
             import tkinter as tk
@@ -5428,15 +6322,23 @@ class CompanionApp:
 
             ui_dispatch.dispatch(_copy_via_tk)
             log.info("diagnostics copied to clipboard (%d chars)", len(text))
+            # ...AND to the dashboard (SYS-7, resilience sweep 2026-08-28).
+            # The clipboard stays: an editor who is already pasting into a
+            # message must not have that taken away, and the upload is the
+            # half that works when they never do. On its own thread, so a slow
+            # or unreachable dashboard cannot hold the tray callback open.
+            self._upload_diagnostics_async("button")
             self._notify_tray(
-                "Diagnostics copied. Paste them to your admin in a message.", "ccsync-companion")
+                "Diagnostics copied, and sent to your admin's dashboard.",
+                "ccsync-companion")
             return True
         except Exception:
             log.exception("could not copy diagnostics to the clipboard")
             log.info("DIAGNOSTICS:\n%s", text)
+            self._upload_diagnostics_async("button")
             self._notify_tray(
                 "Couldn't reach the clipboard. The diagnostics were written to the log "
-                "instead (tray → Open log).", "ccsync-companion")
+                "and sent to your admin's dashboard.", "ccsync-companion")
             return False
         finally:
             self._popup_active_lock.release()
@@ -5616,11 +6518,7 @@ class CompanionApp:
         except Exception:
             log.exception("failed to start manifest cache")
         try:
-            self._media_tree_stop_event.clear()
-            self._media_tree_thread = threading.Thread(
-                target=self._media_tree_loop, name="ccsync-media-tree", daemon=True
-            )
-            self._media_tree_thread.start()
+            self._start_media_tree_thread()
         except Exception:
             log.exception("failed to start media tree cache thread")
         # Report (never delete) partial copies an interrupted FIX ALL left
@@ -5655,11 +6553,7 @@ class CompanionApp:
                 ).start()
             except Exception:
                 log.exception("failed to start site manifest refresh")
-        self._stop_event.clear()
-        self._watcher_thread = threading.Thread(
-            target=self.watcher.run, args=(self._stop_event,), name="ccsync-watcher", daemon=True
-        )
-        self._watcher_thread.start()
+        self._start_watcher_thread()
         # OUTSIDE the lanes branch above, and behind its own try, for the same
         # reason _start_lut_link() is: the base rig runs sync_enabled=false and
         # is the machine that needs proxy generation MOST (its local_root IS
@@ -5700,11 +6594,80 @@ class CompanionApp:
             ("root guard", self._start_root_guard),
             ("b-roll server", self._start_broll_server),
             ("yt-dlp manager", self._start_ytdlp_manager),
+            # LAST: it supervises the threads everything above it started
+            # (SYS-2). See _start_lane_watchdog.
+            ("thread watchdog", self._start_lane_watchdog),
         ):
             try:
                 starter()
             except Exception:
                 log.exception("failed to start the %s", name)
+
+    def _start_watcher_thread(self) -> None:
+        """Start (or replace) the timeline watcher's thread.
+
+        ONE start path, called from start() and from LaneWatchdog (SYS-2,
+        resilience sweep 2026-08-28) -- a watchdog with a restart route of its
+        own would be a second, untested way to spawn this thread.
+
+        Clears the stop latch first: on a restart the event is still clear
+        (shutdown is the only thing that sets it, and the watchdog stands down
+        for that), but a future caller that stopped the watcher on purpose
+        must not get a thread that exits immediately.
+        """
+        self._stop_event.clear()
+        self._watcher_thread_error = None
+        self._watcher_thread = threading.Thread(
+            target=self._watcher_thread_target, name="ccsync-watcher", daemon=True
+        )
+        self._watcher_thread.start()
+
+    def _watcher_thread_target(self) -> None:
+        """watcher.run, with the exception that ends the thread recorded.
+
+        The record is what makes LaneWatchdog's watchdog.json say WHY rather
+        than "restarted for no stated reason". Re-raised, so
+        threading.excepthook -- and through it crash_report -- still sees it
+        exactly as before (SYS-2)."""
+        try:
+            self.watcher.run(self._stop_event)
+        except BaseException as exc:
+            self._watcher_thread_error = f"{type(exc).__name__}: {exc}"
+            raise
+
+    def _start_media_tree_thread(self) -> None:
+        """Start (or replace) the media-tree cache thread. Same contract as
+        _start_watcher_thread: the one start path, shared with the
+        watchdog."""
+        self._media_tree_stop_event.clear()
+        self._media_tree_thread_error = None
+        self._media_tree_heartbeat = time.monotonic()
+        self._media_tree_thread = threading.Thread(
+            target=self._media_tree_thread_target, name="ccsync-media-tree", daemon=True
+        )
+        self._media_tree_thread.start()
+
+    def _media_tree_thread_target(self) -> None:
+        try:
+            self._media_tree_loop()
+        except BaseException as exc:
+            self._media_tree_thread_error = f"{type(exc).__name__}: {exc}"
+            raise
+
+    def _start_lane_watchdog(self) -> None:
+        """The thing that notices when a loop thread stops (SYS-2).
+
+        LAST in start()'s starter tuple, deliberately: it supervises threads
+        the statements above it created, and a watchdog that ran first would
+        read "not started yet" as "died". Its own thread is a daemon that
+        wakes once a minute; the check itself never raises.
+        """
+        if self._lane_watchdog is not None:
+            return
+        watchdog = LaneWatchdog(
+            self, state_path=Path(self._state_dir) / WATCHDOG_STATE_FILENAME)
+        watchdog.start()
+        self._lane_watchdog = watchdog
 
     def _start_ytdlp_manager(self) -> None:
         """Keep this machine's yt-dlp binary present and current.
@@ -6611,6 +7574,15 @@ class CompanionApp:
                 return
             self._shutdown_started = True
         self._stop_event.set()
+        # BEFORE the guards below: its whole job is to START threads, and one
+        # tick landing during teardown would spawn a sequencer into a process
+        # that is exiting. check() reads _shutdown_started too, so this is
+        # belt and braces (SYS-2).
+        try:
+            if self._lane_watchdog is not None:
+                self._lane_watchdog.stop()
+        except Exception:
+            log.exception("failed to stop the thread watchdog")
         # First: a guard still holding a block reason would make the machine
         # refuse to shut down on behalf of a companion that is exiting.
         # Likewise a keep-awake guard still holding ES_SYSTEM_REQUIRED would

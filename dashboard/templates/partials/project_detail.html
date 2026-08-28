@@ -41,6 +41,12 @@
             {# DASH-8 (2026-08-28): person-level, so it comes off every
                computer they own -- named, not implied. #}
             hx-confirm="This removes {{ project.label }} from {{ tick_for }}'s {{ toggle_editor_machines | length }} computer{{ 's' if toggle_editor_machines | length != 1 }} ({{ toggle_editor_machines | join(', ') }}). Their copies stay on disk; nothing new comes down and proxy sync stops for it."
+            {% elif tick_warning is defined and tick_warning %}
+            {# UX-1 (2026-08-28): the CONSEQUENCE of a tick, which used to be
+               silent: 4 TB of proxies onto a 500 GB laptop succeeded, filled
+               the drive and left the machine unusable for Resolve too. It
+               refuses nothing, so this is a confirm and not a block. #}
+            hx-confirm="{{ tick_warning }} Sync it there anyway?"
             {% endif %}
             hx-target="#project-detail" hx-swap="innerHTML">
       [ {{ "UNTICK" if tick_for in pickers else "TICK" }} FOR {{ whom }} ]</button>

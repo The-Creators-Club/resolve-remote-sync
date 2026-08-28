@@ -176,3 +176,45 @@ def test_unknown_editor_in_url_is_not_silently_created(env):
     resp = client.put(f"/api/v1/selection/ghost/{FF5}")
     assert resp.status_code == 200
     assert [s["slug"] for s in dbmod.fetch_selections(conn, "ghost")] == [FF5]
+
+
+# ------------------------------------------------------- UX-1 the preflight
+#
+# UX-1 (resilience sweep 2026-08-28). [ ALL ] on a new editor's column is the
+# click the finding was written about: twelve projects and 4 TB of proxies onto
+# a 500 GB MacBook, every tick succeeding in silence. The confirm has to happen
+# BEFORE the PUT, so both figures are rendered into the grid and
+# assignments.js mirrors the server's rule (health.capacity_warning) in the
+# browser -- no round trip per cell, and [ ALL ] can add a whole column up.
+
+
+def test_the_grid_carries_the_two_figures_the_preflight_needs(env):
+    client, conn = env
+    gb = 1024 ** 3
+    now = dbmod.utcnow_iso()
+    pid = conn.execute("SELECT id FROM projects WHERE slug=?", (FF5,)).fetchone()["id"]
+    conn.execute("""INSERT INTO nas_inventory_state
+                      (project_id, bytes_proxies, n_proxies, walked_at)
+                    VALUES (?, ?, ?, ?)""", (pid, 620 * gb, 40, now))
+    dbmod.upsert_machine(conn, "editor1", "LESO-MBP", now)
+    dbmod.upsert_machine_state(conn, "editor1", "LESO-MBP", None, now,
+                               guard={"at": now, "disk_at": now,
+                                      "disk_root_free_bytes": 180 * gb,
+                                      "disk_root_total_bytes": 500 * gb})
+    conn.commit()
+    as_user(client, "owen")
+    body = client.get("/admin/assignments").text
+    cell = matrix_checkbox(body, FF5, "editor1")
+    assert f'data-proxy-bytes="{620 * gb}"' in cell
+    assert f'data-free-bytes="{180 * gb}"' in cell
+    # ...and the column tool gets the same free figure, for the total
+    assert f'data-col-free="{180 * gb}"' in body
+
+
+def test_a_project_the_collector_never_walked_renders_no_figure(env):
+    """"Cannot say" is an ABSENT attribute, never a zero: a 4 TB project read
+    as 0 GB would be worse than no preflight at all."""
+    client, conn = env
+    as_user(client, "owen")
+    cell = matrix_checkbox(client.get("/admin/assignments").text, DRONE, "editor1")
+    assert cell and "data-proxy-bytes" not in cell

@@ -44,6 +44,11 @@
                column for its wired half that every write endpoint then 409'd.
                base_machine_cells is the per-computer answer. #}
             {% set wired = (c.editor, c.machine) in assignments.base_machine_cells %}
+            {# UX-1 (2026-08-28): this computer's free space, so [ ALL ] can
+               say what a whole column would cost before it writes the first
+               cell. Absent for a machine whose companion is too old to report
+               it, and the confirm then stays silent rather than guessing. #}
+            {% set col_disk = assignments.disk.get((c.editor, c.machine)) or {} %}
             <th>
               <div class="assign-editor-head">
                 <span class="name">{{ c.label }}</span>
@@ -57,6 +62,8 @@
                 <span class="assign-colbtns">
                   <button type="button" class="btn"
                           data-col-all="{{ c.editor }}" data-col-machine="{{ c.machine }}"
+                          {% if col_disk.get('free') is not none %}data-col-free="{{ col_disk.get('free') }}"{% endif %}
+                          data-col-label="{{ c.sub or c.editor }}"
                           title="tick every project for {{ c.sub }}">[ ALL ]</button>
                   <button type="button" class="btn"
                           data-col-none="{{ c.editor }}" data-col-machine="{{ c.machine }}"
@@ -85,10 +92,17 @@
             {% for c in assignments.columns %}
             {% set wired = (c.editor, c.machine) in assignments.base_machine_cells %}
             {% set up_only = (p.slug, c.editor, c.machine) in assignments.upload_only_cells %}
+            {% set cell_disk = assignments.disk.get((c.editor, c.machine)) or {} %}
             <td class="assign-cell">
               <input type="checkbox" class="proj-check matrix-check"
                      data-slug="{{ p.slug }}" data-editor="{{ c.editor }}"
                      data-machine="{{ c.machine }}"
+                     {# UX-1: the two figures the consequence confirm needs,
+                        rendered per cell so a tick needs no round trip. #}
+                     {% if assignments.proxy_bytes.get(p.slug) is not none %}data-proxy-bytes="{{ assignments.proxy_bytes.get(p.slug) }}"{% endif %}
+                     {% if cell_disk.get('free') is not none %}data-free-bytes="{{ cell_disk.get('free') }}"{% endif %}
+                     data-project-label="{{ p.label }}"
+                     data-machine-label="{{ c.sub or c.editor }}"
                      {{ 'checked' if (p.slug, c.editor, c.machine) in assignments.ticked_cells }}
                      {% if wired %}disabled
                      title="{{ c.sub or c.editor }} is wired to the NAS: it works directly off the tree and syncs nothing"

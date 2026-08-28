@@ -209,7 +209,8 @@ class _FakeProc:
         self.stderr = iter(lines)
         self._rc = returncode
 
-    def wait(self):
+    def wait(self, timeout=None):
+        # SYNC-1/SYS-17: proc.wait() is polled with a timeout now.
         return self._rc
 
 
@@ -884,3 +885,238 @@ def test_a_fresh_trip_writes_to_the_new_location(tmp_path):
     assert new.exists()
     assert not (tmp_path / "state").exists()
     assert lane_guard.LaneBBreaker(new, {}).tripped is True
+
+
+# -- lane B's free-space floor (SYS-5 / SYNC-7, sweep 2026-08-28) -----------
+
+
+def _floor(tmp_path, **cfg):
+    return lane_guard.DiskFloorLatch(tmp_path / "disk.json", cfg)
+
+
+def test_a_drive_under_the_floor_parks_lane_b(tmp_path):
+    latch = _floor(tmp_path, lane_b_min_free_bytes=20 * 1024**3)
+    reason = latch.check(8 * 1024**3)
+    assert reason is not None and "8 GB free" in reason
+    assert latch.parked
+
+
+def test_a_drive_above_the_floor_parks_nothing(tmp_path):
+    latch = _floor(tmp_path, lane_b_min_free_bytes=20 * 1024**3)
+    assert latch.check(500 * 1024**3) is None
+    assert not latch.parked
+
+
+def test_the_park_clears_itself_only_at_twice_the_floor(tmp_path):
+    latch = _floor(tmp_path, lane_b_min_free_bytes=20 * 1024**3)
+    latch.check(1 * 1024**3)
+    # Back over the floor but inside the hysteresis band: still parked, or the
+    # sentence would flicker on and off after one deleted clip.
+    assert latch.check(25 * 1024**3) is not None
+    assert latch.parked
+    assert latch.check(41 * 1024**3) is None
+    assert not latch.parked
+
+
+def test_a_measurement_that_failed_changes_nothing_either_way(tmp_path):
+    latch = _floor(tmp_path, lane_b_min_free_bytes=20 * 1024**3)
+    assert latch.check(None) is None
+    assert not latch.parked, "'could not measure' must never park a lane"
+    latch.check(1 * 1024**3)
+    assert latch.check(None) is not None, "...nor release one that is full"
+    assert latch.parked
+
+
+def test_a_park_survives_a_restart(tmp_path):
+    _floor(tmp_path, lane_b_min_free_bytes=20 * 1024**3).check(2 * 1024**3)
+    again = _floor(tmp_path, lane_b_min_free_bytes=20 * 1024**3)
+    assert again.parked and again.reason
+
+
+def test_the_tray_can_clear_the_park(tmp_path):
+    latch = _floor(tmp_path, lane_b_min_free_bytes=20 * 1024**3)
+    latch.check(2 * 1024**3)
+    assert latch.resume("tray") is True
+    assert not latch.parked
+    # Idempotent, like the breaker's resume: a second click is not an error.
+    assert latch.resume("tray") is False
+
+
+def test_a_floor_of_zero_turns_the_whole_device_off(tmp_path):
+    latch = _floor(tmp_path, lane_b_min_free_bytes=0)
+    assert not latch.enabled
+    assert latch.check(0) is None
+    assert not latch.parked
+
+
+def test_lane_b_stands_down_paused_under_the_floor_and_spawns_nothing(tmp_path):
+    calls: list[list[str]] = []
+    lane = _lane_b(tmp_path, remote_entries=["Projects"],
+                   popen_factory=_factory([], 0, calls))
+    lane.disk_floor = _floor(tmp_path, lane_b_min_free_bytes=20 * 1024**3)
+    lane._free_bytes_fn = lambda path: 3 * 1024**3
+    status = lane.run_once()
+    assert calls == [], "no rclone may run against a drive with no room on it"
+    # PAUSED, never ERROR: the lane is not broken, and lanes A and C keep
+    # running exactly as they do for a breaker trip.
+    assert status.state == STATE_PAUSED
+    assert status.last_error is None
+    assert "3 GB free" in (status.detail or "")
+    assert lane.disk_floor.parked
+    assert lane.sync_guard_report()["disk_floor"]["parked"] is True
+
+
+def test_lane_b_runs_again_by_itself_once_there_is_room(tmp_path):
+    calls: list[list[str]] = []
+    lane = _lane_b(tmp_path, remote_entries=["Projects"],
+                   popen_factory=_factory([], 0, calls))
+    lane.disk_floor = _floor(tmp_path, lane_b_min_free_bytes=20 * 1024**3)
+    lane._free_bytes_fn = lambda path: 3 * 1024**3
+    lane.run_once()
+    assert calls == []
+    lane._free_bytes_fn = lambda path: 500 * 1024**3
+    lane.run_once()
+    assert calls, "the park has to clear on its own -- nobody clicks anything"
+    assert not lane.disk_floor.parked
+
+
+def test_a_free_space_probe_that_raises_never_parks_the_lane(tmp_path):
+    calls: list[list[str]] = []
+    lane = _lane_b(tmp_path, remote_entries=["Projects"],
+                   popen_factory=_factory([], 0, calls))
+    lane.disk_floor = _floor(tmp_path, lane_b_min_free_bytes=20 * 1024**3)
+
+    def boom(path):
+        raise OSError("no such device")
+
+    lane._free_bytes_fn = boom
+    lane.run_once()
+    assert calls, "our own broken probe must not stop an editor syncing"
+    assert not lane.disk_floor.parked
+
+
+def test_the_disk_report_names_both_volumes_and_never_raises(tmp_path):
+    class _Usage:
+        def __init__(self, free, total):
+            self.free, self.total = free, total
+
+    report = lane_guard.disk_report(
+        str(tmp_path), system_path=str(tmp_path),
+        usage_fn=lambda path: _Usage(7, 100),
+    )
+    assert report["root_free_bytes"] == 7
+    assert report["root_total_bytes"] == 100
+    assert report["system_free_bytes"] == 7
+    assert report["at"]
+
+    def boom(path):
+        raise OSError("gone")
+
+    unknown = lane_guard.disk_report(str(tmp_path), usage_fn=boom)
+    # None, NOT 0: a drive we could not measure must never render as a drive
+    # with no space left (nor as one that is fine).
+    assert unknown["root_free_bytes"] is None
+    assert unknown["root_total_bytes"] is None
+    assert unknown["system_free_bytes"] is None
+
+
+# -- the trash prune's third trigger and its ordering fallback (SYNC-16) ----
+
+
+def test_disk_pressure_prunes_what_age_and_size_would_have_kept(tmp_path):
+    old = _trash_batch(tmp_path, "20260820-000000", age_days=2, size=1000)
+    newest = _trash_batch(tmp_path, "20260827-000000", age_days=1, size=1000)
+    summary = lane_guard.prune_trash(
+        str(tmp_path), max_age_days=14, max_bytes=0,
+        min_free_bytes=50 * 1024**3, free_bytes_fn=lambda root: 1 * 1024**3,
+    )
+    assert summary["removed"] == 1
+    assert not old.exists()
+    assert newest.exists(), "the newest batch is never the one that goes"
+
+
+def test_disk_pressure_prunes_nothing_when_the_drive_has_room(tmp_path):
+    keep = _trash_batch(tmp_path, "20260820-000000", age_days=2)
+    summary = lane_guard.prune_trash(
+        str(tmp_path), max_age_days=14, max_bytes=0,
+        min_free_bytes=20 * 1024**3, free_bytes_fn=lambda root: 500 * 1024**3,
+    )
+    assert summary["removed"] == 0 and keep.exists()
+
+
+def test_disk_pressure_that_cannot_be_measured_prunes_nothing(tmp_path):
+    keep = _trash_batch(tmp_path, "20260820-000000", age_days=2)
+    _trash_batch(tmp_path, "20260821-000000", age_days=2)
+    summary = lane_guard.prune_trash(
+        str(tmp_path), max_age_days=14, max_bytes=0,
+        min_free_bytes=20 * 1024**3, free_bytes_fn=lambda root: None,
+    )
+    assert summary["removed"] == 0 and keep.exists()
+
+
+def test_the_breaker_still_gates_the_disk_pressure_prune(tmp_path):
+    old = _trash_batch(tmp_path, "20260101-000000", age_days=400)
+    _trash_batch(tmp_path, "20260102-000000", age_days=399)
+    breaker = _breaker(tmp_path)
+    breaker.trip("a bad pass")
+    summary = lane_guard.prune_trash(
+        str(tmp_path), max_age_days=14, breaker=breaker,
+        min_free_bytes=50 * 1024**3, free_bytes_fn=lambda root: 0,
+    )
+    assert summary["removed"] == 0 and old.exists()
+
+
+def test_a_batch_with_no_usable_timestamp_sorts_by_its_name(tmp_path):
+    """SYNC-16: `trash_entries` yielded 0.0 for such a batch, which made a
+    batch created seconds ago the OLDEST thing in the trash -- so the size
+    rule deleted it before one created a fortnight back."""
+    import os
+
+    old = _trash_batch(tmp_path, "20260101-000000", age_days=400, size=1000)
+    # The newest batch, with no usable timestamp anywhere in it: an empty
+    # directory whose own mtime is the epoch is exactly what a batch whose
+    # every stat failed looks like to trash_entries.
+    fresh = tmp_path / lane_guard.TRASH_DIR_NAME / "20260827-120000"
+    fresh.mkdir(parents=True)
+    os.utime(fresh, (0, 0))
+
+    entries = {p.name: m for p, m, _s in lane_guard.trash_entries(str(tmp_path))}
+    assert entries["20260827-120000"] > entries["20260101-000000"]
+
+    summary = lane_guard.prune_trash(str(tmp_path), max_age_days=0, max_bytes=1)
+    assert summary["removed"] == 1
+    assert fresh.exists(), "the newest batch must never be the first one dropped"
+    assert not old.exists()
+
+
+def test_batch_stamp_reads_the_directory_name_and_refuses_anything_else():
+    assert lane_guard.batch_stamp("20260827-120000") is not None
+    assert lane_guard.batch_stamp("not-a-batch") is None
+    assert lane_guard.batch_stamp("") is None
+    assert lane_guard.batch_stamp(None) is None
+
+
+def test_the_sequencer_prunes_the_trash_on_a_lane_that_keeps_failing():
+    """SYNC-16: the prune was the LAST statement of a fully successful lane B
+    pass, so the machine that needed it most -- one erroring every pass with
+    50 GB of recovery copies on a full disk -- never reached it."""
+    from ccsync_companion.sync import sequencer as sequencer_mod
+
+    class _SickLaneB:
+        def __init__(self):
+            self.pruned = 0
+
+        def _maybe_prune_trash(self):
+            self.pruned += 1
+
+    seq = sequencer_mod.Sequencer.__new__(sequencer_mod.Sequencer)
+    seq.lane_b = _SickLaneB()
+    seq.lane_b_enabled = True
+    seq._prune_trash()
+    assert seq.lane_b.pruned == 1
+
+    def boom():
+        raise OSError("the volume went away mid-walk")
+
+    seq.lane_b._maybe_prune_trash = boom
+    seq._prune_trash()  # fault-isolated, exactly like _check_remote_root

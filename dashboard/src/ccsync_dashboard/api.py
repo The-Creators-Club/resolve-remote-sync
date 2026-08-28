@@ -158,14 +158,28 @@ def companion_token_ok(settings, conn: sqlite3.Connection | None, token: str) ->
 
 # ------------------------------------------------------------- view models
 
-def _lanes_view(rows: list[dict[str, Any]], now: str) -> list[dict[str, Any]]:
+def _lanes_view(
+    rows: list[dict[str, Any]], now: str, rotation_seconds: float | None = None
+) -> list[dict[str, Any]]:
+    """`rotation_seconds` is that machine's project_rotation_seconds (SYS-1):
+    the stall budget is 3 rotations, and without it health.lane_stall falls
+    back to a 30 min floor. Absent here on the project page, where the lanes
+    are shown per project and the fleet grid is where a stall is chased."""
+    chips = [health.lane_chip(r, now, rotation_seconds) for r in rows]
     return [
         {
             "lane": r["lane"],
             "label": LANE_LABELS.get(r["lane"], r["lane"]),
             "machine": r["machine"],
             "state": r["state"],
-            "chip": health.lane_chip_status(r, now),
+            "chip": chip[0],
+            # Why the chip is not green, in words, when the reason is not on
+            # the row itself: a red dot with no sentence is what CR-91b's two
+            # silent hours looked like on this page (SYS-1).
+            "chip_reason": chip[1],
+            "progress_token": r.get("progress_token"),
+            "progress_token_since": r.get("progress_token_since"),
+            "state_since": r.get("state_since"),
             "queued": r["queued"],
             "last_error": r["last_error"],
             "last_sync": r["last_sync"],
@@ -177,7 +191,7 @@ def _lanes_view(rows: list[dict[str, Any]], now: str) -> list[dict[str, Any]]:
             "speed_bps": r["speed_bps"],
             "eta_seconds": r["eta_seconds"],
         }
-        for r in rows
+        for r, chip in zip(rows, chips)
     ]
 
 
@@ -762,6 +776,16 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
             "WHERE lane_b_resume_requested_at IS NOT NULL"
         ).fetchall()
     }
+    # SYS-7 (resilience sweep 2026-08-28): everything the WHY sentence needs
+    # that is not already on the row. All four are ONE query for the whole
+    # fleet, because this builder runs every 15 s for every open fleet page.
+    pending_asks = db.pending_diagnostics_requests(conn)
+    diag_stamps = db.diagnostics_stamp_map(conn)
+    machine_role = db.machine_modes(conn)
+    plans = db.plan_summary_map(conn, machines.keys())
+    # A halted fleet is why THIS machine is not syncing, and it is the one
+    # alarm _scope_editors_view deliberately does not redact.
+    fleet_halted = bool(db.get_fleet_halt(conn)["active"])
     result = []
     for entry in machines.values():
         key = (entry["editor_username"], entry["machine"])
@@ -779,6 +803,31 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
         entry["transport"] = transport.get(key) or {}
         entry["guard"] = dict(guards.get(key) or {})
         entry["guard"]["resume_requested"] = key in pending_resumes
+        # SYS-1 (resilience sweep 2026-08-28): re-chip the lanes now that this
+        # machine's OWN rotation budget is in hand (it arrives with the guard
+        # section, which is read after the lane rows), and fold the stall into
+        # the row's dot exactly as wave 1 folded report freshness. A lane in
+        # `syncing` used to be amber for ever -- 2 h 20 m of it on leso's
+        # MacBook with nothing moving and lane B never getting a turn.
+        rotation = entry["guard"].get("rotation_seconds")
+        for lane in entry["lanes"]:
+            lane["chip"], lane["chip_reason"] = health.lane_chip(lane, now, rotation)
+        entry["status"] = health.worst(
+            [l["chip"] for l in entry["lanes"]] + [freshness])
+        if not entry["status_reason"]:
+            entry["status_reason"] = next(
+                (l["chip_reason"] for l in entry["lanes"] if l.get("chip_reason")), None)
+        # SYS-5: the DISK chip's colour, worked out here rather than in the
+        # template so the two thresholds are one testable rule. A machine that
+        # has never reported a disk section gets no chip at all -- not a green
+        # one, which would be "could not check" rendered as "fine".
+        disk_colour, disk_percent = health.disk_status(
+            entry["guard"].get("disk_root_free_bytes"),
+            entry["guard"].get("disk_root_total_bytes"))
+        entry["guard"]["disk_status"] = disk_colour
+        entry["guard"]["disk_percent"] = disk_percent
+        if disk_percent is not None and disk_colour != health.GREEN:
+            entry["status"] = health.worst([entry["status"], disk_colour])
         # SYS-4 / APP-13: the chip's own words, worked out here rather than in
         # the template so the threshold is one testable number. Under a minute
         # is NTP jitter and a laptop coming out of sleep; a minute is already
@@ -788,6 +837,28 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
         if skew is not None and abs(skew) >= db.CLOCK_SKEW_WARN_SECONDS:
             entry["guard"]["clock_skew_abs"] = abs(skew)
             entry["guard"]["clock_skew_dir"] = "AHEAD" if skew > 0 else "SLOW"
+        # SYS-7: ONE SENTENCE for "why is this machine not syncing", composed
+        # from states every one of which was already computed somewhere and
+        # never composed. It is the first line of the machine's row, so the
+        # answer is on the page the owner opens rather than in a message to
+        # the editor whose machine is the broken one.
+        entry["guard"]["diagnostics_requested"] = key in pending_asks
+        entry["diagnostics"] = diag_stamps.get(key) or {}
+        entry["mode"] = machine_role.get(key) or "editor"
+        entry["plan"] = plans.get(key) or {}
+        entry["fleet_halt_active"] = fleet_halted
+        why = health.why_not_syncing(entry, now)
+        if why is None:
+            entry["why"] = None
+        else:
+            entry["why"] = {
+                "reason": why[0],
+                "sentence": why[1],
+                # An upload-only machine is doing exactly what it was ticked
+                # for (CR-85): the sentence is an EXPLANATION, and colouring
+                # it red is what would send an admin chasing it.
+                "informational": why[0] in health.WHY_INFORMATIONAL,
+            }
         entry["ingest"] = ingest.get(key) or {}
         entry["music_ingest"] = music_ingest.get(key) or {}
         entry["proxy"] = proxies.get(key) or {}
@@ -1864,6 +1935,44 @@ def _sync_mode_arg(mode: str | None) -> str:
     return value
 
 
+def tick_capacity_warning(
+    conn: sqlite3.Connection, editor: str, slug: str, machine: str | None = None
+) -> str | None:
+    """UX-1 (resilience sweep 2026-08-28): what this tick costs, in one line.
+
+    "2026/FF5/Animals is 620 GB of proxies. LESO-MBP has 180 GB free."
+
+    REFUSES NOTHING, by design (the owner may know something the dashboard
+    does not), and stays silent when either figure is unknown -- an un-walked
+    project read as 0 GB would be worse than no preflight at all. With no
+    machine named the tick is the PERSON, so every computer they own is
+    checked and each one that would be tight gets its own sentence: that is
+    what [ ALL ] onto a 500 GB MacBook looked like from the owner's side, and
+    it said nothing.
+    """
+    proxy_bytes = db.project_proxy_bytes(conn, slug)
+    if not proxy_bytes:
+        return None
+    row = conn.execute(
+        "SELECT label FROM projects WHERE slug=?", (slug,)
+    ).fetchone()
+    label = (row["label"] if row is not None else slug) or slug
+    targets = [machine] if machine else db.machines_of(conn, editor)
+    sentences = []
+    for target in targets:
+        if not target:
+            continue
+        free, _at = db.machine_free_bytes(conn, editor, target)
+        sentence = health.capacity_warning(label, proxy_bytes, target, free)
+        if sentence:
+            sentences.append(sentence)
+    if not sentences:
+        return None
+    # Three is enough to make the point; a person with six laptops does not
+    # need a wall of text in a confirm dialog.
+    return " ".join(sentences[:3])
+
+
 @router.put("/selection/{editor}/{slug}")
 def api_tick(
     editor: str, slug: str, request: Request, machine: str | None = None,
@@ -1931,6 +2040,10 @@ def api_tick(
     _nudge_collector(request)
     view = _selection_view(conn, editor, machine=target)
     view["changed"] = added
+    # UX-1: the consequence, after the fact for an API caller and BEFORE the
+    # PUT for the two UIs, which read the same figures out of the page and
+    # confirm first (assignments.js, project_detail.html). Never a refusal.
+    view["warning"] = tick_capacity_warning(conn, editor, slug, target)
     return view
 
 
@@ -4577,6 +4690,16 @@ class LaneReportIn(BaseModel):
     bytes_total: int | None = None
     speed_bps: float | None = None
     eta_seconds: float | None = None
+    # SYS-1 (resilience sweep 2026-08-28): the liveness contract. A state may
+    # not be green or amber without a monotonic progress token and the time it
+    # last changed. `progress_token` changes whenever REAL WORK happened
+    # (bytes/files/current project), so a genuinely slow 40 GB file over a
+    # thin uplink is not mistaken for a hang; absent when the lane is idle, or
+    # when the build is too old to say (which reads as "no verdict", never as
+    # "fine"). The time this dashboard judges a stall on is NOT sent by the
+    # companion -- see db.upsert_lane_report's progress_token_since.
+    progress_token: str | None = Field(default=None, max_length=256)
+    state_since: str | None = Field(default=None, max_length=64)
     # Generous but bounded (see SEC-4): current companions send a handful of
     # live transfers per lane, never anywhere near this many.
     transfers: list[TransferIn] = Field(default_factory=list, max_length=256)
@@ -4897,6 +5020,92 @@ class SyncConflictsIn(_BoundedSectionIn):
     paths: list[str] | None = Field(default=None, max_length=32)
 
 
+class DiskIn(_BoundedSectionIn):
+    """One shutil.disk_usage per heavy tick (SYS-5 / UX-1, resilience sweep
+    2026-08-28).
+
+    Free space was invisible to the sync path AND absent from the report, so
+    an editor's full drive showed up as red dots with no cause on any page,
+    and a tick of 4 TB of proxies onto a 500 GB MacBook succeeded silently.
+    `system_free_bytes` is the OS drive when it is a different volume, which
+    is what stops a full boot disk (Resolve caches, the crash directory) from
+    being invisible on a machine whose sync drive is fine."""
+    root_free_bytes: int | None = Field(default=None, ge=0)
+    root_total_bytes: int | None = Field(default=None, ge=0)
+    system_free_bytes: int | None = Field(default=None, ge=0)
+    at: str | None = Field(default=None, max_length=64)
+
+
+class StalledIn(_BoundedSectionIn):
+    """The last stall the COMPANION detected and killed (SYNC-1 / SYS-17).
+
+    The server-side detector (health.lane_stall) and this are two halves of
+    one finding on purpose: the dashboard is the healthy independent observer,
+    and this is the machine that has the evidence -- `killed` is the
+    difference between "rclone made no progress and we shot it" and "it is
+    still sitting there". Absent when no stall has ever been recorded."""
+    lane: str | None = Field(default=None, max_length=32)
+    seconds: int | None = Field(default=None, ge=0)
+    killed: bool | None = None
+    at: str | None = Field(default=None, max_length=64)
+
+
+class RestartRecordIn(_BoundedSectionIn):
+    """One supervised thread's restart record (SYS-2)."""
+    count_24h: int | None = Field(default=None, ge=0)
+    last_at: str | None = Field(default=None, max_length=64)
+    last_error: str | None = Field(default=None, max_length=1000)
+
+
+class RestartsIn(_BoundedSectionIn):
+    """The LaneWatchdog's record: a machine that needs restarting three times
+    an hour is visible rather than merely self-healing (SYS-2).
+
+    DECLARED HERE, STORED ELSEWHERE: the columns and the chip belong to the
+    v33 why-not-syncing step of this same sweep. Declaring it now is what
+    keeps it out of the ignored-sections banner and off the third repeat of
+    SYS-3, which is the whole point of declaring a field early."""
+    sequencer: RestartRecordIn | None = None
+    watcher: RestartRecordIn | None = None
+    media_tree: RestartRecordIn | None = None
+
+
+class BlockedIn(_BoundedSectionIn):
+    """The companion's OWN ranked answer to "why is nothing moving" (SYNC-15).
+
+    Each latch had its own state, its own file and its own (or no) report
+    field, so the fleet page had to INFER "why is this machine doing nothing"
+    from a lane state -- which SYNC-1/5/9 all show can be wrong. This is the
+    aggregate, ranked so the ACTIONABLE reason wins, and
+    health.why_not_syncing prefers it over anything this server derives: the
+    root guard's fourth answer, the licence park and the machine's own
+    transport reach no column here.
+
+    Absent when nothing blocks. `reason` is deliberately NOT an enum: a newer
+    companion knowing a reason this build does not must not 422 its report,
+    and why_not_syncing names an unknown code rather than swallowing it."""
+    reason: str | None = Field(default=None, max_length=64)
+    detail: str | None = Field(default=None, max_length=1000)
+    since: str | None = Field(default=None, max_length=64)
+
+
+class DiskFloorIn(_BoundedSectionIn):
+    """lane_guard.DiskFloorLatch.report() -- WHY lane B stood down (SYNC-7).
+
+    The latch, not the measurement: the figures ride `sync_guard.disk`. A
+    parked lane B reads as a quiet, green, idle one on every other signal the
+    grid has, which is the same hole the breaker's own chip was cut for.
+
+    Declared here so it is not counted as an ignored section; the columns and
+    the "why is this machine not syncing" sentence belong to the v33 step of
+    this sweep."""
+    parked: bool | None = None
+    reason: str | None = Field(default=None, max_length=500)
+    at: str | None = Field(default=None, max_length=64)
+    free_bytes: int | None = Field(default=None, ge=0)
+    floor_bytes: int | None = Field(default=None, ge=0)
+
+
 class SyncGuardIn(BaseModel):
     """The companion's `sync_guard` section (item 9, 2026-08-17).
 
@@ -4931,6 +5140,24 @@ class SyncGuardIn(BaseModel):
     # every one of them is a folder that will carry video both ways.
     folders_unfiltered: list[str] | None = Field(default=None, max_length=64)
     sync_conflicts: SyncConflictsIn | None = None
+    # v32 (SYS-5 / SYS-1 / SYNC-1, resilience sweep 2026-08-28).
+    disk: DiskIn | None = None
+    stalled: StalledIn | None = None
+    # Stored by the v33 step, declared here (see RestartsIn).
+    restarts: RestartsIn | None = None
+    # v33 (SYS-7 / SYNC-15): the one sentence's preferred input.
+    blocked: BlockedIn | None = None
+    # This machine's project_rotation_seconds. Sent because the stall budget
+    # is 3 ROTATIONS: a rig on a 1 h rotation is not stalled at 35 minutes,
+    # and a server that guessed would either cry wolf or wait all afternoon.
+    # Absent leaves health.lane_stall on its 30 min floor.
+    rotation_seconds: float | None = Field(default=None, ge=0)
+    disk_floor: DiskFloorIn | None = None
+    # RootGuard's answer as a plain string, including its SYNC-2 fourth one:
+    # `present` / `absent` / `misplaced` / `not_answering` / `unknown`.
+    # `unknown` is "we could not tell" and must never be rendered as
+    # `present`. Stored by the v33 step, declared here.
+    root_state: str | None = Field(default=None, max_length=32)
 
     @model_validator(mode="before")
     @classmethod
@@ -4961,6 +5188,14 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
     crashes = guard.crashes
     conflicts = guard.sync_conflicts
     folders = guard.folders_unfiltered
+    disk = guard.disk
+    stalled = guard.stalled
+    blocked = guard.blocked
+    restarts = guard.restarts
+    restart_records = [] if restarts is None else [
+        r for r in (restarts.sequencer, restarts.watcher, restarts.media_tree)
+        if r is not None
+    ]
     return {
         "at": now,
         "breaker_tripped": int(bool(breaker.tripped)) if breaker is not None else 0,
@@ -4995,6 +5230,46 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
             ", ".join(folders[:10]) if folders else None
         ),
         "sync_conflicts": conflicts.count if conflicts is not None else None,
+        # v32 (SYS-5 / UX-1). `disk_at` is this section's own marker in the
+        # upsert, not guard_at: the measurement rides HEAVY ticks only, and a
+        # light report in between must not blank the last known free space.
+        "disk_root_free_bytes": disk.root_free_bytes if disk is not None else None,
+        "disk_root_total_bytes": disk.root_total_bytes if disk is not None else None,
+        "disk_system_free_bytes": (
+            disk.system_free_bytes if disk is not None else None),
+        "disk_at": (disk.at or now) if disk is not None else None,
+        "rotation_seconds": guard.rotation_seconds,
+        # v32 (SYNC-1 / SYS-17): the companion's own kill record, which
+        # follows the LATCH rule so a recovered machine clears its chip.
+        "stalled_lane": stalled.lane if stalled is not None else None,
+        "stalled_seconds": stalled.seconds if stalled is not None else None,
+        "stalled_killed": (
+            None if stalled is None or stalled.killed is None
+            else int(bool(stalled.killed))
+        ),
+        "stalled_at": stalled.at if stalled is not None else None,
+        # v33 (SYS-7 / SYNC-15 / SYS-2). db.store_blocked_state writes these,
+        # not the upsert's INSERT, and it writes them from ANY guard-bearing
+        # report: an absent `blocked` is how the companion spells "nothing is
+        # blocking me now", so None has to be able to clear this morning's
+        # sentence rather than preserve it for ever.
+        #
+        # The restart record is FLATTENED ACROSS THE THREE THREADS on purpose:
+        # what an admin needs on the grid is "this machine's background work
+        # has been restarted N times in a day", and which of the three it was
+        # is in the diagnostics bundle beside it.
+        "blocked_reason": blocked.reason if blocked is not None else None,
+        "blocked_detail": blocked.detail if blocked is not None else None,
+        "blocked_since": blocked.since if blocked is not None else None,
+        "restarts_count_24h": (
+            None if not restart_records else
+            sum(int(r.count_24h or 0) for r in restart_records)
+        ),
+        "restarts_last_at": (
+            max((r.last_at for r in restart_records if r.last_at), default=None)
+        ),
+        "restarts_last_error": next(
+            (r.last_error for r in restart_records if r.last_error), None),
     }
 
 
@@ -5662,6 +5937,8 @@ def api_report(
             bytes_total=lane.bytes_total,
             speed_bps=lane.speed_bps,
             eta_seconds=lane.eta_seconds,
+            progress_token=lane.progress_token,
+            state_since=lane.state_since,
         )
     # Sticky fix-destination mapping: the FIRST HIGH-CONFIDENCE auto-match of
     # a Resolve project name to a tree project is stored and never changes
@@ -5734,6 +6011,14 @@ def api_report(
         # slow clock switches lane B off completely and silently.
         client_reported_at=payload.reported_at,
     )
+    # v33 (SYS-7 / SYNC-15 / SYS-2): the companion's own "why is nothing
+    # moving" answer and its watchdog's restart count, onto the row the upsert
+    # above has just guaranteed exists. Its own statement rather than six more
+    # columns in that INSERT, which every work package touching the report
+    # edits, and because this pair has a latch rule of its own (see
+    # db.store_blocked_state).
+    db.store_blocked_state(
+        conn, editor, machine, flatten_sync_guard(payload.sync_guard, received_at))
     # An overridden "Remove from this machine" destroyed a local copy the
     # gate said was not caught up. There is nowhere on the grid for a
     # one-off event, so it goes in the dashboard's log -- which is the only
@@ -5919,6 +6204,28 @@ def api_report(
         # Committed HERE for the same reason the pushed update's clear is:
         # the report's own commit is above us.
         conn.commit()
+    # [ ASK THIS MACHINE WHY ] (v33, SYS-7): an admin wants this computer's
+    # own diagnostics bundle. Rides the reply for the reason every command
+    # here does -- it reaches the tray within one report interval with no
+    # inbound connection to an editor's PC, which is the whole reason the
+    # clipboard was the only route before.
+    #
+    # NOT cleared when the reply goes out, unlike resume_lane_b: it clears
+    # when the BUNDLE ARRIVES (api_diagnostics). The two are opposite risks. A
+    # standing resume re-armed the breaker every cycle, so it had to be
+    # one-shot; a standing ask costs one upload of a text file, and the
+    # failure that matters here is an admin clicking, nothing arriving, and no
+    # way to tell a lost reply from a machine with nothing to say.
+    #
+    # `requested_at` rides it so the companion applies each ask once (the same
+    # stamp comparison resume_lane_b uses); without it, every reply until the
+    # bundle lands would build and upload another one.
+    diag_request = db.diagnostics_request(conn, editor, machine)
+    if diag_request:
+        result["commands"]["diagnostics"] = {
+            "requested_by": diag_request["by_user"],
+            "requested_at": diag_request["at"],
+        }
     # B-roll ingest cancels (BROLL_INGEST_PLAN.md §4.2). Present ONLY when
     # there is something to cancel -- unlike `halt`, an empty list is not an
     # instruction and this rides every tick of every machine. The companion's
@@ -5958,6 +6265,177 @@ def api_report(
             conn, [m["id"] for m in pending_moves], editor, machine, received_at)
         conn.commit()
     return result
+
+
+# ------------------------------------------------ the diagnostics channel
+#
+# SYS-7 (resilience sweep 2026-08-28). `build_diagnostics()` on the companion
+# is genuinely good -- identity, token expiry, root state, config problems,
+# sequencer state, rclone availability, the Resolve bridge, every section
+# fault-isolated -- and it went to the CLIPBOARD, with the instruction "paste
+# them to your admin in a message". If any CCSync window was open it silently
+# went to the log instead. So the one artefact that answers "why is my footage
+# not syncing" existed only if a non-technical editor performed a manual step
+# at the right moment, on the machine that was broken.
+#
+# This is the same bundle on the same authenticated channel the report already
+# uses. Deliberately a SEPARATE route and not a report section: a bundle is up
+# to 256 KB of text on three occasional triggers, and putting it in the
+# 30-second report would either bloat every tick or need a suppression rule
+# (which is how sections start getting dropped -- SYS-3).
+
+DIAGNOSTICS_TRIGGERS = ("button", "lane_error", "admin_request")
+
+
+class DiagnosticsIn(BaseModel):
+    """One diagnostics bundle from one computer.
+
+    `text` is capped here as well as at the body gate (app._BODY_LIMITS):
+    truncated, never rejected, on B6's rule -- an oversized bundle from the
+    machine that is broken is the one bundle you must not throw away.
+    """
+    model_config = ConfigDict(extra="allow")
+
+    editor_name: str = Field(min_length=1, max_length=64)
+    machine: str = Field(min_length=1, max_length=128)
+    machine_id: str | None = Field(default=None, max_length=64)
+    at: str | None = Field(default=None, max_length=64)
+    trigger: str | None = Field(default=None, max_length=32)
+    text: str = Field(default="")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _truncate_rather_than_reject(cls, data):
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        text = out.get("text")
+        if isinstance(text, str) and len(text) > db.DIAGNOSTICS_MAX_CHARS:
+            out["text"] = text[:db.DIAGNOSTICS_MAX_CHARS]
+        # `editor_name` is what the report channel calls this field and what
+        # the companion sends; `editor` is accepted as the same thing because
+        # the wire contract spelled it that way, and a bundle refused over the
+        # name of a key would be the one bundle nobody could get.
+        if not out.get("editor_name") and out.get("editor"):
+            out["editor_name"] = out["editor"]
+        return out
+
+
+@router.post("/diagnostics")
+def api_diagnostics(
+    payload: DiagnosticsIn, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """Store one diagnostics bundle (v33, SYS-7).
+
+    THE SAME AUTH AS /report, check for check, because it carries the same
+    kind of claim: a per-editor token that names somebody else is a refusal,
+    a verifiable X-CCSync-Identity is REQUIRED whenever this server can verify
+    one, and it must match `editor_name`. A bundle names paths, a Resolve
+    project and an editor's own tree, so an unauthenticated one may not be
+    stored under anybody's name (SEC-5).
+    """
+    settings = request.app.state.settings
+    token = request.headers.get("x-ccsync-token", "")
+    auth_kind, token_editor = resolve_companion_credential(settings, conn, token)
+    if auth_kind == AUTH_NONE:
+        if not settings.report_token and not db.looks_like_editor_report_token(token):
+            if not settings.report_token_optional:
+                raise HTTPException(
+                    status_code=401,
+                    detail="report token not configured on server (set DASH_REPORT_TOKEN)",
+                )
+        else:
+            raise HTTPException(status_code=401, detail="bad or missing X-CCSync-Token")
+    received_at = db.utcnow_iso()
+    editor = payload.editor_name.strip().lower()
+    machine = payload.machine.strip()
+    if auth_kind == AUTH_EDITOR and token_editor != editor:
+        log.warning("diagnostics refused: a per-editor token belonging to %r posted "
+                    "as %r", token_editor, editor)
+        raise HTTPException(
+            status_code=401,
+            detail="this X-CCSync-Token belongs to a different editor than editor_name",
+        )
+    identity = request.headers.get("x-ccsync-identity", "")
+    id_user = auth.read_identity_token(settings.session_secret, identity) if identity else None
+    if settings.session_secret:
+        if not identity or id_user is None:
+            raise HTTPException(
+                status_code=401,
+                detail="X-CCSync-Identity required -- sign in from the companion tray",
+            )
+        if id_user != editor:
+            raise HTTPException(
+                status_code=401,
+                detail="X-CCSync-Identity does not match editor_name",
+            )
+    elif identity and id_user is not None and id_user != editor:
+        raise HTTPException(
+            status_code=401, detail="X-CCSync-Identity does not match editor_name")
+
+    trigger = (payload.trigger or "").strip().lower()
+    if trigger not in DIAGNOSTICS_TRIGGERS:
+        # Recorded as `other`, never refused: a trigger this build does not
+        # know is a NEWER companion, and losing the bundle over the label on
+        # it would be the third repeat of SYS-3 in a new place.
+        log.info("diagnostics from %s/%s carried an unknown trigger %r",
+                 editor, machine, trigger)
+        trigger = trigger or "other"
+    bundle_id = db.record_diagnostics(
+        conn, editor=editor, machine=machine,
+        machine_id=(payload.machine_id or "").strip(), trigger=trigger,
+        at=(payload.at or "").strip(), received_at=received_at, text=payload.text,
+    )
+    # THE ADMIN'S REQUEST IS ANSWERED BY THE ARRIVAL, not by the reply that
+    # carried it (see the report reply's `commands.diagnostics`): this is the
+    # ack, and it is the only thing that can distinguish a lost reply from a
+    # machine that never answered.
+    if trigger == "admin_request":
+        db.clear_diagnostics_request(conn, editor, machine)
+    db.audit(conn, editor, "diagnostics.received", machine,
+             {"editor": editor, "machine": machine, "trigger": trigger,
+              "chars": len(payload.text or ""), "id": bundle_id}, now=received_at)
+    conn.commit()
+    log.info("diagnostics bundle #%s from %s/%s (%s, %d chars)",
+             bundle_id, editor, machine, trigger, len(payload.text or ""))
+    return {"ok": True, "id": bundle_id}
+
+
+@router.post("/admin/machines/{editor}/{machine}/ask-why")
+def api_admin_ask_why(
+    editor: str, machine: str, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """[ ASK THIS MACHINE WHY ]'s JSON twin (v33, SYS-7).
+
+    404 rather than a silent success when the machine is unknown, on
+    request_lane_b_resume's reasoning: a request that names nothing must read
+    as a failure to the admin."""
+    admin = _require_admin(request)
+    if not db.request_diagnostics(conn, editor.strip().lower(), machine.strip(),
+                                 admin, db.utcnow_iso()):
+        raise HTTPException(status_code=404,
+                            detail=f"no machine {machine!r} for {editor!r}")
+    conn.commit()
+    return {"ok": True}
+
+
+@router.get("/admin/diagnostics")
+def api_admin_diagnostics(
+    request: Request, editor: str = "", machine: str = "",
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """The stored bundles. Admin only: a bundle names an editor's paths, their
+    Resolve project and their tree, which is exactly what
+    COMMERCIAL_READINESS.md §C L1 says one editor may not read about another.
+    """
+    _require_admin(request)
+    if editor or machine:
+        return {"bundles": db.fetch_diagnostics(
+            conn, editor=editor.strip().lower() or None,
+            machine=machine.strip() or None)}
+    return {"bundles": db.newest_diagnostics_per_machine(conn)}
 
 
 def _slug_for_rel(conn: sqlite3.Connection, rel: str) -> str:

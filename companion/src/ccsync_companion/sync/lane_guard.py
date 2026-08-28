@@ -79,8 +79,30 @@ DEFAULT_TRASH_PRUNE_INTERVAL_SECONDS = 6 * 3600.0
 
 TRASH_DIR_NAME = ".ccsync-trash"
 
+# -- lane B's free-space floor (SYS-5 / SYNC-7, resilience sweep 2026-08-28) --
+#
+# Every other subsystem that writes bytes already has one of these
+# (proxy_gen_free_space_floor_gb, broll_ingest_free_space_floor_gb,
+# broll_server._free_bytes_at); the three lanes that move the actual footage
+# had none. Below the floor rclone fails per file with an ENOSPC line, the
+# lane goes red with a raw rclone string, and `.ccsync-trash` -- up to
+# DEFAULT_TRASH_MAX_BYTES of recovery copies on the SAME volume -- is never
+# reclaimed, because the prune only ran at the tail of a HEALTHY pass.
+#
+# 20 GB, not a percentage: the number that matters is "can the next few
+# proxies land", and on a 1 TB laptop SSD 2% is 20 GB while on a 20 TB base
+# rig it is 400. A percentage would park a machine that has room and let a
+# small one fill.
+DEFAULT_LANE_B_MIN_FREE_BYTES = 20 * 1024**3
+# The park clears ITSELF at twice the floor. One threshold would re-park on
+# the next pass after the editor deleted a single clip, so the sentence would
+# flicker on and off for an afternoon; the same hysteresis the breaker gets
+# from needing a human.
+DISK_FLOOR_CLEAR_MULTIPLE = 2.0
+
 BREAKER_STATE_FILENAME = "lane_b_breaker.json"
 HALT_STATE_FILENAME = "sync_halt.json"
+DISK_FLOOR_STATE_FILENAME = "lane_b_disk_floor.json"
 
 
 def adopt_legacy_latch(new_path: Path, legacy_path: Path) -> Path:
@@ -575,7 +597,237 @@ class LaneBBreaker:
         return deleted, cumulative
 
 
+# -- free disk space (SYS-5 / SYNC-7, resilience sweep 2026-08-28) ---------
+def system_drive_path() -> str:
+    """The OS volume, for the second half of the disk report.
+
+    Reported alongside the sync drive because they are frequently the same
+    volume (a Windows editor whose tree is on C:, a Mac whose root is not on
+    an external SSD) and because a full BOOT disk breaks Resolve, Syncthing
+    and the companion's own log before it breaks a lane -- and the fleet grid
+    could see neither."""
+    if os.name == "nt":
+        drive = os.environ.get("SystemDrive") or "C:"
+        return drive.rstrip("\\/") + "\\"
+    return "/"
+
+
+def free_bytes_at(path: Any) -> Optional[int]:
+    """Free bytes on the volume holding `path`, or None.
+
+    None is "could not measure", and every caller must keep it distinct from
+    zero: a machine whose disk_usage raises must never render as a machine
+    with no space left (nor as a machine that is fine)."""
+    try:
+        return int(shutil.disk_usage(str(path)).free)
+    except Exception:
+        log.debug("could not measure free space at %s", path, exc_info=True)
+        return None
+
+
+def disk_report(
+    local_root: Any,
+    system_path: Optional[str] = None,
+    usage_fn: Optional[Callable[[str], Any]] = None,
+) -> dict[str, Any]:
+    """The report's `sync_guard.disk` block. Never raises.
+
+    One `shutil.disk_usage` per volume, called once per HEAVY report tick --
+    not per lane pass. `root_free_bytes`/`root_total_bytes` are None when the
+    sync drive could not be measured at all (it is unplugged, or wedged), and
+    the dashboard has to render that as "unknown", never as 0 (the sweep's
+    "could not check must never look like fine" rule)."""
+    usage = usage_fn if usage_fn is not None else shutil.disk_usage
+    out: dict[str, Any] = {
+        "root_free_bytes": None,
+        "root_total_bytes": None,
+        "system_free_bytes": None,
+        "at": _now_iso(),
+    }
+    try:
+        info = usage(str(local_root))
+        out["root_free_bytes"] = int(info.free)
+        out["root_total_bytes"] = int(info.total)
+    except Exception:
+        log.debug("disk report: could not measure %s", local_root, exc_info=True)
+    try:
+        out["system_free_bytes"] = int(usage(str(system_path or system_drive_path())).free)
+    except Exception:
+        log.debug("disk report: could not measure the system drive", exc_info=True)
+    return out
+
+
+def _gb(value: Any) -> str:
+    """Binary GB, because `lane_b_min_free_bytes` is written that way in
+    config.toml and a floor an operator set to 20 must read back as 20."""
+    try:
+        return f"{float(value) / 1024**3:.0f}"
+    except (TypeError, ValueError):
+        return "?"
+
+
+class DiskFloorLatch:
+    """Lane B stands down when the sync drive is nearly full.
+
+    Deliberately the BREAKER's shape and not an error (SYS-5 / SYNC-7,
+    resilience sweep 2026-08-28): `paused`, so lanes A and C keep running and
+    the fleet grid does not paint a red dot on a machine that is not broken;
+    persisted, so the tray restart an editor tries first cannot clear it; and
+    clearable by the same [ RESUME ] the breaker uses, because an editor who
+    has just emptied their Downloads folder should not have to wait for a
+    poll to find out whether it worked.
+
+    Unlike the breaker it ALSO clears itself, at
+    DISK_FLOOR_CLEAR_MULTIPLE x the floor. The breaker guards a judgement no
+    machine can make ("is the server in a state worth syncing from"); this
+    guards a number, and a number that has gone back up is the whole answer.
+    """
+
+    def __init__(
+        self,
+        state_path: Path,
+        cfg: Optional[dict] = None,
+        on_park: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        self.state_path = Path(state_path)
+        self.min_free_bytes = max(0, _cfg_int(
+            cfg, "lane_b_min_free_bytes", DEFAULT_LANE_B_MIN_FREE_BYTES))
+        self.clear_free_bytes = int(self.min_free_bytes * DISK_FLOOR_CLEAR_MULTIPLE)
+        self._on_park = on_park
+        self._lock = threading.Lock()
+        state = _read_json(self.state_path)
+        self._parked = bool(state.get("parked"))
+        self._reason = str(state.get("reason") or "")
+        self._at = str(state.get("at") or "")
+        free = state.get("free_bytes")
+        self._free_bytes: Optional[int] = int(free) if isinstance(free, (int, float)) else None
+
+    @property
+    def enabled(self) -> bool:
+        """A floor of 0 turns the whole device off, like every other knob
+        here."""
+        return self.min_free_bytes > 0
+
+    @property
+    def parked(self) -> bool:
+        with self._lock:
+            return self._parked
+
+    @property
+    def reason(self) -> str:
+        with self._lock:
+            return self._reason
+
+    def report(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "parked": self._parked,
+                "reason": self._reason or None,
+                "at": self._at or None,
+                "free_bytes": self._free_bytes,
+                "floor_bytes": self.min_free_bytes,
+            }
+
+    def _persist_locked(self) -> None:
+        _write_json(self.state_path, {
+            "parked": self._parked,
+            "reason": self._reason,
+            "at": self._at,
+            "free_bytes": self._free_bytes,
+        })
+
+    def _sentence(self, free_bytes: int) -> str:
+        return (f"this drive has {_gb(free_bytes)} GB free, and proxy download needs "
+                f"{_gb(self.min_free_bytes)} GB")
+
+    def check(self, free_bytes: Optional[int]) -> Optional[str]:
+        """Account one measurement. Returns the park reason, or None.
+
+        `free_bytes=None` is "could not measure" and changes NOTHING in
+        either direction: it must not park a machine whose disk_usage raised,
+        and it must not release one that is genuinely full. A park already in
+        place keeps answering with its sentence."""
+        if not self.enabled:
+            return None
+        if free_bytes is None:
+            with self._lock:
+                return self._reason or None if self._parked else None
+        free = max(0, int(free_bytes))
+        with self._lock:
+            if self._parked:
+                self._free_bytes = free
+                if free >= self.clear_free_bytes:
+                    reason, self._reason = self._reason, ""
+                    self._parked = False
+                    self._at = _now_iso()
+                    self._persist_locked()
+                    log.warning(
+                        "lane B free-space park CLEARED: %s GB free is back above %s GB "
+                        "(was: %s)", _gb(free), _gb(self.clear_free_bytes), reason)
+                    return None
+                self._persist_locked()
+                return self._reason or None
+            if free >= self.min_free_bytes:
+                if self._free_bytes != free:
+                    self._free_bytes = free
+                return None
+            self._parked = True
+            self._reason = self._sentence(free)
+            self._at = _now_iso()
+            self._free_bytes = free
+            reason = self._reason
+            self._persist_locked()
+        log.error(
+            "lane B is NOT downloading proxies: %s. Uploads (lane A) and the assets "
+            "lane (C) keep running. It starts again on its own once %s GB is free, or "
+            "when someone resumes it from the tray.", reason, _gb(self.clear_free_bytes))
+        if self._on_park is not None:
+            try:
+                self._on_park(reason)
+            except Exception:
+                log.exception("lane B disk floor: on_park callback failed")
+        return reason
+
+    def resume(self, by: str = "tray") -> bool:
+        """The editor (or an admin) says to try anyway. Returns True on the
+        edge only.
+
+        Honest about what it can and cannot do: if the drive is still under
+        the floor the next pass parks it again with the same sentence. That
+        is not the breaker's "the button doesn't work" defect -- there are no
+        counters here to clear, and the number is checked against the disk,
+        not against a memory of it. What the click buys is the pass that
+        proves it, immediately, instead of at the next rotation."""
+        with self._lock:
+            if not self._parked:
+                return False
+            reason, self._reason = self._reason, ""
+            self._parked = False
+            self._at = _now_iso()
+            self._persist_locked()
+        log.warning("lane B free-space park RESUMED by %s (was: %s)", by, reason)
+        return True
+
+
 # -- .ccsync-trash retention ----------------------------------------------
+def batch_stamp(name: Any) -> Optional[float]:
+    """The epoch seconds encoded in a `%Y%m%d-%H%M%S` batch directory name.
+
+    SYNC-16 (resilience sweep 2026-08-28). `trash_entries` yielded 0.0 for a
+    batch whose every stat failed, which made it the OLDEST thing in the
+    trash -- so the size rule deleted a batch created seconds ago before one
+    created a fortnight back. The directory name is `_backup_dir`'s own
+    record of when the batch was made and it needs no filesystem at all.
+
+    Naive-local on purpose: `_backup_dir` names the directory from the local
+    clock, and this has to be comparable with st_mtime, which is also local
+    wall-clock derived. Returns None for anything that is not that format."""
+    try:
+        return datetime.strptime(str(name).strip(), "%Y%m%d-%H%M%S").timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
 def trash_entries(local_root: str) -> list[tuple[Path, float, int]]:
     """(dir, mtime, bytes) for each timestamped batch under `.ccsync-trash`.
 
@@ -612,6 +864,14 @@ def trash_entries(local_root: str) -> list[tuple[Path, float, int]]:
                     newest = max(newest, st.st_mtime)
         except OSError:
             pass
+        if not newest:
+            # Every stat in this batch failed (an unreadable directory, a
+            # volume that answers listdir and nothing else) -- or the batch is
+            # empty and its own mtime is the epoch. Either way 0.0 would make
+            # it the oldest thing here and the size rule would delete it
+            # FIRST, which for a batch made minutes ago is exactly backwards
+            # (SYNC-16, resilience sweep 2026-08-28).
+            newest = batch_stamp(child.name) or 0.0
         out.append((child, newest, total))
     return out
 
@@ -622,6 +882,8 @@ def prune_trash(
     max_bytes: int = DEFAULT_TRASH_MAX_BYTES,
     now: Optional[float] = None,
     breaker: Optional[LaneBBreaker] = None,
+    min_free_bytes: int = 0,
+    free_bytes_fn: Optional[Callable[[Any], Optional[int]]] = None,
 ) -> dict[str, Any]:
     """Age-then-size retention over `<local_root>/.ccsync-trash`.
 
@@ -636,6 +898,14 @@ def prune_trash(
       * nothing is pruned at all while the breaker is tripped: a trip means
         something deleted more than it should have, i.e. precisely when the
         recovery copies matter.
+
+    `min_free_bytes` is the third trigger (SYNC-16 / SYNC-7, resilience sweep
+    2026-08-28): DISK PRESSURE prunes even when neither age nor the size cap
+    has anything to say. The 50 GB the trash is allowed to hold is 50 GB the
+    editor cannot use, and disk-full is precisely the state in which a
+    fortnight-old recovery copy is worth less than the ability to download a
+    proxy. Oldest first, never the last batch standing -- the same two rules
+    the size cap follows.
 
     Every removal is logged with its size. Returns a summary dict; never
     raises.
@@ -666,6 +936,25 @@ def prune_trash(
                 removed += 1
                 removed_bytes += size
                 total -= size
+                keep = [e for e in keep if e[0] != path]
+    if min_free_bytes > 0 and len(keep) > 1:
+        measure = free_bytes_fn if free_bytes_fn is not None else free_bytes_at
+        free = measure(local_root)
+        if free is None:
+            log.debug("trash prune: could not measure free space under %s", local_root)
+        elif free < min_free_bytes:
+            log.warning(
+                "trash prune: only %s GB free under %s (the floor is %s GB) -- dropping "
+                "recovery copies the age and size rules would have kept (SYNC-16)",
+                _gb(free), local_root, _gb(min_free_bytes))
+            for path, _mtime, size in sorted(keep, key=lambda e: e[1])[:-1]:
+                if free >= min_free_bytes:
+                    break
+                if _remove_tree(path, size, f"under the {_gb(min_free_bytes)} GB free-space floor"):
+                    removed += 1
+                    removed_bytes += size
+                    total -= size
+                    free += size
     return {
         "removed": removed,
         "removed_bytes": removed_bytes,

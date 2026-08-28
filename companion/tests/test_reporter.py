@@ -76,7 +76,18 @@ def test_post_once_payload_shape_matches_contract():
     parsed = datetime.fromisoformat(data["reported_at"])
     assert parsed.tzinfo is not None
 
-    assert data["lanes"] == [
+    # SYS-1 (resilience sweep 2026-08-28): every lane entry also carries
+    # `state_since`, which is a live timestamp -- lifted out before the
+    # exact-shape comparison below, and asserted on its own. There is no
+    # `progress_token` here because neither of these statuses has one (an
+    # idle/error lane never sends it, and a lane that has not started a pass
+    # has none to send).
+    lanes_sent = [dict(lane) for lane in data["lanes"]]
+    for lane in lanes_sent:
+        assert lane.pop("state_since"), "a reported state must say when it began"
+        assert "progress_token" not in lane
+
+    assert lanes_sent == [
         {
             "name": "lane_a_video_up", "state": STATE_SYNCING, "queued": 2,
             "transferring": 1, "last_error": None, "last_sync": now.isoformat(),
@@ -1640,3 +1651,86 @@ def test_signing_in_as_a_different_editor_resends_the_heavy_sections():
     who["name"] = "ruskin"
     reporter.post_once()
     assert calls[2]["local_manifest"] == {"a": 1}
+
+
+# -- SYS-1: the liveness contract on the wire --------------------------------
+#
+# CR-91: `state=syncing, transferring=1, last_error=NULL` for 2 h 20 m was
+# indistinguishable, on the fleet page, from a lane that was working. A state
+# may not be reported green or amber without a progress token and the time it
+# entered that state.
+
+
+def _liveness_reporter(statuses):
+    return DashboardReporter(lambda: list(statuses), _cfg())
+
+
+def test_a_running_lane_reports_a_progress_token_and_state_since():
+    from ccsync_companion.sync.base import LaneStatus
+
+    status = LaneStatus(name="lane_a_video_up", state="syncing", transferring=1)
+    status.progress_token = "0:0:Projects/2026/FF5/Animals"
+    payload = _liveness_reporter([status])._build_payload()
+    lane = payload["lanes"][0]
+
+    assert lane["progress_token"] == "0:0:Projects/2026/FF5/Animals"
+    assert lane["state_since"], "the dashboard needs to know how long this has held"
+    # ISO-8601 with an offset: the dashboard subtracts it from an aware now
+    # (CR-89 is what a naive stamp costs there).
+    assert "T" in lane["state_since"] and lane["state_since"].endswith("+00:00")
+
+
+def test_an_idle_lane_reports_no_progress_token():
+    """Absent, not stale: there is nothing in flight for a token to describe,
+    and a leftover one on an idle lane is what the stall rule would misread."""
+    from ccsync_companion.sync.base import LaneStatus
+
+    status = LaneStatus(name="lane_b_proxy_down", state="idle")
+    status.progress_token = "12345:3:Projects/2026/FF5/Animals"
+    lane = _liveness_reporter([status])._build_payload()["lanes"][0]
+
+    assert "progress_token" not in lane
+    assert lane["state_since"]
+
+
+def test_a_lane_adapter_without_the_fields_simply_omits_them():
+    """An older adapter or a test double must not 422 the report, and must
+    not send nulls the dashboard would read as "claims to be moving"."""
+
+    class _Bare:
+        name = "lane_c_syncthing"
+        state = "syncing"
+        queued = 0
+        transferring = 0
+        last_error = None
+        last_sync = None
+        detail = ""
+        current_project = None
+        bytes_done = None
+        bytes_total = None
+        speed_bps = None
+        eta_seconds = None
+        transfers: list = []
+
+    lane = _liveness_reporter([_Bare()])._build_payload()["lanes"][0]
+    assert "progress_token" not in lane and "state_since" not in lane
+
+
+def test_the_liveness_fields_survive_fit_payload():
+    """_fit_payload sheds the heavy sections; the lane core is what it exists
+    to protect, and these two are now part of it."""
+    from ccsync_companion.sync.base import LaneStatus
+
+    status = LaneStatus(name="lane_a_video_up", state="syncing", transferring=1)
+    status.progress_token = "99:1:Projects/2026/FF5/Animals"
+    calls = []
+    reporter = DashboardReporter(
+        lambda: [status], _cfg(),
+        http_post=lambda url, data, headers, timeout: calls.append(data) or {},
+        get_local_manifest=lambda: _big_manifest(64, 2000),
+    )
+    reporter.post_once(light=False)
+
+    lane = calls[0]["lanes"][0]
+    assert lane["progress_token"] == "99:1:Projects/2026/FF5/Animals"
+    assert lane["state_since"]

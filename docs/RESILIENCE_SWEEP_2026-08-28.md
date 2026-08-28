@@ -473,7 +473,9 @@ ledger has already paid for at least once. Most are companion-side and ship in
 one build; the dashboard half (8, 9, 10, 11, 39) is one OTA.
 
 **Wave 2, liveness and the wire contract:** 1, 2, 3, 16, 17, 28. This is the
-"green while dead" fix. Land the report schema widening once (Theme C) so the
+"green while dead" fix. **BUILT 2026-08-28** by five builder agents (plus
+SYNC-12, SYNC-13, SYNC-15, SYNC-16 from the same files); ledger section
+"Resilience sweep, wave 2" in `KNOWN_BUGS.md`; dashboard schema v32 + v33. Land the report schema widening once (Theme C) so the
 disk, crash, resolve-health, blocked-reason and upgrade fields ride the same
 change. Deploy the dashboard before the companions, as always.
 

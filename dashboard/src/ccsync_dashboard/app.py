@@ -46,6 +46,11 @@ STATIC_DIR = Path(__file__).resolve().parents[2] / "static"
 _OPEN_EXACT = {
     "/login", "/api/v1/login", "/api/v1/logout", "/api/v1/me",
     "/api/v1/health", "/api/v1/report", "/api/v1/verify", "/favicon.ico",
+    # The diagnostics channel (v33, SYS-7, resilience sweep 2026-08-28): the
+    # companion posts a bundle on the same token+identity pair /api/v1/report
+    # authenticates with, and api.api_diagnostics repeats every one of those
+    # checks. Open here means "no SESSION", never "no credential".
+    "/api/v1/diagnostics",
     # The site manifest, on the same terms as /api/v1/health: an installer,
     # the onboarding wizard and the companion all read it BEFORE anyone has
     # logged in, and it carries no secret (SYNOLOGY_PORT_PLAN.md WP0 step 3;
@@ -108,7 +113,11 @@ _SETUP_API_PREFIX = "/api/v1/setup/"
 # double-click) after the first call already minted a cookie is a clean 409,
 # not a confusing 403 that reads like the wrong failure.
 _CSRF_EXEMPT_EXACT = {"/login", "/api/v1/login", "/api/v1/logout", "/api/v1/report",
-                      "/api/v1/verify", "/api/v1/setup/admin"}
+                      "/api/v1/verify", "/api/v1/setup/admin",
+                      # Same reasoning as /api/v1/report beside it: a companion
+                      # is not a browser and holds no session cookie to forge
+                      # (v33, SYS-7).
+                      "/api/v1/diagnostics"}
 _CSRF_EXEMPT_PREFIXES = ("/api/v1/selection/", "/api/v1/admin/packages/",
                          "/broll/", "/music/", "/ytdl/")
 _CSRF_METHODS = ("POST", "PUT", "PATCH", "DELETE")
@@ -135,7 +144,18 @@ MAX_UPLOAD_BODY_BYTES = 512 * 1024 * 1024
 # thing before the route function runs), so the gate counts the bytes itself
 # and stops at the ceiling. Content-Length is advisory: a chunked request
 # carries none at all, which is what made the cap bypassable (KNOWN_BUGS B15).
-_BODY_LIMITS = {"/api/v1/report": ("POST", MAX_REPORT_BODY_BYTES)}
+# A diagnostics bundle is build_diagnostics()'s text and nothing else (v33,
+# SYS-7). 256 KB is roughly eight times the largest bundle measured on a
+# machine with every section failing; the route truncates the text field to the
+# same figure, so a body that arrives inside this ceiling with one enormous
+# field still cannot put a megabyte in a TEXT column.
+MAX_DIAGNOSTICS_BODY_BYTES = 256 * 1024
+_BODY_LIMITS = {"/api/v1/report": ("POST", MAX_REPORT_BODY_BYTES),
+                "/api/v1/diagnostics": ("POST", MAX_DIAGNOSTICS_BODY_BYTES)}
+# Companion-authenticated POSTs: the token check runs BEFORE the body is read,
+# so no unauthenticated caller can spend the single-worker container's memory
+# on a body it will refuse anyway (B15).
+_COMPANION_TOKEN_PATHS = ("/api/v1/report", "/api/v1/diagnostics")
 # (path prefix, method, limit) -- the packages route has the platform and
 # version in its path, so it can't be matched exactly. These are declaration
 # checks ONLY: api_publish_package streams its body to disk and counts the
@@ -708,7 +728,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 return _too_large(limit)
             # Credentials first: never spend memory or a pydantic parse on an
             # unauthenticated body.
-            if request.url.path == "/api/v1/report":
+            if request.url.path in _COMPANION_TOKEN_PATHS:
                 denial = _report_auth_denial(request)
                 if denial is not None:
                     return denial

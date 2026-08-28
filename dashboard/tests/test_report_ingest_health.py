@@ -395,3 +395,216 @@ def test_a_recently_seen_machine_is_never_lost(app_env):
     client, conn = app_env
     client.post("/api/v1/report", json=payload(), headers=report_headers())
     assert dbmod.lost_machines(conn, dbmod.utcnow_iso()) == []
+
+
+# ------------------------------------------------------------------- SYS-1
+#
+# The liveness contract's ingest half: the token is stored, and
+# progress_token_since is the SERVER's received_at of the first report that
+# carried the CURRENT token -- so a companion re-sending the same token every
+# 30 s cannot reset the clock on its own stall (CR-91b).
+
+def lane_payload(**extra):
+    body = {"name": "lane_a_video_up", "state": "syncing", "queued": 3,
+            "transferring": 1, "last_error": None, "last_sync": None,
+            "detail": None}
+    body.update(extra)
+    return body
+
+
+def lane_row(conn, lane="lane_a_video_up", machine="EDIT-PC"):
+    return conn.execute(
+        "SELECT * FROM lane_report_current WHERE machine=? AND lane=?",
+        (machine, lane),
+    ).fetchone()
+
+
+def test_the_lane_token_and_state_since_are_stored(app_env):
+    client, conn = app_env
+    client.post("/api/v1/report", json=payload(lanes=[lane_payload(
+        progress_token="120:4:2026/FF5", state_since=NOW)]),
+        headers=report_headers())
+    row = lane_row(conn)
+    assert row["progress_token"] == "120:4:2026/FF5"
+    assert row["state_since"] == NOW
+    assert row["progress_token_since"]
+
+
+def test_the_token_stamp_only_advances_when_the_token_CHANGES(app_env):
+    """The heart of it: a companion re-sending the same token every 30 s must
+    not be able to reset the clock on its own stall. Back-dated by hand
+    because four reports in one test land inside the same second."""
+    client, conn = app_env
+    client.post("/api/v1/report", json=payload(lanes=[lane_payload(
+        progress_token="120:4:2026/FF5")]), headers=report_headers())
+    stuck_since = (dbmod.parse_iso(dbmod.utcnow_iso())
+                   - dt.timedelta(hours=2)).isoformat()
+    conn.execute("UPDATE lane_report_current SET progress_token_since=?",
+                 (stuck_since,))
+    conn.commit()
+    # the same token again, twice: nothing moved on that machine
+    for _ in range(2):
+        client.post("/api/v1/report", json=payload(lanes=[lane_payload(
+            progress_token="120:4:2026/FF5")]), headers=report_headers())
+        assert lane_row(conn)["progress_token_since"] == stuck_since
+    # ...and a token that changed re-stamps it to now
+    client.post("/api/v1/report", json=payload(lanes=[lane_payload(
+        progress_token="900:9:2026/FF5")]), headers=report_headers())
+    assert lane_row(conn)["progress_token_since"] > stuck_since
+
+
+def test_a_report_with_no_token_clears_the_stamp_rather_than_keeping_it(app_env):
+    client, conn = app_env
+    client.post("/api/v1/report", json=payload(lanes=[lane_payload(
+        progress_token="1:1:x")]), headers=report_headers())
+    assert lane_row(conn)["progress_token_since"]
+    client.post("/api/v1/report", json=payload(lanes=[lane_payload()]),
+                headers=report_headers())
+    assert lane_row(conn)["progress_token_since"] is None
+
+
+def test_a_stalled_lane_reddens_the_fleet_row_and_says_why(app_env):
+    """The whole finding, end to end: reports keep flowing, the lane says
+    `syncing` with no error, and the row used to be amber for ever."""
+    client, conn = app_env
+    client.post("/api/v1/report", json=payload(lanes=[lane_payload(
+        progress_token="1:1:x")]), headers=report_headers())
+    stuck_since = (dbmod.parse_iso(dbmod.utcnow_iso())
+                   - dt.timedelta(hours=2)).isoformat()
+    conn.execute("UPDATE lane_report_current SET progress_token_since=?",
+                 (stuck_since,))
+    conn.commit()
+    view = apimod.build_editors_view(conn)
+    row = next(e for e in view["editors"] if e["machine"] == "EDIT-PC")
+    assert row["status"] == health.RED
+    assert "no progress for" in row["status_reason"]
+    assert any("no progress for" in (l["chip_reason"] or "") for l in row["lanes"])
+
+
+def test_the_machines_own_rotation_sets_the_budget(app_env):
+    """A rig on a one-hour rotation is not stalled at 40 minutes."""
+    client, conn = app_env
+    client.post("/api/v1/report",
+                json=payload(lanes=[lane_payload(progress_token="1:1:x")],
+                             sync_guard={"rotation_seconds": 3600}),
+                headers=report_headers())
+    assert machine_row(conn)["rotation_seconds"] == 3600
+    stuck_since = (dbmod.parse_iso(dbmod.utcnow_iso())
+                   - dt.timedelta(minutes=40)).isoformat()
+    conn.execute("UPDATE lane_report_current SET progress_token_since=?",
+                 (stuck_since,))
+    conn.commit()
+    view = apimod.build_editors_view(conn)
+    row = next(e for e in view["editors"] if e["machine"] == "EDIT-PC")
+    assert row["status"] == health.AMBER
+
+
+def test_the_companions_own_kill_record_is_stored_and_clears(app_env):
+    client, conn = app_env
+    client.post("/api/v1/report", json=payload(sync_guard={
+        "stalled": {"lane": "A", "seconds": 1800, "killed": True, "at": NOW}}),
+        headers=report_headers())
+    row = machine_row(conn)
+    assert row["stalled_lane"] == "A" and row["stalled_seconds"] == 1800
+    assert row["stalled_killed"] == 1 and row["stalled_at"] == NOW
+    guard = dbmod.fetch_sync_guard_map(conn)[("jsmith", "EDIT-PC")]
+    assert guard["stalled_killed"] is True
+    client.post("/api/v1/report", json=payload(sync_guard={"halt": {"active": False}}),
+                headers=report_headers())
+    assert machine_row(conn)["stalled_lane"] is None
+
+
+# ------------------------------------------------------------------- SYS-5
+
+def test_the_disk_section_is_flattened_and_chipped(app_env):
+    client, conn = app_env
+    gb = 1024 ** 3
+    client.post("/api/v1/report", json=payload(sync_guard={"disk": {
+        "root_free_bytes": 18 * gb, "root_total_bytes": 500 * gb,
+        "system_free_bytes": 4 * gb, "at": NOW}}), headers=report_headers())
+    row = machine_row(conn)
+    assert row["disk_root_free_bytes"] == 18 * gb
+    assert row["disk_root_total_bytes"] == 500 * gb
+    assert row["disk_system_free_bytes"] == 4 * gb
+    assert row["disk_at"] == NOW
+    view = apimod.build_editors_view(conn)
+    entry = next(e for e in view["editors"] if e["machine"] == "EDIT-PC")
+    assert entry["guard"]["disk_status"] == health.RED
+    assert round(entry["guard"]["disk_percent"]) == 4
+
+
+def test_a_light_report_in_between_does_not_blank_the_last_free_space(app_env):
+    """The measurement rides HEAVY ticks only. A guard-bearing light report
+    must not take the DISK chip off a nearly-full machine."""
+    client, conn = app_env
+    gb = 1024 ** 3
+    client.post("/api/v1/report", json=payload(sync_guard={"disk": {
+        "root_free_bytes": 9 * gb, "root_total_bytes": 500 * gb, "at": NOW}}),
+        headers=report_headers())
+    client.post("/api/v1/report", json=payload(sync_guard={"halt": {"active": False}}),
+                headers=report_headers())
+    assert machine_row(conn)["disk_root_free_bytes"] == 9 * gb
+
+
+def test_the_new_guard_sub_sections_are_declared_not_ignored(app_env):
+    """SYS-3's mechanism, applied before the companion ships them: an
+    undeclared sub-key is accepted, recorded and read by nobody."""
+    client, conn = app_env
+    client.post("/api/v1/report", json=payload(sync_guard={
+        "disk": {"root_free_bytes": 1, "root_total_bytes": 2},
+        "stalled": {"lane": "B", "seconds": 1},
+        "restarts": {"sequencer": {"count_24h": 2, "last_error": "OSError"}},
+        "rotation_seconds": 600,
+    }), headers=report_headers())
+    recorded = dbmod.ignored_report_sections(conn)
+    assert recorded is None or not [
+        k for k in recorded["sections"]
+        if k.startswith("sync_guard.") and k.split(".", 1)[1] in {
+            "disk", "stalled", "restarts", "rotation_seconds"}
+    ]
+
+
+# ------------------------------------------------------------------- UX-1
+
+def _project_with_proxies(conn, slug, proxy_bytes):
+    pid = dbmod.upsert_project(conn, slug, slug, "/mnt/tank/" + slug, NOW)
+    conn.execute("""INSERT INTO nas_inventory_state
+                      (project_id, bytes_proxies, n_proxies, walked_at)
+                    VALUES (?, ?, ?, ?)""", (pid, proxy_bytes, 40, NOW))
+    conn.commit()
+
+
+def test_a_tick_warns_about_a_project_that_will_not_fit(app_env):
+    client, conn = app_env
+    gb = 1024 ** 3
+    client.post("/api/v1/report", json=payload(sync_guard={"disk": {
+        "root_free_bytes": 180 * gb, "root_total_bytes": 500 * gb, "at": NOW}}),
+        headers=report_headers())
+    _project_with_proxies(conn, "2026/FF5/Animals", 620 * gb)
+    warning = apimod.tick_capacity_warning(conn, "jsmith", "2026/FF5/Animals")
+    assert warning is not None
+    assert "620 GB of proxies" in warning and "180 GB free" in warning
+    assert "EDIT-PC" in warning
+
+
+def test_a_project_the_collector_has_never_walked_warns_about_nothing(app_env):
+    client, conn = app_env
+    client.post("/api/v1/report", json=payload(), headers=report_headers())
+    dbmod.upsert_project(conn, "2026/FF5/Empty", "2026/FF5/Empty", "/mnt/tank/y", NOW)
+    conn.commit()
+    assert apimod.tick_capacity_warning(conn, "jsmith", "2026/FF5/Empty") is None
+
+
+def test_the_tick_route_answers_with_the_warning_and_still_ticks(app_env):
+    client, conn = app_env
+    gb = 1024 ** 3
+    client.post("/api/v1/report", json=payload(sync_guard={"disk": {
+        "root_free_bytes": 30 * gb, "root_total_bytes": 500 * gb, "at": NOW}}),
+        headers=report_headers())
+    _project_with_proxies(conn, "ff5-big", 400 * gb)
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "admin"))
+    r = client.put("/api/v1/selection/jsmith/ff5-big")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["changed"] is True                    # it REFUSES NOTHING
+    assert "400 GB of proxies" in (body["warning"] or "")

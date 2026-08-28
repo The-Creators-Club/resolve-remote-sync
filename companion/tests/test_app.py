@@ -6312,3 +6312,203 @@ def test_the_expired_signin_toast_blames_the_clock_when_the_clock_is_wrong(tmp_p
     assert "3 hours behind" in text
     assert "Fix the clock" in text
     assert "\u2014" not in text
+
+
+# -- free space and the one blocked sentence (SYS-5/SYNC-7, SYNC-15) --------
+#
+# Each latch already had its own state, its own file and its own (or no)
+# report field, and the fleet page had to infer "why is this machine doing
+# nothing" from a lane state that can be wrong. `sync_guard.blocked` is ONE
+# ordered answer, and the tray shows the same sentence.
+
+
+def _unblocked_app(tmp_path, **overrides):
+    """An app with nothing at all wrong with it.
+
+    require_login off because the gate is otherwise the FIRST blocked reason
+    on every test machine (no verified identity), which is correct behaviour
+    and useless as a baseline."""
+    app = _make_app(tmp_path, **overrides)
+    app._require_login = False
+    app.eula_problem = lambda: None
+    return app
+
+
+def test_sync_guard_carries_the_disk_reading_for_both_volumes(tmp_path):
+    app = _unblocked_app(tmp_path)
+    disk = app.sync_guard()["disk"]
+    assert set(disk) == {"root_free_bytes", "root_total_bytes",
+                         "system_free_bytes", "at"}
+    assert disk["root_total_bytes"] and disk["root_total_bytes"] > 0
+
+
+def test_the_disk_reading_is_measured_once_per_heavy_tick(tmp_path):
+    """The guard section rides every LIGHT tick too (every 5 s while a lane is
+    active), and two stat-family syscalls against a drive that has just
+    stopped answering is exactly the hot path SYNC-2 is about."""
+    from ccsync_companion.sync import lane_guard
+
+    app = _unblocked_app(tmp_path)
+    calls: list[str] = []
+
+    def counted(local_root, *a, **kw):
+        calls.append(str(local_root))
+        return {"root_free_bytes": 1, "root_total_bytes": 2,
+                "system_free_bytes": 3, "at": "now"}
+
+    app._disk_snapshot, app._disk_snapshot_at = {}, 0.0
+    original = lane_guard.disk_report
+    lane_guard.disk_report = counted
+    try:
+        for _ in range(5):
+            app.disk_snapshot()
+    finally:
+        lane_guard.disk_report = original
+    assert len(calls) == 1
+
+
+def test_sync_guard_always_names_the_root_state(tmp_path):
+    """Including `unknown`, which is "we could not tell" and must never be
+    read as `present` (SYNC-2)."""
+    from ccsync_companion import root_guard as root_guard_mod
+
+    app = _unblocked_app(tmp_path)
+    assert app.sync_guard()["root_state"] == root_guard_mod.ROOT_UNKNOWN
+    app._root_state = root_guard_mod.ROOT_NOT_ANSWERING
+    assert app.sync_guard()["root_state"] == "not_answering"
+
+
+def test_nothing_blocking_means_no_blocked_key_at_all(tmp_path):
+    app = _unblocked_app(tmp_path)
+    assert app.blocked_report(app.sync_guard()) is None
+    assert "blocked" not in app.sync_guard()
+
+
+def test_not_signed_in_is_the_first_thing_an_editor_is_told(tmp_path):
+    app = _make_app(tmp_path)          # require_login left ON, no identity
+    blocked = app.sync_guard()["blocked"]
+    assert blocked["reason"] == "not_signed_in"
+    assert "signed in" in blocked["detail"]
+    assert blocked["since"]
+
+
+@pytest.mark.parametrize("reason,arrange", [
+    ("licence_pending", lambda app: setattr(
+        app, "eula_problem", lambda: "This machine has not accepted the licence")),
+    ("clock_skew", lambda app: setattr(app.reporter, "clock_skew_seconds", -4000.0)),
+    ("root_absent", lambda app: setattr(app, "_root_state", "absent")),
+    ("root_not_answering", lambda app: setattr(app, "_root_state", "not_answering")),
+    ("root_misplaced", lambda app: setattr(app, "_root_state", "misplaced")),
+    ("disk_full", lambda app: app.disk_floor.check(1)),
+    ("fleet_halt", lambda app: app.halt.engage("an admin stopped it", "fleet")),
+    ("local_halt", lambda app: app.halt.engage("the editor stopped it", "local")),
+    ("paused", lambda app: setattr(app, "_paused", True)),
+    ("breaker_tripped", lambda app: app.lane_b_breaker.trip("the NAS listed empty")),
+])
+def test_each_reason_reaches_the_report_on_its_own(tmp_path, reason, arrange):
+    app = _unblocked_app(tmp_path)
+    arrange(app)
+    blocked = app.sync_guard()["blocked"]
+    assert blocked["reason"] == reason
+    assert blocked["detail"], "every reason has to carry a sentence a human reads"
+    assert "—" not in blocked["detail"], "no em dashes in user-visible text"
+
+
+def test_the_first_match_in_the_priority_order_wins(tmp_path):
+    """Ordered by what the READER can act on: the editor's own sign-in before
+    the admin's halt, a wedged drive before a tripped breaker."""
+    app = _unblocked_app(tmp_path)
+    app.halt.engage("an admin stopped it", "fleet")
+    app.lane_b_breaker.trip("the NAS listed empty")
+    app._paused = True
+    assert app.sync_guard()["blocked"]["reason"] == "fleet_halt"
+
+    app._root_state = "not_answering"
+    assert app.sync_guard()["blocked"]["reason"] == "root_not_answering"
+
+    app.eula_problem = lambda: "the licence has not been accepted"
+    assert app.sync_guard()["blocked"]["reason"] == "licence_pending"
+
+    app._require_login = True
+    assert app.sync_guard()["blocked"]["reason"] == "not_signed_in"
+
+
+def test_a_disk_park_is_reported_with_the_latchs_own_sentence(tmp_path):
+    app = _unblocked_app(tmp_path)
+    app.disk_floor.check(3 * 1024**3)
+    blocked = app.sync_guard()["blocked"]
+    assert blocked["reason"] == "disk_full"
+    assert "Not downloading proxies" in blocked["detail"]
+    assert "GB free" in blocked["detail"]
+    assert blocked["since"]
+
+
+def test_a_stall_record_left_by_the_watchdog_is_read_if_present(tmp_path):
+    import json as _json
+
+    from ccsync_companion import config as config_mod
+
+    app = _unblocked_app(tmp_path)
+    state = config_mod.resolved_log_path(app.config).parent / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "lane_stall.json").write_text(_json.dumps({
+        "lane": "B", "seconds": 1800, "killed": True, "at": "2026-08-28T09:00:00+00:00",
+    }), encoding="utf-8")
+    blocked = app.sync_guard()["blocked"]
+    assert blocked["reason"] == "lane_stalled"
+    assert "Lane B" in blocked["detail"]
+    assert blocked["since"] == "2026-08-28T09:00:00+00:00"
+
+
+def test_a_broken_candidate_never_hides_a_lower_priority_reason(tmp_path):
+    app = _unblocked_app(tmp_path)
+
+    def boom():
+        raise RuntimeError("on fire")
+
+    app.eula_problem = boom
+    app._paused = True
+    blocked = app.sync_guard()["blocked"]
+    assert blocked["reason"] == "paused"
+
+
+def test_the_blocked_since_stamp_does_not_move_while_the_reason_stands(tmp_path):
+    app = _unblocked_app(tmp_path)
+    app._paused = True
+    first = app.sync_guard()["blocked"]["since"]
+    assert app.sync_guard()["blocked"]["since"] == first
+    app._paused = False
+    assert app.sync_guard().get("blocked") is None
+
+
+def test_the_tray_says_the_same_sentence_the_grid_does(tmp_path):
+    """SYNC-15's whole point: an editor on the phone to their admin is
+    reading the same words."""
+    from ccsync_companion import tray
+
+    app = _unblocked_app(tmp_path)
+    app.disk_floor.check(3 * 1024**3)
+    guard = app.sync_guard()
+    line = tray._disk_line(guard)
+    assert line and "Not downloading proxies" in line
+    assert guard["blocked"]["detail"].split(":", 1)[1].strip() in line
+
+
+def test_the_tray_sync_line_names_a_wedged_drive_as_such(tmp_path):
+    from ccsync_companion import root_guard as root_guard_mod
+    from ccsync_companion import tray
+
+    snap = {"sync_guard": {}, "root_absent": True,
+            "root_state": root_guard_mod.ROOT_NOT_ANSWERING}
+    assert tray._sync_line(snap) == "Sync: paused (the drive is not answering)"
+    snap["root_state"] = root_guard_mod.ROOT_ABSENT
+    assert "disconnected" in tray._sync_line(snap)
+
+
+def test_the_resume_button_clears_a_disk_park_too(tmp_path):
+    app = _unblocked_app(tmp_path)
+    app.disk_floor.check(1)
+    assert app.disk_floor.parked
+    ok, message = app.resume_lane_b(by="tray")
+    assert ok, message
+    assert not app.disk_floor.parked

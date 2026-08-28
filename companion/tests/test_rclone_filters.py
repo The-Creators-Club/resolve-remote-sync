@@ -628,6 +628,29 @@ class _FakeCompletedProcess:
         self.stderr = ""
 
 
+class _FakeChild:
+    """A finished Popen, for the helpers that stream their pipes.
+
+    SYNC-12 (resilience sweep 2026-08-28): _run_lsf/_run_capture went from
+    subprocess.run(timeout=) -- which kills the child on expiry and then
+    blocks in communicate() forever -- to Popen + a bounded wait, so the
+    stand-in has to be a Popen, not a CompletedProcess."""
+
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+        self._returncode = returncode
+        self.stdout = iter(stdout.splitlines(keepends=True))
+        self.stderr = iter(stderr.splitlines(keepends=True))
+
+    def wait(self, timeout=None) -> int:
+        return self._returncode
+
+    def poll(self):
+        return self._returncode
+
+    def kill(self) -> None:
+        pass
+
+
 def test_rclone_available_uses_utf8_replace_decoding_and_no_console_window(monkeypatch, tmp_path):
     """rclone logs UTF-8; the default cp1252 `text=True` decoding raises on
     non-ASCII bytes (S-6). Also asserts CREATE_NO_WINDOW is passed on
@@ -661,11 +684,11 @@ def test_run_lsf_uses_utf8_replace_decoding_and_no_console_window(monkeypatch):
 
     captured: dict = {}
 
-    def fake_run(cmd, **kwargs):
+    def fake_popen(cmd, **kwargs):
         captured.update(kwargs)
-        return _FakeCompletedProcess(0)
+        return _FakeChild(0)
 
-    monkeypatch.setattr(rl.subprocess, "run", fake_run)
+    monkeypatch.setattr(rl.subprocess, "Popen", fake_popen)
 
     rl._run_lsf(["rclone", "lsf"], timeout=5.0)
 
@@ -744,9 +767,8 @@ def test_run_lsf_logs_the_real_error_when_rclone_exits_nonzero(monkeypatch, capl
     truncation was found."""
     from ccsync_companion.sync import rclone_lane as rl
 
-    proc = _FakeCompletedProcess(1)
-    proc.stderr = f"{_SFTP_NOTICE}\n{_SFTP_CRITICAL}\n"
-    monkeypatch.setattr(rl.subprocess, "run", lambda cmd, **kwargs: proc)
+    proc = _FakeChild(1, stderr=f"{_SFTP_NOTICE}\n{_SFTP_CRITICAL}\n")
+    monkeypatch.setattr(rl.subprocess, "Popen", lambda cmd, **kwargs: proc)
 
     with caplog.at_level("WARNING", logger="ccsync"):
         assert rl._run_lsf(["rclone", "lsf", "remote:"], timeout=5.0) is None

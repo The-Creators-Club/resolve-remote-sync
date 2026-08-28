@@ -178,3 +178,47 @@ def test_the_blocked_removal_body_names_what_is_pending_and_the_word_to_type():
     assert "A001.braw" in body
     assert "Website Highlights" in body
     assert "type the" in body
+
+
+# -- the stall line (SYNC-1, resilience sweep 2026-08-28, CR-91) -------------
+
+
+def test_the_stall_line_names_the_lane_and_stays_off_when_nothing_stalled():
+    """Until this, a lane whose rclone had wedged on a drive that stopped
+    answering said NOTHING on the machine it was happening on -- the fleet
+    page was the only place the failure could ever have been seen, and there
+    it read as `syncing`."""
+    from datetime import datetime, timezone
+
+    from ccsync_companion.tray import _stalled_line
+
+    assert _stalled_line({}) is None
+    assert _stalled_line({"stalled": {}}) is None
+    now = datetime.now(timezone.utc).isoformat()
+    line = _stalled_line({"stalled": {
+        "lane": "B", "seconds": 1800, "killed": True, "at": now}})
+    assert line is not None
+    assert "Proxy download" in line
+    assert "30 min" in line
+    assert "drive" in line
+    assert "—" not in line, "no em dashes in text an editor reads"
+    assert "Uploading" in _stalled_line({"stalled": {
+        "lane": "A", "seconds": 900, "killed": True, "at": now}})
+
+
+def test_a_stall_from_last_week_is_history_not_a_menu_line():
+    from ccsync_companion.tray import _stalled_line
+
+    assert _stalled_line({"stalled": {
+        "lane": "A", "seconds": 900, "killed": True,
+        "at": "2026-08-01T10:00:00+00:00"}}) is None
+    # An unreadable stamp is not silently treated as "just now" either.
+    assert _stalled_line({"stalled": {"lane": "A", "at": "not a date"}}) is not None
+
+
+def test_the_fingerprint_moves_when_a_stall_is_recorded():
+    before = _guard_fingerprint({})
+    after = _guard_fingerprint({"stalled": {
+        "lane": "B", "seconds": 60, "killed": True,
+        "at": "2026-08-28T10:00:00+00:00"}})
+    assert before != after

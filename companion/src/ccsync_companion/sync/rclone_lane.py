@@ -163,6 +163,161 @@ STDERR_TAIL_LINES = 200
 # stderr tail is a far smaller loss than a wedged lane.
 STDERR_READER_JOIN_SECONDS = 30.0
 
+# The express path's own tail (SYNC-13). See _express_spawn: its stderr is
+# re-parsed for the upload counts, so it needs room for every file in a
+# batch, not just the last few hundred lines of a long run.
+EXPRESS_STDERR_TAIL_LINES = 4000
+
+# -- the stall watchdog (SYNC-1 / SYS-17, resilience sweep 2026-08-28) ------
+#
+# CR-91's mechanism. `proc.wait()` had no timeout at all, and rclone's own
+# --max-duration is inert against the failure that produced it: a local read
+# wedged in the kernel (a Mac's external SSD that stopped answering, a
+# subst'ed SMB mapping over a dropped tailnet) never reaches rclone's
+# scheduler, so the SOFT cutoff has nothing to cut off. The lane then sat in
+# `state=syncing, transferring=1, last_error=NULL` for 2 h 20 m holding
+# _run_lock -- and because lane A takes its turn first, lane B never ran and
+# the editor downloaded nothing for the whole period.
+#
+# Two ceilings, and the first one is the one that matters:
+#
+#   ZERO-PROGRESS: bytes and files moved, NOT wall clock, exactly as CR-91
+#   asks -- a genuinely slow 40 GB original over a thin uplink keeps moving
+#   the tally and is never killed, however long it takes.
+#
+#   HARD: a child that has outlived twice its own budget plus five minutes
+#   is not doing the work it was given, whatever its stats say.
+#
+# The poll interval is what turns wait() from unbounded into a loop; it is
+# not a timeout on the run.
+RCLONE_WAIT_POLL_SECONDS = 30.0
+# Floor for the zero-progress window: on a machine with no per-project budget
+# (an unmanaged periodic lane) 15 minutes of a lane moving nothing at all is
+# already far outside normal.
+STALL_ZERO_PROGRESS_MIN_SECONDS = 900.0
+STALL_ZERO_PROGRESS_BUDGET_MULTIPLE = 4.0
+STALL_HARD_CEILING_MULTIPLE = 2.0
+STALL_HARD_CEILING_GRACE_SECONDS = 300.0
+# Stands in for a missing per-project budget. Same value as config.py's
+# project_rotation_seconds default, deliberately duplicated rather than
+# imported: this module depends on nothing above sync/.
+DEFAULT_STALL_BUDGET_SECONDS = 600.0
+# NEVER IN MEMORY ONLY: a companion that restarts (or self-upgrades) after
+# killing a wedged rclone would otherwise erase the only evidence that it
+# happened, which is precisely the evidence CR-91 spent a day not having.
+LANE_STALL_FILENAME = "lane_stall.json"
+# What a killed child's exit code is reported as when it cannot be reaped at
+# all -- a process in an uninterruptible kernel wait cannot be killed, and
+# waiting on it is the hang we are escaping.
+RCLONE_STALL_RETURNCODE = -9
+
+
+def _stall_budget_seconds(max_duration_seconds: Optional[float]) -> float:
+    """The budget the two ceilings are derived from, never zero.
+
+    A hand-edited `project_rotation_seconds = 0` drops --max-duration
+    altogether (config.py refuses it, so this is the belt to that braces);
+    the watchdog must not be disabled by the same edit."""
+    try:
+        value = float(max_duration_seconds or 0)
+    except (TypeError, ValueError):
+        value = 0.0
+    return value if value > 0 else DEFAULT_STALL_BUDGET_SECONDS
+
+
+def zero_progress_limit_seconds(max_duration_seconds: Optional[float]) -> float:
+    """How long a run may move NOTHING before it is killed."""
+    budget = _stall_budget_seconds(max_duration_seconds)
+    return max(
+        STALL_ZERO_PROGRESS_BUDGET_MULTIPLE * budget, STALL_ZERO_PROGRESS_MIN_SECONDS
+    )
+
+
+def hard_ceiling_seconds(max_duration_seconds: Optional[float]) -> float:
+    """How long a run may last regardless of progress."""
+    budget = _stall_budget_seconds(max_duration_seconds)
+    return STALL_HARD_CEILING_MULTIPLE * budget + STALL_HARD_CEILING_GRACE_SECONDS
+
+
+# The dashboard's LaneReportIn cap for the field (api.py). Kept a little
+# under it, like MAX_PROJECT_SLUG_CHARS is for its own field.
+MAX_PROGRESS_TOKEN_CHARS = 200
+
+
+def progress_token(
+    bytes_done: Optional[int], files_done: int, current_project: Optional[str]
+) -> str:
+    """The report's `progress_token` for a lane (SYS-1, wave 2 contract).
+
+    Monotonic within a pass and CHEAP: bytes and files the lane has moved,
+    plus the project it is moving them for, so the dashboard can red a
+    non-terminal state whose token has not changed for 3 rotations. The
+    project is in it because a machine rotating through projects with nothing
+    to move in any of them is still making progress through its plan."""
+    try:
+        done = int(bytes_done or 0)
+    except (TypeError, ValueError):
+        done = 0
+    token = f"{done}:{max(0, int(files_done or 0))}:{current_project or ''}"
+    # BOUNDED: the dashboard declares `progress_token: str | None =
+    # Field(max_length=256)` and pydantic rejects the WHOLE report body on a
+    # violation -- which would take lane status, presence and the upgrade
+    # advertisement down with it, for a liveness field. Nothing bounds a
+    # project rel path (current_project itself is allowed 512), so the sender
+    # does. The numeric head is what changes, so the TAIL is what goes.
+    return token[:MAX_PROGRESS_TOKEN_CHARS]
+
+
+def _iso_age_seconds(stamp: Optional[str]) -> Optional[int]:
+    """Seconds since an ISO-8601 stamp, or None when there isn't one.
+
+    None for "never ran" and for an unparseable stamp: "could not tell" must
+    never render as zero (i.e. as "just now")."""
+    if not stamp:
+        return None
+    try:
+        when = datetime.fromisoformat(str(stamp))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        # Every stamp this module writes carries an offset; a naive one comes
+        # from an older state file and is read as UTC (CR-89's lesson).
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0, int((datetime.now(timezone.utc) - when).total_seconds()))
+
+
+def write_stall_record(path, record: dict) -> None:
+    """Persist the last stall this companion killed. Never raises.
+
+    tmp + os.replace, the same atomic write every other latch in this system
+    uses (identity.py): a half-written evidence file must never be what the
+    next boot reads."""
+    try:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        tmp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, target)
+    except Exception:
+        log.warning("could not persist the lane stall record to %s", path, exc_info=True)
+
+
+def read_stall_record(path) -> Optional[dict]:
+    """The last persisted stall, or None. Never raises."""
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    except Exception:
+        log.debug("could not read the lane stall record at %s", path, exc_info=True)
+        return None
+    try:
+        record = json.loads(raw)
+    except ValueError:
+        log.warning("the lane stall record at %s is not JSON -- ignoring it", path)
+        return None
+    return record if isinstance(record, dict) else None
+
 # -- transport tuning (AUDIT_2 §4.1 P1/P2, §4.2 table) ---------------------
 #
 # Every value below is a DEFAULT, overridable per-key from config.toml via
@@ -800,21 +955,112 @@ def _join_remote_path(remote_root: str, subpath: str) -> str:
     return f"{root}/{sub}"
 
 
-def _run_lsf(cmd: list[str], timeout: float) -> Optional[str]:
-    proc = subprocess.run(
+# What _run_bounded reports for a child it had to kill. Non-zero on purpose:
+# every caller of _run_capture treats a non-zero code as "the probe failed",
+# which is the correct answer for a listing that never finished.
+PROBE_TIMEOUT_RETURNCODE = -1
+
+
+def _run_bounded(
+    cmd: list[str],
+    timeout: float,
+    popen_factory: Optional[Callable[..., Any]] = None,
+) -> tuple[Optional[int], str, str]:
+    """Run a short-lived rclone command with a REAL bound. (code, out, err).
+
+    `code` is None when the child had to be killed, i.e. nothing it printed
+    can be trusted as a complete answer.
+
+    SYNC-12 (resilience sweep 2026-08-28): both helpers below used
+    `subprocess.run(timeout=)`, which kills the child on expiry and then
+    sits in communicate() waiting for the pipes to close. On Windows an
+    rclone that spawned anything inheriting the write handle -- or a child
+    stuck in an uninterruptible kernel wait -- leaves that call blocked
+    forever, so `list_remote_files`'s documented "ten-minute cap" could be
+    infinite. It runs inside _run_lock, on the relocation path, at the exact
+    moment the breaker is deciding whether to stop lane B. _end_probe was
+    written because the authors already knew this; the knowledge had not
+    reached these two.
+
+    The shape is _end_probe's (kill, then a ONE-second wait) plus
+    _run_popen's daemon readers and `abandoned` flag: a reader still parked
+    on a pipe some grandchild holds open is a thread we walk away from, never
+    a lane we block."""
+    factory = popen_factory or subprocess.Popen
+    proc = factory(
         cmd,
-        capture_output=True,
-        timeout=timeout,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         encoding="utf-8",
         errors="replace",
         creationflags=_win_creationflags(),
     )
-    if proc.returncode != 0:
+    abandoned = threading.Event()
+    chunks: dict[str, deque] = {"out": deque(), "err": deque()}
+
+    def _read(stream, key: str) -> None:
+        # Never let a decode error kill a reader silently: an undrained pipe
+        # is how rclone blocks on a full 64 KB buffer and never exits.
+        try:
+            if stream is None:
+                return
+            for line in stream:
+                if abandoned.is_set():
+                    return
+                chunks[key].append(line)
+        except Exception:
+            log.debug("bounded rclone run: %s reader failed", key, exc_info=True)
+
+    threads = [
+        threading.Thread(target=_read, args=(proc.stdout, "out"),
+                         name="ccsync-rclone-probe-stdout", daemon=True),
+        threading.Thread(target=_read, args=(proc.stderr, "err"),
+                         name="ccsync-rclone-probe-stderr", daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+
+    code: Optional[int]
+    try:
+        code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _end_probe(proc)
+        code = None
+    except Exception:
+        log.warning("bounded rclone run: wait() failed", exc_info=True)
+        _end_probe(proc)
+        code = None
+    for thread in threads:
+        thread.join(timeout=STDERR_READER_JOIN_SECONDS if code is not None else 1.0)
+    if any(thread.is_alive() for thread in threads):
+        abandoned.set()
         log.warning(
-            "rclone lsf exited %d: %s", proc.returncode, _stderr_for_log(proc.stderr)
+            "bounded rclone run: a pipe is still open after the child ended -- "
+            "continuing with a partial answer rather than blocking (%s)", cmd[:2],
+        )
+    try:
+        out = "".join(list(chunks["out"]))
+        err = "".join(list(chunks["err"]))
+    except RuntimeError:
+        # An abandoned reader mutated a deque mid-snapshot; a partial answer
+        # beats raising into a caller whose next move is a delete decision.
+        out, err = "", ""
+    return code, out, err
+
+
+def _run_lsf(cmd: list[str], timeout: float) -> Optional[str]:
+    code, out, err = _run_bounded(cmd, timeout)
+    if code is None:
+        log.warning(
+            "rclone lsf did not finish within %.0fs -- killed, treating the listing "
+            "as failed: %s", timeout, _stderr_for_log(err),
         )
         return None
-    return proc.stdout
+    if code != 0:
+        log.warning("rclone lsf exited %d: %s", code, _stderr_for_log(err))
+        return None
+    return out
 
 
 def clone_directory_tree(
@@ -1026,16 +1272,20 @@ def _run_capture(cmd: list[str], timeout: float) -> tuple[int, str]:
     The sibling of _run_lsf, for the commands whose answer arrives on stderr
     because they carry --use-json-log (lsf answers on stdout). Kept separate
     rather than generalised: an accidental stdout/stderr mix-up in a probe
-    that gates a delete is not a bug worth being clever about."""
-    proc = subprocess.run(
-        cmd,
-        capture_output=True,
-        timeout=timeout,
-        encoding="utf-8",
-        errors="replace",
-        creationflags=_win_creationflags(),
-    )
-    return proc.returncode, (proc.stderr or "")
+    that gates a delete is not a bug worth being clever about.
+
+    Bounded through _run_bounded for SYNC-12's reason; a killed child is
+    reported as PROBE_TIMEOUT_RETURNCODE, which every caller already reads
+    as "the probe failed" (and therefore as "I could not tell", which is
+    what makes it refuse the removal)."""
+    code, _out, err = _run_bounded(cmd, timeout)
+    if code is None:
+        log.warning(
+            "rclone probe did not finish within %.0fs -- killed: %s",
+            timeout, _stderr_for_log(err),
+        )
+        return PROBE_TIMEOUT_RETURNCODE, err
+    return code, err
 
 
 def list_remote_top(
@@ -1515,6 +1765,7 @@ def build_express_command(
     transfers: int = 4,
     stats_interval: str | None = None,
     tuning: Optional[RcloneTuning] = None,
+    max_duration_seconds: float | None = None,
 ) -> list[str]:
     """Express lane A (AUDIT_2 C-2): upload exactly the files the watchdog
     named, now, instead of at the sequencer's next turn for that project.
@@ -1560,6 +1811,15 @@ def build_express_command(
         # Disjoint temp names from the periodic pass -- see the constant.
         "--partial-suffix", EXPRESS_PARTIAL_SUFFIX,
         "--transfers", str(transfers),
+        # SYNC-13 (resilience sweep 2026-08-28): express had NO duration
+        # bound at all, and a wedged express run holds _express_run_lock for
+        # the life of the process -- every later window loses the lock,
+        # requeues, and finally gives up to the periodic pass, so express
+        # dies permanently and the only symptom is that new clips take a
+        # whole rotation to reach the NAS instead of ~10 s. NOT a filter flag
+        # (--files-from-raw refuses those, see below): --max-duration is a
+        # copy flag, verified against the bundled 1.74.4.
+        *_max_duration_flags(max_duration_seconds),
         *tuning.flags(DIRECTION_UP),
         *_transport_flags(),
         "--use-json-log",
@@ -1931,6 +2191,7 @@ class RcloneLane(LaneAdapter):
         on_watch_blocked: Optional[Callable[[str], None]] = None,
         watch_probe_fn: Optional[Callable[[str], tuple[str, str]]] = None,
         breaker: Optional["lane_guard.LaneBBreaker"] = None,
+        disk_floor: Optional["lane_guard.DiskFloorLatch"] = None,
         remote_list_fn: Optional[Callable[[list[str], float], Optional[str]]] = None,
         extra_excludes_fn: Optional[Callable[[Optional[str]], list[str]]] = None,
     ) -> None:
@@ -2012,6 +2273,21 @@ class RcloneLane(LaneAdapter):
             )
         else:
             self.breaker = breaker
+        # -- lane B's free-space floor (SYS-5 / SYNC-7, sweep 2026-08-28) --
+        # Constructed here for the same reason the breaker is: the one lane
+        # that fills an editor's disk must never run unguarded because a call
+        # site forgot an argument. app.py passes its own instance so the tray,
+        # the report and the lane read one object.
+        if direction == DIRECTION_DOWN:
+            self.disk_floor = disk_floor or lane_guard.DiskFloorLatch(
+                self._state_dir / lane_guard.DISK_FLOOR_STATE_FILENAME, cfg,
+            )
+        else:
+            self.disk_floor = disk_floor
+        # Injectable so a test can drive the floor without a full disk. Not a
+        # constructor argument by accident: `free_bytes_at` is the seam every
+        # other free-space check in the tree uses.
+        self._free_bytes_fn: Callable[[Any], Optional[int]] = lane_guard.free_bytes_at
         # Injectable for the tests, exactly like subprocess_run: the probe
         # spawns a real `rclone lsf` otherwise.
         self._remote_list_fn = remote_list_fn
@@ -2128,6 +2404,27 @@ class RcloneLane(LaneAdapter):
         self._express_seq = 0
         # Lane B's --backup-dir for the run in flight (see _notify_trash).
         self._last_backup_dir: Optional[str] = None
+
+        # -- the stall watchdog (SYNC-1 / SYS-17, CR-91) ------------------
+        # Attributes, not constructor arguments: every caller of this class
+        # (app.py, consolidate, the tests) would otherwise have to learn
+        # three knobs that only a test ever sets. The clock is injectable for
+        # exactly that reason -- a test must be able to drive four hours of
+        # a wedged mount without sleeping for them.
+        self._monotonic: Callable[[], float] = time.monotonic
+        self._wait_poll_seconds = RCLONE_WAIT_POLL_SECONDS
+        # Shared by both lanes on purpose: the report has ONE `stalled` slot,
+        # and "the last stall this machine killed" is the question it answers.
+        self._stall_file = self._state_dir / LANE_STALL_FILENAME
+        self._last_stall: Optional[dict] = None
+        self._pending_stall_detail: Optional[str] = None
+        # SYNC-13: the express command had no --max-duration at all. The
+        # rotation budget is the sanctioned answer -- an express batch that
+        # has not finished in the time a whole project pass is allowed is not
+        # the ~10 s path the feature exists to be.
+        self._express_max_duration = float(max(
+            60, _cfg_int(cfg, "project_rotation_seconds",
+                         int(DEFAULT_STALL_BUDGET_SECONDS))))
         # Files the last run actually moved (transferred + trashed). The
         # sequencer reads it to tell a pass that did work from one that found
         # nothing to do, which is what its idle backoff keys on
@@ -2645,6 +2942,10 @@ class RcloneLane(LaneAdapter):
         # (breaker, stopped lane, missing root) reads as "this pass moved
         # nothing" instead of repeating the last real pass's count.
         self._last_run_moved = 0
+        # Same reasoning for the stall sentence: a pass that ended down one
+        # of the early-return paths must not hand its predecessor's stall to
+        # the NEXT pass as that pass's error.
+        self._take_pending_stall()
         # THE SAFETY LINE, and it is first for a reason. This lane is
         # `rclone sync <NAS> <local_root>` in the DOWN direction. Against a
         # local_root that is not there -- a macOS editor's external SSD
@@ -2677,6 +2978,14 @@ class RcloneLane(LaneAdapter):
         # projects exactly as before.
         if self.breaker is not None and self.breaker.tripped:
             return self._breaker_stand_down()
+
+        # ...and the free-space floor, on the same terms and in the same
+        # place (SYS-5 / SYNC-7, resilience sweep 2026-08-28). Ahead of the
+        # remote listing below: a full disk is knowable without touching the
+        # NAS at all, and a parked lane must cost nothing per pass.
+        disk_reason = self._check_disk_floor()
+        if disk_reason:
+            return self._disk_stand_down(disk_reason)
 
         available, msg = rclone_available(self.rclone_path)
         if not available:
@@ -2726,6 +3035,11 @@ class RcloneLane(LaneAdapter):
             self._status.speed_bps = None
             self._status.eta_seconds = None
             self._status.transfers = []
+            # SYS-1: stamped at the START of the pass, not only on the first
+            # --stats tick, because the run that has moved nothing at all is
+            # the one the dashboard has to be able to red. A token that
+            # exists and never changes is evidence; an absent one is not.
+            self._status.progress_token = progress_token(0, 0, subpath)
 
         # 2s, not 10s: this feeds the per-file progress the dashboard and
         # tray show, and with a 10s tick the end-to-end staleness (stats +
@@ -2789,7 +3103,8 @@ class RcloneLane(LaneAdapter):
                 result = parse_json_log(stderr_text)
             else:
                 try:
-                    returncode, stderr_text, result = self._run_popen(cmd)
+                    returncode, stderr_text, result = self._run_popen(
+                        cmd, max_duration_seconds)
                 except SpawnCancelled:
                     return self._stand_down_status()
                 except Exception as exc:
@@ -2835,6 +3150,9 @@ class RcloneLane(LaneAdapter):
             self._notify_trash(result)
             return self._breaker_stand_down() if tripped else status
 
+        # BEFORE the lock: _take_pending_stall takes _lock itself, and
+        # threading.Lock is not reentrant.
+        stall_detail = self._take_pending_stall()
         with self._lock:
             self._status.transferring = 0
             self._status.queued = 0
@@ -2851,7 +3169,18 @@ class RcloneLane(LaneAdapter):
             # Exit code is authoritative: rclone logs transient per-attempt
             # failures at error level ("Attempt 1/3 failed ...") even when a
             # retry succeeds and the run as a whole is fine.
-            if returncode == RCLONE_EXIT_MAX_DURATION and max_duration_seconds:
+            #
+            # FIRST, ahead of the exit-code chain: the watchdog killed this
+            # child (SYNC-1 / CR-91), so its exit code says "we killed it"
+            # and its stderr says nothing about why. The stall sentence is
+            # the only informative thing this pass has, and unlike the
+            # stop() case above it IS a failure -- the whole point is that a
+            # wedged lane becomes visible instead of sitting green forever.
+            if stall_detail:
+                self._status.state = STATE_ERROR
+                self._status.last_error = stall_detail
+                self._status.detail = stall_detail
+            elif returncode == RCLONE_EXIT_MAX_DURATION and max_duration_seconds:
                 # The per-project budget ran out. With --cutoff-mode SOFT
                 # everything already in flight completed; the rest is picked
                 # up next pass. A bounded stop, not a failure -- painting the
@@ -3004,6 +3333,49 @@ class RcloneLane(LaneAdapter):
             self.on_trash(str(backup_dir))
         except Exception:
             log.exception("%s: on_trash callback failed", self.name)
+
+    # -- the free-space floor (SYS-5 / SYNC-7, sweep 2026-08-28) ----------
+    def _check_disk_floor(self) -> Optional[str]:
+        """One `shutil.disk_usage` on the sync drive. Returns the park
+        reason, or None.
+
+        Never raises, and a measurement that FAILS parks nothing: the latch
+        keeps whatever state it had (see DiskFloorLatch.check). Lane B only --
+        lane A writes to the NAS, whose capacity is the server's problem and
+        the collector's to poll."""
+        if self.direction != DIRECTION_DOWN or self.disk_floor is None:
+            return None
+        if not getattr(self.disk_floor, "enabled", True):
+            return None
+        try:
+            free = self._free_bytes_fn(self.local_root)
+        except Exception:
+            log.debug("%s: could not measure free space", self.name, exc_info=True)
+            free = None
+        try:
+            return self.disk_floor.check(free)
+        except Exception:
+            log.exception("%s: the free-space floor check failed", self.name)
+            return None
+
+    def _disk_stand_down(self, reason: str) -> LaneStatus:
+        """Park lane B for a nearly-full drive, with its own sentence.
+
+        STATE_PAUSED for the breaker's reasons exactly: the lane is not
+        broken, and lanes A and C must keep running -- an editor whose disk
+        is full still needs their originals to reach the NAS, which is also
+        the only thing that makes it safe for them to delete anything."""
+        with self._lock:
+            self._status.state = STATE_PAUSED
+            self._status.transferring = 0
+            self._status.queued = 0
+            self._status.speed_bps = None
+            self._status.eta_seconds = None
+            self._status.transfers = []
+            self._status.current_project = None
+            self._status.last_error = None
+            self._status.detail = f"NOT DOWNLOADING (disk): {reason}"
+        return self.status()
 
     # -- circuit breaker (COMMERCIAL_READINESS.md item 9, 2026-08-17) -----
     def _breaker_stand_down(self) -> LaneStatus:
@@ -3234,6 +3606,12 @@ class RcloneLane(LaneAdapter):
                 max_age_days=self._trash_max_age_days,
                 max_bytes=self._trash_max_bytes,
                 breaker=self.breaker,
+                # SYNC-16 / SYNC-7: disk pressure is the third trigger, and
+                # the one that matters on the machine whose lane B keeps
+                # failing -- the floor and the prune are the same number.
+                min_free_bytes=(self.disk_floor.min_free_bytes
+                                if self.disk_floor is not None else 0),
+                free_bytes_fn=self._free_bytes_fn,
             )
             trash = scan_trash_dir(self.local_root)
             if trash is not None:
@@ -3258,11 +3636,28 @@ class RcloneLane(LaneAdapter):
                 out["lane_b_breaker"] = self.breaker.report()
             except Exception:
                 log.exception("%s: breaker report failed", self.name)
+        if self.disk_floor is not None:
+            try:
+                # SYS-5 / SYNC-7: the LATCH, not the measurement. The disk
+                # numbers themselves ride `sync_guard.disk`, measured once per
+                # heavy tick in app.py; this is why lane B is parked.
+                out["disk_floor"] = self.disk_floor.report()
+            except Exception:
+                log.exception("%s: disk floor report failed", self.name)
         trash = self.trash_report()
         if trash:
             out["trash"] = trash
         if self._size_mismatches:
             out["skipped_exists"] = self._size_mismatches
+        # SYNC-1 (resilience sweep 2026-08-28): the last wedged rclone this
+        # machine killed. Read through stall_record(), so it survives the
+        # restart that follows the symptom and so a LANE A stall reaches the
+        # report through the one place app.py asks for a guard section.
+        # Absent when nothing has ever stalled -- an absent key is how "no
+        # lane has ever had to be killed here" is spelled.
+        stalled = self.stall_report()
+        if stalled:
+            out["stalled"] = stalled
         return out
 
     # -- spawn cancellation (KNOWN_BUGS B13) ------------------------------
@@ -3297,14 +3692,223 @@ class RcloneLane(LaneAdapter):
             self._status.detail = detail
         return self.status()
 
+    # -- the stall watchdog (SYNC-1 / SYS-17, CR-91) ----------------------
+    def _stall_lane_label(self, express: bool = False) -> str:
+        """"A" | "B" | "express" -- the report's spelling of which lane
+        stalled (the wire contract, not this module's lane names)."""
+        if express:
+            return "express"
+        return "A" if self.direction == DIRECTION_UP else "B"
+
+    def _progress_marker(
+        self, tally: Optional[RcloneRunTally], include_bytes: bool = True
+    ) -> tuple[int, int]:
+        """(bytes, files) this run has moved so far.
+
+        THE test for a hang, and it is deliberately not wall clock: a 40 GB
+        original crawling over a thin uplink keeps moving this tuple and is
+        never killed, while a read wedged in the kernel cannot move it at
+        all. Bytes come from the --stats records _handle_stderr_line already
+        parses; files from the tally beside it, so a run copying millions of
+        tiny files with no stats tick yet still counts as progress."""
+        # include_bytes=False for the express path: `bytes_done` on the
+        # shared status belongs to the PERIODIC run, which can be moving
+        # gigabytes while the express child is wedged -- borrowing its bytes
+        # would hide exactly the stall we are looking for.
+        done = 0
+        if include_bytes:
+            with self._lock:
+                done = self._status.bytes_done or 0
+        moved = int(getattr(tally, "transferred", 0) or 0) + int(
+            getattr(tally, "deleted", 0) or 0)
+        try:
+            return int(done), moved
+        except (TypeError, ValueError):
+            return 0, moved
+
+    def _wait_with_watchdog(
+        self,
+        cmd: list[str],
+        proc: Any,
+        tally: Optional[RcloneRunTally],
+        max_duration_seconds: Optional[float],
+        express: bool = False,
+    ) -> int:
+        """proc.wait(), but bounded -- the two lines CR-91 asked for.
+
+        Polls instead of blocking forever, and kills the child on either
+        ceiling. Nothing here changes a healthy run: a child that exits
+        inside the first poll never sees the watchdog at all.
+
+        ONE EXEMPTION, and it is the difference between this and a timeout:
+        a run that is STILL MOVING BYTES is never killed, at either ceiling.
+        CR-91 asks for exactly that ("bytes moved, not wall clock, is the
+        test") and the cost of getting it wrong is concrete: --cutoff-mode
+        SOFT lets an in-flight transfer land, so a 40 GB original on a thin
+        uplink legitimately outlives any wall-clock ceiling, and SFTP
+        uploads do not resume -- killing it at 25 minutes would restart it
+        from byte 0 next pass, forever, and leave a `.partial` on the NAS
+        each time. So the hard ceiling fires when the run is past it AND has
+        moved nothing for two polls; while bytes keep arriving it logs once
+        and lets the transfer finish."""
+        zero_limit = zero_progress_limit_seconds(max_duration_seconds)
+        hard_limit = hard_ceiling_seconds(max_duration_seconds)
+        clock = self._monotonic
+        spawn_lock = self._express_proc_lock if express else self._proc_lock
+        what = "wedged express rclone" if express else "wedged rclone"
+        started = clock()
+        last_progress_at = started
+        last_marker = self._progress_marker(tally, include_bytes=not express)
+        over_ceiling_logged = False
+        while True:
+            try:
+                return proc.wait(timeout=self._wait_poll_seconds)
+            except subprocess.TimeoutExpired:
+                pass
+            except Exception:
+                # A wait() that cannot be performed at all (a handle the OS
+                # lost, a stand-in that does not take a timeout). Reported as
+                # a failed run rather than retried forever in this loop.
+                log.exception("%s: could not wait on the rclone child", self.name)
+                return RCLONE_STALL_RETURNCODE
+            now = clock()
+            marker = self._progress_marker(tally, include_bytes=not express)
+            if marker != last_marker:
+                last_marker, last_progress_at = marker, now
+            idle_for = now - last_progress_at
+            ran_for = now - started
+            # "Moving" = something arrived within the last two polls. One
+            # poll would make a --stats tick landing a moment late look
+            # like a stall.
+            moving = idle_for < (2 * max(1.0, float(self._wait_poll_seconds)))
+            if idle_for >= zero_limit:
+                stalled_for, detail = idle_for, (
+                    f"rclone made no progress for {int(idle_for)}s - killed")
+            elif ran_for >= hard_limit and not moving:
+                stalled_for, detail = ran_for, (
+                    f"rclone did not exit after {int(ran_for)}s - killed")
+            elif ran_for >= hard_limit:
+                if not over_ceiling_logged:
+                    over_ceiling_logged = True
+                    log.warning(
+                        "%s: rclone is past its %ds ceiling but still moving "
+                        "(%s bytes / %s file(s)) -- letting it finish rather than "
+                        "restarting a transfer from zero",
+                        self.name, int(hard_limit), last_marker[0], last_marker[1],
+                    )
+                continue
+            else:
+                continue
+            log.error(
+                "%s: %s (moved %s bytes / %s file(s) in %ds)\n  argv: %s",
+                self.name, detail, last_marker[0], last_marker[1], int(ran_for),
+                " ".join(cmd),
+            )
+            self._record_stall(int(stalled_for), detail, express=express)
+            with spawn_lock:
+                self._terminate_child(proc, what)
+            try:
+                # Bounded, and it may well not answer: a process in an
+                # uninterruptible kernel wait cannot be killed at all, which
+                # is the hang this whole loop exists to escape. The lane
+                # reports the stall either way and the OS gets the corpse.
+                return proc.wait(timeout=5)
+            except Exception:
+                log.warning(
+                    "%s: the wedged rclone did not die -- leaving it to the OS and "
+                    "reporting the stall", self.name,
+                )
+                return RCLONE_STALL_RETURNCODE
+
+    def _record_stall(self, seconds: int, detail: str, express: bool = False) -> None:
+        """Remember (and persist) a stall this lane just killed.
+
+        Persisted because a companion restart -- or the self-upgrade an
+        editor performs while chasing the symptom -- would otherwise erase
+        the only local record that anything was killed at all."""
+        record = {
+            "lane": self._stall_lane_label(express),
+            "seconds": max(0, int(seconds)),
+            "killed": True,
+            "at": datetime.now(timezone.utc).isoformat(),
+            "detail": detail,
+        }
+        with self._lock:
+            self._last_stall = record
+            if not express:
+                # Consumed by _run_once_locked, so the pass reports the stall
+                # rather than rclone's "exited -9", which says nothing.
+                self._pending_stall_detail = detail
+        write_stall_record(self._stall_file, record)
+
+    def _take_pending_stall(self) -> Optional[str]:
+        with self._lock:
+            detail, self._pending_stall_detail = self._pending_stall_detail, None
+        return detail
+
+    def stall_record(self) -> Optional[dict]:
+        """The last stall this machine detected and killed, or None.
+
+        Falls back to the persisted file, so the answer survives a restart --
+        and so lane B's sync_guard_report can carry a stall that happened on
+        lane A: both lanes share the state dir, and the report has one
+        `stalled` slot."""
+        with self._lock:
+            if self._last_stall:
+                return dict(self._last_stall)
+        return read_stall_record(self._stall_file)
+
+    def stall_report(self) -> Optional[dict]:
+        """`sync_guard.stalled` for the report: the wire's four keys only.
+
+        `detail` is deliberately left off the wire -- the tray and the log
+        carry the sentence; the dashboard gets the machine-readable half."""
+        record = self.stall_record()
+        if not record:
+            return None
+        out = {key: record.get(key) for key in ("lane", "seconds", "killed", "at")}
+        return out if out.get("at") else None
+
+    def abort_run(self, why: str, seconds: int = 0) -> bool:
+        """End the rclone child of the run in flight, without latching the
+        lane off. Returns True when there was one. Never raises.
+
+        The sequencer's bounded lane B join calls this (SYNC-1): an un-joined
+        lane B would still be writing into a project directory the next
+        project's repath moves, and stop() is the wrong tool -- it sets
+        _stop_event for the whole thread generation, i.e. it would leave lane
+        B refusing every later pass until something restarted it. Killing
+        just the child ends the pass, paints the lane red with the reason,
+        and lets the next turn run normally."""
+        try:
+            with self._proc_lock:
+                proc = self._proc
+                if proc is None:
+                    return False
+                self._record_stall(seconds, why)
+                self._terminate_child(proc, "rclone (aborted by the sequencer)")
+            log.warning("%s: %s", self.name, why)
+            return True
+        except Exception:
+            log.exception("%s: abort_run failed", self.name)
+            return False
+
     # -- Popen-based runner with live --stats JSON parsing ---------------
-    def _run_popen(self, cmd: list[str]) -> tuple[int, str, RcloneRunResult]:
+    def _run_popen(
+        self, cmd: list[str], max_duration_seconds: Optional[float] = None,
+    ) -> tuple[int, str, RcloneRunResult]:
         """Run rclone, parsing its stderr AS IT ARRIVES.
 
         Returns (returncode, bounded stderr tail, incremental parse result).
         The tail is STDERR_TAIL_LINES lines, not the whole stream: see
         RcloneRunTally for why keeping all of it was a memory problem on real
-        ingests (AUDIT_3 M-8)."""
+        ingests (AUDIT_3 M-8).
+
+        `max_duration_seconds` is the pass's own budget, and here it is what
+        the stall watchdog's two ceilings are derived from -- see
+        zero_progress_limit_seconds / hard_ceiling_seconds. A stall sets
+        `self._last_stall` (and persists it) and leaves the child killed;
+        _run_once_locked turns that into the lane's error state."""
         factory = self.popen_factory or subprocess.Popen
         # SPAWN AND PUBLISH ATOMICALLY. _kill_running_process() takes the
         # same lock, so it can no longer see `_proc is None` for a child that
@@ -3357,7 +3961,7 @@ class RcloneLane(LaneAdapter):
         )
         reader_thread.start()
         try:
-            returncode = proc.wait()
+            returncode = self._wait_with_watchdog(cmd, proc, tally, max_duration_seconds)
         finally:
             with self._proc_lock:
                 if self._proc is proc:
@@ -3412,6 +4016,8 @@ class RcloneLane(LaneAdapter):
         with self._lock:
             subpath = self._status.current_project
         project_slug = self._project_slug_for_subpath(subpath)
+        moved = (int(getattr(tally, "transferred", 0) or 0) + int(
+            getattr(tally, "deleted", 0) or 0)) if tally is not None else 0
         with self._lock:
             self._status.bytes_done = stats.get("bytes")
             self._status.bytes_total = stats.get("totalBytes")
@@ -3420,6 +4026,10 @@ class RcloneLane(LaneAdapter):
             self._status.transfers = self._normalize_transferring(
                 stats.get("transferring"), project_slug
             )
+            # SYS-1: the evidence that this lane is alive, refreshed here
+            # because this is the one place real movement is observed.
+            self._status.progress_token = progress_token(
+                stats.get("bytes"), moved, subpath)
 
     def _project_slug_for_subpath(self, subpath: Optional[str]) -> Optional[str]:
         """The marker slug for this run's project, or None.
@@ -3749,9 +4359,15 @@ class RcloneLane(LaneAdapter):
             pass
 
     def express_report(self) -> dict:
-        """Counters for the reporter/tray (owned elsewhere). Read-only."""
+        """Counters for the reporter/tray (owned elsewhere). Read-only.
+
+        `last_run_age_seconds` (SYNC-13) is what makes a DEAD express lane
+        visible: the counters simply stop advancing when it wedges, and
+        nothing checked that they were stale. None until the first run."""
         with self._lock:
-            return dict(self._express_status)
+            report = dict(self._express_status)
+        report["last_run_age_seconds"] = _iso_age_seconds(report.get("last_run"))
+        return report
 
     def pause_express(self) -> None:
         """Stop the express lane until resume_express().
@@ -4061,6 +4677,7 @@ class RcloneLane(LaneAdapter):
         cmd = build_express_command(
             self.rclone_path, self.local_root, self.remote, self.remote_root,
             list_file, transfers=self.transfers, tuning=self.tuning,
+            max_duration_seconds=self._express_max_duration,
         )
         log.info("%s: express upload of %d path(s)", self.name, len(rels))
         # Claim these paths BEFORE the child starts: a periodic pass that
@@ -4168,21 +4785,69 @@ class RcloneLane(LaneAdapter):
                 creationflags=_win_creationflags(),
             )
             self._express_proc = proc
-        try:
-            # Single pipe: read to EOF, then wait. No second stream to
-            # deadlock against.
+        # SYNC-13: this used to be `proc.stderr.read()` (blocks until EOF,
+        # which a grandchild holding the write handle never gives) followed by
+        # an unbounded `proc.wait()`. Same shape as _run_popen now: a daemon
+        # reader we can walk away from, and a wait with the stall watchdog's
+        # two ceilings on it.
+        # A BIGGER cap than the periodic path's 200-line tail, and it is
+        # load-bearing: the caller re-parses this text with parse_json_log to
+        # count what express uploaded (and to feed the dashboard's history),
+        # so a batch of up to express_max_batch files must not have its
+        # earliest "Copied" records trimmed away. Still bounded, because the
+        # reason _run_popen keeps a tail at all (AUDIT_3 M-8) applies here
+        # too, just at a much smaller scale.
+        lines: deque[str] = deque(maxlen=EXPRESS_STDERR_TAIL_LINES)
+        tally = RcloneRunTally()
+        abandoned = threading.Event()
+
+        def _reader() -> None:
             try:
-                stderr_text = proc.stderr.read() if proc.stderr is not None else ""
+                if proc.stderr is None:
+                    return
+                for line in proc.stderr:
+                    if abandoned.is_set():
+                        return
+                    lines.append(line)
+                    text = line.strip()
+                    if not text.startswith("{"):
+                        continue
+                    try:
+                        tally.feed_record(json.loads(text))
+                    except ValueError:
+                        continue
             except Exception:
-                log.exception("%s: express stderr read failed -- killing rclone", self.name)
+                log.exception(
+                    "%s: express stderr reader failed -- killing rclone so the wait "
+                    "cannot deadlock", self.name,
+                )
                 try:
                     proc.kill()
                 except Exception:
                     pass
-                stderr_text = ""
-            returncode = proc.wait()
+
+        reader_thread = threading.Thread(
+            target=_reader, name=f"ccsync-{self.name}-express-reader", daemon=True
+        )
+        reader_thread.start()
+        try:
+            returncode = self._wait_with_watchdog(
+                cmd, proc, tally, self._express_max_duration, express=True,
+            )
         finally:
             with self._express_proc_lock:
                 if self._express_proc is proc:
                     self._express_proc = None
+        reader_thread.join(timeout=STDERR_READER_JOIN_SECONDS)
+        if reader_thread.is_alive():
+            abandoned.set()
+            log.warning(
+                "%s: the express rclone exited but its stderr pipe is still open "
+                "after %.0fs -- continuing with a truncated log",
+                self.name, STDERR_READER_JOIN_SECONDS,
+            )
+        try:
+            stderr_text = "".join(list(lines))
+        except RuntimeError:
+            stderr_text = ""
         return returncode, stderr_text

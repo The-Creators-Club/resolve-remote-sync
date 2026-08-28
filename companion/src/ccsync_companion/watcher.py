@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Any, Callable, Optional
 
 from . import canon
@@ -409,6 +410,14 @@ class TimelineWatcher:
         """Blocking supervised loop — run this in its own thread."""
         log.info("timeline watcher started (poll_interval=%ss)", self.poll_interval)
         while not stop_event.is_set():
+            # Loop liveness for app.LaneWatchdog (SYS-2, resilience sweep
+            # 2026-08-28), on the contract collector.py has carried since
+            # ops-efficiency-6. poll_once() talks to Resolve through the
+            # fusionscript C extension, which is exactly the kind of call a
+            # thread can be alive and permanently stuck inside; that is a
+            # different fault from a thread that died, and the watchdog can
+            # only tell them apart if this is stamped.
+            self._heartbeat = time.monotonic()
             try:
                 self.poll_once()
             except Exception:

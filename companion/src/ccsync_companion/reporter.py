@@ -236,6 +236,43 @@ def skew_phrase(skew: Any) -> str:
     return f"{amount} {direction}"
 
 
+# States a lane can be in that are NOT evidence of anything moving. A lane in
+# any other state ("syncing", or whatever a future adapter reports) owes the
+# dashboard a progress token.
+_TERMINAL_LANE_STATES = ("idle", "error", "paused")
+
+
+def _lane_liveness(status: Any) -> dict[str, Any]:
+    """`progress_token` + `state_since` for one lane (SYS-1, wave 2).
+
+    The liveness contract: a state may not be reported green or amber
+    without a monotonic progress token and the time it last changed. CR-91 is
+    what its absence cost -- `state=syncing, transferring=1,
+    last_error=NULL` for 2 h 20 m read as a working lane on the fleet page
+    while the editor downloaded nothing.
+
+    Both keys are OMITTED rather than sent as null when the lane cannot
+    supply them (a lane adapter or test double predating the fields), because
+    absent is how the dashboard tells an older companion from a lane that
+    claims to be moving and is not. The token is omitted when the lane is
+    idle for the same reason: there is nothing in flight for it to describe,
+    and a stale token on an idle lane is what the stall rule would misread.
+    Never raises: this rides every report."""
+    out: dict[str, Any] = {}
+    try:
+        since = getattr(status, "state_since", None)
+        if since is not None:
+            out["state_since"] = since.isoformat() if hasattr(since, "isoformat") else str(since)
+        token = getattr(status, "progress_token", None)
+        state = str(getattr(status, "state", "") or "").lower()
+        if token and state not in _TERMINAL_LANE_STATES:
+            out["progress_token"] = str(token)
+    except Exception:
+        log.exception("lane liveness fields could not be built")
+        return {}
+    return out
+
+
 def _section_digest(value: Any) -> str:
     """A stable digest of one report section, or "" when it cannot be taken.
 
@@ -321,6 +358,13 @@ def default_http_post(url: str, data: dict, headers: dict, timeout: float) -> An
     with upgrade_mod.build_no_redirect_opener().open(req, timeout=timeout) as resp:
         resp_data = resp.read()
     return json.loads(resp_data.decode("utf-8")) if resp_data else {}
+
+
+# A diagnostics bundle's ceiling, the dashboard's own (app.MAX_DIAGNOSTICS_BODY
+# BYTES / db.DIAGNOSTICS_MAX_CHARS). Cut on this side too: the wire is sometimes
+# an editor's home uplink, and a bundle that cannot be posted is a bundle nobody
+# reads (SYS-7, resilience sweep 2026-08-28).
+DIAGNOSTICS_MAX_CHARS = 256 * 1024
 
 
 class DashboardReporter:
@@ -739,6 +783,7 @@ class DashboardReporter:
                     "speed_bps": status.speed_bps,
                     "eta_seconds": status.eta_seconds,
                     "transfers": list(status.transfers),
+                    **_lane_liveness(status),
                 }
                 for status in statuses
             ],
@@ -1121,6 +1166,78 @@ class DashboardReporter:
                 self._on_report_response(resp)
             except Exception:
                 log.exception("on_report_response() failed")
+
+    def post_diagnostics(self, text: str, trigger: str = "button") -> bool:
+        """Upload one build_diagnostics() bundle. Returns whether it landed.
+
+        SYS-7 (resilience sweep 2026-08-28). The bundle used to go to the
+        CLIPBOARD, with the instruction "paste them to your admin in a
+        message" -- so the one artefact that answers "why is my footage not
+        syncing" existed only if a non-technical editor performed a manual
+        step at the right moment, on the machine that was broken. If any
+        CCSync window was open it silently went to the log instead.
+
+        NEVER WITHOUT A VERIFIED IDENTITY, on exactly post_once's rule: a
+        bundle names this machine's paths, its Resolve project and its
+        editor's tree, and posting one under an unverified (or stale) identity
+        would file another person's diagnostics under their name on the fleet
+        page. The same token and the same X-CCSync-Identity header post_once
+        sends, read per call for the reason post_once reads them per call --
+        IdentityManager republishes the report token into this same cfg dict
+        on sign-in.
+
+        Its own request, not a report section: a bundle is up to 256 KB of
+        text on three occasional triggers, and putting it in the 30 s report
+        would either bloat every tick or need a suppression rule (which is how
+        report sections start getting dropped -- SYS-3).
+
+        Raises nothing to a tray callback's taste, but DOES raise on a failed
+        POST like post_once, so callers that want the streak counted can catch
+        it; app.py's three triggers all treat a failure as "try again later",
+        because a diagnostics upload must never be the reason anything else
+        stops.
+        """
+        if not self.enabled:
+            return False
+        editor_name: Optional[str] = self.cfg.get("editor_name", "")
+        if self._get_editor_name is not None:
+            try:
+                editor_name = self._get_editor_name()
+            except Exception:
+                log.exception("get_editor_name() failed")
+                editor_name = None
+            if editor_name is None:
+                log.debug("diagnostics upload skipped: no verified editor identity")
+                return False
+        headers = {"Content-Type": "application/json"}
+        token = str(self.cfg.get("dashboard_token", "") or "").strip() or self.dashboard_token
+        if token:
+            headers["X-CCSync-Token"] = token
+        identity_token = None
+        if self._get_identity_token is not None:
+            try:
+                identity_token = self._get_identity_token()
+            except Exception:
+                log.exception("get_identity_token() failed")
+                identity_token = None
+        if identity_token:
+            headers["X-CCSync-Identity"] = identity_token
+        payload = {
+            "editor_name": editor_name,
+            "machine": platform.node(),
+            "machine_id": self._machine_id(),
+            "trigger": str(trigger or "button"),
+            "at": datetime.now(timezone.utc).isoformat(),
+            # Cut here as well as at the dashboard's body gate: the wire is
+            # sometimes an editor's home uplink, and a bundle that cannot be
+            # posted is a bundle nobody reads.
+            "text": str(text or "")[:DIAGNOSTICS_MAX_CHARS],
+        }
+        url = f"{self.dashboard_url.rstrip('/')}/api/v1/diagnostics"
+        self._http_post(url, payload, headers, self.full_report_timeout)
+        log.info("diagnostics uploaded to the dashboard (%s, %d chars)",
+                 trigger, len(payload["text"]))
+        return True
 
     # -- lifecycle -----------------------------------------------------
     def start(self) -> None:

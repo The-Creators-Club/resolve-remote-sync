@@ -978,6 +978,86 @@ CREATE INDEX IF NOT EXISTS ix_fleet_audit_action ON fleet_audit(action, id);
 ALTER TABLE selections ADD COLUMN changed_at TEXT NOT NULL DEFAULT '';
 """
 
+# SYS-1 / SYS-5 (resilience sweep 2026-08-28). The liveness contract's
+# storage: a lane may not be green or amber without a monotonic progress
+# token AND the server-clock time that token last changed, and a machine's
+# free space is now on the wire instead of being invisible to every page.
+#
+# progress_token_since is OURS, not the companion's: it is the received_at of
+# the first report that carried the CURRENT token (see upsert_lane_report),
+# so a wrong clock on the machine cannot hide a stall and a companion whose
+# sequencer thread has died cannot keep answering "still fresh" (SYS-2).
+#
+# rotation_seconds is the companion's own project_rotation_seconds, sent in
+# sync_guard so the stall budget is 3 rotations rather than a number the
+# server guessed; absent, health.lane_stall falls back to its 30 min floor.
+#
+# stalled_lane/stalled_seconds hold sync_guard.stalled -- the stall the
+# COMPANION detected and killed (SYNC-1/SYS-17). Both are ADD COLUMN, which
+# migrate() skips when the column exists, so the WHY/DIAGNOSTICS step may
+# name them again without breaking the replay.
+SCHEMA_V32 = """
+ALTER TABLE lane_report_current ADD COLUMN progress_token TEXT;
+ALTER TABLE lane_report_current ADD COLUMN progress_token_since TEXT;
+ALTER TABLE lane_report_current ADD COLUMN state_since TEXT;
+ALTER TABLE machine_state ADD COLUMN disk_root_free_bytes INTEGER;
+ALTER TABLE machine_state ADD COLUMN disk_root_total_bytes INTEGER;
+ALTER TABLE machine_state ADD COLUMN disk_system_free_bytes INTEGER;
+ALTER TABLE machine_state ADD COLUMN disk_at TEXT;
+ALTER TABLE machine_state ADD COLUMN rotation_seconds REAL;
+ALTER TABLE machine_state ADD COLUMN stalled_lane TEXT;
+ALTER TABLE machine_state ADD COLUMN stalled_seconds INTEGER;
+ALTER TABLE machine_state ADD COLUMN stalled_killed INTEGER;
+ALTER TABLE machine_state ADD COLUMN stalled_at TEXT;
+"""
+
+# v33: the WHY sentence's stored inputs and the diagnostics channel (SYS-7,
+# resilience sweep 2026-08-28).
+#
+# blocked_* is `sync_guard.blocked` flattened (SYNC-15): the companion's OWN
+# ranked answer to "why is nothing moving", which is the only end that can see
+# the root guard's fourth answer, the licence park and its own transport.
+# health.why_not_syncing prefers it over anything this server derives.
+#
+# restarts_* is the LaneWatchdog's record (SYS-2). It is here, on the machine's
+# row, rather than only in a companion state file, because "this machine has
+# needed its sync thread restarted three times an hour" is the difference
+# between self-healing and a machine that needs a person, and the file it is
+# written to is on the sick machine.
+#
+# `diagnostics` is append-only per machine and bounded twice over: the newest
+# DIAGNOSTICS_KEEP_PER_MACHINE bundles per (editor, machine) at write time, and
+# DIAGNOSTICS_MAX_AGE_DAYS in prune(). A bundle is build_diagnostics()'s text
+# and nothing else -- it holds no credential (the companion redacts its own
+# token), so it lives in the same DB rather than in a second store.
+#
+# The two `machines` columns are the one-shot ASK THIS MACHINE WHY request,
+# modelled on lane_b_resume_requested_at down to the `requested_at` stamp: the
+# companion compares it so a redelivered command is not re-run.
+SCHEMA_V33 = """
+ALTER TABLE machine_state ADD COLUMN blocked_reason TEXT;
+ALTER TABLE machine_state ADD COLUMN blocked_detail TEXT;
+ALTER TABLE machine_state ADD COLUMN blocked_since TEXT;
+ALTER TABLE machine_state ADD COLUMN restarts_count_24h INTEGER;
+ALTER TABLE machine_state ADD COLUMN restarts_last_at TEXT;
+ALTER TABLE machine_state ADD COLUMN restarts_last_error TEXT;
+ALTER TABLE machines ADD COLUMN diagnostics_requested_at TEXT;
+ALTER TABLE machines ADD COLUMN diagnostics_requested_by TEXT;
+CREATE TABLE IF NOT EXISTS diagnostics (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  editor      TEXT NOT NULL,
+  machine     TEXT NOT NULL,
+  machine_id  TEXT NOT NULL DEFAULT '',
+  trigger     TEXT NOT NULL DEFAULT '',
+  at          TEXT NOT NULL DEFAULT '',
+  received_at TEXT NOT NULL,
+  text        TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS ix_diagnostics_machine
+  ON diagnostics(editor, machine, id);
+CREATE INDEX IF NOT EXISTS ix_diagnostics_received ON diagnostics(received_at);
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -1017,6 +1097,10 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # did.
     (30, SCHEMA_V30),
     (31, SCHEMA_V31),
+    # 32 (liveness/disk) and 33 (why-not-syncing/diagnostics) are the second
+    # pair of the same sweep, numbered in advance for the same reason.
+    (32, SCHEMA_V32),
+    (33, SCHEMA_V33),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -1800,18 +1884,44 @@ def upsert_lane_report(
     bytes_total: int | None = None,
     speed_bps: float | None = None,
     eta_seconds: float | None = None,
+    progress_token: str | None = None,
+    state_since: str | None = None,
 ) -> None:
+    """`progress_token` is the lane's own monotonic "real work happened"
+    marker (SYS-1, resilience sweep 2026-08-28).
+
+    The column this dashboard actually judges a stall on is
+    `progress_token_since`, which is written HERE from the server's
+    `received_at` and ONLY when the token differs from the stored one. That is
+    the whole point of the contract: the companion cannot tell us how long it
+    has been stuck (the thread that would notice is the one that is wedged),
+    and it cannot accidentally reset the clock by re-sending the same token
+    every 30 s either.
+
+    A report carrying no token clears the stamp rather than keeping
+    yesterday's: the lane has gone quiet or the build is too old to say, and
+    health.lane_stall answers "no verdict" to both.
+    """
     prev = conn.execute(
-        """SELECT state, last_error FROM lane_report_current
+        """SELECT state, last_error, progress_token, progress_token_since
+           FROM lane_report_current
            WHERE editor_username=? AND machine=? AND lane=?""",
         (editor_username, machine, lane),
     ).fetchone()
+    token_since: str | None = None
+    if progress_token:
+        if (prev is not None and prev["progress_token"] == progress_token
+                and prev["progress_token_since"]):
+            token_since = prev["progress_token_since"]
+        else:
+            token_since = received_at
     conn.execute(
         """INSERT INTO lane_report_current
              (editor_username, machine, lane, state, queued, transferring, last_error,
               last_sync, detail, companion_version, reported_at, received_at,
-              current_project, bytes_done, bytes_total, speed_bps, eta_seconds)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              current_project, bytes_done, bytes_total, speed_bps, eta_seconds,
+              progress_token, progress_token_since, state_since)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(editor_username, machine, lane) DO UPDATE SET
              state=excluded.state, queued=excluded.queued, transferring=excluded.transferring,
              last_error=excluded.last_error, last_sync=excluded.last_sync,
@@ -1819,10 +1929,14 @@ def upsert_lane_report(
              reported_at=excluded.reported_at, received_at=excluded.received_at,
              current_project=excluded.current_project, bytes_done=excluded.bytes_done,
              bytes_total=excluded.bytes_total, speed_bps=excluded.speed_bps,
-             eta_seconds=excluded.eta_seconds""",
+             eta_seconds=excluded.eta_seconds,
+             progress_token=excluded.progress_token,
+             progress_token_since=excluded.progress_token_since,
+             state_since=excluded.state_since""",
         (editor_username, machine, lane, state, queued, transferring, last_error,
          last_sync, detail, companion_version, reported_at, received_at,
-         current_project, bytes_done, bytes_total, speed_bps, eta_seconds),
+         current_project, bytes_done, bytes_total, speed_bps, eta_seconds,
+         progress_token, token_since, state_since),
     )
     if prev is None or prev["state"] != state or prev["last_error"] != last_error:
         conn.execute(
@@ -2479,6 +2593,259 @@ def lane_b_resume_request(
     if row is None or not row["at"]:
         return None
     return dict(row)
+
+
+# -- the WHY sentence and the diagnostics channel (v33, SYS-7) -------------
+#
+# SYS-7 (resilience sweep 2026-08-28): build_diagnostics() on the companion is
+# genuinely good and went to the CLIPBOARD, so the one artefact that answers
+# "why is my footage not syncing" existed only if a non-technical editor
+# performed a manual step at the right moment, on the machine that was broken.
+
+DIAGNOSTICS_KEEP_PER_MACHINE = 5
+DIAGNOSTICS_MAX_AGE_DAYS = 30
+# 256 KB. The route refuses a longer body outright (app._BODY_LIMITS); this is
+# the second cut, applied to the text itself, so a body that arrives inside the
+# ceiling with one enormous field cannot put a megabyte in a TEXT column.
+DIAGNOSTICS_MAX_CHARS = 256 * 1024
+
+
+def store_blocked_state(
+    conn: sqlite3.Connection, editor: str, machine: str,
+    guard: Mapping[str, Any] | None,
+) -> None:
+    """Write `sync_guard.blocked` + `sync_guard.restarts` onto the machine's row.
+
+    Its own UPDATE rather than six more columns in upsert_machine_state's
+    INSERT: that statement is edited by every work package that touches the
+    report, and this pair has one rule of its own anyway.
+
+    THE LATCH RULE, not COALESCE (the same reasoning as the breaker and the
+    supervisor section): these are written by any report that carried a guard
+    section at all, because an ABSENT `blocked` is how the companion spells
+    "nothing is blocking me now" -- and a COALESCE could never express that,
+    so "the sync drive is not there" would have stayed on the grid for ever
+    after the drive came back.
+
+    `guard` None (a companion with no sync_guard section at all) leaves every
+    column alone: it has no opinion to record, and clearing another build's
+    alarm on its behalf is exactly what must not happen.
+    """
+    if guard is None or not guard.get("at"):
+        return
+    conn.execute(
+        """UPDATE machine_state
+              SET blocked_reason=?, blocked_detail=?, blocked_since=?,
+                  restarts_count_24h=?, restarts_last_at=?, restarts_last_error=?
+            WHERE editor_username=? AND machine=?""",
+        (guard.get("blocked_reason"), guard.get("blocked_detail"),
+         guard.get("blocked_since"), guard.get("restarts_count_24h"),
+         guard.get("restarts_last_at"), guard.get("restarts_last_error"),
+         editor, machine),
+    )
+
+
+def plan_summary_map(
+    conn: sqlite3.Connection, keys: Iterable[tuple[str, str]]
+) -> dict[tuple[str, str], dict[str, int]]:
+    """(editor, machine) -> {count, full, upload_only} for the WHY sentence.
+
+    Two queries for the whole fleet rather than selections_for_machine per row
+    (the fleet grid rebuilds every 15 s for every open page), and it carries
+    that function's ONE inheritance rule with it: a machine with rows of its
+    own never also inherits the unassigned bucket, because that is what makes
+    "untick this project on the laptop" expressible (docs/MULTI_MACHINE_PLAN.md).
+
+    Distinguishing `full` from `upload_only` is the whole point: an
+    upload-only machine's lane B is MEANT to be idle (CR-85), and a sentence
+    that called that a fault would send an admin chasing a machine that is
+    working exactly as ticked.
+    """
+    own: dict[tuple[str, str], dict[str, int]] = {}
+    for r in conn.execute(
+        "SELECT editor_username, machine, sync_mode, COUNT(*) AS n FROM selections "
+        "WHERE machine <> ? GROUP BY editor_username, machine, sync_mode",
+        (ANY_MACHINE,),
+    ):
+        own.setdefault((r["editor_username"], r["machine"]), {})[
+            str(r["sync_mode"] or SYNC_MODE_FULL)] = int(r["n"])
+    bucket: dict[str, dict[str, int]] = {}
+    for r in conn.execute(
+        "SELECT editor_username, sync_mode, COUNT(*) AS n FROM selections "
+        "WHERE machine = ? GROUP BY editor_username, sync_mode",
+        (ANY_MACHINE,),
+    ):
+        bucket.setdefault(r["editor_username"], {})[
+            str(r["sync_mode"] or SYNC_MODE_FULL)] = int(r["n"])
+    out: dict[tuple[str, str], dict[str, int]] = {}
+    for editor, machine in keys:
+        modes = own.get((editor, machine))
+        if modes is None:
+            modes = bucket.get(editor, {})
+        out[(editor, machine)] = {
+            "count": sum(modes.values()),
+            "full": int(modes.get(SYNC_MODE_FULL, 0)),
+            "upload_only": int(modes.get(SYNC_MODE_UPLOAD_ONLY, 0)),
+        }
+    return out
+
+
+def request_diagnostics(
+    conn: sqlite3.Connection, editor: str, machine: str,
+    requested_by: str, now: str,
+) -> bool:
+    """[ ASK THIS MACHINE WHY ]: one-shot, delivered on the next report (v33).
+
+    False when there is no such machine, on the same reasoning as
+    request_lane_b_resume: a request that names nothing must read as a failure
+    to the admin rather than as a silent success.
+
+    Unlike the resume request this one is NOT cleared when the reply goes out:
+    it clears when a bundle with trigger `admin_request` ARRIVES. Re-sending
+    it costs one upload of a text file, and the failure it must not have is
+    the one that matters here -- an admin clicking, nothing ever arriving, and
+    no way to tell a lost reply from a machine that had nothing to say.
+    """
+    cur = conn.execute(
+        """UPDATE machines
+              SET diagnostics_requested_at=?, diagnostics_requested_by=?
+            WHERE editor_username=? AND machine=?""",
+        (now, requested_by, editor, machine),
+    )
+    if cur.rowcount > 0:
+        audit(conn, requested_by, "diagnostics.request", machine,
+              {"editor": editor, "machine": machine}, now=now)
+    return cur.rowcount > 0
+
+
+def clear_diagnostics_request(
+    conn: sqlite3.Connection, editor: str, machine: str
+) -> None:
+    conn.execute(
+        """UPDATE machines
+              SET diagnostics_requested_at=NULL, diagnostics_requested_by=NULL
+            WHERE editor_username=? AND machine=?""",
+        (editor, machine),
+    )
+
+
+def diagnostics_request(
+    conn: sqlite3.Connection, editor: str, machine: str
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        """SELECT diagnostics_requested_at AS at,
+                  diagnostics_requested_by AS by_user
+             FROM machines WHERE editor_username=? AND machine=?""",
+        (editor, machine),
+    ).fetchone()
+    if row is None or not row["at"]:
+        return None
+    return dict(row)
+
+
+def pending_diagnostics_requests(conn: sqlite3.Connection) -> set[tuple[str, str]]:
+    """Which machines have an admin's ASK still in flight, so the button can
+    say ASKED rather than inviting a second click at a machine that has
+    simply not reported yet (the RESUME button's own rule)."""
+    return {
+        (r["editor_username"], r["machine"])
+        for r in conn.execute(
+            "SELECT editor_username, machine FROM machines "
+            "WHERE diagnostics_requested_at IS NOT NULL"
+        )
+    }
+
+
+def record_diagnostics(
+    conn: sqlite3.Connection, *, editor: str, machine: str, machine_id: str,
+    trigger: str, at: str, received_at: str, text: str,
+) -> int:
+    """Store one diagnostics bundle and keep only the newest N for that machine.
+
+    Bounded at WRITE time and not only in prune(): the lane-error trigger can
+    fire on every pass of a machine that fails every pass, which is precisely
+    the machine whose bundles you want, and precisely the one that would
+    otherwise fill /data with them. Newest N because the oldest bundle from a
+    machine that has been broken for a week says less than the newest.
+    """
+    cur = conn.execute(
+        "INSERT INTO diagnostics (editor, machine, machine_id, trigger, at, "
+        "received_at, text) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (editor, machine, str(machine_id or ""), str(trigger or ""), str(at or ""),
+         received_at, str(text or "")[:DIAGNOSTICS_MAX_CHARS]),
+    )
+    conn.execute(
+        """DELETE FROM diagnostics
+            WHERE editor=? AND machine=? AND id NOT IN (
+              SELECT id FROM diagnostics WHERE editor=? AND machine=?
+               ORDER BY id DESC LIMIT ?)""",
+        (editor, machine, editor, machine, DIAGNOSTICS_KEEP_PER_MACHINE),
+    )
+    return int(cur.lastrowid or 0)
+
+
+def fetch_diagnostics(
+    conn: sqlite3.Connection, editor: str | None = None,
+    machine: str | None = None, limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Bundles, newest first. `editor`/`machine` narrow it to one computer."""
+    q = "SELECT * FROM diagnostics"
+    where: list[str] = []
+    params: list[Any] = []
+    if editor:
+        where.append("editor = ?")
+        params.append(editor)
+    if machine:
+        where.append("machine = ?")
+        params.append(machine)
+    if where:
+        q += " WHERE " + " AND ".join(where)
+    q += " ORDER BY id DESC LIMIT ?"
+    params.append(max(1, min(int(limit), 200)))
+    return [dict(r) for r in conn.execute(q, params)]
+
+
+def newest_diagnostics_per_machine(
+    conn: sqlite3.Connection, limit: int = 50
+) -> list[dict[str, Any]]:
+    """The newest bundle from each computer that has ever sent one.
+
+    What the admin partial renders: one row per machine, because the question
+    it answers is "what did each of these say last", never "show me every
+    bundle ever".
+    """
+    return [
+        dict(r) for r in conn.execute(
+            """SELECT d.* FROM diagnostics d
+                 JOIN (SELECT editor, machine, MAX(id) AS newest FROM diagnostics
+                        GROUP BY editor, machine) m
+                   ON m.newest = d.id
+                ORDER BY d.id DESC LIMIT ?""",
+            (max(1, min(int(limit), 200)),),
+        )
+    ]
+
+
+def diagnostics_stamp_map(
+    conn: sqlite3.Connection
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """(editor, machine) -> {id, trigger, received_at} of its newest bundle.
+
+    The fleet grid needs "there is an answer for this machine, from N minutes
+    ago" without carrying every bundle's text into a 15-second poll.
+    """
+    return {
+        (r["editor"], r["machine"]): {
+            "id": r["id"], "trigger": r["trigger"], "received_at": r["received_at"],
+        }
+        for r in conn.execute(
+            """SELECT d.id, d.editor, d.machine, d.trigger, d.received_at
+                 FROM diagnostics d
+                 JOIN (SELECT editor, machine, MAX(id) AS newest FROM diagnostics
+                        GROUP BY editor, machine) m
+                   ON m.newest = d.id"""
+        )
+    }
 
 
 # -- dashboard-driven file moves (v29, docs/FILE_MOVES.md) ------------------
@@ -3306,7 +3673,10 @@ def upsert_machine_state(
               received_at, client_reported_at, clock_skew_seconds,
               supervisor_down_since, supervisor_attempts, supervisor_last_error,
               supervisor_supervising, crash_count, crash_newest,
-              folders_unfiltered, folders_unfiltered_names, sync_conflicts)
+              folders_unfiltered, folders_unfiltered_names, sync_conflicts,
+              disk_root_free_bytes, disk_root_total_bytes,
+              disk_system_free_bytes, disk_at, rotation_seconds,
+              stalled_lane, stalled_seconds, stalled_killed, stalled_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -3316,7 +3686,9 @@ def upsert_machine_state(
                    ?, ?, ?,
                    ?, ?, ?,
                    ?, ?, ?,
-                   ?, ?, ?)
+                   ?, ?, ?,
+                   ?, ?, ?, ?, ?,
+                   ?, ?, ?, ?)
            ON CONFLICT(editor_username, machine) DO UPDATE SET
              detected_project_root=excluded.detected_project_root,
              reported_at=excluded.reported_at,
@@ -3498,7 +3870,40 @@ def upsert_machine_state(
                               ELSE excluded.crash_count END,
              crash_newest=CASE WHEN excluded.guard_at IS NULL
                                THEN machine_state.crash_newest
-                               ELSE excluded.crash_newest END""",
+                               ELSE excluded.crash_newest END,
+             -- v32 (SYS-5 / SYS-1). The disk figures are a MEASUREMENT taken
+             -- once per heavy tick, not an alarm that has to be able to
+             -- clear, so they follow the COALESCE rule with disk_at as their
+             -- own marker: a light report in between must not blank the last
+             -- known free space and take the DISK chip off a nearly-full
+             -- machine. Same for rotation_seconds, which is a config value.
+             disk_root_free_bytes=CASE WHEN excluded.disk_at IS NULL
+                                       THEN machine_state.disk_root_free_bytes
+                                       ELSE excluded.disk_root_free_bytes END,
+             disk_root_total_bytes=CASE WHEN excluded.disk_at IS NULL
+                                        THEN machine_state.disk_root_total_bytes
+                                        ELSE excluded.disk_root_total_bytes END,
+             disk_system_free_bytes=CASE WHEN excluded.disk_at IS NULL
+                                         THEN machine_state.disk_system_free_bytes
+                                         ELSE excluded.disk_system_free_bytes END,
+             disk_at=COALESCE(excluded.disk_at, machine_state.disk_at),
+             rotation_seconds=COALESCE(excluded.rotation_seconds,
+                                       machine_state.rotation_seconds),
+             -- ...and the companion's own kill record follows the LATCH rule
+             -- instead: a stall it killed and has since recovered from must
+             -- be able to take its chip off the grid (SYNC-1/SYS-17).
+             stalled_lane=CASE WHEN excluded.guard_at IS NULL
+                               THEN machine_state.stalled_lane
+                               ELSE excluded.stalled_lane END,
+             stalled_seconds=CASE WHEN excluded.guard_at IS NULL
+                                  THEN machine_state.stalled_seconds
+                                  ELSE excluded.stalled_seconds END,
+             stalled_killed=CASE WHEN excluded.guard_at IS NULL
+                                 THEN machine_state.stalled_killed
+                                 ELSE excluded.stalled_killed END,
+             stalled_at=CASE WHEN excluded.guard_at IS NULL
+                             THEN machine_state.stalled_at
+                             ELSE excluded.stalled_at END""",
         (editor, machine, detected_project_root, now, resolve_project, int(verified),
          platform, companion_version,
          t.get("relayed"), t.get("direct"), t.get("orphan_partials"),
@@ -3521,7 +3926,12 @@ def upsert_machine_state(
          g.get("supervisor_last_error"), g.get("supervisor_supervising"),
          g.get("crash_count"), g.get("crash_newest"),
          g.get("folders_unfiltered"), g.get("folders_unfiltered_names"),
-         g.get("sync_conflicts")),
+         g.get("sync_conflicts"),
+         g.get("disk_root_free_bytes"), g.get("disk_root_total_bytes"),
+         g.get("disk_system_free_bytes"), g.get("disk_at"),
+         g.get("rotation_seconds"),
+         g.get("stalled_lane"), g.get("stalled_seconds"),
+         g.get("stalled_killed"), g.get("stalled_at")),
     )
     evict_extra_machines(conn, editor)
 
@@ -3562,6 +3972,31 @@ def fetch_sync_guard_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict
             "folders_unfiltered_names": r["folders_unfiltered_names"],
             "sync_conflicts": r["sync_conflicts"],
             "clock_skew_seconds": r["clock_skew_seconds"],
+            # v32 (SYS-5 / SYS-1). free/total are what the DISK chip reads;
+            # `rotation_seconds` is what turns health.lane_stall's budget from
+            # a guess into this machine's own 3 rotations.
+            "disk_root_free_bytes": r["disk_root_free_bytes"],
+            "disk_root_total_bytes": r["disk_root_total_bytes"],
+            "disk_system_free_bytes": r["disk_system_free_bytes"],
+            "disk_at": r["disk_at"],
+            "rotation_seconds": r["rotation_seconds"],
+            "stalled_lane": r["stalled_lane"],
+            "stalled_seconds": r["stalled_seconds"],
+            "stalled_killed": (
+                None if r["stalled_killed"] is None else bool(r["stalled_killed"])
+            ),
+            "stalled_at": r["stalled_at"],
+            # v33 (SYS-7 / SYNC-15). The companion's own ranked answer to
+            # "why is nothing moving", which health.why_not_syncing prefers
+            # over anything this server can derive, and the LaneWatchdog's
+            # restart record (SYS-2) beside it: a machine that self-heals
+            # three times an hour is a machine that needs a person.
+            "blocked_reason": r["blocked_reason"],
+            "blocked_detail": r["blocked_detail"],
+            "blocked_since": r["blocked_since"],
+            "restarts_count_24h": r["restarts_count_24h"],
+            "restarts_last_at": r["restarts_last_at"],
+            "restarts_last_error": r["restarts_last_error"],
         }
         for r in conn.execute(
             """SELECT editor_username, machine, breaker_tripped, breaker_reason,
@@ -3571,7 +4006,12 @@ def fetch_sync_guard_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict
                       supervisor_last_error, supervisor_supervising,
                       crash_count, crash_newest, folders_unfiltered,
                       folders_unfiltered_names, sync_conflicts,
-                      clock_skew_seconds
+                      clock_skew_seconds,
+                      disk_root_free_bytes, disk_root_total_bytes,
+                      disk_system_free_bytes, disk_at, rotation_seconds,
+                      stalled_lane, stalled_seconds, stalled_killed, stalled_at,
+                      blocked_reason, blocked_detail, blocked_since,
+                      restarts_count_24h, restarts_last_at, restarts_last_error
                FROM machine_state"""
         )
     }
@@ -4195,6 +4635,15 @@ def prune(conn: sqlite3.Connection, now: str) -> None:
     conn.execute(
         "DELETE FROM fleet_audit WHERE at < ?", (cutoff(days=AUDIT_MAX_AGE_DAYS),),
     )
+    # Diagnostics bundles (v33, SYS-7). Bounded at write time to the newest
+    # DIAGNOSTICS_KEEP_PER_MACHINE per computer; this is the age bound, on the
+    # SERVER's received_at rather than the companion's `at` -- a machine with a
+    # wrong clock must not be able to keep its bundles for ever, nor lose them
+    # on arrival (SYS-4's lesson, applied to a second table).
+    conn.execute(
+        "DELETE FROM diagnostics WHERE received_at < ?",
+        (cutoff(days=DIAGNOSTICS_MAX_AGE_DAYS),),
+    )
     conn.execute(
         """DELETE FROM poll_runs WHERE id NOT IN
              (SELECT id FROM poll_runs ORDER BY id DESC LIMIT ?)""",
@@ -4437,6 +4886,83 @@ def fetch_nas_media_summary(conn: sqlite3.Connection, project_id: int) -> dict[s
         return {"n_originals": 0, "bytes_originals": 0, "n_proxies": 0, "bytes_proxies": 0,
                 "walked_at": None, "last_error": None}
     return dict(row)
+
+
+def project_proxy_bytes(conn: sqlite3.Connection, slug: str) -> int | None:
+    """How many bytes of PROXIES this project holds on the NAS, or None.
+
+    UX-1 (resilience sweep 2026-08-28): the figure the tick preflight needs.
+    None means the collector has never walked this project (or the walk was
+    refused and the rollup is deliberately stale-but-kept, see
+    replace_nas_media), which the warning treats as "cannot say" rather than
+    as zero -- a preflight that reads an un-walked 4 TB project as 0 GB is
+    worse than no preflight.
+
+    Proxies only, deliberately: lane B is what a tick brings DOWN to an
+    editor's machine, and originals stay on the NAS.
+    """
+    row = conn.execute(
+        """SELECT s.bytes_proxies AS b, s.walked_at AS walked_at
+           FROM nas_inventory_state s JOIN projects p ON p.id = s.project_id
+           WHERE p.slug = ?""",
+        (slug,),
+    ).fetchone()
+    if row is None or not row["walked_at"]:
+        return None
+    return int(row["b"] or 0)
+
+
+def project_proxy_bytes_map(conn: sqlite3.Connection) -> dict[str, int]:
+    """slug -> NAS proxy bytes, for the pages that need every project at once
+    (the assignment grid's preflight, UX-1). Only projects the collector has
+    actually walked appear, so a missing key reads as "cannot say"."""
+    return {
+        r["slug"]: int(r["b"] or 0)
+        for r in conn.execute(
+            """SELECT p.slug AS slug, s.bytes_proxies AS b
+               FROM nas_inventory_state s JOIN projects p ON p.id = s.project_id
+               WHERE s.walked_at IS NOT NULL AND s.walked_at != ''"""
+        )
+    }
+
+
+def machine_free_bytes(
+    conn: sqlite3.Connection, editor: str, machine: str
+) -> tuple[int | None, str | None]:
+    """(free bytes on that computer's sync drive, when it was measured).
+
+    (None, None) for a machine that has never reported a disk section -- every
+    machine in the field until the companion half of SYS-5 ships. The tick
+    warning stays silent for those rather than inventing a number.
+    """
+    row = conn.execute(
+        """SELECT disk_root_free_bytes AS free, disk_at FROM machine_state
+           WHERE editor_username=? AND machine=?""",
+        (editor, machine),
+    ).fetchone()
+    if row is None:
+        return None, None
+    free = row["free"]
+    return (None if free is None else int(free)), row["disk_at"]
+
+
+def machine_disk_map(
+    conn: sqlite3.Connection, editor: str | None = None
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """(editor, machine) -> {free, total, at} for the assignment grid's
+    column headers, so [ ALL ] can add a column's projects up in the browser
+    without a request per cell (UX-1)."""
+    q = ("SELECT editor_username, machine, disk_root_free_bytes AS free, "
+         "disk_root_total_bytes AS total, disk_at FROM machine_state")
+    params: list[Any] = []
+    if editor is not None:
+        q += " WHERE editor_username=?"
+        params.append(editor)
+    return {
+        (r["editor_username"], r["machine"]): {
+            "free": r["free"], "total": r["total"], "at": r["disk_at"]}
+        for r in conn.execute(q, params)
+    }
 
 
 def fetch_editor_media_for_project(

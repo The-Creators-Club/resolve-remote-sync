@@ -188,7 +188,7 @@ def test_default_toml_text_documents_every_default_key():
         # the measured-safe defaults, and pinning them in every first-run
         # file is how a later re-tune reaches nobody.
         "lane_b_max_deletes_per_pass", "lane_b_max_delete_fraction",
-        "lane_b_remote_shrink_fraction",
+        "lane_b_remote_shrink_fraction", "lane_b_min_free_bytes",
         "trash_max_age_days", "trash_max_bytes", "trash_prune_interval_seconds",
         # The proxy generator's free-space floor and stability window, and the
         # two rehearsal switches (COMMERCIAL_READINESS.md item 9, 2026-08-17).
@@ -268,7 +268,7 @@ EXAMPLE_COMMENTED_OUT = {
     # The lane B circuit breaker + .ccsync-trash retention, same class again
     # (COMMERCIAL_READINESS.md item 9, 2026-08-17).
     "lane_b_max_deletes_per_pass", "lane_b_max_delete_fraction",
-    "lane_b_remote_shrink_fraction",
+    "lane_b_remote_shrink_fraction", "lane_b_min_free_bytes",
     "trash_max_age_days", "trash_max_bytes", "trash_prune_interval_seconds",
     # The proxy generator's free-space floor and stability window, and the two
     # rehearsal switches (COMMERCIAL_READINESS.md item 9, 2026-08-17).
@@ -1198,3 +1198,24 @@ def test_set_value_reports_false_when_the_value_cannot_be_read_back(tmp_path,
 
     monkeypatch.setattr(config_mod, "load_config", _lies)
     assert config_mod.set_value(path, "mode", "base") is False
+
+
+# -- project_rotation_seconds is the watchdog's budget (SYS-17, CR-91) -------
+
+
+@pytest.mark.parametrize("value", [0, -1, "off", None])
+def test_validate_config_refuses_a_non_positive_project_rotation(tmp_path, value):
+    """A hand-edited `project_rotation_seconds = 0` silently removed
+    --max-duration from every lane command (`_max_duration_flags` returns []),
+    i.e. it removed the only time budget a pass had. SYS-17 asks for the
+    refusal to be explicit rather than implicit; this pins it, because the
+    stall watchdog's two ceilings are derived from the same number."""
+    errors, _warnings = config_mod.validate_config(
+        _good_cfg(tmp_path, project_rotation_seconds=value))
+    assert any("project_rotation_seconds must be a positive number" in e for e in errors)
+
+
+def test_a_valid_project_rotation_is_not_flagged(tmp_path):
+    errors, _warnings = config_mod.validate_config(
+        _good_cfg(tmp_path, project_rotation_seconds=900))
+    assert not any("project_rotation_seconds" in e for e in errors)

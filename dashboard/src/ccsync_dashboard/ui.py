@@ -26,6 +26,7 @@ from .api import (
 # The fleet-read redaction the JSON API applies, imported under a name that
 # says where the rule lives: ONE definition, two callers (COMMERCIAL_READINESS.md
 # §C L1, 2026-08-17). See api.py's "scoping fleet reads" block.
+from .api import tick_capacity_warning
 from .api import _purge_user_credentials as api_purge_user_credentials
 from .api import _scope_editors_view as api_scope_editors_view
 from .api import _scope_projects_view as api_scope_projects_view
@@ -958,6 +959,15 @@ def _sidebar_context(request: Request, conn, current: str | None,
         # is the whole difference between an informed click and CR-49's
         # "unticked the wrong row and the fleet unshared it".
         "toggle_editor_machines": db.machines_of(conn, toggle_editor) if toggle_editor else [],
+        # UX-1 (resilience sweep 2026-08-28): what ticking THIS page's project
+        # onto that person's computers would cost, in one sentence, so the
+        # confirm can say it before the write. Only for the current project:
+        # the sidebar's other rows are a tree of a hundred checkboxes and the
+        # figure that matters is the one the owner is looking at.
+        "tick_warning": (
+            tick_capacity_warning(conn, toggle_editor, current)
+            if toggle_editor and current else None
+        ),
     }
 
 
@@ -2097,6 +2107,62 @@ async def partial_admin_resume_lane_b(
     return _render(request, "partials/fleet_grid.html", {
         "view": api_scope_projects_view(build_projects_view(conn), scope),
         "fleet": api_scope_editors_view(build_editors_view(conn), scope),
+    })
+
+
+@router.post("/partials/admin/machines/ask-why")
+async def partial_admin_ask_why(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    """[ ASK THIS MACHINE WHY ] (v33, SYS-7, resilience sweep 2026-08-28).
+
+    Writes the one-shot request the next report reply carries, exactly as the
+    RESUME button beside it does. The admin who has just read "Not syncing:
+    the sync drive is not there on this computer" wants the whole bundle, and
+    until now the only route to it was asking a non-technical editor to click
+    Copy diagnostics on the machine that was broken.
+
+    Re-renders the fleet grid so the ASKED chip appears immediately; a refusal
+    (an unknown machine) shows as the row simply staying put, the same way the
+    two buttons beside it behave."""
+    admin = _require_admin_page(request)
+    form = await _form(request)
+    editor = form.get("editor", "").strip().lower()
+    machine = form.get("machine", "").strip()
+    if not db.request_diagnostics(conn, editor, machine, admin, db.utcnow_iso()):
+        log.warning("ask-why refused: no machine %r for %r", machine, editor)
+    conn.commit()
+    scope = auth.scope_for(request)
+    return _render(request, "partials/fleet_grid.html", {
+        "view": api_scope_projects_view(build_projects_view(conn), scope),
+        "fleet": api_scope_editors_view(build_editors_view(conn), scope),
+    })
+
+
+@router.get("/partials/admin/diagnostics")
+def partial_admin_diagnostics(
+    request: Request, editor: str = "", machine: str = "",
+    conn: sqlite3.Connection = Depends(get_conn)
+):
+    """The stored diagnostics bundles (v33, SYS-7).
+
+    ADMIN ONLY, and not merely by convention: a bundle names an editor's
+    paths, their Resolve project and their tree, which is exactly what
+    COMMERCIAL_READINESS.md §C L1 says one editor may not read about another.
+
+    Lives OUTSIDE the fleet-grid wrapper on the page, so the grid's own 15 s
+    poll cannot swap an open bundle out from under whoever is reading it.
+    """
+    _require_admin_page(request)
+    editor = editor.strip().lower()
+    machine = machine.strip()
+    if editor or machine:
+        bundles = db.fetch_diagnostics(conn, editor=editor or None,
+                                       machine=machine or None, limit=5)
+    else:
+        bundles = db.newest_diagnostics_per_machine(conn)
+    return _render(request, "partials/admin_diagnostics.html", {
+        "diagnostics": {"bundles": bundles, "editor": editor, "machine": machine},
     })
 
 

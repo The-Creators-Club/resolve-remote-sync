@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import sys
 import threading
 import time
 import urllib.error
@@ -30,11 +31,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .. import config as config_mod
+from .. import crash_report
 from ..selection import SelectionClient
 # A LANE's error state, not one of this module's own STATE_* (which describe
 # the sequencer itself) -- hence the alias.
 from .base import STATE_ERROR as STATE_ERROR_LANE
-from .rclone_lane import clone_directory_tree
+from .rclone_lane import clone_directory_tree, hard_ceiling_seconds
 from .borrowed_folders import BorrowedFolderManager
 from .repath import ProjectRepather, _default_move, normalized_safe_rel
 from .shared_folders import SharedFolderManager
@@ -64,6 +66,24 @@ DEFAULT_FOLDER_STATUS_POLL_SECONDS = 5.0
 _POLL_CHUNK_SECONDS = 0.05
 
 PROJECTS_PREFIX = "Projects/"
+
+# -- the bounded lane B join (SYNC-1, resilience sweep 2026-08-28) ---------
+#
+# Grace ON TOP of the lane's own stall ceiling: the lane is expected to kill
+# its own wedged child first, and this join is the backstop for the case
+# where it could not (a process in an uninterruptible kernel wait). Joining
+# at merely "budget + a bit" would cut short the legitimate case -- a SOFT
+# cutoff letting a 40 GB original land -- which is exactly the transfer an
+# editor cannot afford to have restarted from byte 0.
+LANE_B_JOIN_GRACE_SECONDS = 120.0
+# How long the abort itself is given before the rotation walks away.
+LANE_B_ABORT_JOIN_SECONDS = 30.0
+
+
+def lane_b_join_timeout(budget: Optional[float]) -> float:
+    """How long _run_lanes_a_and_b waits for the lane B thread."""
+    return hard_ceiling_seconds(budget) + LANE_B_JOIN_GRACE_SECONDS
+
 
 # Lane C pacing schemes (AUDIT_2 P4/C-1).
 #   "none"   -- never pause a folder; Syncthing's own maxFolderConcurrency
@@ -381,6 +401,23 @@ class Sequencer:
         # latched "run a pass now" signal that only _wait_or_wake consumes.
         self._interrupt = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Loop liveness for app.LaneWatchdog (SYS-2, resilience sweep
+        # 2026-08-28), on exactly the contract dashboard/collector.py has
+        # carried since ops-efficiency-6: monotonic, stamped at the top of
+        # every loop iteration and at every project turn. Before this the
+        # sequencer thread could die on one OSError (an unmapped P: mid-pass)
+        # and NOTHING noticed: _state stayed frozen at whatever the last pass
+        # set, the reporter kept posting that state every 30 s, and the fleet
+        # grid showed a healthy machine that had not synced a byte since.
+        self._heartbeat = time.monotonic()
+        # The last exception that ENDED the thread, and the last one a single
+        # pass survived, as "ClassName: message" -- what the watchdog records
+        # in watchdog.json and the report's sync_guard.restarts carries, so a
+        # machine that needs restarting three times an hour is visible rather
+        # than merely self-healing.
+        self._thread_error: Optional[str] = None
+        self._loop_error: Optional[str] = None
+        self._loop_failures = 0
         self._lock = threading.Lock()
 
         self._state = STATE_STARTUP
@@ -478,6 +515,10 @@ class Sequencer:
         self._interrupt.clear()
         self._resume_event.set()
         self._arm_lanes()
+        # BEFORE the thread exists, so a watchdog that reads it in the
+        # microsecond between these two statements sees "just started", not
+        # a stale stamp from the run that died (SYS-2).
+        self._heartbeat = time.monotonic()
         self._thread = threading.Thread(target=self._run, name="ccsync-sequencer", daemon=True)
         self._thread.start()
 
@@ -511,6 +552,47 @@ class Sequencer:
                 log.exception(
                     "sequencer: could not re-arm lane %s", getattr(lane, "name", lane)
                 )
+
+    # -- liveness (SYS-2; app.LaneWatchdog is the only caller) -----------
+    def thread_died(self) -> bool:
+        """start() ran, stop() did not, and the loop thread is gone.
+
+        Deliberately False for a sequencer that was STOPPED (the same rule
+        collector.thread_died() follows): a sign-out, a pause->stop and the
+        suite's own stop() must never read as the fault the watchdog exists
+        to recover from."""
+        if self._stop_event.is_set():
+            return False
+        thread = self._thread
+        return thread is not None and not thread.is_alive()
+
+    def seconds_since_heartbeat(self) -> float:
+        """How long the loop has been inside one iteration. 0.0 whenever the
+        question does not apply (never started, stopped, dead, or parked in
+        _park_paused because the editor pressed Pause), so a caller can treat
+        any positive number as real.
+
+        PAUSED counts as "does not apply" on purpose: _park_paused blocks on
+        an event for as long as the editor leaves sync paused, and restarting
+        a deliberately paused sequencer would be the watchdog inventing an
+        outage."""
+        thread = self._thread
+        if self._stop_event.is_set() or thread is None or not thread.is_alive():
+            return 0.0
+        if not self._resume_event.is_set():
+            return 0.0
+        return max(0.0, time.monotonic() - self._heartbeat)
+
+    def last_error(self) -> Optional[str]:
+        """The exception that ended the thread, else the last one a pass
+        survived, else None. Read by the watchdog for watchdog.json's
+        last_error -- "restarted for no stated reason" is exactly the shape
+        this sweep exists to stop shipping."""
+        return self._thread_error or self._loop_error
+
+    def loop_failures(self) -> int:
+        """Passes that raised and were logged-and-continued since launch."""
+        return self._loop_failures
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -762,57 +844,141 @@ class Sequencer:
 
     # -- main loop -----------------------------------------------------
     def _run(self) -> None:
-        with self._lock:
-            self._state = STATE_STARTUP
-        self._startup_unpause()
-        while not self._stop_event.is_set():
-            if not self._resume_event.is_set():
-                self._park_paused()
-                continue
+        """The pass loop. ONE bad pass costs one pass, never the thread.
 
-            # BEFORE the selection check, deliberately: an editor with zero
-            # projects ticked still gets the shared libraries, and that is
-            # exactly the branch below that continues without doing anything
-            # else. Fault-isolated -- reconcile() never raises, but a broken
-            # library must not be able to stop project syncing either way.
-            self._reconcile_shared_folders()
+        SYS-2 (resilience sweep 2026-08-28): there was no try/except around
+        this loop body and the STATE_STOPPED assignment sat AFTER the while,
+        so any exception the inner handlers did not cover (an OSError out of
+        _reconcile_paths when a mapped P: drops mid-pass is the observed one)
+        killed the thread with _state frozen at STATE_RUNNING or
+        STATE_BETWEEN_PASSES. start() is never called again, the reporter
+        keeps posting that frozen state every 30 s, and the fleet grid shows
+        a healthy machine that has not moved a byte since -- "green while
+        dead", with no log line after the traceback.
 
-            selection, source = self._selection_get()
-            if not selection:
-                with self._lock:
-                    self._state = STATE_NO_SELECTION
-                    self._current_slug = None
-                    self._queue_slugs = []
-                    self._no_selection_reason = self._describe_no_selection(selection, source)
-                if self._wait_or_wake(self.selection_poll_interval):
-                    break
-                continue
-
-            self._update_known_selection(selection)
-            # AFTER the selection update, deliberately: the borrowed-lender
-            # set is derived from it, and reconciling on the stale set would
-            # accept or drop a lender one pass late.
-            self._reconcile_borrowed_folders()
-            self._reconcile_paths(selection)
-            self._check_remote_root()
-            self._run_pass(selection)
-
-            if self._stop_event.is_set() or not self._resume_event.is_set():
-                continue
-
+        crash_report's hook is NOT bypassed by the catch: a swallowed
+        exception never reaches threading.excepthook, so _note_loop_failure
+        hands it to crash_report.handle itself.
+        """
+        try:
             with self._lock:
-                self._state = STATE_BETWEEN_PASSES
+                self._state = STATE_STARTUP
+            self._startup_unpause()
+            while not self._stop_event.is_set():
+                # Stamped here and at every project turn in _run_pass, which
+                # is what makes a stale heartbeat mean "wedged inside one
+                # turn" rather than "busy with a big upload": the watchdog's
+                # bound is 3x project_rotation_seconds and a turn's lane A/B
+                # budget IS project_rotation_seconds (SYS-2).
+                self._heartbeat = time.monotonic()
+                try:
+                    if not self._resume_event.is_set():
+                        self._park_paused()
+                        continue
+
+                    # BEFORE the selection check, deliberately: an editor with
+                    # zero projects ticked still gets the shared libraries,
+                    # and that is exactly the branch below that continues
+                    # without doing anything else. Fault-isolated --
+                    # reconcile() never raises, but a broken library must not
+                    # be able to stop project syncing either way.
+                    self._reconcile_shared_folders()
+
+                    selection, source = self._selection_get()
+                    if not selection:
+                        with self._lock:
+                            self._state = STATE_NO_SELECTION
+                            self._current_slug = None
+                            self._queue_slugs = []
+                            self._no_selection_reason = self._describe_no_selection(
+                                selection, source)
+                        if self._wait_or_wake(self.selection_poll_interval):
+                            break
+                        continue
+
+                    self._update_known_selection(selection)
+                    # AFTER the selection update, deliberately: the
+                    # borrowed-lender set is derived from it, and reconciling
+                    # on the stale set would accept or drop a lender one pass
+                    # late.
+                    self._reconcile_borrowed_folders()
+                    self._reconcile_paths(selection)
+                    self._check_remote_root()
+                    self._run_pass(selection)
+                    self._prune_trash()
+
+                    if self._stop_event.is_set() or not self._resume_event.is_set():
+                        continue
+
+                    with self._lock:
+                        self._state = STATE_BETWEEN_PASSES
+                        self._current_slug = None
+                        self._queue_slugs = []
+                    self._unpause_all(self._last_selection)
+                    self._note_pass_finished()
+                    if self._wait_or_wake(self._idle_seconds()):
+                        break
+                except Exception:
+                    self._note_loop_failure()
+                    if self._sleep_after_failure():
+                        break
+                    continue
+        except BaseException as exc:
+            # The thread IS ending (a KeyboardInterrupt, a MemoryError, or a
+            # bug in the loop scaffolding above rather than inside a pass).
+            # Record WHY for the watchdog's watchdog.json, then re-raise so
+            # threading.excepthook -- and through it crash_report -- still
+            # sees it exactly as it did before.
+            self._thread_error = f"{type(exc).__name__}: {exc}"
+            log.error("sequencer: the pass loop is exiting on an exception",
+                      exc_info=True)
+            raise
+        finally:
+            # In a finally, not after the while: an exception used to skip
+            # this and leave _state frozen at the last pass's value, which is
+            # the half of SYS-2 that made a dead sequencer look busy.
+            with self._lock:
+                self._state = STATE_STOPPED
                 self._current_slug = None
                 self._queue_slugs = []
-            self._unpause_all(self._last_selection)
-            self._note_pass_finished()
-            if self._wait_or_wake(self._idle_seconds()):
-                break
 
-        with self._lock:
-            self._state = STATE_STOPPED
-            self._current_slug = None
-            self._queue_slugs = []
+    def _note_loop_failure(self) -> None:
+        """Log, count and crash-report the exception the current pass died
+        on, and never raise doing it (SYS-2). ERROR, with the traceback: this
+        is the line whose absence made "it just stopped syncing"
+        undiagnosable for the length of one log rotation."""
+        exc_type, exc_value, exc_tb = sys.exc_info()
+        self._loop_failures += 1
+        if exc_value is not None:
+            self._loop_error = f"{type(exc_value).__name__}: {exc_value}"
+        log.error(
+            "sequencer: pass failed (%d failed pass(es) since launch) -- "
+            "the loop continues with the next one",
+            self._loop_failures, exc_info=(exc_type, exc_value, exc_tb),
+        )
+        try:
+            # A swallowed exception never reaches threading.excepthook, so the
+            # local crash file crash_report.py exists to write would not be
+            # written at all. handle() never raises by contract; this guard is
+            # for that contract changing under us.
+            crash_report.handle(exc_type, exc_value, exc_tb,
+                                thread="ccsync-sequencer")
+        except Exception:
+            log.debug("sequencer: could not write a crash report", exc_info=True)
+
+    def _sleep_after_failure(self) -> bool:
+        """The normal between-passes wait after a failed pass. True when the
+        caller should leave the loop (stop() was called).
+
+        The wait itself is behind a try: _idle_seconds/_wait_or_wake reading a
+        hand-edited config value is exactly the class of fault that got us
+        here, and a failure in the sleep must not turn a survivable pass into
+        a hot loop."""
+        try:
+            return self._wait_or_wake(self._idle_seconds())
+        except Exception:
+            log.exception("sequencer: the post-failure wait failed too")
+            return self._stop_event.wait(max(1.0, self.sequencer_idle_seconds or 1.0))
 
     def _check_remote_root(self) -> None:
         """Ask lane B to probe `remote_root` itself, once per process.
@@ -833,6 +999,30 @@ class Sequencer:
             probe()
         except Exception:
             log.debug("sequencer: the remote_root probe failed", exc_info=True)
+
+    def _prune_trash(self) -> None:
+        """Ask lane B to run its `.ccsync-trash` retention. Never raises.
+
+        SYNC-16 (resilience sweep 2026-08-28): `_maybe_prune_trash()` was the
+        LAST statement of a lane B pass that did not trip, was not stopped
+        mid-transfer and did not error -- so a machine that fails every pass
+        (NAS unreachable, disk full, a filter file that will not validate)
+        kept up to `trash_max_bytes` of recovery copies forever, and disk-full
+        is precisely the state in which that matters. "Nothing is pruned while
+        the breaker is tripped" is deliberate and stays where it belongs,
+        inside prune_trash; "nothing is pruned while the lane is failing" was
+        an accident of placement.
+
+        Fault-isolated exactly like _check_remote_root: the retention policy
+        must never be able to cost a pass. Its own interval gate is inside
+        _maybe_prune_trash, so calling it once per pass is cheap."""
+        prune = getattr(self.lane_b, "_maybe_prune_trash", None)
+        if prune is None or not self.lane_b_enabled:
+            return
+        try:
+            prune()
+        except Exception:
+            log.debug("sequencer: the trash prune failed", exc_info=True)
 
     def _reconcile_shared_folders(self) -> None:
         """Keep the fleet-wide asset libraries online. Never raises."""
@@ -1419,6 +1609,12 @@ class Sequencer:
                         break
 
                     processed += 1
+                    # A project turn is the coarsest unit that still bounds
+                    # the watchdog's staleness sensibly (SYS-2): lanes A and B
+                    # get project_rotation_seconds each, so a heartbeat older
+                    # than 3x that is a turn that overran its own budget three
+                    # times over, not a big upload.
+                    self._heartbeat = time.monotonic()
                     self._process_project(item, ordered)
                     slug = str(item.get("slug"))
                     processed_entries[slug] = item
@@ -1603,7 +1799,50 @@ class Sequencer:
         finally:
             # Always join: an un-joined lane B would still be writing into
             # the project directory while the next project's repath moves it.
-            thread.join()
+            #
+            # BOUNDED since SYNC-1 (resilience sweep 2026-08-28, CR-91). The
+            # reason above is why this join cannot simply be dropped, and it
+            # is also why an UNBOUNDED one froze the whole rotation: a lane B
+            # whose rclone wedged on a local read held this thread forever,
+            # so lane A finishing released nothing. The timeout sits ABOVE
+            # the lane's own stall ceiling on purpose -- the lane kills its
+            # own wedged child first (rclone_lane's watchdog), and this is
+            # the backstop for the case where even that could not, e.g. a
+            # child in an uninterruptible kernel wait. A legitimately long
+            # transfer is never cut short by it: --cutoff-mode SOFT lets an
+            # in-flight file land, and the ceiling already allows twice the
+            # budget plus five minutes for it.
+            timeout = lane_b_join_timeout(budget)
+            thread.join(timeout=timeout)
+            if thread.is_alive():
+                why = (
+                    f"lane B did not finish within {int(timeout)}s on {subpath} -- "
+                    "ending its rclone so the rotation can continue"
+                )
+                log.warning("sequencer: %s", why)
+                # Its child, NOT the lane: stop() latches _stop_event for the
+                # whole thread generation and would leave lane B refusing
+                # every later pass (see RcloneLane.abort_run).
+                aborted = False
+                try:
+                    abort = getattr(self.lane_b, "abort_run", None)
+                    if abort is not None:
+                        aborted = bool(abort(why, int(timeout)))
+                except Exception:
+                    log.exception("sequencer: could not abort the wedged lane B")
+                # A second, short join: the abort normally lands in
+                # milliseconds, and a lane B thread that is STILL alive is
+                # one we deliberately walk away from rather than block the
+                # rotation for. It cannot start another pass -- RcloneLane's
+                # _run_lock is still held by it.
+                thread.join(timeout=LANE_B_ABORT_JOIN_SECONDS)
+                if thread.is_alive():
+                    log.error(
+                        "sequencer: lane B is STILL running after the abort "
+                        "(%s) -- continuing without it; the next project's "
+                        "repath may be blocked until it ends",
+                        "child killed" if aborted else "no child to kill",
+                    )
         self._note_transport(outcomes, run_b)
 
     # -- pass economics (ops-efficiency-2 / -4, 2026-08-21) ---------------

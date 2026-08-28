@@ -102,14 +102,20 @@ lane_b_min_age_seconds = 120
 #                                   whichever is smaller (small projects)
 #   lane_b_remote_shrink_fraction   trip when the NAS listing shrinks past
 #                                   this share of what it held last pass
+#   lane_b_min_free_bytes           free space below which lane B stands down
+#                                   rather than fill the drive; it starts
+#                                   again by itself at twice this
 # lane_b_max_deletes_per_pass = 50
 # lane_b_max_delete_fraction = 0.25
 # lane_b_remote_shrink_fraction = 0.5
+# lane_b_min_free_bytes = 21474836480
 #
 # How long recovery copies are kept in <local_root>/.ccsync-trash, and how
 # big that directory may get before the OLDEST batches are dropped. The
 # newest batch is never pruned by the size rule, and NOTHING is pruned while
-# the breaker above is tripped. 0 disables the age rule / the size cap.
+# the breaker above is tripped. Since 2026-08-28 a third rule prunes when the
+# drive drops below lane_b_min_free_bytes, whatever the age or size says.
+# 0 disables the age rule / the size cap.
 # trash_max_age_days = 14
 # trash_max_bytes = 53687091200
 # trash_prune_interval_seconds = 21600

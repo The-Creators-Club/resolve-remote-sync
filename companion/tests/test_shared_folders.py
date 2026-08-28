@@ -266,3 +266,47 @@ def test_the_manager_can_name_its_folders_for_the_halt(tmp_path):
     assert shared_folders.SharedFolderManager(
         FakeAdmin(), tmp_path).folder_ids() == [
             folder_id for folder_id, _rel, _label in shared_folders.SHARED_ASSET_FOLDERS]
+
+
+# -- SYNC-6: the drive is out --------------------------------------------------
+
+
+def test_reconcile_does_nothing_at_all_while_the_tree_is_absent(tmp_path):
+    """SYNC-6 (resilience sweep 2026-08-28): the sequencer calls this at its
+    loop head, BEFORE any root check. On a Mac whose SSD is unplugged,
+    _accept's mkdir(parents=True) builds
+    /Volumes/SAMDISK/Creators_Club/Assets/Luts on the BOOT disk -- the ghost
+    directory root_guard.probe_root exists to detect, which then makes macOS
+    mount the real drive as "/Volumes/SAMDISK 1" permanently -- and points a
+    Syncthing folder at it."""
+    admin = FakeAdmin(pending={LUTS_FOLDER_ID: {"offeredBy": {"DEVICE-1": {}}}})
+    gone = tmp_path / "Volumes" / "SAMDISK"  # never created
+    mgr = shared_folders.SharedFolderManager(admin, gone, folders=ONLY_LUTS)
+    assert mgr.reconcile() == {}
+    assert admin.calls == []
+    assert not gone.exists()
+
+
+def test_the_root_check_is_the_injected_one_and_an_unanswerable_probe_is_absent(tmp_path):
+    admin = FakeAdmin(pending={LUTS_FOLDER_ID: {"offeredBy": {"DEVICE-1": {}}}})
+
+    def _boom():
+        raise RuntimeError("the volume did not answer")
+
+    mgr = shared_folders.SharedFolderManager(
+        admin, tmp_path, folders=ONLY_LUTS, root_present_fn=_boom)
+    # tmp_path IS a directory, so only the injected predicate can produce this.
+    assert mgr.reconcile() == {}
+    assert admin.calls == []
+
+
+def test_accept_refuses_the_mkdir_if_the_drive_goes_out_mid_reconcile(tmp_path):
+    """The second half of the guard: root_present() is answered at the loop
+    head, the mkdir check immediately before the mkdir."""
+    admin = FakeAdmin(pending={LUTS_FOLDER_ID: {"offeredBy": {"DEVICE-1": {}}}})
+    gone = tmp_path / "Volumes" / "SAMDISK"
+    mgr = shared_folders.SharedFolderManager(
+        admin, gone, folders=ONLY_LUTS, root_present_fn=lambda: True)
+    assert mgr.reconcile()[LUTS_FOLDER_ID] == "error"
+    assert [c for c in admin.names() if c == "accept"] == []
+    assert not gone.exists()

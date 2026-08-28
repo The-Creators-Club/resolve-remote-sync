@@ -836,3 +836,51 @@ def test_the_remote_root_probe_is_paid_for_once(tmp_path):
     assert lane.check_remote_root() is True
     assert len(calls) == 1
     assert not breaker.tripped
+
+
+# -- APP-3: the latches live where a support session will not delete them ---
+
+
+def test_adopting_a_legacy_latch_moves_it(tmp_path):
+    legacy = tmp_path / "state" / lane_guard.BREAKER_STATE_FILENAME
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(json.dumps({"tripped": True, "reason": "shrank"}),
+                      encoding="utf-8")
+    new = tmp_path / lane_guard.BREAKER_STATE_FILENAME
+
+    assert lane_guard.adopt_legacy_latch(new, legacy) == new
+    assert json.loads(new.read_text(encoding="utf-8"))["tripped"] is True
+    # Moved, not copied: a downgrade must not re-latch on a stale file.
+    assert not legacy.exists()
+
+    breaker = lane_guard.LaneBBreaker(new, {})
+    assert breaker.tripped is True
+
+
+def test_adoption_never_overwrites_a_latch_already_in_the_new_place(tmp_path):
+    legacy = tmp_path / "state" / lane_guard.HALT_STATE_FILENAME
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.write_text(json.dumps({"active": False}), encoding="utf-8")
+    new = tmp_path / lane_guard.HALT_STATE_FILENAME
+    new.write_text(json.dumps({"active": True, "scope": "fleet"}), encoding="utf-8")
+
+    lane_guard.adopt_legacy_latch(new, legacy)
+    assert lane_guard.HaltState(new).active is True
+
+
+def test_adoption_is_a_no_op_and_never_raises_without_a_legacy_file(tmp_path):
+    new = tmp_path / lane_guard.BREAKER_STATE_FILENAME
+    assert lane_guard.adopt_legacy_latch(new, tmp_path / "state" / "nope.json") == new
+    assert not new.exists()
+    assert lane_guard.LaneBBreaker(new, {}).tripped is False
+
+
+def test_a_fresh_trip_writes_to_the_new_location(tmp_path):
+    """The whole point: the file the breaker latches into is beside
+    config.toml, not under the state/ directory support sessions delete."""
+    new = tmp_path / lane_guard.BREAKER_STATE_FILENAME
+    breaker = lane_guard.LaneBBreaker(new, {})
+    breaker.trip("a test trip")
+    assert new.exists()
+    assert not (tmp_path / "state").exists()
+    assert lane_guard.LaneBBreaker(new, {}).tripped is True

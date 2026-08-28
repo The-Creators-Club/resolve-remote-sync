@@ -43,6 +43,7 @@ from . import popup
 from . import bpg as bpg_mod
 from . import proxy_gen as proxy_gen_mod
 from . import proxy_relink
+from . import reporter as reporter_mod
 from . import resolve_bridge
 from . import resolve_journal
 from . import resolve_prefs as resolve_prefs_mod
@@ -900,19 +901,31 @@ class CompanionApp:
         self._lanes_started = False
 
         # -- the two safety latches (COMMERCIAL_READINESS.md item 9) --------
-        # Both persist to <state_dir>, both are read HERE so their state is
-        # in hand before a single lane exists: a breaker that only latches
-        # once lane B has run, or a halt that only applies after the first
-        # report, is a latch an editor clears by restarting the tray. The
-        # state dir is resolved the same way _build_lanes() resolves it, and
-        # deliberately not read from self._state_dir -- that attribute does
-        # not exist until _build_lanes() runs, one line below.
+        # Both are read HERE so their state is in hand before a single lane
+        # exists: a breaker that only latches once lane B has run, or a halt
+        # that only applies after the first report, is a latch an editor
+        # clears by restarting the tray.
+        #
+        # They live in config_mod.CONFIG_DIR, beside machine.json and
+        # upgrade_floor.json, NOT under <log dir>/state/ (APP-3, resilience
+        # sweep 2026-08-28): state/ is what support sessions are told to
+        # delete, and deleting it cleared the breaker only a human may reset
+        # and a fleet halt an admin had set. lane_guard.adopt_legacy_latch
+        # carries a live latch across the move, once.
         guard_state_dir = config_mod.resolved_log_path(cfg).parent / "state"
+        latch_dir = config_mod.CONFIG_DIR
         self.lane_b_breaker = lane_guard.LaneBBreaker(
-            guard_state_dir / lane_guard.BREAKER_STATE_FILENAME, cfg,
+            lane_guard.adopt_legacy_latch(
+                latch_dir / lane_guard.BREAKER_STATE_FILENAME,
+                guard_state_dir / lane_guard.BREAKER_STATE_FILENAME,
+            ),
+            cfg,
             on_trip=self._notify_breaker_tripped,
         )
-        self.halt = lane_guard.HaltState(guard_state_dir / lane_guard.HALT_STATE_FILENAME)
+        self.halt = lane_guard.HaltState(lane_guard.adopt_legacy_latch(
+            latch_dir / lane_guard.HALT_STATE_FILENAME,
+            guard_state_dir / lane_guard.HALT_STATE_FILENAME,
+        ))
         # -- the sync engine's own supervisor (SYNC-17, 2026-08-18) ---------
         # Built here, beside the latches, for the same reason they are: its
         # incident state has to be in hand before lane C's first poll, or a
@@ -1256,6 +1269,11 @@ class CompanionApp:
             # Answers to the dashboard's file-move commands
             # (docs/FILE_MOVES.md): read lazily, the ledger is built below.
             get_file_moves_applied=self._file_move_results,
+            # APP-1 (resilience sweep 2026-08-28): the ONE thing the reporter
+            # says out loud. A revoked credential is a human's problem, and
+            # nothing else on this machine can tell the editor about it -- the
+            # lanes keep working and the tray stays green.
+            notify=self._notify_tray,
         )
         self.watcher = TimelineWatcher(
             local_root=cfg["local_root"],
@@ -1416,6 +1434,14 @@ class CompanionApp:
             # (AUDIT_2 L-6/UX-3).
             expected_folder_ids_fn=(
                 (lambda: self.sequencer.expected_folder_slugs() if self.sequencer else [])
+                if self._managed else None
+            ),
+            # SYNC-5 (resilience sweep 2026-08-28): late-bound for the same
+            # reason as the folder list above. This is the one path by which
+            # "that project's folder is parked without its filter list"
+            # leaves the sequencer at all.
+            unfiltered_folders_fn=(
+                (lambda: self.sequencer.unconfirmed_slugs() if self.sequencer else [])
                 if self._managed else None
             ),
             # SYNC-17 (2026-08-18): the poll that discovers "the API did not
@@ -3477,8 +3503,12 @@ class CompanionApp:
         unc = self._server_p_unc()
         self._p_swap_busy = True
         try:
+            # local_root so drive_swap can tell a LEGACY subst mapping of this
+            # machine's own copy from somebody else's P: before it unmaps
+            # anything (UX-6, resilience sweep 2026-08-28).
             ok, message = drive_swap.swap_to_server(unc, username=username,
-                                                    password=password)
+                                                    password=password,
+                                                    local_root=str(self.config.get("local_root", "")))
             if ok and username:
                 drive_swap.persist_credentials(unc, username, password)
             if not ok:
@@ -4396,6 +4426,61 @@ class CompanionApp:
         except Exception:
             log.exception("halt.report() failed")
         try:
+            # APP-1 (resilience sweep 2026-08-28): whether the dashboard is
+            # ACCEPTING this machine's reports. It rides the report it is
+            # about, which sounds circular and is not: what an admin reads on
+            # the grid is the streak that ENDED, i.e. "this machine was
+            # rejected 40 times before this one got through", and the machine
+            # that is being rejected right now shows its last accepted report
+            # ageing on the grid with the reason in the tray and in
+            # diagnostics.
+            guard["reporter"] = self.reporter.health()
+        except Exception:
+            log.exception("reporter health() failed")
+        try:
+            # APP-13/SYS-4: the dashboard's own received_at against this
+            # machine's clock. Absent until a reply has carried one, because
+            # "we could not check" must never render as zero skew.
+            skew = getattr(self.reporter, "clock_skew_seconds", None)
+            if skew is not None:
+                guard["clock_skew_seconds"] = skew
+        except Exception:
+            log.exception("reporter clock skew read failed")
+        try:
+            # APP-6: a background thread died and the tray stayed green.
+            # Omitted while the count is zero, on the same terms as
+            # skipped_exists: an absent key is how "nothing has crashed" is
+            # spelled, which is also what clears the chip.
+            crashes = crash_report.crash_summary(self.config)
+            if crashes.get("count"):
+                guard["crashes"] = crashes
+        except Exception:
+            log.exception("crash_summary() failed")
+        try:
+            # SYNC-5 (resilience sweep 2026-08-28): the projects lane C is
+            # deliberately keeping paused because their .stignore never
+            # landed. Absent while nothing is parked, so an absent key is how
+            # "every selected folder is filtered" is spelled. Lane C's own
+            # state/last_error carries the sentence for the tray and the grid;
+            # this is the machine-readable half, so the dashboard can name the
+            # projects without parsing a string.
+            unfiltered = getattr(self._lane_c, "unfiltered_folders", lambda: [])()
+            if unfiltered:
+                guard["folders_unfiltered"] = list(unfiltered)[:20]
+        except Exception:
+            log.exception("unfiltered_folders() failed")
+        try:
+            # UX-7 (resilience sweep 2026-08-28): Syncthing conflict copies
+            # this machine holds. Free: the manifest walk already visited
+            # every file, so this is a cached dict read. Absent when there are
+            # none. Reported, not acted on -- which side of a conflict is
+            # wanted is the owner's judgement, never ours.
+            conflicts = self.manifest_cache.sync_conflicts()
+            if conflicts:
+                guard["sync_conflicts"] = conflicts
+        except Exception:
+            log.exception("sync_conflicts() failed")
+        try:
             # Empty while the sync engine is up, so an absent section is how
             # "Syncthing is running" is spelled (SYNC-17, 2026-08-18). The
             # lane C error says it too, but the lane says only what is wrong
@@ -5208,6 +5293,44 @@ class CompanionApp:
                 out.append(f"  RELAYED: {len(relayed)} Syncthing device(s) are NOT on a "
                            f"direct path -- {relayed}")
             out.append(f"  {health}")
+        except Exception as exc:
+            out.append(f"  <failed: {exc}>")
+
+        out.append("")
+        out.append("-- last dashboard report --")
+        # APP-1: the section that was missing. `dashboard_url` was printed
+        # right at the top of this bundle and "has anything this machine sent
+        # ever been accepted" was not, so a revoked token and a healthy fleet
+        # produced identical diagnostics.
+        try:
+            health = self.reporter.health()
+            accepted = health.get("last_success_at") or (
+                "NEVER (nothing this machine has sent was accepted)")
+            out.append(f"  last ACCEPTED: {accepted}")
+            out.append(f"  last status: {health.get('last_status') or '(no report yet)'}")
+            out.append(f"  failures in a row: {health.get('consecutive_failures')}")
+            skew = getattr(self.reporter, "clock_skew_seconds", None)
+            if skew is None:
+                out.append("  clock vs the server: not measured yet (no reply has "
+                           "carried the server's time)")
+            else:
+                which = "this computer is AHEAD" if skew > 0 else "this computer is BEHIND"
+                out.append(f"  clock vs the server: {skew:+.0f}s ({which})")
+        except Exception as exc:
+            out.append(f"  <failed: {exc}>")
+
+        out.append("")
+        out.append("-- background task failures (crash reports) --")
+        # APP-6: crash_report's own docstring names "the tray stayed up with a
+        # dead lane" as what it exists to fix, and nothing surfaced the files
+        # it wrote -- least of all the bundle an admin actually asks for.
+        try:
+            summary = crash_report.crash_summary(self.config)
+            out.append(f"  directory: {crash_report.crash_dir(self.config)}")
+            out.append(f"  count: {summary.get('count')}")
+            for entry in crash_report.recent_reports(self.config):
+                out.append(f"  {entry.get('when')} {entry.get('type')} "
+                           f"in thread {entry.get('thread')} ({entry.get('name')})")
         except Exception as exc:
             out.append(f"  <failed: {exc}>")
 
@@ -6417,6 +6540,28 @@ class CompanionApp:
         except Exception:
             log.exception("orphan reservation re-check failed")
 
+    def _identity_expired_text(self) -> str:
+        """What to say when the identity token stops being valid (APP-13).
+
+        A clock hours out of true expires a pre-CR-86 token the instant it is
+        issued, so "sign in again" sends the editor round a loop that cannot
+        terminate. Past CLOCK_SKEW_WARN_SECONDS of measured skew, name the
+        clock -- that IS the thing they can fix. With no measurement (an
+        older dashboard, or no report accepted yet) the old sentence stands:
+        a guess dressed as a diagnosis is worse than the plain instruction."""
+        skew = getattr(self.reporter, "clock_skew_seconds", None)
+        try:
+            large = skew is not None and abs(float(skew)) >= reporter_mod.CLOCK_SKEW_WARN_SECONDS
+        except (TypeError, ValueError):
+            large = False
+        if large:
+            phrase = reporter_mod.skew_phrase(skew)
+            return (f"This computer's clock is {phrase} the server's, which is why your "
+                    "CCSync sign-in looks expired. Fix the clock (Windows: Date and time "
+                    "-> Sync now) and syncing will start again.")
+        return ("Your CCSync sign-in has expired, so syncing has stopped. "
+                "Right-click the tray icon → Sign in…")
+
     def _identity_watch_loop(self) -> None:
         """Notice a token EXPIRING, not just a sign-out.
 
@@ -6443,9 +6588,12 @@ class CompanionApp:
                             log.exception("identity expiry: failed to stop sync lanes")
                         self._mark_lanes_pending_login()
                         self._lanes_started = False
-                    self._notify_tray(
-                        "Your CCSync sign-in has expired, so syncing has stopped. "
-                        "Right-click the tray icon → Sign in…", "ccsync-companion")
+                    # APP-13: a badly wrong clock invalidates a pre-CR-86
+                    # token INSTANTLY, and "your sign-in has expired" is then
+                    # a lie the editor cannot act on -- signing in again
+                    # produces a token the same clock rejects again. Name the
+                    # clock instead when we have measured it.
+                    self._notify_tray(self._identity_expired_text(), "ccsync-companion")
                 else:
                     self.on_signed_in()
             except Exception:

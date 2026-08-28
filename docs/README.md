@@ -76,6 +76,7 @@ Index written 2026-08-17 (`COMMERCIAL_READINESS.md` item 13).
 | Doc | What it is |
 |---|---|
 | [`COMMERCIAL_READINESS.md`](COMMERCIAL_READINESS.md) | The 2026-08-17 audit and the ranked list of what must change to sell this to other organisations |
+| [`RESILIENCE_SWEEP_2026-08-28.md`](RESILIENCE_SWEEP_2026-08-28.md) | The ten-agent resilience sweep: 201 findings in `resilience-sweep-2026-08-28/`, fourteen themes, and a ranked, waved build list ("green while dead" is one class; the guard usually exists in one of N places) |
 | [`SYNOLOGY_PORT_PLAN.md`](SYNOLOGY_PORT_PLAN.md) | The plan behind the second NAS backend |
 | [`BROLL_INGEST_PLAN.md`](BROLL_INGEST_PLAN.md) | Drag-and-drop b-roll ingest: the design, the contracts and what was deviated from |
 | [`MUSIC_INGEST_PLAN.md`](MUSIC_INGEST_PLAN.md) | The same for music, reusing the b-roll machinery, plus what it deliberately does not compute |

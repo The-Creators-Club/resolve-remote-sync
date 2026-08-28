@@ -663,6 +663,12 @@ def test_the_argv_is_the_shared_naming_contract(tmp_path, ytdlp):
     assert argv[argv.index("-o") + 1] == ytdl_common.outtmpl(str(outdir_for(tmp_path)))
     assert argv[argv.index("--merge-output-format") + 1] == "mp4"
     assert "--write-info-json" in argv and "--no-playlist" in argv
+    # YT-3 (2026-08-28): without --no-mtime yt-dlp stamps YouTube's upload date
+    # on the finished file, and lane A's `--min-age 120s` -- the only thing
+    # standing between a still-converting original and `copy
+    # --ignore-existing` making it the fleet's permanent copy -- is then
+    # satisfied the instant the file appears.
+    assert "--no-mtime" in argv
     # The merger the whole scope depends on, always named when the capability
     # said yes (COMP-BROLL-5).
     assert argv[argv.index("--ffmpeg-location") + 1] == \
@@ -2697,7 +2703,8 @@ def test_swap_in_moves_a_locked_original_aside_and_keeps_the_work_otherwise(
     assert (tmp_path / "clip [id].original.mp4").read_bytes() == b"old"
     assert note == "original was in use, kept as clip [id].original.mp4"
 
-    # even the rename refused: the converted file stays under its own name
+    # every rename refused, including the fallback's own: the converted file
+    # stays where ffmpeg wrote it rather than the work being thrown away
     original.write_bytes(b"old")
     tmp.write_bytes(b"new")
 
@@ -2710,6 +2717,100 @@ def test_swap_in_moves_a_locked_original_aside_and_keeps_the_work_otherwise(
     assert original.read_bytes() == b"old"
     assert note == "converted, but could not replace clip [id].mp4: saved as clip [id].editready.mp4"
     assert "—" not in note
+
+
+def test_the_fallback_deliverable_keeps_the_id_last_in_its_stem():
+    """YT-6 (resilience sweep 2026-08-28). `<stem>.editready.mp4` was a
+    deliverable that no sweep could touch (it WAS the clip, YTDL-17) and no
+    dedupe or importer could recognise (its stem ended `.editready`, not
+    `[id]`), so an editor got two clips per converted download, one of them
+    undecodable. The marker goes in front of the bracket instead."""
+    assert ex.converted_name("Chan - T [abc].mp4") == "Chan - T.converted [abc].mp4"
+    assert ex.converted_name("Chan - v2.0 [abc].webm") == "Chan - v2.0.converted [abc].webm"
+    # only the LAST bracket group is the id: a title's own brackets survive
+    assert ex.converted_name("Chan - T [live] [abc].mp4") ==         "Chan - T [live].converted [abc].mp4"
+    # a name this executor did not write is at least distinguishable
+    assert ex.converted_name("whatever.mp4") == "whatever.converted.mp4"
+    # and the stem still ends in [id], which is what every reader anchors on
+    assert Path(ex.converted_name("Chan - T [abc].mp4")).stem.endswith("[abc]")
+    assert ex.is_sweepable(ex.converted_name("Chan - T [abc].mp4")) is False
+
+
+def test_a_clip_locked_by_resolve_is_delivered_under_the_converted_name(
+        tmp_path, monkeypatch):
+    """The Windows case: the clip is already in the editor's open Resolve
+    project, so neither the delete nor the rename-aside is allowed. The work
+    is kept under a name whose stem still ends in `[id]`, and the note that
+    explains it rides the clip row."""
+    original = tmp_path / "clip [id].webm"
+    original.write_bytes(b"vp9")
+    tmp = tmp_path / "clip [id].editready.mp4"
+    tmp.write_bytes(b"h264")
+    final = tmp_path / "clip [id].mp4"
+    real_replace = os.replace
+
+    def locked(src, dst):
+        if Path(dst).name in (final.name, "clip [id].original.webm"):
+            raise PermissionError("Access is denied")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(ex.os, "remove",
+                        lambda p: (_ for _ in ()).throw(PermissionError("denied")))
+    monkeypatch.setattr(ex.os, "replace", locked)
+    name, note = ex.swap_in(tmp, final, original)
+
+    assert name == "clip.converted [id].mp4"
+    assert (tmp_path / name).read_bytes() == b"h264"
+    assert original.read_bytes() == b"vp9", "the locked original is never lost"
+    assert note == ("converted, but clip [id].webm was in use: "
+                    "saved as clip.converted [id].mp4")
+    assert "—" not in note
+
+
+def test_a_half_written_conversion_is_litter_now_that_it_is_never_delivered():
+    """The other half of YT-6: `.editready` could not be swept while it might
+    be the deliverable, so a truncated one from a killed tray or a closed lid
+    sat in the canonical tree matching lane A's `+ *.mp4` forever."""
+    assert ex.is_sweepable("Ch - T [abc].editready.mp4") is True
+    # ...but a locked-aside original is FOOTAGE, and no age or folder sweep may
+    # be what deletes it: clear_aside_originals is the id-scoped retry
+    assert ex.is_sweepable("Ch - T [abc].original.webm") is False
+
+
+def test_the_aside_original_is_retried_on_the_next_attempt(tmp_path):
+    """It was never deleted by anything: a full second copy of every converted
+    clip, matching lane A's `+ *.mp4`, in the canonical tree forever."""
+    outdir = tmp_path / "term"
+    outdir.mkdir()
+    (outdir / "A [aaa].original.webm").write_bytes(b"x" * 11)
+    (outdir / "B [bbb].original.webm").write_bytes(b"y")
+    (outdir / "A [aaa].mp4").write_bytes(b"z")
+
+    assert ex.clear_aside_originals(outdir, "aaa") == (1, 0)
+    # the neighbour's is untouched: the folder is shared with the rest of the
+    # search and with the other executor
+    assert sorted(p.name for p in outdir.iterdir()) == [
+        "A [aaa].mp4", "B [bbb].original.webm"]
+    # nothing there is not a failure
+    assert ex.clear_aside_originals(outdir, "aaa") == (0, 0)
+
+
+def test_an_original_still_in_use_is_reported_in_bytes_not_forced(tmp_path,
+                                                                 monkeypatch):
+    """The editor may have that file in a timeline this second, so the delete
+    is never forced. What cannot be reclaimed is reported."""
+    outdir = tmp_path / "term"
+    outdir.mkdir()
+    (outdir / "A [aaa].original.webm").write_bytes(b"x" * 2048)
+
+    def refuse(self, *a, **kw):
+        raise PermissionError("Access is denied")
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+    assert ex.clear_aside_originals(outdir, "aaa") == (0, 2048)
+    assert ex._reclaimable_bytes(2048) == "2048 bytes"
+    assert ex._reclaimable_bytes(3 * 1024 ** 2) == "3 MB"
+    assert ex._reclaimable_bytes(int(1.5 * 1024 ** 3)) == "1.5 GB"
 
 
 def fake_ffprobe(tmp_path) -> str:

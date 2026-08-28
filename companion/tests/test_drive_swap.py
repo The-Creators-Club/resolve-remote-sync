@@ -72,6 +72,36 @@ def _fake_credwrite(monkeypatch, result=1, raises=None):
     return calls
 
 
+# -- UX-6 (resilience sweep 2026-08-28): the ownership probe before the unmap -
+#
+# swap_to_server asks classify_p_target(current_p_target(...)) FIRST now and
+# refuses on "other"/"none", so every scripted run_fn below has to answer the
+# `net use P:` query with something. Wrapping rather than editing each runner
+# keeps the recorded call lists exactly what they were: the query is answered
+# in the wrapper and never reaches the inner (recording) function.
+_LOOPBACK_P = "\\\\localhost\\" + drive_swap.LOOPBACK_SHARE
+_P_QUERY = ["net", "use", "P:"]
+
+
+def _reports_local_p(inner):
+    """Wrap a run_fn so the P: ownership probe sees OUR OWN loopback share."""
+    def run(args):
+        if list(args) == _P_QUERY:
+            return _proc(0, f"Remote name   {_LOOPBACK_P}\n")
+        return inner(args)
+    return run
+
+
+def _reports_p(target):
+    """A run_fn whose only answer is "P: is mapped at <target>"; a blank
+    target is the "nothing mapped, or we could not read the table" state."""
+    def run(args):
+        if list(args) == _P_QUERY and target:
+            return _proc(0, f"Remote name   {target}\n")
+        return _proc(0, "")
+    return run
+
+
 def test_classify_p_target():
     f = drive_swap.classify_p_target
     assert f("\\\\localhost\\CCSync_P", r"D:\Creators_Club", "") == "local"
@@ -131,7 +161,7 @@ def test_swap_to_server_sequence_and_auth_hint(monkeypatch):
         return _proc(0, "")
 
     connects = _fake_wnet(monkeypatch, code=0)
-    ok, msg = drive_swap.swap_to_server(unc, ok_run)
+    ok, msg = drive_swap.swap_to_server(unc, _reports_local_p(ok_run))
     assert ok and "SERVER" in msg
     # unmap both styles (still subprocess -- no secret on those)...
     assert calls == [["net", "use", "P:", "/delete", "/y"], ["subst", "P:", "/D"]]
@@ -141,7 +171,7 @@ def test_swap_to_server_sequence_and_auth_hint(monkeypatch):
 
     # ERROR_ACCESS_DENIED -- the tray reacts by asking for the server login.
     _fake_wnet(monkeypatch, code=5)
-    ok, msg = drive_swap.swap_to_server(unc, ok_run)
+    ok, msg = drive_swap.swap_to_server(unc, _reports_local_p(ok_run))
     assert not ok
     assert drive_swap.is_auth_failure(msg)
 
@@ -151,7 +181,7 @@ def test_the_connect_never_asks_windows_to_prompt(monkeypatch):
     windowed exe doesn't have. WNetAddConnection2W only prompts when handed
     CONNECT_INTERACTIVE (0x8), so the flags word must never carry it."""
     connects = _fake_wnet(monkeypatch)
-    drive_swap.swap_to_server("\\\\nas\\Pool\\CC", lambda args: _proc(0),
+    drive_swap.swap_to_server("\\\\nas\\Pool\\CC", _reports_local_p(lambda args: _proc(0)),
                               username="owen", password="pw")
     flags = connects[0][-1]
     assert not flags & 0x00000008           # CONNECT_INTERACTIVE
@@ -173,7 +203,7 @@ def test_bad_credentials_codes_are_classified_as_auth(monkeypatch, code):
     """These four must keep meaning "the server wants credentials" -- that
     classification is what makes the tray offer login-and-retry."""
     _fake_wnet(monkeypatch, code=code)
-    ok, msg = drive_swap.swap_to_server("\\\\nas\\Pool\\CC", lambda a: _proc(0),
+    ok, msg = drive_swap.swap_to_server("\\\\nas\\Pool\\CC", _reports_local_p(lambda a: _proc(0)),
                                         username="owen", password="pw")
     assert not ok
     assert str(code) in msg
@@ -183,7 +213,7 @@ def test_bad_credentials_codes_are_classified_as_auth(monkeypatch, code):
 @pytest.mark.parametrize("code,fragment", [(53, "network path"), (67, "network name")])
 def test_unreachable_and_bad_share_are_not_auth(monkeypatch, code, fragment):
     _fake_wnet(monkeypatch, code=code)
-    ok, msg = drive_swap.swap_to_server("\\\\nas\\Pool\\CC", lambda a: _proc(0))
+    ok, msg = drive_swap.swap_to_server("\\\\nas\\Pool\\CC", _reports_local_p(lambda a: _proc(0)))
     assert not ok
     assert fragment in msg
     assert not drive_swap.is_auth_failure(msg)   # no point asking for a login
@@ -195,7 +225,7 @@ def test_1219_credential_conflict_reads_as_a_conflict_not_an_auth_failure(monkey
     returns 1219 again), so the message must carry no _AUTH_HINTS word --
     which net use's own localised text did, incidentally, via "user name"."""
     _fake_wnet(monkeypatch, code=1219)
-    ok, msg = drive_swap.swap_to_server("\\\\nas\\Pool\\CC", lambda a: _proc(0),
+    ok, msg = drive_swap.swap_to_server("\\\\nas\\Pool\\CC", _reports_local_p(lambda a: _proc(0)),
                                         username="owen", password="pw")
     assert not ok
     assert "1219" in msg and "disconnect" in msg.lower()
@@ -204,7 +234,7 @@ def test_1219_credential_conflict_reads_as_a_conflict_not_an_auth_failure(monkey
 
 def test_an_unmapped_win32_code_still_reports_something_usable(monkeypatch):
     _fake_wnet(monkeypatch, code=1234)
-    ok, msg = drive_swap.swap_to_server("\\\\nas\\Pool\\CC", lambda a: _proc(0))
+    ok, msg = drive_swap.swap_to_server("\\\\nas\\Pool\\CC", _reports_local_p(lambda a: _proc(0)))
     assert not ok and "1234" in msg
 
 
@@ -217,7 +247,7 @@ def test_swap_to_server_with_credentials_and_persist(monkeypatch):
         return _proc(0, "")
 
     connects = _fake_wnet(monkeypatch)
-    ok, _ = drive_swap.swap_to_server(unc, run, username="owen", password="pw")
+    ok, _ = drive_swap.swap_to_server(unc, _reports_local_p(run), username="owen", password="pw")
     assert ok
     # R1: the login rides the CALL, not an argv.
     assert connects == [(unc, "P:", "owen", "pw", drive_swap.CONNECT_TEMPORARY)]
@@ -267,6 +297,83 @@ def test_swap_to_local_prefers_loopback_then_subst():
 def test_swap_to_server_unconfigured_refuses():
     ok, msg = drive_swap.swap_to_server("", lambda args: _proc(0))
     assert not ok and "not configured" in msg
+
+
+# -- UX-6: the swap must not delete a P: it did not create ------------------
+
+def test_swap_refuses_a_foreign_p_and_spawns_no_unmap(monkeypatch):
+    """The base rig, or any machine set up before CCSync: P: is a real SMB
+    mapping of the NAS. `net use P: /delete /y` there is unrecoverable -- the
+    swap back re-maps P: at local_root, not at whatever was there -- and every
+    P:\\... clip path in that machine's Resolve database then resolves against
+    a different tree."""
+    spawned = []
+
+    def recording(args):
+        spawned.append(list(args))
+        if list(args) == _P_QUERY:
+            return _proc(0, "Remote name   \\\\OTHERNAS\\Media\n")
+        return _proc(0, "")
+
+    _fake_wnet(monkeypatch)      # would raise AssertionError if reached
+    ok, msg = drive_swap.swap_to_server("\\\\nas\\Pool\\CC", recording,
+                                        local_root=r"D:\Creators_Club")
+    assert not ok
+    assert "OTHERNAS" in msg and "did not create" in msg
+    assert "cannot put it back" in msg
+    # the ONLY spawn is the read-only query: no /delete, no subst /D
+    assert spawned == [_P_QUERY]
+
+
+def test_swap_refuses_when_the_mapping_cannot_be_read(monkeypatch):
+    """current_p_target() answers "" both for "nothing is mapped" and for "the
+    query failed", so "none" is the could-not-tell state -- and the installer's
+    rule (B21) is that could-not-tell means somebody else's."""
+    spawned = []
+
+    def blind(args):
+        spawned.append(list(args))
+        raise OSError("net use is not available")
+
+    _fake_wnet(monkeypatch)
+    ok, msg = drive_swap.swap_to_server("\\\\nas\\Pool\\CC", blind,
+                                        local_root=r"D:\Creators_Club")
+    assert not ok
+    assert "could not tell" in msg and "left exactly as it is" in msg
+    assert all("/delete" not in " ".join(a) for a in spawned)
+    assert all("/D" not in a for a in spawned)
+
+
+def test_a_legacy_subst_of_our_own_local_root_is_still_ours(monkeypatch):
+    """The refusal must not catch the machines the swap exists for: a
+    pre-loopback rig whose P: is `subst P: <local_root>` classifies as "local"
+    only when local_root is passed through (which is why swap_to_server takes
+    it)."""
+    def subst_p(args):
+        if list(args) == _P_QUERY:
+            return _proc(2, "", "The network connection could not be found.")
+        if list(args) == ["subst"]:
+            return _proc(0, "P:\\: => D:\\Creators_Club\n")
+        return _proc(0, "")
+
+    _fake_wnet(monkeypatch, code=0)
+    ok, msg = drive_swap.swap_to_server("\\\\nas\\Pool\\CC", subst_p,
+                                        local_root=r"D:\Creators_Club")
+    assert ok, msg
+
+
+def test_p_already_on_the_server_is_a_no_op(monkeypatch):
+    unc = "\\\\nas\\Pool\\CC"
+    _fake_wnet(monkeypatch)      # a connect here would fail the autouse guard
+    ok, msg = drive_swap.swap_to_server(unc, _reports_p(unc),
+                                        local_root=r"D:\Creators_Club")
+    assert ok and "already shows the SERVER" in msg
+
+
+def test_the_refusals_carry_no_em_dash():
+    """Owner's rule 2026-08-18: no em dashes in text an editor reads."""
+    for text in (drive_swap._FOREIGN_P_REFUSAL, drive_swap._UNKNOWN_P_REFUSAL):
+        assert "\u2014" not in text and "\u2013" not in text
 
 
 def test_derive_server_unc_from_existing_config():
@@ -327,7 +434,7 @@ def test_an_unreachable_server_times_out_without_leaking_the_password(
     try:
         with caplog.at_level(logging.DEBUG, logger="ccsync.drive_swap"):
             ok, msg = drive_swap.swap_to_server(
-                "\\\\nas\\Pool\\Creators_Club", lambda args: _proc(0),
+                "\\\\nas\\Pool\\Creators_Club", _reports_local_p(lambda args: _proc(0)),
                 username="owen", password=_SECRET,
             )
     finally:
@@ -350,7 +457,7 @@ def test_a_raising_connect_reports_only_the_exception_type(monkeypatch, caplog):
 
     with caplog.at_level(logging.DEBUG, logger="ccsync.drive_swap"):
         ok, msg = drive_swap.swap_to_server(
-            "\\\\nas\\Pool\\Creators_Club", lambda args: _proc(0),
+            "\\\\nas\\Pool\\Creators_Club", _reports_local_p(lambda args: _proc(0)),
             username="owen", password=_SECRET)
 
     assert not ok
@@ -379,7 +486,7 @@ def test_no_swap_path_puts_the_password_on_an_argv(monkeypatch):
     unc = "\\\\nas\\Pool\\Creators_Club"
     _fake_wnet(monkeypatch)
     _fake_credwrite(monkeypatch)
-    drive_swap.swap_to_server(unc, recording_run, username="owen", password=_SECRET)
+    drive_swap.swap_to_server(unc, _reports_local_p(recording_run), username="owen", password=_SECRET)
     drive_swap.persist_credentials(unc, "owen", _SECRET, recording_run)
     drive_swap.swap_to_local(r"D:\Creators_Club", recording_run)
 
@@ -432,7 +539,7 @@ def test_a_failing_unmap_logs_a_redacted_argv(monkeypatch, caplog):
 
     _fake_wnet(monkeypatch)
     with caplog.at_level(logging.DEBUG, logger="ccsync.drive_swap"):
-        drive_swap.swap_to_server("\\\\nas\\Pool\\CC", timing_out,
+        drive_swap.swap_to_server("\\\\nas\\Pool\\CC", _reports_local_p(timing_out),
                                   username="owen", password=_SECRET)
 
     logged = " ".join(r.getMessage() for r in caplog.records)

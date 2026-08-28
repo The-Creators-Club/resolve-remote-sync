@@ -311,3 +311,70 @@ def test_a_raising_gate_scans_anyway(tmp_path):
 
     cache = manifest_mod.ManifestCache({"local_root": str(tmp_path)}, root_present_fn=_boom)
     assert cache._root_is_present() is True
+
+
+# -- UX-7: Syncthing conflict copies -------------------------------------------
+
+
+def test_the_walk_counts_syncthing_conflict_copies_of_any_kind(tmp_path):
+    """UX-7 (resilience sweep 2026-08-28): two editors changed the same file,
+    Syncthing kept both, and nothing in the companion or the dashboard ever
+    mentioned the string -- while SPEC.md:343 says it is surfaced in the tray.
+    Counted whatever the extension: the common case is a .drp or an audio
+    file, not a video original."""
+    project_dir = _make_project(tmp_path, "2026", "FF5", "Nuclear")
+    _touch(project_dir / "a.mov", size=10)
+    _touch(project_dir / "Edit.sync-conflict-20260828-104500-ABCDEFG.drp", size=5)
+    _touch(project_dir / "Audio" / "track.sync-conflict-20260828-104500-ABCDEFG.mp3",
+           size=5)
+    _touch(project_dir / "B-roll" / "A001.sync-conflict-20260828-104500-ABCDEFG.mov",
+           size=5)
+
+    conflicts: dict = {}
+    result = manifest_mod.scan_local_manifest(str(tmp_path), conflicts_out=conflicts)
+    assert conflicts["count"] == 3
+    assert any(p.endswith("Edit.sync-conflict-20260828-104500-ABCDEFG.drp")
+               for p in conflicts["paths"])
+    assert all(p.startswith("2026/FF5/Nuclear/") for p in conflicts["paths"])
+    # Nothing is deleted, and a conflict copy that IS a video still counts in
+    # the rollups: it is a real file on this disk.
+    assert (project_dir / "Edit.sync-conflict-20260828-104500-ABCDEFG.drp").exists()
+    assert result["2026/FF5/Nuclear"]["n_originals"] == 2
+
+
+def test_the_conflict_path_list_is_capped_but_the_count_is_exact(tmp_path):
+    project_dir = _make_project(tmp_path, "2026", "FF5", "Nuclear")
+    for i in range(manifest_mod.MAX_CONFLICT_PATHS + 5):
+        _touch(project_dir / f"f{i}.sync-conflict-20260828-104500-ABCDEFG.txt", size=1)
+    conflicts: dict = {}
+    manifest_mod.scan_local_manifest(str(tmp_path), conflicts_out=conflicts)
+    assert conflicts["count"] == manifest_mod.MAX_CONFLICT_PATHS + 5
+    assert len(conflicts["paths"]) == manifest_mod.MAX_CONFLICT_PATHS
+
+
+def test_the_cache_reports_conflicts_and_says_nothing_when_there_are_none(tmp_path):
+    project_dir = _make_project(tmp_path, "2026", "FF5", "Nuclear")
+    _touch(project_dir / "a.mov", size=10)
+    cache = manifest_mod.ManifestCache({"local_root": str(tmp_path)})
+    cache.refresh_once()
+    # {} is how "no conflicts" is spelled, so the report field is simply absent.
+    assert cache.sync_conflicts() == {}
+
+    _touch(project_dir / "Edit.sync-conflict-20260828-104500-ABCDEFG.drp", size=5)
+    cache.refresh_once()
+    assert cache.sync_conflicts()["count"] == 1
+
+
+def test_a_skipped_scan_never_reads_as_the_conflicts_being_gone(tmp_path):
+    """The same rule the manifest cache itself follows: hold the last good
+    answer rather than publish an empty one."""
+    project_dir = _make_project(tmp_path, "2026", "FF5", "Nuclear")
+    _touch(project_dir / "Edit.sync-conflict-20260828-104500-ABCDEFG.drp", size=5)
+    present = {"yes": True}
+    cache = manifest_mod.ManifestCache(
+        {"local_root": str(tmp_path)}, root_present_fn=lambda: present["yes"])
+    cache.refresh_once()
+    assert cache.sync_conflicts()["count"] == 1
+    present["yes"] = False
+    cache.refresh_once()
+    assert cache.sync_conflicts()["count"] == 1

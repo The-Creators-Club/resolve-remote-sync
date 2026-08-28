@@ -466,6 +466,10 @@ $Files = @(
     @{ Src = "installer\START_HERE.md";           Dst = "START_HERE.md" },
     @{ Src = "installer\FIRST_UPGRADE.md";        Dst = "FIRST_UPGRADE.md" },
     @{ Src = "installer\windows_bootstrap.ps1";   Dst = "windows_bootstrap.ps1" },
+    # Dot-sourced from beside windows_bootstrap.ps1 AND windows_uninstall.ps1
+    # (OPS-8, 2026-08-28). The bootstrap exits 1 without it rather than run a
+    # drive teardown with no ownership check, so it is not optional freight.
+    @{ Src = "installer\drive_mapping.ps1";       Dst = "drive_mapping.ps1" },
     @{ Src = "installer\windows_upgrade.ps1";     Dst = "windows_upgrade.ps1" },
     @{ Src = "installer\windows_uninstall.ps1";   Dst = "windows_uninstall.ps1" },
     @{ Src = "installer\macos_bootstrap.sh";      Dst = "macos_bootstrap.sh" },

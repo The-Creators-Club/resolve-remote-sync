@@ -238,10 +238,15 @@ def add_items(
 def remove_item(
     folder_id: int, video_id: int,
     conn: sqlite3.Connection = Depends(cf.get_shares_db),
+    index: sqlite3.Connection = Depends(get_db),
     _user: str = Depends(require_user),
 ) -> None:
+    # The index connection is what lets the id the panel sends be matched
+    # against the identity the item was stored under (MEDIA-23, 2026-08-28):
+    # after a rebuild renumbers videos.id they are different numbers for the
+    # same clip, and this used to 404 on a clip the folder does hold.
     _folder_or_404(conn, folder_id)
-    if not cf.remove_item(conn, folder_id, video_id):
+    if not cf.remove_item(conn, folder_id, video_id, index):
         raise HTTPException(404, "that clip is not in this folder")
 
 
@@ -250,11 +255,12 @@ def set_note(
     folder_id: int, video_id: int,
     body: ClientFolderNoteIn,
     conn: sqlite3.Connection = Depends(cf.get_shares_db),
+    index: sqlite3.Connection = Depends(get_db),
     _user: str = Depends(require_user),
 ) -> dict:
     _folder_or_404(conn, folder_id)
     try:
-        ok = cf.set_note(conn, folder_id, video_id, body.note)
+        ok = cf.set_note(conn, folder_id, video_id, body.note, index)
     except cf.ClientFolderError as e:
         raise _bad_request(e) from e
     if not ok:

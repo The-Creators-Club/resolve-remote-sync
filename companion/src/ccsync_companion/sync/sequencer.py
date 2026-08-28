@@ -273,7 +273,12 @@ class Sequencer:
         self.shared_folders = (
             shared_folders
             if shared_folders is not None
-            else SharedFolderManager(admin, self.local_root, halted=halted)
+            # SYNC-6 (resilience sweep 2026-08-28): reconcile() runs at the
+            # loop head, before any root check, and it can mkdir -- the same
+            # ghost-tree-on-the-boot-disk hazard _clone_structure is guarded
+            # against, so it takes the same predicate.
+            else SharedFolderManager(admin, self.local_root, halted=halted,
+                                     root_present_fn=self._local_root_is_present)
         )
         # Lender folders this machine borrows from without ticking them
         # (SHARED_FOLDERS_PLAN.md §3.3) -- same lifecycle as the asset
@@ -286,7 +291,9 @@ class Sequencer:
             else BorrowedFolderManager(
                 admin, self.local_root, lenders_fn=self.borrowed_lenders,
                 selected_slugs_fn=self.expected_folder_slugs,
-                halted=halted, move_dir=_default_move)
+                halted=halted, move_dir=_default_move,
+                # SYNC-6, as above: _accept and _repoint both mkdir.
+                root_present_fn=self._local_root_is_present)
         )
         # EVERY numeric here goes through config.coerce_numeric/coerce_count.
         # A bare float(cfg.get(...)) raises on a hand-edited
@@ -641,6 +648,26 @@ class Sequencer:
         """The slugs ticked upload-only in the current selection."""
         with self._lock:
             return set(self._upload_only_slugs)
+
+    def unconfirmed_slugs(self) -> list[str]:
+        """Selected slugs whose .stignore is NOT known to be in place, so
+        lane C is deliberately keeping their folder paused.
+
+        SYNC-5 (resilience sweep 2026-08-28). The latch itself is old and
+        correct (AUDIT_2 L-3/B14) but was reported NOWHERE: with 1 of 5
+        folders parked, lane C's own check_once falls through to
+        `state=IDLE, queued=0, last_sync=now` and that project simply never
+        syncs, green forever. This is the read side, so the report and the
+        tray can say which projects are waiting for their filter list.
+        Never raises, and asks the same predicate every sweep asks."""
+        out: list[str] = []
+        for slug in self.expected_folder_slugs():
+            try:
+                if self._ignores_unconfirmed_for(slug):
+                    out.append(str(slug))
+            except Exception:
+                log.debug("sequencer: unconfirmed check failed for %s", slug, exc_info=True)
+        return out
 
     def halt_folder_ids(self) -> list[str]:
         """EVERY lane C folder a halt has to pause: the selected projects

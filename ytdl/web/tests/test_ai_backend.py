@@ -358,6 +358,76 @@ def test_the_dashboards_env_overlay_reaches_the_subprocess(run_cli, monkeypatch)
     assert 'ANTHROPIC_API_KEY' not in env
 
 
+def test_the_cli_subprocess_never_sees_a_fleet_credential(run_cli, monkeypatch):
+    """YT-9 (resilience sweep 2026-08-28): the environment is an ALLOW-LIST.
+
+    Until this the CLI got `dict(os.environ)` minus four AI keys, so a binary
+    fetched from the internet at an admin's click, running arbitrary tools of
+    its own over YouTube titles and descriptions, was handed every credential
+    the fleet has. Nothing here needed any of them, and an allow-list also
+    withholds the NEXT secret somebody adds to the container's environment.
+    """
+    secrets = {
+        'DASH_SESSION_SECRET': 'a' * 40,
+        'DASH_REPORT_TOKEN': 'b' * 40,
+        'SYNCTHING_API_KEY': 'c' * 40,
+        'TRUENAS_API_KEY': 'd' * 40,
+        'BROLL_INGEST_TOKEN': 'e' * 40,
+        'DASH_RELEASE_PUBKEYS': 'f' * 40,
+    }
+    for key, value in secrets.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv('PATH', os.environ.get('PATH', '/usr/bin'))
+
+    calls = run_cli(FakeProc(stdout='ok'))
+    ai_backend.complete('s', 'u', provider=cli())
+    env = calls[0][1]['env']
+    for key, value in secrets.items():
+        assert key not in env, key
+        assert value not in env.values(), key
+    # ...and the CLI can still find its binary and its own credentials
+    assert env.get('PATH')
+
+
+def test_the_allow_list_keeps_what_a_cli_actually_needs(run_cli, monkeypatch):
+    """The other direction of YT-9: an allow-list that dropped the locale or
+    the proxy variables would break a working deployment to close a hole."""
+    for key in ('LANG', 'LC_ALL', 'TZ', 'TERM', 'TMPDIR', 'HTTPS_PROXY',
+                'NO_PROXY', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME'):
+        monkeypatch.setenv(key, 'set-' + key.lower())
+    monkeypatch.setenv('http_proxy', 'http://corp:3128')   # lowercase is real
+    calls = run_cli(FakeProc(stdout='ok'))
+    ai_backend.complete('s', 'u', provider=cli())
+    env = calls[0][1]['env']
+    for key in ('LANG', 'LC_ALL', 'TZ', 'TERM', 'TMPDIR', 'HTTPS_PROXY',
+                'NO_PROXY', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME'):
+        assert env.get(key) == 'set-' + key.lower(), key
+    # the lowercase spelling is a real Linux convention, so it is allowed and
+    # passed through under ITS OWN name. Asserted on the predicate rather than
+    # through os.environ because Windows upper-cases the mapping's keys, which
+    # would make this test pass for the wrong reason there.
+    assert ai_backend.env_var_allowed('http_proxy') is True
+    assert env.get('http_proxy', env.get('HTTP_PROXY')) == 'http://corp:3128'
+
+
+def test_the_allow_list_matches_the_dashboards(run_cli):
+    """It is a COPY of ccsync_dashboard.cli_tools' and it must not drift: two
+    lists means the probe that says "signed in" and the job that runs are
+    reasoning about different environments, which is cli_env's whole reason
+    for existing. Imported here only because the dashboard package happens to
+    be importable in this suite; the deployed ytdl app imports nothing from
+    it, which is why the copy exists at all."""
+    cli_tools = pytest.importorskip('ccsync_dashboard.cli_tools')
+    assert (set(ai_backend._ALLOWED_ENV_VARS)
+            == set(cli_tools._ALLOWED_ENV_VARS))
+    assert (tuple(ai_backend._ALLOWED_ENV_PREFIXES)
+            == tuple(cli_tools._ALLOWED_ENV_PREFIXES))
+    for name in ('PATH', 'DASH_SESSION_SECRET', 'http_proxy', 'CLAUDE_X',
+                 'ANTHROPIC_API_KEY', ''):
+        assert (ai_backend.env_var_allowed(name)
+                == cli_tools.env_var_allowed(name)), name
+
+
 def test_a_provider_never_prints_its_env_overlay(run_cli):
     """`repr` of a Provider ends up in log lines, tracebacks and pytest diffs,
     and the overlay can carry an OAuth token."""

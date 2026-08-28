@@ -745,3 +745,53 @@ def test_a_failed_device_id_refresh_keeps_the_last_known_one(monkeypatch, tmp_pa
     monkeypatch.setattr(syncthing_lane, "DEVICE_ID_REFRESH_SECONDS", 0.0)
     state["up"] = False
     assert lane._get_my_device_id() == "DEV-1"
+
+
+# -- SYNC-5: a folder parked without its filter list ---------------------------
+
+
+def test_check_once_is_an_error_while_a_folder_waits_for_its_filter_list(
+        fake_syncthing_server):
+    """SYNC-5 (resilience sweep 2026-08-28): the sequencer keeps a folder
+    paused when its .stignore never landed (AUDIT_2 L-3/B14). With 1 of 5
+    paused, check_once fell through to state=IDLE/queued=0/last_sync=now and
+    that project simply never synced, green forever."""
+    lane = _lane_for(fake_syncthing_server, expected_folder_ids=["proj-1"],
+                     unfiltered_folders_fn=lambda: ["proj-2"])
+    status = lane.check_once()
+    assert status.state == STATE_ERROR
+    assert "not sharing yet" in status.last_error
+    assert "proj-2" in status.last_error
+    assert "—" not in status.last_error  # no em dashes in visible text
+
+
+def test_a_real_folder_error_and_an_unfiltered_folder_are_both_reported(
+        fake_syncthing_server):
+    """An admin needs both sentences: the folder that IS in error, and the one
+    that is parked waiting for its filter list."""
+    fake_syncthing_server.fake_state["db_status"]["proj-1"] = {
+        "needTotalItems": 0, "errors": 2, "state": "error", "error": "disk full",
+    }
+    lane = _lane_for(fake_syncthing_server, expected_folder_ids=["proj-1"],
+                     unfiltered_folders_fn=lambda: ["proj-2"])
+    status = lane.check_once()
+    assert status.state == STATE_ERROR
+    assert "in error" in status.last_error
+    assert "not sharing yet" in status.last_error
+
+
+def test_a_failing_unfiltered_probe_never_takes_the_lane_report_down(
+        fake_syncthing_server):
+    def _boom():
+        raise RuntimeError("no")
+
+    lane = _lane_for(fake_syncthing_server, expected_folder_ids=["proj-1"],
+                     unfiltered_folders_fn=_boom)
+    assert lane.check_once().state == STATE_IDLE
+    assert lane.unfiltered_folders() == []
+
+
+def test_the_unfiltered_sentence_names_at_most_five_projects():
+    text = SyncthingLane.unfiltered_sentence([f"p{i}" for i in range(7)])
+    assert text.startswith("7 project(s) are not sharing yet")
+    assert "+2 more" in text

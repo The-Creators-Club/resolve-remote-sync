@@ -29,18 +29,32 @@
     Exits 1 on any failure.
 #>
 $ErrorActionPreference = "Stop"
-# Pull just the parsers out of the bootstrap so they can be exercised
-# standalone. The slice runs from the FIRST of the two functions to the
-# comment that opens Get-DriveMapping (which needs a real machine).
-$BootstrapPath = Join-Path (Split-Path -Parent $PSScriptRoot) "windows_bootstrap.ps1"
-$src = Get-Content -Raw $BootstrapPath
-$start = $src.IndexOf('function ConvertFrom-CanonicalPrefix')
-$end = $src.IndexOf('# Reads the CURRENT USER''s DOS device map')
-if ($start -lt 0 -or $end -lt 0 -or $end -le $start) {
-    Write-Host "FAIL: could not slice the parsers out of $BootstrapPath -- did a function get renamed?" -ForegroundColor Red
+# The parsers used to be sliced out of windows_bootstrap.ps1 by string index.
+# They live in installer/drive_mapping.ps1 since 2026-08-28 (OPS-8 / UX-23),
+# shared with windows_uninstall.ps1, so this dot-sources the real file -- which
+# also means a syntax error in it fails the suite instead of hiding until an
+# editor runs an install.
+$InstallerDir = Split-Path -Parent $PSScriptRoot
+$BootstrapPath = Join-Path $InstallerDir "windows_bootstrap.ps1"
+$UninstallPath = Join-Path $InstallerDir "windows_uninstall.ps1"
+$LibPath = Join-Path $InstallerDir "drive_mapping.ps1"
+if (-not (Test-Path -LiteralPath $LibPath)) {
+    Write-Host "FAIL: no drive_mapping.ps1 at $LibPath" -ForegroundColor Red
     exit 1
 }
-Invoke-Expression $src.Substring($start, $end - $start)
+$IsElevated = $false          # the library reads it; nothing here mounts anything
+function Write-Step { param([string]$m) }
+function Write-Warn2 { param([string]$m) }
+. $LibPath
+$src = Get-Content -Raw $BootstrapPath
+foreach ($fn in @('ConvertFrom-CanonicalPrefix', 'ConvertFrom-DriveMapReport',
+                  'Get-DriveMapping', 'Invoke-MappingCommand', 'Invoke-AtUserIntegrity',
+                  'Test-IsElevated')) {
+    if (-not (Get-Command $fn -ErrorAction SilentlyContinue)) {
+        Write-Host "FAIL: drive_mapping.ps1 does not define $fn" -ForegroundColor Red
+        exit 1
+    }
+}
 
 # --- ConvertFrom-CanonicalPrefix -------------------------------------------
 $prefixCases = @(
@@ -163,18 +177,72 @@ else {
   }
 }
 
+# --- one classification, in one file, used by both scripts -----------------
+# OPS-8 / UX-23 (resilience sweep 2026-08-28). windows_uninstall.ps1 decided
+# "is this drive ours?" from Get-PSDrive + Test-Path inside a try/catch, and
+# any failure there left $displayRoot BLANK -- which the ownership expression
+# read as "a subst mapping, ours" and then ran `net use <drive> /delete /y` on.
+# The bootstrap had already been fixed to treat "can't tell" as foreign (B21);
+# the uninstaller inverted it. These cases pin the fix in place, because the
+# machine states that trigger it (an elevated run, a disconnected persistent
+# mapping) are the ones a manual test never has.
+$uninst = Get-Content -Raw $UninstallPath
+$uninstLines = @(Get-Content $UninstallPath | Where-Object { $_ -notmatch '^\s*#' })
+$srcLines = @(Get-Content $BootstrapPath | Where-Object { $_ -notmatch '^\s*#' })
+
+$sourceCases = @(
+  @{ n = 'the uninstaller dot-sources the shared library'
+     ok = ($uninstLines -match '^\s*\.\s+\$DriveMappingLib').Count -gt 0 }
+  @{ n = 'the bootstrap dot-sources it too'
+     ok = ($srcLines -match '^\s*\.\s+\$DriveMappingLib').Count -gt 0 }
+  @{ n = 'neither script redefines the parsers'
+     ok = -not ($srcLines -match 'function ConvertFrom-DriveMapReport') -and
+          -not ($uninstLines -match 'function ConvertFrom-DriveMapReport') }
+  @{ n = 'the uninstaller classifies with Get-DriveMapping'
+     ok = ($uninstLines -match 'Get-DriveMapping').Count -gt 0 }
+  @{ n = 'the uninstaller no longer asks Get-PSDrive/DisplayRoot whose drive it is'
+     ok = -not ($uninstLines -match 'Get-PSDrive') -and -not ($uninstLines -match 'DisplayRoot') }
+  @{ n = 'an unreadable mapping table is FOREIGN in the uninstaller'
+     ok = $uninst -match '\$null -eq \$mapping' }
+  @{ n = 'the unmap runs at the USER integrity level, not this token''s'
+     ok = ($uninstLines -match 'Invoke-MappingCommand "net use \$DriveRoot /delete /y"').Count -gt 0 }
+  @{ n = 'no raw cmd /c net use /delete survives in the uninstaller'
+     ok = -not ($uninstLines -match 'cmd /c "net use \$DriveRoot /delete') }
+  @{ n = 'the share is removed only after the unmap settled'
+     ok = ($uninstLines -match '\$share -and -not \$unmapSettled').Count -gt 0 }
+  @{ n = 'and the two by-hand commands are printed when it did not'
+     ok = ($uninst -match 'net use \$DriveRoot /delete /y') -and
+          ($uninst -match 'Remove-SmbShare -Name \$ShareName -Force') }
+  @{ n = 'the bootstrap refuses to run without the library'
+     ok = ($srcLines -match 'drive_mapping\.ps1 is missing').Count -gt 0 }
+  @{ n = 'the editor package ships the library'
+     ok = (Get-Content -Raw (Join-Path $InstallerDir "build_editor_package.ps1")) -match
+          'installer\\drive_mapping\.ps1' }
+  @{ n = 'onboard.exe bundles it beside the bootstrap it extracts'
+     ok = (Get-Content -Raw (Join-Path (Split-Path -Parent $InstallerDir) "onboarding\build_onboard.spec")) -match
+          'DRIVE_MAPPING_PS1' }
+)
+foreach ($c in $sourceCases) {
+  if ($c.ok) { Write-Host "  PASS  $($c.n)" }
+  else {
+    $fail++
+    Write-Host "  FAIL  $($c.n)" -ForegroundColor Red
+  }
+}
+
+# A $null report is what Get-DriveMapping returns when the probe could not be
+# read at all; the parser must never turn that into a mapping.
+$nullRes = ConvertFrom-DriveMapReport -Report $null -Letter 'P'
+if (-not $nullRes.Mapped -and $nullRes.Kind -eq 'none') { Write-Host "  PASS  an unreadable report is never a mapping" }
+else { $fail++; Write-Host "  FAIL  an unreadable report parsed as a mapping" -ForegroundColor Red }
+
 Write-Host ""
 if ($fail -gt 0) { Write-Host "$fail FAILED" -ForegroundColor Red; exit 1 }
 Write-Host "all ConvertFrom-CanonicalPrefix + ConvertFrom-DriveMapReport cases pass"
 
 # --- and the live end-to-end probe on this machine -------------------------
 Write-Host ""
-$IsElevated = $false
-$live = & {
-  $src2 = $src.Substring($src.IndexOf('function Get-DriveMapping'), $src.IndexOf('function Test-IsElevated') - $src.IndexOf('function Get-DriveMapping'))
-  Invoke-Expression $src2
-  Get-DriveMapping -Letter 'P'
-}
+$live = Get-DriveMapping -Letter 'P'
 if ($null -eq $live) { Write-Host "live probe: could not determine (would be treated as FOREIGN)" }
 # Not an assertion: what this machine has mapped is not the test's business.
 else { Write-Host "live probe on this machine: Mapped=$($live.Mapped) Kind=$($live.Kind) Target='$($live.Target)'" }

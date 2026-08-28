@@ -236,11 +236,13 @@ from common import (  # noqa: F401 - truenas_api/run_ssh/wait_for_job/ok are als
     DEFAULT_HOMES_PARENT, DEFAULT_TRUENAS_HOST, DEFAULT_TRUENAS_USER, EDITORS_GROUP, EnvError,
     DEFAULT_PROJECTS_ROOT, PROJECTS_DIRNAME, SHARED_ASSETS_REL, SHARED_ASSET_FOLDERS,
     ScriptCalls, add_host_key_arg, add_nas_kind_arg,
-    add_site_arg, cli, editor_shell_is_sftp_only, editor_shell_mode, get_backend,
-    load_site, nas_admin_password, ok, require_env, require_site_value,
+    add_site_arg, cli, confirm_destructive, editor_shell_is_sftp_only,
+    editor_shell_mode, get_backend,
+    load_site, nas_admin_password, ok, print_nas_banner, require_env,
+    require_site_value,
     run_ssh, set_host_key_pin, sftp_put_text, shell_quote, site_bool, site_int, site_list,
     site_value,
-    snapshot_before, ssh_client, truenas_api_key,
+    snapshot_before, snapshot_verdict, ssh_client, truenas_api_key,
     synology_api, truenas_api, truenas_conn_params, wait_for_job,
 )
 from backends import truenas as truenas_backend
@@ -3637,6 +3639,10 @@ def main():
     add_host_key_arg(ap)
     add_site_arg(ap)
     add_nas_kind_arg(ap)
+    ap.add_argument("--yes", action="store_true",
+                    help="skip the typed confirmation of the NAS's name that "
+                         "--recreate asks for on a terminal (OPS-4, 2026-08-28). "
+                         "A plain redeploy never asks.")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     # --push-ffmpeg-from-local is the named door onto --ffmpeg-fetch local: the
@@ -3646,6 +3652,9 @@ def main():
     if args.push_ffmpeg_from_local:
         args.ffmpeg_fetch = "local"
     set_host_key_pin(args.host_key)
+    # Which box, which manifest, which tree, before anything connects (OPS-4,
+    # 2026-08-28). cli() prints it too; print_nas_banner is idempotent.
+    print_nas_banner()
     global _ARGS
     _ARGS = args
     # Which shape this deploy builds (2026-08-18, docs/DOCKER.md). Resolved
@@ -3991,6 +4000,21 @@ def main():
     # succeeded at doing the wrong thing (COMMERCIAL_READINESS.md item 8,
     # 2026-08-17). Best-effort unless --require-snapshot: a NAS whose snapshot
     # API is unreachable must not be a NAS that cannot be deployed to.
+    #
+    # OPS-4 (2026-08-28): --recreate DELETES the stack (host app/ and data/
+    # survive, the container and its compose-level settings do not), so it asks
+    # which NAS this is first. A plain redeploy does not: it is the routine
+    # command, run many times a day, and a prompt there would train the reflex
+    # that answers this one.
+    if args.recreate:
+        confirm_destructive(
+            f"About to DELETE and re-create the {APP_NAME} app "
+            f"(<host-root> {root} is not deleted).",
+            assume_yes=args.yes, dry_run=args.dry_run)
+    # OPS-9 (2026-08-28): the return value used to be discarded here, which is
+    # WPK-6 ("nobody read the WARNING because the deploy went on to succeed").
+    # It is a row in ~/.ccsync/snapshot_log.jsonl now, and a line in the final
+    # summary block below.
     snapshot_before("recreate" if args.recreate else "deploy", root,
                     dry_run=args.dry_run, require=args.require_snapshot,
                     backend=backend())
@@ -4479,6 +4503,9 @@ def main():
                   f"{APP_NAME!r} app from the TrueNAS UI to pick up the new code.")
         if image_mode and restarted:
             verify_image_boot(args.port, expected_runtime_id(), args.dry_run)
+        # The redeploy path's FINAL line: whether the app tree that was just
+        # swapped has a point-in-time behind it (OPS-9, 2026-08-28).
+        print(snapshot_verdict())
         return 0
 
     # The create itself is the backend's: a custom_app POST on TrueNAS Apps,
@@ -4562,6 +4589,7 @@ def main():
         env=env_file,
     )
     if rc_deploy != 0 or args.dry_run:
+        print(snapshot_verdict())
         return rc_deploy
 
     # The image-mode half of the existing post-deploy health check: a
@@ -4575,6 +4603,7 @@ def main():
         return 1
 
     print(f"installed custom app: {APP_NAME} on port {args.port}")
+    print(snapshot_verdict())
     print(f"Next: open http://<tailnet-ip>:{args.port}/ and check /api/v1/health; then set "
           f"dashboard_url/dashboard_token in each editor's ~/.ccsync/config.toml.")
     return 0

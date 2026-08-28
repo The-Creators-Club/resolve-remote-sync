@@ -27,6 +27,7 @@ upgrade.py / reporter.py.
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import logging
@@ -146,6 +147,23 @@ ACTION_NONE = "none"            # present and current
 ACTION_INSTALLED = "installed"
 ACTION_UPDATED = "updated"
 ACTION_FAILED = "failed"        # needed an install/update and did not get one
+ACTION_STALE = "stale"          # past MAX AGE and -U could not fix it (still usable)
+
+# THE MAX-AGE RULE (YT-1, resilience sweep 2026-08-28). Before this the only
+# thing that ever moved a companion's yt-dlp was the dashboard's floor, and
+# that floor is a constant in a dashboard release (ytdlweb/config.py's
+# DEFAULT_MIN_YTDLP_VERSION) overridable only by an env var somebody types.
+# That is precisely the structure that produced CR-80 and CR-83: YouTube
+# changes something, yt-dlp fixes it within the week, and every machine in the
+# fleet sits on a binary that cannot download while logging "yt-dlp X is
+# current" nightly, until a human notices and ships a release. yt-dlp versions
+# ARE dates, so staleness is measurable here without asking anybody: past this
+# many days we run `yt-dlp -U` on our own initiative. It cannot roll backwards
+# (-U only ever goes to the latest stable) and it never touches an override.
+# 21 days is roughly three of yt-dlp's release cycles: long enough that a
+# healthy fleet updates on the floor as it always did, short enough that a
+# YouTube break is closed without a release.
+DEFAULT_MAX_AGE_DAYS = 21
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +359,34 @@ def version_floor_is_rankable(minimum: Any) -> bool:
     fleet with it (COMP-BROLL-9). Nothing here can fix a value that lives in
     the container's environment, so ensure() says so out loud instead."""
     return upgrade_mod.parse_version(minimum) is not None
+
+
+def version_age_days(current: Any, now_ts: Optional[float] = None) -> Optional[int]:
+    """How many days old a yt-dlp version string is, or None.
+
+    yt-dlp's versions ARE release dates (YYYY.MM.DD, plus an occasional
+    `.1` for a same-day re-release), which is what makes the max-age rule
+    possible without asking GitHub anything (YT-1, 2026-08-28). None for
+    anything unparseable and for a version stamped in the FUTURE: a machine
+    with a wrong clock, or an editor running a nightly built tomorrow, must
+    not be told it is stale -- "we cannot tell" is a different answer from
+    "it is old", and only the second one may trigger an update.
+    """
+    text = str(current or "").strip()
+    if not _VERSION_RE.match(text):
+        return None
+    parts = text.split(".")
+    try:
+        released = datetime.date(int(parts[0]), int(parts[1]), int(parts[2]))
+    except (ValueError, IndexError):
+        return None
+    stamp = time.time() if now_ts is None else float(now_ts)
+    try:
+        today = datetime.datetime.fromtimestamp(stamp, datetime.timezone.utc).date()
+    except (OverflowError, OSError, ValueError):
+        return None
+    age = (today - released).days
+    return age if age >= 0 else None
 
 
 def _win_creationflags() -> int:
@@ -628,6 +674,79 @@ class YtDlpManager:
             )
         return floor
 
+    # -- the max-age rule (YT-1) -----------------------------------------
+    def _max_age_days(self) -> int:
+        """`ytdlp_max_age_days` from config, or DEFAULT_MAX_AGE_DAYS.
+
+        0 or negative switches the rule OFF, which is the honest escape hatch
+        for a machine that must not fetch a new binary on its own (the same
+        editor `ytdl_local_downloads = false` exists for, one notch weaker).
+        A non-integer is the default with a word in the log, exactly as
+        local_downloads_enabled treats a hand-edited non-boolean."""
+        raw = self.cfg.get("ytdlp_max_age_days", DEFAULT_MAX_AGE_DAYS)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            if raw is not None and raw != DEFAULT_MAX_AGE_DAYS:
+                log.error(
+                    "config: ytdlp_max_age_days=%r is not a number of days -- "
+                    "using %s", raw, DEFAULT_MAX_AGE_DAYS,
+                )
+            return DEFAULT_MAX_AGE_DAYS
+        return int(raw)
+
+    def _enforce_max_age(self, current: str, floor: Optional[str]) -> Optional[dict[str, Any]]:
+        """`yt-dlp -U` when the installed version is past its shelf life.
+
+        Called only after the floor comparison has said the binary is fine,
+        so this is the branch that used to be "yt-dlp X is current" forever
+        (YT-1, 2026-08-28). Returns None when the rule does not apply -- an
+        age we cannot compute, a rule switched off, a binary inside the window
+        -- and ensure() then publishes what it always did.
+
+        An update that FAILS is not ok=False: the binary is above the
+        dashboard's floor and can very probably still download. It is
+        published as ACTION_STALE with the age in the message, because a
+        machine drifting past three release cycles is a thing the owner has to
+        be able to see before an editor hits it, and "could not check" must
+        never render as "fine".
+        """
+        limit = self._max_age_days()
+        if limit <= 0:
+            return None
+        age = version_age_days(current, self._clock())
+        if age is None or age <= limit:
+            return None
+        log.info(
+            "ytdlp: %s is %s days old (limit %s) -- updating on our own "
+            "initiative, no dashboard floor involved", current, age, limit,
+        )
+        updated = self.self_update()
+        after = version(cfg=self.cfg, run_fn=self._run) if updated else None
+        if not updated or after is None:
+            return self._publish(
+                True, current, ACTION_STALE,
+                f"yt-dlp {current} is {age} days old and it could not update "
+                f"itself -- YouTube downloads on this machine may start failing",
+            )
+        # -U goes to the latest stable only, so it cannot roll backwards; the
+        # guard is for the day it does something else. Keeping the OLD string
+        # in that case would report a version that is no longer installed.
+        if version_is_older(after, current):
+            log.warning(
+                "ytdlp: -U left %s where %s was -- reporting what is actually "
+                "installed", after, current,
+            )
+        ok = after is not None and not (floor and version_is_older(after, floor))
+        if after == current:
+            return self._publish(
+                True, current, ACTION_STALE,
+                f"yt-dlp {current} is {age} days old and it is already the "
+                f"newest release -- nothing newer to take",
+            )
+        return self._publish(
+            ok, after, ACTION_UPDATED,
+            f"yt-dlp {current} was {age} days old, updated to {after}",
+        )
+
     # -- install ---------------------------------------------------------
     def _free_space_ok(self, directory: Path) -> bool:
         """Refuse the download when the disk cannot take it.
@@ -794,6 +913,7 @@ class YtDlpManager:
             ytdlp_path override                  -> version check ONLY
             binary missing                       -> install
             binary older than min_version        -> yt-dlp -U
+            binary older than max age (21 days)  -> yt-dlp -U   (YT-1)
             otherwise                            -> nothing
 
         `min_version` defaults to the dashboard's `min_ytdlp_version`; when
@@ -885,6 +1005,15 @@ class YtDlpManager:
                     ok, after, ACTION_UPDATED,
                     f"updated yt-dlp {current} -> {after or '(version unreadable)'}",
                 )
+
+            # YT-1 (2026-08-28): the max-age rule, and it lives HERE rather
+            # than beside the floor test on purpose -- everything above it
+            # already decided to touch the binary, and the override branch has
+            # returned long since (nothing installs or updates over a
+            # hand-managed yt-dlp).
+            aged = self._enforce_max_age(current, floor)
+            if aged is not None:
+                return aged
 
             return self._publish(True, current, ACTION_NONE, f"yt-dlp {current} is current")
 

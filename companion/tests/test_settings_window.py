@@ -116,20 +116,113 @@ def test_restart_prompt_appears_only_when_mode_on_disk_differs(tmp_path):
 # -- role switch actions --------------------------------------------------
 
 
-def test_switching_to_base_writes_config_without_a_confirmation(tmp_path, monkeypatch):
+def test_switching_to_base_asks_first_and_spells_out_the_consequence(tmp_path,
+                                                                     monkeypatch):
+    """UX-2 (2026-08-28): this used to write config.toml with no dialog at
+    all, and the toast only said the role had changed."""
+    import threading
+
     from ccsync_companion import config as config_mod
+    from ccsync_companion import popup
 
     path = tmp_path / "config.toml"
     config_mod.ensure_config_exists(path)
     monkeypatch.setattr(config_mod, "CONFIG_PATH", path)
 
-    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    class _LockyApp(_FakeApp):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self._popup_active_lock = threading.Lock()
+
+    app = _LockyApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
     notified = []
     monkeypatch.setattr(sw.tray_mod, "_notify", lambda a, msg: notified.append(msg))
 
+    asked = []
+
+    def _confirm(title, body, ok_label="PROCEED"):
+        asked.append(body)
+        return False
+
+    monkeypatch.setattr(popup, "confirm_dialog", _confirm)
+
+    # Declined: nothing is written, and the lock is released.
+    sw.action_set_role(app, "base")
+    assert config_mod.load_config(path).get("mode", "editor") == "editor"
+    assert not app._popup_active_lock.locked()
+    assert len(asked) == 1
+    body = asked[0]
+    for phrase in ("WIRED TO THE SERVER", "sync NOTHING to it",
+                   "no proxy downloads", "tick projects"):
+        assert phrase in body, body
+    assert "—" not in body  # no em dashes in copy an editor reads
+
+    # Confirmed: the write happens.
+    monkeypatch.setattr(popup, "confirm_dialog",
+                        lambda title, body, ok_label="PROCEED": True)
     sw.action_set_role(app, "base")
     assert config_mod.load_config(path)["mode"] == "base"
     assert any("WIRED TO THE SERVER" in m for m in notified)
+    assert not app._popup_active_lock.locked()
+
+
+def test_switching_to_base_refuses_when_another_window_is_open(tmp_path, monkeypatch):
+    import threading
+
+    from ccsync_companion import config as config_mod
+    from ccsync_companion import popup
+
+    path = tmp_path / "config.toml"
+    config_mod.ensure_config_exists(path)
+    monkeypatch.setattr(config_mod, "CONFIG_PATH", path)
+
+    class _LockyApp(_FakeApp):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self._popup_active_lock = threading.Lock()
+
+    app = _LockyApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    app._popup_active_lock.acquire()
+    notified = []
+    monkeypatch.setattr(sw.tray_mod, "_notify", lambda a, msg: notified.append(msg))
+    asked = []
+    monkeypatch.setattr(popup, "confirm_dialog",
+                        lambda *a, **k: asked.append(1) or True)
+
+    sw.action_set_role(app, "base")
+    assert asked == []
+    assert any("already open" in m for m in notified)
+    assert config_mod.load_config(path).get("mode", "editor") == "editor"
+
+
+def test_a_role_that_cannot_be_read_back_is_reported_not_celebrated(tmp_path,
+                                                                    monkeypatch):
+    """APP-11 (2026-08-28): set_value returns False when load_config cannot
+    see the value it just wrote -- the shape that made this button silently
+    do nothing forever on a config.toml with a hand-added [table]."""
+    import threading
+
+    from ccsync_companion import config as config_mod
+    from ccsync_companion import popup
+
+    path = tmp_path / "config.toml"
+    config_mod.ensure_config_exists(path)
+    monkeypatch.setattr(config_mod, "CONFIG_PATH", path)
+
+    class _LockyApp(_FakeApp):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self._popup_active_lock = threading.Lock()
+
+    app = _LockyApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    notified = []
+    monkeypatch.setattr(sw.tray_mod, "_notify", lambda a, msg: notified.append(msg))
+    monkeypatch.setattr(popup, "confirm_dialog", lambda *a, **k: True)
+    monkeypatch.setattr(config_mod, "set_value", lambda *a, **k: False)
+
+    sw.action_set_role(app, "base")
+    assert any("Couldn't save that" in m for m in notified)
+    assert not any("is now set to" in m for m in notified)
 
 
 def test_switching_to_editor_requires_typed_remote_confirmation(tmp_path, monkeypatch):

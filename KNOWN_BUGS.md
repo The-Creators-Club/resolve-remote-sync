@@ -3095,6 +3095,1099 @@ fingerprint, tooltip length), `test_shutdown_guard.py` (`live_busy`),
 `test_config.py` (the key is documented commented-out, like the keep-awake
 pair). Ships as companion 0.9.55; no dashboard change.
 
+## Resilience sweep, wave 1 (2026-08-28) - FIXED in repo, unshipped
+
+The ten-agent resilience sweep (`docs/RESILIENCE_SWEEP_2026-08-28.md`, raw
+findings in `docs/resilience-sweep-2026-08-28/`) produced 201 findings; wave 1
+is the nineteen cheapest high-severity ones, built the same day by nine
+builder agents. Ids below are the sweep's own (SYNC-n, APP-n, DASH-n, ...),
+not new CR numbers, so they can be found in the sweep reports.
+
+Ships as: companion 0.9.55 (the same unshipped build CR-92 is on), dashboard
+schema v30 + v31 (the next dashboard release), AND a rebuilt installer
+package + onboard.exe (OPS-8 adds `installer/drive_mapping.ps1`, which the
+bootstrap now requires). Deploy the dashboard before the companions: the
+companion sends new `sync_guard` sections that v30 declares.
+
+Known follow-ups left by the builders: `sync/rclone_lane.py`'s test-only
+fallback breaker still builds at the old `state/` path (APP-3); DASH-5's
+"walk collapsed" refusal has no UI override (needs `force=True` if a
+project's originals really were all deleted on the NAS); YT-3's staging
+half (download outside the tree) is still open; SYS-11's rows are not yet
+in any weekly report (SYS-8, later wave); `docs/CLIENT_FOLDERS.md` still
+describes the old hour of media cache (MEDIA-22).
+
+### SYNC-3 - on a Mac the relocation probe cannot match its own trashed files - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** A Mac editor holds `Interviewees/Matej Šimalčík/...`; an admin reorganises that
+folder on the NAS; lane B moves the proxies aside and the lane B breaker trips, parking proxy
+download for a day even though every byte is still on the server. The operator runbook's promise
+that "a move should no longer reach you as an alarm" (CR-44) was false on every Mac.
+
+**Cause.** `_count_relocations` compared paths read off the LOCAL disk (macOS listdir: NFD)
+against paths read off the NAS (NFC) with `rel in remote_paths` and `remote_files.get(name)`.
+Every path containing a diacritic scored as a deletion, so the probe under-counted and the
+breaker tripped. CR-90's lesson had been applied at the dashboard's write chokepoints only.
+CJK folders beside it matched fine, which is what made the shape unreadable.
+
+**Fix.** Both sides fold through a new `nfc_key()` helper before the comparison, for the rel
+paths and the basename index alike (`sync/rclone_lane.py:400` for the helper,
+`:3160` in `_count_relocations`). Comparison only: nothing on this path opens, renames or
+deletes a file, so the bytes on disk are still the bytes rclone is handed.
+
+**Tests.** `companion/tests/test_rclone_lane.py` - three tests against the real NFC/NFD pair
+already committed in `dashboard/tests/test_unicode_paths.py`: an NFD trashed path matched
+against the NAS's NFC listing at the same rel, the CR-44 basename+size move across the same
+boundary, and a genuine deletion still counted as a deletion (the fold must not turn the
+breaker off).
+
+### SYNC-11 - the file-move exclusion does not match a macOS path, so the moved file re-uploads - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** An admin moves a file on the NAS through the project page; the editor's Mac moves
+its own copy and reports success; the next lane A pass puts the file straight back at the old
+NAS path - the exact failure `docs/FILE_MOVES.md` exists to prevent, with nothing reporting it.
+
+**Cause.** The dashboard's `from_rel` is NFC; the file on the Mac's own disk is NFD. The
+exclusion is handed to rclone as a literal glob and rclone matches the bytes it reads off the
+filesystem, so a path with any diacritic was never excluded. `apply_move` itself survives
+(APFS lookups are normalisation-insensitive), which is what makes it look like it works.
+
+**Fix.** `file_moves.FileMoveLedger.recent_excludes` (`file_moves.py:206`) emits every path in
+BOTH spellings, deduped - an extra `-` rule that matches nothing is free. Separately,
+`build_filter_rules_up` (`sync/rclone_lane.py:417`) now emits a `/**` directory-prune companion
+for every excluded path, because a move can name a directory (`is_dir`) and `- /Sub/Dir` alone
+is a prune that is easy to get wrong. Both still sit ahead of the `+ *<ext>` includes.
+
+**Tests.** `companion/tests/test_file_moves.py` - both spellings emitted for a diacritic path,
+an ASCII path still one rule, and the `/**` companion present and ahead of `+ *.mov`.
+`test_rclone_filters.py`'s existing positional assertion updated for the second rule.
+
+### SYNC-5 - a folder latched paused for missing ignores is invisible, lane C still reports green - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** One project of an editor's five never syncs, indefinitely, while lane C reports
+`state=IDLE, queued=0, last_sync=now` and the tray dot is green. The only trace was a single
+DEBUG line.
+
+**Cause.** The ignores-unconfirmed latch (AUDIT_2 L-3/B14) correctly keeps a folder paused when
+its `.stignore` never landed, but `_ignores_unconfirmed` never left `sequencer.py`, and
+`check_once` only reports `PAUSED` when EVERY expected folder is paused - with 1 of 5 it fell
+through to the green `else`.
+
+**Fix.** `Sequencer.unconfirmed_slugs()` (`sync/sequencer.py:645`) publishes the latch;
+`SyncthingLane` takes it as `unfiltered_folders_fn` and a non-empty answer makes lane C
+`state=error` with the sentence "N project(s) are not sharing yet - waiting for their filter
+list: ..." (`sync/syncthing_lane.py:344`, `:660`), reported alongside a real folder error rather
+than instead of it. The wiring is in `app.py:1421`; the machine-readable half rides the report as
+`sync_guard.folders_unfiltered` (`app.py:4400`), and `tray._unfiltered_line` puts the same
+sentence in the Settings window's SYNC LANES section.
+
+**Tests.** `companion/tests/test_syncthing_lane.py` - error state and sentence with one folder
+parked, both reasons reported together, a raising probe never taking the lane report down, and
+the sentence's five-project cap. `companion/tests/test_sequencer.py` - the latch and the admin's
+half-accepted-folder record both published, and a raising predicate answering `[]`.
+
+### SYNC-6 - the shared/borrowed folder reconcile mkdirs into an absent local_root - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** A Mac editor's SSD is out at login. Within the root guard's 5 s poll the sequencer's
+loop head reconciles the shared and borrowed folders, `mkdir(parents=True)` builds
+`/Volumes/SAMDISK/Creators_Club/Assets/...` on the BOOT disk, and macOS then mounts the real
+drive as `/Volumes/SAMDISK 1` - `ROOT_MISPLACED`, permanently, until a human deletes the ghost.
+On a first accept the Syncthing folder is also POINTED at the ghost.
+
+**Cause.** `_clone_structure` and both rclone lanes check the root first; the shared/borrowed
+reconcile, which runs earlier in the same loop, did not.
+
+**Fix.** Both managers take the `root_present_fn` `ManifestCache` takes and return `{}` from
+`reconcile()` when it is False (`sync/shared_folders.py:118`, `sync/borrowed_folders.py:98`);
+unanswerable counts as ABSENT, because what it gates is a mkdir. A second `_mkdir_allowed()`
+gate immediately before each mkdir refuses when the local_root ancestor is not a directory, for
+the drive that goes out mid-reconcile - `_accept` returns "error", `_repoint` leaves the folder
+pointed where it is. Wired from `sequencer.py:276`/`:290`.
+
+**Tests.** `companion/tests/test_shared_folders.py` and `test_borrowed_folders.py` - reconcile
+touches nothing and creates nothing while the tree is absent, an unanswerable probe counts as
+absent, and the accept/repoint mkdir guards hold when the root check says present but the
+directory is not there.
+
+### UX-7 - Syncthing conflict copies are never detected or surfaced - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** Two editors change the same file; Syncthing writes
+`<name>.sync-conflict-20260828-104500-XXXX.<ext>` beside it and says nothing. Lane A uploads the
+conflict copy to the NAS as a new file (it never deletes), lane B redistributes it, and one
+editor's work is orphaned into a file nobody looks at. `SPEC.md:343` says this is surfaced in
+the tray; the string appeared nowhere in `companion/src` or `dashboard/src`.
+
+**Cause.** Nothing ever looked for it.
+
+**Fix.** The manifest walk already visits every file, so the scan is free: `scan_local_manifest`
+counts `*.sync-conflict-*` of ANY extension (the check sits ahead of the VIDEO_EXTS filter -
+the common case is a .drp or an audio file) and fills an optional `conflicts_out`
+(`manifest.py:110`, `:158`). `ManifestCache.sync_conflicts()` (`manifest.py:276`) holds the last
+successful scan's count and up to 20 paths, logs a WARNING when non-zero, and rides the report as
+`sync_guard.sync_conflicts` (`app.py:4407`). `tray._conflicts_line` renders the advisory in the
+Settings window. Nothing here deletes or merges anything: which side is the work is a human's
+judgement.
+
+**Tests.** `companion/tests/test_manifest.py` - conflict copies of any kind counted and
+path-prefixed by project, the path list capped while the count stays exact, `{}` when there are
+none, and a skipped scan (drive out) never reading as "the conflicts are gone".
+
+### YT-3 (filter half) - the pre-conversion original is uploaded under the final name - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** An editor downloads a clip, YouTube serves VP9, and the companion starts a
+ten-minute libx264 re-encode inside the tree. A lane A pass during those minutes uploads the
+un-converted file under the final name; `copy --ignore-existing` then makes it the fleet's
+permanent copy, undecodable, with no error anywhere. CR-79's failure arriving through the sync
+lane.
+
+**Cause.** `build_filter_rules_up` had no rule for the work files, and they carry real video
+extensions.
+
+**Fix.** `YTDL_WORK_EXCLUDE_RULES` (`sync/rclone_lane.py:113`) excludes `*.editready.*`,
+`*.original.*`, `*.temp.*`, `*.f[0-9][0-9][0-9]*.*` and `*.failed`, inserted AHEAD of the
+`+ *<ext>` includes (`:426`) because rclone filter matching is first-match-wins. This is the
+filter half only; the `--no-mtime` half (which restores `--min-age` as a real gate) is on the
+ytdl executors and belongs to another change.
+
+**Tests.** `companion/tests/test_rclone_filters.py` - every pattern present and ahead of the
+first include, plus a real-rclone dry run over a `Youtube/` dir holding a conversion in flight:
+only the finished name is uploaded.
+
+### APP-4 - a config.toml rewrite could take the machine to ALL DEFAULTS - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** An editor uses Settings -> THIS COMPUTER to change the role on a
+machine whose disk is full, or the process dies in the millisecond between
+`write_text` truncating config.toml and refilling it. On the next start every
+setting is a default: blank `local_root`, blank `remote`, and a blank
+`dashboard_url`, which is what decides whether `DashboardReporter` exists at
+all. The lanes refuse (correctly), and the machine also vanishes from the
+fleet grid with the editor's credentials gone. The only route back was a
+reinstall.
+
+**Cause.** `config.set_value` was the one writer of config.toml at runtime and
+the only one in the package that wrote in place: `text = path.read_text()` ...
+`path.write_text(...)`. Every other holder of a credential here
+(`identity.save_identity`, `machine.py`, `eula.py`, `upgrade.py`) already went
+tmp + harden + `os.replace`. And a decode error had exactly one outcome,
+"falling back to ALL DEFAULTS", with no memory of the file that worked
+yesterday.
+
+**Fix.** `set_value` writes `config.toml.tmp`, calls `secretfile.harden` on it
+BEFORE the rename (config.toml carries a fleet report token) and `os.replace`s
+it into position, returning False and leaving the live file untouched if any
+of that fails (`companion/src/ccsync_companion/config.py`, `set_value`).
+`load_config` keeps `config.toml.bak` of the last file that PARSED, refreshed
+atomically and only when the content changed (`_refresh_backup`), and on a
+`TOMLDecodeError` loads that backup instead of defaults, logging loudly and
+recording `_config_load_error` plus a new `_config_from_backup` flag so
+`validate_config` still raises it as a config problem the tray and the lane
+detail show - with wording that says "the last good copy of your settings"
+rather than the old "every setting below is a DEFAULT", which would now be a
+lie.
+
+**Tests.** `companion/tests/test_config.py`: the write survives a failing
+`os.replace` with the live file byte-identical and no `.tmp` left behind; the
+backup is written on a clean parse; a truncated config.toml loads the backup,
+reports `_config_from_backup`, and still produces a `validate_config` error;
+a corrupt file with no backup still falls back to defaults.
+
+### APP-11 - the role button could write into a TOML table and then do nothing, forever - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** On a config.toml somebody had hand-extended with a `[proxy]` or
+`[experimental]` table, Settings -> WIRED TO THE SERVER appeared to do
+nothing at all, every time, with nothing logged and no "takes effect next
+start" banner.
+
+**Cause.** `set_value` matched `^\s*key\s*=` anywhere in the file and, when
+the key was absent, appended at EOF - which on such a file is INSIDE the last
+table. `tomllib` then parsed it as `proxy.mode`, top-level `mode` stayed
+absent, `load_config` returned the old value and `_mode_needs_restart`
+compared equal.
+
+**Fix.** `set_value` searches and writes only the top-level block above the
+first `^\s*\[` header, inserts a new key before that header (backing up over
+the blank lines that separate the block from it) rather than at EOF, and then
+re-reads the file through `load_config` to prove the value took, logging ERROR
+and returning False when it did not (`config.py`, `set_value` / `_value_took`).
+`settings_window.action_set_role` routes a False into its existing "Couldn't
+save that - see the log" toast instead of announcing the new role.
+
+**Tests.** `companion/tests/test_config.py` (a file with a `[proxy]` table:
+top-level `mode` takes, `proxy.mode` untouched; a lying `load_config` makes
+`set_value` return False) and `companion/tests/test_settings_window.py` (a
+role that cannot be read back is reported, not celebrated).
+
+### UX-2(a) - WIRED TO THE SERVER turned all syncing off with no confirmation - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** An editor opens Settings out of curiosity and clicks WIRED TO
+THE SERVER because their desk is in the office. config.toml is written with no
+dialog at all and a toast that only says the role changed; from the next start
+`sync_enabled` is False, every lane is dead, and an admin cannot even tick a
+project for that machine.
+
+**Cause.** `action_set_role` gated only the DANGEROUS direction (to editor,
+behind the typed-word "REMOTE" dialog, because lane B can delete on a real
+base rig) on the argument that the base direction "is always safe". Safe from
+data loss is not the same as safe: it is the one click that stops all syncing
+on a machine that needs it.
+
+**Fix.** The base direction now takes the popup lock the same way and asks
+through `popup.confirm_dialog` (the plain yes/no variant of the same dialog
+family, since nothing is deleted) with the consequence spelled out: no
+uploads, no proxy downloads, no shared project files, and no ticks from the
+admin (`companion/src/ccsync_companion/settings_window.py`,
+`action_set_role`). Declining writes nothing.
+
+**Tests.** `companion/tests/test_settings_window.py`: the dialog is asked
+before anything is written and its copy names the consequences (and carries no
+em dash); declining leaves `mode` alone and releases the lock; a second window
+already open refuses without asking.
+
+### APP-3 - both persistent safety latches lived in the directory support tells people to delete - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** Lane B's breaker trips, or an admin sets a fleet halt. Support
+(or the editor, following an old note) does the usual "close CCSync, delete
+`~/.ccsync/state`, start it again" - and the breaker only a human may clear,
+plus a fleet halt set on the dashboard, clear themselves on that machine.
+
+**Cause.** `lane_b_breaker.json` and `sync_halt.json` were written under
+`<log dir>/state/`. Both were made persistent precisely so a restart could not
+clear them, and then placed where a restart-adjacent ritual does -
+`machine.py`'s own comment names `state/` as "the directory a support session
+is most likely to be told to delete", and `upgrade.py` moved the downgrade
+floor out for exactly this reason.
+
+**Fix.** Both latches now live in `config_mod.CONFIG_DIR`, beside
+`machine.json` and `upgrade_floor.json` (`companion/src/ccsync_companion/app.py`,
+the "two safety latches" block in `CompanionApp.__init__`), and
+`lane_guard.adopt_legacy_latch()` MOVES a latch written by an older build into
+the new place once, on start - a copy would let a downgrade re-latch on stale
+state, and no adoption at all would have cleared a live latch on every machine
+the move was meant to protect. The Syncthing supervisor's incident record
+stays under `state/`: it is diagnostics, not a latch.
+`docs/SYNC_SAFETY.md` updated.
+
+**Tests.** `companion/tests/test_lane_guard.py` (adoption moves the file and
+leaves nothing behind; it never overwrites a latch already in the new place;
+it is a no-op without a legacy file; a fresh trip writes to the new location
+and no `state/` dir is created) and `companion/tests/test_sync_halt.py` (both
+latch paths are `CONFIG_DIR`; a fleet halt written by an older build under
+`state/` is still in force after the move; the supervisor state is
+deliberately NOT beside them).
+
+### RES-2 - the unprompted-rewrite rate limiter lived only in RAM - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** A machine with a wrong `canonical_prefix`/`local_root`
+auto-relinks a project, the tray restarts (an OTA, an auto-update, an EULA
+park, a crash, or the editor quitting and reopening it), and the same
+unprompted rewrite of hundreds of clip paths runs again. Nothing bounded the
+day: at one pass per 15 minutes a permanently misconfigured machine was
+entitled to ~96 project-database rewrites the editor never asked for, and
+nobody was ever told.
+
+**Cause.** `_automatic_at`, `_save_points` and `_sessions` were module
+globals, and both bars were monotonic - CLAUDE.md's own rule is "never make a
+safety latch in-memory-only".
+
+**Fix.** `resolve_journal.allow_automatic` now works on WALL clock and
+persists the 15-minute bar to `~/.ccsync/state/resolve_auto.json`, loaded
+lazily on the first call and written tmp + `os.replace`
+(`companion/src/ccsync_companion/resolve_journal.py`: `auto_state_path`,
+`_load_auto_state_locked`, `_save_auto_state_locked`). A stamp in the future
+(a clock put back, a state file copied off another machine) is clamped to
+"now" AND the correction is written back, or the same stamp would be
+re-clamped forever and the pass would never be allowed again. Alongside it a
+per-project daily cap (`AUTOMATIC_MAX_PER_DAY = 8`, counting both unprompted
+sources together) which, when it holds a pass, logs a WARNING naming the
+project and saying "this looks like a configuration problem, tray -> Copy
+diagnostics". `_save_points` stays in memory on purpose: it is a cost limiter,
+and a restart taking one extra save point is the safe direction.
+
+**Tests.** `companion/tests/test_resolve_journal.py`: the bar still holds
+after a simulated restart and expires correctly across one; a future stamp is
+treated as now and does not bar forever; unreadable state never stops a
+relink; the daily cap allows exactly N, is per project, counts both sources
+together, resets the next day, and its log line names the fix.
+
+### APP-1 - nobody was told when the dashboard stopped accepting this machine's reports - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** An admin revokes an editor's `cce1.…` token, or an installer typo
+leaves a wrong port in `dashboard_url`, and nothing anywhere says so. The lanes
+keep syncing, the tray stays green, and the machine simply goes dark on the
+fleet grid. The log carried one WARNING for the whole streak and DEBUG for
+every failure after it, so a 401 (a human has to act) was indistinguishable
+from a five-second timeout (the NAS is rebooting). `build_diagnostics()` -- the
+bundle an admin actually asks for -- printed `dashboard_url` and never "has
+anything this machine sent ever been accepted".
+
+**Cause.** `DashboardReporter` kept no health state at all. `_run_cycle`'s
+`self._error_logged` was the entire memory of a failure streak, it lived in
+RAM, and no consumer of the report or the tray could read it.
+
+**Fix.** `reporter.py` now keeps `last_success_at` (wall clock), `last_status`
+(`"ok"` / `"HTTP 401"` / the exception class name) and `consecutive_failures`,
+and persists the first two plus the measured clock skew to
+`~/.ccsync/state/reporter.json` with tmp + `replace`
+(`reporter.py:_load_state`/`_save_state`) -- "not reachable since Tuesday" is
+precisely the fact a restart used to destroy. The record is kept in `post_once`
+rather than in `_run_cycle` (`reporter.py`, around the `self._http_post` call)
+so a tray "Sync now" counts the same as a loop tick; `_run_cycle` counts the
+failures that never reached the POST. `health()` rides every report tick inside
+`sync_guard` as `reporter: {last_success_at, last_status,
+consecutive_failures}` (`app.py:sync_guard`), which is the one channel an admin
+has. 401/403 gets a single toast ("Your CCSync credential was rejected by the
+dashboard - sign in again", wired through the new `notify=` argument to
+`self._notify_tray`) and re-logs at WARNING every hour instead of falling to
+DEBUG (`AUTH_RELOG_SECONDS`). A new diagnostics section, `-- last dashboard
+report --`, names the last accepted report, the last status, the streak and the
+clock. Past ten failures in a row the Settings window carries a line
+(`tray._reporter_line`, rendered from `settings_window.py`'s SYNC LANES
+section), which names a rejected credential differently from an unreachable
+server because they are different people's jobs.
+
+**Tests.** `companion/tests/test_reporter_health.py` (health record, streaks,
+the "HTTP 401" spelling, persistence across a restart, a corrupt state file, the
+one-and-only-one credential toast, the hourly re-log, the tray line and its
+threshold) and `companion/tests/test_app.py` (the `sync_guard` block, the
+diagnostics section, a broken `health()` not taking the guard down).
+
+### APP-6 - a crash report was written and surfaced nowhere - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** `crash_report.py`'s own docstring names "the tray stayed up with a
+dead lane" as the failure it exists to fix. A background thread raising out of
+an unsupervised call wrote `~/.ccsync/crashes/<stamp>-<thread>.json` and one
+ERROR line that rotates away at 5 MB. The tray stayed green, the dashboard
+never heard, and `build_diagnostics()` did not mention that the directory
+existed.
+
+**Cause.** The writer had no reader. Nothing counted the files, and neither the
+report payload nor the diagnostics bundle nor any tray line knew about them.
+
+**Fix.** `crash_report.crash_summary()` returns `{count, newest}` from a
+bounded, name-sorted scan of `crash_dir()`, cached for `SUMMARY_TTL_SECONDS`
+and invalidated by `write_report` itself so the next report tick carries the
+crash that just happened (`crash_report.py`). `install()` logs at WARNING what
+an earlier run left behind -- a machine that starts with crash files is a
+machine that has been failing and restarting. `app.sync_guard()` adds
+`crashes: {count, newest}`, omitted while the count is zero on the same terms as
+`skipped_exists`. `build_diagnostics()` gains a `-- background task failures
+(crash reports) --` section listing the newest three with their exception type
+and thread (`crash_report.recent_reports`), and `tray._crashes_line` puts "A
+background task failed on this computer … Copy diagnostics for your admin" in
+the Settings window while the count is non-zero.
+
+**Tests.** `companion/tests/test_crash_report.py` (the summary before and after
+a write, cache invalidation, the exception type in `recent_reports`, an
+unreadable crash file reported rather than dropped, a hopeless config, the
+install-time log) and `companion/tests/test_app.py` (`crashes` in `sync_guard`,
+the diagnostics section) and `test_reporter_health.py` (the tray line).
+
+### APP-13 / SYS-4 - nothing measured this computer's clock, while the server's own time was in every report reply - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** A dead CMOS battery, a VM resumed from a snapshot or a Mac back
+from sleep before NTP catches up, and two independent things break silently.
+Lane B passes rclone `--min-age 60s`, and rclone ages a remote file against the
+LOCAL clock: with a slow clock every file on the NAS looks like it was written
+in the future, the pass excludes all of them, exits 0, and the lane reports
+idle and green while the editor downloads no proxies at all. Separately a clock
+far in the future invalidates a pre-CR-86 identity token instantly, and the
+editor is told their sign-in expired -- a lie they cannot act on, because
+signing in again yields a token the same clock rejects.
+
+**Cause.** `api_report`'s reply has carried the server's own `received_at`
+(`api.py:5453`) for months and `post_once` threw it away. There was no skew
+check anywhere in either component.
+
+**Fix.** `reporter._note_clock_skew()` parses the reply's `received_at`
+(`parse_server_time`, tolerant of a naive stamp read as UTC, since guessing the
+other way is what CR-89 cost the dashboard), stores
+`clock_skew_seconds` in memory and in `reporter.json`, and logs a WARNING at
+most once an hour past `CLOCK_SKEW_WARN_SECONDS` (5 minutes). The value rides
+`sync_guard` as `clock_skew_seconds`, absent until a reply has carried one --
+"could not check" must not render as zero. Past 60 s
+`tray._clock_skew_line` says "This computer's clock is 20 minutes behind the
+server's. Sync will not work correctly until it is fixed", and
+`build_diagnostics()` carries the signed value. The identity-expiry toast now
+goes through `app._identity_expired_text()`, which names the clock instead of
+the sign-in when the measured skew is large. An older dashboard sends no
+`received_at`: that is a `None`, never an exception.
+
+**Tests.** `companion/tests/test_reporter_health.py` (skew computed from the
+reply, an absent field leaving `None` rather than zero, junk values, a naive
+stamp read as UTC, the hourly warning, persistence across a restart, the phrase
+helper, the tray line) and `companion/tests/test_app.py` (the toast switching
+on skew, the diagnostics line).
+
+### SYS-3 / SYNC-8 - report telemetry the companion sends was discarded at the model boundary, for the third time - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** The companion computed `sync_guard.syncthing_supervisor` (how long
+that machine's Syncthing engine has been down, how many automatic restarts have
+failed, the last error) and sent it on every report for weeks. Nothing on the
+dashboard ever showed it, and no log line anywhere said so. Before it, the same
+mechanism lost `transport_health` for months (B17) and `proxy_coverage` /
+`youtube_import` for about a year each. Every occurrence was found by a human
+reading the source, never by a signal.
+
+**Cause.** `ReportIn` used pydantic's default `extra="ignore"`, so an
+undeclared top-level key (and, on `SyncGuardIn`, an undeclared sub-key) was
+dropped silently by the model before the route body ran. The companion's own
+source said so out loud at `app.sync_guard()`: "THE DASHBOARD DOES NOT READ
+THIS YET ... `extra='ignore'` drops it".
+
+**Fix.** `ReportIn` and `SyncGuardIn` now carry
+`model_config = ConfigDict(extra="allow")`
+(`dashboard/src/ccsync_dashboard/api.py`, `ReportIn` / `SyncGuardIn`), and
+`api_report` names what it does not read: `undeclared_report_sections()`
+collects the top-level extras plus the `sync_guard.*` extras,
+`_ignored_sections_to_log()` logs one WARNING per (machine, key) per UTC day
+(a 30 s cadence would otherwise write 2,880 identical lines a day and roll the
+log away), and `db.record_ignored_report_sections()` keeps a bounded `meta`
+record that `build_editors_view` publishes as `ignored_report_sections` and
+`templates/partials/fleet_grid.html` renders as
+`[ N REPORT SECTIONS IGNORED: ... ]`. Then the sections themselves were
+declared: `SyncthingSupervisorIn`, `ReporterHealthIn`, `CrashesIn`,
+`SyncConflictsIn` plus `clock_skew_seconds` and `folders_unfiltered` on
+`SyncGuardIn`, flattened by `flatten_sync_guard` into twelve v30
+`machine_state` columns and chipped on the fleet grid
+(`[ SYNC ENGINE DOWN 6h, 3 RESTARTS FAILED ]`, `[ CRASHES: n ]`,
+`[ UNFILTERED FOLDERS: n ]`, `[ CONFLICTS: n ]`). All four follow the LATCH
+rule rather than COALESCE: the supervisor section is empty-when-healthy by the
+companion's design, so a guard-bearing report that omits it has to be able to
+clear the incident. The new sub-models inherit a bounding validator
+(`_BoundedSectionIn`, extracted from `_ReportSectionIn` as
+`_bound_to_field_caps`) and `SyncGuardIn` now bounds its own fields too, because
+`sync_guard` is not one of `ReportIn`'s tolerant sections and a raising cap
+there would have 422'd the whole report - taking the lanes, transfers and
+presence with it, and silencing the very alarm the section carries (B6).
+
+**Tests.** `server/tests/test_cross_component.py` gains the parity gate the
+finding asked for, in the same shape as the VIDEO_EXTS gate above it: an `ast`
+walk of `reporter._build_payload`, `app.sync_guard` and
+`rclone_lane.sync_guard_report` collects every dict key the companion CAN emit
+and asserts each is declared, plus a test that neither model may go back to
+`extra="ignore"`. `dashboard/tests/test_report_ingest_health.py` covers the
+accept-and-record path, the namespaced sub-key, the once-a-day log, the
+accumulate-not-replace record, every bound on it, an unparseable meta row, the
+flattening, the clear-on-absence rule, tri-state `supervising`, and the
+truncate-instead-of-422 behaviour.
+
+### SYS-4 - retention and eviction read a client-supplied clock (dashboard half) - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** A machine whose clock is far out (a VM resumed from a snapshot, a
+dead CMOS battery, a Mac back from Time Machine) either vanishes from the fleet
+grid on every prune while reporting perfectly, or pins itself as "most recent"
+for ever and evicts its owner's genuinely live computers. Nothing anywhere in
+either component measured clock skew.
+
+**Cause.** `db.prune()` deleted `machine_state` rows on `reported_at < cutoff`
+and `evict_extra_machines` ordered by `reported_at` - a column whose NAME says
+the client supplied it, while every neighbouring table correctly uses
+`received_at`/`refreshed_at`. api.py happened to pass the server's own
+timestamp into it, so the bug was latent rather than live; the next hand that
+passed the companion's value in would have made it real, and the companion's
+timestamp had nowhere else to go.
+
+**Fix.** v30 (`db.py`, `SCHEMA_V30`) adds `machine_state.received_at` (the
+server's clock, backfilled from `reported_at`), `client_reported_at` and
+`clock_skew_seconds`. `db.clamp_reported_at()` is the new pure helper: it
+measures skew, stores the client's value as-is inside a 7-day window, and past
+that replaces it with our own `received_at` while keeping the measurement -
+a broken clock does not get to be a stored ordering key. An unreadable
+timestamp comes back `(None, None, True)`, never as no-skew.
+`upsert_machine_state` takes `client_reported_at` and writes all three;
+`prune()` and `evict_extra_machines()` now read
+`COALESCE(received_at, reported_at)`. Past `CLOCK_SKEW_WARN_SECONDS` (60 s,
+twice lane B's `--min-age 60s`) `build_editors_view` chips
+`[ CLOCK 20m SLOW ]` with a tooltip explaining that lane B can transfer
+nothing at all with a clock that far out.
+
+**Tests.** `dashboard/tests/test_report_ingest_health.py`: the clamp's three
+outcomes, both clocks and the skew stored from a real report, a machine 40 days
+behind real time surviving a prune while a genuinely silent one still ages out,
+and a machine claiming 2098 losing the eviction race to twenty live ones.
+
+### UX-2(b) - an editor who stops syncing for ever keeps a green dot - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** An editor clicks Settings -> WIRED TO THE SERVER, or SIGN OUT, or
+Quit. The lanes stop and, for the first two, so does the reporting. The dot the
+owner scans on the dashboard stays GREEN for a machine that has been dark for a
+week.
+
+**Cause.** `health.editor_status` reddens on a lane error, on being offline
+WHILE BEHIND, and on stale completion. An editor who was caught up when they
+clicked has `behind=False`, so none of the three fires. On the fleet grid the
+row's dot is `worst()` over the lane chips, and a machine that stopped
+reporting has its last lane states frozen mid-green.
+
+**Fix.** `health.py` gains `report_freshness()` and the thresholds the finding
+named: no report for `>= 3 * STALE_REPORT_SECONDS` (15 min) is AMBER, `>= 6 h`
+is RED, with a reason string naming the last report time. It is read
+INDEPENDENTLY of `behind` inside `editor_status` (new `last_report_at`
+keyword), and `build_editors_view` folds the same colour into each fleet row's
+`worst()` and publishes `status_reason` as the dot's tooltip
+(`templates/partials/fleet_grid.html`). health.py stays pure - no I/O, one new
+function and two constants. `last_report_at=None` is deliberately not amber: a
+Syncthing device with no companion row is the `unmapped` case, which the grid
+already labels. An unparseable timestamp is AMBER with the reason naming it,
+never green.
+
+**Tests.** `dashboard/tests/test_report_ingest_health.py` (the UX-2b block):
+green/amber/red on a caught-up machine by report age alone, None left alone,
+the reason naming the timestamp, an unreadable timestamp not rendering as fine,
+the thresholds themselves, and a fleet row with three frozen-green lane chips
+coming out RED.
+
+### DASH-16 - a computer that dies is pruned out of the fleet rather than marked lost - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** An editor's PC dies, or an editor leaves and takes the laptop. The
+grid does the right thing for a day; at 14 days the machine's media presence
+disappears; at 30 days its `machine_state` row is deleted and the computer
+quietly leaves the page, while its `machines` registry row, its `selections`
+plan and its Syncthing share all remain. The fleet looks healthier than it is,
+and a Syncthing device that still holds project data is shared with nothing
+watching it.
+
+**Cause.** Every fleet row was derived from a status table with its own
+retention (`MACHINE_STATE_MAX_AGE_DAYS` = 30, `MEDIA_REPORT_MAX_AGE_DAYS` =
+14). The registry row that survives every prune was never rendered.
+
+**Fix.** `db.lost_machines()` returns registry rows whose `last_seen` is older
+than `LOST_MACHINE_DAYS` (7) together with the plan each one still holds;
+`build_editors_view` publishes the ones with no live row of their own as
+`lost_machines`, `_scope_editors_view` redacts them the way it redacts the rows
+beside them, and `templates/partials/fleet_grid.html` renders a
+`[ LOST COMPUTERS ]` table with the still-planned projects and a `[ FORGET ]`
+button. The button posts to a new `ui.partial_admin_forget_lost_machine`, which
+is `forget_machine_everywhere` (CR-76, the same call the Users page's
+[ REMOVE ] makes) re-rendering the fleet grid rather than the users partial.
+
+**Tests.** `dashboard/tests/test_report_ingest_health.py` (the DASH-16 block):
+a machine whose `machine_state` row is pruned away still appears as a LOST row
+carrying its tick, a machine still on the grid is never also listed as lost,
+and a machine that reported a minute ago is never lost.
+
+### DASH-4 - an empty Syncthing folder list deactivated every project - FIXED in repo 2026-08-28, unshipped
+
+Symptom: Syncthing on the NAS comes back with a default or restored config it
+could not load, answers `/rest/config` with 200 and zero folders, and its
+`myID` is perfectly valid, so none of the empty-myID guards fire. Fifteen
+minutes later every project was `active=0`; the hourly prune's
+`purge_nas_media_for_inactive` then deleted all of `nas_media` and
+`nas_inventory_state`. The project list and fleet grid emptied out,
+`fetch_sync_backlog` (which joins `p.active = 1`) reported nobody behind, and
+`api_tick` answered `404 unknown or inactive project` so an admin could not
+even re-tick. All of it silent.
+
+Cause: `db.deactivate_missing_projects` had no floor at all - it trusted
+whatever `seen` list `collector._run_config` handed it, while the enforce
+cycle one function up has had a blast-radius brake for a year.
+
+Fix: the same brake, in `db.py:deactivate_missing_projects`
+(dashboard/src/ccsync_dashboard/db.py:1430). One trigger, two wordings: any
+pass that would deactivate more than `max(2, 25%)` of active projects is
+refused, and an empty `seen` gets its own sentence because "Syncthing reported
+0 folders" is the signature an operator needs to read rather than a
+percentage. The floor of 2 is what keeps a one- or two-project site able to
+retire its projects legitimately. The refusal is
+persisted to `meta` with the counts that produced it
+(`db.META_DEACTIVATION_REFUSAL`), the next healthy pass is the only thing that
+clears it, and `collector._run_config` (collector.py:931) logs it and returns
+"refused deactivating N project(s)" as the cycle's note. The fleet page raises
+a red banner carrying the message ("Syncthing reported 0 of 37 folders - not
+deactivating anything") from templates/partials/fleet_grid.html, and
+`/api/v1/health` returns it under `collector_alarms`. `force=True` applies a
+pass whatever its size.
+
+Tests: `dashboard/tests/test_db.py` (six cases: empty list, over-ceiling,
+under-ceiling-applies-and-clears, the only project, force, the grace window),
+`test_collector.py::test_an_empty_folder_list_does_not_empty_the_project_list`
+(four folders vanish and come back, end to end through the collector, note and
+alarm asserted), `test_api.py` for the banner and the health field.
+
+### DASH-5 - an unmounted project dir wiped that project's NAS inventory - FIXED in repo 2026-08-28, unshipped
+
+Symptom: the ZFS dataset under `/projects/<project>` is not mounted when the
+container starts (pool import ordering after a NAS reboot), or a project is
+renamed by hand while the inventory cycle runs. `/projects` is the bind mount
+point so it exists, the project dir exists and is empty, the walk returns `[]`
+- and `replace_nas_media` deleted the whole inventory and wrote the rollup as
+0 originals / 0 proxies with `last_error` NULL. Every media-presence view then
+said the NAS holds nothing, and the backlog reported every original an editor
+holds as "the NAS is missing this": the page telling the owner his footage is
+not on the server.
+
+Cause: an unconditional `DELETE FROM nas_media WHERE project_id=?` followed by
+zero inserts. No floor, no "this looks wrong" check, and an empty directory
+was indistinguishable from an absent one.
+
+Fix: `db.replace_nas_media`
+(dashboard/src/ccsync_dashboard/db.py:3513) refuses a walk that takes a
+project from originals to none, or that drops more than 90% of its files,
+unless `force=True`: the previous inventory stays, `tree_sig` is deliberately
+NOT advanced (so the next cycle walks again rather than believing itself up to
+date), and `nas_inventory_state.last_error` becomes "walk returned 0 of N
+files - not replacing". `fetch_nas_media_summary` carries `last_error` and
+`walked_at` now, and the project page renders a red [ NAS INVENTORY NOT
+UPDATED ] line above the figures (templates/partials/project_detail.html).
+Plus the not-mounted canary in `collector._run_inventory`: a `Projects/` with
+zero entries skips the whole cycle with a note, and a project dir with no
+media AND no `.stfolder` is recorded as "it looks unmounted, not empty" rather
+than walked.
+
+Tests: `dashboard/tests/test_inventory.py` (seven cases: collapse to zero, the
+90% floor, force, a genuinely-empty first walk, and three end-to-end through
+the collector for an emptied dir, a marker-less dir and an unmounted
+`Projects/`), `test_api.py` for the project-page line.
+
+### DASH-3 - the enforce blast-radius brake fired into the container log and nowhere else - FIXED in repo 2026-08-28, unshipped
+
+Symptom: Syncthing is restarted with a re-created config, or four editors'
+devices are not yet approved, so the next enforce cycle computes more share
+removals than `DASH_ENFORCE_MAX_REMOVALS` and refuses them all. `_timed`
+recorded the cycle as ok (nothing raised), so `poll_runs`, `/api/v1/health`
+and the whole UI said enforce was fine while every genuine untick since -
+including an admin unticking a project to stop an editor filling their drive -
+went unapplied. The state was per-cycle and in-memory: a container restart
+lost even the log line.
+
+Cause: the brake's only output was `log.error("REFUSING %d share
+removal(s)...")`.
+
+Fix: `collector._run_enforce`
+(dashboard/src/ccsync_dashboard/collector.py:1151) persists the refusal
+through `db.record_enforce_refusal` (timestamp, count, limit, the folder and
+device sets, the capped pair list) and clears it on the first pass that comes
+in under the limit; it also records the +/- it was about to apply through
+`db.record_enforce_plan`, before the HTTP loop and committed there for the
+same reason the seed is. `/api/v1/health` returns both under
+`collector_alarms`; the fleet page raises a red banner ("N share removal(s)
+refused: shares are FROZEN...") and renders a read-only pending-diff table in
+a new [ COLLECTOR ] panel (templates/partials/collector_health.html). The
+panel names Syncthing device ids, so `api._scope_editors_view` drops the whole
+block for non-admins.
+
+Tests: `dashboard/tests/test_enforce.py` (refusal persisted with the right
+pairs, the note on `poll_runs`, the alarm clearing on a sane pass, the plan
+recorded and reset to empty when nothing is pending), `test_api.py` (health
+field, banner, panel, and that an editor sees none of it).
+
+### DASH-14 - a cycle that early-returned or refused was recorded as a successful poll - FIXED in repo 2026-08-28, unshipped
+
+Symptom: Syncthing answers with an empty `myID` for ten minutes during a
+restart, so `_run_enforce` returns immediately every cycle - and `poll_runs`,
+`/api/v1/health`'s `last_polls` and every view said enforce last ran
+successfully N seconds ago. Three distinct "I did nothing" outcomes (empty
+myID, a refused removal pass, a seed that could not be marked done) were
+indistinguishable from "I reconciled everything".
+
+Cause: `_timed` already stores a note a runner returns (the mechanism
+ops-efficiency-5 added for completion's "partial: ..."), and none of these
+runners returned one.
+
+Fix: `_run_config`, `_run_enforce` and `_run_inventory` return notes now
+("skipped: empty myID", "refused N share removal(s)", "seed deferred: ...",
+"refused deactivating N project(s)", "skipped: the Projects tree looks
+unmounted", "kept N project inventory(ies): the walk collapsed"). New
+`db.collector_health` reads the last run per kind with its note and colours a
+kind amber when the note is non-empty, red when it failed, and the [ COLLECTOR
+] panel on the fleet page renders the note under WHAT IT DID NOT DO.
+
+Tests: `dashboard/tests/test_enforce.py` (empty myID on both halves, the
+refusal note, amber status), `test_collector.py` (a clean cycle stays green,
+the deactivation note), `test_api.py` (the panel renders the note and an
+[ INCOMPLETE ] chip).
+
+### SYS-11 - no audit trail: "who unticked this, and when" was unanswerable - FIXED in repo 2026-08-28, unshipped
+
+Symptom: an editor says a project stopped syncing on Tuesday. With two admins
+on the dashboard, nothing in the product could say what changed on Tuesday.
+Selections were DELETEd in place, and the fleet halt, the lane B resume,
+pushed updates and file moves each kept some state in four different shapes,
+none of them a timeline. The only history was a handful of `log.warning` lines
+in a container log that rotates.
+
+Cause: there was no history table. `grep -n audit dashboard/src/ccsync_dashboard/`
+returned nothing, and every state-changing route wrote only the new state.
+
+Fix: one append-only ledger, `fleet_audit(id, at, actor, action, subject,
+detail_json)`, schema v31 (`db.py:966` SCHEMA_V31, migration step at
+`db.py:1019`), with one helper `db.audit()` (`db.py:2888`) written from the
+routes that already exist: tick and untick from both the JSON API and the
+htmx checkbox (`api.py:1928`, `api.py:1954`, `ui.py:855`, through the shared
+`api.audit_plan_change`), fleet halt set/clear and lane B resume and pushed
+update inside the db functions that already carry the actor
+(`db.set_fleet_halt`, `db.request_lane_b_resume`, `db.request_machine_update`,
+`db.record_file_move`), user delete and machine forget in the one
+implementation both doors share (`api.delete_user_everywhere`,
+`api.forget_machine_everywhere`), package publish/make-current/delete
+(`api.py:4210,4225,4256`, `ui.py:2018,2110`), device approval
+(`api.py:3855`) and site settings save/import (`setup_routes.py:231,268`).
+Retention is a single DELETE in the existing prune cycle at 180 days
+(`db.py:4195`) - the only statement in the product that removes a row from
+this table. The timeline is a Settings-hub page, `/admin/audit`
+(`ui.py:1125`, `templates/admin_audit.html`,
+`templates/partials/admin_audit.html`): last 200 rows newest first, with a
+filter over subject, actor and action.
+
+Tests: `dashboard/tests/test_fleet_audit.py` - a row for tick, untick, halt
+from both doors, machine forget, make-current, pushed update and resume; that
+the htmx checkbox is not a softer door than the JSON route; that a no-op tick
+writes nothing; the subject filter; the page render; admins only; and the
+180-day prune.
+
+### DASH-8 - a tick or untick left no record of who did it, and no undo - FIXED in repo 2026-08-28, unshipped
+
+Symptom: an admin unticks a project on the wrong row of the fleet grid - or
+unticks with no `?machine=` from a stale page, which removes it from every
+computer that person owns, deliberately. Within one enforce cycle the folder
+is unshared from all of them and the editor's companion stops syncing the
+project. There was no page that said who did it and no way to put it back
+except remembering what had been there.
+
+Cause: `remove_selection` DELETEs the rows. `selections` kept `created_by`
+and `created_at` for an add and nothing at all for a removal, so both the
+history and the material an undo would need were gone at the moment they were
+needed.
+
+Fix: three parts, on top of SYS-11's ledger. (1) A "recent plan changes"
+panel on the fleet page (`ui.py:1037` and its partial
+`templates/partials/plan_changes.html`, included from `fleet.html` for admins
+only) listing the last hour's ticks and unticks with a one-click [ UNDO ]
+(`ui.py:1044`). The undo is a RESTORE of the audit row's `before` placements,
+not an inverse action: a person-level untick removed rows from several
+computers, each possibly in a different mode, so re-ticking "the project"
+would hand every one of them a full sync. It is itself audited, an
+already-undone row is marked rather than hidden, and a change older than an
+hour is refused in words rather than silently. (2) The enforce cycle holds an
+existing share whose UNTICK is less than 60 s old (`collector.py:1087` and
+`db.recent_plan_change_devices`), so an undo inside the window costs Syncthing
+nothing. Deliberately narrow, both halves measured on 2026-08-28: it never
+delays an ADDITION (that would hand back the 2026-07-26 nudge fix), and it
+never freezes on row FRESHNESS - an upload-only tick writes a fresh row for a
+machine whose share must be REMOVED, and freezing on `selections.changed_at`
+held it (caught by
+test_the_enforce_cycle_never_shares_a_folder_for_an_upload_only_tick).
+`changed_at` (v31) is still stamped, because `created_at` cannot say when a
+tick last changed mode. (3) The three person-level untick controls - the sidebar
+checkbox, the project page's [ UNTICK FOR ... ] and the queue panel's
+[ UNTICK ] - now carry an `hx-confirm` naming the computers it will affect
+("This removes 2025/FF4 from ruskin's 2 computers (EDIT-PC, LAPTOP)"), on the
+way OUT only.
+
+Tests: `dashboard/tests/test_fleet_audit.py` - the undo round-trip for a
+person-level untick across two computers in two modes, for a tick, and for a
+mode switch; the refusals (not a plan change, hour-old, missing row); the
+panel's presence for an admin and absence for an editor and on an empty hour.
+`dashboard/tests/test_enforce.py` - a fresh untick keeps its share for one
+cycle and loses it on the next, and a fresh tick is never delayed.
+
+### YT-1 - nothing on an editor's machine ever updated yt-dlp on its own initiative - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** YouTube ships a change; yt-dlp fixes it within the week; every
+machine in the fleet sits on a binary that cannot download while logging
+"yt-dlp X is current" nightly, and the only cure is a dashboard release plus an
+OTA. CR-80 and CR-83 were both this shape, and both were reported by an editor
+rather than noticed by the dashboard.
+
+**Cause.** `ytdlp_manager.ensure()` updated only on `if floor and
+version_is_older(current, floor)`, and that floor is `DEFAULT_MIN_YTDLP_VERSION`
+- a constant in a dashboard release, overridable only by a hand-typed env var.
+`_maybe_poke_ytdlp` (added so a download failure triggers a re-check) called the
+same `ensure()`, re-read the same unchanged floor, and did nothing. Server side,
+nothing anywhere measured the age of the yt-dlp the container was running.
+
+**Fix.** A MAX-AGE rule: yt-dlp's versions ARE release dates, so
+`ytdlp_manager.version_age_days` (companion/src/ccsync_companion/ytdlp_manager.py:364)
+ages the installed version locally and `_enforce_max_age` (:696) runs
+`self_update()` past `ytdlp_max_age_days` (config default 21, 0 switches it off)
+regardless of the floor, publishing `ACTION_UPDATED`, or the new `ACTION_STALE`
+(:149) with `ok=True` and the age in the message when `-U` could not help. It
+never fires on the `ytdlp_path` override branch (which returns first: an
+editor's own binary is theirs), never rolls backwards (`-U` goes to latest
+stable only, and the reported version is always the one actually installed), and
+never fires on an age it cannot compute - an unparseable version or one dated in
+the future is "cannot tell", not "stale". Server side `/ytdl/api/health` now
+carries `yt_dlp_age_days`, `yt_dlp_stale` and `yt_dlp_age_detail`
+(ytdl/web/ytdlweb/routes_api.py:168-170, :197-250) against
+`config.YTDLP_MAX_AGE_DAYS` (ytdl/web/ytdlweb/config.py:274-303, env
+`YTDL_YTDLP_MAX_AGE_DAYS`, same 21 days), and the health strip's yt-dlp pip goes
+amber with the age in it (ytdl/web/static/app.js).
+
+**Tests.** companion/tests/test_ytdlp_manager.py: the age parser, the update
+with no floor at all, the inside-the-window no-op, the config override and
+off-switch, the junk value, the named-`stale` failure, "nothing newer to take",
+the override branch never being touched, and a version that cannot be aged never
+being updated on a guess. The suite now runs against a FROZEN clock (`_NOW`,
+`_days_ago`) because the rule made `ensure()` time-dependent.
+ytdl/web/tests/test_api.py: the age and the warning flag, the unrankable/future/
+absent cases, and the off-switch.
+
+### YT-9 - the AI CLI was handed the dashboard's entire secret environment - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** A site turns on `ai_cli_providers`; the wizard installs `claude`;
+an editor's search runs it over YouTube titles and descriptions - untrusted,
+attacker-controlled text - in the container that holds the fleet's credentials.
+
+**Cause.** `cli_tools.STRIPPED_ENV_VARS` was exactly four names (three API keys
+plus `ANTHROPIC_AUTH_TOKEN`) and `cli_env` was `dict(os.environ)` minus those
+four, so the CLI received `DASH_SESSION_SECRET`, `DASH_REPORT_TOKEN`,
+`SYNCTHING_API_KEY`, `TRUENAS_API_KEY`, `BROLL_INGEST_TOKEN` and
+`DASH_RELEASE_PUBKEYS`. Both modules' docstrings asserted the posture was "the
+container's own AI keys are removed"; nothing stated or enforced that the rest
+was withheld, because it wasn't.
+
+**Fix.** `cli_env` is an ALLOW-LIST
+(dashboard/src/ccsync_dashboard/cli_tools.py:301-372, :417-427): PATH, HOME,
+LANG, LC_*, TZ, TERM, TMPDIR, the proxy variables in either case, the Windows
+minimum a child process needs, and the publishers' own `CLAUDE_*` / `CODEX_*`
+namespaces. One predicate, `env_var_allowed`, so the probe, the Test button, the
+pty sign-in and the real ytdl call stay in agreement; the wizard's overlay is
+applied after the filter and is not subject to it. `ytdlweb.ai_backend._cli_env`
+carries the same list as a documented COPY that must not drift
+(ytdl/web/ytdlweb/ai_backend.py:757-820) - the deployed ytdl app imports nothing
+from the dashboard, the same rule as identity.py's copied properties. Both module
+docstrings now state the posture.
+
+**Tests.** dashboard/tests/test_cli_tools.py: no fleet credential (the six above
+plus `TRUENAS_PW`) is in the child env even when set in `os.environ`, by name and
+by value; and the other direction, that the locale, TMPDIR, proxy and publisher
+variables still arrive. ytdl/web/tests/test_ai_backend.py: the same two, plus a
+drift test asserting the ytdl copy's list and predicate equal the dashboard's
+for every case.
+
+### YT-3 - the pre-conversion original could become the fleet's permanent copy of a clip - PARTLY FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** An editor downloads a 1080p clip, YouTube serves VP9, a ten-minute
+libx264 re-encode starts, and lane A's periodic pass runs during it. The VP9
+file goes up under the final name; lane A is `copy --ignore-existing`, so the
+first version of a name to reach the NAS is the only one that ever will. Every
+other editor and every future project gets the undecodable copy, permanently,
+with no error anywhere: CR-79's failure arriving through the sync lane.
+
+**Cause.** The canonical tree IS the download workspace, and the only stability
+gate on it is `--min-age 120s` - but neither executor passed `--no-mtime`, so
+yt-dlp stamped the media response's `Last-Modified` (for YouTube, usually the
+upload date, years back) on the finished file. It was eligible instantly.
+
+**Fix.** `--no-mtime` in the companion executor's argv builder
+(companion/src/ccsync_companion/ytdl_executor.py, `build_argv`) and
+`updatetime: False` in the server's `build_opts`
+(ytdl/web/ytdlweb/vendor/downloader.py), so `--min-age` is a real gate again on
+both sides and a file that reaches the NAS from one is not datable differently
+from the other. The lane-filter half of the finding (excluding `*.editready.*`,
+`*.original.*`, `*.temp.*`, `*.f[0-9][0-9][0-9]*.*`, `*.failed` ahead of the
+`+ *<ext>` block) belongs to `sync/rclone_lane.py` and was done by the sync
+agent; neither half suffices alone, and the staging option (download outside the
+tree) is still open.
+
+**Tests.** companion/tests/test_ytdl_executor.py's argv contract test asserts
+`--no-mtime`; ytdl/web/tests/test_downloader.py asserts `opts['updatetime'] is
+False`.
+
+### YT-6 - `.original.mp4` and `.editready.mp4` became second copies of the clip, in the media pool and on the NAS - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** Two clips per converted download in a shared Resolve project, one
+of them undecodable or truncated, plus a permanent second copy of the footage on
+the NAS - and nothing anywhere explaining the odd name.
+
+**Cause.** Three things at once. (1) `swap_in`'s fallback deliverable was
+`<stem>.editready.mp4`, whose stem ends `.editready`, not `[id]` - and `[id]`
+last in the stem is what the dedupe scan (`ytsearch._ID_RE`), `_landed_file` and
+`youtube_import._is_clip_name` all anchor on. So it could not be swept (it was
+the clip, YTDL-17) and could not be recognised as the clip either, which is how
+a truncated `.editready` from a killed container sat in the canonical tree
+matching lane A's `+ *.mp4` forever. (2) `_is_clip_name` excluded dotfiles,
+`.partial/.tmp/.lock` and `.fNNN/.temp` stems but not `.editready` or
+`.original`, both of which end `.mp4`, so the importer filed them into
+`Master/Youtube` as extra clips. (3) Nothing ever removed a `.original` - the
+pre-conversion download `swap_in` could not delete because Resolve had it open.
+
+**Fix.** (a) The fallback deliverable is `<title>.converted [id].mp4`
+(`ytdl_executor.converted_name` :1460 / `downloader.converted_name`), the marker
+in FRONT of the id bracket so the stem still ends `[id]`. (b) `.editready` is
+now an intermediate in both `_INTERMEDIATE_STEM_RE`
+(companion/src/ccsync_companion/ytdl_executor.py:144),
+`worker._INTERMEDIATE_STEM` (ytdl/web/ytdlweb/worker.py) and
+`youtube_import._INTERMEDIATE_STEM_RE`, which the rename above is what made
+safe; `.original` is excluded from the importer too but deliberately NOT from
+either sweep, because an age rule over a shared folder must not be what deletes
+footage. (c) `clear_aside_originals` (ytdl_executor.py:1272) and
+`_retry_aside_originals` (worker.py) retry that delete id-scoped on the next
+attempt at the same clip, when Resolve has usually let go; what they cannot
+delete they report in bytes, and `reclaimable_note` / `_reclaimable_bytes` put it
+on the clip row. `swap_in`'s own note now rides the row on both sides - the
+server's through a new `notes` list on `ensure_edit_ready`/`_swap_in` and
+`download()`'s `note` key, merged into `dl_error` on the done row.
+
+**Tests.** companion/tests/test_ytdl_executor.py: `converted_name` including a
+title with its own brackets, the locked-by-Resolve delivery and its note, the
+`.editready`-is-litter / `.original`-is-not pair, the id-scoped retry with a
+neighbour's file left alone, and the reported-not-forced case with the byte
+formatter. companion/tests/test_youtube_import.py: both new intermediates are
+never imported and a `.converted` deliverable still is.
+ytdl/web/tests/test_downloader.py and test_worker.py: the same rename, the
+retry, the reported bytes, and an end-to-end download whose clip row carries
+both sentences. Three existing worker tests that pinned `.editready` as a
+deliverable (YTDL-17's invariant) were updated to the new one.
+
+### MEDIA-1 - a rebuilt index could serve a client an uncurated clip - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** A client holding a share link saw, and could stream, a clip nobody
+had curated into their folder: any clip that had inherited the `videos.id` of a
+curated clip which had since left the archive. Nothing in the UI or the logs
+said so, and the suite was green because its only renumbering test kept the
+curated clip in the index.
+
+**Cause.** `resolve_items` (broll/web/app/client_folders.py) read the item by
+id, noticed the identity disagreed, tried `(share, rel_path)` -- and when that
+found nothing KEPT the by-id row it had already read. `public_video_ids` is
+built from `resolve_items`, and `routes_share._member_id` authorises the public
+media and detail routes on it, so the intruder was published, drawn and served.
+The fourth site of CR-63 (broll-1), which fixed `member_video_id` and the two
+routes but not the function they fall back to.
+
+**Fix.** broll/web/app/client_folders.py:555-570 -- the by-name row is now the
+only answer in that branch (`video = <by name>`, which may be None), so an item
+whose identity cannot be confirmed is dropped from the public list and reported
+`missing` to the curator, exactly the verdict `member_video_id` already gave.
+The docstring's promise was corrected with it.
+
+**Tests.** broll/web/tests/test_client_folders.py
+`test_a_rebuild_that_reuses_a_deleted_clips_id_serves_none_of_it`: curated clip
+deleted, its id handed to a clip in another share, then the folder JSON, the
+detail route and all three media routes are checked (404 each), plus
+`public_video_ids` directly and the curator's `missing` row. It fails on the old
+code.
+
+### MEDIA-23 - pulling a clip out of a client folder 404'd after an index rebuild - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** After a renumbering index build, the card popover correctly showed
+a clip as held by a live client folder, but clicking to remove it answered
+`404 "that clip is not in this folder"` while the client went on seeing it. A
+note typed on such a clip disappeared the same way.
+
+**Cause.** `client_folders.remove_item` and `set_note` matched
+`video_id = ?` against the id the panel sends, which is the id the index has
+NOW, not the id the item was stored under. `routes_client_folders.list_folders`
+already resolves identity the right way (by id OR by `(share, rel_path)`) for
+the tick, which is why the tick was right and the action was wrong. Sites four
+and five of CR-63's family.
+
+**Fix.** broll/web/app/client_folders.py:424-468 -- a shared `_identity_of`
+helper reads the current `(share, rel_path)` for the id and both statements now
+match `video_id = ? OR (share = ? AND rel_path = ?)`; a caller with no index
+connection, or a clip that has left the index, gets the empty pair, which no
+row carries, so the behaviour falls back to id-only rather than matching
+everything. routes_client_folders.py:243-265 passes the index connection.
+
+**Tests.** broll/web/tests/test_client_folders.py
+`test_pulling_a_clip_out_of_a_folder_works_after_a_renumbering_rebuild`: note
+then delete under the new id, the client's page emptied, and a clip that really
+is not in the folder still 404s on both routes. It fails on the old code.
+
+### MEDIA-22 - revoking a share link did not stop playback for an hour - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** Revoke is the control the client-folders design leans on for "the
+link got away", and the page JSON obeyed it at once, but proxies, sprites and
+posters carried an hour of private cache: a client mid-session kept playing and
+the browser was entitled not to re-ask at all until the hour was up.
+
+**Cause.** `routes_share._MEDIA_CACHE = "private, max-age=3600"`, against a
+module docstring and docs/CLIENT_FOLDERS.md that both promise the next request
+after a revoke is refused.
+
+**Fix.** broll/web/app/routes_share.py:206-215 -- `private, no-cache`, which
+means "ask before reusing", not "do not store"; and
+broll/web/app/media.py:36-49,66-79,109 gives `serve_file_with_range` a weak
+ETag over size+mtime and answers a matching `If-None-Match` with 304, so the
+re-ask costs a round trip rather than the file and the bandwidth win the hour
+of cache was there for is kept. Both docstrings that promised the old
+behaviour were corrected, including the honest limit: revoke stops the next
+fetch, not the second of video already decoded in the element.
+
+**Tests.** broll/web/tests/test_client_folders.py
+`test_share_media_is_revalidated_not_cached_for_an_hour`: no `max-age` on any
+of the three media routes, an ETag present, a conditional re-request answered
+304, and the same conditional request after a revoke answered 404.
+
+### MEDIA-21 - a Mac editor's NFD filename broke music ingest three ways - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** A Mac editor drops `Matej Šimalčík - Theme.wav`. The upload lands
+on the NAS but the item never goes live: `POST .../uploaded` answers
+`409 not_uploaded` ("the library does not hold this file yet") every tick, for a
+file sitting in the library. Separately, a re-encode of a track already held
+under the other spelling sailed past `find_reencode`, and a name already on
+disk in the decomposed spelling could be handed out a second time.
+
+**Cause.** macOS listdir is NFD, the NAS and Windows are NFC, and the two
+spellings are different byte strings (CR-90, docs/GOTCHAS.md section 17).
+Nothing in `musicweb` normalised anything: `db.safe_upload_name` minted the NFD
+name, `db.norm_stem`'s strip to `[a-z0-9]` deletes a precomposed `Š` but leaves
+the bare `s` of the decomposed spelling (so `simalcik` vs `imalk` -- two keys
+for one recording), `ingest_batches._taken_on_disk` compared one spelling
+against an NFC library, and `mark_uploaded` stat()ed the allocated path while
+rclone had written whatever the editor's machine holds.
+
+**Fix.** music/web/musicweb/db.py:493-513 (`safe_upload_name` returns NFC --
+this is where a library name is MINTED, so it decides what the bytes on disk
+are called; it is not normalising a path something already opened, which CR-90
+forbids) and :531-545 (`norm_stem` normalises before folding).
+music/web/musicweb/ingest_batches.py:230-264 adds `_spellings`, used by
+`_taken_on_disk` so the "is this name taken" QUESTION is asked of both
+spellings, and by `mark_uploaded`:949-971, which stats each spelling and takes
+the first that exists -- so what is opened and stat()ed is always a path that
+exists on the disk exactly as written -- then corrects `tracks.rel_path` /
+`filename` to the spelling on disk (:988-996) with a WARNING, because that is
+the path `/api/audio` and the companion's "+ Resolve" have to open.
+
+**Tests.** music/web/tests/test_db.py's three MEDIA-21 tests (normalised mint,
+one duplicate key for both spellings, `find_reencode` across the pair, with the
+NFC/NFD pair built rather than typed) and
+music/web/tests/test_fleet_ingest.py
+`test_a_mac_drop_lands_and_goes_live_in_whichever_spelling_it_arrives` /
+`test_a_name_held_under_the_other_spelling_is_stepped_around`. All five fail on
+the old code.
+
+### OPS-4 - no server script said WHICH NAS it was about to change, and the destructive ones applied by default - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** `setup_tree.py` printed `Target project root: /mnt/<pool>/<tree>/Projects/...` and nothing else, then `chown -R`'d as root on whichever box `[nas] host` resolved to. With a vendor `site.toml` in the repo and a customer's under `--site`, which box that is depends on whether the operator remembered the flag in that terminal. `install_dashboard_app --recreate` and `setup_editor_account --revoke-key --apply` had the same exposure: no host in any output line, no confirmation.
+
+**Cause.** The pinned SSH host key was the only backstop, and it is silent when both hosts are recorded in `~/.ccsync/known_hosts`. Nothing in the package rendered the resolved identity at all.
+
+**Fix.** `common.nas_banner()` / `print_nas_banner()` (`server/common.py:1834-1870`) build and print one idempotent line, `NAS: <user>@<host>:<port> (<kind>)  site: <file or "<none>">  tree: <root>`, and `common.cli()` prints it for EVERY script in the package before its first connection (`common.py:2063`, suppressed for `--help`); the three destructive scripts also call it themselves so a direct `main()` shows it. `common.confirm_destructive()` (`common.py:1873-1930`) gates a run on `--apply`/`--yes` or, on a tty, a typed match of the host's short name (`nas_short_name` returns an IP literal whole, because "192" confirms nothing); `--dry-run` never asks, and a non-tty with no flag is a refusal, not a go-ahead. Wired into `setup_tree.py:218-227,275-286` (new `--yes`), `install_dashboard_app.py:4003-4013` (`--recreate` only; a plain redeploy is the routine command and never asks) and `setup_editor_account.py:344-353` (`--revoke-key --apply`).
+
+**Tests.** `server/tests/test_hardening.py` section "OPS-4": the banner's contents, `<not configured>` instead of a raise, once per process, IP vs hostname confirmation, a wrong word stops with "Nothing was changed", a non-tty refuses naming `--yes`, `setup_tree` reaches no ssh unconfirmed, `--recreate` asks while a redeploy does not, and `--revoke-key` cannot revoke without a confirmation. `server/`: 600 passed, 2 skipped.
+
+### OPS-9(a) - "no snapshot" was a stderr line in a 500-line log and nothing durable - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** WPK-6 again: `snapshot_before` warned on stderr and returned False, `setup_tree.py` and `install_dashboard_app.py` both DISCARDED that return value, the run went on to succeed, and the operator's belief that backups are configured was never contradicted.
+
+**Cause.** The only signal was mid-log, and there was no record of the attempt anywhere afterwards.
+
+**Fix.** `common.snapshot_before` now records every attempt through `_record_snapshot` (`server/common.py:1933-1972`): one `{ts, label, path, ok, detail}` JSON object appended (single write on an `O_APPEND` handle, not tmp + replace, because replacing a shared LOG would lose the other script's lines) to `~/.ccsync/snapshot_log.jsonl`, overridable with `$CCSYNC_SNAPSHOT_LOG`; an unwritable log warns and never stops a deploy. `common.snapshot_verdict()` (`common.py:1975-1992`) renders the one line the callers print in their FINAL block: `this run had a snapshot behind it: yes` / `NO (<detail>)`, with "none was attempted" as an explicit NO. Printed by `setup_tree.py:296,311,315` (Done, the remote-failure block and the dry run) and `install_dashboard_app.py:4508,4592,4606`. The ship gate proposed in the same finding is deliberately NOT here (later wave).
+
+**Tests.** `server/tests/test_backup_restore.py` section 3b: both outcomes are appended with a non-blank detail on a NO, the log is appended and never rewritten, an unwritable log still yields a correct verdict, a skipped call reads NO, the reason is named, and both `setup_tree` and the deploy print the verdict in their final block.
+
+### UX-6 - the grade swap deleted a foreign P: mapping with no ownership check - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** On a machine whose P: is a real NAS mapping (the base rig, or any machine set up before CCSync), `GRADE FROM SERVER ORIGINALS (SWAP P:)` ran `net use P: /delete /y` on it, the `/y` answering the open-files prompt. The swap back re-maps P: at `local_root`, never at what used to be there, so the original mapping was gone for good and every `P:\...` clip path in that machine's Resolve database then resolved against a different tree. The confirmation dialog talked about playback speed only.
+
+**Cause.** `drive_swap.swap_to_server` called `_unmap` unconditionally, while `classify_p_target` -- the answer -- already existed two functions above it, and both the installer and the wizard already refused a P: they did not create.
+
+**Fix.** `swap_to_server` classifies BEFORE it unmaps (`companion/src/ccsync_companion/drive_swap.py:405-421`): `other` refuses with "P: is currently mapped to <target>, which CCSync did not create. Swapping would replace it and CCSync cannot put it back."; `none` (returned both for "nothing mapped" and for "the table could not be read") refuses the way the installer does; `server` is a no-op. It takes `local_root` as a keyword so a machine still on the legacy `subst P: <local_root>` mapping still classifies as ours (`app.py:3488-3494` passes it). No em dashes in either refusal.
+
+**Tests.** `companion/tests/test_drive_swap.py`: a foreign P: refuses and the only spawn is the read-only query, an unreadable table refuses, a legacy subst of our own local_root still swaps, P: already on the server is a no-op, and a scan for em dashes in both strings. The existing scripted runners are wrapped by `_reports_local_p` so their recorded call lists are unchanged. 31 passed in that file.
+
+### OPS-8 / UX-23 - the Windows uninstaller inverted the "can't tell = foreign" rule the bootstrap obeys - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** Two failures on one guard. (a) `Get-PSDrive` inside a `try{}catch{}` left `$displayRoot` blank on any failure, and the ownership expression read blank as "a subst mapping, ours" -- so `net use P: /delete /y` ran on the base rig's real NAS mapping, the exact D-8/B21 destruction the bootstrap refuses to risk. `Test-Path` also reports false for a DISCONNECTED persistent mapping (NAS asleep, Tailscale down), which bypassed the guard entirely. (b) Run elevated (reasonable: `Remove-SmbShare` needs it) the unmap was skipped because the elevated token's device map does not hold the user's mapping, while `Remove-SmbShare` SUCCEEDED, leaving the user's session with a drive letter that errors on every access.
+
+**Cause.** The bootstrap's `Get-DriveMapping` / `Invoke-MappingCommand` treatment (B21, INST-1) was never carried to the uninstaller, which kept its own weaker copy.
+
+**Fix.** The five primitives moved into a shared `installer/drive_mapping.ps1` that both scripts dot-source from `$PSScriptRoot` (`windows_bootstrap.ps1:432-447`, which exits 1 when the file is absent rather than run a teardown with no ownership check; `windows_uninstall.ps1:69-105`, where a missing library leaves the mapping and share alone instead). Section 3 of the uninstaller (`windows_uninstall.ps1:186-278`) now classifies with `Get-DriveMapping` (`$null` = foreign), routes both unmap commands through `Invoke-MappingCommand` so an elevated run acts on the USER's device map, and proves the result by RE-READING the map -- neither exit code is a signal, since exactly one of `subst /D` and `net use /delete` can succeed. The SMB share is removed only after that settled; otherwise both are left in place and the two by-hand commands are printed, and the loopback firewall rule stays with the share it scopes. The library ships in the editor package (`build_editor_package.ps1:468-472`) and is bundled beside the bootstrap inside `onboard.exe` (`onboarding/build_onboard.spec:24-27,46`), which extracts and runs it from `_MEIPASS`. No `.gitattributes` change needed: `*.ps1 text eol=crlf` already covers it.
+
+**Tests.** `installer/tests/Test-DriveMapParser.ps1` dot-sources the real library instead of slicing functions out of the bootstrap by string index, asserts all six functions exist, and adds thirteen source cases: both scripts dot-source it, neither redefines the parsers, the uninstaller no longer mentions `Get-PSDrive`/`DisplayRoot`, `$null` is foreign, the unmap goes through `Invoke-MappingCommand`, no raw `cmd /c net use /delete` survives, the share is gated on `$unmapSettled`, the two commands are printed, the bootstrap refuses without the library, and both packagers ship it. 41 cases pass, plus the live probe (which on this base rig correctly reports P: as a foreign netuse mapping).
+
 ## Approving a computer under its own name mints a phantom editor (CR-91, 2026-08-28)
 
 ### CR-91 - "one user, many devices" read as "assign a NEW username per device", and typing the machine name is the B16 unshare - FIXED in repo 2026-08-28 as dashboard 0.7.16, NOT YET DEPLOYED

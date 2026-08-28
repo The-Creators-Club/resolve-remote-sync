@@ -27,6 +27,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
@@ -109,6 +110,26 @@ IN_PROGRESS_EXCLUDE_RULES = ["- *.tmp", "- *.lock", "- *.partial"]
 # `.DS_Store` needs no rule: it matches no `+ *<ext>` and dies on the
 # trailing `- **`.
 APPLEDOUBLE_EXCLUDE_RULE = "- ._*"
+
+# YT-3 (resilience sweep 2026-08-28): the ytdl executors download AND convert
+# inside the tree, so a half-made file carries a real video extension while
+# `_ensure_edit_ready`'s libx264 pass runs (minutes to hours). Lane A is
+# `copy --ignore-existing`: the FIRST version of a name to reach the NAS is
+# the only one that ever will, so uploading the pre-conversion original makes
+# the undecodable copy the whole fleet's permanent one (CR-79 arriving through
+# the sync lane). These are `-` rules and MUST come before the `+ *<ext>`
+# includes -- rclone filter matching is first-match-wins.
+#   *.editready.* / *.original.* -- the conversion's two sides
+#   *.temp.*                     -- ffmpeg/yt-dlp scratch output
+#   *.fNNN*.*                    -- yt-dlp per-format fragments (.f137.mp4)
+#   *.failed                     -- an abandoned attempt, kept for diagnosis
+YTDL_WORK_EXCLUDE_RULES = [
+    "- *.editready.*",
+    "- *.original.*",
+    "- *.temp.*",
+    "- *.f[0-9][0-9][0-9]*.*",
+    "- *.failed",
+]
 
 # Blast-radius bound on lane B's sync (AUDIT_2 §4.2 safety row). Measured:
 # rclone stops deleting once the cap is hit and exits non-zero, and under
@@ -376,6 +397,17 @@ def escape_filter_pattern(text: str) -> str:
     return "".join("\\" + ch if ch in _FILTER_METACHARACTERS else ch for ch in str(text))
 
 
+def nfc_key(text: str) -> str:
+    """A path folded to Unicode NFC for COMPARISON ONLY (SYNC-3, CR-90).
+
+    macOS listdir hands out NFD, the NAS and Windows hand out NFC, so
+    `Matej Šimalčík` read off a Mac's disk is a different byte string from the
+    same name read off the NAS. Never feed this to anything that opens,
+    renames or deletes a file: there the bytes on disk are the truth.
+    """
+    return unicodedata.normalize("NFC", str(text or ""))
+
+
 def build_filter_rules_up(exclude_paths: Optional[Iterable[str]] = None) -> list[str]:
     """Lane A: video files anywhere EXCEPT under a Proxy/ dir, nothing else.
 
@@ -395,8 +427,17 @@ def build_filter_rules_up(exclude_paths: Optional[Iterable[str]] = None) -> list
     `-` rules, so whichever matches first reaches the same verdict.
     """
     rules = [APPLEDOUBLE_EXCLUDE_RULE]
-    rules += [f"- /{escape_filter_pattern(rel)}" for rel in (exclude_paths or [])]
+    # SYNC-11 (resilience sweep 2026-08-28): each excluded path gets a `/**`
+    # companion rule. `- /Sub/Dir` alone is a directory-prune that is easy to
+    # get wrong, and a file-moves exclusion CAN name a directory
+    # (`file_moves` carries `is_dir`). For a plain file the extra rule matches
+    # nothing, and both are `-` rules, so it is free either way.
+    for rel in (exclude_paths or []):
+        escaped = escape_filter_pattern(rel)
+        rules.append(f"- /{escaped}")
+        rules.append(f"- /{escaped}/**")
     rules += ["- **/Proxy/**", "- /Proxy/**"]
+    rules += YTDL_WORK_EXCLUDE_RULES
     rules += [f"+ *{ext}" for ext in VIDEO_EXTS]
     rules.append("- **")
     return rules
@@ -3082,11 +3123,20 @@ class RcloneLane(LaneAdapter):
             # Neither is evidence of a move, and the empty case is the one
             # the breaker exists for.
             return 0
+        # SYNC-3 (resilience sweep 2026-08-28): both sides fold to NFC before
+        # the comparison. The trashed paths came off the LOCAL disk (NFD on a
+        # Mac), the remote ones off the NAS (NFC), so before this every path
+        # with a diacritic scored as a deletion and the breaker tripped on a
+        # benign reorganisation. Comparison only -- nothing here opens a file.
+        remote_keys = {nfc_key(p) for p in remote_paths}
+        remote_by_name: dict[str, set[int]] = {}
+        for name, sizes in remote_files.items():
+            remote_by_name.setdefault(nfc_key(name), set()).update(sizes)
         relocated = 0
         for name, size, rel in trashed:
-            if rel and rel in remote_paths:
+            if rel and nfc_key(rel) in remote_keys:
                 relocated += 1
-            elif size in remote_files.get(name, ()):
+            elif size in remote_by_name.get(nfc_key(name), ()):
                 relocated += 1
         return relocated
 

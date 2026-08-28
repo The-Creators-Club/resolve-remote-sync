@@ -355,11 +355,39 @@ def is_auth_failure(message: str) -> bool:
     return any(h in str(message or "").lower() for h in _AUTH_HINTS)
 
 
+# UX-6 (resilience sweep 2026-08-28): the two refusals swap_to_server makes
+# BEFORE _unmap. Every other code path that touches P: already asks whose
+# mapping it is -- windows_bootstrap.ps1's Get-DriveMapping guard,
+# onboarding/steps.build_cleanup_plan, and the shared
+# installer/drive_mapping.ps1 they both use now. The grade swap did not: it
+# ran `net use P: /delete /y` (the /y answering the open-files prompt) on
+# whatever P: was, and swapping BACK re-maps P: at local_root, never at what
+# used to be there. On the base rig, or any machine set up before CCSync, that
+# is a real NAS mapping destroyed for good with every P:\... clip path in that
+# machine's Resolve database now resolving against a different tree.
+#
+# "none" is refused for the same reason the installer refuses it: it is
+# returned both when nothing is mapped and when the mapping table could not be
+# read at all (current_p_target swallows the failure), and "we could not tell"
+# must never render as "it is ours".
+_FOREIGN_P_REFUSAL = (
+    "P: is currently mapped to {target}, which CCSync did not create. "
+    "Swapping would replace it and CCSync cannot put it back."
+)
+_UNKNOWN_P_REFUSAL = (
+    "CCSync could not tell what P: is mapped to, so it is being left exactly "
+    "as it is. Nothing was changed. If P: is not mapped at all, restart the "
+    "CCSync app or re-run the installer to put your local mapping back, then "
+    "try the swap again."
+)
+
+
 def swap_to_server(
     server_unc: str,
     run_fn: RunFn = _default_run,
     username: str = "",
     password: str = "",
+    local_root: str = "",
 ) -> tuple[bool, str]:
     """Map P: to the server tree. On failure the caller MUST restore the
     local map (see app.swap_p_to_server) -- this function reports, it does
@@ -372,6 +400,21 @@ def swap_to_server(
     this exact shape."""
     if not str(server_unc or "").strip():
         return False, "server_p_unc is not configured"
+    # local_root is a keyword with a default because the signature is public
+    # (app.py and test_app.py both call it): without it a machine still on the
+    # LEGACY `subst P: <local_root>` mapping would classify as "other" and be
+    # refused, so the caller passes the same local_root it would hand
+    # swap_to_local.
+    target = current_p_target(run_fn)
+    state = classify_p_target(target, local_root, server_unc)
+    if state == "other":
+        return False, _FOREIGN_P_REFUSAL.format(target=target)
+    if state == "none":
+        return False, _UNKNOWN_P_REFUSAL
+    if state == "server":
+        # Already there. Re-running the unmap+connect would work, but saying so
+        # is cheaper and cannot fail halfway.
+        return True, "P: already shows the SERVER originals"
     _unmap(run_fn)
     try:
         # _TIMEOUT_S passed rather than defaulted so the ceiling is read at

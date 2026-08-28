@@ -51,6 +51,17 @@ MAX_PROJECTS = 64
 
 GetSelectedRelsFn = Callable[[], Optional[set]]
 
+# UX-7 (resilience sweep 2026-08-28): Syncthing's own name for "two machines
+# changed this file and I kept both" -- `<name>.sync-conflict-20260828-104500-
+# ABCDEFG.<ext>`. Nothing in the companion or the dashboard mentioned the
+# string before this, though SPEC.md:343 promises it is surfaced in the tray:
+# lane A then uploads the copy to the NAS as a new file (it never deletes),
+# lane B redistributes it, and one editor's work is orphaned into a file
+# nobody looks at. This scan only COUNTS them. Never delete or merge a
+# conflict copy: which side is wanted is a human's judgement.
+SYNC_CONFLICT_MARKER = ".sync-conflict-"
+MAX_CONFLICT_PATHS = 20
+
 # Module-level so the "reported fewer projects than exist" warning fires on a
 # CHANGE rather than every refresh_interval forever (the warn-once pattern
 # used in reporter.py/watcher.py). None = nothing logged yet.
@@ -97,6 +108,7 @@ def scan_local_manifest(
     local_root: str,
     selected_rels: Optional[set] = None,
     size_fn: Callable[[str], int] = os.path.getsize,
+    conflicts_out: Optional[dict[str, Any]] = None,
 ) -> dict[str, dict[str, Any]]:
     """Walk every project dir under local_root and build the manifest dict.
 
@@ -104,10 +116,21 @@ def scan_local_manifest(
     <series>/<project>") for which per-file lists should be populated --
     every other project still gets exact rollups, just with originals/
     proxies=None. `selected_rels=None` means every project is rollup-only.
+
+    `conflicts_out`, when supplied, is filled with
+    `{"count": n, "paths": [...]}` for the Syncthing conflict copies seen on
+    this walk (UX-7). An out-param rather than a second return value or a key
+    in the result: the result dict is keyed by project rel and is consumed
+    field-by-field by the dashboard, so a non-project key there would be a
+    schema change. Conflict copies are counted whatever their extension --
+    the common case is a .drp or an audio file, not a video original, so the
+    check sits AHEAD of the VIDEO_EXTS filter.
     """
     global _last_truncation_logged
 
     result: dict[str, dict[str, Any]] = {}
+    conflict_count = 0
+    conflict_paths: list[str] = []
     # Selection rels union in so a just-selected project whose marker file
     # hasn't synced down yet still gets a rollup (see fixer.list_project_dirs).
     project_rels = fixer.list_project_dirs(local_root, extra_rels=selected_rels or ())
@@ -143,6 +166,15 @@ def scan_local_manifest(
 
         for dirpath, _dirnames, filenames in os.walk(project_dir):
             for filename in filenames:
+                if SYNC_CONFLICT_MARKER in filename:
+                    conflict_count += 1
+                    if len(conflict_paths) < MAX_CONFLICT_PATHS:
+                        full = os.path.join(dirpath, filename)
+                        try:
+                            shown = Path(full).relative_to(project_dir).as_posix()
+                        except ValueError:
+                            shown = filename
+                        conflict_paths.append(f"{project_rel}/{shown}")
                 ext = os.path.splitext(filename)[1].lower()
                 if ext not in rclone_lane.VIDEO_EXTS:
                     continue
@@ -183,6 +215,9 @@ def scan_local_manifest(
             "originals": originals,
             "proxies": proxies,
         }
+    if conflicts_out is not None:
+        conflicts_out["count"] = conflict_count
+        conflicts_out["paths"] = conflict_paths
     return result
 
 
@@ -214,6 +249,11 @@ class ManifestCache:
 
         self._lock = threading.Lock()
         self._cache: dict[str, dict[str, Any]] = {}
+        # UX-7: the last scan's Syncthing conflict copies. Held beside the
+        # cache and replaced only on a successful scan, for the same reason
+        # the cache is: a skipped scan must not read as "the conflicts are
+        # gone".
+        self._conflicts: dict[str, Any] = {"count": 0, "paths": []}
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -232,6 +272,16 @@ class ManifestCache:
     def get(self) -> dict[str, dict[str, Any]]:
         with self._lock:
             return dict(self._cache)
+
+    def sync_conflicts(self) -> dict[str, Any]:
+        """`{"count": n, "paths": [...]}` from the last successful scan
+        (UX-7). Cheap and non-blocking, like get(); {} when there are none,
+        so an absent report field is how "no conflicts" is spelled."""
+        with self._lock:
+            count = int(self._conflicts.get("count") or 0)
+            if not count:
+                return {}
+            return {"count": count, "paths": list(self._conflicts.get("paths") or [])}
 
     def _root_is_present(self) -> bool:
         """Whether local_root is there to be scanned. Never raises; an
@@ -262,12 +312,29 @@ class ManifestCache:
             selected_rels = None
             if self._get_selected_rels is not None:
                 selected_rels = self._get_selected_rels()
-            scanned = scan_local_manifest(self.local_root, selected_rels, self._size_fn)
+            conflicts: dict[str, Any] = {}
+            scanned = scan_local_manifest(
+                self.local_root, selected_rels, self._size_fn,
+                conflicts_out=conflicts,
+            )
         except Exception:
             log.exception("manifest cache: refresh failed")
             return
         with self._lock:
             self._cache = scanned
+            self._conflicts = {
+                "count": int(conflicts.get("count") or 0),
+                "paths": list(conflicts.get("paths") or []),
+            }
+        count = int(conflicts.get("count") or 0)
+        if count:
+            # WARNING, not info: nothing else in the system will ever mention
+            # these files, and lane A is about to upload them (UX-7).
+            log.warning(
+                "manifest cache: %d Syncthing conflict cop%s on this machine (e.g. %s). "
+                "Nothing here deletes or merges them.",
+                count, "y" if count == 1 else "ies",
+                ", ".join(list(conflicts.get("paths") or [])[:3]) or "?")
 
     def _loop(self) -> None:
         while not self._stop_event.is_set():

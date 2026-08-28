@@ -62,18 +62,21 @@ from common import (
     add_site_arg,
     build_marker_write_cmd,
     cli,
+    confirm_destructive,
     get_backend,
     project_acl_mode,
     project_group_name,
     project_path,
     project_path_rel,
     project_relative_dirs,
+    print_nas_banner,
     require_site_value,
     run_ssh,
     set_host_key_pin,
     shell_quote,
     slugify,
     snapshot_before,
+    snapshot_verdict,
     validate_slug,
 )
 
@@ -215,9 +218,17 @@ def main():
                           "cannot be taken. Default is best-effort: warn and continue, "
                           "because a NAS with no snapshot API must not be a NAS where "
                           "projects cannot be created.")
+    ap.add_argument("--yes", action="store_true",
+                     help="skip the typed confirmation of the NAS's name. This script "
+                          "chowns recursively as root on whichever host [nas] host "
+                          "resolves to, so without --yes (or --dry-run) it asks "
+                          "(OPS-4, 2026-08-28).")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     set_host_key_pin(args.host_key)
+    # Which box, which manifest, which tree -- printed before anything connects
+    # (OPS-4). cli() prints it too; print_nas_banner is idempotent.
+    print_nas_banner()
     backend = get_backend(args)
     args.projects_root = require_site_value(
         args.projects_root, "[tree] pool_root/tree_name", "--projects-root")
@@ -263,6 +274,17 @@ def main():
     # it (COMMERCIAL_READINESS.md item 8). Snapshot first; best-effort unless
     # --require-snapshot, and it is the whole tree that is snapshotted, not
     # `base`, because a snapshot is per dataset/share.
+    # ...and before that, the question: is this the box you meant? (OPS-4,
+    # 2026-08-28) The scenario is a repo site.toml and a customer's under
+    # --site, in two terminals, with the flag forgotten in one of them.
+    confirm_destructive(
+        f"About to create {base} and re-apply ownership recursively "
+        f"(chown -R as root) under {args.projects_root}.",
+        assume_yes=args.yes, dry_run=args.dry_run)
+
+    # OPS-9 (2026-08-28): the return value used to be discarded, so "no
+    # snapshot" was a stderr line nobody read (WPK-6). It is a line in the
+    # summary block below now, and a row in ~/.ccsync/snapshot_log.jsonl.
     snapshot_before("setup_tree", args.projects_root, dry_run=args.dry_run,
                     require=args.require_snapshot, backend=backend)
 
@@ -271,6 +293,7 @@ def main():
     if args.dry_run:
         print("[dry-run] remote script that would run:")
         print(script)
+        print(f"[dry-run] {snapshot_verdict()}")
         return 0
 
     if out:
@@ -285,9 +308,11 @@ def main():
         return rc
     if rc != 0:
         print(f"FAILED (remote exit code {rc})", file=sys.stderr)
+        print(snapshot_verdict(), file=sys.stderr)
         return rc
 
     print("Done.")
+    print(snapshot_verdict())
     return 0
 
 

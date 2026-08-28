@@ -1901,3 +1901,37 @@ def test_startup_verify_latches_a_restricted_selected_folder():
     seq, lane_a, lane_b, events = _build(selection, admin)
     seq._verify_startup_ignores(items)
     assert seq._ignores_unconfirmed_for("s-lender")
+
+
+def test_unconfirmed_slugs_publishes_the_ignores_latch():
+    """SYNC-5 (resilience sweep 2026-08-28): the latch was reported nowhere.
+    A folder deliberately kept paused because its .stignore never landed
+    carried nothing on lane C, indefinitely -- one project that never syncs,
+    green forever. This is the read side lane C and the report use."""
+    admin = FakeAdmin()
+    seq, _lane_a, _lane_b, _events = _build(FakeSelectionClient([]), admin)
+    with seq._lock:
+        seq._slug_to_item = {"s-a": _item("s-a", "2026/FF5/Alpha", 0),
+                             "s-b": _item("s-b", "2026/FF5/Beta", 1)}
+    assert seq.unconfirmed_slugs() == []
+
+    seq._ignores_unconfirmed.add("s-b")
+    assert seq.unconfirmed_slugs() == ["s-b"]
+
+    # The admin's half-accepted-folder record counts too (B14), and a probe
+    # that raises must not take the read down with it.
+    admin._ignores_unconfirmed.add("s-a")
+    assert seq.unconfirmed_slugs() == ["s-a", "s-b"]
+
+
+def test_unconfirmed_slugs_never_raises_when_the_predicate_fails():
+    admin = FakeAdmin()
+    seq, _a, _b, _e = _build(FakeSelectionClient([]), admin)
+    with seq._lock:
+        seq._slug_to_item = {"s-a": _item("s-a", "2026/FF5/Alpha", 0)}
+
+    def _boom(slug):
+        raise RuntimeError("no")
+
+    admin.ignores_confirmed = _boom
+    assert seq.unconfirmed_slugs() == []

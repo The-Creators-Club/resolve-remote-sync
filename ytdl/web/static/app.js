@@ -404,9 +404,22 @@ function renderEvidence(h) {
   // new, and a server that sends no version shows no pip at all (the main pip
   // still carries "yt-dlp missing" on its own).
   const version = h.yt_dlp_version == null ? '' : String(h.yt_dlp_version);
-  setPip('#healthytdlp', version ? `yt-dlp ${version}` : '',
-         h.yt_dlp === 'ok' ? 'on' : 'off',
-         'the yt-dlp this server is actually running');
+  // ... and HOW OLD it is (YT-1, 2026-08-28). A version string on its own told
+  // nobody anything during CR-80: 2026.07.04 looks like a version, and it was
+  // seven weeks past the release that could still download. The age is the
+  // part a human can act on, so it goes in the same pip and turns it amber.
+  const ytdlpStale = h.yt_dlp_stale === true;
+  const ytdlpAge = h.yt_dlp_age_days == null ? null : Number(h.yt_dlp_age_days);
+  const ytdlpText = version
+    ? (ytdlpStale && ytdlpAge != null
+        ? `yt-dlp ${version} (${ytdlpAge}d old)`
+        : `yt-dlp ${version}`)
+    : '';
+  setPip('#healthytdlp', ytdlpText,
+         h.yt_dlp !== 'ok' ? 'off' : ytdlpStale ? 'warn' : 'on',
+         h.yt_dlp_age_detail == null || !h.yt_dlp_age_detail
+           ? 'the yt-dlp this server is actually running'
+           : String(h.yt_dlp_age_detail));
 
   // The PO-token sidecar, as an ANSWER and not as a configured URL: CR-73 sat
   // undetected for days behind a sidecar that was configured and unreachable.

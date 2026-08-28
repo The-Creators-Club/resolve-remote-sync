@@ -312,3 +312,74 @@ def test_synced_pct_falls_back_to_lane_c_without_a_manifest(app_env):
     body = client.get("/api/v1/projects/2025-ff4-nuclear").json()
     (e,) = [x for x in body["editors"] if x["display_name"] == "jsmith"]
     assert e["synced_pct"] == e["completion"] == 62.5
+
+
+# -- the collector's brakes are visible (DASH-3 / DASH-4 / DASH-14, resilience
+#    sweep 2026-08-28). Both refusals used to exist only in the container log,
+#    while poll_runs, /api/v1/health and every page said the cycle was fine.
+
+def _seed_refusals(conn):
+    now = dbmod.utcnow_iso()
+    dbmod.record_enforce_refusal(conn, now, [("2025-ff4-nuclear", DEVICE_ID),
+                                             ("2026-ff5-alpha", DEVICE_ID)], 1)
+    dbmod.meta_set_json(conn, dbmod.META_DEACTIVATION_REFUSAL, {
+        "at": now, "message": "Syncthing reported 0 of 37 folders - not deactivating anything",
+        "seen": 0, "active": 37, "would_deactivate": 37, "ceiling": 9, "projects": []})
+    dbmod.record_enforce_plan(conn, now, [
+        ("2025-ff4-nuclear", {DEVICE_ID}, set()),
+        ("2026-ff5-alpha", set(), {DEVICE_ID}),
+    ])
+    dbmod.record_poll_run(conn, "enforce", now, now, True, "refused 2 share removal(s)")
+    conn.commit()
+
+
+def test_health_reports_the_collector_alarms(app_env):
+    client, conn = app_env
+    seed(conn)
+    _seed_refusals(conn)
+    alarms = client.get("/api/v1/health").json()["collector_alarms"]
+    assert alarms["enforce_refusal"]["count"] == 2
+    assert "0 of 37 folders" in alarms["deactivation_refusal"]["message"]
+    assert alarms["enforce_plan"]["n_add"] == 1 and alarms["enforce_plan"]["n_remove"] == 1
+
+
+def test_the_fleet_page_banners_and_panel_show_the_refusals(app_env):
+    client, conn = app_env
+    seed(conn)
+    _seed_refusals(conn)
+    page = client.get("/").text
+    assert "SHARE REMOVAL(S) REFUSED" in page and "shares are FROZEN" in page
+    assert "0 of 37 folders" in page
+    # the health panel + the read-only pending diff
+    assert "[ COLLECTOR ]" in page and "[ PENDING SHARE CHANGES ]" in page
+    assert "refused 2 share removal(s)" in page
+    assert "[ INCOMPLETE ]" in page
+
+
+def test_an_editor_is_not_shown_the_collector_panel(app_env):
+    """It names Syncthing device ids and is an admin diagnostic: the whole
+    block goes in _scope_editors_view, so the partial cannot render it."""
+    client, conn = app_env
+    seed(conn)
+    _seed_refusals(conn)
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "jsmith"))
+    page = client.get("/").text
+    assert "[ COLLECTOR ]" not in page
+    assert "SHARE REMOVAL(S) REFUSED" not in page
+    assert "collector" not in client.get("/api/v1/editors").json()
+
+
+def test_the_project_page_says_a_nas_inventory_was_not_replaced(app_env):
+    """DASH-5: a project dir that went missing under the collector used to
+    write 0 originals with no error, so this page told the owner the server
+    holds none of his footage."""
+    client, conn = app_env
+    pid, _did = seed(conn)
+    dbmod.replace_nas_media(conn, pid, [("B-roll/a.braw", "original", ".braw", 10, 1)],
+                            "sig1", 1, T)
+    conn.commit()
+    assert dbmod.replace_nas_media(conn, pid, [], "sig2", 1, T) is False
+    conn.commit()
+    page = client.get("/project/2025-ff4-nuclear").text
+    assert "[ NAS INVENTORY NOT UPDATED ]" in page
+    assert "not replacing" in page

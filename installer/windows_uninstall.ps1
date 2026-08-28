@@ -65,6 +65,32 @@ function Write-Step { param([string]$m) Write-Host "[uninstall] $m" }
 function Write-Skip { param([string]$m) Write-Host "[uninstall] (skip) $m" -ForegroundColor DarkGray }
 function Write-Warn2 { param([string]$m) Write-Host "[uninstall] WARNING: $m" -ForegroundColor Yellow }
 
+# The tree-drive classification and the mount/unmount primitives, shared with
+# windows_bootstrap.ps1 (OPS-8 / UX-23, resilience sweep 2026-08-28). This
+# script used to decide "is this drive ours?" from Get-PSDrive + Test-Path,
+# with a try/catch that turned any failure into a BLANK DisplayRoot -- which
+# the ownership expression read as "a subst mapping, ours" and then ran
+# `net use <drive> /delete /y` on. That is the inversion of the rule the
+# bootstrap was fixed to obey (B21): unreadable means somebody else's.
+#
+# NOT fatal when absent, unlike in the bootstrap: removing the app, the
+# autostart entries and the binaries is the bulk of an uninstall and needs no
+# drive mapping at all. Without the library the mapping and share are LEFT
+# ALONE and the two commands are printed.
+$MappingLibLoaded = $false
+$DriveMappingLib = Join-Path $PSScriptRoot "drive_mapping.ps1"
+if (Test-Path -LiteralPath $DriveMappingLib) {
+    try {
+        . $DriveMappingLib
+        $MappingLibLoaded = $true
+    }
+    catch {
+        Write-Warn2 "could not load drive_mapping.ps1: $($_.Exception.Message)"
+    }
+}
+$IsElevated = $false
+if ($MappingLibLoaded) { $IsElevated = Test-IsElevated }
+
 $RunKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $CcsyncLocal = "$env:LOCALAPPDATA\ccsync"
 $BinDir = "$CcsyncLocal\bin"
@@ -176,36 +202,75 @@ else { Write-Skip "no orphaned CCSync-OneShot-* scheduled tasks" }
 # DisplayRoot and is always ours (the bootstrap's fallback style); a net-use
 # mapping is only ours if it points at our own loopback share. Anything
 # else -- a net-use mapping to a real host -- must be left alone.
+#
+# OPS-8 / UX-23 (resilience sweep 2026-08-28) replaced Get-PSDrive +
+# Test-Path with the bootstrap's own Get-DriveMapping. Three things changed,
+# each of them a real machine state this script used to get wrong:
+#   $null (mappings unreadable) is FOREIGN, not "a subst mapping, ours".
+#   A disconnected persistent mapping (NAS asleep, Tailscale down) is a
+#   MAPPING; Test-Path called it absent and the ownership guard never ran.
+#   The unmap goes through Invoke-MappingCommand, so an elevated uninstall
+#   (which is the reasonable way to run one -- Remove-SmbShare needs it)
+#   acts on the USER's device map instead of the elevated token's own.
 Write-Step "tree drive: $DriveRoot (loopback share '$ShareName')"
-if (Test-Path "$DriveRoot\") {
-    $pDrive = $null
-    try { $pDrive = Get-PSDrive -Name $DriveLetter -ErrorAction Stop } catch {}
-    $displayRoot = $null
-    if ($pDrive) { $displayRoot = $pDrive.DisplayRoot }
-    $looksLikeOurs = [string]::IsNullOrWhiteSpace($displayRoot) -or
-                     ($displayRoot -match ('^\\\\localhost\\' + [Regex]::Escape($ShareName) + '$'))
-
-    if (-not $looksLikeOurs) {
-        Write-Skip "$DriveRoot is mapped to '$displayRoot' -- not this installer's mapping (looks like a real NAS mapping, e.g. on the base rig). Leaving it alone; remove the share/label leftovers below only."
+# Gates the share removal below: the share must outlive a mapping that is
+# still pointing at it. A user session left holding $DriveRoot after the share
+# is gone has a drive letter that ERRORS on every access, which is worse than
+# one that is cleanly still there.
+$unmapSettled = $false
+$mapping = $null
+if (-not $MappingLibLoaded) {
+    Write-Warn2 "drive_mapping.ps1 is not beside this script, so $DriveRoot cannot be classified. Leaving the mapping and the '$ShareName' share exactly as they are -- see the two commands printed below."
+}
+else {
+    $mapping = Get-DriveMapping -Letter $DriveLetter
+    if ($null -eq $mapping) {
+        Write-Warn2 "could not read this logon session's drive mappings, so $DriveRoot is being treated as somebody else's and left alone. That is deliberate: guessing 'there is nothing mapped here' is how a real NAS mapping gets deleted (B21)."
     }
-    elseif ($DryRun) {
-        Write-Step "[dry-run] would unmap $DriveRoot ($(if ($displayRoot) { $displayRoot } else { 'subst mapping' }))"
+    elseif (-not $mapping.Mapped) {
+        Write-Skip "$DriveRoot not mapped"
+        $unmapSettled = $true
     }
     else {
-        # subst and net use are separate mechanisms; try both, ignore errors.
-        # Redirect inside cmd -- a PowerShell-level 2>$null turns native
-        # stderr into a NativeCommandError (fatal under EAP Stop).
-        & cmd /c "subst $DriveRoot /D >nul 2>&1"
-        & cmd /c "net use $DriveRoot /delete /y >nul 2>&1"
-        Write-Step "unmapped $DriveRoot (if it was mapped)"
+        $target = $mapping.Target
+        $ours = ($mapping.Kind -eq "subst") -or
+                ($target -match ('^(?i)\\\\localhost\\' + [Regex]::Escape($ShareName) + '$'))
+        if (-not $ours) {
+            Write-Skip "$DriveRoot is mapped to '$target' -- not this installer's mapping (looks like a real NAS mapping, e.g. on the base rig). Leaving it alone; remove the share/label leftovers below only."
+        }
+        elseif ($DryRun) {
+            Write-Step "[dry-run] would unmap $DriveRoot ($target, $($mapping.Kind))"
+            $unmapSettled = $true
+        }
+        else {
+            # subst and net use are separate mechanisms and exactly one of
+            # them can succeed, so neither exit code is the signal: re-reading
+            # the device map is. An unreadable re-read counts as "still
+            # mapped", which keeps the share.
+            Invoke-MappingCommand "subst $DriveRoot /D" | Out-Null
+            Invoke-MappingCommand "net use $DriveRoot /delete /y" "unmapped $DriveRoot" | Out-Null
+            $after = Get-DriveMapping -Letter $DriveLetter
+            if ($null -ne $after -and -not $after.Mapped) {
+                $unmapSettled = $true
+                Write-Step "unmapped $DriveRoot (was $target)"
+            }
+            else {
+                $still = if ($null -eq $after) { "could not be re-read" } else { "still points at $($after.Target)" }
+                Write-Warn2 "$DriveRoot $still after the unmap. Keeping the '$ShareName' share, because a drive letter mapped to a share that no longer exists errors on every access instead of being cleanly gone."
+            }
+        }
     }
 }
-else { Write-Skip "$DriveRoot not mapped" }
 
 # the loopback share behind the labelled net-use mapping (needs admin)
 $share = $null
 try { $share = Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue } catch {}
-if ($share) {
+if ($share -and -not $unmapSettled) {
+    Write-Skip "keeping SMB share ${ShareName}: $DriveRoot was not unmapped (see above). To finish by hand, run these two, in this order:"
+    Write-Host "    net use $DriveRoot /delete /y"
+    Write-Host "    Remove-SmbShare -Name $ShareName -Force        (administrator PowerShell)"
+}
+elseif ($share) {
     if ($DryRun) { Write-Step "[dry-run] would remove SMB share $ShareName" }
     else {
         try {
@@ -223,10 +288,16 @@ else { Write-Skip "no SMB share: $ShareName" }
 # The inbound-SMB block rule the bootstrap installs alongside that share
 # (2026-08-17, COMMERCIAL_READINESS.md item 15). It goes when the share goes:
 # a vendor-named firewall rule left behind after an uninstall is how a machine
-# ends up with SMB quietly blocked and nobody knowing why.
+# ends up with SMB quietly blocked and nobody knowing why. It also STAYS when
+# the share stays (OPS-8, 2026-08-28): the rule is what scopes that share to
+# this machine, so dropping it while the share is still published would widen
+# the exposure of the whole project tree.
 $smbRule = $null
 try { $smbRule = Get-NetFirewallRule -DisplayName $SmbFirewallRuleName -ErrorAction SilentlyContinue } catch {}
-if ($smbRule) {
+if ($smbRule -and $share -and -not $unmapSettled) {
+    Write-Skip "keeping firewall rule '$SmbFirewallRuleName': it is what keeps the '$ShareName' share reachable only from this machine, and that share is still published."
+}
+elseif ($smbRule) {
     if ($DryRun) { Write-Step "[dry-run] would remove firewall rule '$SmbFirewallRuleName'" }
     else {
         try {

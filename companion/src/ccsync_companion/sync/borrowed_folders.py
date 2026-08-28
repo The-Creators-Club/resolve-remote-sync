@@ -67,6 +67,7 @@ class BorrowedFolderManager:
         selected_slugs_fn: Optional[Callable[[], list]] = None,
         halted: Optional[Callable[[], bool]] = None,
         move_dir: Optional[Callable[[str, str], None]] = None,
+        root_present_fn: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.admin = admin
         self.local_root = Path(local_root).expanduser()
@@ -78,6 +79,13 @@ class BorrowedFolderManager:
         self.selected_slugs_fn = selected_slugs_fn
         self._halted = halted
         self._move_dir = move_dir
+        # SYNC-6 (resilience sweep 2026-08-28): see SharedFolderManager for
+        # the whole story. This reconcile runs at the sequencer's loop head,
+        # before any root check, and both _accept and _repoint end in a
+        # mkdir(parents=True) that would build the tree on the boot disk
+        # while the external SSD is out -- and then point a Syncthing folder
+        # at it.
+        self._root_present_fn = root_present_fn
         self._error_logged: set[str] = set()
 
     def folder_ids(self) -> list[str]:
@@ -95,9 +103,45 @@ class BorrowedFolderManager:
             log.debug("borrowed folders: the halt check failed", exc_info=True)
             return True
 
+    def root_present(self) -> bool:
+        """Is the sync tree here? (SYNC-6.) Never raises; unanswerable counts
+        as ABSENT, because what it gates is a mkdir into a ghost tree."""
+        if self._root_present_fn is None:
+            try:
+                return self.local_root.is_dir()
+            except OSError:
+                return False
+        try:
+            return bool(self._root_present_fn())
+        except Exception:
+            log.debug("borrowed folders: the root check failed", exc_info=True)
+            return False
+
+    def _mkdir_allowed(self, want_path: str) -> bool:
+        """Refuse a mkdir whose local_root ancestor is not a directory
+        (SYNC-6): the drive can go out between the loop-head check and here."""
+        try:
+            if self.local_root.is_dir():
+                return True
+        except OSError:
+            return False
+        log.warning(
+            "borrowed folders: refusing to create %s -- %s is not a directory "
+            "(SYNC-6: that mkdir would build a ghost tree on the boot disk)",
+            want_path, self.local_root)
+        return False
+
     def reconcile(self) -> dict[str, str]:
         """Reconcile every borrowed lender folder. Returns {lender_slug:
-        outcome} for the log and the tray, not for control flow."""
+        outcome} for the log and the tray, not for control flow.
+
+        Returns {} untouched when the sync tree is not present (SYNC-6):
+        nothing here, including the drop path, is worth doing against a root
+        that is not on the machine."""
+        if not self.root_present():
+            log.debug("borrowed folders: %s is not present -- skipping the reconcile",
+                      self.local_root)
+            return {}
         try:
             lenders = dict(self.lenders_fn() or {})
         except Exception:
@@ -178,6 +222,10 @@ class BorrowedFolderManager:
         return outcome
 
     def _repoint(self, slug: str, old_path: str, want_path: str, rel: str) -> None:
+        if not self._mkdir_allowed(want_path):
+            # Leave the folder pointed where it is: a re-point at a path we
+            # cannot create is worse than a stale one (SYNC-6).
+            return
         log.warning("borrowed folder %s is at %r, re-pointing it at %r (the lender moved "
                     "on the NAS)", slug, old_path, want_path)
         try:
@@ -256,6 +304,8 @@ class BorrowedFolderManager:
         log.info("accepting borrowed folder %s (%s) from %s at %s, restricted to %d "
                  "subtree(s)", slug, rel, device_id, want_path,
                  sum(1 for l in want_ignores if l.startswith("!") and not l.endswith("/**")))
+        if not self._mkdir_allowed(want_path):
+            return "error"
         try:
             Path(want_path).mkdir(parents=True, exist_ok=True)
         except OSError as exc:

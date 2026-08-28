@@ -74,9 +74,20 @@ class SharedFolderManager:
         local_root: Path | str,
         folders: Optional[list[tuple[str, str, str]]] = None,
         halted: Optional[Callable[[], bool]] = None,
+        root_present_fn: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.admin = admin
         self.local_root = Path(local_root).expanduser()
+        # SYNC-6 (resilience sweep 2026-08-28): "is the tree actually here?"
+        # -- the same callback ManifestCache takes (manifest.py). The
+        # sequencer runs this reconcile at its loop head, BEFORE any root
+        # check, and _accept's mkdir(parents=True) on an absent external SSD
+        # creates the whole chain on the BOOT disk instead: that is exactly
+        # the ghost directory at /Volumes/<Name> root_guard.probe_root exists
+        # to detect, and macOS then mounts the real drive as
+        # "/Volumes/SAMDISK 1" (ROOT_MISPLACED) permanently. Worse, the
+        # folder is POINTED at the ghost. Absent means do nothing at all.
+        self._root_present_fn = root_present_fn
         self.folders = list(SHARED_ASSET_FOLDERS if folders is None else folders)
         # "Is syncing halted on this machine?" (sync-safety-2, 2026-08-21).
         # The halt pauses folders through Syncthing's REST API and this
@@ -115,10 +126,49 @@ class SharedFolderManager:
             log.debug("shared folders: the halt check failed", exc_info=True)
             return True
 
+    def root_present(self) -> bool:
+        """Is the sync tree here? (SYNC-6.) Never raises; a check that could
+        not answer counts as ABSENT, because the thing it gates is a
+        mkdir(parents=True) whose failure mode is a ghost tree on the boot
+        disk. With no callback wired in, one plain isdir of local_root."""
+        if self._root_present_fn is None:
+            try:
+                return self.local_root.is_dir()
+            except OSError:
+                return False
+        try:
+            return bool(self._root_present_fn())
+        except Exception:
+            log.debug("shared folders: the root check failed", exc_info=True)
+            return False
+
+    def _mkdir_allowed(self, want_path: str) -> bool:
+        """Refuse to create a folder path whose local_root ancestor is not a
+        directory (SYNC-6). The second half of the guard: root_present() is
+        answered at the loop head, this one immediately before the mkdir, so
+        a drive that went out in between cannot be written past."""
+        try:
+            if self.local_root.is_dir():
+                return True
+        except OSError:
+            return False
+        log.warning(
+            "shared folders: refusing to create %s -- %s is not a directory "
+            "(SYNC-6: that mkdir would build a ghost tree on the boot disk)",
+            want_path, self.local_root)
+        return False
+
     def reconcile(self) -> dict[str, str]:
         """Reconcile every shared folder. Returns {folder_id: outcome} where
         outcome is one of "ok", "accepted", "repaired", "not-offered",
-        "error" -- for the log line and the tray, not for control flow."""
+        "error" -- for the log line and the tray, not for control flow.
+
+        Returns {} untouched when the sync tree is not present (SYNC-6)."""
+        if not self.root_present():
+            log.debug(
+                "shared folders: %s is not present -- skipping the reconcile",
+                self.local_root)
+            return {}
         results: dict[str, str] = {}
         for folder_id, rel, label in self.folders:
             try:
@@ -263,6 +313,8 @@ class SharedFolderManager:
         log.info(
             "accepting shared asset folder %s (%s) from %s at %s",
             folder_id, label, device_id, want_path)
+        if not self._mkdir_allowed(want_path):
+            return "error"
         # The directory must exist before Syncthing takes the folder online:
         # a missing path is a folder error state, not an empty folder.
         try:

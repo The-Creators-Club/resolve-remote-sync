@@ -324,10 +324,115 @@ def test_setup_tree_snapshots_before_it_chowns(monkeypatch):
     monkeypatch.setattr(setup_tree, "run_ssh",
                         lambda *a, **k: (order.append("ssh"), (0, "", ""))[1])
     monkeypatch.setattr(setup_tree, "set_host_key_pin", lambda v: None)
+    # --yes: OPS-4 (2026-08-28) put a typed confirmation in front of the
+    # recursive chown, and a non-tty with no flag is a refusal.
     monkeypatch.setattr(sys, "argv",
-                        ["setup_tree.py", "--project-rel-path", "2026/CCT/S1"])
+                        ["setup_tree.py", "--project-rel-path", "2026/CCT/S1", "--yes"])
     setup_tree.main()
     assert order == ["snapshot", "ssh"]
+
+
+# --------------------------------------------------------------------------
+# 3b. OPS-9 (resilience sweep 2026-08-28): the fact is DURABLE and it is in
+#     the summary block, not only mid-log
+#
+#     WPK-6 is the whole reason: "nobody read the WARNING because the deploy
+#     went on to succeed". One line on stderr in a 500-line log is not a
+#     record, and the operator's belief that backups are configured is never
+#     contradicted.
+# --------------------------------------------------------------------------
+
+@pytest.fixture
+def snapshot_log(tmp_path, monkeypatch):
+    path = tmp_path / "snapshot_log.jsonl"
+    monkeypatch.setenv(common.SNAPSHOT_LOG_ENV, str(path))
+    monkeypatch.setattr(common, "_LAST_SNAPSHOT", None, raising=False)
+    return path
+
+
+def _rows(path):
+    import json
+
+    return [json.loads(line) for line in
+            path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_every_snapshot_attempt_is_appended_win_or_lose(snapshot_log):
+    common.snapshot_before("deploy", APPS, backend=WorkingBackend())
+    common.snapshot_before("setup_tree", TREE, backend=FailingBackend())
+    rows = _rows(snapshot_log)
+    assert [r["label"] for r in rows] == ["deploy", "setup_tree"]
+    assert [r["ok"] for r in rows] == [True, False]
+    assert rows[0]["path"] == APPS and rows[1]["path"] == TREE
+    assert rows[1]["detail"]                      # never a blank NO
+    assert all(r["ts"].endswith("+00:00") for r in rows)
+
+
+def test_the_log_is_appended_never_rewritten(snapshot_log):
+    snapshot_log.write_text('{"ts": "earlier", "label": "x", "ok": true}\n',
+                            encoding="utf-8")
+    common.snapshot_before("deploy", APPS, backend=WorkingBackend())
+    rows = _rows(snapshot_log)
+    assert len(rows) == 2 and rows[0]["ts"] == "earlier"
+
+
+def test_an_unwritable_log_is_not_a_reason_a_deploy_stops(tmp_path, monkeypatch,
+                                                          capsys):
+    # A FILE where the log's parent directory would have to be: mkdir(parents)
+    # raises there, which is the shape a read-only or full ~/.ccsync fails in.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv(common.SNAPSHOT_LOG_ENV, str(blocker / "snapshot_log.jsonl"))
+    monkeypatch.setattr(common, "_LAST_SNAPSHOT", None, raising=False)
+    assert common.snapshot_before("deploy", APPS, backend=WorkingBackend()) is True
+    assert "this run had a snapshot behind it: yes" == common.snapshot_verdict()
+
+
+def test_the_verdict_reads_no_when_nothing_was_even_attempted(monkeypatch):
+    """A caller that skipped the call is exactly the case a reader would
+    otherwise take for a yes."""
+    monkeypatch.setattr(common, "_LAST_SNAPSHOT", None, raising=False)
+    assert common.snapshot_verdict().startswith(
+        "this run had a snapshot behind it: NO")
+    assert "none was attempted" in common.snapshot_verdict()
+
+
+def test_the_verdict_names_the_reason_when_there_was_no_snapshot(snapshot_log):
+    common.snapshot_before("deploy", APPS, backend=RefusingBackend())
+    verdict = common.snapshot_verdict()
+    assert verdict.startswith("this run had a snapshot behind it: NO")
+    assert "UnsupportedOnBackend" in verdict
+
+
+def test_setup_tree_prints_the_verdict_in_its_final_block(monkeypatch, capsys,
+                                                          snapshot_log):
+    """It used to DISCARD snapshot_before's return value entirely."""
+    import setup_tree  # noqa: PLC0415
+
+    # A REAL backend (setup_tree asks it for the chown/chmod lines) whose
+    # snapshot fails, which is the state the verdict exists to report.
+    class NoSnapshotBackend(TrueNASBackend):
+        def snapshot(self, path, label, dry_run):
+            return False
+
+    monkeypatch.setattr(setup_tree, "get_backend",
+                        lambda args=None: NoSnapshotBackend())
+    monkeypatch.setattr(setup_tree, "run_ssh", lambda *a, **k: (0, "", ""))
+    monkeypatch.setattr(setup_tree, "set_host_key_pin", lambda v: None)
+    monkeypatch.setattr(sys, "argv", ["setup_tree.py", "--project-rel-path",
+                                      "2026/CCT/S1", "--yes"])
+    assert setup_tree.main() == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[-1].startswith("this run had a snapshot behind it: NO")
+    assert _rows(snapshot_log)[-1]["label"] == "setup_tree"
+
+
+def test_the_deploy_prints_the_verdict_too(monkeypatch, capsys, snapshot_log):
+    monkeypatch.setattr(ida, "install_tree", lambda *a, **k: True)
+    monkeypatch.setattr(ida, "verify_image_boot", lambda *a, **k: True)
+    monkeypatch.setattr(sys, "argv", ["install_dashboard_app.py", "--dry-run"])
+    ida.main()
+    assert "this run had a snapshot behind it: " in capsys.readouterr().out
 
 
 # --------------------------------------------------------------------------

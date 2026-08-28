@@ -4,6 +4,8 @@ The refusals are the interesting half. This app writes into the Projects tree,
 so "409 because you already have a job" and "400 because that is not a project
 you sync" are the actual product, not error handling.
 """
+from datetime import date
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -231,6 +233,62 @@ def test_health_names_the_running_yt_dlp(client, no_pot_probe):
 
     assert client.get('/api/health').json()['yt_dlp_version'] == \
         yt_dlp.version.__version__
+
+
+def test_health_reports_how_old_the_running_yt_dlp_is(client, monkeypatch,
+                                                     no_pot_probe):
+    """YT-1 (resilience sweep 2026-08-28). CR-80 and CR-83 were both noticed by
+    an editor who could not download, never by this page, and in both the
+    container's yt-dlp was weeks old. yt-dlp's versions ARE release dates, so
+    the age costs nothing to compute and is the signal that would have shown
+    either coming."""
+    from ytdlweb import routes_api
+
+    monkeypatch.setattr(routes_api, '_yt_dlp_version', lambda: '2026.08.27')
+    h = client.get('/api/health').json()
+    assert h['yt_dlp_age_days'] == (date.today() - date(2026, 8, 27)).days
+    assert h['yt_dlp_stale'] is False
+    assert 'days old' in h['yt_dlp_age_detail']
+
+    monkeypatch.setattr(routes_api, '_yt_dlp_version', lambda: '2026.01.01')
+    h = client.get('/api/health').json()
+    assert h['yt_dlp_stale'] is True
+    assert 'past the' in h['yt_dlp_age_detail']
+    assert '—' not in h['yt_dlp_age_detail']       # house rule
+
+
+def test_an_unrankable_or_future_yt_dlp_version_is_not_reported_as_fresh(
+        client, monkeypatch, no_pot_probe):
+    """"could not tell" must never render as "fine" -- and it must not render
+    as stale either, or a container with a wrong clock shows a warning nobody
+    can clear. The flag stays false and the detail line says why."""
+    from ytdlweb import routes_api
+
+    monkeypatch.setattr(routes_api, '_yt_dlp_version', lambda: 'nightly')
+    h = client.get('/api/health').json()
+    assert h['yt_dlp_age_days'] is None and h['yt_dlp_stale'] is False
+    assert 'not a date' in h['yt_dlp_age_detail']
+
+    monkeypatch.setattr(routes_api, '_yt_dlp_version', lambda: '2099.01.01')
+    h = client.get('/api/health').json()
+    assert h['yt_dlp_age_days'] is None and h['yt_dlp_stale'] is False
+
+    monkeypatch.setattr(routes_api, '_yt_dlp_version', lambda: '')
+    h = client.get('/api/health').json()
+    assert h['yt_dlp_age_days'] is None and h['yt_dlp_stale'] is False
+    assert 'no yt-dlp is installed' in h['yt_dlp_age_detail']
+
+
+def test_the_staleness_warning_can_be_switched_off(client, monkeypatch,
+                                                   no_pot_probe):
+    """A deployment that pins yt-dlp deliberately should not carry a permanent
+    amber pip about it. The age is still reported."""
+    from ytdlweb import config, routes_api
+
+    monkeypatch.setattr(routes_api, '_yt_dlp_version', lambda: '2020.01.01')
+    monkeypatch.setattr(config, 'YTDLP_MAX_AGE_DAYS', 0)
+    h = client.get('/api/health').json()
+    assert h['yt_dlp_stale'] is False and h['yt_dlp_age_days'] > 1000
 
 
 def test_health_reports_what_the_cookie_jar_holds(client, tmp_path, monkeypatch,

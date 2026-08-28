@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}CC SYNC: TIMELINE{% endblock %}
+{% block layout %}
+  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s" hx-swap="innerHTML">
+    {% include "partials/sidebar.html" %}
+  </aside>
+  <main class="main">
+    {% include "partials/settings_nav.html" %}
+    <div class="detail-head"><h1>[ TIMELINE ]</h1></div>
+    <p class="muted" style="margin: 0.4rem 0 0.9rem; max-width: 62ch;">
+      What changed in this fleet, and who changed it. Every state-changing
+      action writes one line here: a project ticked or unticked, a fleet halt
+      set or released, proxy download resumed for a computer, a user deleted, a
+      computer forgotten, a build published or made current, an update pushed,
+      a file moved on the server, site settings saved, a Syncthing device
+      approved. Nothing edits or removes a line except the retention pass.
+    </p>
+    {# NOT polled: this page is read, not watched, and a 30s innerHTML swap
+       would throw away whatever the reader had typed in the filter. #}
+    {% include "partials/admin_audit.html" %}
+  </main>
+{% endblock %}

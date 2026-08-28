@@ -40,3 +40,14 @@ for _shadowing in ("TRUENAS_HOST", "SYNO_HOST", "TRUENAS_USER", "SYNO_USER",
 # setdefault, not a bare assignment: running the suite against another site's
 # manifest (CCSYNC_SITE=... pytest) is a legitimate thing to want.
 os.environ.setdefault("CCSYNC_SITE", str(FIXTURE_SITE))
+
+# OPS-9 (resilience sweep 2026-08-28): snapshot_before now APPENDS a durable
+# record, and its default path is the operator's own
+# ~/.ccsync/snapshot_log.jsonl. A suite that runs several dozen snapshot calls
+# must not write rows into the live ledger of the machine it is running on, so
+# every test gets a throwaway path unless it sets its own.
+import tempfile  # noqa: E402
+
+os.environ.setdefault(
+    "CCSYNC_SNAPSHOT_LOG",
+    str(Path(tempfile.gettempdir()) / "ccsync-tests-snapshot_log.jsonl"))

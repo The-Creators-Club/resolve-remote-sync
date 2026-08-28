@@ -271,6 +271,36 @@ HEARTBEAT_SECONDS = int(os.environ.get('YTDL_HEARTBEAT_SECONDS') or '30')
 DEFAULT_MIN_YTDLP_VERSION = '2026.08.19'
 MIN_YTDLP_VERSION = os.environ.get('YTDL_MIN_YTDLP_VERSION') or DEFAULT_MIN_YTDLP_VERSION
 
+# How old the yt-dlp THIS container runs may get before /api/health calls it
+# stale (YT-1, resilience sweep 2026-08-28). The floor above is a promise about
+# the FLEET's binaries and it only moves when somebody edits this file; nothing
+# anywhere measured the age of the one doing the downloading. Both CR-80 and
+# CR-83 were noticed by an editor, not by the dashboard, and in both cases the
+# container's yt-dlp was weeks old. yt-dlp's versions are release dates, so this
+# needs no network call. Same 21 days as the companion's ytdlp_max_age_days, on
+# purpose: two numbers that mean "past its shelf life" would drift.
+DEFAULT_YTDLP_MAX_AGE_DAYS = 21
+
+
+def _max_age_days(raw):
+    """YTDL_YTDLP_MAX_AGE_DAYS as a positive int, or the default.
+
+    0 or negative switches the warning off, for a deployment that pins yt-dlp
+    deliberately and does not want a permanent amber pip about it."""
+    text = str(raw or '').strip()
+    if not text:
+        return DEFAULT_YTDLP_MAX_AGE_DAYS
+    try:
+        return int(text)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            'YTDL_YTDLP_MAX_AGE_DAYS=%r is not a number of days, using %s',
+            raw, DEFAULT_YTDLP_MAX_AGE_DAYS)
+        return DEFAULT_YTDLP_MAX_AGE_DAYS
+
+
+YTDLP_MAX_AGE_DAYS = _max_age_days(os.environ.get('YTDL_YTDLP_MAX_AGE_DAYS'))
+
 _VERSION_PART = re.compile(r'^\d+$')
 
 

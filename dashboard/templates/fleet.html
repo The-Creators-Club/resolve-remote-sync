@@ -19,6 +19,15 @@
       {% include "partials/fleet_grid.html" %}
     </div>
 
+    {# Recent plan changes with their undo (DASH-8, 2026-08-28), between the
+       grid and the live window: it is read at exactly the moment the grid
+       says a project stopped syncing. Its own load trigger, so a slow
+       ledger read can never hold up the grid, and it renders as nothing at
+       all when the last hour holds no plan change. #}
+    {% if scope_admin %}
+    <div hx-get="/partials/plan-changes" hx-trigger="load, every 60s" hx-swap="innerHTML"></div>
+    {% endif %}
+
     {# The /transfers page, windowed (2026-08-18). The panel is the scroll
        container and the poll lives on the wrapper INSIDE it: the swap is
        innerHTML, so replacing the wrapper leaves the panel -- and therefore

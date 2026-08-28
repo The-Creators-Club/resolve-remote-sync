@@ -238,7 +238,9 @@ of work.
 - **Every public request re-checks.** `routes_share._live_folder` (token
   valid, not revoked, not expired) and `_member_id` (this clip is in this
   folder) run per request, so a link that dies while a page is open stops
-  serving on the next thumbnail, not the next visit.
+  serving on the next thumbnail, not the next visit. Media is served
+  `no-cache` with an ETag (MEDIA-22, 2026-08-28: it used to carry an hour of
+  `max-age`, which let a revoked clip keep playing from the browser cache).
 - **The dashboard opens one prefix.** `app.login_gate` lets `/broll/share/`
   through with no session; `BrollGate` still strips any inbound
   `X-CCSync-User`, so an anonymous request is anonymous inside the sub-app.

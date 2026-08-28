@@ -276,3 +276,80 @@ def test_a_failing_sender_never_breaks_the_local_report(tmp_path):
     except ValueError:
         path = crash_report.handle(*sys.exc_info(), "MainThread", cfg)
     assert path is not None and path.exists()
+
+
+# -- APP-6: what an admin can actually see (resilience sweep 2026-08-28) -----
+
+
+def test_crash_summary_is_empty_before_anything_crashes(tmp_path):
+    summary = crash_report.crash_summary(_cfg(tmp_path))
+    assert summary == {"count": 0, "newest": None}
+
+
+def test_crash_summary_counts_and_names_the_newest(tmp_path):
+    cfg = _cfg(tmp_path)
+    assert crash_report.crash_summary(cfg)["count"] == 0
+    # An OLDER report, written by hand: the filename carries the stamp at
+    # second resolution, so two crashes in the same second are one file (which
+    # is a property of the writer, not of the counting).
+    directory = crash_report.crash_dir(cfg)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "20260101T000000+0000-lane-a.json").write_text("{}", encoding="utf-8")
+    crash_report.invalidate_summary()
+    try:
+        _boom()
+    except ValueError:
+        crash_report.handle(*sys.exc_info(), "lane-b", cfg)
+    # The cache MUST have been invalidated by the write: a count taken before
+    # the crash is exactly the silence APP-6 is about.
+    summary = crash_report.crash_summary(cfg)
+    assert summary["count"] == 2
+    newest = sorted(p.name for p in directory.glob("*.json"))[-1]
+    assert summary["newest"] == newest
+    assert "lane-b" in summary["newest"]
+
+
+def test_recent_reports_carries_the_exception_type(tmp_path):
+    cfg = _cfg(tmp_path)
+    try:
+        _boom()
+    except ValueError:
+        crash_report.handle(*sys.exc_info(), "ccsync-sequencer", cfg)
+    entries = crash_report.recent_reports(cfg)
+    assert len(entries) == 1
+    assert entries[0]["type"] == "ValueError"
+    assert entries[0]["thread"] == "ccsync-sequencer"
+    assert entries[0]["name"].endswith(".json")
+
+
+def test_an_unreadable_crash_file_is_reported_not_dropped(tmp_path):
+    cfg = _cfg(tmp_path)
+    directory = crash_report.crash_dir(cfg)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "20260828T090000+0000-lane-a.json").write_text("{not json",
+                                                                encoding="utf-8")
+    crash_report.invalidate_summary()
+    assert crash_report.crash_summary(cfg)["count"] == 1
+    assert crash_report.recent_reports(cfg)[0]["type"] == "<unreadable>"
+
+
+def test_the_summary_never_raises_on_a_hopeless_config(monkeypatch):
+    def _explode(cfg=None):
+        raise RuntimeError("no home directory")
+
+    monkeypatch.setattr(crash_report, "crash_dir", _explode)
+    crash_report.invalidate_summary()
+    assert crash_report.crash_summary({}) == {"count": 0, "newest": None}
+    assert crash_report.recent_reports({}) == []
+
+
+def test_install_logs_what_an_earlier_run_left_behind(tmp_path, caplog):
+    cfg = _cfg(tmp_path)
+    try:
+        _boom()
+    except ValueError:
+        crash_report.handle(*sys.exc_info(), "lane-a", cfg)
+    crash_report._reset_for_tests()
+    with caplog.at_level("WARNING", logger="ccsync.crash"):
+        crash_report.install(cfg)
+    assert any("from an earlier run" in r.getMessage() for r in caplog.records)

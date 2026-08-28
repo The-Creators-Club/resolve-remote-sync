@@ -1,0 +1,67 @@
+{# The collector's own cycles, with the note each one returned (DASH-14,
+   resilience sweep 2026-08-28), and the read-only diff the enforce cycle
+   would apply next (DASH-3's dry run).
+
+   Rendered from `fleet.collector`, which api.py's _scope_editors_view removes
+   for non-admins: it names Syncthing device ids. It is INSIDE the fleet grid
+   partial on purpose -- that partial is what the page and the every-15s poll
+   both render, so the panel refreshes with the alarms above it rather than
+   going stale beneath them.
+
+   The pending diff is computed by the enforce cycle itself, from the same
+   desired/actual sets it acts on, and only ever read here. Nothing on this
+   page writes a share. #}
+<div class="side-head" style="margin-top:2rem">[ COLLECTOR ]</div>
+<div class="rule">{{ "─" * 100 }}</div>
+{% if fleet.collector.collector_stale %}
+<div class="banner">▲ the last collector cycle finished too long ago: everything below is
+  the last thing it managed to do, not the state now.</div>
+{% endif %}
+<table class="editors">
+  <thead><tr><th></th><th>CYCLE</th><th>LAST RUN</th><th>WHAT IT DID NOT DO</th></tr></thead>
+  <tbody>
+  {% for k in fleet.collector.kinds %}
+    <tr>
+      <td><span class="dot {{ k.status }}">●</span></td>
+      <td class="mono-sm">{{ k.kind }}</td>
+      <td class="muted">{{ k.finished_at | ago }}</td>
+      <td class="mono-sm">
+        {% if not k.ok %}<span class="chip red">[ FAILED ]</span> {{ k.note or "no reason recorded" }}
+        {% elif k.note %}<span class="chip amber">[ INCOMPLETE ]</span> {{ k.note }}
+        {% else %}<span class="muted">nothing</span>{% endif %}
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="4" class="muted">no collector cycle has finished yet</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+{% set plan = fleet.collector.enforce_plan %}
+<div class="side-head" style="margin-top:1.4rem">[ PENDING SHARE CHANGES ]</div>
+<div class="rule">{{ "─" * 100 }}</div>
+{% if not plan %}
+<div class="muted">no enforce cycle has run yet</div>
+{% elif not plan.folders %}
+<div class="muted">nothing pending: every folder's shares matched the plan as of
+  {{ plan.at | ago }}</div>
+{% else %}
+<div class="mono-sm muted">what the enforce cycle would apply, as of {{ plan.at | ago }}:
+  {{ plan.n_add }} share(s) to add, {{ plan.n_remove }} to remove. Read only, nothing on
+  this page changes a share.</div>
+<table class="editors">
+  <thead><tr><th>FOLDER</th><th>ADD</th><th>REMOVE</th></tr></thead>
+  <tbody>
+  {% for f in plan.folders %}
+    <tr>
+      <td class="mono-sm">{{ f.folder }}</td>
+      <td class="mono-sm">{% for d in f.add %}<span class="chip green">+ {{ d[:7] }}</span> {% else %}<span class="muted">-</span>{% endfor %}</td>
+      <td class="mono-sm">{% for d in f.remove %}<span class="chip red">- {{ d[:7] }}</span> {% else %}<span class="muted">-</span>{% endfor %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% if plan.truncated %}
+<div class="muted mono-sm">showing the first 100 folders</div>
+{% endif %}
+{% endif %}

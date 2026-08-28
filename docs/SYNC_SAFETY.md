@@ -25,8 +25,13 @@ whole proxy set into the trash at 20 GB per pass, one pass at a time, forever
 ## 1. The circuit breaker
 
 `lane_guard.LaneBBreaker`, persisted to
-`~/.ccsync/state/lane_b_breaker.json` so a trip survives the tray restart an
-editor will absolutely try first. Three triggers:
+`~/.ccsync/lane_b_breaker.json` so a trip survives the tray restart an
+editor will absolutely try first. It moved out of `~/.ccsync/state/` on
+2026-08-28 (resilience sweep APP-3): `state/` is the directory a support
+session is most likely to be told to delete, so the latch only a human may
+clear was sitting where "close CCSync, delete state, start it again" cleared
+it. A latch left over from an older build is moved into place once, on
+start (`lane_guard.adopt_legacy_latch`). Three triggers:
 
 | # | When | Fires |
 |---|---|---|
@@ -133,7 +138,8 @@ project's folder name, and it is logged locally AND reported to the dashboard
 express upload and deliberately leaves lane C running — it exists for "my
 laptop is on a hotspot".
 
-The halt (`lane_guard.HaltState`, `~/.ccsync/state/sync_halt.json`) stops lanes
+The halt (`lane_guard.HaltState`, `~/.ccsync/sync_halt.json`, moved out of
+`state/` with the breaker above) stops lanes
 A and B **and pauses every lane C folder through Syncthing's own REST API**, and
 survives a restart. Two scopes:
 

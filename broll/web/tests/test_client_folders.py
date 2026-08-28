@@ -42,6 +42,10 @@ from tests.factories import insert_segment, insert_video
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
 
+# Enough of a file that serve_file_with_range has something to stat and read.
+JPEG = b"\xff\xd8\xff\xd9"
+MP4 = b"\x00\x00\x00\x18ftypmp42" + b"x" * 64
+
 
 # --- fixtures ---------------------------------------------------------------------
 
@@ -297,6 +301,116 @@ def test_a_rebuild_that_gives_the_old_id_to_another_clip_serves_none_of_it(
     for kind, ext in (("poster", "jpg"), ("sprite", "jpg"), ("proxy", "mp4")):
         r = anon.get(f"/share/{tok}/media/{kind}/{old_id}.{ext}")
         assert r.status_code == 404, f"{kind}: an uncurated clip was served"
+
+
+def test_a_rebuild_that_reuses_a_deleted_clips_id_serves_none_of_it(
+        as_editor, seeded, conn, data_root):
+    """MEDIA-1, 2026-08-28. The test above keeps the curated clip in the
+    archive, so the by-name re-resolution finds it and the intruder never gets
+    authorised. The dangerous shape is the curated clip having LEFT the
+    archive: by-name finds nothing, and resolve_items used to keep the by-id
+    row it had already read -- which after a rebuild is some other clip. That
+    row went into public_video_ids, which is what _member_id authorises on, so
+    the client's page drew and streamed footage nobody curated.
+    """
+    folder = _create(as_editor, title="Acme")
+    _add(as_editor, folder["id"], seeded["harbor"], seeded["drone"])
+    old_id, tok = seeded["harbor"], folder["token"]
+
+    # The rebuild: harbor.mov is gone from the archive, and its number has
+    # been handed to a clip in another share nobody curated into anything.
+    conn.execute("DELETE FROM videos")
+    conn.commit()
+    intruder = insert_video(conn, id=old_id, share="broll",
+                            rel_path="Downloads/politics/protest.mp4", duration_s=9.0)
+    kept = insert_video(conn, id=9001, share="ff3", rel_path="day1/drone.mov",
+                        duration_s=42.0)
+    insert_segment(conn, intruder, t_start=0, t_end=9,
+                   description="a protest nobody licensed", setting="street")
+    for sub, ext, blob in (("posters", "jpg", JPEG), ("sprites", "jpg", JPEG),
+                           ("proxies", "mp4", MP4)):
+        (data_root / sub / f"{kept}.{ext}").write_bytes(blob)
+
+    anon = TestClient(broll_app)
+    body = anon.get(f"/share/{tok}/api/folder").json()
+    assert [i["id"] for i in body["items"]] == [kept], "the intruder was published"
+    assert body["n_items"] == 1
+    assert "protest" not in anon.get(f"/share/{tok}/api/folder").text
+
+    assert cf.public_video_ids(cf.open_connection(), conn, folder["id"]) == {kept}
+    detail = anon.get(f"/share/{tok}/api/videos/{old_id}")
+    assert detail.status_code == 404, "an uncurated clip's segments went out"
+    for kind, ext in (("poster", "jpg"), ("sprite", "jpg"), ("proxy", "mp4")):
+        r = anon.get(f"/share/{tok}/media/{kind}/{old_id}.{ext}")
+        assert r.status_code == 404, f"{kind}: an uncurated clip was served"
+
+    # ...and the curator is told the clip is gone rather than shown the clip
+    # that inherited its number.
+    mine = as_editor.get(f"api/client-folders/{folder['id']}").json()["items"]
+    assert [(i.get("missing", False), i.get("rel_path")) for i in mine] == [
+        (True, "day1/harbor.mov"), (False, "day1/drone.mov")]
+
+
+def test_pulling_a_clip_out_of_a_folder_works_after_a_renumbering_rebuild(
+        as_editor, seeded, conn):
+    """MEDIA-23, 2026-08-28. The card popover sends the id the index has NOW.
+    After a rebuild that is not the id the item was stored under, so an
+    id-only DELETE answered "that clip is not in this folder" while the client
+    went on seeing it -- and a note went to nowhere with a 404 beside it."""
+    folder = _create(as_editor, title="Acme")
+    _add(as_editor, folder["id"], seeded["harbor"])
+    conn.execute("DELETE FROM videos WHERE id = ?", (seeded["harbor"],))
+    new_id = insert_video(conn, id=4120, share="ff3", rel_path="day1/harbor.mov",
+                          duration_s=42.0)
+    conn.commit()
+
+    r = as_editor.put(f"api/client-folders/{folder['id']}/items/{new_id}/note",
+                      json={"note": "the one with the crane"})
+    assert r.status_code == 200, r.text
+    items = as_editor.get(f"api/client-folders/{folder['id']}").json()["items"]
+    assert [i["note"] for i in items] == ["the one with the crane"]
+
+    r = as_editor.delete(f"api/client-folders/{folder['id']}/items/{new_id}")
+    assert r.status_code == 204, r.text
+    assert as_editor.get(f"api/client-folders/{folder['id']}").json()["items"] == []
+    theirs = TestClient(broll_app).get(f"/share/{folder['token']}/api/folder").json()
+    assert theirs["items"] == [] and theirs["n_items"] == 0
+
+    # A clip that really is not in the folder is still a 404, and a note for
+    # one still fails: the widened match must not match everything.
+    assert as_editor.delete(
+        f"api/client-folders/{folder['id']}/items/{seeded['outsider']}").status_code == 404
+    assert as_editor.put(
+        f"api/client-folders/{folder['id']}/items/{seeded['outsider']}/note",
+        json={"note": "x"}).status_code == 404
+
+
+def test_share_media_is_revalidated_not_cached_for_an_hour(as_editor, seeded):
+    """MEDIA-22, 2026-08-28. Revoke is the control the design leans on for "the
+    link got away", and an hour of `max-age` meant the browser did not have to
+    ask again for an hour. `no-cache` plus an ETag keeps the bandwidth (the
+    re-ask is a 304) and makes revoke bite at the next request."""
+    folder = _create(as_editor)
+    _add(as_editor, folder["id"], seeded["harbor"])
+    tok, vid = folder["token"], seeded["harbor"]
+    anon = TestClient(broll_app)
+
+    for kind, ext in (("poster", "jpg"), ("sprite", "jpg"), ("proxy", "mp4")):
+        r = anon.get(f"/share/{tok}/media/{kind}/{vid}.{ext}")
+        assert r.status_code == 200
+        cache = r.headers["cache-control"]
+        assert "no-cache" in cache and "max-age" not in cache, f"{kind}: {cache}"
+        etag = r.headers.get("etag")
+        assert etag, f"{kind}: no validator, so no-cache costs the whole file"
+        again = anon.get(f"/share/{tok}/media/{kind}/{vid}.{ext}",
+                         headers={"If-None-Match": etag})
+        assert again.status_code == 304 and not again.content
+
+    as_editor.post(f"api/client-folders/{folder['id']}/revoke")
+    # The conditional request the browser makes next is a 404, not a 304.
+    r = anon.get(f"/share/{tok}/media/proxy/{vid}.mp4",
+                 headers={"If-None-Match": "W/\"whatever\""})
+    assert r.status_code == 404
 
 
 def test_a_rebuild_leaves_the_tick_on_and_a_second_add_makes_no_duplicate(

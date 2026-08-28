@@ -82,6 +82,46 @@ TRASH_DIR_NAME = ".ccsync-trash"
 BREAKER_STATE_FILENAME = "lane_b_breaker.json"
 HALT_STATE_FILENAME = "sync_halt.json"
 
+
+def adopt_legacy_latch(new_path: Path, legacy_path: Path) -> Path:
+    """Carry a latch file forward from its pre-2026-08-28 location, once.
+    Returns `new_path` either way; never raises.
+
+    APP-3 (resilience sweep 2026-08-28). Both latches used to live under
+    `<log dir>/state/` -- the ONE directory this codebase's own comments say
+    a support session is most likely to be told to delete ("close CCSync,
+    delete ~/.ccsync/state, start it again"). So the two devices that were
+    made persistent precisely so a restart could not clear them (the
+    breaker only a human may reset, and a FLEET halt an admin set) were
+    sitting where a restart-adjacent ritual clears them. They now live in
+    config_mod.CONFIG_DIR beside machine.json and upgrade_floor.json, for
+    the same reason upgrade.py moved the downgrade floor there.
+
+    Without this adoption the move itself would CLEAR a live latch on every
+    machine that had one -- the one direction a latch must never fail --
+    so the old file is moved, not read: an upgrade must not leave a stale
+    copy that a downgrade would then latch on again."""
+    try:
+        new_path = Path(new_path)
+        legacy_path = Path(legacy_path)
+        if new_path == legacy_path or new_path.exists() or not legacy_path.exists():
+            return new_path
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.replace(legacy_path, new_path)
+        except OSError:
+            # A `log_path` on a second drive puts the legacy file on another
+            # volume, where replace() cannot rename across the boundary.
+            shutil.move(str(legacy_path), str(new_path))
+        log.warning(
+            "moved the sync latch %s out of %s and into %s -- state/ is the "
+            "directory support sessions are told to delete (APP-3)",
+            new_path.name, legacy_path.parent, new_path.parent,
+        )
+    except Exception:
+        log.debug("could not adopt the legacy latch %s", new_path, exc_info=True)
+    return Path(new_path)
+
 HALT_SCOPE_LOCAL = "local"
 HALT_SCOPE_FLEET = "fleet"
 

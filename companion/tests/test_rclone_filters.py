@@ -1756,8 +1756,13 @@ def test_exclude_rules_come_first_and_the_terminator_survives():
     # rules[0] is the AppleDouble exclude (KNOWN_BUGS 12) -- also an exclude,
     # so the property under test is unchanged: both express paths are ahead
     # of every include, in order.
+    # Each excluded path now contributes TWO rules, the plain one and the
+    # directory-prune companion (SYNC-11, 2026-08-28): a file-moves exclusion
+    # can name a directory, and `- /Sub/Dir` alone is easy to get wrong.
     assert rules[1] == "- /B-roll/a.mov"
-    assert rules[2] == "- /Interviews/b.braw"
+    assert rules[2] == "- /B-roll/a.mov/**"
+    assert rules[3] == "- /Interviews/b.braw"
+    assert rules[4] == "- /Interviews/b.braw/**"
     assert rules.index("- /B-roll/a.mov") < rules.index("+ *.mov")
     assert rules[-1] == "- **"
 
@@ -1874,3 +1879,49 @@ def test_a_proxy_being_encoded_crosses_no_lane_in_either_direction(rclone_binary
     assert landed == ["Sub/Proxy/A001.mov"], (
         f"lane B pulled a proxy that was still being encoded: {landed}"
     )
+
+
+# -- YT-3: the ytdl work files must never reach the NAS ------------------------
+
+
+def test_lane_a_excludes_the_ytdl_work_files_ahead_of_the_video_includes():
+    """YT-3 (resilience sweep 2026-08-28): the executors download AND convert
+    inside the tree, so a half-made file carries a real video extension for
+    the minutes-to-hours `_ensure_edit_ready` takes. Lane A is `copy
+    --ignore-existing`, so whichever version reaches the NAS first is the
+    fleet's permanent copy -- the VP9 original under the final name, with no
+    error anywhere (CR-79 through the sync lane). These are `-` rules and must
+    beat the `+ *<ext>` includes: rclone is first-match-wins."""
+    rules = build_filter_rules_up()
+    first_include = min(i for i, r in enumerate(rules) if r.startswith("+ "))
+    for pattern in ("- *.editready.*", "- *.original.*", "- *.temp.*",
+                    "- *.f[0-9][0-9][0-9]*.*", "- *.failed"):
+        assert pattern in rules
+        assert rules.index(pattern) < first_include, pattern
+    # ...and the appledouble rule still owns the head of the list.
+    assert rules[0] == APPLEDOUBLE_EXCLUDE_RULE
+
+
+def test_lane_a_dry_run_skips_a_conversion_in_flight(rclone_binary, tmp_path):
+    """The same thing against the real binary: only the finished name is
+    uploaded, however plausible the work files' extensions look."""
+    src = tmp_path / "src" / "Youtube"
+    src.mkdir(parents=True)
+    old = time.time() - 3600  # past --min-age, so nothing is skipped for age
+    for name in ("Interview.mp4", "Interview.editready.mp4", "Interview.original.mp4",
+                 "Interview.temp.mp4", "Interview.f137.mp4", "Interview.mp4.failed"):
+        path = src / name
+        path.write_text("some bytes")  # past --min-size 1B
+        os.utime(path, (old, old))
+
+    filter_file = write_filter_file(build_filter_rules_up(), tmp_path / "filter_up.txt")
+    dst = tmp_path / "dst"
+    cmd = build_up_command(rclone_binary, str(tmp_path / "src"), None, str(dst),
+                           filter_file)
+    cmd[3] = str(dst)
+    proc = subprocess.run(cmd + ["--dry-run"], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    log_text = proc.stderr
+    assert "Youtube/Interview.mp4" in log_text.replace("\\", "/")
+    for name in ("editready", "original", "temp", "f137", "failed"):
+        assert name not in log_text, name

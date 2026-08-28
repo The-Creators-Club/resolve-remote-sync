@@ -97,8 +97,10 @@ import sys
 # reach past every monkeypatch in server/tests.
 from common import (  # noqa: F401
     DEFAULT_HOMES_PARENT, EDITORS_GROUP, ScriptCalls, add_host_key_arg,
-    add_nas_kind_arg, add_site_arg, cli, editor_shell_is_sftp_only,
-    editor_shell_mode, get_backend, ok, project_acl_mode, project_group_name,
+    add_nas_kind_arg, add_site_arg, cli, confirm_destructive,
+    editor_shell_is_sftp_only,
+    editor_shell_mode, get_backend, ok, print_nas_banner, project_acl_mode,
+    project_group_name,
     require_site_value, run_ssh, set_host_key_pin, shell_quote, site_value,
     synology_api, truenas_api, wait_for_job,
 )
@@ -339,6 +341,14 @@ def revoke_key(args) -> int:
         print("  Lanes A and B stop working for them immediately; lane C (Syncthing) "
               "does NOT -- unshare their device on the dashboard as well.")
         return 0
+    # OPS-4 (2026-08-28): --apply on the WRONG NAS revokes a key on a fleet
+    # that is working. --apply is itself the flag confirm_destructive accepts,
+    # so on a terminal this asks for the host's name once more; --yes is the
+    # non-interactive answer.
+    confirm_destructive(
+        f"About to remove {name}'s installed SSH public key"
+        + (" and disable the account" if args.lock else "") + ".",
+        assume_yes=args.yes, dry_run=bool(getattr(args, "dry_run", False)))
     ok_done, detail = backend().revoke_editor_key(existing["id"], lock=args.lock)
     if not ok_done:
         print(f"FAILED to revoke {name}'s key: {detail}", file=sys.stderr)
@@ -429,9 +439,16 @@ def main():
     add_host_key_arg(ap)
     add_site_arg(ap)
     add_nas_kind_arg(ap)
+    ap.add_argument("--yes", action="store_true",
+                    help="skip the typed confirmation of the NAS's name that "
+                         "--revoke-key --apply asks for on a terminal (OPS-4, "
+                         "2026-08-28).")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     set_host_key_pin(args.host_key)
+    # Which box this run is about to change (OPS-4). cli() prints it too;
+    # print_nas_banner is idempotent.
+    print_nas_banner()
     global _ARGS
     _ARGS = args
 

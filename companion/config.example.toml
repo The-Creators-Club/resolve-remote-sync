@@ -517,6 +517,13 @@ ytdl_local_downloads = true
 # companion only READS its version -- it will never install over it, and never
 # run -U against it.
 ytdlp_path = ""
+# How many days old that yt-dlp may get before the companion updates it
+# without waiting to be told to. yt-dlp's version numbers are release dates, so
+# this is just "if mine is older than three weeks, get the new one" -- and it is
+# what stops a YouTube change from quietly breaking downloads on every machine
+# until somebody notices. Set 0 to turn it off. Ignored when ytdlp_path is set:
+# a yt-dlp you installed is yours.
+ytdlp_max_age_days = 21
 
 # A cookies.txt exported from a signed-in YouTube session (Netscape format).
 # Set this and YOUR downloads use it: it is what passes YouTube's bot check

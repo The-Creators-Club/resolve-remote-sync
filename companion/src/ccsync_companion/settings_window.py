@@ -111,11 +111,41 @@ def action_set_role(app: "CompanionApp", role: str) -> None:
     thread AFTER the Settings window has already closed and released its
     own hold on the lock (see the module docstring's "one rule").
 
-    Switching TO "base" (WIRED TO THE SERVER) is always safe: on a real
-    editor machine it just turns sync off, the same as unticking every
-    project.
+    Switching TO "base" (WIRED TO THE SERVER) destroys nothing, but it is
+    the one click in the companion that turns ALL syncing off for good on a
+    machine that needs it, and it used to have no dialog at all (UX-2,
+    resilience sweep 2026-08-28): an editor who clicked it out of curiosity
+    because their desk is in the office got a toast saying the role changed
+    and, from the next start, three dead lanes and a dashboard that could
+    not tick a project for them. Plain yes/no rather than the typed-word
+    gate: the consequence is "nothing syncs", not "footage is deleted".
     """
     role = "base" if str(role).strip().lower() == "base" else "editor"
+    if role == "base":
+        from . import popup
+
+        lock = getattr(app, "_popup_active_lock", None)
+        if lock is not None and not lock.acquire(blocking=False):
+            tray_mod._notify(app, "Another CCSync window is already open. Close it first.")
+            return
+        try:
+            body = (
+                "Set this computer to WIRED TO THE SERVER? A wired computer "
+                "works straight off the server share, so CCSync will sync "
+                "NOTHING to it: no uploads, no proxy downloads, no shared "
+                "project files. Your admin will not be able to tick projects "
+                "for it either. If this laptop keeps its own copy of the "
+                "projects, this is not the setting you want."
+            )
+            confirmed = popup.confirm_dialog(
+                "CCSYNC.EXE: switch to WIRED TO THE SERVER", body,
+                ok_label="WIRED TO THE SERVER",
+            )
+        finally:
+            if lock is not None:
+                lock.release()
+        if not confirmed:
+            return
     if role == "editor":
         lock = getattr(app, "_popup_active_lock", None)
         if lock is not None and not lock.acquire(blocking=False):
@@ -143,9 +173,16 @@ def action_set_role(app: "CompanionApp", role: str) -> None:
         if not confirmed:
             return
     try:
-        config_mod.set_value(config_mod.CONFIG_PATH, "mode", role)
+        # False, not an exception, when the line was written but load_config
+        # cannot read it back (APP-11, 2026-08-28) -- the shape that made this
+        # button silently do nothing forever on a config.toml with a
+        # hand-added [table].
+        saved = config_mod.set_value(config_mod.CONFIG_PATH, "mode", role)
     except Exception:
         log.exception("settings: could not write mode=%s to config.toml", role)
+        tray_mod._notify(app, "Couldn't save that -- see the log.")
+        return
+    if not saved:
         tray_mod._notify(app, "Couldn't save that -- see the log.")
         return
     tray_mod._notify(
@@ -218,7 +255,17 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
             lane_items.append(Line(text))
     guard = snap.get("sync_guard") or {}
     for text in (tray_mod._halt_line(guard), tray_mod._breaker_line(guard),
-                 tray_mod._skipped_exists_line(guard), tray_mod._trash_line(guard)):
+                 tray_mod._skipped_exists_line(guard),
+                 # SYNC-5 / UX-7 (resilience sweep 2026-08-28): both read the
+                 # same sync_guard the four above do.
+                 tray_mod._unfiltered_line(guard), tray_mod._conflicts_line(guard),
+                 # APP-1 / APP-13 / APP-6 (resilience sweep 2026-08-28): the
+                 # three states that used to be visible NOWHERE on the
+                 # machine they were happening on. Above the trash line
+                 # because each one is something that has stopped working.
+                 tray_mod._reporter_line(guard), tray_mod._clock_skew_line(guard),
+                 tray_mod._crashes_line(guard),
+                 tray_mod._trash_line(guard)):
         if text:
             lane_items.append(Line(text, style="warning"))
     if snap.get("root_unfinished"):

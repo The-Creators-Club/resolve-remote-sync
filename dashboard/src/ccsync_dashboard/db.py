@@ -602,6 +602,52 @@ def age_seconds(ts: str, now: str) -> float:
     return (parse_iso(now) - parse_iso(ts)).total_seconds()
 
 
+# SYS-4 / APP-13 (resilience sweep 2026-08-28). A companion's own wall clock
+# reaches this server on every report and nothing anywhere compared it with
+# ours. Two independent failures come out of that: a slow clock makes lane B
+# transfer nothing at all (rclone's `--min-age` computes a remote file's age
+# as local-clock-minus-modtime, so every file on the NAS looks like it was
+# written in the future and is excluded, and the lane exits 0 and reports
+# idle-and-green), and a wrong clock in a retention or ordering predicate
+# either vanishes a live machine from the fleet grid or pins a dead one at
+# the top of it.
+#
+# So the client's timestamp is STORED SEPARATELY from ours and clamped before
+# it is: a VM resumed from a 2019 snapshot must not be able to write a value
+# that sorts below every real row, and a dead CMOS battery claiming 2098 must
+# not be able to write one that sorts above them. Past the clamp the stored
+# value is our own received_at, and the real difference is kept as a number
+# so the grid can chip it.
+CLOCK_SKEW_CLAMP_SECONDS = 7 * 24 * 3600
+# What the grid chips. Below a minute is NTP jitter and a laptop coming out of
+# sleep; a minute is already twice the `--min-age 60s` lane B passes.
+CLOCK_SKEW_WARN_SECONDS = 60.0
+
+
+def clamp_reported_at(
+    client_reported_at: str | None, received_at: str
+) -> tuple[str | None, float | None, bool]:
+    """(stored client timestamp, skew seconds, was it clamped).
+
+    Skew is POSITIVE when the client's clock is AHEAD of this server's. An
+    unparseable timestamp is not a crash and not a zero: it comes back as
+    (None, None, True) -- "we could not read it" is its own answer, and
+    rendering it as no-skew is the failure this exists to stop.
+    """
+    if not client_reported_at:
+        return None, None, False
+    try:
+        skew = age_seconds(received_at, client_reported_at)
+    except (ValueError, TypeError):
+        return None, None, True
+    if abs(skew) > CLOCK_SKEW_CLAMP_SECONDS:
+        # Past the clamp the client's claim is not evidence of anything except
+        # that its clock is broken, so it does not get to be a stored ordering
+        # key. The measurement survives; the value does not.
+        return received_at, skew, True
+    return client_reported_at, skew, False
+
+
 def connect(path: str | Path) -> sqlite3.Connection:
     # check_same_thread=False: FastAPI may create a request's connection in a
     # threadpool worker but use it from an async handler on the event loop.
@@ -861,6 +907,77 @@ CREATE INDEX IF NOT EXISTS ix_file_move_targets_machine
   ON file_move_targets(editor_username, machine, applied_at);
 """
 
+# v30: what the dashboard was throwing away (SYS-3 / SYNC-8 / SYS-4 /
+# APP-6 / APP-13, resilience sweep 2026-08-28).
+#
+# `received_at` is the SERVER's clock for this row. machine_state has only
+# ever had `reported_at`, and api.py has always written the server's own
+# timestamp into it -- so the retention predicate and the eviction ordering
+# read a column whose NAME says "the client said so", and the next hand that
+# passed the companion's value in would have made both true. Naming the
+# server clock explicitly is what lets `client_reported_at` hold the
+# companion's own timestamp (clamped: a machine restored from a snapshot
+# claims 2019, a dead CMOS battery claims 2098) and `clock_skew_seconds` hold
+# the difference -- the only measurement of skew in either component. A slow
+# clock switches lane B off completely and silently (rclone --min-age sees
+# every remote file as written in the future, excludes all of them, and exits
+# 0 having transferred nothing), so it has to be visible somewhere.
+#
+# The rest is telemetry the companion has been computing and sending for
+# weeks that `extra="ignore"` dropped at the model boundary: the Syncthing
+# supervisor's incident record (SYNC-8 -- the difference between "he
+# rebooted" and "that machine has needed a human since Tuesday"), the crash
+# counter, the unfiltered-folder list and the Syncthing conflict count. All
+# nullable, so a companion too old to send any of it leaves them NULL, which
+# is not the same answer as zero and must not be rendered as one.
+SCHEMA_V30 = """
+ALTER TABLE machine_state ADD COLUMN received_at TEXT;
+ALTER TABLE machine_state ADD COLUMN client_reported_at TEXT;
+ALTER TABLE machine_state ADD COLUMN clock_skew_seconds REAL;
+ALTER TABLE machine_state ADD COLUMN supervisor_down_since TEXT;
+ALTER TABLE machine_state ADD COLUMN supervisor_attempts INTEGER;
+ALTER TABLE machine_state ADD COLUMN supervisor_last_error TEXT;
+ALTER TABLE machine_state ADD COLUMN supervisor_supervising INTEGER;
+ALTER TABLE machine_state ADD COLUMN crash_count INTEGER;
+ALTER TABLE machine_state ADD COLUMN crash_newest TEXT;
+ALTER TABLE machine_state ADD COLUMN folders_unfiltered INTEGER;
+ALTER TABLE machine_state ADD COLUMN folders_unfiltered_names TEXT;
+ALTER TABLE machine_state ADD COLUMN sync_conflicts INTEGER;
+UPDATE machine_state SET received_at = reported_at WHERE received_at IS NULL;
+"""
+
+# v31: the fleet audit ledger (SYS-11 / DASH-8, resilience sweep 2026-08-28).
+#
+# There was no history of any state change anywhere: `selections` rows were
+# DELETEd in place, and "who stopped this project syncing on Tuesday, and
+# when" was unanswerable on a site with two admins. Append-only on purpose --
+# nothing in the product ever UPDATEs or DELETEs a row here except the 180-day
+# retention pass in prune().
+#
+# `detail_json` carries the shape each action needs (a plan change carries the
+# BEFORE and AFTER placements, which is what makes the undo a restore rather
+# than a guess); `subject` is the one thing a human filters on, so it holds
+# the noun -- a project slug, an editor, a machine, a version.
+#
+# selections.changed_at records when a tick was last written or switched
+# modes, which `created_at` cannot say. The enforce freeze deliberately does
+# NOT read it -- see recent_plan_change_devices for the upload-only tick that
+# proved freshness is not a reason to keep a share.
+SCHEMA_V31 = """
+CREATE TABLE IF NOT EXISTS fleet_audit (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  at          TEXT NOT NULL,
+  actor       TEXT NOT NULL,
+  action      TEXT NOT NULL,
+  subject     TEXT NOT NULL DEFAULT '',
+  detail_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS ix_fleet_audit_at ON fleet_audit(at);
+CREATE INDEX IF NOT EXISTS ix_fleet_audit_subject ON fleet_audit(subject, id);
+CREATE INDEX IF NOT EXISTS ix_fleet_audit_action ON fleet_audit(action, id);
+ALTER TABLE selections ADD COLUMN changed_at TEXT NOT NULL DEFAULT '';
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -894,6 +1011,12 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (27, SCHEMA_V27),
     (28, SCHEMA_V28),
     (29, SCHEMA_V29),
+    # 30 and 31 landed together from two parallel work packages of the same
+    # sweep (resilience sweep 2026-08-28), each with its number fixed in
+    # advance so the two could merge without renumbering -- exactly as 17-19
+    # did.
+    (30, SCHEMA_V30),
+    (31, SCHEMA_V31),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -1432,22 +1555,77 @@ def deactivate_missing_projects(
     seen_slugs: Iterable[str],
     now: str | None = None,
     grace_seconds: int = 900,
-) -> None:
+    force: bool = False,
+) -> dict[str, Any]:
     """Deactivate projects whose Syncthing folder is gone -- EXCEPT rows seen
     recently. The grace window exists for eagerly-created projects (the
     /project-setup page inserts the row immediately; the collector's
     provision cycle creates the Syncthing folder up to 5 minutes later --
     without the grace, this would flip the new project inactive in the gap
-    and break the link/create flow that just made it)."""
+    and break the link/create flow that just made it).
+
+    BLAST-RADIUS BRAKE (DASH-4, resilience sweep 2026-08-28), the same shape
+    the enforce cycle has had one function up for a year. A Syncthing whose
+    config was re-created or restored answers /rest/config with 200 and ZERO
+    folders while myID is perfectly valid, so none of the empty-myID guards
+    fire: `seen` was [], every project flipped active=0, and the hourly
+    prune's purge_nas_media_for_inactive then deleted the whole NAS
+    inventory. Everything downstream reads active=1, so the project list and
+    the fleet grid emptied out, nobody appeared behind, and api_tick answered
+    404 so an admin could not even re-tick -- all silently, for the one thing
+    this dashboard exists to say. Two refusals now: an EMPTY `seen` against a
+    database that has active projects (never a legitimate steady state), and
+    a pass that would deactivate more than max(2, 25%) of them. The refusal
+    is persisted for the banner, not just logged, and it does not clear
+    itself: the next healthy pass does.
+
+    Returns {"deactivated": n, "refused": <record or None>}. `force=True`
+    applies the pass whatever its size (there is no caller today; it exists
+    so an admin tool need not re-implement the query).
+    """
     slugs = list(seen_slugs)
     placeholders = ",".join("?" * len(slugs)) or "''"
     now = now or utcnow_iso()
     cutoff = (parse_iso(now) - dt.timedelta(seconds=grace_seconds)).isoformat()
-    conn.execute(
-        f"UPDATE projects SET active=0 WHERE active=1 AND last_seen < ? "
-        f"AND slug NOT IN ({placeholders})",
-        [cutoff, *slugs],
-    )
+    n_active = conn.execute(
+        "SELECT COUNT(*) AS n FROM projects WHERE active=1").fetchone()["n"]
+    candidates = [
+        r["slug"] for r in conn.execute(
+            f"SELECT slug FROM projects WHERE active=1 AND last_seen < ? "
+            f"AND slug NOT IN ({placeholders}) ORDER BY slug",
+            [cutoff, *slugs],
+        )
+    ]
+    ceiling = max(2, n_active // 4)
+    reason = None
+    if not force and len(candidates) > ceiling:
+        # ONE trigger, two wordings. The size test is what governs, so a small
+        # site can still lose its one or two projects legitimately (the floor
+        # of 2 is the same floor the finding proposed); the empty-`seen` case
+        # gets its own sentence because "Syncthing reported 0 folders" is the
+        # signature an operator needs to read, not a percentage.
+        if not slugs:
+            reason = (f"Syncthing reported 0 of {n_active} folders - "
+                      f"not deactivating anything")
+        else:
+            reason = (f"Syncthing reported {len(slugs)} of {n_active} folders - "
+                      f"not deactivating {len(candidates)} project(s)")
+    if reason is not None:
+        record = {"at": now, "message": reason, "seen": len(slugs),
+                  "active": n_active, "would_deactivate": len(candidates),
+                  "ceiling": ceiling, "projects": candidates[:100]}
+        meta_set_json(conn, META_DEACTIVATION_REFUSAL, record)
+        return {"deactivated": 0, "refused": record}
+    if candidates:
+        conn.execute(
+            f"UPDATE projects SET active=0 WHERE active=1 AND last_seen < ? "
+            f"AND slug NOT IN ({placeholders})",
+            [cutoff, *slugs],
+        )
+    # A pass that came in under the brake is the evidence the last refusal is
+    # over; nothing else clears it.
+    meta_delete(conn, META_DEACTIVATION_REFUSAL)
+    return {"deactivated": len(candidates), "refused": None}
 
 
 def set_folder_status(
@@ -1666,6 +1844,200 @@ def meta_set(conn: sqlite3.Connection, key: str, value: str) -> None:
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (key, value),
     )
+
+
+def meta_delete(conn: sqlite3.Connection, key: str) -> None:
+    conn.execute("DELETE FROM meta WHERE key=?", (key,))
+
+
+# ------------------------------------------------------- collector alarms
+#
+# DASH-3 / DASH-4 (resilience sweep 2026-08-28). Two of the collector's
+# safety brakes -- the enforce blast-radius refusal and the new deactivation
+# refusal -- used to fire into the container log and nowhere else, so
+# `poll_runs`, /api/v1/health and every page said the cycle was fine while
+# every genuine untick sat unapplied. A brake nobody can see is not a brake
+# (the wave-1 rule: never make a safety latch in-memory-only). `meta` rather
+# than a new table because each of these has exactly one CURRENT value and no
+# history worth keeping, and because a schema version is a shared resource.
+META_ENFORCE_REFUSAL = "collector_enforce_refusal"
+META_ENFORCE_PLAN = "collector_enforce_plan"
+META_DEACTIVATION_REFUSAL = "collector_deactivation_refusal"
+
+
+def meta_set_json(conn: sqlite3.Connection, key: str, value: Any) -> None:
+    meta_set(conn, key, json.dumps(value, sort_keys=True))
+
+
+def meta_get_json(conn: sqlite3.Connection, key: str) -> Any | None:
+    """The JSON value at `key`, or None. Unparseable is None, never a raise:
+    these feed a banner, and a bad row must not be able to 500 the page that
+    tells the fleet whether footage is syncing."""
+    raw = meta_get(conn, key)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+
+
+def record_enforce_refusal(
+    conn: sqlite3.Connection, now: str, removals: Iterable[tuple[str, str]], limit: int,
+) -> dict[str, Any]:
+    """Persist "the enforce cycle refused N share removals this pass"."""
+    pairs = [{"folder": slug, "device": device} for slug, device in sorted(removals)]
+    record = {
+        "at": now,
+        "count": len(pairs),
+        "limit": int(limit),
+        "folders": sorted({p["folder"] for p in pairs}),
+        "devices": sorted({p["device"] for p in pairs}),
+        # Capped: an admin needs the shape, not 4000 rows in a meta value.
+        "pairs": pairs[:200],
+        "truncated": len(pairs) > 200,
+    }
+    meta_set_json(conn, META_ENFORCE_REFUSAL, record)
+    return record
+
+
+def clear_enforce_refusal(conn: sqlite3.Connection) -> None:
+    meta_delete(conn, META_ENFORCE_REFUSAL)
+
+
+def record_enforce_plan(
+    conn: sqlite3.Connection, now: str, plan: Iterable[tuple[str, set[str], set[str]]],
+) -> dict[str, Any]:
+    """Persist the +/- an enforce cycle was about to apply (DASH-3's dry-run
+    view). Read-only for the reader: computed from the same desired/actual
+    sets the cycle itself uses, written once per cycle, never acted on."""
+    folders = [
+        {"folder": slug,
+         "add": sorted(desired - actual),
+         "remove": sorted(actual - desired)}
+        for slug, desired, actual in plan
+    ]
+    record = {
+        "at": now,
+        "folders": folders[:100],
+        "truncated": len(folders) > 100,
+        "n_add": sum(len(f["add"]) for f in folders),
+        "n_remove": sum(len(f["remove"]) for f in folders),
+    }
+    meta_set_json(conn, META_ENFORCE_PLAN, record)
+    return record
+
+
+# SYS-3 (resilience sweep 2026-08-28). A report section the companion has
+# computed and sent for weeks was dropped by an undeclared pydantic field, in
+# silence, for the THIRD time: B17 lost `transport_health` for months, then
+# `proxy_coverage`/`youtube_import` "rode every heavy tick since their
+# features shipped and reached nobody", then `sync_guard.syncthing_supervisor`
+# (SYNC-8). Every one was found by a human reading the code.
+#
+# ReportIn now ACCEPTS extras and records the ones it does not read, so the
+# next occurrence announces itself on the fleet page instead of waiting for a
+# code review. `meta` for the same reason the collector alarms use it: one
+# current value, no history worth keeping, and a schema version is a shared
+# resource.
+META_IGNORED_REPORT_SECTIONS = "ignored_report_sections"
+# The keys are CLIENT-SUPPLIED strings on an endpoint with no rate limit, so
+# every dimension of this record is bounded.
+MAX_IGNORED_SECTIONS = 20
+MAX_IGNORED_SECTION_KEY_CHARS = 64
+MAX_IGNORED_SECTION_MACHINES = 10
+
+
+def record_ignored_report_sections(
+    conn: sqlite3.Connection, now: str, machine: str, keys: Iterable[str],
+) -> dict[str, Any] | None:
+    """Fold "this machine sent sections we do not read" into the meta record.
+
+    Returns the stored record, or None when `keys` was empty (which is the
+    normal case and writes nothing). Accumulates rather than replaces: the
+    point is a section nobody noticed, and a single report from one machine
+    naming it must not be overwritten by the next machine's clean one.
+    """
+    names = sorted({str(k)[:MAX_IGNORED_SECTION_KEY_CHARS] for k in keys if str(k)})
+    if not names:
+        return None
+    record = meta_get_json(conn, META_IGNORED_REPORT_SECTIONS) or {}
+    sections = record.get("sections")
+    if not isinstance(sections, dict):
+        sections = {}
+    for name in names:
+        entry = sections.get(name)
+        if not isinstance(entry, dict):
+            entry = {"machines": [], "reports": 0, "first_seen": now}
+        machines = [m for m in entry.get("machines") or [] if isinstance(m, str)]
+        if machine and machine not in machines:
+            machines.append(machine)
+        entry["machines"] = machines[:MAX_IGNORED_SECTION_MACHINES]
+        entry["reports"] = int(entry.get("reports") or 0) + 1
+        entry["last_seen"] = now
+        entry.setdefault("first_seen", now)
+        sections[name] = entry
+    if len(sections) > MAX_IGNORED_SECTIONS:
+        # Newest wins: an old name that has stopped arriving is the one whose
+        # absence is safe to lose.
+        keep = sorted(sections.items(), key=lambda kv: kv[1].get("last_seen") or "",
+                      reverse=True)[:MAX_IGNORED_SECTIONS]
+        sections = dict(keep)
+    record = {"at": now, "sections": sections}
+    meta_set_json(conn, META_IGNORED_REPORT_SECTIONS, record)
+    return record
+
+
+def ignored_report_sections(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    """The record the fleet banner renders, or None when nothing was ever
+    dropped. Never raises: meta_get_json swallows an unparseable row."""
+    record = meta_get_json(conn, META_IGNORED_REPORT_SECTIONS)
+    if not isinstance(record, dict) or not record.get("sections"):
+        return None
+    return record
+
+
+def clear_ignored_report_sections(conn: sqlite3.Connection) -> None:
+    """For the deploy that declares the field: the banner has to be able to
+    go away without waiting for a retention pass."""
+    meta_delete(conn, META_IGNORED_REPORT_SECTIONS)
+
+
+def collector_alarms(conn: sqlite3.Connection) -> dict[str, Any]:
+    """The persisted brake state the fleet banner and /api/v1/health read."""
+    return {
+        "enforce_refusal": meta_get_json(conn, META_ENFORCE_REFUSAL),
+        "enforce_plan": meta_get_json(conn, META_ENFORCE_PLAN),
+        "deactivation_refusal": meta_get_json(conn, META_DEACTIVATION_REFUSAL),
+    }
+
+
+def collector_health(conn: sqlite3.Connection, now: str | None = None) -> dict[str, Any]:
+    """Per-kind last poll WITH its note, plus the alarms (DASH-14).
+
+    `poll_runs.error` carries a note on a SUCCESSFUL run too (the mechanism
+    ops-efficiency-5 added for completion's "partial: ..."): "skipped: empty
+    myID", "refused 12 removals" and "seed deferred" are three distinct "I did
+    nothing" outcomes that read as "I reconciled everything" when only `ok` is
+    rendered. A kind with a note is amber, not green.
+    """
+    status = fetch_collector_status(conn, now=now)
+    kinds = []
+    for kind, run in sorted(status["kinds"].items()):
+        note = (run.get("error") or "").strip() or None
+        kinds.append({
+            "kind": kind,
+            "ok": bool(run.get("ok")),
+            "finished_at": run.get("finished_at"),
+            "note": note,
+            "status": "red" if not run.get("ok") else ("amber" if note else "green"),
+        })
+    return {
+        "kinds": kinds,
+        "syncthing_reachable": status["syncthing_reachable"],
+        "collector_stale": status["collector_stale"],
+        **collector_alarms(conn),
+    }
 
 
 def insert_companion_package(
@@ -1890,6 +2262,52 @@ def fetch_machines(conn: sqlite3.Connection, editor: str | None = None) -> list[
     return [dict(r) for r in conn.execute(q, params)]
 
 
+# DASH-16 (resilience sweep 2026-08-28). An editor's PC dies, or an editor
+# leaves and takes the laptop, and nobody tells the owner. The grid did the
+# right thing for a day (`received_at | ago` plus a red lane chip after 15
+# minutes); at 14 days the machine's media presence disappeared and at 30 its
+# machine_state row was DELETED, so the computer quietly left the page --
+# while its `machines` registry row, its `selections` plan and its Syncthing
+# share all remained. The fleet then looks healthier than it is, and a device
+# that still holds project data is shared with nothing watching it.
+#
+# The registry row is the anchor because it already survives every prune. A
+# week is the threshold: past a holiday-length absence, and well short of the
+# 14-day media age-out that is the first thing to visibly go.
+LOST_MACHINE_DAYS = 7
+
+
+def lost_machines(
+    conn: sqlite3.Connection, now: str, days: int = LOST_MACHINE_DAYS
+) -> list[dict[str, Any]]:
+    """Registry rows whose last report is older than `days`, with the plan
+    each one still holds.
+
+    Says nothing about machine_state -- the caller decides whether a machine
+    is ALSO still on the grid under its own row (see build_editors_view).
+    `projects` is the tick list that is still being enforced for a computer
+    nobody is watching, which is the actual reason this is worth a row.
+    """
+    cutoff = (parse_iso(now) - dt.timedelta(days=days)).isoformat()
+    out: list[dict[str, Any]] = []
+    for row in conn.execute(
+        """SELECT * FROM machines WHERE last_seen < ?
+           ORDER BY last_seen, editor_username, machine""",
+        (cutoff,),
+    ):
+        machine = dict(row)
+        machine["projects"] = [
+            r["project_slug"] for r in conn.execute(
+                """SELECT project_slug FROM selections
+                   WHERE editor_username=? AND machine=?
+                   ORDER BY project_slug""",
+                (machine["editor_username"], machine["machine"]),
+            )
+        ]
+        out.append(machine)
+    return out
+
+
 def machine_by_device_id(conn: sqlite3.Connection, device_id: str) -> dict[str, Any] | None:
     """Which computer is this Syncthing device? The enforce cycle's join
     (WP3): a folder is shared with a DEVICE, and only this mapping can say
@@ -1976,6 +2394,9 @@ def request_machine_update(
             WHERE editor_username=? AND machine=?""",
         (version, now, requested_by, editor, machine),
     )
+    if cur.rowcount > 0:
+        audit(conn, requested_by, "machine.update_push", machine,
+              {"editor": editor, "machine": machine, "version": version}, now=now)
     return cur.rowcount > 0
 
 
@@ -2023,6 +2444,9 @@ def request_lane_b_resume(
             WHERE editor_username=? AND machine=?""",
         (now, requested_by, editor, machine),
     )
+    if cur.rowcount > 0:
+        audit(conn, requested_by, "lane_b.resume_request", machine,
+              {"editor": editor, "machine": machine}, now=now)
     return cur.rowcount > 0
 
 
@@ -2088,6 +2512,13 @@ def record_file_move(
                VALUES (?, ?, ?)""",
             (move_id, editor, machine),
         )
+    # SYS-11 (2026-08-28): the move already has its own table, but the
+    # timeline is where an incident is read, and "the file came back" starts
+    # with when it was moved and by whom.
+    audit(conn, requested_by, "file.move", from_slug,
+          {"move_id": move_id, "from": f"{from_project_rel}/{from_rel}",
+           "to": f"{to_project_rel}/{to_rel}", "is_dir": bool(is_dir),
+           "machines": len({(e, m) for e, m in targets if e and m})}, now=now)
     return move_id
 
 
@@ -2293,10 +2724,15 @@ def materialise_bucket(
         cur = conn.execute(
             """INSERT OR IGNORE INTO selections
                  (editor_username, machine, project_slug, position, created_at,
-                  created_by, sync_mode)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                  created_by, sync_mode, changed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (editor, machine, row["project_slug"], row["position"],
-             row["created_at"], row["created_by"], row["sync_mode"]),
+             row["created_at"], row["created_by"], row["sync_mode"],
+             # NOT stamped as a change (DASH-8, resilience sweep 2026-08-28):
+             # materialising the bucket writes the plan this machine was
+             # already inheriting, so freezing the enforce cycle on it would
+             # delay a share nobody asked to change.
+             row["created_at"]),
         )
         copied += cur.rowcount
     return copied
@@ -2324,16 +2760,16 @@ def add_selection(
     cur = conn.execute(
         """INSERT OR IGNORE INTO selections
              (editor_username, machine, project_slug, position, created_at,
-              created_by, sync_mode)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (editor, machine, slug, next_pos, now, created_by, sync_mode),
+              created_by, sync_mode, changed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (editor, machine, slug, next_pos, now, created_by, sync_mode, now),
     )
     if cur.rowcount > 0:
         return True
     cur = conn.execute(
-        """UPDATE selections SET sync_mode=?
+        """UPDATE selections SET sync_mode=?, changed_at=?
             WHERE editor_username=? AND machine=? AND project_slug=? AND sync_mode<>?""",
-        (sync_mode, editor, machine, slug, sync_mode),
+        (sync_mode, now, editor, machine, slug, sync_mode),
     )
     return cur.rowcount > 0
 
@@ -2400,6 +2836,191 @@ def remove_selection(
             (editor, machine, slug),
         )
     return cur.rowcount > 0
+
+
+def selection_placements(
+    conn: sqlite3.Connection, editor: str, slug: str, machine: str | None = None
+) -> list[dict[str, str]]:
+    """WHERE this project is ticked for this person right now, and in which
+    mode: [{"machine": ..., "mode": ...}], the unassigned bucket included as
+    machine "".
+
+    Taken as a SNAPSHOT either side of a plan change, this is what makes
+    DASH-8's undo a restore rather than a guess: an untick of a person-level
+    tick removed rows from two computers in two different modes, and nothing
+    anywhere recorded that. `machine=None` is every computer, matching
+    remove_selection's own meaning of the word.
+    """
+    q = ("SELECT machine, sync_mode FROM selections "
+         "WHERE editor_username=? AND project_slug=?")
+    params: list[Any] = [editor, slug]
+    if machine is not None:
+        q += " AND machine=?"
+        params.append(machine)
+    return [{"machine": r["machine"], "mode": r["sync_mode"]}
+            for r in conn.execute(q + " ORDER BY machine", params)]
+
+
+# ---------------------------------------------------------------- fleet audit
+# SYS-11 / DASH-8 (resilience sweep 2026-08-28). One append-only ledger for
+# every state change an admin (or a companion) makes, written from the routes
+# that already exist. The alternative -- and what this replaces -- is
+# reconstructing an incident from four differently-shaped state tables and a
+# container log that rotates.
+
+AUDIT_MAX_AGE_DAYS = 180
+
+# How long a plan change is left alone by the enforce cycle, so DASH-8's
+# [ UNDO ] inside that window costs nothing on Syncthing: an unshare that
+# never happened needs no re-share, and a re-share is what restarts the
+# folder on every device holding it.
+PLAN_FREEZE_SECONDS = 60
+
+# How far back the fleet page's "recent plan changes" panel looks. An UNDO
+# offered for a change made yesterday is not an undo, it is a second decision
+# taken with less information than the first.
+PLAN_UNDO_WINDOW_SECONDS = 3600
+
+AUDIT_TICK = "plan.tick"
+AUDIT_UNTICK = "plan.untick"
+AUDIT_PLAN_UNDO = "plan.undo"
+
+
+def audit(
+    conn: sqlite3.Connection, actor: str, action: str, subject: str = "",
+    detail: Mapping[str, Any] | None = None, now: str | None = None,
+) -> int:
+    """Append one row to the fleet audit ledger and return its id.
+
+    Deliberately NOT wrapped in a try/except: it is one INSERT on the
+    connection the change itself is being written on, so it lands in the same
+    transaction and cannot record something that was then rolled back (nor
+    lose the record of something that was not). Call it BEFORE the route's
+    commit; a route that has already committed has to commit again.
+
+    `actor` is the session's admin username, or the editor name for a write a
+    companion originated. Never blank: "" would read as "the system did it",
+    which is the answer this table exists to stop giving.
+    """
+    cur = conn.execute(
+        "INSERT INTO fleet_audit (at, actor, action, subject, detail_json) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (now or utcnow_iso(), str(actor or "?"), action, str(subject or ""),
+         json.dumps(dict(detail or {}), sort_keys=True)),
+    )
+    return int(cur.lastrowid or 0)
+
+
+def _audit_row(row: sqlite3.Row) -> dict[str, Any]:
+    out = dict(row)
+    try:
+        out["detail"] = json.loads(out.get("detail_json") or "{}")
+    except (ValueError, TypeError):
+        # A row nothing can parse is still evidence that something happened:
+        # show it as a raw string rather than dropping it from the timeline.
+        out["detail"] = {"raw": out.get("detail_json")}
+    return out
+
+
+def fetch_audit(
+    conn: sqlite3.Connection, limit: int = 200, subject: str | None = None,
+    actions: tuple[str, ...] | None = None,
+) -> list[dict[str, Any]]:
+    """The timeline: newest first. `subject` is a substring match over the
+    noun, the actor and the action, because what a human remembers is "FF4"
+    or "ruskin", not which column it was stored in."""
+    q = "SELECT * FROM fleet_audit"
+    params: list[Any] = []
+    where: list[str] = []
+    if subject:
+        where.append("(subject LIKE ? OR actor LIKE ? OR action LIKE ?)")
+        like = f"%{subject}%"
+        params += [like, like, like]
+    if actions:
+        where.append("action IN (%s)" % ", ".join("?" for _ in actions))
+        params += list(actions)
+    if where:
+        q += " WHERE " + " AND ".join(where)
+    q += " ORDER BY id DESC LIMIT ?"
+    params.append(max(1, min(int(limit), 1000)))
+    return [_audit_row(r) for r in conn.execute(q, params)]
+
+
+def audit_entry(conn: sqlite3.Connection, audit_id: int) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM fleet_audit WHERE id=?", (int(audit_id),)).fetchone()
+    return _audit_row(row) if row is not None else None
+
+
+def recent_plan_changes(
+    conn: sqlite3.Connection, now: str, window_seconds: int = PLAN_UNDO_WINDOW_SECONDS,
+) -> list[dict[str, Any]]:
+    """Tick/untick events inside the undo window, newest first, with the ones
+    that have already been undone marked rather than hidden.
+
+    Marked and not hidden because "somebody has already put that back" is
+    itself the answer to the question the panel is being read for.
+    """
+    cutoff = _iso_minus(now, window_seconds)
+    rows = [
+        _audit_row(r) for r in conn.execute(
+            "SELECT * FROM fleet_audit WHERE at >= ? AND action IN (?, ?) "
+            "ORDER BY id DESC LIMIT 200",
+            (cutoff, AUDIT_TICK, AUDIT_UNTICK),
+        )
+    ]
+    undone = {
+        int(_audit_row(r)["detail"].get("undid") or 0)
+        for r in conn.execute(
+            "SELECT * FROM fleet_audit WHERE at >= ? AND action = ?",
+            (_iso_minus(now, window_seconds * 2), AUDIT_PLAN_UNDO),
+        )
+    }
+    for row in rows:
+        row["undone"] = row["id"] in undone
+    return rows
+
+
+def recent_plan_change_devices(
+    conn: sqlite3.Connection, now: str, machine_devices: Mapping[tuple[str, str], str],
+    window_seconds: int = PLAN_FREEZE_SECONDS,
+) -> dict[str, frozenset[str]]:
+    """{project_slug: {syncthing device id, ...}} for UNTICKS made in the last
+    `window_seconds`: the (folder, device) pairs whose existing share the
+    enforce cycle should leave exactly as it finds it this pass, so DASH-8's
+    [ UNDO ] inside the window costs nothing.
+
+    UNTICKS ONLY, and never `selections.changed_at`, both learned the same
+    way (measured 2026-08-28): a row that is FRESH is not a row that should
+    keep its share. An upload-only tick writes a fresh row for a machine
+    whose share must be REMOVED (docs/UPLOAD_ONLY_TICK.md: no share at all,
+    deliberately not a sendonly folder), and freezing on freshness held it --
+    test_the_enforce_cycle_never_shares_a_folder_for_an_upload_only_tick.
+    An untick is the one change whose undo needs the share to still be there;
+    undoing a tick just removes what it added, which costs one cycle.
+    """
+    frozen: dict[str, set[str]] = {}
+    cutoff = _iso_minus(now, window_seconds)
+    for row in conn.execute(
+        "SELECT subject, detail_json FROM fleet_audit WHERE at >= ? AND action = ?",
+        (cutoff, AUDIT_UNTICK),
+    ).fetchall():
+        try:
+            detail = json.loads(row["detail_json"] or "{}")
+        except (ValueError, TypeError):
+            continue
+        slug = str(detail.get("slug") or row["subject"] or "")
+        editor = str(detail.get("editor") or "")
+        if not slug or not editor:
+            continue
+        machines = {str(p.get("machine") or "")
+                    for side in ("before", "after")
+                    for p in (detail.get(side) or [])}
+        machines.add(str(detail.get("machine") or ""))
+        for machine in machines:
+            device_id = machine_devices.get((editor, machine))
+            if device_id:
+                frozen.setdefault(slug, set()).add(device_id)
+    return {slug: frozenset(ids) for slug, ids in frozen.items()}
 
 
 def selections_for_machine(
@@ -2625,6 +3246,7 @@ def upsert_machine_state(
     ingest: Mapping[str, Any] | None = None,
     proxy: Mapping[str, Any] | None = None,
     music: Mapping[str, Any] | None = None,
+    client_reported_at: str | None = None,
 ) -> None:
     """`transport` is summarize_transport_health()'s flattened dict, or None.
 
@@ -2646,7 +3268,15 @@ def upsert_machine_state(
     report including the ones carrying no ingest section at all: the
     companion's reporter omits an empty section, so "the batch finished" is
     spelled by the section's ABSENCE and a COALESCEd flag would leave the
-    machine indexing on the grid forever."""
+    machine indexing on the grid forever.
+
+    `now` is the SERVER's clock and lands in both `reported_at` (which has
+    always held it, whatever its name says) and the v30 `received_at`, which
+    is what prune() and evict_extra_machines() order on. `client_reported_at`
+    is the companion's own wall clock, clamped by clamp_reported_at, with the
+    difference kept in `clock_skew_seconds` (SYS-4, resilience sweep
+    2026-08-28)."""
+    stored_client_at, skew, _clamped = clamp_reported_at(client_reported_at, now)
     t = dict(transport or {})
     g = dict(guard or {})
     i = dict(ingest or {})
@@ -2672,13 +3302,21 @@ def upsert_machine_state(
               music_ingest_gate, music_ingest_done, music_ingest_total,
               music_ingest_failed, music_ingest_track, music_ingest_percent,
               music_ingest_warning, music_ingest_at,
-              mode)
+              mode,
+              received_at, client_reported_at, clock_skew_seconds,
+              supervisor_down_since, supervisor_attempts, supervisor_last_error,
+              supervisor_supervising, crash_count, crash_newest,
+              folders_unfiltered, folders_unfiltered_names, sync_conflicts)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                    ?, ?, ?,
                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                   ?)
+                   ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?)
            ON CONFLICT(editor_username, machine) DO UPDATE SET
              detected_project_root=excluded.detected_project_root,
              reported_at=excluded.reported_at,
@@ -2811,7 +3449,56 @@ def upsert_machine_state(
              -- This only holds because api.py passes None (not "editor")
              -- when the report omitted it -- the default used to be applied
              -- there first, which made this a no-op (ultrareview 2026-08-19).
-             mode=COALESCE(excluded.mode, machine_state.mode)""",
+             mode=COALESCE(excluded.mode, machine_state.mode),
+             -- v30. received_at is OURS, so it is written blind on every
+             -- report; the two client-clock columns are written blind too,
+             -- because "this report carried no timestamp we could read" has
+             -- to be able to replace yesterday's answer (SYS-4).
+             received_at=excluded.received_at,
+             client_reported_at=excluded.client_reported_at,
+             clock_skew_seconds=excluded.clock_skew_seconds,
+             -- The supervisor section is EMPTY-WHEN-HEALTHY by the
+             -- companion's own design (an absent section is how "the sync
+             -- engine is up" is spelled), so these follow the LATCH rule and
+             -- not the COALESCE rule: they are cleared by any report that
+             -- carried a guard section without them. A COALESCE here would
+             -- leave "sync engine down since Tuesday" on the grid for ever
+             -- after the engine came back (SYNC-8).
+             supervisor_down_since=CASE WHEN excluded.guard_at IS NULL
+                                        THEN machine_state.supervisor_down_since
+                                        ELSE excluded.supervisor_down_since END,
+             supervisor_attempts=CASE WHEN excluded.guard_at IS NULL
+                                      THEN machine_state.supervisor_attempts
+                                      ELSE excluded.supervisor_attempts END,
+             supervisor_last_error=CASE WHEN excluded.guard_at IS NULL
+                                        THEN machine_state.supervisor_last_error
+                                        ELSE excluded.supervisor_last_error END,
+             supervisor_supervising=CASE WHEN excluded.guard_at IS NULL
+                                         THEN machine_state.supervisor_supervising
+                                         ELSE excluded.supervisor_supervising END,
+             -- Same rule, same reason: a conflict the editor has since
+             -- resolved, or a folder whose filter has since been written,
+             -- must be able to take its own chip off the grid.
+             folders_unfiltered=CASE WHEN excluded.guard_at IS NULL
+                                     THEN machine_state.folders_unfiltered
+                                     ELSE excluded.folders_unfiltered END,
+             folders_unfiltered_names=CASE WHEN excluded.guard_at IS NULL
+                                           THEN machine_state.folders_unfiltered_names
+                                           ELSE excluded.folders_unfiltered_names END,
+             sync_conflicts=CASE WHEN excluded.guard_at IS NULL
+                                 THEN machine_state.sync_conflicts
+                                 ELSE excluded.sync_conflicts END,
+             -- Crashes are a HIGH-WATER count on the machine's own disk, not
+             -- a current state: it only goes down when somebody empties
+             -- ~/.ccsync/crashes, and the companion is the one counting. So
+             -- this one is written from any guard-bearing report too, which
+             -- is what lets an emptied directory clear the chip.
+             crash_count=CASE WHEN excluded.guard_at IS NULL
+                              THEN machine_state.crash_count
+                              ELSE excluded.crash_count END,
+             crash_newest=CASE WHEN excluded.guard_at IS NULL
+                               THEN machine_state.crash_newest
+                               ELSE excluded.crash_newest END""",
         (editor, machine, detected_project_root, now, resolve_project, int(verified),
          platform, companion_version,
          t.get("relayed"), t.get("direct"), t.get("orphan_partials"),
@@ -2828,7 +3515,13 @@ def upsert_machine_state(
          int(bool(m.get("active"))), m.get("batch"), m.get("state"),
          m.get("gate"), m.get("done"), m.get("total"), m.get("failed"),
          m.get("track"), m.get("percent"), m.get("warning"), m.get("at"),
-         mode),
+         mode,
+         now, stored_client_at, skew,
+         g.get("supervisor_down_since"), g.get("supervisor_attempts"),
+         g.get("supervisor_last_error"), g.get("supervisor_supervising"),
+         g.get("crash_count"), g.get("crash_newest"),
+         g.get("folders_unfiltered"), g.get("folders_unfiltered_names"),
+         g.get("sync_conflicts")),
     )
     evict_extra_machines(conn, editor)
 
@@ -2851,11 +3544,34 @@ def fetch_sync_guard_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict
             "halt_reason": r["halt_reason"],
             "skipped_exists": r["skipped_exists"],
             "at": r["guard_at"],
+            # v30 (SYNC-8 / APP-6 / APP-13 / SYNC-x, resilience sweep
+            # 2026-08-28). Every one of these was already on the wire and
+            # dropped at the model boundary. `supervising` and the skew are
+            # TRI-STATE on purpose: None means this companion never told us,
+            # which the grid must not render as "fine".
+            "supervisor_down_since": r["supervisor_down_since"],
+            "supervisor_attempts": r["supervisor_attempts"],
+            "supervisor_last_error": r["supervisor_last_error"],
+            "supervisor_supervising": (
+                None if r["supervisor_supervising"] is None
+                else bool(r["supervisor_supervising"])
+            ),
+            "crash_count": r["crash_count"],
+            "crash_newest": r["crash_newest"],
+            "folders_unfiltered": r["folders_unfiltered"],
+            "folders_unfiltered_names": r["folders_unfiltered_names"],
+            "sync_conflicts": r["sync_conflicts"],
+            "clock_skew_seconds": r["clock_skew_seconds"],
         }
         for r in conn.execute(
             """SELECT editor_username, machine, breaker_tripped, breaker_reason,
                       breaker_at, trash_bytes, trash_count, halt_active, halt_scope,
-                      halt_reason, skipped_exists, guard_at
+                      halt_reason, skipped_exists, guard_at,
+                      supervisor_down_since, supervisor_attempts,
+                      supervisor_last_error, supervisor_supervising,
+                      crash_count, crash_newest, folders_unfiltered,
+                      folders_unfiltered_names, sync_conflicts,
+                      clock_skew_seconds
                FROM machine_state"""
         )
     }
@@ -3003,6 +3719,11 @@ def set_fleet_halt(
         "set_at": now or utcnow_iso(),
     }
     meta_set(conn, FLEET_HALT_KEY, json.dumps(state))
+    # Audited HERE rather than at the two call sites (SYS-11, 2026-08-28): the
+    # JSON route and the Users page both pass their admin through this one
+    # function, and a ledger the second door can skip is worse than none.
+    audit(conn, by, "fleet.halt_set" if active else "fleet.halt_clear",
+          "fleet", {"reason": state["reason"]}, now=state["set_at"])
     return state
 
 
@@ -3041,11 +3762,16 @@ def evict_extra_machines(
     unthrottled, so without this one identity-token holder could grow
     machine_state without bound -- and every row shows up in the fleet grid.
     Evicting the OLDEST (rather than refusing the new row) means a live
-    companion, which reports every 30s, can never be the row that goes."""
+    companion, which reports every 30s, can never be the row that goes.
+
+    Ordered on the SERVER's `received_at` (v30, SYS-4): a machine whose clock
+    is set to 2098 would otherwise pin itself as "most recent" for ever and
+    evict its owner's genuinely live computers."""
     victims = [
         r["machine"] for r in conn.execute(
             """SELECT machine FROM machine_state WHERE editor_username=?
-               ORDER BY reported_at DESC, machine ASC LIMIT -1 OFFSET ?""",
+               ORDER BY COALESCE(received_at, reported_at) DESC, machine ASC
+               LIMIT -1 OFFSET ?""",
             (editor, keep),
         )
     ]
@@ -3447,13 +4173,27 @@ def prune(conn: sqlite3.Connection, now: str) -> None:
     # machine must age out of the fleet grid exactly like its lane rows do.
     # The write-time cap (evict_extra_machines) bounds the burst; this bounds
     # the long tail.
+    # SYS-4 (resilience sweep 2026-08-28): `received_at` (v30), never the
+    # client's clock. This predicate has always read the column named
+    # `reported_at`, which api.py happens to fill with the server's own
+    # timestamp -- one hand passing the companion's value in, and a machine
+    # 30 days behind real time would have been DELETED from the fleet grid on
+    # every prune while reporting perfectly. COALESCE covers a row written
+    # before v30 backfilled (and any test that INSERTs by hand).
     conn.execute(
-        "DELETE FROM machine_state WHERE reported_at < ?",
+        "DELETE FROM machine_state WHERE COALESCE(received_at, reported_at) < ?",
         (cutoff(days=MACHINE_STATE_MAX_AGE_DAYS),),
     )
     conn.execute(
         "DELETE FROM missing_files WHERE refreshed_at < ?",
         (cutoff(days=MISSING_FILES_MAX_AGE_DAYS),),
+    )
+    # The audit ledger is append-only, so this is the ONLY statement in the
+    # product that removes a row from it (SYS-11, 2026-08-28). 180 days: long
+    # enough that "what changed the week an editor lost two days of syncing"
+    # is still answerable, bounded so /data cannot grow without limit.
+    conn.execute(
+        "DELETE FROM fleet_audit WHERE at < ?", (cutoff(days=AUDIT_MAX_AGE_DAYS),),
     )
     conn.execute(
         """DELETE FROM poll_runs WHERE id NOT IN
@@ -3517,9 +4257,47 @@ def replace_nas_media(
     tree_sig: str,
     n_dirs: int,
     now: str,
-) -> None:
+    force: bool = False,
+) -> bool:
     """rows: [(rel_path, kind, ext, size, mtime_ns)]. Replaces the project's
-    inventory and recomputes the rollup in nas_inventory_state."""
+    inventory and recomputes the rollup in nas_inventory_state.
+
+    REFUSES A COLLAPSE (DASH-5, resilience sweep 2026-08-28). Returns True if
+    it replaced, False if it refused. When the ZFS dataset under
+    /projects/<project> is not mounted (pool import ordering after a NAS
+    reboot) or the directory is being renamed by hand mid-cycle, the parent
+    bind mount still exists, the project dir exists and is EMPTY, and the
+    walk returns []. This function used to DELETE the whole inventory and
+    write the rollup as 0 originals / 0 proxies with last_error NULL, so
+    every media-presence view said the NAS holds nothing and
+    fetch_sync_backlog reported every original an editor holds as "the NAS is
+    missing this" -- the page telling the owner his footage is not on the
+    server. A project cannot lose all (or ~all) of its media between two
+    cycles by any legitimate route, so the previous inventory is kept and the
+    reason goes into nas_inventory_state.last_error, where the project page
+    renders it. tree_sig is deliberately NOT updated on a refusal: the next
+    cycle must walk again rather than believe it is up to date.
+    """
+    prev = conn.execute(
+        """SELECT n_originals, n_proxies FROM nas_inventory_state
+           WHERE project_id=?""", (project_id,)
+    ).fetchone()
+    prev_total = ((prev["n_originals"] or 0) + (prev["n_proxies"] or 0)) if prev else 0
+    prev_originals = (prev["n_originals"] or 0) if prev else 0
+    if not force and prev_total > 0:
+        collapsed = (
+            (prev_originals > 0 and not any(r[1] == "original" for r in rows))
+            or len(rows) < prev_total * 0.1
+        )
+        if collapsed:
+            message = (f"walk returned {len(rows)} of {prev_total} files - not replacing. "
+                       f"The project directory looks unmounted or was renamed on the NAS.")
+            conn.execute(
+                """UPDATE nas_inventory_state SET walked_at=?, last_error=?
+                   WHERE project_id=?""",
+                (now, message, project_id),
+            )
+            return False
     conn.execute("DELETE FROM nas_media WHERE project_id=?", (project_id,))
     conn.executemany(
         """INSERT OR REPLACE INTO nas_media
@@ -3544,6 +4322,7 @@ def replace_nas_media(
              walked_at=excluded.walked_at, last_error=NULL""",
         (project_id, tree_sig, n_dirs, n_orig, b_orig, n_prox, b_prox, now),
     )
+    return True
 
 
 def nas_inventory_sig(conn: sqlite3.Connection, project_id: int) -> str | None:
@@ -3644,13 +4423,19 @@ def replace_active_transfers(
 # ---------------------------------------------------------------- media presence reads
 
 def fetch_nas_media_summary(conn: sqlite3.Connection, project_id: int) -> dict[str, int]:
+    # last_error / walked_at ride along since DASH-5 (resilience sweep
+    # 2026-08-28): the project page has to be able to say "this project's NAS
+    # inventory is the one from before the dataset went missing", and every
+    # caller of this function already hands the dict straight to a view.
     row = conn.execute(
-        """SELECT n_originals, bytes_originals, n_proxies, bytes_proxies
+        """SELECT n_originals, bytes_originals, n_proxies, bytes_proxies,
+                  walked_at, last_error
            FROM nas_inventory_state WHERE project_id=?""",
         (project_id,),
     ).fetchone()
     if row is None:
-        return {"n_originals": 0, "bytes_originals": 0, "n_proxies": 0, "bytes_proxies": 0}
+        return {"n_originals": 0, "bytes_originals": 0, "n_proxies": 0, "bytes_proxies": 0,
+                "walked_at": None, "last_error": None}
     return dict(row)
 
 

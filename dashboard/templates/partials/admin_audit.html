@@ -1,0 +1,48 @@
+{# The fleet timeline (SYS-11, resilience sweep 2026-08-28): the last 200 rows
+   of the append-only fleet_audit ledger, newest first.
+
+   `detail` is rendered as its own JSON on purpose. Every action carries a
+   different shape (a plan change carries both placements, a publish carries a
+   version and a platform), and a column per key would be a schema this page
+   has to be taught about every time a route starts writing a row. #}
+<div class="admin-users-box" id="admin-audit">
+  <div class="side-head">[ WHAT CHANGED ]
+    <span class="muted">Every tick, halt, resume, deletion, publish and pushed update,
+      with who did it. Kept for {{ audit_max_age_days }} days.</span></div>
+
+  <form class="inline-form" style="margin-bottom:0.6rem"
+        hx-get="/partials/admin/audit" hx-target="#admin-audit" hx-swap="outerHTML">
+    <input type="search" name="q" value="{{ audit_query }}" style="min-width:18rem"
+           placeholder="filter by project, editor, computer, version or action"
+           aria-label="filter the timeline">
+    <button class="btn" type="submit">[ FILTER ]</button>
+    {% if audit_query %}
+      {# A LINK, not a second `q` field: htmx would send both the input's
+         value and the button's, and which one wins is the framework's
+         business, not this page's. #}
+      <a class="btn" href="/admin/audit">[ CLEAR ]</a>
+    {% endif %}
+  </form>
+
+  {% if audit_rows %}
+    <table class="editors">
+      <thead><tr><th>WHEN</th><th>WHO</th><th>ACTION</th><th>SUBJECT</th><th>DETAIL</th></tr></thead>
+      <tbody>
+      {% for row in audit_rows %}
+        <tr class="editor-row">
+          <td class="mono-sm muted" title="{{ row.at }}">{{ row.at | ago }}</td>
+          <td class="who">{{ row.actor }}</td>
+          <td class="mono-sm">{{ row.action }}</td>
+          <td class="mono-sm">{{ row.subject }}</td>
+          <td class="mono-sm muted">{{ row.detail_json }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  {% elif audit_query %}
+    <div class="muted">nothing in the timeline matches "{{ audit_query }}"</div>
+  {% else %}
+    <div class="muted">nothing has been recorded yet. Every tick, halt, deletion and
+      publish from here on lands in this list.</div>
+  {% endif %}
+</div>

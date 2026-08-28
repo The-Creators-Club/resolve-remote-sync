@@ -8,6 +8,7 @@ through a fake lane.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -494,11 +495,43 @@ def test_an_open_supervisor_incident_reaches_the_report(tmp_path):
     assert "syncthing_supervisor" not in app.sync_guard()
 
 
-def test_the_supervisors_state_lives_beside_the_other_latches(tmp_path):
+def test_the_supervisors_state_stays_in_the_state_dir(tmp_path):
+    """The supervisor's incident record is diagnostics, so it stays under
+    state/. The two LATCHES moved out of it (APP-3, 2026-08-28) because
+    deleting state/ cleared a breaker only a human may clear."""
     app = _app(tmp_path)
     assert app.syncthing_supervisor.state_path.name == "syncthing_supervisor.json"
+    assert app.syncthing_supervisor.state_path.parent.name == "state"
     assert (app.syncthing_supervisor.state_path.parent
-            == app.lane_b_breaker.state_path.parent)
+            != app.lane_b_breaker.state_path.parent)
+
+
+def test_both_latches_live_beside_the_config_not_in_the_state_dir(tmp_path):
+    from ccsync_companion import config as config_mod
+
+    app = _app(tmp_path)
+    for latch in (app.lane_b_breaker.state_path, app.halt.state_path):
+        assert latch.parent == config_mod.CONFIG_DIR, latch
+
+
+def test_a_latch_written_by_an_older_build_is_adopted(tmp_path, monkeypatch):
+    """The move must not CLEAR a live latch: an editor whose lane B is
+    tripped, or a machine carrying a fleet halt, keeps it (APP-3)."""
+    from ccsync_companion import config as config_mod
+    from ccsync_companion.sync import lane_guard
+
+    legacy = tmp_path / "state"
+    legacy.mkdir(parents=True, exist_ok=True)
+    (legacy / lane_guard.HALT_STATE_FILENAME).write_text(
+        json.dumps({"active": True, "scope": "fleet", "reason": "admin said so"}),
+        encoding="utf-8")
+
+    app = _app(tmp_path)
+    assert app.halt.state_path == config_mod.CONFIG_DIR / lane_guard.HALT_STATE_FILENAME
+    assert app.halt.active is True
+    assert app.halt.scope == "fleet"
+    # ...and the old copy is GONE, so a downgrade cannot latch on it again.
+    assert not (legacy / lane_guard.HALT_STATE_FILENAME).exists()
 
 
 # -- borrowed folders in the removal gate (SHARED_FOLDERS_PLAN.md WP2) ------

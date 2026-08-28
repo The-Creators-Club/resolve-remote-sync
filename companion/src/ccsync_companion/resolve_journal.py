@@ -70,6 +70,22 @@ SAVE_POINT_INTERVAL_SECONDS = 900.0
 # the editor pressing a button.
 AUTOMATIC_MIN_INTERVAL_SECONDS = 900.0
 
+# ...and at most this many times per project per day, however long the tray
+# has been up. RES-2 (resilience sweep 2026-08-28): the 15-minute bar bounds
+# a LOOP, not a day. A machine with a wrong canonical_prefix/local_root is
+# wrong every 15 minutes, so it was entitled to ~96 unprompted rewrites of
+# hundreds of clip paths a day, each one a project-database write the editor
+# never asked for. The cap is what turns "keep re-offering" into "tell
+# somebody".
+AUTOMATIC_MAX_PER_DAY = 8
+
+# Where the two bars above are remembered across a restart. RES-2: these
+# lived in module globals, so an OTA, a crash, an EULA park or the editor
+# quitting and reopening the tray reset them -- and every one of those is
+# routine, which is why CLAUDE.md's rule is "never make a safety latch
+# in-memory-only" (lane B's breaker is on disk for exactly this reason).
+AUTO_STATE_FILENAME = "resolve_auto.json"
+
 # Bound on one journal file. A pathological pass (every clip in a 4,000-clip
 # project) must not write an unbounded file into a home directory; the log
 # still carries every line.
@@ -93,8 +109,18 @@ _lock = threading.Lock()
 _sessions: dict[str, dict[str, Any]] = {}
 # {project slug: float} -- when the last save point was taken.
 _save_points: dict[str, float] = {}
-# {(project slug, source): float} -- the automatic-path rate limiter.
+# {(project slug, source): float} -- the automatic-path rate limiter. WALL
+# clock (time.time), not monotonic, because it is persisted: a monotonic
+# stamp means nothing to the next process.
 _automatic_at: dict[tuple[str, str], float] = {}
+# {project slug: {"day": "YYYY-MM-DD", "count": int, "held": int}} -- the
+# per-day cap, per project (not per source: two sources rewriting the same
+# project all day is the same fault seen twice).
+_automatic_daily: dict[str, dict[str, Any]] = {}
+# False until the two dicts above have been read back off disk once. Lazy,
+# not at import: the test suite redirects HOME per test, and importing this
+# module must not touch a home directory at all.
+_auto_state_loaded = False
 
 
 def journal_root() -> Path:
@@ -119,42 +145,161 @@ def project_slug(project_name: Any) -> str:
 
 
 def reset_for_tests() -> None:
-    """Drop the in-memory burst/rate-limit state. The module keeps its state
-    in globals (one companion, one Resolve), so a test that does not clear it
-    inherits the previous test's open session."""
+    """Drop the in-memory burst/rate-limit state AND the persisted copy. The
+    module keeps its state in globals (one companion, one Resolve), so a test
+    that does not clear it inherits the previous test's open session."""
+    global _auto_state_loaded
     with _lock:
         _sessions.clear()
         _save_points.clear()
         _automatic_at.clear()
+        _automatic_daily.clear()
+        _auto_state_loaded = False
+        try:
+            auto_state_path().unlink()
+        except (OSError, NotImplementedError):
+            # NotImplementedError: a test that fakes `os.name = "posix"` on
+            # Windows makes Path() pick PosixPath, which cannot be built
+            # here; the fixture tears down before the monkeypatch restores.
+            pass
+
+
+# -- the persisted half of the rate limiter (RES-2, 2026-08-28) ------------
+
+def auto_state_path() -> Path:
+    """`~/.ccsync/state/resolve_auto.json`. Expanded per call for the reason
+    journal_root() is."""
+    return Path(os.path.expanduser("~")) / ".ccsync" / "state" / AUTO_STATE_FILENAME
+
+
+def _day_key(now: float) -> str:
+    """The day a timestamp belongs to, in UTC. UTC and not local time so a
+    DST change or a travelling laptop cannot hand a machine a second
+    allowance of automatic rewrites."""
+    return datetime.fromtimestamp(float(now), timezone.utc).strftime("%Y-%m-%d")
+
+
+def _load_auto_state_locked(now: float) -> None:
+    """Read the persisted limiter back, once. Caller holds `_lock`.
+
+    Never raises and never refuses on unreadable state: a limiter that
+    cannot load must degrade to "nothing remembered", not to a relink that
+    never runs (Media Offline is the worse failure)."""
+    global _auto_state_loaded
+    _auto_state_loaded = True
+    data = _read(auto_state_path())
+    if not data:
+        return
+    corrected = False
+    stamps = data.get("automatic_at")
+    if isinstance(stamps, dict):
+        for slug, sources in stamps.items():
+            if not isinstance(sources, dict):
+                continue
+            for source, value in sources.items():
+                try:
+                    stamp = float(value)
+                except (TypeError, ValueError):
+                    continue
+                # A stamp in the FUTURE is a clock that has been put back
+                # (or a file copied off another machine). Treated as "now",
+                # which bars the pass for one interval rather than either
+                # letting it through or barring it until the date arrives.
+                # The correction is written back, or the SAME future stamp
+                # would be re-clamped to each new "now" forever and the pass
+                # would never be allowed again.
+                if stamp > float(now):
+                    stamp = float(now)
+                    corrected = True
+                _automatic_at[(str(slug), str(source))] = stamp
+    daily = data.get("daily")
+    if isinstance(daily, dict):
+        for slug, bucket in daily.items():
+            if not isinstance(bucket, dict):
+                continue
+            try:
+                _automatic_daily[str(slug)] = {
+                    "day": str(bucket.get("day", "")),
+                    "count": int(bucket.get("count", 0)),
+                    "held": int(bucket.get("held", 0)),
+                }
+            except (TypeError, ValueError):
+                continue
+    if corrected:
+        _save_auto_state_locked()
+
+
+def _ensure_auto_state_locked(now: float) -> None:
+    if not _auto_state_loaded:
+        _load_auto_state_locked(now)
+
+
+def _save_auto_state_locked() -> None:
+    """Persist the limiter. Caller holds `_lock`. Never raises."""
+    stamps: dict[str, dict[str, float]] = {}
+    for (slug, source), value in _automatic_at.items():
+        stamps.setdefault(slug, {})[source] = value
+    try:
+        _write(auto_state_path(), {"automatic_at": stamps, "daily": _automatic_daily})
+    except Exception:
+        log.debug("resolve journal: could not persist the automatic-pass limiter",
+                  exc_info=True)
 
 
 # -- rate limiting ---------------------------------------------------------
 
 def allow_automatic(project_name: Any, source: str,
                     min_interval: Optional[float] = None,
-                    clock: Callable[[], float] = time.monotonic) -> bool:
+                    clock: Callable[[], float] = time.time,
+                    max_per_day: Optional[int] = None) -> bool:
     """May an UNPROMPTED path rewrite this project again yet?
 
     First call for a (project, source) always wins; after that the pass is
-    refused until `min_interval` has passed. The refusal is silent to the
-    editor on purpose -- the condition that triggers it (clips still stored
-    under a local spelling) is either fixed by the pass that just ran or is
-    something no amount of repetition will fix, and a toast per poll is the
-    behaviour this limiter exists to stop.
+    refused until `min_interval` has passed, and refused for the rest of the
+    day once the project has had `max_per_day` of them. The refusal is silent
+    to the editor on purpose -- the condition that triggers it (clips still
+    stored under a local spelling) is either fixed by the pass that just ran
+    or is something no amount of repetition will fix, and a toast per poll is
+    the behaviour this limiter exists to stop. The DAILY cap does log a
+    WARNING, because by then it is a machine that needs a person.
+
+    The clock is wall clock (`time.time`), not monotonic: both bars are
+    persisted to auto_state_path() and survive a restart (RES-2, 2026-08-28),
+    and a monotonic stamp means nothing to the next process.
     """
     # Read off the module rather than defaulted in the signature: a default
     # argument binds at def time, so a caller (or a test) that changes
     # AUTOMATIC_MIN_INTERVAL_SECONDS would be silently ignored.
     if min_interval is None:
         min_interval = AUTOMATIC_MIN_INTERVAL_SECONDS
+    if max_per_day is None:
+        max_per_day = AUTOMATIC_MAX_PER_DAY
     try:
-        key = (project_slug(project_name), str(source or ""))
+        slug = project_slug(project_name)
+        key = (slug, str(source or ""))
         now = float(clock())
         with _lock:
+            _ensure_auto_state_locked(now)
             last = _automatic_at.get(key)
-            if last is not None and (now - last) < float(min_interval):
+            if last is not None and (now - min(last, now)) < float(min_interval):
+                return False
+            day = _day_key(now)
+            bucket = _automatic_daily.get(slug) or {}
+            count = int(bucket.get("count", 0)) if bucket.get("day") == day else 0
+            held = int(bucket.get("held", 0)) if bucket.get("day") == day else 0
+            if int(max_per_day) > 0 and count >= int(max_per_day):
+                _automatic_daily[slug] = {"day": day, "count": count, "held": held + 1}
+                _save_auto_state_locked()
+                log.warning(
+                    "resolve journal: %s has already had %d unprompted rewrites "
+                    "today, so this one is held (%d held so far) -- this looks "
+                    "like a configuration problem, tray -> Copy diagnostics",
+                    slug, count, held + 1,
+                )
                 return False
             _automatic_at[key] = now
+            _automatic_daily[slug] = {"day": day, "count": count + 1, "held": held}
+            _save_auto_state_locked()
         return True
     except Exception:
         # A broken limiter must not stop a relink that fixes Media Offline.
@@ -164,14 +309,16 @@ def allow_automatic(project_name: Any, source: str,
 
 def seconds_until_automatic(project_name: Any, source: str,
                             min_interval: Optional[float] = None,
-                            clock: Callable[[], float] = time.monotonic) -> float:
+                            clock: Callable[[], float] = time.time) -> float:
     """How long the automatic path is still barred for. 0.0 when it may run.
-    Read-only: unlike allow_automatic() this does NOT claim the slot."""
+    Read-only: unlike allow_automatic() this does NOT claim the slot, and it
+    does not answer for the DAILY cap (which is not a countdown)."""
     if min_interval is None:
         min_interval = AUTOMATIC_MIN_INTERVAL_SECONDS
     try:
         key = (project_slug(project_name), str(source or ""))
         with _lock:
+            _ensure_auto_state_locked(float(clock()))
             last = _automatic_at.get(key)
         if last is None:
             return 0.0

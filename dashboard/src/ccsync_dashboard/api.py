@@ -189,6 +189,11 @@ def _editor_view(
 ) -> dict[str, Any]:
     username = e["editor_username"]
     lane_rows = lanes_by_editor.get(username, []) if username else []
+    # UX-2 (resilience sweep 2026-08-28): when this editor's companion last
+    # reported ANYTHING. None for a Syncthing device with no companion row at
+    # all -- that is the `unmapped` case, not a stale one.
+    last_report_at = max(
+        (r["received_at"] for r in lane_rows if r["received_at"]), default=None)
     status = health.editor_status(
         completion=e["completion"],
         need_items=e["need_items"],
@@ -198,7 +203,9 @@ def _editor_view(
         syncthing_reachable=reachable,
         lanes=lane_rows,
         now=now,
+        last_report_at=last_report_at,
     )
+    _freshness, stale_reason = health.report_freshness(last_report_at, now)
     have_items = None
     if e["global_items"] is not None:
         have_items = max(e["global_items"] - e["need_items"], 0)
@@ -227,6 +234,10 @@ def _editor_view(
         "eta_seconds": eta_seconds,
         "updated_at": e["updated_at"],
         "status": status,
+        "last_report_at": last_report_at,
+        # Why the dot is not green, when the reason is silence rather than a
+        # number on the row. Rendered as the dot's tooltip.
+        "status_reason": stale_reason,
         "lanes": _lanes_view(lane_rows, now),
     }
 
@@ -754,11 +765,29 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
     result = []
     for entry in machines.values():
         key = (entry["editor_username"], entry["machine"])
-        entry["status"] = health.worst(l["chip"] for l in entry["lanes"])
+        # UX-2 (resilience sweep 2026-08-28): freshness is its own input, not
+        # a property of the lanes. A machine whose editor signed out, quit, or
+        # set it to WIRED TO THE SERVER stops reporting with its last lane
+        # states frozen mid-green, and `worst()` over those chips is green for
+        # ever. A machine with no lane rows at all (state row only) has no
+        # chips to be worst of, which is the same hole from the other side.
+        freshness, stale_reason = health.report_freshness(entry.get("received_at"), now)
+        entry["status"] = health.worst(
+            [l["chip"] for l in entry["lanes"]] + [freshness])
+        entry["status_reason"] = stale_reason
         entry["verified"] = verified.get(key, False)
         entry["transport"] = transport.get(key) or {}
         entry["guard"] = dict(guards.get(key) or {})
         entry["guard"]["resume_requested"] = key in pending_resumes
+        # SYS-4 / APP-13: the chip's own words, worked out here rather than in
+        # the template so the threshold is one testable number. Under a minute
+        # is NTP jitter and a laptop coming out of sleep; a minute is already
+        # twice the `--min-age 60s` lane B passes, and a slow clock makes that
+        # pass exclude every file on the NAS and exit 0 having done nothing.
+        skew = entry["guard"].get("clock_skew_seconds")
+        if skew is not None and abs(skew) >= db.CLOCK_SKEW_WARN_SECONDS:
+            entry["guard"]["clock_skew_abs"] = abs(skew)
+            entry["guard"]["clock_skew_dir"] = "AHEAD" if skew > 0 else "SLOW"
         entry["ingest"] = ingest.get(key) or {}
         entry["music_ingest"] = music_ingest.get(key) or {}
         entry["proxy"] = proxies.get(key) or {}
@@ -790,7 +819,20 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
     # /partials/fleet poll get the same ones.
     tripped = [e for e in result if (e.get("guard") or {}).get("breaker_tripped")]
     halted = [e for e in result if (e.get("guard") or {}).get("halt_active")]
+    # DASH-16: a computer must never leave this page just because a status
+    # table aged out. The `machines` registry row survives every prune, and it
+    # still carries the sync plan that is still being enforced for a machine
+    # nobody is watching -- so a machine past LOST_MACHINE_DAYS with no live
+    # row of its own gets a LOST row of its own instead of vanishing.
+    live = {(e["editor_username"], e["machine"]) for e in result}
+    lost = [
+        m for m in db.lost_machines(conn, now)
+        if (m["editor_username"], m["machine"]) not in live
+    ]
     return {"generated_at": now, "editors": result,
+            "lost_machines": lost,
+            # SYS-3: report sections this dashboard accepted and does not read.
+            "ignored_report_sections": db.ignored_report_sections(conn),
             "current_companion_version": current_version_for("windows"),
             "breaker_tripped": [
                 {"editor": e["editor_username"], "machine": e["machine"],
@@ -802,7 +844,15 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
                  "scope": (e.get("guard") or {}).get("halt_scope")}
                 for e in halted
             ],
-            "fleet_halt": db.get_fleet_halt(conn)}
+            "fleet_halt": db.get_fleet_halt(conn),
+            # THE COLLECTOR'S OWN BRAKES + per-kind notes (DASH-3 / DASH-4 /
+            # DASH-14, resilience sweep 2026-08-28). Here rather than in a
+            # second builder because both the fleet page and its every-15s
+            # /partials/fleet poll render the same partial from this one dict,
+            # and a frozen share set is a fleet alarm in exactly the sense
+            # item 9's banners are: nothing else on any page can show it.
+            # Redacted for non-admins in _scope_editors_view (device ids).
+            "collector": db.collector_health(conn)}
 
 
 # ------------------------------------------------------- scoping fleet reads
@@ -896,6 +946,22 @@ def _scope_editors_view(view: dict[str, Any], scope: auth.Scope) -> dict[str, An
     for key in ("breaker_tripped", "halted"):
         view[key] = [m for m in view.get(key, [])
                      if _scope_shows(scope, str(m.get("editor") or ""))]
+    # The collector health block names Syncthing DEVICE IDS (the pending
+    # enforce diff) and is an admin diagnostic, so it goes entirely
+    # (DASH-3, resilience sweep 2026-08-28). Not merely trimmed: there is no
+    # per-editor half of it that an editor needs.
+    view.pop("collector", None)
+    # The LOST rows (DASH-16) name editors, machines and the plan each one
+    # still holds, so they follow the same rule as the live rows beside them.
+    view["lost_machines"] = [
+        m for m in view.get("lost_machines") or []
+        if _scope_shows(scope, str(m.get("editor_username") or ""))
+    ]
+    # SYS-3's ignored-section record names machines and is an admin
+    # diagnostic about this dashboard's own schema, not about anyone's
+    # footage: it goes entirely rather than being trimmed.
+    if not scope.admin:
+        view.pop("ignored_report_sections", None)
     return view
 
 
@@ -987,7 +1053,23 @@ def api_health(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -
             kind: {"finished_at": run["finished_at"], "ok": bool(run["ok"]), "error": run["error"]}
             for kind, run in collector["kinds"].items()
         },
+        # THE BRAKES THAT HAVE FIRED (DASH-3 / DASH-4, resilience sweep
+        # 2026-08-28). A refused enforce pass and a refused deactivation pass
+        # are both states in which every cycle above still reports ok while
+        # nothing is being applied, so they belong in the one route an
+        # operator (and the container healthcheck's reader) already looks at.
+        # Best-effort: a health route that cannot answer is worse than one
+        # that answers without this block.
+        "collector_alarms": _collector_alarms_block(conn),
     }
+
+
+def _collector_alarms_block(conn: sqlite3.Connection) -> dict[str, Any]:
+    try:
+        return db.collector_alarms(conn)
+    except Exception:  # noqa: BLE001
+        log.exception("could not read the collector alarm state")
+        return {}
 
 
 # How often a failed live-myID read is retried. The site route is open, so an
@@ -1341,6 +1423,9 @@ def build_queue_view(conn: sqlite3.Connection, editor: str, now: str | None = No
         root_source = mapping["source"] if mapping else None
 
     return {"editor": editor, "generated_at": now, "queue": items,
+            # The computers a person-level untick from this panel would take
+            # the project off, named in the confirm (DASH-8, 2026-08-28).
+            "machines": db.machines_of(conn, editor),
             "available": available, "current_project": current,
             "resolve_project": resolve_project,
             "root_slug": root_slug,
@@ -1737,6 +1822,33 @@ def api_get_selection(
     return _selection_view(conn, editor, machine=_machine_arg(machine))
 
 
+def audit_plan_change(
+    conn: sqlite3.Connection, actor: str, action: str, editor: str, slug: str,
+    target: str | None, before: list[dict[str, str]], after: list[dict[str, str]],
+) -> int:
+    """Record one tick or untick in the fleet audit ledger (SYS-11 / DASH-8,
+    resilience sweep 2026-08-28), and answer 0 for a change that changed
+    nothing.
+
+    BOTH placements are stored, not the intent: the person-level untick
+    removes rows from every computer that person owns, each possibly in a
+    different mode, and "put it back" is only answerable from what was there.
+    That makes [ UNDO ] a restore of `before`, and it makes the same row
+    readable as history a year later.
+
+    Shared by the JSON API and the htmx toggle deliberately: a ledger the
+    second door can walk past is worse than no ledger, because it reads as
+    "nobody did that".
+    """
+    if before == after:
+        return 0
+    return db.audit(conn, actor, action, slug, {
+        "editor": editor, "slug": slug, "machine": target or "",
+        "scope": "machine" if target else "person",
+        "before": before, "after": after,
+    })
+
+
 def _sync_mode_arg(mode: str | None) -> str:
     """The `?mode=` query parameter of a tick. Absent means `full` -- what
     every tick meant before 2026-08-27, and what an old client or a
@@ -1802,6 +1914,7 @@ def api_tick(
                    "and syncs nothing, so projects cannot be ticked for it",
         )
     now = db.utcnow_iso()
+    before = db.selection_placements(conn, editor, slug, machine=target)
     if target is None:
         # No machine named: every computer this person has, which is what the
         # person-level control in the grid means and what an old client (or a
@@ -1812,6 +1925,8 @@ def api_tick(
     else:
         added = db.add_selection(conn, editor, slug, created_by=user, now=now,
                                  machine=target, sync_mode=sync_mode)
+    audit_plan_change(conn, user, db.AUDIT_TICK, editor, slug, target, before,
+                      db.selection_placements(conn, editor, slug, machine=target))
     conn.commit()
     _nudge_collector(request)
     view = _selection_view(conn, editor, machine=target)
@@ -1825,13 +1940,20 @@ def api_untick(
     conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict[str, Any]:
     editor = editor.strip().lower()
-    _require_selection_untick(request, editor, conn)
+    # The actor the audit ledger needs, and the helper already knows it:
+    # a session admin, the editor themself, or "companion:<editor>" for the
+    # tray's own untick-before-delete (SYS-11, 2026-08-28).
+    actor = _require_selection_untick(request, editor, conn)
     target = _machine_arg(machine)
     # No machine named removes it EVERYWHERE, including the unassigned
     # bucket: under-sharing is the safe direction for a removal, and an old
     # client asking for "stop syncing this" must not leave it running on one
     # of the person's computers.
+    before = db.selection_placements(conn, editor, slug, machine=target)
     removed = db.remove_selection(conn, editor, slug, machine=target)
+    audit_plan_change(conn, actor, db.AUDIT_UNTICK, editor,
+                      slug, target, before,
+                      db.selection_placements(conn, editor, slug, machine=target))
     conn.commit()
     _nudge_collector(request)
     view = _selection_view(conn, editor, machine=target)
@@ -3297,6 +3419,9 @@ def delete_user_everywhere(request: Request, conn: sqlite3.Connection, username:
         result["warnings"].extend(result["account"].get("warnings") or [])
 
     result["fleet"] = db.forget_editor(conn, username)
+    db.audit(conn, admin, "user.delete", username,
+             {"machines": result["fleet"]["machines"],
+              "devices_removed": len(result["devices_removed"])})
     conn.commit()
     purged = _purge_user_credentials(request, conn, username, by=admin)
     result.update(purged)
@@ -3344,6 +3469,9 @@ def forget_machine_everywhere(request: Request, conn: sqlite3.Connection, editor
     for entry in removed:
         db.forget_device(conn, entry["device_id"])
     forgotten = db.forget_machine(conn, editor, machine)
+    db.audit(conn, admin, "machine.forget", machine,
+             {"editor": editor, "machine": machine,
+              "deleted": (forgotten or {}).get("deleted", {})})
     conn.commit()
     log.warning("admin %r removed computer %s/%s (%d syncthing device(s) removed, plan rows %d)",
                 admin, editor, machine, len(removed),
@@ -3759,7 +3887,7 @@ def api_admin_approve_device(
     payload: ApproveDeviceIn, request: Request,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> dict[str, Any]:
-    _require_admin(request)
+    admin = _require_admin(request)
     settings = request.app.state.settings
     if not settings.syncthing_url:
         raise HTTPException(status_code=503, detail="SYNCTHING_GUI_URL is not configured")
@@ -3784,6 +3912,8 @@ def api_admin_approve_device(
     # this username is a real editor account -- record it, so the enforce
     # cycle is allowed to manage the device's shares (B16).
     db.record_known_editor(conn, username, "admin")
+    db.audit(conn, admin, "device.approve", username,
+             {"editor": username, "device_id": device_id})
     conn.commit()
     return {"ok": True, "view": build_admin_users_view(settings, conn)}
 
@@ -4208,6 +4338,11 @@ async def api_publish_package(
         )
     except package_store.PackageStoreError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    db.audit(conn, user, "package.publish", version,
+             {"kind": kind, "platform": platform, "version": version,
+              "make_current": bool(make_current), "signed_binary": bool(signed_binary),
+              "min_version": min_version})
+    conn.commit()
     return {"ok": True, "view": build_packages_view(conn, settings)}
 
 
@@ -4219,11 +4354,13 @@ def api_set_current_package(
 ) -> dict[str, Any]:
     """Set (or roll back) which version the fleet is offered (kind=companion)
     or which installer the download serves (kind=onboard)."""
-    _require_admin(request)
+    admin = _require_admin(request)
     platform = platform.strip().lower()
     kind = kind.strip().lower()
     if not db.set_current_package(conn, platform, version, kind):
         raise HTTPException(status_code=404, detail=f"no published {platform} {kind} package {version}")
+    db.audit(conn, admin, "package.make_current", version,
+             {"kind": kind, "platform": platform, "version": version})
     conn.commit()
     return {"ok": True, "view": build_packages_view(conn, request.app.state.settings)}
 
@@ -4234,7 +4371,7 @@ def api_delete_package(
     kind: str = "companion",
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> dict[str, Any]:
-    _require_admin(request)
+    admin = _require_admin(request)
     settings = request.app.state.settings
     platform = platform.strip().lower()
     kind = kind.strip().lower()
@@ -4247,6 +4384,8 @@ def api_delete_package(
             detail="cannot delete the current version -- make another version current first",
         )
     db.delete_companion_package(conn, platform, version, kind)
+    db.audit(conn, admin, "package.delete", version,
+             {"kind": kind, "platform": platform, "version": version})
     conn.commit()
     _unlink_package_file(settings, row)
     return {"ok": True, "view": build_packages_view(conn, settings)}
@@ -4596,6 +4735,57 @@ def flatten_transport_health(
     return flat
 
 
+def _bound_to_field_caps(cls, data):
+    """Apply a model's own max_length/ge/le to the RAW dict, truncating.
+
+    `max_length` on a plain Field RAISES, and a raising validator fires
+    before the route body -- one 300-character VRAM refusal would have taken
+    the whole machine off the fleet grid (B6's lesson). So the caps are
+    applied here instead: strings truncated, sequences sliced, numbers
+    clamped. Shared by _BoundedSectionIn and _ReportSectionIn (they differ
+    only in model_config).
+    """
+    if not isinstance(data, dict):
+        return data
+    out = dict(data)
+    for name, field in cls.model_fields.items():
+        if name not in out:
+            continue
+        value = out[name]
+        for meta in field.metadata:
+            cap = getattr(meta, "max_length", None)
+            if cap is not None:
+                if isinstance(value, (str, list)):
+                    value = value[:cap]
+                elif isinstance(value, dict) and len(value) > cap:
+                    value = dict(list(value.items())[:cap])
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                low, high = getattr(meta, "ge", None), getattr(meta, "le", None)
+                if low is not None and value < low:
+                    value = low
+                if high is not None and value > high:
+                    value = high
+        out[name] = value
+    return out
+
+
+class _BoundedSectionIn(BaseModel):
+    """A report sub-section that TRUNCATES rather than rejects.
+
+    `sync_guard` is not one of ReportIn's tolerant sections (a bad one there
+    still 422s the whole report), and it is where the alarms live -- so a
+    supervisor `last_error` carrying a 4 KB traceback must not be able to
+    take the machine off the fleet grid it is trying to raise an alarm on
+    (SYS-3, resilience sweep 2026-08-28).
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _bound_rather_than_reject(cls, data):
+        return _bound_to_field_caps(cls, data)
+
+
 class BreakerIn(BaseModel):
     """companion sync/lane_guard.LaneBBreaker.report() -- lane B's circuit
     breaker (COMMERCIAL_READINESS.md item 9, 2026-08-17). `tripped` means
@@ -4644,6 +4834,69 @@ class RemovalOverrideIn(BaseModel):
     reasons: list[str] | None = Field(default=None, max_length=8)
 
 
+# ---- the sync_guard sections this dashboard used to drop ----------------
+#
+# SYS-3 / SYNC-8 (resilience sweep 2026-08-28). Every model below describes
+# something the companion has been computing and sending for weeks that
+# `extra="ignore"` threw away at the model boundary with no log line. The
+# companion's own source said so out loud about the first one: "THE DASHBOARD
+# DOES NOT READ THIS YET ... extra='ignore' drops it (BROLL-ING-1 is what
+# that costs when nobody says so out loud)."
+
+
+class SyncthingSupervisorIn(_BoundedSectionIn):
+    """companion sync/syncthing_supervisor.SyncthingSupervisor.report().
+
+    EMPTY WHILE HEALTHY by that method's design: an absent section is how
+    "the sync engine is up" is spelled, and a zeroed one would need a second
+    field to say the same thing. What this carries that lane C's own state
+    cannot is DURATION and ATTEMPTS -- the difference between "he rebooted"
+    and "that machine has needed a human since Tuesday" (SYNC-8)."""
+    down_since: str | None = Field(default=None, max_length=64)
+    attempts: int | None = Field(default=None, ge=0)
+    last_error: str | None = Field(default=None, max_length=1000)
+    last_attempt: str | None = Field(default=None, max_length=64)
+    # Tri-state. False means the engine is down AND automatic restarts are off
+    # or suppressed on that machine, i.e. nothing is trying; None means this
+    # companion is too old to say, which is not the same answer.
+    supervising: bool | None = None
+
+
+class ReporterHealthIn(_BoundedSectionIn):
+    """The companion's own view of whether its reports are landing (APP-1).
+
+    Only ever seen on a report that DID land, so it is a RECOVERY record: a
+    streak that has just ended, and the last status the streak had. A machine
+    still inside a streak is simply absent from the grid, which is the half
+    of APP-1 that only silence can tell you about."""
+    last_success_at: str | None = Field(default=None, max_length=64)
+    # An HTTP code or an exception class name -- "401" (a credential a human
+    # must replace) reads nothing like "TimeoutError" (a NAS rebooting).
+    last_status: str | None = Field(default=None, max_length=64)
+    consecutive_failures: int | None = Field(default=None, ge=0)
+
+
+class CrashesIn(_BoundedSectionIn):
+    """~/.ccsync/crashes -- the tracebacks threading.excepthook wrote (APP-6).
+
+    A count, not the files: the point is that an admin can see a machine
+    where a background task died, on a grid, without asking for a
+    diagnostics bundle. Non-zero here with three green lanes is the exact
+    shape crash_report.py's own docstring names as the failure to fix."""
+    count: int | None = Field(default=None, ge=0)
+    newest: str | None = Field(default=None, max_length=256)
+
+
+class SyncConflictsIn(_BoundedSectionIn):
+    """Syncthing's `.sync-conflict-*` files in this machine's tree.
+
+    Two editors saving one project file is a normal Syncthing outcome and a
+    silent one: the loser's work is renamed, not lost, and nothing tells
+    anybody. `paths` is a sample for the tooltip, never the whole set."""
+    count: int | None = Field(default=None, ge=0)
+    paths: list[str] | None = Field(default=None, max_length=32)
+
+
 class SyncGuardIn(BaseModel):
     """The companion's `sync_guard` section (item 9, 2026-08-17).
 
@@ -4653,11 +4906,43 @@ class SyncGuardIn(BaseModel):
     here -- an OLDER companion sends none of this, which reads as "no alarm",
     which is right: it has no breaker to trip.
     """
+    # extra='allow', not 'ignore' (SYS-3): an undeclared sub-key here is what
+    # lost syncthing_supervisor for weeks. Accepting it is what lets
+    # api_report NAME it in a log line and on the fleet page instead of a
+    # human finding it in a code read months later.
+    model_config = ConfigDict(extra="allow")
+
     lane_b_breaker: BreakerIn | None = None
     trash: TrashIn | None = None
     halt: HaltIn | None = None
     skipped_exists: SkippedExistsIn | None = None
     removal_overrides: list[RemovalOverrideIn] | None = Field(default=None, max_length=8)
+    # Sent since companion 0.9.x and dropped until v30 (SYNC-8).
+    syncthing_supervisor: SyncthingSupervisorIn | None = None
+    reporter: ReporterHealthIn | None = None
+    crashes: CrashesIn | None = None
+    # The companion's OWN measurement of its clock against the server's
+    # (APP-13). Declared so it is not reported as an ignored section; the
+    # value the grid chips is the one THIS server computes from `reported_at`
+    # against its own clock (db.clamp_reported_at), because that one needs no
+    # companion release and cannot be wrong about which clock it trusts.
+    clock_skew_seconds: float | None = None
+    # Syncthing folders on that machine with no .stignore filter written yet:
+    # every one of them is a folder that will carry video both ways.
+    folders_unfiltered: list[str] | None = Field(default=None, max_length=64)
+    sync_conflicts: SyncConflictsIn | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _bound_rather_than_reject(cls, data):
+        """The caps on THIS model truncate too (SYS-3).
+
+        sync_guard is not one of ReportIn's tolerant sections, so a 65th
+        unfiltered folder or a 9th removal override would have 422'd the whole
+        report -- taking the lanes, the transfers and the presence data with
+        it, and silencing the very alarms this section exists to carry (B6's
+        lesson, applied to the alarm channel)."""
+        return _bound_to_field_caps(cls, data)
 
 
 def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] | None:
@@ -4672,6 +4957,10 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
         return None
     breaker = guard.lane_b_breaker
     halt = guard.halt
+    sup = guard.syncthing_supervisor
+    crashes = guard.crashes
+    conflicts = guard.sync_conflicts
+    folders = guard.folders_unfiltered
     return {
         "at": now,
         "breaker_tripped": int(bool(breaker.tripped)) if breaker is not None else 0,
@@ -4685,6 +4974,27 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
         "skipped_exists": (
             guard.skipped_exists.count if guard.skipped_exists is not None else None
         ),
+        # v30 (SYS-3 / SYNC-8 / APP-6, resilience sweep 2026-08-28). Every one
+        # of these is None when the section was absent, and the upsert writes
+        # them from any guard-bearing report -- an absent supervisor section
+        # is how the companion spells "the sync engine is up", so None has to
+        # be able to CLEAR yesterday's incident rather than preserve it.
+        "supervisor_down_since": sup.down_since if sup is not None else None,
+        "supervisor_attempts": sup.attempts if sup is not None else None,
+        "supervisor_last_error": sup.last_error if sup is not None else None,
+        "supervisor_supervising": (
+            None if sup is None or sup.supervising is None
+            else int(bool(sup.supervising))
+        ),
+        "crash_count": crashes.count if crashes is not None else None,
+        "crash_newest": crashes.newest if crashes is not None else None,
+        # A COUNT plus a sample of names: the grid needs "this machine has
+        # unfiltered folders" and a tooltip, not the list in a column.
+        "folders_unfiltered": None if folders is None else len(folders),
+        "folders_unfiltered_names": (
+            ", ".join(folders[:10]) if folders else None
+        ),
+        "sync_conflicts": conflicts.count if conflicts is not None else None,
     }
 
 
@@ -4706,46 +5016,15 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
 # anyone else on the fleet can see that footage at all.
 
 
-class _ReportSectionIn(BaseModel):
-    """Base for those sections: extras ignored, everything else BOUNDED.
-
-    `max_length` on a plain Field RAISES, and a raising validator fires
-    before the route body -- one 300-character VRAM refusal would have taken
-    the whole machine off the fleet grid (B6's lesson). Here the caps are
-    applied to the raw dict instead: strings truncated, sequences sliced,
-    numbers clamped to their ge/le.
+class _ReportSectionIn(_BoundedSectionIn):
+    """Base for those sections: extras ignored, everything else BOUNDED by
+    _bound_to_field_caps (inherited).
     """
 
     # protected_namespaces: `model_download_percent` is a field name from the
     # companion's payload, not a pydantic attribute; without this, importing
     # this module warns about every `model_*` field.
     model_config = ConfigDict(extra="ignore", protected_namespaces=())
-
-    @model_validator(mode="before")
-    @classmethod
-    def _bound_rather_than_reject(cls, data):
-        if not isinstance(data, dict):
-            return data
-        out = dict(data)
-        for name, field in cls.model_fields.items():
-            if name not in out:
-                continue
-            value = out[name]
-            for meta in field.metadata:
-                cap = getattr(meta, "max_length", None)
-                if cap is not None:
-                    if isinstance(value, (str, list)):
-                        value = value[:cap]
-                    elif isinstance(value, dict) and len(value) > cap:
-                        value = dict(list(value.items())[:cap])
-                if isinstance(value, (int, float)) and not isinstance(value, bool):
-                    low, high = getattr(meta, "ge", None), getattr(meta, "le", None)
-                    if low is not None and value < low:
-                        value = low
-                    if high is not None and value > high:
-                        value = high
-            out[name] = value
-        return out
 
 
 class ProxyCoverageProjectIn(_ReportSectionIn):
@@ -5057,7 +5336,59 @@ class FileMoveResultIn(BaseModel):
     detail: str | None = Field(default=None, max_length=512)
 
 
+# SYS-3 (resilience sweep 2026-08-28): one WARNING per (machine, section) per
+# UTC day. A 30 s report cadence means a single undeclared section would
+# otherwise write 2,880 identical lines a day per machine and roll the log
+# that carries everything else away. The durable record is the `meta` row
+# (db.record_ignored_report_sections) -- this dict is only rate limiting, so
+# losing it on a restart costs one extra log line, and it is bounded because
+# `machine` is a client-chosen string on an unthrottled endpoint.
+_IGNORED_SECTION_LOGGED: dict[tuple[str, str], str] = {}
+_IGNORED_SECTION_LOG_CAP = 500
+
+
+def _ignored_sections_to_log(machine: str, keys: list[str], day: str) -> list[str]:
+    """Which of `keys` has not been logged for `machine` on `day` yet."""
+    if len(_IGNORED_SECTION_LOGGED) > _IGNORED_SECTION_LOG_CAP:
+        _IGNORED_SECTION_LOGGED.clear()
+    fresh = []
+    for key in keys:
+        if _IGNORED_SECTION_LOGGED.get((machine, key)) != day:
+            _IGNORED_SECTION_LOGGED[(machine, key)] = day
+            fresh.append(key)
+    return fresh
+
+
+def undeclared_report_sections(payload: "ReportIn") -> list[str]:
+    """Top-level and sync_guard keys this dashboard accepted but does not read.
+
+    sync_guard sub-keys are prefixed so the two namespaces cannot collide in
+    the record or the banner. `truncated` is excluded: the validator writes it
+    onto the raw dict itself, so a client that also sent it is not telling us
+    anything (and B6 already reports truncation loudly on its own).
+    """
+    keys = [k for k in sorted(payload.model_extra or {}) if k != "truncated"]
+    guard = payload.sync_guard
+    if guard is not None:
+        keys += [f"sync_guard.{k}" for k in sorted(guard.model_extra or {})]
+    return keys
+
+
 class ReportIn(BaseModel):
+    # extra='allow' (SYS-3, resilience sweep 2026-08-28). The default,
+    # 'ignore', has now silently thrown away companion telemetry three times:
+    # transport_health for months (B17), proxy_coverage and youtube_import
+    # for a year each ("have ridden every heavy tick since their features
+    # shipped and reached nobody"), and sync_guard.syncthing_supervisor
+    # (SYNC-8). Each was found by a human reading the code; none by a signal.
+    # Accepting the extras is what lets api_report name them in a log line
+    # and on the fleet page, so the FOURTH one announces itself.
+    #
+    # Nothing reads model_extra except that reporting: an undeclared key is
+    # still not stored, still not rendered as data, and still cannot reach a
+    # table. It is bounded by the request-size limit like the rest of the body.
+    model_config = ConfigDict(extra="allow")
+
     editor_name: str = Field(min_length=1, max_length=64)
     machine: str = Field(min_length=1, max_length=128)
     # WP1 (MULTI_MACHINE_PLAN.md): the computer's own identity, minted once
@@ -5289,6 +5620,28 @@ def api_report(
             ", ".join(f"{k}: {v} dropped" for k, v in sorted(payload.truncated.items())),
         )
 
+    # SYS-3: a section this dashboard does not read is now LOUD. The report is
+    # accepted either way -- an undeclared key must never be a reason a
+    # machine drops off the fleet grid -- but "the companion computed this and
+    # we threw it away" has to be visible somewhere, because three times now
+    # it has only been visible in the source.
+    ignored_sections = undeclared_report_sections(payload)
+    if ignored_sections:
+        for key in _ignored_sections_to_log(
+                f"{editor}/{machine}", ignored_sections, received_at[:10]):
+            log.warning(
+                "report from %s/%s carries section %r that this dashboard does not "
+                "read -- the report was accepted and that section was discarded. "
+                "Declare it on ReportIn/SyncGuardIn (SYS-3).",
+                editor, machine, key,
+            )
+        try:
+            db.record_ignored_report_sections(
+                conn, received_at, f"{editor}/{machine}", ignored_sections)
+        except Exception as e:  # noqa: BLE001 - a banner must never 500 a report
+            log.warning("could not record the ignored report sections (%s: %s)",
+                        type(e).__name__, e)
+
     for lane in payload.lanes:
         db.upsert_lane_report(
             conn,
@@ -5376,6 +5729,10 @@ def api_report(
         ingest=flatten_broll_ingest(payload.broll_ingest, received_at),
         music=flatten_music_ingest(payload.music_ingest, received_at),
         proxy=flatten_proxy_coverage(payload.proxy_coverage, received_at),
+        # SYS-4: the companion's OWN wall clock, kept apart from ours and
+        # clamped before it is stored. Nothing anywhere measured skew, and a
+        # slow clock switches lane B off completely and silently.
+        client_reported_at=payload.reported_at,
     )
     # An overridden "Remove from this machine" destroyed a local copy the
     # gate said was not caught up. There is nowhere on the grid for a

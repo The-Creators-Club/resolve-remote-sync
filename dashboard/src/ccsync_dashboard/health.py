@@ -20,6 +20,21 @@ OFFLINE_RED_SECONDS = 15 * 60
 STALE_COMPLETION_SECONDS = 5 * 60
 STALE_REPORT_SECONDS = 5 * 60
 
+# UX-2 (resilience sweep 2026-08-28). There are three one-click ways for an
+# editor to stop syncing for ever -- Settings -> WIRED TO THE SERVER (which
+# writes sync_enabled=False), SIGN OUT (which stops the lanes AND the
+# reporting, because editor_identity() then returns None) and Quit -- and an
+# editor who was CAUGHT UP when they clicked has behind=False, so neither the
+# offline branch nor the stale-completion branch below fires. The dot the
+# owner scans stayed GREEN for a machine that had been dark for a week.
+#
+# So freshness is its own rule, independent of `behind`: a companion reports
+# every 30 s, so 15 minutes of silence is already three times the staleness
+# the lane chips redden at, and six hours is a machine nobody is going to
+# notice any other way.
+STALE_EDITOR_AMBER_SECONDS = 3 * STALE_REPORT_SECONDS
+STALE_EDITOR_RED_SECONDS = 6 * 60 * 60
+
 
 def worst(statuses: Iterable[str]) -> str:
     result = GREEN
@@ -59,6 +74,28 @@ def is_proxy_only(have: Mapping[str, int]) -> bool:
     return have.get("n_originals", 0) == 0 and have.get("n_proxies", 0) > 0
 
 
+def report_freshness(last_report_at: str | None, now: str) -> tuple[str, str | None]:
+    """(colour, reason) for how long ago this machine's companion last reported.
+
+    `last_report_at` None means "this device has no companion row at all",
+    which is NOT an amber machine -- it is an unmapped Syncthing device, and
+    the grid says so with its own `unmapped` flag. Anything else is measured:
+    a timestamp that will not parse comes back AMBER with the reason naming
+    it, never green (UX-2, resilience sweep 2026-08-28).
+    """
+    if last_report_at is None:
+        return GREEN, None
+    try:
+        age = age_seconds(last_report_at, now)
+    except (ValueError, TypeError):
+        return AMBER, "the last report time on record cannot be read"
+    if age >= STALE_EDITOR_RED_SECONDS:
+        return RED, f"no report since {last_report_at}"
+    if age >= STALE_EDITOR_AMBER_SECONDS:
+        return AMBER, f"no report since {last_report_at}"
+    return GREEN, None
+
+
 def editor_status(
     *,
     completion: float | None,
@@ -69,14 +106,24 @@ def editor_status(
     syncthing_reachable: bool,
     lanes: Iterable[Mapping[str, Any]] = (),
     now: str,
+    last_report_at: str | None = None,
 ) -> str:
     """Status of one editor device within one project.
 
     `lanes` are this editor's lane_report_current rows (any project -- lane
     A/B state is per-editor, not per-project).
+
+    `last_report_at` is when that companion last reported at all. It is read
+    INDEPENDENTLY of `behind` (UX-2): an editor who was caught up when they
+    signed out, quit, or set the machine to WIRED TO THE SERVER is behind
+    nothing and connected to nothing, and every other branch here says green.
     """
     lane_states = [l["state"] for l in lanes]
     if "error" in lane_states:
+        return RED
+
+    freshness, _reason = report_freshness(last_report_at, now)
+    if freshness == RED:
         return RED
 
     behind = bool(need_items) or (completion is not None and completion < 100)
@@ -90,7 +137,7 @@ def editor_status(
     ):
         return RED
 
-    if behind or "syncing" in lane_states:
+    if behind or "syncing" in lane_states or freshness == AMBER:
         return AMBER
     return GREEN
 

@@ -6234,3 +6234,81 @@ def test_the_non_canonical_filter_keeps_a_uid_only_clip_and_drops_a_bare_one(tmp
 
     assert [i["file_path"] for i in app._canon_relink_pending] == [
         library_item["file_path"]]
+
+
+# -- APP-1 / APP-6 / APP-13 (resilience sweep 2026-08-28) -------------------
+# The three states that were happening on the machine and visible nowhere on
+# it: the dashboard rejecting its reports, a crashed background thread, and a
+# clock hours out of true.
+
+
+def test_sync_guard_carries_the_reporter_health_record(tmp_path):
+    app = _make_app(tmp_path)
+    health = app.sync_guard()["reporter"]
+    assert set(health) == {"last_success_at", "last_status", "consecutive_failures"}
+    assert health["consecutive_failures"] == 0
+
+
+def test_sync_guard_omits_skew_and_crashes_until_there_are_any(tmp_path):
+    """"Could not check" must never render as "fine": an absent key is how
+    "no reading yet" is spelled, and the dashboard reads it that way."""
+    guard = _make_app(tmp_path).sync_guard()
+    assert "clock_skew_seconds" not in guard
+    assert "crashes" not in guard
+
+
+def test_sync_guard_reports_a_measured_skew_and_a_crash(tmp_path):
+    from ccsync_companion import crash_report
+
+    app = _make_app(tmp_path)
+    app.reporter.clock_skew_seconds = -1234.0
+    directory = crash_report.crash_dir(app.config)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "20260828T090000+0000-lane-b.json").write_text("{}", encoding="utf-8")
+    crash_report.invalidate_summary()
+    guard = app.sync_guard()
+    assert guard["clock_skew_seconds"] == -1234.0
+    assert guard["crashes"]["count"] == 1
+    assert guard["crashes"]["newest"] == "20260828T090000+0000-lane-b.json"
+
+
+def test_a_broken_reporter_health_never_takes_the_guard_down(tmp_path):
+    app = _make_app(tmp_path)
+
+    def boom():
+        raise RuntimeError("on fire")
+
+    app.reporter.health = boom
+    guard = app.sync_guard()          # must not raise
+    assert "reporter" not in guard
+    assert "halt" in guard
+
+
+def test_build_diagnostics_names_the_last_dashboard_report_and_any_crash(tmp_path):
+    from ccsync_companion import crash_report
+
+    app = _make_app(tmp_path)
+    directory = crash_report.crash_dir(app.config)
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "20260828T090000+0000-ccsync-sequencer.json").write_text(
+        '{"when": "2026-08-28T09:00:00+00:00", "thread": "ccsync-sequencer",'
+        ' "exception": {"type": "TclError"}}', encoding="utf-8")
+    crash_report.invalidate_summary()
+    text = app.build_diagnostics()
+    assert "last dashboard report" in text
+    assert "last ACCEPTED: NEVER" in text
+    assert "not measured yet" in text
+    assert "background task failures" in text
+    assert "TclError" in text
+    assert "ccsync-sequencer" in text
+
+
+def test_the_expired_signin_toast_blames_the_clock_when_the_clock_is_wrong(tmp_path):
+    app = _make_app(tmp_path)
+    assert "has expired" in app._identity_expired_text()
+
+    app.reporter.clock_skew_seconds = -3 * 3600
+    text = app._identity_expired_text()
+    assert "3 hours behind" in text
+    assert "Fix the clock" in text
+    assert "\u2014" not in text

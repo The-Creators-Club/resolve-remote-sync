@@ -3,6 +3,7 @@ import os
 import sqlite3
 import threading
 import time
+import unicodedata
 
 import numpy as np
 import pytest
@@ -351,3 +352,53 @@ def test_load_matrix_shapes(seeded_db):
     assert wmat.shape[0] == len(tids) == 8
     assert db.load_debias(con).shape == (1, mat.shape[1])
     con.close()
+
+
+# --- MEDIA-21: a Mac's filenames arrive decomposed ----------------------------
+
+# One name, two byte strings: NFC is what the NAS and Windows hold, NFD what
+# macOS listdir hands a browser (docs/GOTCHAS.md section 17, CR-90). Built
+# rather than typed, so no editor's own normalisation can quietly make this
+# fixture a pair of identical strings.
+_RAW = 'Matej Šimalčík - Theme.wav'
+NFC_NAME = unicodedata.normalize('NFC', _RAW)
+NFD_NAME = unicodedata.normalize('NFD', _RAW)
+
+
+def test_a_decomposed_upload_name_is_stored_normalised():
+    """MEDIA-21, 2026-08-28. safe_upload_name is where a library name is
+    MINTED, so it is where the two spellings have to become one: everything
+    downstream (allocate_name's reservations, _taken_on_disk, mark_uploaded's
+    stat) compares against what it returns."""
+    assert NFC_NAME != NFD_NAME, 'the fixture pair is not actually two strings'
+    assert unicodedata.is_normalized('NFC', db.safe_upload_name(NFD_NAME))
+    assert db.safe_upload_name(NFD_NAME) == db.safe_upload_name(NFC_NAME) == NFC_NAME
+    # The traversal and forbidden-character rules still hold on a decomposed
+    # name: normalising is the last step, not a replacement for them.
+    assert db.safe_upload_name('..\\..\\' + NFD_NAME) == NFC_NAME
+    assert db.safe_upload_name('') == 'untitled'
+
+
+def test_the_duplicate_key_is_the_same_in_both_spellings():
+    """The strip to [a-z0-9] deletes a precomposed accented letter outright but
+    leaves the bare ASCII letter of its decomposed spelling behind, so the two
+    spellings keyed differently -- and find_reencode, which exists to catch a
+    re-encode no content hash can see, missed it."""
+    assert db.norm_stem(NFD_NAME) == db.norm_stem(NFC_NAME)
+    assert db.norm_stem(NFD_NAME)
+
+
+def test_find_reencode_matches_a_track_held_under_the_other_spelling(tmp_path):
+    con = db.connect(tmp_path / 'nfd.db')
+    db.init(con)
+    try:
+        con.execute('INSERT INTO tracks(id,rel_path,filename,duration,embedding,dim) '
+                    'VALUES(1,?,?,120.0,?,4)',
+                    (NFC_NAME, NFC_NAME, db.to_blob([0.5] * 4)))
+        con.commit()
+        # A Mac drops an .ogg re-encode of the track already held: another
+        # extension, not one byte in common, the same name in the other
+        # spelling.
+        assert db.find_reencode(con, NFD_NAME.replace('.wav', '.ogg'), 120.4) == NFC_NAME
+    finally:
+        con.close()

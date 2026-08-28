@@ -835,7 +835,78 @@ _SWEEPABLE = ('.part', '.ytdl', '.temp')
 # `[id].<ext>`, so its stem ends in `[id]`. Identical to the local executor's
 # ytdl_executor._INTERMEDIATE_STEM_RE, deliberately -- both executors write
 # into one canonical tree and must leave the same things behind in it.
-_INTERMEDIATE_STEM = re.compile(r'\.(f\d+|temp)$')
+#
+# `.editready` joined them in YT-6 (2026-08-28), which is what the note above
+# _SWEEPABLE was waiting for: downloader._swap_in's fallback now delivers under
+# `converted_name` (the marker before the id bracket, so the stem still ends in
+# `[id]`), so `.editready` is only ever ffmpeg's half-written output. A
+# truncated one from a container kill used to be swept by nothing, disowned by
+# nothing, and still matched lane A's `+ *.mp4`.
+#
+# `.original` is deliberately NOT here. It is a whole real download that
+# _swap_in could not delete because Resolve had it open, and _sweep_stale is an
+# AGE rule over a whole shared folder: footage nobody chose to lose must not go
+# that way. _retry_aside_originals is the id-scoped retry instead.
+_INTERMEDIATE_STEM = re.compile(r'\.(f\d+|temp|editready)$')
+
+
+# YT-6 (2026-08-28): what _swap_in renames a locked original to.
+ASIDE_SUFFIX = '.original'
+
+
+def _retry_aside_originals(outdir, vid):
+    """Retry the delete _swap_in could not do. -> (deleted, bytes still there).
+
+    When Resolve holds the pre-conversion original open, _swap_in renames it
+    `... [id].original.<ext>` rather than deleting it, and before this NOTHING
+    ever removed it: a full second copy of every converted clip, matching lane
+    A's `+ *.mp4`, accumulating in the canonical tree forever.
+
+    ID-SCOPED and only on the way in to a fresh attempt at the same clip, for
+    _clear_partials' reason (the folder is shared with the rest of the search
+    and with the other executor). What it cannot delete it reports in bytes, so
+    the clip row can say how much is reclaimable: nothing here forces the
+    delete, because that file may be in a timeline this second.
+    """
+    deleted, remaining = 0, 0
+    for name in _id_bearing_files(outdir, vid):
+        if not Path(name).stem.endswith(ASIDE_SUFFIX):
+            continue
+        path = Path(outdir) / name
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        try:
+            path.unlink()
+        except OSError as exc:  # noqa: BLE001
+            remaining += size
+            log.info('%s is still in use (%s); %s bytes stay reclaimable',
+                     path, exc, size)
+            continue
+        deleted += 1
+        log.info('reclaimed %s bytes from %s (the original a previous '
+                 'conversion of %s could not replace)', size, path, vid)
+    return deleted, remaining
+
+
+def reclaimable_note(size):
+    """"an earlier copy ... (N MB reclaimable)" for the clip row, or None.
+
+    Hyphens and plain words only: this reaches an editor (house rule, no em
+    dashes).
+    """
+    size = int(size or 0)
+    if size <= 0:
+        return None
+    if size >= 1024 ** 3:
+        human = '%.1f GB' % (size / 1024 ** 3)
+    elif size >= 1024 ** 2:
+        human = '%d MB' % (size / 1024 ** 2)
+    else:
+        human = '%d bytes' % size
+    return ('an earlier copy of this clip is still in use (%s reclaimable)'
+            % human)
 
 
 def _sweepable(name):
@@ -1528,6 +1599,10 @@ def _phase_download(c, job):
             cur['status'] = msg
             _set_progress(_job, _vid, cur)
 
+        # YT-6 (2026-08-28): retry the delete a previous conversion of this
+        # clip could not do, before `before` is taken and before the bytes
+        # arrive. Resolve has usually let go of the file by now.
+        _reclaimed, _still_held = _retry_aside_originals(outdir, vid)
         before = _id_bearing_files(outdir, vid)
         try:
             # `note` is the quality downgrade, when the clip only landed
@@ -1602,6 +1677,15 @@ def _phase_download(c, job):
         # landed, just not at the rung that was asked for, and this row is the
         # only place that would ever say so (SAQBbd1Rxmo, 2026-08-13). It is
         # None on every ordinary download, which is what the row already holds.
+        # The swap's own note ("original was in use, kept as ...") and the
+        # space an undeletable earlier copy is holding, merged into the same
+        # row (YT-6, 2026-08-28). Until this the only place either was said was
+        # the in-memory progress dict, cleared the instant the clip finished:
+        # an editor with a `.converted` file in their term folder had nothing
+        # anywhere to explain the name.
+        note = '; '.join(part for part in (note, res.get('note'),
+                                           reclaimable_note(_still_held))
+                         if part) or None
         db.set_video(c, job_id, vid, dl_state='done', filepath=filepath,
                      dl_error=note,
                      title=res.get('title') or v['title'],

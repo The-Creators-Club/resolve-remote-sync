@@ -29,6 +29,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -191,7 +192,18 @@ class FileMoveLedger:
         """Old paths, relative to `subpath` (a lane A run root such as
         `Projects/2026/Base Drone`), of every move heard of in the last
         EXCLUDE_WINDOW_SECONDS. Applied or refused: both mean the server no
-        longer wants the file there."""
+        longer wants the file there.
+
+        SYNC-11 (resilience sweep 2026-08-28): every path is emitted in BOTH
+        Unicode spellings, NFC and NFD, deduped. The dashboard's `from_rel`
+        is NFC; a Mac's own filesystem hands the same name to rclone in NFD,
+        and rclone matches an exclude rule against the bytes it reads off the
+        disk -- so before this, a moved path with any diacritic was simply
+        not excluded and lane A put it straight back on the NAS, the one
+        failure this whole feature exists to stop (CR-90's lesson, CR-90
+        itself being why it went unnoticed: CJK names never warn you). These
+        are `-` rules, so the spelling that matches nothing costs nothing.
+        Comparison/matching only: `apply_move` still uses the raw path."""
         if not subpath:
             return []
         wanted = subpath.replace("\\", "/").strip("/")
@@ -205,6 +217,10 @@ class FileMoveLedger:
             if str(e.get("from_project_rel", "")).lower() != wanted.lower():
                 continue
             rel = str(e.get("from_rel") or "")
-            if rel and rel not in out:
-                out.append(rel)
+            if not rel:
+                continue
+            for spelling in (unicodedata.normalize("NFC", rel),
+                             unicodedata.normalize("NFD", rel)):
+                if spelling not in out:
+                    out.append(spelling)
         return out

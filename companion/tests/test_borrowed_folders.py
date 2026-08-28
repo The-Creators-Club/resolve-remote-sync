@@ -326,3 +326,61 @@ def test_one_broken_lender_does_not_stop_the_rest(tmp_path):
     results = mgr.reconcile()
     assert results["bad-lender"] == "error"
     assert results[SLUG] == "accepted"
+
+
+# -- SYNC-6: the drive is out --------------------------------------------------
+
+
+def test_reconcile_does_nothing_at_all_while_the_tree_is_absent(tmp_path):
+    """SYNC-6 (resilience sweep 2026-08-28): called from the sequencer's loop
+    head, before any root check. Both _accept and _repoint end in a
+    mkdir(parents=True) that would build the lender's path on the boot disk
+    while the external SSD is out, and then point a Syncthing folder at it."""
+    admin = FakeAdmin(pending={SLUG: {"offeredBy": {"DEVICE-1": {}}}})
+    gone = tmp_path / "Volumes" / "SAMDISK"  # never created
+    mgr = BorrowedFolderManager(admin, gone, lenders_fn=_lenders,
+                                selected_slugs_fn=lambda: [])
+    assert mgr.reconcile() == {}
+    assert admin.calls == [] and admin.removed == []
+    assert not gone.exists()
+
+
+def test_an_unanswerable_root_probe_counts_as_absent(tmp_path):
+    admin = FakeAdmin(pending={SLUG: {"offeredBy": {"DEVICE-1": {}}}})
+
+    def _boom():
+        raise RuntimeError("the volume did not answer")
+
+    mgr = BorrowedFolderManager(admin, tmp_path, lenders_fn=_lenders,
+                                selected_slugs_fn=lambda: [],
+                                root_present_fn=_boom)
+    assert mgr.reconcile() == {}
+    assert admin.calls == []
+
+
+def test_accept_refuses_the_mkdir_if_the_drive_goes_out_mid_reconcile(tmp_path):
+    admin = FakeAdmin(pending={SLUG: {"offeredBy": {"DEVICE-1": {}}}})
+    gone = tmp_path / "Volumes" / "SAMDISK"
+    mgr = BorrowedFolderManager(admin, gone, lenders_fn=_lenders,
+                                selected_slugs_fn=lambda: [],
+                                root_present_fn=lambda: True)
+    assert mgr.reconcile()[SLUG] == "error"
+    assert "accept" not in admin.names()
+    assert not gone.exists()
+
+
+def test_repoint_leaves_the_folder_where_it_is_when_the_drive_is_out(tmp_path):
+    """A re-point at a path we cannot create is worse than a stale one: the
+    folder would be pointed at a ghost directory on the boot disk."""
+    gone = tmp_path / "Volumes" / "SAMDISK"
+    admin = FakeAdmin(
+        folder={"id": SLUG, "paused": False, "path": str(tmp_path / "old"),
+                "ignoreDelete": True},
+        ignores=list(restricted_ignore_lines([SUB])),
+    )
+    mgr = BorrowedFolderManager(admin, gone, lenders_fn=_lenders,
+                                selected_slugs_fn=lambda: [],
+                                root_present_fn=lambda: True)
+    mgr.reconcile()
+    assert "set_path" not in admin.names()
+    assert not gone.exists()

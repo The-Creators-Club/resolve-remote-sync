@@ -194,6 +194,7 @@ class SyncthingLane(LaneAdapter):
         http_get: Optional[HttpGetFn] = None,
         expected_folder_ids_fn: Optional[Callable[[], list[str]]] = None,
         supervisor: Optional[Any] = None,
+        unfiltered_folders_fn: Optional[Callable[[], list[str]]] = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._configured_api_key = api_key
@@ -207,6 +208,14 @@ class SyncthingLane(LaneAdapter):
         # `expected_folder_ids_fn` (e.g. Sequencer.expected_folder_slugs) and
         # it is evaluated fresh on every poll.
         self.expected_folder_ids_fn = expected_folder_ids_fn
+        # SYNC-5 (resilience sweep 2026-08-28): the slugs the sequencer is
+        # deliberately keeping paused because their .stignore never landed
+        # (Sequencer.unconfirmed_slugs). One paused folder out of five never
+        # reached the PAUSED branch below -- only ALL-paused does -- so the
+        # lane published idle/queued=0/last_sync=now while that project
+        # synced nothing, indefinitely. Optional and duck-typed, like the
+        # supervisor: a lane built without one behaves exactly as before.
+        self.unfiltered_folders_fn = unfiltered_folders_fn
         # SYNC-17 (2026-08-18): this poll is the only thread in the companion
         # that knows whether 127.0.0.1:8384 answered, so it is where the
         # supervisor is driven from (sync/syncthing_supervisor.py). Optional,
@@ -333,6 +342,29 @@ class SyncthingLane(LaneAdapter):
             except Exception:
                 log.debug("expected_folder_ids_fn failed; falling back to the static list")
         return list(self.expected_folder_ids)
+
+    def unfiltered_folders(self) -> list[str]:
+        """Selected projects whose Syncthing folder is parked without its
+        filter list (SYNC-5, 2026-08-28). Never raises: a diagnostic that
+        could fail the poll would take the whole lane report with it."""
+        if self.unfiltered_folders_fn is None:
+            return []
+        try:
+            return [str(s) for s in (self.unfiltered_folders_fn() or []) if s]
+        except Exception:
+            log.debug("unfiltered_folders_fn failed", exc_info=True)
+            return []
+
+    @staticmethod
+    def unfiltered_sentence(slugs: list[str]) -> str:
+        """The one sentence an editor and an admin both read for SYNC-5."""
+        shown = ", ".join(slugs[:5])
+        if len(slugs) > 5:
+            shown += f", +{len(slugs) - 5} more"
+        return (
+            f"{len(slugs)} project(s) are not sharing yet - waiting for their "
+            f"filter list: {shown}"
+        )
 
     def connection_path_summary(self) -> dict[str, Any]:
         """Last-seen per-device connection types, e.g.
@@ -629,12 +661,22 @@ class SyncthingLane(LaneAdapter):
                     except Exception:
                         log.debug("outgoing completion check failed for %s/%s", fid, did)
 
-        if errored:
+        # SYNC-5: a folder parked for missing ignores is a STOP for that
+        # project, not a slow pass, and it outranks every green branch below
+        # (it used to reach none of them). It is reported alongside a real
+        # folder error rather than instead of it: an admin needs both.
+        unfiltered = self.unfiltered_folders()
+        if errored or unfiltered:
+            reasons = []
+            if errored:
+                reasons.append("folder(s) in error: " + ", ".join(errored))
+            if unfiltered:
+                reasons.append(self.unfiltered_sentence(unfiltered))
             status = LaneStatus(
                 name=self.name,
                 state=STATE_ERROR,
                 queued=queued,
-                last_error="folder(s) in error: " + ", ".join(errored),
+                last_error=" | ".join(reasons),
                 detail=path_detail,
             )
         elif queued > 0:

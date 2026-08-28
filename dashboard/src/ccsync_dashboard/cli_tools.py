@@ -43,6 +43,16 @@ and then check is a state we can describe to an admin ("installed but the
 binary is gone") rather than one that reads as "not installed" and silently
 re-downloads 313 MB.
 
+**The CLI gets an ALLOW-LISTED environment, not the container's** (YT-9,
+resilience sweep 2026-08-28). `cli_env()` builds the child environment from a
+named list -- PATH, HOME, the locale/timezone/terminal trio, TMPDIR, the proxy
+variables, and the publishers' own `CLAUDE_*` / `CODEX_*` namespaces -- so no
+fleet credential (`DASH_SESSION_SECRET`, `DASH_REPORT_TOKEN`,
+`SYNCTHING_API_KEY`, `TRUENAS_API_KEY`, `BROLL_INGEST_TOKEN`) is ever in it.
+It used to be the whole of `os.environ` minus four AI keys, which handed a
+binary fetched from the internet, driven by untrusted YouTube text, every
+secret the dashboard has.
+
 **$HOME is ours, never the container's.** The CLIs persist credentials under
 `$HOME/.claude` / `$HOME/.codex`. The container's default HOME is inside the
 image on some deployments and on a tmpfs on others, so a sign-in done through
@@ -294,8 +304,66 @@ def _utcnow() -> str:
 # wants their SUBSCRIPTION spent; Claude Code prefers ANTHROPIC_API_KEY when it
 # finds one, so an inherited key would bill the wrong account and the page
 # would report "signed in" about the key rather than the login.
+#
+# KEPT after cli_env became an allow-list (YT-9, 2026-08-28) even though the
+# allow-list already excludes all four: this tuple is the reason the AI keys
+# are gone, the allow-list is the reason everything ELSE is, and folding the
+# first into the second would lose the sentence above. ai_providers and the
+# tests both name it.
 STRIPPED_ENV_VARS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY",
                      "ANTHROPIC_AUTH_TOKEN")
+
+# THE ALLOW-LIST (YT-9, resilience sweep 2026-08-28). This used to be
+# `dict(os.environ)` minus the four names above, which meant an AI CLI -- fed
+# untrusted text (YouTube titles and descriptions), running arbitrary tools of
+# its own, installed from the internet at an admin's click -- was handed
+# DASH_SESSION_SECRET, DASH_REPORT_TOKEN, SYNCTHING_API_KEY, TRUENAS_API_KEY,
+# BROLL_INGEST_TOKEN and DASH_RELEASE_PUBKEYS: every credential the fleet has.
+# Nothing needed them, and nothing about the old shape stated that the rest
+# was withheld, because it wasn't. An allow-list also fails in the right
+# direction: the next secret somebody adds to the container's environment is
+# withheld by default instead of leaking until a reviewer notices.
+#
+# What is on it and why: PATH (find the binary and its own helpers), HOME (the
+# CLI's credentials, and cli_env_overlay overrides it), the locale/timezone
+# trio so output is not mojibake, TERM for the pty sign-in, TMPDIR because a
+# 300 MB CLI needs somewhere to write, and the proxy trio because a customer
+# behind a corporate proxy has no other way to reach the publisher's API.
+_ALLOWED_ENV_VARS = frozenset({
+    "PATH", "HOME", "LANG", "TZ", "TERM", "TMPDIR",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+    # Windows children cannot start without these. The deployment is a Linux
+    # container, but the test suite and a dev run are not, and a child that
+    # dies on a missing SystemRoot would make this look like a CLI bug.
+    "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "SYSTEMDRIVE",
+    "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
+    "PROGRAMFILES", "PROGRAMFILES(X86)", "NUMBER_OF_PROCESSORS", "OS",
+})
+
+# LC_* is the rest of the locale. CLAUDE_* / CODEX_* are the publishers' own
+# namespaces: whatever the admin set through the wizard or the overlay
+# (CLAUDE_CODE_OAUTH_TOKEN is one of them) is exactly what this CLI is meant
+# to receive, and enumerating the publisher's variable names here would go
+# stale the first time they add one.
+_ALLOWED_ENV_PREFIXES = ("LC_", "CLAUDE_", "CODEX_")
+
+
+def env_var_allowed(name: str) -> bool:
+    """Is `name` a variable an AI CLI subprocess may see? (YT-9)
+
+    Matched case-insensitively because Windows upper-cases os.environ while
+    the lowercase `http_proxy` spelling is a real Linux convention; the
+    variable is then passed through under ITS OWN name, never a normalised
+    one, so a child that reads `http_proxy` still finds it.
+    """
+    key = str(name or "").upper()
+    if not key:
+        return False
+    if key in STRIPPED_ENV_VARS:
+        return False
+    if key in _ALLOWED_ENV_VARS:
+        return True
+    return any(key.startswith(prefix) for prefix in _ALLOWED_ENV_PREFIXES)
 
 # Passed THROUGH (not stripped) when we hold one: the token the setup-token
 # strategy produced is the credential the customer signed in with.
@@ -346,10 +414,15 @@ def cli_env_overlay(settings: Any, name: str) -> dict:
 
 
 def cli_env(settings: Any, name: str, base: dict | None = None) -> dict:
-    """The complete environment a CLI subprocess gets."""
-    env = dict(os.environ if base is None else base)
-    for var in STRIPPED_ENV_VARS:
-        env.pop(var, None)
+    """The complete environment a CLI subprocess gets: an ALLOW-LIST (YT-9).
+
+    Everything the container holds that is not on `env_var_allowed`'s list is
+    withheld, the fleet's credentials included. The overlay is applied AFTER
+    the filter and is not subject to it: those variables are ours, set on
+    purpose, and HOME is the whole point of the helper.
+    """
+    source = os.environ if base is None else base
+    env = {key: value for key, value in source.items() if env_var_allowed(key)}
     env.update(cli_env_overlay(settings, name))
     return env
 

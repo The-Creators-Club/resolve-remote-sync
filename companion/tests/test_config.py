@@ -1091,4 +1091,110 @@ def test_set_value_hardens_a_freshly_created_file(tmp_path, monkeypatch):
     hardened = []
     monkeypatch.setattr(secretfile, "harden", lambda p: hardened.append(p))
     config_mod.set_value(path, "mode", "base")
-    assert hardened == [path]
+    # The file itself when ensure_config_exists created it, and then the
+    # .tmp BEFORE each rename -- set_value's own write and the config.toml.bak
+    # load_config refreshes (APP-4, 2026-08-28). Never the live file after a
+    # write, which would leave a window where it is world-readable.
+    assert path in hardened
+    assert hardened[0] == path
+    assert all(p == path or p.name.endswith(".tmp") for p in hardened), hardened
+
+
+# -- APP-4 / APP-11: the atomic write, the backup, and the read-back --------
+
+
+def test_set_value_writes_through_a_tmp_file_and_never_truncates_the_live_one(
+        tmp_path, monkeypatch):
+    """A kill between truncate and rewrite used to leave config.toml empty,
+    which on the next start is load_config falling back to ALL DEFAULTS --
+    no local_root, no remote, and no dashboard_url, so the machine also
+    stops reporting and vanishes from the fleet grid (APP-4)."""
+    path = tmp_path / "config.toml"
+    config_mod.ensure_config_exists(path)
+    before = path.read_text(encoding="utf-8")
+
+    real_replace = config_mod.os.replace
+
+    def _die(src, dst):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(config_mod.os, "replace", _die)
+    assert config_mod.set_value(path, "mode", "base") is False
+    # The live file is untouched, and no .tmp is left lying around.
+    assert path.read_text(encoding="utf-8") == before
+    assert not (tmp_path / "config.toml.tmp").exists()
+
+    monkeypatch.setattr(config_mod.os, "replace", real_replace)
+    assert config_mod.set_value(path, "mode", "base") is True
+
+
+def test_load_config_keeps_a_backup_of_the_last_file_that_parsed(tmp_path):
+    path = tmp_path / "config.toml"
+    config_mod.set_value(path, "editor_name", "owen")
+    config_mod.load_config(path)
+    backup = config_mod.backup_path(path)
+    assert backup.exists()
+    assert 'editor_name = "owen"' in backup.read_text(encoding="utf-8")
+
+
+def test_a_corrupt_config_loads_the_backup_instead_of_all_defaults(tmp_path, caplog):
+    path = tmp_path / "config.toml"
+    config_mod.set_value(path, "editor_name", "owen")
+    config_mod.set_value(path, "dashboard_url", "http://nas:8081")
+    config_mod.load_config(path)  # seeds config.toml.bak
+
+    path.write_text("", encoding="utf-8")  # the truncated-write shape
+    path.write_text('editor_name = "ow', encoding="utf-8")  # ...or a torn one
+    with caplog.at_level("ERROR"):
+        cfg = config_mod.load_config(path)
+
+    assert cfg["editor_name"] == "owen"
+    assert cfg["dashboard_url"] == "http://nas:8081"
+    assert cfg["_config_from_backup"] is True
+    assert cfg["_config_load_error"]
+    assert "last good copy" in caplog.text
+    # ...and the editor/admin is still told, so this is never silent.
+    errors, _warnings = config_mod.validate_config(cfg)
+    assert any("last good copy" in e for e in errors)
+
+
+def test_a_corrupt_config_with_no_backup_still_falls_back_to_defaults(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text("editor_name = \"ow", encoding="utf-8")
+    cfg = config_mod.load_config(path)
+    assert cfg["_config_load_error"]
+    assert cfg["_config_from_backup"] is False
+    assert cfg["editor_name"] == config_mod.DEFAULTS["editor_name"]
+
+
+def test_set_value_inserts_before_a_table_header_not_at_eof(tmp_path):
+    """APP-11: an appended key landed INSIDE the last table, so `mode`
+    parsed as `proxy.mode`, top-level `mode` stayed absent, and the Settings
+    role button appeared to do nothing at all, every time."""
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '\n'.join(['editor_name = "owen"', '', '[proxy]', 'mode = "keep"', '']),
+        encoding="utf-8")
+
+    assert config_mod.set_value(path, "mode", "base") is True
+    cfg = config_mod.load_config(path)
+    assert cfg["mode"] == "base"
+    assert cfg["editor_name"] == "owen"
+    # The table's own key is untouched.
+    assert cfg["proxy"]["mode"] == "keep"
+
+
+def test_set_value_reports_false_when_the_value_cannot_be_read_back(tmp_path,
+                                                                    monkeypatch):
+    path = tmp_path / "config.toml"
+    config_mod.ensure_config_exists(path)
+
+    real_load = config_mod.load_config
+
+    def _lies(p=config_mod.CONFIG_PATH):
+        data = dict(real_load(p))
+        data["mode"] = "editor"
+        return data
+
+    monkeypatch.setattr(config_mod, "load_config", _lies)
+    assert config_mod.set_value(path, "mode", "base") is False

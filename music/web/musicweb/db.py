@@ -36,6 +36,7 @@ import re
 import shutil
 import sqlite3
 import threading
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -496,10 +497,20 @@ def safe_upload_name(name):
     unchanged, and the char-replace below then turned each backslash into an
     underscore ('.._.._evil.wav') instead of stripping the traversal like it
     does on Windows.
+
+    NFC on the way out (MEDIA-21, 2026-08-28). A Mac's listdir hands the
+    browser NFD, the NAS and Windows are NFC, and `Matej Šimalčík - Theme.wav`
+    in the two spellings is two different byte strings -- so the NFD spelling
+    got reserved by allocate_name, compared against an NFC library by
+    _taken_on_disk, keyed differently by norm_stem, and stat()ed against
+    whatever rclone actually wrote (docs/GOTCHAS.md section 17, CR-90). This
+    is the one place a library name is MINTED, so normalising here decides
+    what the bytes on disk are called; it is not normalising a path something
+    already opened, which is the thing CR-90 forbids.
     """
     name = re.split(r'[\\/]+', str(name or 'untitled'))[-1]
     name = ''.join('_' if c in '<>:"/\\|?*' else c for c in name).strip()
-    return name or 'untitled'
+    return unicodedata.normalize('NFC', name) if name else 'untitled'
 
 
 def unique_dest(name, root=None):
@@ -519,7 +530,16 @@ def unique_dest(name, root=None):
 
 
 def norm_stem(name):
-    stem = os.path.splitext(os.path.basename(name))[0].lower()
+    """The duplicate-defence key for a filename.
+
+    NFC first (MEDIA-21, 2026-08-28): the strip to [a-z0-9] below deletes a
+    precomposed 'Š' outright but leaves the bare 's' of its decomposed
+    spelling behind, so a Mac's NFD 'Šimalčík' keys as 'simalcik' where the
+    NAS's NFC copy keys as 'imalk' -- two keys for one recording, and
+    find_reencode misses the re-encode it exists to catch (CR-90).
+    """
+    stem = os.path.splitext(os.path.basename(
+        unicodedata.normalize('NFC', str(name or ''))))[0].lower()
     stem = re.sub(r'^es[_ ]', '', stem)
     stem = re.sub(r'[\(\[]\d+[\)\]]', ' ', stem)          # (2)
     stem = re.sub(r'[^a-z0-9]+', '', stem)

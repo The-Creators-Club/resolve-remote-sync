@@ -158,6 +158,16 @@ def health(request: Request):
         # a `docker exec`, and it was half the diagnosis: 2026.07.04 had no
         # working anonymous client left.
         'yt_dlp_version': _yt_dlp_version(),
+        # HOW OLD that yt-dlp is, in days, and whether that is past the shelf
+        # life (YT-1, 2026-08-28). yt-dlp's versions are release dates, so this
+        # costs nothing, and it is the one signal that would have shown CR-80
+        # and CR-83 coming: in both, a weeks-old yt-dlp was reported by an
+        # editor who could not download, never by this page. None means the
+        # version string could not be ranked as a date, which is NOT the same
+        # as fresh -- `yt_dlp_stale` stays false and the detail line says so.
+        'yt_dlp_age_days': _yt_dlp_age_days(),
+        'yt_dlp_stale': _yt_dlp_is_stale(),
+        'yt_dlp_age_detail': _yt_dlp_age_detail(),
         # 'none' | 'empty' | 'present' -- what the jar HOLDS, next to the old
         # boolean that only says a path is configured. CR-80's fix parked the
         # flagged jar as its two header lines with the path still set.
@@ -182,6 +192,58 @@ def _yt_dlp_version():
         return str(yt_dlp.version.__version__ or '')
     except Exception:  # noqa: BLE001
         return ''
+
+
+def _yt_dlp_age_days():
+    """Days since the running yt-dlp's release, or None.
+
+    Its version IS the release date (YYYY.MM.DD, occasionally with a same-day
+    `.1`), so no network call and no GitHub API are involved. None for a
+    version that cannot be read or ranked, and for one dated in the FUTURE: a
+    container with a wrong clock must not be told its yt-dlp is old, because
+    "we cannot tell" and "it is stale" are different answers.
+    """
+    parts = str(_yt_dlp_version() or '').strip().split('.')
+    if len(parts) < 3:
+        return None
+    try:
+        released = date(int(parts[0]), int(parts[1]), int(parts[2]))
+    except ValueError:
+        return None
+    age = (date.today() - released).days
+    return age if age >= 0 else None
+
+
+def _yt_dlp_is_stale():
+    """Is the running yt-dlp past config.YTDLP_MAX_AGE_DAYS?
+
+    False when the age is unknown or the rule is switched off (a limit of 0 or
+    less). The unknown case is carried by `yt_dlp_age_detail` instead: a flag
+    that goes true on "could not tell" would be an amber pip nobody can clear.
+    """
+    limit = config.YTDLP_MAX_AGE_DAYS
+    if limit <= 0:
+        return False
+    age = _yt_dlp_age_days()
+    return age is not None and age > limit
+
+
+def _yt_dlp_age_detail():
+    """One line for the health strip's tooltip. No em dashes (house rule)."""
+    version = str(_yt_dlp_version() or '').strip()
+    if not version:
+        return 'no yt-dlp is installed on this server'
+    age = _yt_dlp_age_days()
+    if age is None:
+        return (f'the running yt-dlp is {version}, whose version is not a date '
+                f'this can age, so nothing here can tell you whether it is stale')
+    limit = config.YTDLP_MAX_AGE_DAYS
+    line = f'the running yt-dlp is {age} days old ({version})'
+    if limit > 0 and age > limit:
+        return (line + f', past the {limit} day limit. YouTube breaks yt-dlp '
+                'deliberately, so update the copy on this server before '
+                'downloads start failing.')
+    return line
 
 
 def _newest(paths, source):

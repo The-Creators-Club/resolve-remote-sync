@@ -916,6 +916,39 @@ def test_a_finally_failed_clip_takes_its_own_partials_and_nobody_elses(
     assert unrelated.name in left, 'a deliverable is not a leftover (YTDL-17)'
 
 
+def test_the_swap_note_and_the_reclaimable_space_reach_the_clip_row(
+        con, job, fake_claude, fake_youtube, project_root, monkeypatch):
+    """YT-6: an editor with a `.converted` file in their term folder had
+    nothing anywhere to explain the name. _swap_in's note went to the
+    in-memory progress dict, which is cleared the instant the clip finishes."""
+    outdir = project_root / job['term_dir']
+    outdir.mkdir(parents=True, exist_ok=True)
+    stuck = outdir / 'A [aaaaaaaaaaa].original.webm'
+    stuck.write_bytes(b'x' * (3 * 1024 * 1024))
+
+    def refuse(self, *a, **kw):
+        raise OSError('Access is denied')
+
+    monkeypatch.setattr(Path, 'unlink', refuse)
+
+    def download(url, outdir_, quality='best', **_kw):
+        vid = url.rsplit('=', 1)[-1]
+        path = Path(outdir_) / f'A.converted [{vid}].mp4'
+        path.write_bytes(b'fake video')
+        return {'title': 'A', 'channel': 'C', 'video_url': url,
+                'thumbnail': None, 'duration': 10, 'filepath': str(path),
+                'sidecar': None,
+                'note': f'original was in use, kept as A [{vid}].original.webm'}
+
+    monkeypatch.setattr(worker.downloader, 'download', download)
+    _download(con, job, fake_claude, fake_youtube, ['aaaaaaaaaaa'])
+
+    row = db.get_video(con, job['id'], 'aaaaaaaaaaa')
+    assert row['dl_state'] == 'done'
+    assert 'original was in use' in row['dl_error']
+    assert '3 MB reclaimable' in row['dl_error']
+
+
 # ------------------------------------------------------- pasted-link jobs
 
 def _url_job(con, ids, user=USER):
@@ -1106,15 +1139,19 @@ def test_a_failed_link_is_one_dead_video_not_a_dead_job(
 
 def test_the_sweep_takes_fragments_and_leaves_the_deliverables(project_root):
     """YTDL-17 (2026-08-11): `'.part' in name` also matched a title containing
-    ".part", and `.editready` matched `<stem>.editready.mp4` -- which is not a
-    leftover but _swap_in's fallback DELIVERABLE, ledgered under exactly that
-    name. Sweeping it left the ledger blocking a fleet-wide re-fetch and any
-    Resolve project referencing it Media Offline."""
+    ".part". `.editready` was on the same list of things not to sweep, because
+    it was _swap_in's fallback DELIVERABLE, ledgered under exactly that name.
+
+    YT-6 (resilience sweep 2026-08-28) took that half away by renaming the
+    fallback to `<title>.converted [id].mp4`, whose stem still ends in `[id]`.
+    A `.editready` is now only ever ffmpeg's half-written output, so it is
+    litter; the `.converted` deliverable is what must survive the sweep, and
+    the title containing ".part" still must."""
     d = project_root / 'term'
     d.mkdir(parents=True, exist_ok=True)
     swept = ['A [aaaaaaaaaaa].f616.mp4.part', 'A [aaaaaaaaaaa].f616.mp4.ytdl',
-             'A [aaaaaaaaaaa].part-Frag7']
-    kept = ['A [aaaaaaaaaaa].editready.mp4', 'A [bbbbbbbbbbb].mp4',
+             'A [aaaaaaaaaaa].part-Frag7', 'A [aaaaaaaaaaa].editready.mp4']
+    kept = ['A.converted [aaaaaaaaaaa].mp4', 'A [bbbbbbbbbbb].mp4',
             'The .part standard explained [ccccccccccc].mp4', 'manifest.json']
     for name in swept + kept:
         p = d / name
@@ -1141,11 +1178,15 @@ def test_the_sweep_takes_a_completed_per_format_stream_too(project_root):
     d = project_root / 'term'
     d.mkdir(parents=True, exist_ok=True)
     swept = ['A [aaaaaaaaaaa].f137.mp4', 'A [aaaaaaaaaaa].f251.webm',
-             'A [aaaaaaaaaaa].temp.mp4']
+             'A [aaaaaaaaaaa].temp.mp4', 'A [aaaaaaaaaaa].editready.mp4']
     # ...and the deliverable can never match: the outtmpl ends every finished
-    # name in `[id].<ext>`, so its stem ends in `[id]`
-    kept = ['A [aaaaaaaaaaa].mp4', 'A [aaaaaaaaaaa].editready.mp4',
-            'A [aaaaaaaaaaa].credits.json', 'manifest.json']
+    # name in `[id].<ext>`, so its stem ends in `[id]` -- which is exactly why
+    # YT-6 moved the fallback deliverable's marker in FRONT of the bracket
+    kept = ['A [aaaaaaaaaaa].mp4', 'A.converted [aaaaaaaaaaa].mp4',
+            'A [aaaaaaaaaaa].credits.json', 'manifest.json',
+            # a locked-aside original is footage, and an AGE rule over a
+            # shared folder must never be what deletes it (YT-6)
+            'A [aaaaaaaaaaa].original.mp4']
     for name in swept + kept:
         p = d / name
         p.write_bytes(b'x')
@@ -1161,9 +1202,12 @@ def test_a_completed_per_format_stream_is_never_the_clip_and_always_litter():
     _sweepable says it is litter, and _landed_file (which anchors on `[id]` at
     the end of the stem) has always refused to read it as the clip."""
     for name in ('A [aaaaaaaaaaa].f137.mp4', 'A [aaaaaaaaaaa].temp.mp4',
-                 'A [aaaaaaaaaaa].f137.mp4.part', 'A [aaaaaaaaaaa].part-Frag7'):
+                 'A [aaaaaaaaaaa].f137.mp4.part', 'A [aaaaaaaaaaa].part-Frag7',
+                 # YT-6: no longer a possible deliverable, so now litter
+                 'A [aaaaaaaaaaa].editready.mp4'):
         assert worker._sweepable(name) is True, name
-    for name in ('A [aaaaaaaaaaa].mp4', 'A [aaaaaaaaaaa].editready.mp4',
+    for name in ('A [aaaaaaaaaaa].mp4', 'A.converted [aaaaaaaaaaa].mp4',
+                 'A [aaaaaaaaaaa].original.mp4',
                  'A [aaaaaaaaaaa].credits.json',
                  'The .part standard explained [ccccccccccc].mp4'):
         assert worker._sweepable(name) is False, name
@@ -1182,6 +1226,49 @@ def test_a_failed_clip_takes_its_completed_streams_with_it(project_root):
     worker._clear_partials(d, 'aaaaaaaaaaa')
     assert sorted(p.name for p in d.iterdir()) == [
         'A [aaaaaaaaaaa].mp4.failed', 'B [bbbbbbbbbbb].f137.mp4']
+
+
+def test_a_locked_aside_original_is_retried_on_the_next_attempt(project_root):
+    """YT-6 (resilience sweep 2026-08-28): when Resolve holds the file open,
+    _swap_in renames the pre-conversion original to `... [id].original.<ext>`
+    and NOTHING ever removed it -- a full second copy of every converted clip,
+    matching lane A's `+ *.mp4`, in the canonical tree forever. The retry is
+    id-scoped and runs on the way in to the next attempt at the same clip,
+    when Resolve has usually let go."""
+    d = project_root / 'term'
+    d.mkdir(parents=True, exist_ok=True)
+    (d / 'A [aaaaaaaaaaa].original.webm').write_bytes(b'x' * 11)
+    (d / 'B [bbbbbbbbbbb].original.webm').write_bytes(b'y')
+    (d / 'A [aaaaaaaaaaa].mp4').write_bytes(b'z')
+
+    deleted, remaining = worker._retry_aside_originals(d, 'aaaaaaaaaaa')
+    assert (deleted, remaining) == (1, 0)
+    # the neighbour's is untouched: the folder is shared with the rest of the
+    # search and with the other executor
+    assert sorted(p.name for p in d.iterdir()) == [
+        'A [aaaaaaaaaaa].mp4', 'B [bbbbbbbbbbb].original.webm']
+
+
+def test_an_original_that_is_still_in_use_is_reported_not_forced(project_root,
+                                                                monkeypatch):
+    """The file may be in a timeline this second, so the delete is never
+    forced. What cannot be reclaimed is REPORTED, in bytes, and the sentence
+    goes on the clip row."""
+    d = project_root / 'term'
+    d.mkdir(parents=True, exist_ok=True)
+    (d / 'A [aaaaaaaaaaa].original.webm').write_bytes(b'x' * 2048)
+
+    def refuse(self, *a, **kw):
+        raise OSError('Access is denied')
+
+    monkeypatch.setattr(Path, 'unlink', refuse)
+    deleted, remaining = worker._retry_aside_originals(d, 'aaaaaaaaaaa')
+    assert (deleted, remaining) == (0, 2048)
+    assert 'still in use' in worker.reclaimable_note(remaining)
+    assert '2048 bytes' in worker.reclaimable_note(remaining)
+    assert '—' not in worker.reclaimable_note(remaining)   # house rule
+    assert worker.reclaimable_note(0) is None
+    assert '1.5 GB' in worker.reclaimable_note(int(1.5 * 1024 ** 3))
 
 
 def test_the_sweep_leaves_this_runs_resume_state_alone(project_root):

@@ -21,6 +21,10 @@ SPEC_DIR = Path(SPECPATH)
 REPO_ROOT = SPEC_DIR.parent
 COMPANION_SRC = REPO_ROOT / "companion" / "src"
 BOOTSTRAP_PS1 = REPO_ROOT / "installer" / "windows_bootstrap.ps1"
+# windows_bootstrap.ps1 dot-sources this from $PSScriptRoot, which for the
+# wizard is the _MEIPASS extraction dir -- so it has to be extracted BESIDE
+# it or the bootstrap exits 1 on every wizard install (OPS-8, 2026-08-28).
+DRIVE_MAPPING_PS1 = REPO_ROOT / "installer" / "drive_mapping.ps1"
 COMPANION_EXE = REPO_ROOT / "companion" / "dist" / "ccsync-companion.exe"
 EULA_MD = SPEC_DIR / "assets" / "EULA.md"
 
@@ -39,6 +43,7 @@ a = Analysis(
     binaries=[],
     datas=[
         (str(BOOTSTRAP_PS1), "."),
+        (str(DRIVE_MAPPING_PS1), "."),
         (str(COMPANION_EXE), "."),   # bundled so onboard.exe installs everything
         # Logo for the wizard window icon -- theme.apply_window_icon() reads
         # it from sys._MEIPASS/ccsync_companion/assets/icon.png.

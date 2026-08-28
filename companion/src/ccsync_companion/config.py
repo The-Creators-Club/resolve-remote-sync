@@ -14,6 +14,7 @@ asserts the two agree on keys).
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import sys
@@ -542,6 +543,15 @@ DEFAULTS: dict[str, Any] = {
     # manage yourself (a brew install, a nightly) and the companion only ever
     # READS its version: it never installs over it and never runs -U against it.
     "ytdlp_path": "",
+    # How old this machine's managed yt-dlp may get before the companion
+    # updates it on its OWN initiative, whatever the dashboard's floor says
+    # (YT-1, resilience sweep 2026-08-28). yt-dlp versions are release dates,
+    # so the age is measurable locally -- which matters because the floor is a
+    # constant in a dashboard release, and CR-80/CR-83 were both "the whole
+    # fleet cannot download and every companion logs `current` nightly". 0 or
+    # negative switches the rule off. Never applies to `ytdlp_path`: a yt-dlp
+    # an editor manages is theirs.
+    "ytdlp_max_age_days": 21,
     # A Netscape cookies.txt exported from a signed-in YouTube session, or "".
     # Set = the local downloader sends it (yt-dlp --cookies), which is what
     # lets an editor's machine pass the bot check and download age-gated
@@ -1168,6 +1178,13 @@ ytdl_local_downloads = true
 # and the companion will only read its version: it never installs over your
 # binary and never runs `yt-dlp -U` against it.
 ytdlp_path = ""
+# How many days old the copy of yt-dlp this app looks after may get before it
+# updates itself without waiting to be told to. yt-dlp's version numbers are
+# release dates, so this is just "if mine is older than three weeks, get the
+# new one" -- it is what stops a YouTube change from quietly breaking downloads
+# on every machine until somebody notices. Set 0 to turn it off. Ignored if you
+# set ytdlp_path above: a yt-dlp you installed is yours.
+ytdlp_max_age_days = 21
 
 # A cookies.txt exported from a signed-in YouTube session (Netscape format).
 # Set this and YOUR downloads use it: it is what passes YouTube's bot check
@@ -1351,7 +1368,7 @@ def ensure_config_exists(path: Path = CONFIG_PATH) -> None:
 _CONFIG_HARDENED = False
 
 
-def set_value(path: Path, key: str, value: Any) -> None:
+def set_value(path: Path, key: str, value: Any) -> bool:
     """Rewrite ONE key in config.toml in place, preserving every other line
     (comments included) -- added 2026-08-27 for the Settings window's role
     switch (MULTI_BASE_RIG_PLAN.md WP0/WP1).
@@ -1371,6 +1388,25 @@ def set_value(path: Path, key: str, value: Any) -> None:
     gets the same DEFAULT_TOML_TEXT + owner-only hardening every other path
     to this file goes through (secretfile.harden) before this ever touches
     it.
+
+    Returns True only when the value is READABLE BACK through load_config.
+    APP-11 (resilience sweep 2026-08-28): the old version matched a
+    `key =` line anywhere in the file and, when the key was absent,
+    appended at EOF. On a config.toml somebody had hand-extended with a
+    `[proxy]`/`[experimental]` table, EOF is INSIDE that table, so
+    `mode = "base"` parsed as `proxy.mode`, top-level `mode` stayed absent,
+    and the Settings window's role button appeared to do nothing at all,
+    every time, with nothing logged. So: only the top-level block (above
+    the first `[table]` header) is searched and written, and the file is
+    then re-parsed to prove the write took.
+
+    APP-4 (same sweep): written tmp + harden + os.replace, the ordering
+    identity.save_identity uses -- config.toml carries a fleet report token,
+    and the old in-place `write_text` left it truncated-and-empty if the
+    process died mid-write, which on the next start is load_config falling
+    back to ALL DEFAULTS: no local_root, no remote, and no dashboard_url, so
+    the machine stops reporting and vanishes from the fleet grid with its
+    credentials gone.
     """
     ensure_config_exists(path)
     if isinstance(value, bool):
@@ -1391,15 +1427,122 @@ def set_value(path: Path, key: str, value: Any) -> None:
     text = path.read_text(encoding="utf-8-sig")
     lines = text.splitlines()
     pattern = re.compile(r"^\s*" + re.escape(key) + r"\s*=")
-    for i, existing in enumerate(lines):
-        if pattern.match(existing):
+    # Everything from the first table header down belongs to a table, so a
+    # `key =` line there is a DIFFERENT key (`proxy.mode`, not `mode`) and
+    # an append past it writes into that table -- see the docstring.
+    table_header = re.compile(r"^\s*\[")
+    first_table = next(
+        (i for i, existing in enumerate(lines) if table_header.match(existing)),
+        len(lines),
+    )
+    for i in range(first_table):
+        if pattern.match(lines[i]):
             lines[i] = new_line
             break
     else:
-        if lines and lines[-1].strip():
-            lines.append("")
-        lines.append(new_line)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        if first_table >= len(lines):
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.append(new_line)
+        else:
+            # Back up over the blank line(s) that separate the top-level
+            # block from the header, so the new key joins the block it
+            # belongs to rather than being wedged against `[table]`.
+            insert_at = first_table
+            while insert_at > 0 and not lines[insert_at - 1].strip():
+                insert_at -= 1
+            lines.insert(insert_at, new_line)
+
+    tmp_path = path.with_name(path.name + ".tmp")
+    try:
+        tmp_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        # Hardened BEFORE the rename, so the token this file carries is
+        # never world-readable even for the instant between the two calls
+        # (identity.save_identity's ordering).
+        from . import secretfile
+
+        secretfile.harden(tmp_path)
+        os.replace(tmp_path, path)
+    except OSError:
+        log.exception("config: could not write %s = %r to %s", key, value, path)
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        return False
+
+    reloaded = load_config(path)
+    if not _value_took(reloaded.get(key), value):
+        log.error(
+            "config: wrote `%s` to %s but load_config still reads %s=%r -- the "
+            "setting did NOT take. A [table] header in the file, or a second "
+            "definition of the same key, is the usual cause; fix the file by "
+            "hand.",
+            new_line, path, key, reloaded.get(key),
+        )
+        return False
+    return True
+
+
+def _value_took(loaded: Any, wanted: Any) -> bool:
+    """Did the value set_value wrote survive a load_config round trip?
+
+    Deliberately tolerant about TYPE: load_config coerces list fields,
+    applies MODE_PROFILES and lets the site manifest override some keys, so
+    an exact `==` would report a failure for a value that is on disk and
+    correct. What this has to catch is the APP-11 shape -- the key landing
+    somewhere load_config cannot see it at all."""
+    if isinstance(wanted, bool) or isinstance(loaded, bool):
+        return bool(loaded) == bool(wanted)
+    return str(loaded).strip() == str(wanted).strip()
+
+
+# The last config.toml that PARSED, kept beside the live one. APP-4
+# (resilience sweep 2026-08-28): "the settings you had yesterday" beats "no
+# settings at all", and the difference between the two is a machine that is
+# still on the fleet grid and one that has vanished from it.
+BACKUP_SUFFIX = ".bak"
+
+
+def backup_path(path: Path) -> Path:
+    return Path(path).with_name(Path(path).name + BACKUP_SUFFIX)
+
+
+def _refresh_backup(path: Path, text: str) -> None:
+    """Remember `text` as the last good config.toml. Never raises.
+
+    Only rewrites when the content actually changed: load_config runs on
+    every start AND every ~2 s while the Settings window is open, and
+    secretfile.harden spawns icacls on Windows."""
+    try:
+        target = backup_path(path)
+        try:
+            if target.read_text(encoding="utf-8") == text:
+                return
+        except OSError:
+            pass
+        tmp = target.with_name(target.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        # The backup carries the same report token the live file does.
+        from . import secretfile
+
+        secretfile.harden(tmp)
+        os.replace(tmp, target)
+    except Exception:
+        log.debug("config: could not refresh %s", backup_path(path), exc_info=True)
+
+
+def _read_backup(path: Path) -> Optional[dict[str, Any]]:
+    """The last good config.toml, parsed -- or None when there isn't one.
+
+    A backup that no longer parses either is None, not a second failure:
+    the caller's job is to fall back further, not to raise."""
+    try:
+        text = backup_path(path).read_text(encoding="utf-8-sig")
+        data = tomllib.loads(text)
+    except (OSError, ValueError, tomllib.TOMLDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
@@ -1424,6 +1567,7 @@ def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
     ensure_config_exists(path)
     data: Any = {}
     load_error: Optional[str] = None
+    from_backup = False
     try:
         text = path.read_text(encoding="utf-8-sig")
         data = tomllib.loads(text)
@@ -1432,20 +1576,45 @@ def load_config(path: Path = CONFIG_PATH) -> dict[str, Any]:
         log.error("config: %s -- falling back to defaults", load_error)
         data = {}
     except tomllib.TOMLDecodeError as exc:
-        load_error = f"{path} is not valid TOML: {exc}"
-        log.error(
-            "config: %s -- falling back to ALL DEFAULTS; the file on disk "
-            "looks fine to a human but every setting below is now a "
-            "default, not what's actually in the file",
-            load_error,
-        )
-        data = {}
+        # APP-4 (resilience sweep 2026-08-28): before the backup existed this
+        # went straight to ALL DEFAULTS -- blank local_root, blank remote AND
+        # a blank dashboard_url, which is what stops DashboardReporter being
+        # created at all. A machine with a truncated config.toml therefore
+        # went dark on the fleet grid at the same moment its settings were
+        # lost, and the only route back was a reinstall.
+        rescued = _read_backup(path)
+        if rescued is not None:
+            data = rescued
+            from_backup = True
+            load_error = (
+                f"{path} is not valid TOML ({exc}) -- CCSync is running on the "
+                f"last good copy of your settings ({backup_path(path).name})"
+            )
+            log.error(
+                "config: %s. Nothing you changed since that copy was saved is "
+                "in effect. Fix or replace config.toml.", load_error,
+            )
+        else:
+            load_error = f"{path} is not valid TOML: {exc}"
+            log.error(
+                "config: %s -- falling back to ALL DEFAULTS; the file on disk "
+                "looks fine to a human but every setting below is now a "
+                "default, not what's actually in the file",
+                load_error,
+            )
+            data = {}
+    else:
+        _refresh_backup(path, text)
 
     merged = dict(DEFAULTS)
     if isinstance(data, dict):
         merged.update(data)
     # None when the file parsed cleanly -- see validate_config().
     merged["_config_load_error"] = load_error
+    # True when the values above came from config.toml.bak rather than
+    # config.toml: they are real settings, just possibly stale, so
+    # validate_config() must not call them "a DEFAULT".
+    merged["_config_from_backup"] = from_backup
 
     # Role profile: mode="base" flips the sync/popup defaults, but an
     # explicit key in the file always wins.
@@ -1565,7 +1734,15 @@ def validate_config(cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
     warnings: list[str] = []
 
     load_error = cfg.get("_config_load_error")
-    if load_error:
+    if load_error and cfg.get("_config_from_backup"):
+        # APP-4 (2026-08-28): still an ERROR, so it reaches config_problems
+        # and stops the lanes until a human looks -- but the old wording
+        # ("every setting below is a DEFAULT") would be a lie here.
+        errors.append(
+            f"config.toml could not be read, so CCSync loaded the last good "
+            f"copy of your settings instead -- {load_error}"
+        )
+    elif load_error:
         errors.append(
             f"config.toml failed to load and every setting below is a DEFAULT, "
             f"not what's in the file -- {load_error}"

@@ -794,7 +794,59 @@ def test_the_env_helper_strips_the_api_keys_and_sets_our_home(settings, monkeypa
     env = cli_tools.cli_env(settings, name)
     assert "ANTHROPIC_API_KEY" not in env
     assert env["HOME"] == str(cli_tools.home_dir(settings, name))
-    assert env["PATH"] == "/usr/bin"              # the rest is inherited
+    assert env["PATH"] == "/usr/bin"              # allow-listed, see YT-9 below
+
+
+def test_no_fleet_credential_is_ever_in_a_cli_subprocess_environment(
+        settings, monkeypatch):
+    """YT-9 (resilience sweep 2026-08-28): cli_env is an ALLOW-LIST.
+
+    It used to be `dict(os.environ)` minus four AI keys, so an AI CLI --
+    fetched from the internet at an admin's click, fed untrusted YouTube
+    titles and descriptions, running tools of its own -- was handed every
+    credential the fleet has. Nothing needed them, and an allow-list withholds
+    the NEXT secret somebody puts in the container's environment too.
+    """
+    secrets = {
+        "DASH_SESSION_SECRET": "a" * 40,
+        "DASH_REPORT_TOKEN": "b" * 40,
+        "SYNCTHING_API_KEY": "c" * 40,
+        "TRUENAS_API_KEY": "d" * 40,
+        "BROLL_INGEST_TOKEN": "e" * 40,
+        "DASH_RELEASE_PUBKEYS": "f" * 40,
+        "TRUENAS_PW": "g" * 40,
+    }
+    for key, value in secrets.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("PATH", "/usr/bin")
+
+    env = cli_tools.cli_env(settings, cli_tools.CLAUDE_CODE)
+    for key, value in secrets.items():
+        assert key not in env, key
+        assert value not in env.values(), key
+    assert env["PATH"] == "/usr/bin"
+
+
+def test_the_allow_list_keeps_what_a_cli_actually_needs(settings, monkeypatch):
+    """The other direction: an allow-list that dropped the locale, TMPDIR or
+    the proxy variables would break a working deployment to close a hole. The
+    publishers' own namespaces pass because whatever the admin set through the
+    wizard is exactly what the CLI is meant to receive."""
+    for key in ("LANG", "LC_ALL", "TZ", "TERM", "TMPDIR", "HTTPS_PROXY",
+                "NO_PROXY", "CLAUDE_CONFIG_DIR", "CODEX_HOME"):
+        monkeypatch.setenv(key, "set-" + key.lower())
+    env = cli_tools.cli_env(settings, cli_tools.CLAUDE_CODE)
+    for key in ("LANG", "LC_ALL", "TZ", "TERM", "TMPDIR", "HTTPS_PROXY",
+                "NO_PROXY", "CLAUDE_CONFIG_DIR", "CODEX_HOME"):
+        assert env.get(key) == "set-" + key.lower(), key
+    # Case-insensitive on the way in, own name on the way out: the lowercase
+    # `http_proxy` spelling is a real Linux convention, and Windows
+    # upper-cases os.environ, so the predicate is what this asserts on.
+    assert cli_tools.env_var_allowed("http_proxy") is True
+    assert cli_tools.env_var_allowed("dash_session_secret") is False
+    assert cli_tools.env_var_allowed("") is False
+    for var in cli_tools.STRIPPED_ENV_VARS:
+        assert cli_tools.env_var_allowed(var) is False, var
 
 
 def test_a_cli_the_customer_installed_themselves_keeps_its_own_home(settings, monkeypatch):

@@ -237,3 +237,41 @@ def test_malformed_and_absent_commands_are_ignored(tmp_path):
     stub.apply({"commands": {}})
     stub.apply("not a dict")
     assert stub._file_move_results() == []
+
+
+# -- SYNC-11: the exclusion across the Mac/NAS Unicode boundary ---------------
+
+# The dashboard's from_rel is NFC; the same file on a Mac's own disk is NFD,
+# and rclone matches an exclude rule against the bytes it reads off the disk.
+_NFC_REL = "Interviewees/Matej Šimalčík/A002_07161726_C048.braw"
+_NFD_REL = "Interviewees/Matej Šimalčík/A002_07161726_C048.braw"
+
+
+def test_the_exclusion_is_emitted_in_both_unicode_spellings(tmp_path):
+    """SYNC-11: one spelling excludes nothing on the platform the other one
+    came from, and lane A then re-uploads the file to the path the admin just
+    moved it away from."""
+    assert _NFC_REL != _NFD_REL  # the pair really is two byte strings
+    ledger = file_moves.FileMoveLedger(tmp_path / "state", now=lambda: 1000.0)
+    ledger.record(file_moves.parse_command(_cmd(from_rel=_NFC_REL)), ok=True, detail="ok")
+    got = ledger.recent_excludes(f"Projects/{DRONE}")
+    assert set(got) == {_NFC_REL, _NFD_REL}
+
+
+def test_an_ascii_path_is_still_one_rule(tmp_path):
+    """The two spellings of an ASCII path are the same string: no duplicate."""
+    ledger = file_moves.FileMoveLedger(tmp_path / "state", now=lambda: 1000.0)
+    ledger.record(file_moves.parse_command(_cmd()), ok=True, detail="ok")
+    assert ledger.recent_excludes(f"Projects/{DRONE}") == ["B-roll/A001_0512.braw"]
+
+
+def test_every_exclusion_also_gets_the_directory_prune_form():
+    """SYNC-11's other half: a move CAN name a directory (`is_dir`), and
+    `- /Sub/Dir` alone is a directory-prune that is easy to get wrong."""
+    from ccsync_companion.sync.rclone_lane import build_filter_rules_up
+
+    rules = build_filter_rules_up(["B-roll/Gone"])
+    assert "- /B-roll/Gone" in rules
+    assert "- /B-roll/Gone/**" in rules
+    # ...and both still come before the includes (first-match-wins).
+    assert rules.index("- /B-roll/Gone/**") < rules.index("+ *.mov")

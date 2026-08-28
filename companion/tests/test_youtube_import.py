@@ -275,6 +275,13 @@ def test_half_delivered_files_are_never_imported(tmp_path, name):
     "Cruz Yanez - Aerial View Rio Grande LNG [SAQBbd1Rxmo].f299.webm",
     # ...and the merge target, mid-write.
     "Cruz Yanez - Aerial View Rio Grande LNG [SAQBbd1Rxmo].temp.mp4",
+    # YT-6 (resilience sweep 2026-08-28): the conversion's half-written output
+    # and the pre-conversion original that swap_in could not delete because
+    # Resolve had the file open. Both end `.mp4`, both were imported as EXTRA
+    # clips -- two clips per download in a shared project, one of them
+    # undecodable or truncated, and nothing anywhere said why.
+    "Cruz Yanez - Aerial View Rio Grande LNG [SAQBbd1Rxmo].editready.mp4",
+    "Cruz Yanez - Aerial View Rio Grande LNG [SAQBbd1Rxmo].original.mp4",
 ])
 def test_yt_dlp_intermediates_are_never_imported(tmp_path, name):
     """COMP-BROLL-4. Before companion 0.8.0 no yt-dlp ever ran on an editor
@@ -303,6 +310,10 @@ def test_the_merged_clip_itself_is_still_imported(tmp_path):
     _drop(tmp_path, [
         "Cruz Yanez - Aerial View Rio Grande LNG [SAQBbd1Rxmo].mp4",
         "Some Channel - Inside the f137 format [aaaaaaaaaaa].mp4",
+        # and the fallback deliverable a locked conversion leaves (YT-6): the
+        # marker is in front of the bracket precisely so this file is still
+        # read as the clip
+        "Cruz Yanez - Aerial View Rio Grande LNG.converted [bbbbbbbbbbb].mp4",
     ])
     importer = _make(tmp_path)
 
@@ -311,6 +322,7 @@ def test_the_merged_clip_itself_is_still_imported(tmp_path):
     names = sorted(os.path.basename(p) for p in importer._import_fn.calls[0]["paths"])
     assert names == [
         "Cruz Yanez - Aerial View Rio Grande LNG [SAQBbd1Rxmo].mp4",
+        "Cruz Yanez - Aerial View Rio Grande LNG.converted [bbbbbbbbbbb].mp4",
         "Some Channel - Inside the f137 format [aaaaaaaaaaa].mp4",
     ]
 

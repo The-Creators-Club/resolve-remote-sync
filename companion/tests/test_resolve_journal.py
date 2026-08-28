@@ -189,3 +189,118 @@ def test_old_rollback_exports_are_swept_too():
 
     assert not stale_export.exists()
     assert fresh_export.exists()
+
+
+class TestRateLimitSurvivesARestart:
+    """RES-2 (resilience sweep 2026-08-28): the two bars on the UNPROMPTED
+    rewrites were module globals, so an OTA, a crash, an EULA park or the
+    editor reopening the tray reset them -- and a machine with a wrong
+    canonical_prefix then rewrote hundreds of clip paths again on every
+    launch."""
+
+    @staticmethod
+    def _restart():
+        """Everything a new process loses, without losing the disk state."""
+        resolve_journal._automatic_at.clear()
+        resolve_journal._automatic_daily.clear()
+        resolve_journal._auto_state_loaded = False
+
+    def test_the_window_is_still_barred_after_a_restart(self):
+        clock = [1_750_000_000.0]
+        assert resolve_journal.allow_automatic(
+            "FF5", "canon-relink", clock=lambda: clock[0]) is True
+        assert resolve_journal.auto_state_path().exists()
+
+        self._restart()
+        clock[0] += 60
+        assert resolve_journal.allow_automatic(
+            "FF5", "canon-relink", clock=lambda: clock[0]) is False
+
+        self._restart()
+        clock[0] += resolve_journal.AUTOMATIC_MIN_INTERVAL_SECONDS
+        assert resolve_journal.allow_automatic(
+            "FF5", "canon-relink", clock=lambda: clock[0]) is True
+
+    def test_a_stamp_from_the_future_is_treated_as_now(self):
+        """A clock put back (or a state file copied off another machine) must
+        not bar the pass until the date arrives."""
+        resolve_journal.allow_automatic(
+            "FF5", "canon-relink", clock=lambda: 2_000_000_000.0)
+        self._restart()
+        now = 1_750_000_000.0
+        assert resolve_journal.allow_automatic(
+            "FF5", "canon-relink", clock=lambda: now) is False
+        self._restart()
+        assert resolve_journal.allow_automatic(
+            "FF5", "canon-relink",
+            clock=lambda: now + resolve_journal.AUTOMATIC_MIN_INTERVAL_SECONDS + 1,
+        ) is True
+
+    def test_unreadable_state_does_not_stop_a_relink(self, monkeypatch):
+        resolve_journal.auto_state_path().parent.mkdir(parents=True, exist_ok=True)
+        resolve_journal.auto_state_path().write_text("{not json", encoding="utf-8")
+        self._restart()
+        assert resolve_journal.allow_automatic("FF5", "canon-relink") is True
+
+
+class TestDailyCap:
+    def test_a_project_gets_at_most_N_automatic_rewrites_a_day(self, caplog):
+        clock = [1_750_000_000.0]
+        step = resolve_journal.AUTOMATIC_MIN_INTERVAL_SECONDS + 1
+        allowed = 0
+        for _ in range(20):
+            if resolve_journal.allow_automatic("FF5", "canon-relink",
+                                               clock=lambda: clock[0]):
+                allowed += 1
+            clock[0] += step
+        assert allowed == resolve_journal.AUTOMATIC_MAX_PER_DAY
+
+    def test_the_cap_says_what_to_do_about_it(self, caplog):
+        clock = [1_750_000_000.0]
+        step = resolve_journal.AUTOMATIC_MIN_INTERVAL_SECONDS + 1
+        with caplog.at_level("WARNING"):
+            for _ in range(resolve_journal.AUTOMATIC_MAX_PER_DAY + 2):
+                resolve_journal.allow_automatic("FF5", "canon-relink",
+                                                clock=lambda: clock[0])
+                clock[0] += step
+        assert "configuration problem" in caplog.text
+        assert "Copy diagnostics" in caplog.text
+
+    def test_the_next_day_is_a_new_allowance(self):
+        clock = [1_750_000_000.0]
+        step = resolve_journal.AUTOMATIC_MIN_INTERVAL_SECONDS + 1
+        for _ in range(resolve_journal.AUTOMATIC_MAX_PER_DAY + 3):
+            resolve_journal.allow_automatic("FF5", "canon-relink",
+                                            clock=lambda: clock[0])
+            clock[0] += step
+        assert resolve_journal.allow_automatic(
+            "FF5", "canon-relink", clock=lambda: clock[0]) is False
+        clock[0] += 86400
+        assert resolve_journal.allow_automatic(
+            "FF5", "canon-relink", clock=lambda: clock[0]) is True
+
+    def test_the_cap_is_per_project(self):
+        clock = [1_750_000_000.0]
+        step = resolve_journal.AUTOMATIC_MIN_INTERVAL_SECONDS + 1
+        for _ in range(resolve_journal.AUTOMATIC_MAX_PER_DAY + 3):
+            resolve_journal.allow_automatic("FF5", "canon-relink",
+                                            clock=lambda: clock[0])
+            clock[0] += step
+        assert resolve_journal.allow_automatic(
+            "FF5", "canon-relink", clock=lambda: clock[0]) is False
+        assert resolve_journal.allow_automatic(
+            "FF6", "canon-relink", clock=lambda: clock[0]) is True
+
+    def test_the_cap_counts_both_unprompted_sources_together(self):
+        """Two sources rewriting the same project all day is one fault seen
+        twice, not two allowances."""
+        clock = [1_750_000_000.0]
+        step = resolve_journal.AUTOMATIC_MIN_INTERVAL_SECONDS + 1
+        allowed = 0
+        for i in range(30):
+            source = "canon-relink" if i % 2 else "auto-proxy-relink"
+            if resolve_journal.allow_automatic("FF5", source,
+                                               clock=lambda: clock[0]):
+                allowed += 1
+            clock[0] += step
+        assert allowed == resolve_journal.AUTOMATIC_MAX_PER_DAY

@@ -421,10 +421,33 @@ def add_items(conn: sqlite3.Connection, index_conn: sqlite3.Connection, folder_i
     return {"added": added, "already": already}
 
 
-def remove_item(conn: sqlite3.Connection, folder_id: int, video_id: int) -> bool:
+def _identity_of(index_conn: sqlite3.Connection | None, video_id: int) -> tuple[str, str]:
+    """The (share, rel_path) the CURRENT index files `video_id` under, or a
+    pair nothing matches.
+
+    MEDIA-23 (resilience sweep 2026-08-28): the panel sends the id the index
+    has NOW, which after a rebuild is not the id the item was stored under.
+    An id-only match then answered "that clip is not in this folder" to an
+    editor pulling a clip out of a live client link, while the client kept
+    seeing it -- and the same for a note. The empty pair is deliberate: no
+    row carries it, so a caller with no index connection (or a clip that has
+    left the index) falls back to the id-only behaviour rather than matching
+    everything (broll-1's family, sites four and five).
+    """
+    if index_conn is None:
+        return "", ""
+    row = index_conn.execute(
+        "SELECT share, rel_path FROM videos WHERE id = ?", (video_id,)).fetchone()
+    return (row["share"], row["rel_path"]) if row is not None else ("", "")
+
+
+def remove_item(conn: sqlite3.Connection, folder_id: int, video_id: int,
+                index_conn: sqlite3.Connection | None = None) -> bool:
+    share, rel_path = _identity_of(index_conn, video_id)
     cur = conn.execute(
-        "DELETE FROM client_folder_items WHERE folder_id = ? AND video_id = ?",
-        (folder_id, video_id),
+        "DELETE FROM client_folder_items WHERE folder_id = ? "
+        "AND (video_id = ? OR (share = ? AND rel_path = ?))",
+        (folder_id, video_id, share, rel_path),
     )
     conn.execute("UPDATE client_folders SET updated_at = ? WHERE id = ?",
                  (now_iso(), folder_id))
@@ -432,10 +455,13 @@ def remove_item(conn: sqlite3.Connection, folder_id: int, video_id: int) -> bool
     return cur.rowcount > 0
 
 
-def set_note(conn: sqlite3.Connection, folder_id: int, video_id: int, note: str) -> bool:
+def set_note(conn: sqlite3.Connection, folder_id: int, video_id: int, note: str,
+             index_conn: sqlite3.Connection | None = None) -> bool:
+    share, rel_path = _identity_of(index_conn, video_id)
     cur = conn.execute(
-        "UPDATE client_folder_items SET note = ? WHERE folder_id = ? AND video_id = ?",
-        (_clean_text(note, MAX_NOTE, "note"), folder_id, video_id),
+        "UPDATE client_folder_items SET note = ? WHERE folder_id = ? "
+        "AND (video_id = ? OR (share = ? AND rel_path = ?))",
+        (_clean_text(note, MAX_NOTE, "note"), folder_id, video_id, share, rel_path),
     )
     conn.commit()
     return cur.rowcount > 0
@@ -512,11 +538,12 @@ def resolve_items(conn: sqlite3.Connection, index_conn: sqlite3.Connection,
     file's basename, sans extension -- the one bit of the path a client may
     see, because it is what the editor named the shot); `public=False` adds
     rel_path/share/category for the curator's own list. Either way an item
-    whose id no longer exists in the index is re-resolved by (share, rel_path)
-    -- an archive rebuilt with new ids keeps its folders -- and one that
-    cannot be found at all is DROPPED from the result rather than shown as a
-    broken card (the panel reports it as `missing`, the public page never
-    sees it).
+    whose stored id no longer names the clip it was curated as -- gone from the
+    index, or renumbered so the id belongs to something else -- is re-resolved
+    by (share, rel_path), which is how an archive rebuilt with new ids keeps
+    its folders; and one that cannot be found BY NAME is DROPPED rather than
+    shown as a broken card or, worse, served as whatever inherited its number
+    (the panel reports it as `missing`, the public page never sees it).
     """
     out = []
     # Two items can resolve to ONE clip: a folder written before 2026-08-21
@@ -530,11 +557,17 @@ def resolve_items(conn: sqlite3.Connection, index_conn: sqlite3.Connection,
         video = index_conn.execute(
             "SELECT * FROM videos WHERE id = ?", (item["video_id"],)).fetchone()
         if video is None or (video["share"], video["rel_path"]) != (item["share"], item["rel_path"]):
-            by_name = index_conn.execute(
+            # MEDIA-1 (resilience sweep 2026-08-28): the by-id row is NOT a
+            # fallback. When the identity disagrees the id names some other
+            # clip -- a rebuild reuses low ids -- and keeping it here put that
+            # clip in public_video_ids, which is what _member_id authorises
+            # on, so the client's page drew and streamed footage nobody
+            # curated (the fourth site of broll-1, which fixed the other
+            # three). By name or not at all: None below drops the item, and
+            # the curator's panel reports it `missing`.
+            video = index_conn.execute(
                 "SELECT * FROM videos WHERE share = ? AND rel_path = ?",
                 (item["share"], item["rel_path"])).fetchone()
-            if by_name is not None:
-                video = by_name
         if video is None:
             if not public:
                 out.append({"video_id": item["video_id"], "share": item["share"],

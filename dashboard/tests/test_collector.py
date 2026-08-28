@@ -523,3 +523,56 @@ def test_a_slow_syncthing_cannot_park_the_whole_collector(conn, fake, monkeypatc
     polled = {r["slug"] for r in conn.execute(
         "SELECT p.slug FROM completion_current c JOIN projects p ON p.id=c.project_id")}
     assert len(polled) == 2
+
+
+def test_an_empty_folder_list_does_not_empty_the_project_list(conn, fake, collector):
+    """DASH-4 (resilience sweep 2026-08-28): Syncthing coming back with a
+    default/empty config answers /rest/config 200 with zero folders and a
+    valid myID, so no empty-myID guard fires. Every project used to flip
+    active=0, the hourly prune then deleted the whole NAS inventory, and the
+    dashboard quietly stopped being able to say who was behind."""
+    import datetime as _dt
+    for slug in ("2026-ff5-a", "2026-ff5-b", "2026-ff5-c"):
+        fake.state["folders"].append({
+            "id": slug, "label": slug, "path": f"/data/Projects/{slug}",
+            "devices": [{"deviceID": SERVER_ID}],
+            "type": "sendreceive", "ignorePerms": True})
+    collector.run_cycle(conn, ["config"])
+    assert len(dbmod.fetch_projects(conn)) == 4
+
+    fake.state["folders"] = []
+    aged = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=1)) \
+        .replace(microsecond=0).isoformat()
+    conn.execute("UPDATE projects SET last_seen=?", (aged,))
+    conn.commit()
+    assert collector.run_cycle(conn, ["config"])["config"] is True
+    assert len(dbmod.fetch_projects(conn)) == 4          # nothing deactivated
+
+    # ...and the cycle says so, on the row every health view reads (DASH-14).
+    run = conn.execute("SELECT ok, error FROM poll_runs WHERE kind='config' "
+                       "ORDER BY id DESC LIMIT 1").fetchone()
+    assert run["ok"] == 1 and "refused deactivating 4 project(s)" == run["error"]
+    refusal = dbmod.collector_alarms(conn)["deactivation_refusal"]
+    assert refusal["active"] == 4 and "0 of 4 folders" in refusal["message"]
+
+    # The folders coming back is what clears it, with no admin action.
+    fake.state["folders"] = [{
+        "id": "2025-ff4-nuclear", "label": "2025/FF4/Nuclear",
+        "path": "/data/Projects/2025/FF4/Nuclear",
+        "devices": [{"deviceID": SERVER_ID}, {"deviceID": EDITOR_ID}],
+        "type": "sendreceive", "ignorePerms": True}]
+    for slug in ("2026-ff5-a", "2026-ff5-b", "2026-ff5-c"):
+        fake.state["folders"].append({
+            "id": slug, "label": slug, "path": f"/data/Projects/{slug}",
+            "devices": [{"deviceID": SERVER_ID}],
+            "type": "sendreceive", "ignorePerms": True})
+    collector.run_cycle(conn, ["config"])
+    assert dbmod.collector_alarms(conn)["deactivation_refusal"] is None
+    assert len(dbmod.fetch_projects(conn)) == 4
+
+
+def test_collector_health_notes_a_clean_cycle_green(conn, fake, collector):
+    collector.run_cycle(conn, ["config"])
+    health = dbmod.collector_health(conn)
+    config = next(k for k in health["kinds"] if k["kind"] == "config")
+    assert config["status"] == "green" and config["note"] is None

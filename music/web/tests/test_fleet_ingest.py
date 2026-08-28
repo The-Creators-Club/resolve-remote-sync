@@ -11,6 +11,7 @@ becomes a track row with tags and axes, scored by the CLAP TEXT tower this
 container already runs, with no torch anywhere.
 """
 import base64
+import unicodedata
 
 import numpy as np
 import pytest
@@ -484,6 +485,63 @@ def test_uploaded_refuses_until_the_file_is_really_there(fleet, fake_encoder):
         conn = db.con()
         conn.execute('DELETE FROM tracks WHERE id=?', (got['track_id'],))
         conn.commit()
+
+
+def test_a_mac_drop_lands_and_goes_live_in_whichever_spelling_it_arrives(
+        fleet, fake_encoder):
+    """MEDIA-21, 2026-08-28. macOS listdir is NFD, the NAS and Windows are NFC,
+    and the two are different byte strings to stat() (CR-90). The name is
+    minted NFC at `result`, but rclone copies the bytes the editor's machine
+    holds, so the file can land under the decomposed spelling -- and stat()ing
+    the NFC path alone answered "the library does not hold this file yet" for a
+    file that was sitting right there: a 409 not_uploaded loop with no way out.
+    """
+    raw = 'Matej Šimalčík - Theme.wav'
+    nfc, nfd = unicodedata.normalize('NFC', raw), unicodedata.normalize('NFD', raw)
+    assert nfc != nfd
+
+    uid = make_batch(fleet, names=(nfd,))
+    item = claim(fleet, uid).json()['items'][0]['uid']
+    got = fleet.post(f'/api/fleet/ingest/batches/{uid}/items/{item}/result',
+                     json=result_body(), headers=headers()).json()
+    assert got['rel_path'] == nfc, 'the allocated name is not normalised'
+
+    # rclone put the bytes there under the spelling the Mac gave it.
+    landed = config.share_root() / nfd
+    landed.write_bytes(b'x' * 2048)
+    try:
+        r = fleet.post(f'/api/fleet/ingest/batches/{uid}/items/{item}/uploaded',
+                       json={'size': 2048}, headers=headers())
+        assert r.status_code == 200, r.text
+        assert r.json()['live'] is True
+        conn = db.con()
+        row = conn.execute('SELECT rel_path, bytes FROM tracks WHERE id=?',
+                           (got['track_id'],)).fetchone()
+        # The row names what is ON THE DISK, because that is the path
+        # /api/audio and the companion's "+ Resolve" have to open.
+        assert row['bytes'] == 2048
+        assert row['rel_path'] == nfd
+    finally:
+        landed.unlink(missing_ok=True)
+        conn = db.con()
+        conn.execute('DELETE FROM tracks WHERE id=?', (got['track_id'],))
+        conn.commit()
+
+
+def test_a_name_held_under_the_other_spelling_is_stepped_around(fleet, fake_encoder):
+    """The collision check asks about both spellings too (MEDIA-21): a library
+    already holding the decomposed name must not be handed the same slot for a
+    second file, or the second upload overwrites the first."""
+    raw = 'Harbour Drone.wav'
+    held = config.share_root() / unicodedata.normalize('NFD', 'Scène 1.wav')
+    held.write_bytes(b'y' * 8)
+    try:
+        allocated = ingest_batches.allocate_name(db.con(), unicodedata.normalize(
+            'NFC', 'Scène 1.wav'))
+        assert allocated == unicodedata.normalize('NFC', 'Scène 1 (2).wav')
+        assert ingest_batches.allocate_name(db.con(), raw) == raw
+    finally:
+        held.unlink(missing_ok=True)
 
 
 def test_uploaded_before_a_result_is_refused(fleet):

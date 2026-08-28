@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from fractions import Fraction
 from pathlib import Path
@@ -199,6 +200,17 @@ def build_opts(outdir: str, quality: str, container: str = "mp4",
         "postprocessors": postprocessors,
         "writethumbnail": False,
         "noplaylist": True,
+        # [vendor] yt-dlp's --no-mtime (YT-3, resilience sweep 2026-08-28).
+        # Without it the finished file carries the media response's
+        # Last-Modified, which for YouTube is usually the upload date, so a
+        # clip written into the canonical tree is years old the moment it
+        # appears. Every consumer of that tree that gates on age -- the
+        # companion's lane A `--min-age 120s`, the proxy generator's stability
+        # check, an operator's `find -mtime` -- is then reading a date that has
+        # nothing to do with when the bytes landed. The companion's executor
+        # passes the same flag; a file that reaches the NAS from one side must
+        # not be datable differently from the other.
+        "updatetime": False,
         "restrictfilenames": False,
         "windowsfilenames": True,
         "ignoreerrors": False,
@@ -341,7 +353,7 @@ def _color_args(v: dict) -> list[str]:
 
 def ensure_edit_ready(filepath: str, edit_codec: str = "h264",
                       ffmpeg_location: str | None = None,
-                      on_status=None) -> str:
+                      on_status=None, notes: list | None = None) -> str:
     """Convert `filepath` to something DaVinci Resolve can actually decode.
 
     Returns the path of the usable file (the original, if it was already fine).
@@ -354,6 +366,12 @@ def ensure_edit_ready(filepath: str, edit_codec: str = "h264",
       "dnxhr" — DNxHR HQ + 16-bit PCM in .mov. Always re-encodes; big files,
                 but the smoothest scrubbing in Resolve.
       "none"  — leave the file exactly as downloaded.
+
+    [vendor] `notes` (YT-6, 2026-08-28): a list the swap appends its own note
+    to, when it had to improvise a name. on_status only reaches the in-memory
+    progress dict, which is cleared the moment the clip finishes, so the one
+    place a delivered-under-an-odd-name clip was explained was a line the
+    editor had to be watching for. The clip ROW carries it now.
     """
     if edit_codec not in ("h264", "dnxhr") or not filepath or not os.path.exists(filepath):
         return filepath
@@ -428,10 +446,34 @@ def ensure_edit_ready(filepath: str, edit_codec: str = "h264",
         raise RuntimeError("Edit-ready conversion failed: "
                            + (res.stderr or "").strip()[-500:])
 
-    return _swap_in(tmp, stem + out_ext, filepath, on_status)
+    return _swap_in(tmp, stem + out_ext, filepath, on_status, notes)
 
 
-def _swap_in(tmp: str, final: str, original: str, on_status=None) -> str:
+# [vendor] YT-6 (resilience sweep 2026-08-28). The fallback deliverable's name.
+# Every finished download's stem ends in `[id]`, and that anchoring is what
+# ytsearch._ID_RE, worker._landed_file and the companion's importer all read to
+# tell a clip from its litter. `<stem>.editready.mp4` broke it in both
+# directions: nothing could sweep it (it was the deliverable, YTDL-17) and
+# nothing recognised it as the clip either, so the companion's importer filed
+# it into the media pool as a second clip. The marker goes BEFORE the id
+# bracket instead. Same rule, same spelling, as the companion's
+# ytdl_executor.converted_name.
+CONVERTED_MARKER = ".converted"
+_ID_TAIL_RE = re.compile(r"^(?P<head>.*?)(?P<id>\s*\[[^\[\]]*\])$")
+
+
+def converted_name(final: str) -> str:
+    """`<title>.converted [id].mp4` for a deliverable `<title> [id].mp4`."""
+    path = Path(final)
+    match = _ID_TAIL_RE.match(path.stem)
+    if match:
+        return str(path.with_name(match.group("head") + CONVERTED_MARKER
+                                  + match.group("id") + path.suffix))
+    return str(path.with_name(path.stem + CONVERTED_MARKER + path.suffix))
+
+
+def _swap_in(tmp: str, final: str, original: str, on_status=None,
+             notes: list | None = None) -> str:
     """Put the converted file at `final` and get rid of `original`.
 
     Windows refuses to overwrite or delete a file another process holds open —
@@ -439,6 +481,13 @@ def _swap_in(tmp: str, final: str, original: str, on_status=None) -> str:
     "Access is denied". A plain rename of the locked file *is* allowed, so fall
     back to moving it aside instead of deleting it.
     """
+    def say(message):
+        # [vendor] YT-6: the same sentence to the live progress AND to the row.
+        if on_status:
+            on_status(message)
+        if notes is not None:
+            notes.append(message)
+
     same = os.path.abspath(final) == os.path.abspath(original)
     try:
         if not same:
@@ -453,17 +502,26 @@ def _swap_in(tmp: str, final: str, original: str, on_status=None) -> str:
         os.replace(original, aside)
         os.replace(tmp, final)
     except OSError:
-        # Even the rename failed — keep the converted file under its own name
-        # rather than throwing the work away.
-        if on_status:
-            # [vendor] Reworded from the upstream em dash (house style, 2026-08-18).
-            on_status(f"converted, but could not replace "
-                      f"{os.path.basename(original)}: saved as {os.path.basename(tmp)}")
-        return tmp
+        # Even the rename failed. Keep the converted file rather than throwing
+        # the work away, but under a name whose stem still ends in `[id]`
+        # ([vendor] YT-6, 2026-08-28): under the `.editready` name it was a
+        # deliverable no sweep could touch and no dedupe could recognise.
+        keep = converted_name(final)
+        try:
+            os.replace(tmp, keep)
+        except OSError:
+            # [vendor] Reworded from the upstream em dash (house style,
+            # 2026-08-18).
+            say(f"converted, but could not replace "
+                f"{os.path.basename(original)}: saved as "
+                f"{os.path.basename(tmp)}")
+            return tmp
+        say(f"converted, but {os.path.basename(original)} was in use: "
+            f"saved as {os.path.basename(keep)}")
+        return keep
 
-    if on_status:
-        # [vendor] Reworded from the upstream em dash (house style, 2026-08-18).
-        on_status(f"original was in use, kept as {os.path.basename(aside)}")
+    # [vendor] Reworded from the upstream em dash (house style, 2026-08-18).
+    say(f"original was in use, kept as {os.path.basename(aside)}")
     return final
 
 
@@ -546,8 +604,10 @@ def download(url: str, outdir: str, quality: str = "best",
         info = ydl.extract_info(url, download=True)
         filepath = _final_filepath(ydl, info)
 
+    convert_notes: list = []
     if filepath and quality != "audio":
-        filepath = ensure_edit_ready(filepath, edit_codec, ffmpeg_location, on_status)
+        filepath = ensure_edit_ready(filepath, edit_codec, ffmpeg_location,
+                                     on_status, convert_notes)
 
     sidecar = _write_sidecar(info, filepath) if (write_sidecar and filepath) else None
     return {
@@ -559,6 +619,9 @@ def download(url: str, outdir: str, quality: str = "best",
         "duration": info.get("duration"),
         "filepath": filepath,
         "sidecar": sidecar,
+        # [vendor] What the swap had to improvise, for the clip row (YT-6,
+        # 2026-08-28). Empty on every ordinary download.
+        "note": "; ".join(convert_notes) or None,
     }
 
 

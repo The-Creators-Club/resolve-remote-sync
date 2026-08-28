@@ -10,6 +10,8 @@ and stubbing it would prove nothing about it.
 
 from __future__ import annotations
 
+import calendar
+import datetime
 import hashlib
 import io
 import json
@@ -160,7 +162,23 @@ class _World:
         return any(argv[1:] == ["-U"] for argv in self.argvs)
 
 
-def _manager(world=None, *, cfg=None, min_version="2026.08.10", github=None):
+# A FROZEN "today" for every ensure() in this file. YT-1's max-age rule made
+# ensure() time-dependent: with the real clock, every version string in this
+# suite would quietly cross the 21-day line as the wall clock passed it, and
+# the tests would start failing on a DATE rather than on a change. Noon UTC so
+# no timezone can move the day either way.
+_TODAY = datetime.date(2026, 8, 28)
+_NOW = calendar.timegm(_TODAY.timetuple()) + 12 * 3600
+
+
+def _days_ago(n: int) -> str:
+    """A yt-dlp version string `n` days before the frozen today."""
+    d = _TODAY - datetime.timedelta(days=n)
+    return f"{d.year:04d}.{d.month:02d}.{d.day:02d}"
+
+
+def _manager(world=None, *, cfg=None, min_version="2026.08.10", github=None,
+             clock=None):
     config = {"dashboard_url": "http://dash.example.com"}
     config.update(cfg or {})
     payload = {"min_ytdlp_version": min_version, "download_pause_seconds": 3}
@@ -169,6 +187,7 @@ def _manager(world=None, *, cfg=None, min_version="2026.08.10", github=None):
         http_open=_dashboard(payload),
         github_open=github or _release(b"downloaded-yt-dlp"),
         run_fn=(world.run if world is not None else None),
+        clock=clock or (lambda: _NOW),
     )
 
 
@@ -600,18 +619,153 @@ def test_ensure_does_nothing_when_the_binary_is_current():
 
 
 def test_ensure_leaves_a_present_binary_alone_when_the_dashboard_is_down():
-    """An unreachable dashboard is not evidence that anything is stale."""
-    world = _World(installed="2020.01.01")
+    """An unreachable dashboard is not evidence that anything is stale.
+
+    The version is INSIDE the max-age window on purpose (YT-1, 2026-08-28):
+    what this test owns is that a missing floor never moves the binary, and
+    the max-age rule -- which does move it, dashboard or no dashboard -- has
+    its own tests below."""
+    world = _World(installed=_days_ago(5))
     mgr = ytdlp_mod.YtDlpManager(
         {"dashboard_url": "http://dash.example.com"},
         http_open=_dashboard(OSError("dashboard down")),
         github_open=_release(b"x"),
         run_fn=world.run,
+        clock=lambda: _NOW,
     )
     status = mgr.ensure()
     assert not world.updated
     assert status["action"] == ytdlp_mod.ACTION_NONE
     assert status["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# the max-age rule (YT-1, resilience sweep 2026-08-28)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("version, expected", [
+    ("2026.08.28", 0),
+    ("2026.08.07", 21),
+    ("2026.08.06", 22),
+    ("2026.8.6", 22),                 # unpadded, still a date
+    ("2026.08.06.123456", 22),        # a nightly's fourth part is not a day
+    ("2099.01.01", None),             # a wrong clock is "cannot tell"
+    ("nightly", None),
+    ("", None),
+    (None, None),
+])
+def test_version_age_days(version, expected):
+    assert ytdlp_mod.version_age_days(version, _NOW) == expected
+
+
+def test_a_binary_past_the_max_age_updates_itself_with_no_floor_at_all():
+    """THE point of YT-1. Before this the only thing that ever moved an
+    editor's yt-dlp was the dashboard's floor, and that floor is a constant in
+    a dashboard release: CR-80 and CR-83 were both "the whole fleet cannot
+    download, every companion logs `yt-dlp X is current` nightly, and the cure
+    is a release plus an OTA"."""
+    world = _World(installed=_days_ago(40), update_to=_days_ago(0))
+    mgr = _manager(world, min_version=None)
+    mgr.install = lambda: pytest.fail("an update must never be a fresh install")
+
+    status = mgr.ensure()
+    assert world.updated
+    assert status["action"] == ytdlp_mod.ACTION_UPDATED
+    assert status["ok"] is True
+    assert status["version"] == _days_ago(0)
+    assert "40 days old" in status["message"]
+
+
+def test_a_binary_inside_the_window_is_still_left_alone():
+    world = _World(installed=_days_ago(20))
+    mgr = _manager(world, min_version=None)
+    status = mgr.ensure()
+    assert not world.updated
+    assert status["action"] == ytdlp_mod.ACTION_NONE
+    assert "is current" in status["message"]
+
+
+def test_the_max_age_is_config_overridable_and_can_be_switched_off():
+    world = _World(installed=_days_ago(30), update_to=_days_ago(0))
+    assert _manager(world, min_version=None,
+                    cfg={"ytdlp_max_age_days": 0}).ensure()["action"] ==         ytdlp_mod.ACTION_NONE
+    assert not world.updated
+
+    world2 = _World(installed=_days_ago(9), update_to=_days_ago(0))
+    _manager(world2, min_version=None, cfg={"ytdlp_max_age_days": 7}).ensure()
+    assert world2.updated
+
+
+def test_a_junk_max_age_is_the_default_not_a_refusal(caplog):
+    world = _World(installed=_days_ago(30), update_to=_days_ago(0))
+    with caplog.at_level(logging.ERROR, logger="ccsync.ytdlp"):
+        status = _manager(world, min_version=None,
+                          cfg={"ytdlp_max_age_days": "three weeks"}).ensure()
+    assert world.updated and status["action"] == ytdlp_mod.ACTION_UPDATED
+    assert any("not a number of days" in r.getMessage() for r in caplog.records)
+
+
+def test_an_update_that_cannot_happen_is_named_stale_and_not_called_current():
+    """"Could not check" must never render as "fine". The binary is above the
+    dashboard's floor and can very probably still download, so ok stays True
+    -- but the action and the message say the machine is drifting, which is
+    the thing nobody could see during CR-80."""
+    world = _World(installed=_days_ago(40), update_ok=False)
+    status = _manager(world, min_version=None).ensure()
+    assert status["action"] == ytdlp_mod.ACTION_STALE
+    assert status["ok"] is True
+    assert status["version"] == _days_ago(40)
+    assert "40 days old" in status["message"]
+    assert "—" not in status["message"]        # house rule
+
+
+def test_an_update_that_finds_nothing_newer_says_exactly_that():
+    """`-U` on the newest release exits 0 and changes nothing. Reporting
+    ACTION_UPDATED there would claim a version bump that did not happen, and
+    reporting "current" would hide a binary that is three release cycles old
+    because yt-dlp itself has not shipped."""
+    world = _World(installed=_days_ago(40))          # update_to=None: no change
+    status = _manager(world, min_version=None).ensure()
+    assert world.updated
+    assert status["action"] == ytdlp_mod.ACTION_STALE
+    assert status["version"] == _days_ago(40)
+    assert "newest release" in status["message"]
+
+
+def test_the_max_age_never_touches_a_hand_managed_binary(tmp_path):
+    """An editor who set `ytdlp_path` owns that file: a brew-managed copy, a
+    nightly they are testing. Running -U against it fights brew for the file,
+    and the override branch returns long before the max-age rule."""
+    mine = tmp_path / "mine" / "yt-dlp"
+    mine.parent.mkdir(parents=True)
+    mine.write_bytes(b"theirs")
+
+    def run(argv, timeout):
+        assert argv[1:] == ["--version"], "an override must never be handed -U"
+        return _Proc(0, _days_ago(400) + chr(10))
+
+    mgr = ytdlp_mod.YtDlpManager(
+        {"dashboard_url": "http://dash.example.com", "ytdlp_path": str(mine)},
+        http_open=_dashboard({"min_ytdlp_version": None}),
+        github_open=_release(b"x"), run_fn=run, clock=lambda: _NOW,
+    )
+    mgr.install = lambda: pytest.fail("install() over a hand-managed yt-dlp")
+    status = mgr.ensure()
+    assert status["action"] == ytdlp_mod.ACTION_CHECKED
+    assert status["ok"] is True
+
+
+def test_a_version_this_cannot_age_is_never_updated_on_a_guess():
+    """A version that is not a real calendar date, or a machine whose clock is
+    wrong. "We cannot tell" is not "it is old", and only the second may
+    replace an editor's binary. (A version string this cannot PARSE at all is
+    a different branch: version() answers None and ensure() installs.)"""
+    for version in ("2026.13.45", _days_ago(-30)):
+        world = _World(installed=version, update_to=_days_ago(0))
+        status = _manager(world, min_version=None).ensure()
+        assert not world.updated, version
+        assert status["action"] == ytdlp_mod.ACTION_NONE, version
 
 
 @pytest.mark.parametrize("floor, rankable", [

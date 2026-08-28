@@ -128,7 +128,20 @@ SWEEPABLE_SUFFIXES = (".part", ".ytdl", ".temp")
 # A deliverable can never match: the outtmpl ends every finished name in
 # `[id].<ext>`, so its stem ends in `[id]`, and both callers are id-scoped to
 # that segment anyway.
-_INTERMEDIATE_STEM_RE = re.compile(r"\.(f\d+|temp)$")
+#
+# `.editready` joined them in YT-6 (2026-08-28). It could not before: it was
+# also _swap_in's fallback DELIVERABLE, so sweeping it deleted the only copy
+# of the clip (YTDL-17). The deliverable is `converted_name` now, whose stem
+# still ends in `[id]`, which frees the `.editready` name to mean what it
+# always looked like it meant -- ffmpeg's half-written output. A truncated one
+# from a killed container or a closed lid was otherwise never swept, never
+# disowned, and still matched lane A's `+ *.mp4`.
+#
+# `.original` is deliberately NOT here: it is a whole real download that
+# swap_in could not delete because Resolve had it open, and the id-scoped
+# retry (clear_aside_originals) is what tries again. An age-based folder sweep
+# deleting footage is not a thing this module does.
+_INTERMEDIATE_STEM_RE = re.compile(r"\.(f\d+|temp|editready)$")
 
 # What a failed attempt's leftovers are RENAMED to, rather than deleted --
 # worker.DISOWNED_SUFFIX and _disown_output, verbatim rule (YTDL-3,
@@ -1256,6 +1269,43 @@ def clear_partials(outdir: Any, video_id: str) -> None:
                         "may resume from it", name, outdir, exc)
 
 
+def clear_aside_originals(outdir: Any, video_id: str) -> tuple[int, int]:
+    """Retry the delete swap_in could not do. -> (deleted, bytes still there).
+
+    YT-6 (2026-08-28): when Resolve holds the pre-conversion original open,
+    swap_in renames it `... [id].original.<ext>` instead of deleting it, and
+    before this NOTHING ever removed it. It is a full second copy of the clip,
+    it matches lane A's `+ *.mp4`, and one term folder collected one per
+    converted download forever.
+
+    ID-SCOPED and only on the way IN to a fresh attempt at the same clip, for
+    clear_partials' reason: the folder is shared with every other clip of the
+    search and with the other executor. Resolve is normally no longer holding
+    the file by then (a later session, a closed project), so this is the
+    natural moment. What it cannot delete it REPORTS, in bytes, so the note on
+    the clip row can say how much is reclaimable rather than the space being
+    invisible; nothing here forces a delete, because the editor may have that
+    file open in a timeline this second.
+    """
+    deleted, remaining = 0, 0
+    for name in id_bearing_files(outdir, video_id):
+        if not Path(name).stem.endswith(ORIGINAL_SUFFIX):
+            continue
+        path = Path(str(outdir)) / name
+        size = _size_of(path)
+        try:
+            path.unlink()
+        except OSError as exc:
+            remaining += size
+            log.info("ytdl: %s is still in use (%s); %s bytes stay reclaimable",
+                     path, exc, size)
+            continue
+        deleted += 1
+        log.info("ytdl: reclaimed %s bytes from %s (the original this clip's "
+                 "conversion could not replace last time)", size, path)
+    return deleted, remaining
+
+
 def disown_output(outdir: Any, video_id: str, before: set) -> None:
     """Rename what a FAILED attempt landed so nothing downstream reads it.
 
@@ -1315,6 +1365,24 @@ EDIT_SAFE_ACODECS = frozenset({"aac"})
 # original is moved aside so the converted file can take its name.
 EDITREADY_SUFFIX = ".editready"
 ORIGINAL_SUFFIX = ".original"
+
+# YT-6 (resilience sweep 2026-08-28): the FALLBACK deliverable's name, and the
+# reason it is not `.editready` any more. Every finished download's stem ends
+# in `[id]` -- that anchoring is what the dedupe scan (ytsearch._ID_RE), the
+# server's _landed_file and youtube_import._is_clip_name all read to tell a
+# clip from its litter. `<stem>.editready.mp4` broke it: the file was the
+# deliverable, so nothing could sweep it, and its stem ended in `.editready`,
+# so nothing recognised it as the clip either. The editor got two clips per
+# download (the importer filed both) and a truncated `.editready` from a
+# container kill was never swept, never disowned, and still matched lane A's
+# `+ *.mp4`. Putting the marker BEFORE the id bracket keeps both properties:
+# the stem still ends `[id]`, and the name still says what happened.
+CONVERTED_SUFFIX = ".converted"
+
+# The trailing `[id]` of a yt-dlp outtmpl name. Non-greedy head so a title
+# that itself contains brackets keeps them: only the LAST bracket group is the
+# id (the same anchoring rule as the dedupe scan).
+_ID_TAIL_RE = re.compile(r"^(?P<head>.*?)(?P<id>\s*\[[^\[\]]*\])$")
 
 # ffprobe reads headers; ffmpeg re-encodes a whole clip. The conversion budget
 # is above CLIP_TIMEOUT_SECONDS because libx264 at crf 18 on a laptop runs
@@ -1439,6 +1507,23 @@ def editready_name(name: str) -> str:
     return str(Path(name).with_suffix("")) + EDITREADY_SUFFIX + ".mp4"
 
 
+def converted_name(final: str) -> str:
+    """`<title>.converted [id].mp4` for a deliverable `<title> [id].mp4`.
+
+    The marker goes BEFORE the id bracket so the stem still ends in `[id]`
+    (YT-6, 2026-08-28) -- see CONVERTED_SUFFIX. A name with no bracket group
+    at all is not something this executor wrote, so it gets the marker on the
+    end and is at least distinguishable; nothing downstream could have
+    recognised it as a clip either way.
+    """
+    path = Path(final)
+    stem, ext = path.stem, path.suffix
+    match = _ID_TAIL_RE.match(stem)
+    if match:
+        return match.group("head") + CONVERTED_SUFFIX + match.group("id") + ext
+    return stem + CONVERTED_SUFFIX + ext
+
+
 def swap_in(tmp: Path, final: Path, original: Path) -> tuple[str, Optional[str]]:
     """_swap_in, verbatim in effect: -> (name delivered, note or None).
 
@@ -1446,8 +1531,11 @@ def swap_in(tmp: Path, final: Path, original: Path) -> tuple[str, Optional[str]]
     -- a clip already in an open Resolve project fails os.replace() with
     "Access is denied". A plain rename of the locked file IS allowed, so the
     original is moved aside to `.original` instead of deleted; and if even
-    that fails, the converted file stays under its own `.editready` name
-    rather than the work being thrown away. The note is what on_status said.
+    that fails, the converted file is delivered under `converted_name` rather
+    than the work being thrown away. The note is what on_status said, and it
+    rides the clip row (_download_one merges it into `note`) because an odd
+    name in a term folder with no explanation anywhere is how COMP-BROLL-4 and
+    YT-6 both got misread.
     """
     same = os.path.abspath(str(final)) == os.path.abspath(str(original))
     try:
@@ -1462,9 +1550,49 @@ def swap_in(tmp: Path, final: Path, original: Path) -> tuple[str, Optional[str]]
         os.replace(original, aside)
         os.replace(tmp, final)
     except OSError:
+        pass
+    else:
+        # The size is deliberately NOT in this note: the file is reported as
+        # reclaimable on the next attempt at the same clip (YT-6), when the
+        # id-scoped retry has actually tried to delete it and failed. Saying
+        # "N bytes to reclaim" here would be saying it about a file we have not
+        # yet asked to remove.
+        return final.name, f"original was in use, kept as {aside.name}"
+    # Neither the original's name nor its place could be taken. Deliver the
+    # converted file under a name whose stem still ends in `[id]`, so the
+    # importer and the dedupe scan can both read it as the clip.
+    keep = final.with_name(converted_name(final.name))
+    try:
+        os.replace(tmp, keep)
+    except OSError:
         return tmp.name, (f"converted, but could not replace {original.name}: "
                           f"saved as {tmp.name}")
-    return final.name, f"original was in use, kept as {aside.name}"
+    return keep.name, (f"converted, but {original.name} was in use: "
+                       f"saved as {keep.name}")
+
+
+def _size_of(path: Any) -> int:
+    """A file's size, or 0 for anything that cannot be stat'd."""
+    try:
+        return int(Path(path).stat().st_size)
+    except (OSError, ValueError):
+        return 0
+
+
+def _reclaimable_bytes(size: int) -> str:
+    """A byte count for a clip note (YT-6).
+
+    The space a locked-aside original is holding is REPORTED rather than
+    silently reclaimed: it is a real download, the editor may have it open in
+    Resolve this second, and a sentence saying how much is there is what lets
+    a human choose. No em dashes and no locale (the note reaches an editor).
+    """
+    size = int(size or 0)
+    if size >= 1024 ** 3:
+        return f"{size / 1024 ** 3:.1f} GB"
+    if size >= 1024 ** 2:
+        return f"{size / 1024 ** 2:.0f} MB"
+    return f"{size} bytes"
 
 
 def _configured_ffmpeg(cfg: dict[str, Any]) -> str:
@@ -2043,6 +2171,11 @@ class DownloadJob:
         # What was already there, for disown_output: a corpse this attempt did
         # not create belongs to whoever did (worker._record_failure's `before`).
         before = id_bearing_files(outdir, video_id)
+        # YT-6 (2026-08-28): the delete a previous conversion could not do,
+        # retried now that Resolve has probably let go of the file. Before the
+        # download, so `before` already reflects it and the space is free for
+        # the bytes about to arrive.
+        _reclaimed, still_held = clear_aside_originals(outdir, video_id)
         self.client.clip_status(self.job_id, video_id, "downloading")
 
         ok, note, error = self._run_ytdlp_with_fallback(url, outdir, quality, video_id)
@@ -2079,6 +2212,12 @@ class DownloadJob:
             return
         if conv_note:
             note = f"{note}; {conv_note}" if note else conv_note
+        if still_held:
+            # Reported, never quietly reclaimed (YT-6): the aside file is a
+            # whole download and the editor may have it open in a timeline.
+            held = (f"an earlier copy of this clip is still in use "
+                    f"({_reclaimable_bytes(still_held)} reclaimable)")
+            note = f"{note}; {held}" if note else held
 
         video_path = Path(outdir) / name
         # The scratch copy first (COMP-BROLL-1); the in-tree one is the fallback
@@ -2494,6 +2633,17 @@ class DownloadJob:
             "--merge-output-format", "mp4",
             "-o", ytdl_common.outtmpl(outdir),
             "--no-playlist",
+            # --no-mtime: the finished file keeps TODAY as its mtime instead of
+            # the media response's Last-Modified, which for YouTube is usually
+            # the upload date (YT-3, resilience sweep 2026-08-28). Lane A's only
+            # stability gate on this tree is `--min-age 120s`, so a file stamped
+            # 2019 was eligible the instant it appeared: the pre-conversion VP9
+            # original could go up under the final name, and lane A is
+            # `copy --ignore-existing`, whose rule is that the first version of
+            # a name to reach the NAS is the only one that ever will. That is
+            # CR-79's undecodable clip arriving through the sync lane. With this
+            # flag --min-age is a real gate again.
+            "--no-mtime",
             # Progress as ONE machine-readable line per update, on stdout,
             # where default_run's pump reads it (2026-08-25, the owner: the
             # tray should say "Downloading: x/x (xx MB/s)"). --newline because

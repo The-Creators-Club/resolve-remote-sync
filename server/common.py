@@ -21,10 +21,12 @@ None of the functions in this file talk to the network at import time.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
 import tomllib
+import types
 from pathlib import Path
 
 import urllib3
@@ -1778,7 +1780,213 @@ def get_backend(args=None, kind: str = "", calls: ScriptCalls | None = None):
     return backend
 
 
+# --------------------------------------------------------------------------
+# Which NAS am I about to change? (OPS-4, resilience sweep 2026-08-28)
+# --------------------------------------------------------------------------
+#
+# Until today no script in this package printed the HOST. setup_tree.py said
+# "Target project root: /mnt/<pool>/<tree>/Projects/..." and then `chown -R`'d
+# on whichever box [nas] host happened to resolve to -- which, with a vendor
+# site.toml in the repo and a customer's under --site, is decided by whether
+# the operator remembered the flag. The pinned host key is the only backstop
+# and it is SILENT when both hosts are recorded in ~/.ccsync/known_hosts.
+#
+# So: one banner, printed once per process before the first connection, and a
+# typed confirmation on the three commands that are recursive or destructive.
+
+_BANNER_PRINTED = False
+
+
+def _argv_value(flag: str, argv=None) -> str:
+    """`--flag value` / `--flag=value` straight out of argv, or "".
+
+    Same trick as site_path_from_argv and for the same reason: the banner is
+    printed from cli(), before any script's parser exists.
+    """
+    argv = list(sys.argv[1:] if argv is None else argv)
+    for i, tok in enumerate(argv):
+        if tok == flag and i + 1 < len(argv):
+            return argv[i + 1]
+        if tok.startswith(flag + "="):
+            return tok.split("=", 1)[1]
+    return ""
+
+
+def nas_short_name(host: str) -> str:
+    """The word an operator has to type to confirm: the host's first label.
+
+    An IP literal is returned whole -- "192" is not a name anybody would
+    recognise as this NAS, and typing it would confirm nothing.
+    """
+    text = str(host or "").strip().strip("[]")
+    if not text:
+        return ""
+    try:
+        import ipaddress  # noqa: PLC0415 - only needed on this path
+
+        ipaddress.ip_address(text)
+        return text
+    except ValueError:
+        pass
+    return text.split(".")[0] or text
+
+
+def nas_banner() -> str:
+    """One line naming the box, the manifest and the tree this run acts on.
+
+    Never raises: an unconfigured identity is the state where this line is
+    most useful, so a missing [nas] host renders as <not configured> and the
+    refusal that names the key follows from the caller.
+    """
+    try:
+        host, user = nas_host_user(dry_run=True)
+    except EnvError:
+        host, user = "<not configured>", "<not configured>"
+    try:
+        port = nas_ssh_port()
+    except (EnvError, ValueError):
+        port = 22
+    try:
+        kind = nas_kind(types.SimpleNamespace(nas_kind=_argv_value("--nas-kind")))
+    except EnvError:
+        kind = "unknown kind"
+    return (f"NAS: {user}@{host}:{port} ({kind})  "
+            f"site: {site_file() or '<none>'}  "
+            f"tree: {DEFAULT_CC_ROOT or '<not configured>'}")
+
+
+def print_nas_banner(force: bool = False, stream=None) -> str:
+    """Print nas_banner() once per process. Returns the line.
+
+    Idempotent because it is printed from cli() for every script AND from the
+    destructive ones right before they ask for confirmation; two identical
+    lines would read as two different targets to a tired operator.
+    """
+    global _BANNER_PRINTED
+    line = nas_banner()
+    if force or not _BANNER_PRINTED:
+        _BANNER_PRINTED = True
+        print(line, file=stream or sys.stdout, flush=True)
+    return line
+
+
+def confirm_destructive(what: str, *, assume_yes: bool = False,
+                        dry_run: bool = False, flag: str = "--yes",
+                        stdin=None) -> None:
+    """Gate a recursive/destructive run on --apply/--yes or a typed hostname.
+
+    Raises EnvError (i.e. cli() prints one line and exits 2, nothing touched)
+    when the operator does not confirm. --dry-run never asks: describing what
+    would happen is the safe half, and a prompt there would only train the
+    reflex that answers this one too.
+
+    A non-tty with no flag is a REFUSAL rather than a silent go-ahead: a script
+    or a CI job that means it can pass the flag, and "could not ask" must not
+    render as "yes" (the direction every other guard in this package takes).
+    """
+    if dry_run:
+        return
+    print_nas_banner()
+    try:
+        host, user = nas_host_user(dry_run=True)
+    except EnvError:
+        # No host means no connection either; let the caller's own refusal name
+        # the key instead of inventing one here.
+        return
+    if assume_yes:
+        print(f"{what}\n  confirmed by {flag}: proceeding against {user}@{host}.")
+        return
+    want = nas_short_name(host)
+    stream = stdin or sys.stdin
+    try:
+        interactive = bool(stream is not None and stream.isatty())
+    except Exception:  # noqa: BLE001 - a closed/odd stdin is "not interactive"
+        interactive = False
+    if not interactive:
+        raise EnvError(
+            f"{what}\n  This changes {user}@{host} and there is no terminal here to "
+            f"confirm it on. Re-run with {flag} if that is the box you mean, or with "
+            f"--dry-run to see what it would do. Nothing was changed.")
+    print(f"{what}\n  This changes {user}@{host}. Type the NAS's name ({want}) "
+          f"to go ahead: ", end="", flush=True)
+    typed = (stream.readline() or "").strip()
+    if typed.lower() != want.lower():
+        raise EnvError(
+            f"stopped: {typed!r} is not {want!r}. Nothing was changed. "
+            f"({flag} skips this question.)")
+
+
 REQUIRE_SNAPSHOT_ENV = "CCSYNC_REQUIRE_SNAPSHOT"
+# OPS-9 (resilience sweep 2026-08-28): where the durable record of every
+# snapshot attempt goes. One JSON object per line, appended, never rewritten.
+# The env var is for tests and for an operator keeping several sites' state
+# apart, exactly like CCSYNC_KNOWN_HOSTS.
+SNAPSHOT_LOG_ENV = "CCSYNC_SNAPSHOT_LOG"
+_LAST_SNAPSHOT: dict | None = None
+
+
+def snapshot_log_path() -> Path:
+    override = os.environ.get(SNAPSHOT_LOG_ENV, "").strip()
+    return Path(override) if override else Path.home() / ".ccsync" / "snapshot_log.jsonl"
+
+
+def _record_snapshot(label: str, path: str, ok: bool, detail: str = "") -> None:
+    """Append one {ts, label, path, ok, detail} line, and remember it.
+
+    WPK-6 is why this exists: "nobody read the WARNING because the deploy went
+    on to succeed". A warning on stderr in a 500-line log is not a record, and
+    the operator's belief that backups are configured is never contradicted.
+
+    Appended with a single write on a file opened "a" (O_APPEND) rather than
+    the tmp + os.replace this repo uses for whole-file state: replacing a LOG
+    would race two scripts into losing each other's lines, while an append of
+    one short line does not interleave.
+
+    Best-effort by design -- an unwritable ~/.ccsync must not be the reason a
+    deploy stops. The verdict line the caller prints comes from the in-memory
+    half either way.
+    """
+    global _LAST_SNAPSHOT
+    entry = {
+        "ts": _now_iso(),
+        "label": str(label or ""),
+        "path": str(path or ""),
+        "ok": bool(ok),
+        "detail": str(detail or ""),
+    }
+    _LAST_SNAPSHOT = entry
+    try:
+        target = snapshot_log_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, sort_keys=True) + "\n")
+    except OSError as exc:
+        print(f"WARNING: could not append to {snapshot_log_path()} ({exc}). The "
+              f"snapshot verdict below is still correct for this run.",
+              file=sys.stderr)
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone  # noqa: PLC0415
+
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def snapshot_verdict() -> str:
+    """The one line every script that snapshots prints in its FINAL summary.
+
+    Mid-log is where the warning already was, and it was not read (WPK-6). The
+    answer belongs next to "Done." -- and "no snapshot was attempted" is a NO,
+    not a blank, because a caller that skipped the call is exactly the case a
+    reader would otherwise take for a yes.
+    """
+    entry = _LAST_SNAPSHOT
+    if entry is None:
+        return "this run had a snapshot behind it: NO (none was attempted)"
+    if entry.get("ok"):
+        return "this run had a snapshot behind it: yes"
+    return (f"this run had a snapshot behind it: NO "
+            f"({entry.get('detail') or 'the backend reported a failure'})")
 
 
 def snapshot_before(label: str, path: str = "", dry_run: bool = False,
@@ -1808,6 +2016,7 @@ def snapshot_before(label: str, path: str = "", dry_run: bool = False,
     if not target:
         why = ("no path to snapshot: neither an explicit path nor [tree] "
                "pool_root/tree_name in site.toml")
+        _record_snapshot(label, target, False, why)
         if strict:
             raise EnvError(f"--require-snapshot was given but there is {why}.")
         print(f"WARNING: skipping the pre-{label} snapshot -- {why}.", file=sys.stderr)
@@ -1819,8 +2028,10 @@ def snapshot_before(label: str, path: str = "", dry_run: bool = False,
     else:
         exc_text = ""
     if ok:
+        _record_snapshot(label, target, True, "dry run" if dry_run else "")
         return True
     detail = exc_text or "the backend reported a failure (see above)"
+    _record_snapshot(label, target, False, detail)
     if strict:
         raise EnvError(
             f"refusing to run {label!r} without a snapshot of {target}: {detail}. "
@@ -1840,7 +2051,16 @@ def cli(main_fn) -> int:
     that is not written yet are ANSWERS, not crashes: an admin running
     setup_tree.py on a fresh checkout should read "here is the key you have not
     set", not a traceback ending in KeyError (2026-08-17).
+
+    It is also where the OPS-4 banner is printed (2026-08-28), so EVERY script
+    in this package names its target host without each one having to remember
+    to. Suppressed for --help/-h: argparse's usage text is the answer there and
+    nothing is about to connect. Tests call main() directly and so do not see
+    it; print_nas_banner() is idempotent, so the destructive scripts printing
+    it themselves before a prompt is not a second line.
     """
+    if not any(tok in ("-h", "--help") for tok in sys.argv[1:]):
+        print_nas_banner()
     try:
         return main_fn()
     except EnvError as e:

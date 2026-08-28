@@ -1240,3 +1240,119 @@ def test_the_companion_forgives_a_failed_conversion_only_when_the_probe_failed(
     assert delivered == str(original)
     with pytest.raises(RuntimeError, match="Edit-ready conversion failed"):
         _drive_vendored(monkeypatch, tmp_path, VP9_OPUS, convert_ok=False)
+
+
+# -- the report WIRE CONTRACT: every section the companion sends is declared --
+#
+# SYS-3 (resilience sweep 2026-08-28). `ReportIn` used pydantic's default
+# extra='ignore', so a section the companion computed and sent every 30 s was
+# thrown away at the model boundary with no log line -- three times, each
+# found months later by a human reading the code: transport_health (B17),
+# proxy_coverage and youtube_import ("have ridden every heavy tick since their
+# features shipped and reached nobody"), and sync_guard.syncthing_supervisor
+# (SYNC-8, whose loss the companion's own source describes out loud).
+#
+# The dashboard now ACCEPTS the extras and reports them, which makes the next
+# occurrence visible in a day. This test makes it visible before the commit:
+# it is the same parity gate the VIDEO_EXTS lists above get, applied to the
+# wire contract instead of a constant.
+#
+# Parsed from the SOURCE rather than driven through a live DashboardReporter:
+# _build_payload needs a dozen getters, a config and a machine identity, and
+# the assertion here is about which keys the code CAN emit, not which ones one
+# constructed instance happens to.
+COMPANION_REPORTER_SRC = (REPO_ROOT / "companion" / "src" / "ccsync_companion"
+                          / "reporter.py")
+COMPANION_APP_SRC = (REPO_ROOT / "companion" / "src" / "ccsync_companion" / "app.py")
+COMPANION_RCLONE_SRC = (REPO_ROOT / "companion" / "src" / "ccsync_companion"
+                        / "sync" / "rclone_lane.py")
+
+
+def _dict_keys_built_in(path, function: str, variable: str) -> set[str]:
+    """The string keys `function` writes into `variable`.
+
+    Both shapes the companion uses: the dict literal the variable is
+    initialised with (an AnnAssign, `payload: dict[str, Any] = {...}`) and
+    every `variable["key"] = ...` afterwards. A key built from an expression
+    rather than a literal is invisible here, which is why the runtime side of
+    SYS-3 (the ignored-section banner) exists as well as this test.
+    """
+    import ast
+
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    keys: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name != function:
+            continue
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Assign):
+                targets = inner.targets
+            elif isinstance(inner, ast.AnnAssign):
+                targets = [inner.target]
+            else:
+                continue
+            for target in targets:
+                if (isinstance(target, ast.Subscript)
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == variable
+                        and isinstance(target.slice, ast.Constant)
+                        and isinstance(target.slice.value, str)):
+                    keys.add(target.slice.value)
+                if (isinstance(target, ast.Name) and target.id == variable
+                        and isinstance(inner.value, ast.Dict)):
+                    for key in inner.value.keys:
+                        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                            keys.add(key.value)
+    if not keys:
+        raise AssertionError(
+            f"found no dict keys for {variable} in {function}() of {path.name} -- "
+            "the function was renamed or the payload is built some other way now, "
+            "and this parity gate is silently passing"
+        )
+    return keys
+
+
+def test_every_report_section_the_companion_sends_is_declared_on_ReportIn():
+    from ccsync_dashboard.api import ReportIn
+
+    sent = _dict_keys_built_in(COMPANION_REPORTER_SRC, "_build_payload", "payload")
+    declared = set(ReportIn.model_fields)
+    undeclared = sent - declared
+    assert not undeclared, (
+        "the companion's report payload carries top-level section(s) that "
+        f"ReportIn does not declare: {sorted(undeclared)}. Pydantic accepts them "
+        "(extra='allow') and api_report logs and banners them, but nothing STORES "
+        "them -- declare a field and a flatten_*/machine_state column, or the "
+        "telemetry reaches nobody (SYS-3, B17)."
+    )
+
+
+def test_every_sync_guard_section_the_companion_sends_is_declared():
+    from ccsync_dashboard.api import SyncGuardIn
+
+    sent = _dict_keys_built_in(COMPANION_APP_SRC, "sync_guard", "guard")
+    # app.sync_guard() folds lane B's own contribution in with guard.update().
+    sent |= _dict_keys_built_in(COMPANION_RCLONE_SRC, "sync_guard_report", "out")
+    declared = set(SyncGuardIn.model_fields)
+    undeclared = sent - declared
+    assert not undeclared, (
+        "the companion's sync_guard section carries sub-key(s) that SyncGuardIn "
+        f"does not declare: {sorted(undeclared)}. This is the exact mechanism that "
+        "lost syncthing_supervisor for weeks while the companion's own source said "
+        "so out loud (SYNC-8/SYS-3)."
+    )
+
+
+def test_the_dashboard_accepts_extras_rather_than_dropping_them_silently():
+    """The runtime half of SYS-3: the two models must not go back to
+    extra='ignore', which is what made the three losses silent."""
+    from ccsync_dashboard.api import ReportIn, SyncGuardIn
+
+    for model in (ReportIn, SyncGuardIn):
+        assert model.model_config.get("extra") == "allow", (
+            f"{model.__name__} must keep extra='allow': that is what lets "
+            "api_report NAME an undeclared section in the log and on the fleet "
+            "page instead of throwing it away in silence (SYS-3)."
+        )

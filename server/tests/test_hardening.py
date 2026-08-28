@@ -521,6 +521,157 @@ def test_without_a_project_group_setup_tree_is_unchanged():
 
 
 # ---------------------------------------------------------------------------
+# OPS-4 (resilience sweep 2026-08-28): which NAS, and are you sure?
+#
+# The scenario is a vendor site.toml in the repo and a customer's under
+# --site, in two terminals. The pinned host key is no help when both hosts are
+# recorded in ~/.ccsync/known_hosts, and until today nothing printed the host
+# at all.
+# ---------------------------------------------------------------------------
+
+class _Tty:
+    """A stdin stand-in: isatty() true, one scripted answer."""
+
+    def __init__(self, answer):
+        self.answer = answer
+
+    def isatty(self):
+        return True
+
+    def readline(self):
+        return self.answer + "\n"
+
+
+class _Pipe:
+    def isatty(self):
+        return False
+
+    def readline(self):  # pragma: no cover - a refusal happens before this
+        raise AssertionError("a non-tty must never be read for a confirmation")
+
+
+def test_the_banner_names_the_host_the_manifest_and_the_tree():
+    line = common.nas_banner()
+    host, user = common.nas_host_user(dry_run=True)
+    assert line.startswith(f"NAS: {user}@{host}:{common.nas_ssh_port()} ")
+    assert f"({common.nas_kind()})" in line
+    assert f"site: {common.site_file()}" in line
+    assert f"tree: {common.DEFAULT_CC_ROOT}" in line
+
+
+def test_the_banner_says_not_configured_rather_than_raising(monkeypatch):
+    """An unconfigured identity is exactly when this line is worth having, so
+    it must not be the thing that raises."""
+    monkeypatch.setattr(common, "nas_host_user",
+                        lambda dry_run=False: (_ for _ in ()).throw(
+                            common.EnvError("[nas] host is not configured")))
+    line = common.nas_banner()
+    assert "<not configured>" in line
+
+
+def test_the_banner_is_printed_once_per_process(monkeypatch, capsys):
+    monkeypatch.setattr(common, "_BANNER_PRINTED", False, raising=False)
+    common.print_nas_banner()
+    common.print_nas_banner()
+    assert capsys.readouterr().out.count("NAS: ") == 1
+
+
+def test_an_ip_host_is_confirmed_whole_not_by_its_first_octet():
+    assert common.nas_short_name("192.168.0.10") == "192.168.0.10"
+    assert common.nas_short_name("nas.tail26290e.ts.net") == "nas"
+    assert common.nas_short_name("truenas") == "truenas"
+
+
+def test_a_typed_host_name_confirms_and_a_wrong_one_stops(monkeypatch, capsys):
+    host, _user = common.nas_host_user(dry_run=True)
+    short = common.nas_short_name(host)
+    common.confirm_destructive("About to chown -R.", stdin=_Tty(short.upper()))
+    capsys.readouterr()
+    with pytest.raises(common.EnvError) as exc:
+        common.confirm_destructive("About to chown -R.", stdin=_Tty("yes"))
+    assert "Nothing was changed" in str(exc.value)
+
+
+def test_a_non_tty_with_no_flag_is_a_refusal_not_a_go_ahead():
+    """"Could not ask" must never render as "yes" -- the direction every other
+    guard in this package takes."""
+    with pytest.raises(common.EnvError) as exc:
+        common.confirm_destructive("About to delete the stack.", stdin=_Pipe())
+    assert "--yes" in str(exc.value)
+
+
+def test_the_flag_and_dry_run_both_skip_the_question():
+    common.confirm_destructive("x", assume_yes=True, stdin=_Pipe())
+    common.confirm_destructive("x", dry_run=True, stdin=_Pipe())
+
+
+def test_setup_tree_refuses_a_recursive_chown_nobody_confirmed(monkeypatch, capsys):
+    """setup_tree with no --yes on a non-tty must not reach the ssh at all."""
+    monkeypatch.setattr(common, "_BANNER_PRINTED", False, raising=False)
+    monkeypatch.setattr(setup_tree, "run_ssh",
+                        lambda *a, **k: pytest.fail("nothing may be sent"))
+    monkeypatch.setattr(setup_tree, "snapshot_before", lambda *a, **k: True)
+    monkeypatch.setattr(setup_tree, "set_host_key_pin", lambda v: None)
+    monkeypatch.setattr(sys, "argv",
+                        ["setup_tree.py", "--project-rel-path", "2026/CCT/S1"])
+    with pytest.raises(common.EnvError):
+        setup_tree.main()
+    assert "NAS: " in capsys.readouterr().out
+
+
+def test_a_plain_redeploy_never_asks_but_recreate_does(monkeypatch):
+    """--recreate DELETEs the app; a redeploy is the routine command run many
+    times a day, and a prompt there would train the reflex that answers this
+    one."""
+    asked = []
+    monkeypatch.setattr(ida, "confirm_destructive",
+                        lambda what, **kw: asked.append((what, kw)))
+    monkeypatch.setattr(ida, "install_tree", lambda *a, **k: True)
+    monkeypatch.setattr(ida, "verify_image_boot", lambda *a, **k: True)
+    monkeypatch.setattr(sys, "argv", ["install_dashboard_app.py", "--dry-run"])
+    ida.main()
+    assert asked == []
+    monkeypatch.setattr(sys, "argv",
+                        ["install_dashboard_app.py", "--dry-run", "--recreate"])
+    ida.main()
+    assert len(asked) == 1
+    what, kw = asked[0]
+    assert "DELETE" in what and kw["dry_run"] is True
+
+
+def test_revoke_key_asks_before_it_revokes(monkeypatch, capsys):
+    """--apply on the wrong NAS revokes a key on a fleet that is working."""
+    import setup_editor_account as sea  # noqa: PLC0415
+
+    monkeypatch.setattr(sea, "find_user", lambda name, dry_run: {"id": 7})
+    monkeypatch.setattr(sea, "set_host_key_pin", lambda v: None)
+
+    class _Backend:
+        def revoke_editor_key(self, uid, lock=False):
+            raise AssertionError("must not revoke without a confirmation")
+
+    monkeypatch.setattr(sea, "backend", lambda: _Backend())
+    monkeypatch.setattr(sys, "argv", ["setup_editor_account.py", "--name", "jsmith",
+                                      "--revoke-key", "--apply"])
+    with pytest.raises(common.EnvError):
+        sea.main()
+
+    revoked = []
+
+    class _OkBackend:
+        def revoke_editor_key(self, uid, lock=False):
+            revoked.append((uid, lock))
+            return True, ""
+
+    monkeypatch.setattr(sea, "backend", lambda: _OkBackend())
+    monkeypatch.setattr(sys, "argv", ["setup_editor_account.py", "--name", "jsmith",
+                                      "--revoke-key", "--apply", "--yes"])
+    assert sea.main() == 0
+    assert revoked == [(7, False)]
+    capsys.readouterr()
+
+
+# ---------------------------------------------------------------------------
 # site.example.toml documents every new key (it is the file a customer edits)
 # ---------------------------------------------------------------------------
 

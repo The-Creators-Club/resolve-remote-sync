@@ -8,7 +8,10 @@ these are the paths where a wrong answer is SILENT: a file delivered in a codec
 Resolve cannot decode, or a ledger row pointing at nothing.
 """
 import json
+import os
 import types
+from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -290,3 +293,63 @@ def test_fragments_download_in_parallel_and_the_knob_is_bounded(tmp_path, monkey
     assert downloader.fragment_jobs() == 16       # bulk-automation ceiling
     monkeypatch.setenv(downloader.FRAGMENT_JOBS_ENV, 'junk')
     assert downloader.fragment_jobs() == 6
+
+
+# ------------------------------------------------ the mtime and the swap (YT-3/YT-6)
+
+def test_the_finished_file_is_not_stamped_with_youtubes_upload_date(tmp_path):
+    """YT-3 (resilience sweep 2026-08-28): without --no-mtime yt-dlp stamps the
+    media response's Last-Modified on the finished file, which for YouTube is
+    usually the upload date. The canonical tree IS the download workspace, and
+    every consumer that gates on age reads that date: the companion's lane A
+    `--min-age 120s` most of all, which is the only thing standing between a
+    still-converting original and `copy --ignore-existing` making it the
+    fleet's permanent copy of the clip."""
+    opts = downloader.build_opts(str(tmp_path), quality='1080p')
+    assert opts['updatetime'] is False
+
+
+def test_the_fallback_deliverable_keeps_the_id_last_in_its_stem(tmp_path):
+    """YT-6: `<stem>.editready.mp4` was a deliverable that no sweep could
+    touch (it was the clip) and no dedupe could recognise (its stem ended
+    `.editready`, not `[id]`), so the companion's importer filed it into the
+    media pool as a SECOND clip. The marker goes in front of the bracket."""
+    assert (downloader.converted_name('/x/Chan - T [abcdefghijk].mp4')
+            == str(Path('/x/Chan - T.converted [abcdefghijk].mp4')))
+    # a title with brackets of its own keeps them: only the LAST group is the id
+    assert (downloader.converted_name('/x/Chan - T [live] [abcdefghijk].mp4')
+            == str(Path('/x/Chan - T [live].converted [abcdefghijk].mp4')))
+    # and a name this executor did not write is at least distinguishable
+    assert (downloader.converted_name('/x/whatever.mp4')
+            == str(Path('/x/whatever.converted.mp4')))
+
+
+def test_a_locked_original_delivers_under_the_converted_name_with_a_note(tmp_path):
+    """The Windows case YT-6 is about: the clip is open in the editor's Resolve
+    project, so neither the delete nor the rename-aside is allowed. The work is
+    kept, under a name whose stem still ends in `[id]`, and the note that
+    explains it now reaches the clip row and not only the live progress dict."""
+    original = tmp_path / 'Chan - T [abcdefghijk].webm'
+    tmp = tmp_path / 'Chan - T [abcdefghijk].editready.mp4'
+    original.write_bytes(b'vp9')
+    tmp.write_bytes(b'h264')
+    final = str(tmp_path / 'Chan - T [abcdefghijk].mp4')
+
+    def refuse(*a, **kw):
+        raise OSError('Access is denied')
+
+    notes = []
+    real_replace = os.replace
+
+    def replace(src, dst):
+        if str(dst).endswith('.original.webm') or str(dst) == final:
+            raise OSError('Access is denied')
+        return real_replace(src, dst)
+
+    with mock.patch('os.remove', refuse), mock.patch('os.replace', replace):
+        got = downloader._swap_in(str(tmp), final, str(original), None, notes)
+
+    assert Path(got).name == 'Chan - T.converted [abcdefghijk].mp4'
+    assert Path(got).exists() and original.exists()
+    assert notes and 'was in use' in notes[0]
+    assert 'saved as Chan - T.converted [abcdefghijk].mp4' in notes[0]

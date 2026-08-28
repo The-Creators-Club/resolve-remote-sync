@@ -109,3 +109,107 @@ def test_inventory_disabled_without_projects_dir(conn, fake):
     results = c.run_cycle(conn, ["config", "inventory"])
     assert results["inventory"] is True
     assert conn.execute("SELECT COUNT(*) FROM poll_runs WHERE kind='inventory'").fetchone()[0] == 0
+
+
+# -- the collapse brake + the not-mounted canary (DASH-5, resilience sweep
+#    2026-08-28). An unmounted ZFS dataset under /projects/<project> leaves
+#    the dir present and EMPTY, so the walk returned [] and the old code
+#    wrote 0 originals / 0 proxies with last_error NULL: every media-presence
+#    view then said the NAS holds nothing and the backlog listed every
+#    original an editor holds as missing from the server.
+
+def test_replace_nas_media_refuses_a_collapse_to_zero(conn):
+    pid = dbmod.upsert_project(conn, "p", "P", "/p", "2026-08-28T00:00:00+00:00")
+    rows = [("B-roll/a.braw", "original", ".braw", 100, 1),
+            ("B-roll/b.braw", "original", ".braw", 100, 2),
+            ("B-roll/Proxy/a.mov", "proxy", ".mov", 10, 3)]
+    assert dbmod.replace_nas_media(conn, pid, rows, "sig1", 2,
+                                   "2026-08-28T00:00:00+00:00") is True
+
+    assert dbmod.replace_nas_media(conn, pid, [], "sig2", 1,
+                                   "2026-08-28T01:00:00+00:00") is False
+    summary = dbmod.fetch_nas_media_summary(conn, pid)
+    assert summary["n_originals"] == 2 and summary["n_proxies"] == 1
+    assert "0 of 3 files" in summary["last_error"]
+    assert conn.execute("SELECT COUNT(*) FROM nas_media").fetchone()[0] == 3
+    # tree_sig must NOT advance, or the next cycle believes it is up to date
+    # and never walks again.
+    assert dbmod.nas_inventory_sig(conn, pid) == "sig1"
+
+
+def test_replace_nas_media_refuses_losing_more_than_90_percent(conn):
+    pid = dbmod.upsert_project(conn, "p", "P", "/p", "2026-08-28T00:00:00+00:00")
+    rows = [(f"B-roll/{i}.braw", "original", ".braw", 10, i) for i in range(40)]
+    dbmod.replace_nas_media(conn, pid, rows, "sig1", 2, "2026-08-28T00:00:00+00:00")
+    assert dbmod.replace_nas_media(conn, pid, rows[:3], "sig2", 2,
+                                   "2026-08-28T01:00:00+00:00") is False
+    assert dbmod.fetch_nas_media_summary(conn, pid)["n_originals"] == 40
+    # ...but a normal churn is applied.
+    assert dbmod.replace_nas_media(conn, pid, rows[:30], "sig3", 2,
+                                   "2026-08-28T02:00:00+00:00") is True
+    summary = dbmod.fetch_nas_media_summary(conn, pid)
+    assert summary["n_originals"] == 30 and summary["last_error"] is None
+
+
+def test_replace_nas_media_force_overrides_the_brake(conn):
+    pid = dbmod.upsert_project(conn, "p", "P", "/p", "2026-08-28T00:00:00+00:00")
+    rows = [("a.braw", "original", ".braw", 10, 1)]
+    dbmod.replace_nas_media(conn, pid, rows, "sig1", 1, "2026-08-28T00:00:00+00:00")
+    assert dbmod.replace_nas_media(conn, pid, [], "sig2", 1,
+                                   "2026-08-28T01:00:00+00:00", force=True) is True
+    assert dbmod.fetch_nas_media_summary(conn, pid)["n_originals"] == 0
+
+
+def test_a_first_walk_of_an_empty_project_is_not_refused(conn):
+    """There is nothing to protect on a project with no recorded inventory:
+    the brake must not stop a genuinely empty new project being recorded."""
+    pid = dbmod.upsert_project(conn, "p", "P", "/p", "2026-08-28T00:00:00+00:00")
+    assert dbmod.replace_nas_media(conn, pid, [], "sig1", 1,
+                                   "2026-08-28T00:00:00+00:00") is True
+    assert dbmod.fetch_nas_media_summary(conn, pid)["last_error"] is None
+
+
+def test_an_unmounted_project_dir_keeps_its_inventory(conn, tmp_path, collector):
+    """End to end: the dir empties out between two cycles (dataset not
+    mounted, or renamed by hand mid-cycle) and the collector keeps the last
+    good inventory, with the reason on the row the project page reads."""
+    proj = make_project_tree(tmp_path / "projects", "2025/FF4/Nuclear")
+    collector.run_cycle(conn, ["config", "inventory"])
+    pid = conn.execute("SELECT id FROM projects WHERE slug='2025-ff4-nuclear'").fetchone()[0]
+    assert dbmod.fetch_nas_media_summary(conn, pid)["n_originals"] == 2
+
+    import shutil
+    shutil.rmtree(proj / "B-roll")
+    shutil.rmtree(proj / "Audio")
+    (proj / ".stfolder").mkdir()        # the marker is still there: really empty
+    note = collector._run_inventory(conn)
+    summary = dbmod.fetch_nas_media_summary(conn, pid)
+    assert summary["n_originals"] == 2                    # kept
+    assert "not replacing" in summary["last_error"]
+    assert note and "collapsed" in note
+
+
+def test_a_project_dir_with_no_marker_and_no_media_reads_as_unmounted(conn, tmp_path, collector):
+    (tmp_path / "projects" / "2025" / "FF4" / "Nuclear").mkdir(parents=True)
+    (tmp_path / "projects" / "keep-the-tree-non-empty").mkdir()
+    collector.run_cycle(conn, ["config"])
+    note = collector._run_inventory(conn)
+    pid = conn.execute("SELECT id FROM projects WHERE slug='2025-ff4-nuclear'").fetchone()[0]
+    row = conn.execute("SELECT last_error FROM nas_inventory_state WHERE project_id=?",
+                       (pid,)).fetchone()
+    assert row is not None and "unmounted" in row["last_error"]
+    assert note and "unreadable" in note
+
+
+def test_an_empty_projects_tree_reads_as_unmounted_not_empty(conn, tmp_path, collector):
+    """/projects is a bind mount POINT, so it exists whether or not the
+    dataset under it is mounted. Zero entries is never a live fleet."""
+    make_project_tree(tmp_path / "projects", "2025/FF4/Nuclear")
+    collector.run_cycle(conn, ["config", "inventory"])
+    pid = conn.execute("SELECT id FROM projects WHERE slug='2025-ff4-nuclear'").fetchone()[0]
+
+    import shutil
+    shutil.rmtree(tmp_path / "projects" / "2025")
+    note = collector._run_inventory(conn)
+    assert note and "unmounted" in note
+    assert dbmod.fetch_nas_media_summary(conn, pid)["n_originals"] == 2

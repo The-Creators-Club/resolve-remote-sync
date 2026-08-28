@@ -6,6 +6,7 @@ suffix (bytes=-500) range forms.
 """
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -29,15 +30,40 @@ def _iter_file(path: Path, start: int, length: int) -> Iterator[bytes]:
             yield chunk
 
 
+def _etag(stat: os.stat_result) -> str:
+    """A validator over size + mtime.
+
+    MEDIA-22 (resilience sweep 2026-08-28): the public share routes used to
+    hand a client an hour of private cache, so revoking a link that had got
+    away did not stop the clip playing (or being re-fetched) for that hour.
+    They now send `no-cache`, which means "ask every time", not "do not
+    store" -- an ETag keeps the bandwidth win, because the re-ask is a 304 on
+    a link that is still live and a 404 on one that is not. Weak, since it
+    describes the file's metadata rather than its bytes; these files are
+    written once by the indexer and never edited in place.
+    """
+    return f'W/"{stat.st_size:x}-{int(stat.st_mtime):x}"'
+
+
 def serve_file_with_range(request: Request, path: Path, media_type: str) -> Response:
     if not path.is_file():
         raise HTTPException(status_code=404, detail="file not found")
 
-    file_size = path.stat().st_size
+    stat = path.stat()
+    file_size = stat.st_size
+    etag = _etag(stat)
     range_header = request.headers.get("range")
 
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match and etag in [t.strip() for t in if_none_match.split(",")]:
+        # A conditional GET on an unchanged file. 304 carries no body, so it
+        # is answered whether or not a Range was asked for: the client already
+        # holds the bytes it would have got.
+        return Response(status_code=304, headers={"ETag": etag, "Accept-Ranges": "bytes"})
+
     if not range_header:
-        headers = {"Content-Length": str(file_size), "Accept-Ranges": "bytes"}
+        headers = {"Content-Length": str(file_size), "Accept-Ranges": "bytes",
+                   "ETag": etag}
         return StreamingResponse(
             _iter_file(path, 0, file_size), media_type=media_type, headers=headers
         )
@@ -71,6 +97,7 @@ def serve_file_with_range(request: Request, path: Path, media_type: str) -> Resp
         "Content-Range": f"bytes {start}-{end}/{file_size}",
         "Accept-Ranges": "bytes",
         "Content-Length": str(length),
+        "ETag": etag,
     }
     return StreamingResponse(
         _iter_file(path, start, length),

@@ -1,0 +1,58 @@
+{# Recent plan changes, with the undo (DASH-8, resilience sweep 2026-08-28).
+
+   The fleet page is where "why has this stopped syncing" is asked, so it is
+   where "somebody unticked it four minutes ago" has to be answerable. Rows
+   come from the append-only fleet_audit ledger, not from selections -- an
+   untick DELETES its row, which is exactly why there was nothing to read.
+
+   The panel renders nothing at all when the last hour holds no plan change:
+   an empty box on the fleet page every day of the year teaches people to
+   stop looking at it. #}
+{% if plan_changes or plan_error or plan_notice %}
+<div class="admin-users-box" id="plan-changes">
+  <div class="side-head">[ RECENT PLAN CHANGES ]
+    <span class="muted">Ticks and unticks from the last hour. [ UNDO ] puts one back
+      exactly as it was, on the same computers and in the same mode.</span></div>
+
+  {% if plan_error %}<div class="banner">▲ {{ plan_error }}</div>{% endif %}
+  {% if plan_notice %}<div class="banner">{{ plan_notice }}</div>{% endif %}
+
+  {% if plan_changes %}
+    <table class="editors">
+      <thead><tr><th>WHEN</th><th>WHO</th><th>WHAT</th><th>PROJECT</th><th>EDITOR</th><th>WHERE</th><th></th></tr></thead>
+      <tbody>
+      {% for row in plan_changes %}
+        <tr class="editor-row">
+          <td class="mono-sm muted">{{ row.at | ago }}</td>
+          <td class="who">{{ row.actor }}</td>
+          <td class="mono-sm">
+            {% if row.action == "plan.untick" %}<span class="chip red">[ UNTICKED ]</span>
+            {% else %}<span class="chip">[ TICKED ]</span>{% endif %}
+          </td>
+          <td class="mono-sm">{{ row.detail.slug }}</td>
+          <td class="mono-sm">{{ row.detail.editor }}</td>
+          <td class="mono-sm muted">
+            {% if row.detail.scope == "person" %}
+              every computer{% if row.detail.before | length > 1 %} ({{ row.detail.before | length }}){% endif %}
+            {% else %}{{ row.detail.machine or "unassigned" }}{% endif %}
+          </td>
+          <td>
+            {% if row.undone %}
+              <span class="muted mono-sm">put back</span>
+            {% else %}
+              <form class="inline-form" hx-post="/partials/plan-changes/{{ row.id }}/undo"
+                    hx-target="#plan-changes" hx-swap="outerHTML">
+                <button class="btn" type="submit">[ UNDO ]</button>
+              </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <div class="muted mono-sm" style="margin-top:0.5rem">
+      Older changes are on the <a href="/admin/audit">fleet timeline</a>.
+    </div>
+  {% endif %}
+</div>
+{% endif %}

@@ -33,6 +33,7 @@ from PIL import Image, ImageDraw  # noqa: F401  (ImportError here is by design)
 
 from . import config as config_mod
 from . import proxy_history
+from . import reporter as reporter_mod
 from . import resolve_bridge
 from . import site as site_mod
 from . import ui_dispatch
@@ -2087,6 +2088,124 @@ def _skipped_exists_line(guard: dict) -> Optional[str]:
     return (f"⚠ {count} file{'s' if count != 1 else ''} on the server "
             f"{'have' if count != 1 else 'has'} the same name but a different size. "
             "Your newer version will NOT upload")
+
+
+def _unfiltered_line(guard: dict) -> Optional[str]:
+    """The projects whose sharing is parked because their filter list never
+    landed (SYNC-5, resilience sweep 2026-08-28).
+
+    Lane C reports `error` for this too, but the lane line names no project:
+    this one does, because "which of my projects is not sharing" is the
+    question, and the answer is an admin's job, not the editor's."""
+    slugs = [str(s) for s in ((guard or {}).get("folders_unfiltered") or []) if s]
+    if not slugs:
+        return None
+    shown = ", ".join(slugs[:3])
+    if len(slugs) > 3:
+        shown += f", +{len(slugs) - 3} more"
+    return (f"⚠ {len(slugs)} project(s) are not sharing yet - waiting for their "
+            f"filter list: {shown}")
+
+
+def _conflicts_line(guard: dict) -> Optional[str]:
+    """Syncthing conflict copies on this machine (UX-7).
+
+    Advisory and never actioned from here: two people changed the same file,
+    Syncthing kept both, and only a human can say which one is the work. The
+    sentence names the file so the editor can find it in Explorer/Finder."""
+    conflicts = (guard or {}).get("sync_conflicts") or {}
+    try:
+        count = int(conflicts.get("count") or 0)
+    except (TypeError, ValueError):
+        return None
+    if count <= 0:
+        return None
+    paths = [str(p) for p in (conflicts.get("paths") or []) if p]
+    example = f" (e.g. {paths[0].rsplit('/', 1)[-1]})" if paths else ""
+    return (f"⚠ {count} file{'s' if count != 1 else ''} "
+            f"{'were' if count != 1 else 'was'} edited on two machines at once, so "
+            f"Syncthing kept both copies{example}. Nothing was lost: ask your admin "
+            "which one to keep")
+
+
+# Report cycles in a row that must fail before the tray says so (APP-1).
+# ~10 intervals: at the normal 60 s cadence that is ten minutes, which is
+# long enough that a NAS reboot or a laptop lid does not produce a line and
+# short enough that a revoked token is named the same morning.
+REPORTER_FAILURE_STREAK = 10
+
+
+def _reporter_line(guard: dict) -> Optional[str]:
+    """"The dashboard has not accepted a report for 3h", or None (APP-1,
+    resilience sweep 2026-08-28).
+
+    The failure this closes: a revoked per-editor token, or a typo in
+    `dashboard_url`, left the lanes syncing and the tray green while the
+    machine went dark on the fleet grid. Nothing on this computer said so.
+
+    A rejected CREDENTIAL is named separately from an unreachable server,
+    because they are different jobs: one is the editor's (sign in again), the
+    other is their admin's."""
+    health = (guard or {}).get("reporter") or {}
+    if not isinstance(health, dict):
+        return None
+    try:
+        streak = int(health.get("consecutive_failures") or 0)
+    except (TypeError, ValueError):
+        return None
+    if streak < REPORTER_FAILURE_STREAK:
+        return None
+    status = str(health.get("last_status") or "")
+    if status in ("HTTP 401", "HTTP 403"):
+        return ("⚠ The dashboard is refusing this computer's reports: your CCSync "
+                "sign-in was rejected. Sign in again from this menu")
+    since = reporter_mod.parse_server_time(health.get("last_success_at"))
+    if since is None:
+        return ("⚠ The dashboard has never accepted a report from this computer. "
+                "Your work may not be visible to your admin. Copy diagnostics for them")
+    age = max(0.0, time.time() - since)
+    return (f"⚠ The dashboard has not accepted a report for "
+            f"{proxy_history.human_duration(age)}, so your admin cannot see whether "
+            "this computer is syncing")
+
+
+def _clock_skew_line(guard: dict) -> Optional[str]:
+    """"This computer's clock is 20 minutes behind the server" (APP-13/SYS-4).
+
+    Not cosmetic: lane B passes rclone `--min-age`, and rclone ages a remote
+    file against the LOCAL clock, so a slow clock makes every file on the NAS
+    look like it was written in the future and the pass transfers nothing,
+    exits 0, and reports idle and green."""
+    skew = (guard or {}).get("clock_skew_seconds")
+    try:
+        value = float(skew)
+    except (TypeError, ValueError):
+        return None
+    if abs(value) < 60:
+        return None
+    phrase = reporter_mod.skew_phrase(value)
+    return (f"⚠ This computer's clock is {phrase} the server's. Sync will not work "
+            "correctly until it is fixed")
+
+
+def _crashes_line(guard: dict) -> Optional[str]:
+    """"A background task failed" (APP-6).
+
+    crash_report.py exists because "the tray stayed up with a dead lane" is
+    the failure this fleet keeps hitting, and until the sweep the file it
+    wrote was surfaced nowhere at all."""
+    crashes = (guard or {}).get("crashes") or {}
+    if not isinstance(crashes, dict):
+        return None
+    try:
+        count = int(crashes.get("count") or 0)
+    except (TypeError, ValueError):
+        return None
+    if count <= 0:
+        return None
+    return (f"⚠ A background task failed on this computer "
+            f"({count} report{'s' if count != 1 else ''} saved). Copy diagnostics "
+            "for your admin")
 
 
 def _progress_bucket(status: LaneStatus) -> Optional[int]:

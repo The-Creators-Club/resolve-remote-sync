@@ -871,7 +871,7 @@ class Collector:
                     return False
         return True
 
-    def _run_config(self, conn) -> None:
+    def _run_config(self, conn) -> str | None:
         cfg = self.client.config()
         my_id = str(self.client.system_status().get("myID", "") or "")
         if not my_id:
@@ -889,7 +889,9 @@ class Collector:
             # good cycle. _run_enforce has always skipped the pass here; this
             # one only said it did (KNOWN_BUGS DASH-7, 2026-08-11).
             log.error("skipping config: syncthing reported an empty myID and none is known yet")
-            return
+            # DASH-14 (resilience sweep 2026-08-28): the note is what stops
+            # _timed recording "I did nothing" as a clean reconcile.
+            return "skipped: empty myID"
         self._my_id = my_id
         now = self.now_fn()
         # One query per cycle, not one per device: the device -> editor mapping
@@ -928,9 +930,18 @@ class Collector:
             self._folder_devices[slug] = [
                 d["deviceID"] for d in folder.get("devices", []) if d["deviceID"] != my_id
             ]
-        db.deactivate_missing_projects(conn, seen, now=now)
+        # DASH-4 (resilience sweep 2026-08-28): the brake lives in db.py so the
+        # refusal is persisted with the counts that produced it; here it only
+        # has to be said out loud and handed to _timed as this cycle's note.
+        result = db.deactivate_missing_projects(conn, seen, now=now)
+        refused = result.get("refused")
+        if refused:
+            log.error("REFUSING to deactivate %d of %d active project(s): %s",
+                      refused["would_deactivate"], refused["active"], refused["message"])
+            return f"refused deactivating {refused['would_deactivate']} project(s)"
+        return None
 
-    def _run_enforce(self, conn) -> None:
+    def _run_enforce(self, conn) -> str | None:
         """Reconcile Syncthing folder shares with the selections table.
 
         Selections are the authority for MAPPED editor devices. Unmapped
@@ -951,9 +962,14 @@ class Collector:
             # from every folder -- a put_folder on EVERY folder, every cycle,
             # each of which restarts the folder in Syncthing. Skip the pass.
             log.error("skipping enforce: syncthing reported an empty myID")
-            return
+            # DASH-14 (resilience sweep 2026-08-28). Three distinct "I did
+            # nothing" outcomes in this one function used to be recorded as
+            # "I reconciled everything": this one, the removal refusal below,
+            # and a seed that could not be marked done.
+            return "skipped: empty myID"
         folders = cfg.get("folders", [])
         devices = [d for d in cfg.get("devices", []) if d["deviceID"] != my_id]
+        note: str | None = None
 
         if db.meta_get(conn, "selections_seeded") is None:
             # THE SEED IS THE BOOTSTRAP, so it deliberately uses the
@@ -1011,6 +1027,7 @@ class Collector:
                     "not marking selections as seeded: %d folder(s), %d mapped editor device(s) "
                     "in this snapshot -- retrying next cycle",
                     len(folders), sum(1 for e in shape_map.values() if e))
+                note = "seed deferred: no mapped editor device in this snapshot"
 
         # Resolved AFTER the seed, so anything it just recorded counts.
         known_editors = db.known_editor_usernames(conn)
@@ -1067,6 +1084,18 @@ class Collector:
             if device_id:
                 machine_devices[(row["editor_username"], row["machine"])] = device_id
         mapped_device_ids = set(machine_devices.values())
+        # DASH-8 (resilience sweep 2026-08-28): (folder, device) pairs whose
+        # plan change is seconds old keep a share they already have, so the
+        # fleet page's [ UNDO ] inside its 60 s window costs Syncthing nothing
+        # -- an unshare that never happened needs no re-share, and a re-share
+        # restarts the folder on every device holding it.
+        #
+        # Removals ONLY. An ADDITION is never delayed by this: ticking used to
+        # wait out interval_enforce before anything started (fixed 2026-07-26
+        # with the nudge), and making a fresh tick wait 60 s would hand that
+        # back. Undoing a tick costs the share it already made; undoing an
+        # untick, which is the accident this panel exists for, costs nothing.
+        frozen_devices = db.recent_plan_change_devices(conn, self.now_fn(), machine_devices)
         plans: list[tuple[str, set[str], set[str]]] = []   # (slug, desired, actual)
         for folder in folders:
             slug = folder["id"]
@@ -1144,6 +1173,7 @@ class Collector:
                     }
             # devices outside the config snapshot entirely (shouldn't happen) stay put
             desired |= actual - set(id_to_editor) - {my_id}
+            desired |= actual & frozen_devices.get(slug, frozenset())  # see above
             if desired == actual:
                 continue
             plans.append((slug, desired, actual))
@@ -1163,6 +1193,17 @@ class Collector:
         removal_devices = {d for _slug, d in removals}
         limit = self.settings.enforce_max_share_removals
         skip_removals = len(removals) > limit
+        # DASH-3 (resilience sweep 2026-08-28): the diff this cycle was about
+        # to apply, and the refusal if it refused, are PERSISTED before the
+        # HTTP loop below. Both used to exist only in the container log and
+        # in this frame, so a restart lost even that -- while every genuine
+        # untick made since (including an admin unticking a project to stop
+        # an editor filling their drive) silently went unapplied behind a
+        # cycle that reported ok. Committed before the loop for the same
+        # reason the seed is: holding a write transaction open across
+        # Syncthing calls is what makes an editor's POST /api/v1/report 500
+        # with "database is locked".
+        db.record_enforce_plan(conn, self.now_fn(), plans)
         if skip_removals:
             log.error(
                 "REFUSING %d share removal(s) in one enforce cycle (limit %d): %d device(s) "
@@ -1171,6 +1212,11 @@ class Collector:
                 len(removals), limit, len(removal_devices),
                 ", ".join(sorted(removal_devices)),
                 len({slug for slug, _d in removals}))
+            db.record_enforce_refusal(conn, self.now_fn(), removals, limit)
+            note = f"refused {len(removals)} share removal(s)"
+        else:
+            db.clear_enforce_refusal(conn)
+        conn.commit()
 
         for slug, desired, actual in plans:
             if skip_removals:
@@ -1188,8 +1234,9 @@ class Collector:
             added = sorted(desired - actual)
             removed = sorted(actual - desired)
             log.info("enforced shares on %s: +%s -%s", slug, added or "[]", removed or "[]")
+        return note
 
-    def _run_inventory(self, conn) -> None:
+    def _run_inventory(self, conn) -> str | None:
         """Walk the NAS Projects tree for a bounded slice of projects each
         cycle, recording originals + proxies.
 
@@ -1210,6 +1257,21 @@ class Collector:
         projects_dir = Path(self.settings.projects_dir)
         if not projects_dir.is_dir():
             raise RuntimeError(f"DASH_PROJECTS_DIR does not exist: {projects_dir}")
+        # NOT-MOUNTED CANARY (DASH-5, resilience sweep 2026-08-28). /projects
+        # is a bind mount point, so it exists whether or not the dataset
+        # under it is mounted: an unmounted tree reads as a Projects/ with
+        # zero entries in it, which is not a state any live fleet is ever in.
+        # Walking it would take every project's inventory to zero. "Could not
+        # check" must never render as "fine", so this is a NOTE on the cycle,
+        # not a silent skip.
+        try:
+            mounted = any(True for _ in os.scandir(projects_dir))
+        except OSError as exc:
+            raise RuntimeError(f"cannot read DASH_PROJECTS_DIR {projects_dir}: {exc}") from exc
+        if not mounted:
+            log.error("inventory: %s has zero entries -- the Projects tree looks UNMOUNTED, "
+                      "not empty; skipping the walk so no inventory is wiped", projects_dir)
+            return "skipped: the Projects tree looks unmounted (0 entries)"
         active = conn.execute(
             "SELECT id, label, path FROM projects WHERE active=1 ORDER BY id"
         ).fetchall()
@@ -1236,14 +1298,36 @@ class Collector:
             sig, n_dirs = self._dir_signature(proj_dir)
             if sig == db.nas_inventory_sig(conn, pid):
                 continue  # unchanged since last walk -- skip the file scan
-            walked.append((pid, rel, self._walk_media_files(proj_dir), sig, n_dirs))
+            rows = self._walk_media_files(proj_dir)
+            # A project dir with NO media and no .stfolder is Syncthing's own
+            # answer to "is this really the folder": the marker is the first
+            # thing a mount brings back and the first thing a rename takes
+            # away (DASH-5, resilience sweep 2026-08-28). A dir that still
+            # holds media is inventoried whatever its marker says -- the
+            # collapse brake in db.replace_nas_media covers the rest.
+            if not rows and not (proj_dir / ".stfolder").exists():
+                errors.append((pid, "project dir has no .stfolder marker and no media "
+                                    "files - it looks unmounted, not empty"))
+                continue
+            walked.append((pid, rel, rows, sig, n_dirs))
 
         # -- phase 2: one short write burst ---------------------------------
         for pid, message in errors:
             db.record_inventory_error(conn, pid, message, now)
+        refused = 0
         for pid, rel, rows, sig, n_dirs in walked:
-            db.replace_nas_media(conn, pid, rows, sig, n_dirs, now)
-            log.info("inventory: %s -> %d media file(s)", rel, len(rows))
+            if db.replace_nas_media(conn, pid, rows, sig, n_dirs, now):
+                log.info("inventory: %s -> %d media file(s)", rel, len(rows))
+            else:
+                refused += 1
+                log.error("inventory: %s walked to %d media file(s) from a non-empty "
+                          "inventory -- KEEPING the previous one", rel, len(rows))
+        notes = []
+        if errors:
+            notes.append(f"{len(errors)} project dir(s) unreadable")
+        if refused:
+            notes.append(f"kept {refused} project inventory(ies): the walk collapsed")
+        return "; ".join(notes) or None
 
     @staticmethod
     def _project_rel(row, prefix: str) -> str:

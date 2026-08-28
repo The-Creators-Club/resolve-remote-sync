@@ -1354,3 +1354,67 @@ def test_backup_dir_and_breaker_scope_take_a_deep_borrowed_subpath(tmp_path):
     # a remote-shrank memory recorded for the deep scope stays keyed to
     # exactly that scope string
     assert lane.breaker.check_remote(sub, ["a.mp4", "b.mp4"]) is None
+
+
+# -- SYNC-3: the relocation probe across the Mac/NAS Unicode boundary --------
+
+# The pair already committed in dashboard/tests/test_unicode_paths.py: the
+# SAME name, spelled as macOS's listdir hands it out (NFD) and as the NAS and
+# Windows hand it out (NFC). Written out literally, not composed at import
+# time, for the same reason that file does: the bytes ARE the test.
+_NFC_REL = "Interviewees/Matej Šimalčík/Proxy/A002_07161726_C048.mp4"
+_NFD_REL = "Interviewees/Matej Šimalčík/Proxy/A002_07161726_C048.mp4"
+
+
+def _relocation_lane(tmp_path, trashed, remote_lines):
+    """A lane B whose trash holds `trashed` [(rel, size)] and whose remote
+    listing returns `remote_lines` ["<size>;<rel>"]."""
+    lane = _make_lane(tmp_path, DIRECTION_DOWN)
+    backup = tmp_path / ".ccsync-trash" / "20260828-1"
+    for rel, size in trashed:
+        target = backup.joinpath(*rel.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"x" * size)
+    lane._last_backup_dir = str(backup)
+    lane._remote_list_fn = lambda cmd, timeout: "\n".join(remote_lines)
+    return lane
+
+
+def test_relocation_probe_matches_an_nfd_path_against_the_nas_nfc_listing(tmp_path):
+    """SYNC-3: the trashed paths come off the LOCAL disk (NFD on a Mac), the
+    remote listing off the NAS (NFC). Before the NFC fold, every path with a
+    diacritic scored as a deletion and the breaker tripped on a benign
+    reorganisation."""
+    # Guard against a future reformat folding the pair into one spelling and
+    # making every assertion below vacuous.
+    assert _NFC_REL != _NFD_REL
+    lane = _relocation_lane(
+        tmp_path,
+        trashed=[(_NFD_REL, 7)],
+        # the NAS still has the file, at the same rel, NFC-spelled
+        remote_lines=[f"7;{_NFC_REL}"],
+    )
+    assert lane._count_relocations("Projects/2026/FF5/Alpha") == 1
+
+
+def test_relocation_probe_matches_an_nfd_basename_moved_on_the_nas(tmp_path):
+    """The CR-44 half: same basename + same size at ANOTHER path is a move.
+    The basename carries the diacritic too."""
+    moved = "B-roll/Matej Šimalčík/A002_07161726_C048.mp4"
+    lane = _relocation_lane(
+        tmp_path,
+        trashed=[(_NFD_REL, 5)],
+        remote_lines=[f"5;{moved}"],
+    )
+    assert lane._count_relocations("Projects/2026/FF5/Alpha") == 1
+
+
+def test_relocation_probe_still_counts_a_real_deletion_as_a_deletion(tmp_path):
+    """The fold must not turn the breaker off: a file the NAS genuinely no
+    longer holds, under any spelling, is still a deletion."""
+    lane = _relocation_lane(
+        tmp_path,
+        trashed=[(_NFD_REL, 5)],
+        remote_lines=["5;Interviewees/Somebody Else/Proxy/other.mp4"],
+    )
+    assert lane._count_relocations("Projects/2026/FF5/Alpha") == 0

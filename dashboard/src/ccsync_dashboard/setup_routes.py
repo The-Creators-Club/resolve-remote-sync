@@ -30,7 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
-from . import auth, setup_engine, site_store
+from . import auth, db, setup_engine, site_store
 from .api import get_conn
 
 router = APIRouter(prefix="/api/v1")
@@ -230,6 +230,10 @@ def api_admin_site_put(
         site_store.set_many(conn, payload.values, updated_by=admin)
     except site_store.SiteValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    # SYS-11 (resilience sweep 2026-08-28): the KEYS, never the values -- a
+    # site setting can be a token, and this table is read by a page.
+    db.audit(conn, admin, "site.settings_save", "site",
+             {"keys": sorted(payload.values)})
     conn.commit()
     # The brand ui._render paints comes from this table now (product-surface-2,
     # 2026-08-21) and is cached per process, so every writer of site_settings
@@ -266,6 +270,8 @@ def api_admin_site_import(
         site_store.set_many(conn, parsed, updated_by=admin)
     except site_store.SiteValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    db.audit(conn, admin, "site.settings_import", "site",   # keys only, see above
+             {"keys": sorted(parsed)})
     conn.commit()
     site_store.invalidate(request.app)          # see api_admin_site_put
     log.info("admin %r imported site settings: %s", admin, ", ".join(sorted(parsed)))

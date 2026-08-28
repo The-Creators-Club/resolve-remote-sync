@@ -425,3 +425,160 @@ def test_broken_link_shares_nothing(conn, fake, collector):
     devices = {d["deviceID"] for f in fake.state["folders"]
                if f["id"] == "2026-ff5-lender" for d in f["devices"]}
     assert devices == {SERVER_ID}
+
+
+# -- the refusal is PERSISTED and the diff is readable (DASH-3 / DASH-14,
+#    resilience sweep 2026-08-28). The brake used to fire into the container
+#    log and nowhere else, while _timed recorded the cycle as ok: poll_runs,
+#    /api/v1/health and every page said enforce was fine and every genuine
+#    untick sat unapplied.
+
+def _refuse_five_removals(conn, fake, collector):
+    collector.settings = Settings(
+        **{**collector.settings.__dict__, "enforce_max_share_removals": 3})
+    slugs = [SLUG] + [_add_second_folder(fake, f"2026-ff5-p{i}") for i in range(4)]
+    collector.run_cycle(conn, ["config", "enforce"])
+    now = dbmod.utcnow_iso()
+    for slug in slugs:
+        dbmod.add_selection(conn, "jsmith", slug, "admin", now)
+    conn.commit()
+    collector.run_cycle(conn, ["config", "enforce"])
+    for slug in slugs:
+        dbmod.remove_selection(conn, "jsmith", slug)
+    conn.commit()
+    collector.run_cycle(conn, ["enforce"])
+    return slugs
+
+
+def test_a_refused_enforce_pass_is_persisted_and_noted(conn, fake, collector):
+    slugs = _refuse_five_removals(conn, fake, collector)
+    refusal = dbmod.collector_alarms(conn)["enforce_refusal"]
+    assert refusal["count"] == 5 and refusal["limit"] == 3
+    assert refusal["devices"] == [EDITOR_ID]
+    assert sorted(refusal["folders"]) == sorted(slugs)
+    assert {(p["folder"], p["device"]) for p in refusal["pairs"]} == \
+        {(slug, EDITOR_ID) for slug in slugs}
+
+    # ...and the cycle no longer reports a clean reconcile (DASH-14).
+    run = conn.execute("SELECT ok, error FROM poll_runs WHERE kind='enforce' "
+                       "ORDER BY id DESC LIMIT 1").fetchone()
+    assert run["ok"] == 1 and "refused 5 share removal(s)" == run["error"]
+    health = dbmod.collector_health(conn)
+    enforce = next(k for k in health["kinds"] if k["kind"] == "enforce")
+    assert enforce["status"] == "amber" and "refused" in enforce["note"]
+
+
+def test_the_refusal_clears_when_the_next_pass_is_sane(conn, fake, collector):
+    slugs = _refuse_five_removals(conn, fake, collector)
+    assert dbmod.collector_alarms(conn)["enforce_refusal"] is not None
+    now = dbmod.utcnow_iso()
+    for slug in slugs[1:]:
+        dbmod.add_selection(conn, "jsmith", slug, "admin", now)
+    conn.commit()
+    collector.run_cycle(conn, ["enforce"])          # one removal, under the limit
+    assert dbmod.collector_alarms(conn)["enforce_refusal"] is None
+    assert dbmod.collector_health(conn)["kinds"][0]["kind"] is not None
+
+
+def test_the_pending_enforce_diff_is_recorded_for_the_dry_run_view(conn, fake, collector):
+    """The admin-visible +/- comes from the same desired/actual sets the cycle
+    itself acts on, written once per cycle and never acted on."""
+    slugs = _refuse_five_removals(conn, fake, collector)
+    plan = dbmod.collector_alarms(conn)["enforce_plan"]
+    assert plan["n_remove"] == 5 and plan["n_add"] == 0
+    assert {f["folder"] for f in plan["folders"]} == set(slugs)
+    assert all(f["remove"] == [EDITOR_ID] for f in plan["folders"])
+
+    # A cycle with nothing to do records an EMPTY plan rather than leaving the
+    # last one standing: "nothing pending" and "I have not looked" must not
+    # render the same.
+    now = dbmod.utcnow_iso()
+    for slug in slugs:
+        dbmod.add_selection(conn, "jsmith", slug, "admin", now)
+    conn.commit()
+    collector.run_cycle(conn, ["enforce"])
+    collector.run_cycle(conn, ["enforce"])
+    assert dbmod.collector_alarms(conn)["enforce_plan"]["folders"] == []
+
+
+def test_an_empty_my_id_is_noted_not_recorded_as_a_reconcile(conn, fake, collector):
+    """Ten minutes of a restarting Syncthing used to read as ten successful
+    enforce cycles."""
+    collector.run_cycle(conn, ["config", "enforce"])
+    fake.state["my_id"] = ""
+    results = collector.run_cycle(conn, ["enforce"])
+    assert results["enforce"] is True                  # still not a FAILURE
+    run = conn.execute("SELECT ok, error FROM poll_runs WHERE kind='enforce' "
+                       "ORDER BY id DESC LIMIT 1").fetchone()
+    assert run["ok"] == 1 and run["error"] == "skipped: empty myID"
+    health = dbmod.collector_health(conn)
+    assert {k["kind"]: k["status"] for k in health["kinds"]}["enforce"] == "amber"
+
+
+def test_a_first_config_cycle_with_no_my_id_is_noted(conn, fake, collector):
+    """The config half of the same restart: with no last known server id
+    there is nothing to fall back to, so the pass is skipped -- and said."""
+    fake.state["my_id"] = ""
+    assert collector.run_cycle(conn, ["config"])["config"] is True
+    run = conn.execute("SELECT ok, error FROM poll_runs WHERE kind='config' "
+                       "ORDER BY id DESC LIMIT 1").fetchone()
+    assert run["ok"] == 1 and run["error"] == "skipped: empty myID"
+
+
+def test_a_fresh_untick_keeps_its_share_for_one_cycle(conn, fake, collector):
+    """DASH-8 (resilience sweep 2026-08-28): the undo window is free.
+
+    An untick recorded in the audit ledger seconds ago leaves the share
+    exactly as it is, so the fleet page's [ UNDO ] does not pay for an
+    unshare followed by a re-share -- which restarts the folder on every
+    device holding it. One cycle later the freeze has lifted and the removal
+    happens.
+    """
+    collector.run_cycle(conn, ["config", "enforce"])          # seeds jsmith
+    now = dbmod.utcnow_iso()
+    dbmod.upsert_machine(conn, "jsmith", "JS-DESKTOP", now, syncthing_device_id=EDITOR_ID)
+    dbmod.add_selection(conn, "jsmith", SLUG, "admin", now, machine="JS-DESKTOP")
+    conn.commit()
+    collector.run_cycle(conn, ["enforce"])
+    assert EDITOR_ID in folder_devices(fake)
+
+    dbmod.remove_selection(conn, "jsmith", SLUG, machine="JS-DESKTOP")
+    dbmod.remove_selection(conn, "jsmith", SLUG, machine=dbmod.ANY_MACHINE)
+    dbmod.audit(conn, "owen", dbmod.AUDIT_UNTICK, SLUG, {
+        "editor": "jsmith", "slug": SLUG, "machine": "JS-DESKTOP",
+        "before": [{"machine": "JS-DESKTOP", "mode": "full"}], "after": [],
+    })
+    conn.commit()
+    collector.run_cycle(conn, ["enforce"])
+    assert EDITOR_ID in folder_devices(fake)                  # frozen, not unshared
+
+    # The same cycle a minute later: the window has closed.
+    collector.now_fn = lambda: dbmod._iso_minus(
+        dbmod.utcnow_iso(), -(dbmod.PLAN_FREEZE_SECONDS + 5))
+    collector.run_cycle(conn, ["enforce"])
+    assert EDITOR_ID not in folder_devices(fake)
+
+
+def test_a_fresh_tick_is_never_delayed_by_the_freeze(conn, fake, collector):
+    """The freeze holds shares, it does not withhold them. Ticking used to
+    wait out interval_enforce before anything started (fixed 2026-07-26 with
+    the collector nudge) and this must not hand that back."""
+    collector.run_cycle(conn, ["config", "enforce"])
+    now = dbmod.utcnow_iso()
+    fake.state["folders"].append({
+        "id": "2026-ff5-fresh", "label": "2026/FF5/Fresh",
+        "path": "/data/Projects/2026/FF5/Fresh",
+        "devices": [{"deviceID": SERVER_ID}],
+        "type": "sendreceive", "ignorePerms": True,
+    })
+    dbmod.upsert_machine(conn, "jsmith", "JS-DESKTOP", now, syncthing_device_id=EDITOR_ID)
+    dbmod.add_selection(conn, "jsmith", "2026-ff5-fresh", "admin", now, machine="JS-DESKTOP")
+    dbmod.audit(conn, "owen", dbmod.AUDIT_TICK, "2026-ff5-fresh", {
+        "editor": "jsmith", "slug": "2026-ff5-fresh", "machine": "JS-DESKTOP",
+        "before": [], "after": [{"machine": "JS-DESKTOP", "mode": "full"}],
+    })
+    conn.commit()
+    collector.run_cycle(conn, ["config", "enforce"])
+    devices = {d["deviceID"] for f in fake.state["folders"]
+               if f["id"] == "2026-ff5-fresh" for d in f["devices"]}
+    assert EDITOR_ID in devices

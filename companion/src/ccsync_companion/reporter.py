@@ -19,6 +19,7 @@ import threading
 import time
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import config as config_mod
@@ -144,6 +145,96 @@ OMITTABLE_SECTIONS = ("local_manifest", "media_tree")
 # Syncthing's home is regenerated under a running companion.
 DEVICE_ID_REFRESH_SECONDS = 300.0
 
+# -- reporter health (APP-1, resilience sweep 2026-08-28) -------------------
+# A revoked per-editor token, or a `dashboard_url` with a typo in the port,
+# produced exactly ONE WARNING and then DEBUG forever: three green lanes, no
+# toast, no tray line, and a diagnostics bundle that did not carry the fact.
+# The machine simply went dark on the fleet grid while the editor saw nothing
+# wrong. These three fields are the whole fix, and they are persisted because
+# "not reachable since Tuesday" is precisely the fact a restart destroys.
+REPORTER_STATE_FILENAME = "reporter.json"
+# 401/403 is a human's problem, not a network's: re-log it at WARNING this
+# often instead of letting it fall to DEBUG with the rest of the streak.
+AUTH_RELOG_SECONDS = 3600.0
+# HTTP codes that mean "this credential is dead", not "try again later".
+AUTH_REJECT_CODES = (401, 403)
+# SYS-4/APP-13: the dashboard's own `received_at` has been in every report
+# reply for months and was thrown away. Past this much disagreement the
+# machine is misreporting its own timestamps AND lane B's `--min-age` filter
+# starts excluding every file on the NAS (rclone computes age from the LOCAL
+# clock), which reports as a green, idle lane that transfers nothing.
+CLOCK_SKEW_WARN_SECONDS = 300.0
+CLOCK_SKEW_RELOG_SECONDS = 3600.0
+# How often a HEALTHY reporter rewrites its state file. The active cadence is
+# one report every 5 s while a lane is moving bytes, and a tiny JSON write at
+# that rate for a value nobody reads until something breaks is not a trade
+# worth making. A CHANGE of status always writes immediately.
+STATE_SAVE_MIN_SECONDS = 60.0
+
+
+def _iso_utc(when: Optional[float]) -> Optional[str]:
+    """A unix wall-clock stamp as the same ISO-8601-with-offset spelling the
+    dashboard uses everywhere (db.utcnow_iso), or None. Never raises: an
+    unrepresentable clock (a machine set to year 12000) must not be able to
+    fail a report."""
+    if when is None:
+        return None
+    try:
+        return (datetime.fromtimestamp(float(when), timezone.utc)
+                .replace(microsecond=0).isoformat())
+    except (OverflowError, OSError, ValueError, TypeError):
+        return None
+
+
+def parse_server_time(value: Any) -> Optional[float]:
+    """The dashboard's `received_at` (api.py's api_report reply, db.utcnow_iso
+    -> "2026-08-28T09:15:00+00:00") as a unix timestamp, or None.
+
+    Tolerates a naive stamp by reading it as UTC, which is what CR-89 cost the
+    dashboard when it guessed the other way. An older dashboard sends no such
+    field at all, and that is a None, never an exception."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    try:
+        return parsed.timestamp()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def skew_phrase(skew: Any) -> str:
+    """"20 minutes behind" / "3 hours ahead", or "" when there is no reading.
+
+    One function because the tray line, the sign-in toast and the diagnostics
+    bundle all have to say the same thing about the same number, and three
+    copies would drift the first time one was reworded. User-visible copy: no
+    em dash (house rule, 2026-08-18)."""
+    try:
+        value = float(skew)
+    except (TypeError, ValueError):
+        return ""
+    magnitude = abs(value)
+    direction = "ahead" if value > 0 else "behind"
+    if magnitude < 90:
+        amount = f"{int(round(magnitude))} seconds"
+    elif magnitude < 90 * 60:
+        minutes = int(round(magnitude / 60))
+        amount = f"{minutes} minute{'s' if minutes != 1 else ''}"
+    else:
+        hours = int(round(magnitude / 3600))
+        amount = f"{hours} hour{'s' if hours != 1 else ''}"
+    return f"{amount} {direction}"
+
 
 def _section_digest(value: Any) -> str:
     """A stable digest of one report section, or "" when it cannot be taken.
@@ -260,6 +351,8 @@ class DashboardReporter:
         get_broll_ingest: Optional[GetBrollIngestFn] = None,
         get_music_ingest: Optional[GetMusicIngestFn] = None,
         get_file_moves_applied: Optional[Callable[[], list[dict[str, Any]]]] = None,
+        notify: Optional[Callable[[str], None]] = None,
+        state_dir: Optional[Path] = None,
     ) -> None:
         self._get_statuses = get_statuses
         # Answers to the dashboard's file-move commands (docs/FILE_MOVES.md).
@@ -375,6 +468,175 @@ class DashboardReporter:
         # local_manifest/media_tree payload on every fast active tick
         # forever.
         self._last_heavy_at = 0.0
+
+        # -- reporter health (APP-1) + clock skew (APP-13/SYS-4) ------------
+        # Wall clock, not monotonic: the question these answer is "for how
+        # long has the dashboard not accepted anything from this computer",
+        # and it has to survive a restart to be worth asking.
+        self.last_success_at: Optional[float] = None
+        self.last_status: Optional[str] = None
+        self.consecutive_failures = 0
+        self.clock_skew_seconds: Optional[float] = None
+        # One toast per process for a rejected credential. Not per streak: a
+        # 401 does not clear by itself, and re-toasting it every interval
+        # would train the editor to dismiss it.
+        self._auth_notified = False
+        self._auth_warned_at = 0.0
+        self._skew_warned_at = 0.0
+        # Set by _note_failure, read by _run_cycle: whether THIS failure is
+        # the one that gets a WARNING (the first of a streak, or the hourly
+        # re-log of a rejected credential).
+        self._warn_pending = True
+        # Bumped by every _note_failure, so _run_cycle can tell a failure
+        # post_once already counted (the POST itself) from one it did not
+        # (a payload that would not serialize, say) and count that too.
+        self._failure_seq = 0
+        self._state_saved_at = 0.0
+        self._notify = notify
+        self._state_path: Optional[Path] = None
+        try:
+            base = (Path(state_dir) if state_dir is not None
+                    else config_mod.resolved_log_path(cfg).parent / "state")
+            self._state_path = Path(base) / REPORTER_STATE_FILENAME
+        except Exception:
+            # A reporter with nowhere to persist still reports; it just
+            # forgets across a restart. Never a construction failure: this
+            # runs inside CompanionApp.__init__, where an exception is the
+            # windowed exe vanishing with no tray (AUDIT_2 CORE-H2).
+            log.debug("reporter health state path unavailable", exc_info=True)
+        self._load_state()
+
+    # -- reporter health -----------------------------------------------
+    def _load_state(self) -> None:
+        """Adopt the last run's health record. Never raises, and a missing or
+        corrupt file is simply "we know nothing yet" -- it must never be able
+        to stop the reporter from starting."""
+        path = self._state_path
+        if path is None:
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except Exception:
+            log.debug("could not read %s", path, exc_info=True)
+            return
+        if not isinstance(data, dict):
+            return
+        raw = data.get("last_success_at")
+        if isinstance(raw, str) and raw.strip():
+            self.last_success_at = parse_server_time(raw)
+        elif isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            self.last_success_at = float(raw)
+        status = data.get("last_status")
+        if isinstance(status, str) and status:
+            self.last_status = status
+        skew = data.get("clock_skew_seconds")
+        if isinstance(skew, (int, float)) and not isinstance(skew, bool):
+            self.clock_skew_seconds = float(skew)
+
+    def _save_state(self) -> None:
+        """tmp + replace, like identity.save_identity: a half-written health
+        record that fails to parse on the next start would read as "we have
+        never reported", which is the one answer this file must not invent."""
+        path = self._state_path
+        if path is None:
+            return
+        payload = {
+            "last_success_at": _iso_utc(self.last_success_at),
+            "last_status": self.last_status,
+            "clock_skew_seconds": self.clock_skew_seconds,
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            tmp.replace(path)
+            self._state_saved_at = time.monotonic()
+        except Exception:
+            log.debug("could not write %s", path, exc_info=True)
+
+    def health(self) -> dict[str, Any]:
+        """The `reporter` block of the `sync_guard` report section (APP-1).
+
+        Rides EVERY tick and is never shed by _fit_payload: it is a hundred
+        bytes, and it is the only channel through which an admin can tell a
+        machine whose reports are being REJECTED from one that has nothing to
+        say. `last_success_at` is an ISO-8601 UTC string, the same spelling
+        the dashboard's own `received_at` uses."""
+        return {
+            "last_success_at": _iso_utc(self.last_success_at),
+            "last_status": self.last_status,
+            "consecutive_failures": self.consecutive_failures,
+        }
+
+    def _note_success(self, resp: Any) -> None:
+        was = self.last_status
+        skew_was = self.clock_skew_seconds
+        self.last_success_at = time.time()
+        self.last_status = "ok"
+        self.consecutive_failures = 0
+        # A credential that works again re-arms the toast, so a SECOND
+        # revocation is announced too.
+        self._auth_notified = False
+        self._note_clock_skew(resp)
+        if (was != "ok" or skew_was != self.clock_skew_seconds
+                or (time.monotonic() - self._state_saved_at) >= STATE_SAVE_MIN_SECONDS):
+            self._save_state()
+
+    def _note_failure(self, exc: BaseException) -> None:
+        code = getattr(exc, "code", None)
+        self.last_status = (f"HTTP {code}" if isinstance(code, int)
+                            else type(exc).__name__)
+        self.consecutive_failures += 1
+        self._failure_seq += 1
+        rejected = isinstance(code, int) and code in AUTH_REJECT_CODES
+        now = time.monotonic()
+        self._warn_pending = (not self._error_logged) or (
+            rejected and (now - self._auth_warned_at) >= AUTH_RELOG_SECONDS)
+        if rejected:
+            if self._warn_pending:
+                self._auth_warned_at = now
+            if not self._auth_notified:
+                self._auth_notified = True
+                self._toast("Your CCSync credential was rejected by the dashboard "
+                            "- sign in again")
+        self._save_state()
+
+    def _toast(self, text: str) -> None:
+        if self._notify is None:
+            return
+        try:
+            self._notify(text)
+        except Exception:
+            log.debug("reporter notify failed", exc_info=True)
+
+    def _note_clock_skew(self, resp: Any) -> None:
+        """Compare the dashboard's own `received_at` with this machine's
+        clock (SYS-4). An older dashboard sends no such field: that is a
+        None and never an exception, and it must not clear a skew this run
+        already measured -- "we could not check" is not "the clock is fine"."""
+        if not isinstance(resp, dict):
+            return
+        server = parse_server_time(resp.get("received_at"))
+        if server is None:
+            return
+        # Positive = this computer is AHEAD of the server. Rounded: the
+        # network round trip is worth a second or two of noise and nothing
+        # here acts below a minute.
+        skew = round(time.time() - server, 1)
+        self.clock_skew_seconds = skew
+        if abs(skew) < CLOCK_SKEW_WARN_SECONDS:
+            self._skew_warned_at = 0.0
+            return
+        now = time.monotonic()
+        if self._skew_warned_at and (now - self._skew_warned_at) < CLOCK_SKEW_RELOG_SECONDS:
+            return
+        self._skew_warned_at = now
+        log.warning(
+            "this computer's clock is %.0f s %s the dashboard's -- lane B's "
+            "--min-age filter and every timestamp this machine reports are "
+            "wrong until it is fixed", abs(skew), "ahead of" if skew > 0 else "behind")
 
     @property
     def enabled(self) -> bool:
@@ -826,7 +1088,15 @@ class DashboardReporter:
         # forever (AUDIT_2 CORE-M12). Light ticks keep the short timeout,
         # which is what makes live transfer progress feel responsive.
         timeout = self.timeout if light else self.full_report_timeout
-        resp = self._http_post(url, payload, headers, timeout)
+        # The health record is kept HERE and not in _run_cycle (APP-1): a
+        # tray "Sync now" and the loopback both call post_once directly, and
+        # a streak that only one caller counts is a streak nobody can trust.
+        try:
+            resp = self._http_post(url, payload, headers, timeout)
+        except Exception as exc:
+            self._note_failure(exc)
+            raise
+        self._note_success(resp)
         if not light:
             # AFTER the post: a report that raised never reached the
             # dashboard, so nothing about it may suppress the next one
@@ -908,11 +1178,23 @@ class DashboardReporter:
             # payload every report_interval_active seconds forever instead
             # of degrading to the normal cadence.
             self._last_heavy_at = time.monotonic()
+        seq = self._failure_seq
         try:
             self.post_once(light=light)
         except Exception as exc:
-            if not self._error_logged:
-                log.warning("dashboard report failed: %s", exc)
+            if self._failure_seq == seq:
+                # It never reached the POST (a payload that would not
+                # serialize, a getter that raised): still a report that did
+                # not arrive, so it still counts against the streak.
+                self._note_failure(exc)
+            # _warn_pending, not `not self._error_logged`: a 401/403 is a
+            # human's problem and re-logs at WARNING every hour, because the
+            # old "WARNING once, DEBUG forever" rule made a revoked
+            # credential indistinguishable from a five-second timeout in the
+            # one log a support session reads (APP-1).
+            if self._warn_pending:
+                log.warning("dashboard report failed (%s, %d in a row): %s",
+                            self.last_status, self.consecutive_failures, exc)
                 self._error_logged = True
             else:
                 log.debug("dashboard report failed: %s", exc)

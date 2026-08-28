@@ -109,9 +109,20 @@ SKIP_SUFFIXES = (".partial", ".tmp", ".lock")
 # project pointing at a path that exists on no machine in the fleet, which
 # decision 2 above (no database) means nothing ever reaps.
 #
+# `.editready` and `.original` joined them in YT-6 (resilience sweep
+# 2026-08-28), and they are the half that reached editors: `.editready` is
+# ffmpeg's half-written conversion and `.original` is the pre-conversion
+# download that swap_in could not delete because Resolve had the file open.
+# Both end `.mp4`, so both passed the extension test above and the importer
+# filed them into `Master/Youtube` as EXTRA clips -- two clips per download,
+# one of them undecodable or truncated, in a shared project. The converted
+# file's own fallback name now keeps the id last in its stem
+# (ytdl_executor.converted_name), so excluding these two costs no deliverable.
+#
 # The same rule as ytdl_executor._INTERMEDIATE_STEM_RE, and for the same
 # reason: a finished clip's stem always ends in `[id]`, never in `.fNNN`.
-_INTERMEDIATE_STEM_RE = re.compile(r"\.(f\d+|temp)$", re.IGNORECASE)
+_INTERMEDIATE_STEM_RE = re.compile(r"\.(f\d+|temp|editready|original)$",
+                                   re.IGNORECASE)
 
 # Gate answers, published verbatim as status()["state"]. Plain strings rather
 # than an enum because they cross into the report payload, and a dashboard
@@ -524,7 +535,8 @@ class YoutubeImporter:
         (Syncthing's `.syncthing.<name>.tmp`, macOS's `._name`), the
         half-delivered suffixes above, yt-dlp's own per-format intermediates
         (which ARE `.mp4` and would otherwise pass on their extension alone --
-        COMP-BROLL-4), and anything outside the video whitelist -- which is
+        COMP-BROLL-4, and `.editready`/`.original` for the same reason,
+        YT-6), and anything outside the video whitelist -- which is
         what keeps `<name>.credits.json` (the sidecar the Resolve credits
         script reads) and `manifest.json` out of the pool.
         """

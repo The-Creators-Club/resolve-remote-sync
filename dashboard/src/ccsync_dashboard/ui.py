@@ -20,7 +20,7 @@ from . import (auth, dashboard_update, db, local_users, oidc, package_store, pro
 from .api import (
     approve_username_error, build_admin_users_view, build_editors_view,
     build_packages_view, build_presence_view, build_project_view, build_projects_view,
-    build_queue_view, build_report_tokens_view, build_transfers_view,
+    audit_plan_change, build_queue_view, build_report_tokens_view, build_transfers_view,
     delete_user_everywhere, forget_machine_everywhere, get_conn, normalize_device_id,
 )
 # The fleet-read redaction the JSON API applies, imported under a name that
@@ -807,6 +807,11 @@ def partial_toggle(
                             detail=f"{editor} has no computer named {target!r}")
     wanted = _sync_mode_arg(mode) if (mode or "").strip() else None
     ticked = {s["slug"] for s in db.fetch_selections(conn, editor, machine=target)}
+    # SYS-11 / DASH-8 (resilience sweep 2026-08-28). Snapshot, act, record:
+    # the same three lines as the JSON route, because a ledger the checkbox
+    # can walk past reads as "nobody did that".
+    before = db.selection_placements(conn, editor, slug, machine=target)
+    action = db.AUDIT_UNTICK if (slug in ticked and wanted is None) else db.AUDIT_TICK
     if slug in ticked and wanted is None:
         db.remove_selection(conn, editor, slug, machine=target)
     else:
@@ -847,6 +852,8 @@ def partial_toggle(
             db.add_selection(conn, editor, slug, created_by=user,
                              now=db.utcnow_iso(), machine=target,
                              sync_mode=sync_mode)
+    audit_plan_change(conn, user, action, editor, slug, target, before,
+                      db.selection_placements(conn, editor, slug, machine=target))
     conn.commit()
     # Reconcile Syncthing sharing promptly -- ticking used to wait out
     # interval_enforce (up to 60s) before anything started (2026-07-26).
@@ -875,6 +882,9 @@ def partial_toggle(
                         "move_projects": [dict(r) for r in conn.execute(
                             "SELECT slug, label FROM projects WHERE active=1 ORDER BY label")],
                         "tick_editor": editor,
+                        # DASH-8: the person-level untick confirm (see
+                        # _sidebar_context; this render does not build one).
+                        "toggle_editor_machines": db.machines_of(conn, editor),
                         "as_qs": _as_qs(request, editor)})
     return _render(request, "partials/my_queue.html", {
         "queue": build_queue_view(conn, editor, machine=target),
@@ -942,6 +952,12 @@ def _sidebar_context(request: Request, conn, current: str | None,
         "toggle_editor_base": bool(
             toggle_editor and toggle_editor in db.base_only_editors(conn)
         ),
+        # DASH-8 (2026-08-28): the sidebar checkbox and the project page's
+        # [ UNTICK FOR ... ] are PERSON-level, so an untick takes the project
+        # off every computer that person owns. The confirm names them, which
+        # is the whole difference between an informed click and CR-49's
+        # "unticked the wrong row and the fleet unshared it".
+        "toggle_editor_machines": db.machines_of(conn, toggle_editor) if toggle_editor else [],
     }
 
 
@@ -998,6 +1014,130 @@ def partial_transfers(request: Request, conn: sqlite3.Connection = Depends(get_c
         "transfers": build_transfers_view(conn, editor=scope.editor),
         "scope_admin": scope.admin,
     })
+
+
+# --------------------------------------------- plan changes, and the undo
+# DASH-8 (resilience sweep 2026-08-28). An untick with no `?machine=` removes
+# a project from EVERY computer its editor owns, and until this panel the only
+# record of it was the absence of a row. The window is short on purpose
+# (db.PLAN_UNDO_WINDOW_SECONDS): an undo offered for yesterday's change is not
+# an undo, it is a second decision taken with less information than the first.
+
+
+def _plan_changes_context(request: Request, conn, error: str | None = None,
+                          notice: str | None = None) -> dict:
+    return {
+        "plan_changes": db.recent_plan_changes(conn, db.utcnow_iso()),
+        "plan_error": error,
+        "plan_notice": notice,
+    }
+
+
+@router.get("/partials/plan-changes")
+def partial_plan_changes(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    _require_admin_page(request)
+    return _render(request, "partials/plan_changes.html",
+                   _plan_changes_context(request, conn))
+
+
+@router.post("/partials/plan-changes/{audit_id}/undo")
+def partial_plan_change_undo(
+    audit_id: int, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    """Put one tick or untick back exactly as it was.
+
+    A RESTORE of the audit row's `before` placements, not an inverse action:
+    the person-level untick that this exists for removed rows from several
+    computers, each possibly in a different mode, and re-ticking "the project"
+    would hand every one of them a full sync (docs/UPLOAD_ONLY_TICK.md). The
+    undo is itself audited, and the enforce cycle leaves the restored rows
+    alone for 60 s -- so an undo inside the window costs Syncthing nothing.
+    """
+    admin = _require_admin_page(request)
+    entry = db.audit_entry(conn, audit_id)
+    error = None
+    notice = None
+    if entry is None or entry["action"] not in (db.AUDIT_TICK, db.AUDIT_UNTICK):
+        error = "that is not a plan change this page can undo"
+    else:
+        detail = entry["detail"] or {}
+        editor = str(detail.get("editor") or "")
+        slug = str(detail.get("slug") or entry["subject"] or "")
+        before = detail.get("before") or []
+        after = detail.get("after") or []
+        try:
+            age = (db.parse_iso(db.utcnow_iso()) - db.parse_iso(entry["at"])).total_seconds()
+        except (ValueError, TypeError):
+            # An unparseable (or offset-less, hence naive) stamp reads as
+            # "now" rather than as an exception: the same rule the `ago`
+            # filter learned in CR-89, and this page must render.
+            age = 0.0
+        if not editor or not slug:
+            error = "that record does not name a project and an editor, so it cannot be undone"
+        elif age > db.PLAN_UNDO_WINDOW_SECONDS:
+            # Named, not silently refused: "nothing happened" is the one
+            # answer a safety control must never give.
+            error = ("that change is more than an hour old, so it is no longer offered "
+                     "as an undo. Tick or untick it yourself if that is what you want.")
+        else:
+            now = db.utcnow_iso()
+            keep = {str(row.get("machine") or "") for row in before}
+            for row in after:
+                machine = str(row.get("machine") or "")
+                if machine not in keep:
+                    db.remove_selection(conn, editor, slug, machine=machine)
+            for row in before:
+                db.add_selection(
+                    conn, editor, slug, created_by=f"undo:{admin}", now=now,
+                    machine=str(row.get("machine") or ""),
+                    sync_mode=str(row.get("mode") or db.SYNC_MODE_FULL),
+                )
+            db.audit(conn, admin, db.AUDIT_PLAN_UNDO, slug, {
+                "undid": int(audit_id), "undid_action": entry["action"],
+                "editor": editor, "slug": slug, "restored": before,
+            }, now=now)
+            conn.commit()
+            from .api import _nudge_collector
+
+            _nudge_collector(request)
+            notice = (f"put {slug} back for {editor}"
+                      if before else f"removed {slug} again for {editor}")
+    return _render(request, "partials/plan_changes.html",
+                   _plan_changes_context(request, conn, error=error, notice=notice))
+
+
+# ------------------------------------------------------ the fleet timeline
+# SYS-11 (resilience sweep 2026-08-28). Every state-changing route writes one
+# row to `fleet_audit`; this is where a human reads them back. It answers
+# "what changed on Tuesday, and who did it" as a lookup, which is what CR-91a,
+# CR-49 and CR-42 each cost a day of inference.
+
+
+def _audit_context(request: Request, conn, query: str) -> dict:
+    return {
+        "audit_rows": db.fetch_audit(conn, limit=200, subject=query or None),
+        "audit_query": query,
+        "audit_max_age_days": db.AUDIT_MAX_AGE_DAYS,
+    }
+
+
+@router.get("/admin/audit")
+def page_admin_audit(request: Request, q: str = "",
+                     conn: sqlite3.Connection = Depends(get_conn)):
+    _require_admin_page(request)
+    return _render(request, "admin_audit.html", {
+        **_sidebar_context(request, conn, None),
+        **_audit_context(request, conn, q.strip()),
+        "nav_current": "audit",
+    })
+
+
+@router.get("/partials/admin/audit")
+def partial_admin_audit(request: Request, q: str = "",
+                        conn: sqlite3.Connection = Depends(get_conn)):
+    _require_admin_page(request)
+    return _render(request, "partials/admin_audit.html",
+                   _audit_context(request, conn, q.strip()))
 
 
 @router.get("/partials/project/{slug}/bins")
@@ -1885,7 +2025,7 @@ def partial_admin_packages(request: Request, conn: sqlite3.Connection = Depends(
 async def partial_admin_package_current(
     request: Request, conn: sqlite3.Connection = Depends(get_conn)
 ):
-    _require_admin_page(request)
+    admin = _require_admin_page(request)
     form = await _form(request)
     platform = form.get("platform", "").strip().lower()
     version = form.get("version", "").strip()
@@ -1895,6 +2035,8 @@ async def partial_admin_package_current(
     if not db.set_current_package(conn, platform, version, kind):
         error = f"no published {platform} {kind} package {version}"
     else:
+        db.audit(conn, admin, "package.make_current", version,
+                 {"kind": kind, "platform": platform, "version": version})
         conn.commit()
 
     return _render(request, "partials/admin_packages.html", _packages_and_feed(conn, request, error))
@@ -1958,6 +2100,34 @@ async def partial_admin_resume_lane_b(
     })
 
 
+@router.post("/partials/admin/machines/forget-lost")
+async def partial_admin_forget_lost_machine(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    """Forget one LOST computer from the fleet page (DASH-16, resilience sweep
+    2026-08-28).
+
+    Same implementation as the Users page's [ REMOVE ] and the JSON twin, and
+    deliberately a second route rather than a shared one: this one re-renders
+    the FLEET GRID, and the admin who is looking at a LOST row is looking at
+    it there. A refusal shows as the row simply staying put, exactly as it
+    does for the RESUME button beside it."""
+    admin = _require_admin_page(request)
+    form = await _form(request)
+    editor = form.get("editor", "").strip().lower()
+    machine = form.get("machine", "").strip()
+    try:
+        forget_machine_everywhere(request, conn, editor, machine, admin=admin)
+    except HTTPException as exc:
+        log.warning("forget of lost machine %s/%s refused: %s", editor, machine,
+                    exc.detail)
+    scope = auth.scope_for(request)
+    return _render(request, "partials/fleet_grid.html", {
+        "view": api_scope_projects_view(build_projects_view(conn), scope),
+        "fleet": api_scope_editors_view(build_editors_view(conn), scope),
+    })
+
+
 @router.post("/partials/admin/machines/update/cancel")
 async def partial_admin_machine_update_cancel(
     request: Request, conn: sqlite3.Connection = Depends(get_conn)
@@ -1975,7 +2145,7 @@ async def partial_admin_machine_update_cancel(
 async def partial_admin_package_delete(
     request: Request, conn: sqlite3.Connection = Depends(get_conn)
 ):
-    _require_admin_page(request)
+    admin = _require_admin_page(request)
     settings = request.app.state.settings
     form = await _form(request)
     platform = form.get("platform", "").strip().lower()
@@ -1990,6 +2160,8 @@ async def partial_admin_package_delete(
         error = "cannot delete the current version; make another version current first"
     else:
         db.delete_companion_package(conn, platform, version, kind)
+        db.audit(conn, admin, "package.delete", version,
+                 {"kind": kind, "platform": platform, "version": version})
         conn.commit()
         try:
             (settings.packages_path() / row["platform"] / row["filename"]).unlink(missing_ok=True)

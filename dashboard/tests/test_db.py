@@ -295,8 +295,14 @@ def test_replace_nas_media_computes_rollup(conn):
     ]
     dbmod.replace_nas_media(conn, pid, rows, "sig1", 3, T0)
     summary = dbmod.fetch_nas_media_summary(conn, pid)
-    assert summary == {"n_originals": 2, "bytes_originals": 1500,
-                       "n_proxies": 1, "bytes_proxies": 50}
+    # last_error/walked_at ride along since DASH-5 (2026-08-28), hence the
+    # subset rather than an equality: the project page needs to be able to say
+    # "these are the figures from before the dataset went missing".
+    assert {k: summary[k] for k in ("n_originals", "bytes_originals",
+                                    "n_proxies", "bytes_proxies")} == {
+        "n_originals": 2, "bytes_originals": 1500,
+        "n_proxies": 1, "bytes_proxies": 50}
+    assert summary["last_error"] is None
     assert dbmod.nas_inventory_sig(conn, pid) == "sig1"
     assert conn.execute("SELECT COUNT(*) FROM nas_media").fetchone()[0] == 3
     # replace with a new set drops the old rows
@@ -689,3 +695,86 @@ def test_fetch_borrowers_of_and_by_lender(conn):
     # ok only: a missing link shares nothing and shows on the borrower side
     assert [b["borrower_slug"] for b in dbmod.fetch_borrowers_of(conn, "lender")] == ["b1"]
     assert dbmod.fetch_borrowers_by_lender(conn) == {"lender": {"b1"}}
+
+
+# -- the deactivation blast-radius brake (DASH-4, resilience sweep 2026-08-28)
+
+def _seed_projects(conn, n, aged=True):
+    """n active projects whose last_seen is outside the grace window."""
+    old = (dbmod.parse_iso(dbmod.utcnow_iso()) - dt.timedelta(hours=1)).isoformat() \
+        if aged else dbmod.utcnow_iso()
+    slugs = []
+    for i in range(n):
+        slug = f"p{i:02d}"
+        dbmod.upsert_project(conn, slug, slug, f"/data/Projects/{slug}", old)
+        slugs.append(slug)
+    conn.commit()
+    return slugs
+
+
+def test_empty_folder_list_does_not_deactivate_the_fleet(conn):
+    """Syncthing with a re-created config answers 200 with zero folders and a
+    perfectly valid myID, so no empty-myID guard fires. Every project used to
+    flip active=0 and the hourly prune then deleted the whole NAS inventory."""
+    slugs = _seed_projects(conn, 8)
+    result = dbmod.deactivate_missing_projects(conn, [])
+    assert result["deactivated"] == 0
+    assert result["refused"]["would_deactivate"] == 8
+    assert "0 of 8 folders" in result["refused"]["message"]
+    assert [p["slug"] for p in dbmod.fetch_projects(conn)] == slugs
+
+    # ...and it is PERSISTED, not just logged: a container restart used to
+    # lose even the log line.
+    alarms = dbmod.collector_alarms(conn)
+    assert alarms["deactivation_refusal"]["active"] == 8
+
+
+def test_a_partial_folder_list_over_the_ceiling_is_refused(conn):
+    _seed_projects(conn, 8)
+    result = dbmod.deactivate_missing_projects(conn, ["p00", "p01"])
+    assert result["deactivated"] == 0
+    assert "2 of 8 folders" in result["refused"]["message"]
+    assert len(dbmod.fetch_projects(conn)) == 8
+
+
+def test_a_deactivation_under_the_ceiling_still_applies_and_clears_the_alarm(conn):
+    _seed_projects(conn, 8)
+    dbmod.deactivate_missing_projects(conn, [])              # refused, alarm set
+    assert dbmod.collector_alarms(conn)["deactivation_refusal"] is not None
+    # 8 active, ceiling max(2, 2) = 2: dropping two is a normal removal.
+    kept = [f"p{i:02d}" for i in range(6)]
+    result = dbmod.deactivate_missing_projects(conn, kept)
+    assert result["deactivated"] == 2 and result["refused"] is None
+    assert sorted(p["slug"] for p in dbmod.fetch_projects(conn)) == kept
+    # Only a healthy pass clears it.
+    assert dbmod.collector_alarms(conn)["deactivation_refusal"] is None
+
+
+def test_the_only_project_can_still_be_deactivated(conn):
+    """One project, genuinely deleted from Syncthing, must still go inactive:
+    with a single row there is no mass anything to refuse."""
+    _seed_projects(conn, 1)
+    result = dbmod.deactivate_missing_projects(conn, [])
+    assert result["deactivated"] == 1 and result["refused"] is None
+    assert dbmod.fetch_projects(conn) == []
+
+
+def test_force_applies_a_pass_the_brake_would_refuse(conn):
+    _seed_projects(conn, 8)
+    result = dbmod.deactivate_missing_projects(conn, [], force=True)
+    assert result["deactivated"] == 8 and result["refused"] is None
+
+
+def test_recently_seen_projects_are_never_candidates(conn):
+    """The grace window still governs: an eagerly-created /project-setup row
+    is not a deactivation candidate, so it cannot trip the brake either."""
+    _seed_projects(conn, 8, aged=False)
+    result = dbmod.deactivate_missing_projects(conn, [])
+    assert result == {"deactivated": 0, "refused": None}
+    assert len(dbmod.fetch_projects(conn)) == 8
+
+
+def test_meta_get_json_survives_a_corrupt_value(conn):
+    dbmod.meta_set(conn, dbmod.META_ENFORCE_REFUSAL, "{not json")
+    assert dbmod.meta_get_json(conn, dbmod.META_ENFORCE_REFUSAL) is None
+    assert dbmod.collector_alarms(conn)["enforce_refusal"] is None

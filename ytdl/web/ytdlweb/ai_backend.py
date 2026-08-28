@@ -34,7 +34,7 @@ no container restart, and a key they revoke stops working just as fast. The
 old module-level `config.ANTHROPIC_API_KEY` is the fallback for a standalone
 `uvicorn ytdlweb.main:app` with no dashboard in reach.
 
-Two properties this module must never lose:
+Three properties this module must never lose:
 
 **A KEY IS NEVER LOGGED, REPR'D OR RETURNED.** `Provider.__repr__` prints
 whether a key is set, never the key -- a namedtuple would have put the
@@ -47,6 +47,14 @@ takes two arguments rather than one string. Both HTTP providers have a real
 system role. The two CLIs do not have one we can rely on across versions, so
 there the split degrades to a labelled section of one stdin document -- which
 is one more reason the API providers are the default and the CLIs are opt-in.
+
+**A CLI SUBPROCESS GETS AN ALLOW-LISTED ENVIRONMENT** (YT-9, 2026-08-28).
+`_cli_env` names the variables a CLI may see; every other one the container
+holds is withheld, so no fleet credential (`DASH_SESSION_SECRET`,
+`DASH_REPORT_TOKEN`, `SYNCTHING_API_KEY`, `TRUENAS_API_KEY`,
+`BROLL_INGEST_TOKEN`) reaches a binary that was fetched from the internet and
+is being fed attacker-controlled text. It was previously `os.environ` minus
+four AI keys.
 """
 import json
 import logging
@@ -755,27 +763,67 @@ def looks_like_cli_auth_failure(text):
     return any(marker in low for marker in _AUTH_MARKERS)
 
 
-def _cli_env(provider=None):
-    """The environment the CLI subprocess gets.
+# THE ALLOW-LIST, COPIED FROM ccsync_dashboard.cli_tools AND IT MUST NOT DRIFT
+# (YT-9, resilience sweep 2026-08-28) -- the same rule, and for the same reason,
+# as identity.py's two copied properties: this app is mounted in-process by the
+# dashboard but deliberately imports nothing from it, so the alternative to a
+# copy is an import that makes a bare `ytdl/web` checkout unrunnable.
+#
+# Until this sweep the CLI got `dict(os.environ)` minus four AI keys, i.e.
+# DASH_SESSION_SECRET, DASH_REPORT_TOKEN, SYNCTHING_API_KEY, TRUENAS_API_KEY
+# and BROLL_INGEST_TOKEN went to a binary fetched from the internet at an
+# admin's click and fed untrusted text (YouTube titles and descriptions).
+# Nothing needed them. An allow-list also withholds the NEXT secret somebody
+# adds to the container's environment, instead of leaking it until a review.
+_ALLOWED_ENV_VARS = frozenset({
+    'PATH', 'HOME', 'LANG', 'TZ', 'TERM', 'TMPDIR',
+    'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'ALL_PROXY',
+    'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'SYSTEMDRIVE',
+    'TEMP', 'TMP', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA',
+    'PROGRAMFILES', 'PROGRAMFILES(X86)', 'NUMBER_OF_PROCESSORS', 'OS',
+})
+_ALLOWED_ENV_PREFIXES = ('LC_', 'CLAUDE_', 'CODEX_')
+_STRIPPED_ENV_VARS = ('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'DEEPSEEK_API_KEY',
+                      'ANTHROPIC_AUTH_TOKEN')
 
-    The container's own AI keys are REMOVED: a CLI provider is selected
-    because the customer wants their subscription used, and leaving
-    ANTHROPIC_API_KEY in the environment would silently bill their API key
-    instead (Claude Code prefers it when present) -- the opposite of what the
-    admin picked, and invisible until the invoice.
 
-    The dashboard's overlay is then applied (2026-08-18): `HOME` pointing at
-    `<data>/tools/<tool>/home`, where the setup wizard signed the CLI in, and
-    `CLAUDE_CODE_OAUTH_TOKEN` when that is the credential it holds. The SAME
-    overlay the dashboard's own probe and Test button use
-    (`ccsync_dashboard.cli_tools.cli_env`) -- if this ran against a different
-    $HOME, the Settings page would report "signed in" about an account no job
-    could reach.
+def env_var_allowed(name):
+    """Is `name` a variable an AI CLI subprocess may see? (YT-9)
+
+    Case-insensitive because Windows upper-cases os.environ and the lowercase
+    `http_proxy` spelling is a real Linux convention; the variable is passed
+    through under its own name, never a normalised one.
     """
-    env = dict(os.environ)
-    for name in ('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'DEEPSEEK_API_KEY',
-                 'ANTHROPIC_AUTH_TOKEN'):
-        env.pop(name, None)
+    key = str(name or '').upper()
+    if not key:
+        return False
+    if key in _STRIPPED_ENV_VARS:
+        return False
+    if key in _ALLOWED_ENV_VARS:
+        return True
+    return any(key.startswith(prefix) for prefix in _ALLOWED_ENV_PREFIXES)
+
+
+def _cli_env(provider=None):
+    """The environment the CLI subprocess gets: an ALLOW-LIST (YT-9).
+
+    The container's own AI keys are removed for a reason of their own: a CLI
+    provider is selected because the customer wants their subscription used,
+    and leaving ANTHROPIC_API_KEY in the environment would silently bill their
+    API key instead (Claude Code prefers it when present) -- the opposite of
+    what the admin picked, and invisible until the invoice. Everything else is
+    withheld because nothing here needs it and the fleet's credentials live in
+    the same environment.
+
+    The dashboard's overlay is then applied (2026-08-18) and is NOT filtered:
+    `HOME` pointing at `<data>/tools/<tool>/home`, where the setup wizard
+    signed the CLI in, and `CLAUDE_CODE_OAUTH_TOKEN` when that is the
+    credential it holds. The SAME overlay the dashboard's own probe and Test
+    button use (`ccsync_dashboard.cli_tools.cli_env`) -- if this ran against a
+    different $HOME, the Settings page would report "signed in" about an
+    account no job could reach.
+    """
+    env = {key: value for key, value in os.environ.items() if env_var_allowed(key)}
     overlay = getattr(provider, 'cli_env', None) or {}
     for key, value in overlay.items():
         env[str(key)] = str(value)

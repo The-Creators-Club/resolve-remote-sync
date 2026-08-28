@@ -35,7 +35,11 @@ the caller was not given.
 Media membership is checked PER REQUEST, not per page: a link that is revoked
 while a client has the page open stops serving the next thumbnail, not the
 next visit. `_live_folder` is the one dependency every route hangs off, so a
-route added later cannot forget the check.
+route added later cannot forget the check. The media responses are `no-cache`
+with an ETag for that reason (MEDIA-22, 2026-08-28) -- with the hour of
+private cache they used to carry, "the next request" could be an hour after
+the revoke. What is already decoded in a playing <video> element is beyond
+any header's reach; revoke stops the NEXT fetch, not this second of playback.
 """
 from __future__ import annotations
 
@@ -199,11 +203,16 @@ def share_video(token: str, video_id: int, folder: sqlite3.Row = Depends(_live_f
     }), "private, no-store")
 
 
-# Media: the same files, the same Range handling, one more gate in front. An
-# hour of private cache so a client scrubbing back and forth is not re-pulling
-# sprite sheets through the funnel; `private` so nothing between here and the
-# browser keeps a copy past that browser.
-_MEDIA_CACHE = "private, max-age=3600"
+# Media: the same files, the same Range handling, one more gate in front.
+# `no-cache` is NOT "do not store": the browser may keep the sprite sheet and
+# the proxy, it just has to ASK before reusing them, and serve_file_with_range
+# answers that ask with a 304 (MEDIA-22, 2026-08-28). So a client scrubbing
+# back and forth still is not re-pulling megabytes through the funnel, and a
+# revoked link stops playing at the next request instead of an hour later --
+# which is the control the whole design leans on for "the link got away". The
+# hour of `max-age` that used to be here made revoke a promise this file did
+# not keep. `private` so nothing between here and the browser keeps a copy.
+_MEDIA_CACHE = "private, no-cache"
 
 
 @router.get("/{token}/media/proxy/{video_id}.mp4")

@@ -44,6 +44,7 @@ import platform
 import re
 import sys
 import threading
+import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,6 +65,17 @@ BREADCRUMB_MAX_BYTES = 256_000
 # A crash LOOP is when this directory would otherwise grow without bound, and a
 # crash loop is also when it is least likely anyone is watching.
 MAX_CRASH_FILES = 20
+# APP-6 (resilience sweep 2026-08-28): the module docstring above names "the
+# tray stayed up with a dead lane" as the failure this file exists to fix, and
+# until the sweep NOTHING surfaced a crash file -- not the tray, not
+# build_diagnostics(), not the report. A crash was written and the machine went
+# on looking green. The summary below is read by app.sync_guard() on every
+# report tick, so the scan is bounded (MAX_CRASH_FILES names) and cached for
+# this long between rescans; a write invalidates it immediately.
+SUMMARY_TTL_SECONDS = 60.0
+# How many of the newest reports build_diagnostics() names, with their
+# exception types. Three is what fits in a section an admin reads at a glance.
+DIAGNOSTIC_CRASH_COUNT = 3
 
 # Redaction, applied to every breadcrumb line and to the exception text.
 #
@@ -132,6 +144,86 @@ def _prune(directory: Path, keep: Optional[int] = None) -> None:
         pass
 
 
+# -- what an admin can actually see (APP-6) ---------------------------------
+_summary_lock = threading.Lock()
+# (taken_at_monotonic, directory, summary). One slot: there is one crash
+# directory per process, and the key is carried so a test (or a config that
+# redirects the log path) can never be served another directory's answer.
+_summary_cache: Optional[tuple[float, str, dict[str, Any]]] = None
+
+
+def invalidate_summary() -> None:
+    """Drop the cached count. Called by write_report, so the report that goes
+    out after a crash carries it rather than one written up to a minute
+    later."""
+    global _summary_cache
+    with _summary_lock:
+        _summary_cache = None
+
+
+def _crash_files(cfg: Optional[dict[str, Any]] = None) -> list[Path]:
+    """Newest LAST. Bounded by MAX_CRASH_FILES in practice (_prune), and the
+    sort is by NAME because the name starts with the UTC stamp -- mtime would
+    reorder a directory that was copied off the machine and back."""
+    try:
+        return sorted(crash_dir(cfg).glob("*.json"), key=lambda p: p.name)
+    except Exception:  # noqa: BLE001 - a missing/unreadable dir is "none"
+        return []
+
+
+def crash_summary(cfg: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """`{"count": n, "newest": "<filename>"}` -- the `crashes` block of the
+    `sync_guard` report section. Never raises.
+
+    A handful of bytes on every tick, and the only channel that tells an
+    admin a background thread died on a machine whose lanes still look
+    green."""
+    global _summary_cache
+    directory = ""
+    try:
+        directory = str(crash_dir(cfg))
+    except Exception:  # noqa: BLE001
+        pass
+    now = time.monotonic()
+    with _summary_lock:
+        cached = _summary_cache
+        if (cached is not None and cached[1] == directory
+                and (now - cached[0]) < SUMMARY_TTL_SECONDS):
+            return dict(cached[2])
+    files = _crash_files(cfg)
+    summary: dict[str, Any] = {
+        "count": len(files),
+        "newest": files[-1].name if files else None,
+    }
+    with _summary_lock:
+        _summary_cache = (now, directory, dict(summary))
+    return summary
+
+
+def recent_reports(cfg: Optional[dict[str, Any]] = None,
+                   limit: int = DIAGNOSTIC_CRASH_COUNT) -> list[dict[str, Any]]:
+    """The newest `limit` crash files as `{name, when, thread, type}`, newest
+    first, for build_diagnostics(). Never raises: an unreadable or half-written
+    file is reported as such rather than dropped, because "there is a crash
+    file here I cannot read" is itself the answer."""
+    out: list[dict[str, Any]] = []
+    for path in reversed(_crash_files(cfg)[-max(1, int(limit or 1)):]):
+        entry: dict[str, Any] = {"name": path.name, "when": None,
+                                 "thread": None, "type": "<unreadable>"}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                entry["when"] = data.get("when")
+                entry["thread"] = data.get("thread")
+                exception = data.get("exception")
+                if isinstance(exception, dict):
+                    entry["type"] = exception.get("type") or "<unknown>"
+        except Exception:  # noqa: BLE001
+            pass
+        out.append(entry)
+    return out
+
+
 def build_report(exc_type, exc_value, exc_tb, *, thread: str = "MainThread",
                  cfg: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     cfg = cfg or {}
@@ -185,6 +277,9 @@ def write_report(report: dict[str, Any],
         with os.fdopen(handle, "w", encoding="utf-8") as fh:
             json.dump(report, fh, indent=2, ensure_ascii=False)
         _prune(directory)
+        # APP-6: before the return, so the next report tick and the next tray
+        # render both carry this crash rather than a count taken before it.
+        invalidate_summary()
         return path
     except Exception:  # noqa: BLE001
         return None
@@ -311,6 +406,19 @@ def install(cfg: Optional[dict[str, Any]] = None) -> None:
     if previous_thread_hook is not None:
         threading.excepthook = _thread_hook
 
+    # APP-6: count what an EARLIER run left behind. A machine that starts with
+    # crash files already in the directory is a machine that has been failing
+    # and restarting, and until the sweep the only trace of that was files
+    # nobody looked at.
+    try:
+        existing = crash_summary(cfg)
+        if existing.get("count"):
+            log.warning("%s crash report(s) from an earlier run are in %s "
+                        "(newest: %s)", existing["count"], crash_dir(cfg),
+                        existing.get("newest"))
+    except Exception:  # noqa: BLE001 - see the module docstring: never raise
+        pass
+
     init_sender(cfg)
 
 
@@ -320,3 +428,4 @@ def _reset_for_tests() -> None:
     global _installed, _sentry
     _installed = False
     _sentry = None
+    invalidate_summary()

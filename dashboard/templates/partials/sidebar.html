@@ -17,6 +17,13 @@
              title="sync this project to every computer {{ toggle_editor }} uses. Per-computer plans live on Settings, Assignments."
              hx-post="/partials/selection/{{ toggle_editor }}/{{ p.slug }}/toggle?view=sidebar{{ '&slug_page=' ~ current_slug if current_slug }}{{ as_qs }}"
              hx-target="closest .projects" hx-swap="outerHTML"
+             {% if p.slug in selected_slugs and toggle_editor_machines is defined and toggle_editor_machines %}
+             {# DASH-8 (2026-08-28): this box is the PERSON, so unticking it
+                stops the project syncing on every computer they own. Named,
+                because CR-49 was an untick on the wrong row. Ticking needs no
+                confirm, hence the `checked` condition. #}
+             hx-confirm="This removes {{ p.short if p.short is defined else p.label }} from {{ toggle_editor }}'s {{ toggle_editor_machines | length }} computer{{ 's' if toggle_editor_machines | length != 1 }} ({{ toggle_editor_machines | join(', ') }}). Their copies stay on disk; nothing new comes down and proxy sync stops for it."
+             {% endif %}
            {% endif %}
            {{ 'checked' if p.slug in selected_slugs }}>
     {% if upload_only_slugs is defined and p.slug in upload_only_slugs %}<span class="chip amber" title="upload only: {{ toggle_editor }}'s computer sends its video originals for this project to the server and downloads nothing. Change it on the project page or on Settings, Assignments.">[ UP ]</span>{% endif %}

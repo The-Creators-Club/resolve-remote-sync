@@ -767,6 +767,12 @@ class DashboardReporter:
             "syncthing_device_id": self._syncthing_device_id(),
             "companion_version": config_mod.VERSION,
             "platform": upgrade_mod.platform_key(),
+            # REL-16 (resilience sweep 2026-08-28): `platform` alone was the
+            # channel's only discriminator, so an Intel Mac reporting `macos`
+            # was offered the arm64 build GitHub's macos-latest runner
+            # produced -- downloaded, verified, swapped in, and unable to
+            # exec. A dashboard too old to read this key ignores it.
+            "arch": upgrade_mod.arch_key(),
             "reported_at": datetime.now(timezone.utc).isoformat(),
             "lanes": [
                 {

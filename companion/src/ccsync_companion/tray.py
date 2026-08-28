@@ -2372,6 +2372,47 @@ def _crashes_line(guard: dict) -> Optional[str]:
 RESTART_ADVISORY_COUNT = 3
 
 
+def _upgrade_line(guard: dict) -> Optional[str]:
+    """"CCSync could not install the update N times" (REL-8, resilience sweep
+    2026-08-28).
+
+    Only once the machine has GIVEN UP: below the cap it is still retrying on
+    its own back-off, and a line for every transient failure would train the
+    editor to ignore this one. The cause is on the report and in diagnostics
+    (an AV quarantine, a captive portal mangling the download, a full disk, a
+    binary for the wrong architecture); what the editor can do about any of
+    them is hand their admin the diagnostics."""
+    info = (guard or {}).get("upgrade") or {}
+    if not isinstance(info, dict):
+        return None
+    try:
+        attempts = int(info.get("attempts") or 0)
+    except (TypeError, ValueError):
+        return None
+    if attempts < upgrade_mod.MAX_UPGRADE_ATTEMPTS:
+        return None
+    version = str(info.get("version") or "").strip()
+    target = f" to v{version}" if version else ""
+    return (f"⚠ CCSync could not install the update{target} {attempts} times, so it "
+            "has stopped trying. Copy diagnostics for your admin")
+
+
+def _reverted_line(guard: dict) -> Optional[str]:
+    """"CCSync went back to the previous version" (APP-5 / REL-2).
+
+    Says it where it stays readable: the toast raised at the rollback start
+    is gone in ten seconds, and the machine is running an OLDER build than
+    the fleet until an admin publishes a fix."""
+    info = (guard or {}).get("upgrade") or {}
+    if not isinstance(info, dict):
+        return None
+    bad = str(info.get("reverted_from") or "").strip()
+    if not bad:
+        return None
+    return (f"⚠ The v{bad} update kept crashing, so CCSync went back to the "
+            "previous version. Your admin has been told")
+
+
 def _restarts_line(guard: dict) -> Optional[str]:
     """"CCSync keeps restarting its sync engine" (SYS-2).
 

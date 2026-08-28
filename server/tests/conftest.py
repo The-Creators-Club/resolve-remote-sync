@@ -51,3 +51,35 @@ import tempfile  # noqa: E402
 os.environ.setdefault(
     "CCSYNC_SNAPSHOT_LOG",
     str(Path(tempfile.gettempdir()) / "ccsync-tests-snapshot_log.jsonl"))
+
+
+# OPS-1 (resilience sweep 2026-08-28): every restart now probes
+# /api/v1/health from inside the container and the deploy FAILS when it does
+# not answer as this checkout's VERSION. That probe retries for
+# HEALTH_PROBE_SECONDS, and the suite's fake `run_ssh` answers every command
+# with an empty string -- which is exactly the wedged-container shape, so an
+# unstubbed probe would make every whole-deploy test sit out the full budget
+# and then fail. The probe is therefore HEALTHY BY DEFAULT here, and the
+# tests that are about it (test_deploy_resilience.py) replace this stub with
+# their own.
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _health_probe_answers_healthy(monkeypatch):
+    import sys  # noqa: PLC0415
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    try:
+        import install_dashboard_app as ida  # noqa: PLC0415 - after CCSYNC_SITE is set
+    except Exception:
+        # A test module that never touches the deploy script (the compose
+        # goldens, the site-manifest reloads) has nothing to stub.
+        return
+
+    monkeypatch.setattr(
+        ida, "probe_dashboard_health",
+        lambda port, expected, dry_run, budget=0: (
+            True, {"ok": True, "version": expected or ida.repo_dashboard_version()},
+            "stubbed by conftest"),
+        raising=False)

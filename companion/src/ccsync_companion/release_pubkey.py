@@ -93,10 +93,41 @@ RECORD_FIELDS: tuple[str, ...] = (
 # byte for byte as it always did, and the new kind gets the field it needs.
 KIND_EXTRA_FIELDS: dict = {"dashboard": ("runtime_id",)}
 
+# Kind-scoped extras that are OPTIONAL: signed when the record carries one,
+# absent from the canonical bytes when it does not (REL-4/SYS-13, REL-16,
+# resilience sweep 2026-08-28). MUST match release_trust.py's copy -- these
+# two files are duplicated on purpose (see the module docstring), and a
+# disagreement here is "every editor refuses every build".
+#
+# `requires_dashboard` is the dashboard version a companion build needs before
+# it may be offered at all; `arch` is the CPU it was built for. Both are
+# enforced by the DASHBOARD; a companion only has to canonicalise them, which
+# is what this build being able to accept a record that carries them means.
+#
+# Blank reads as ABSENT: the signer omits an empty field, so a record served
+# with `arch=""` must canonicalise like a pre-wave record that never had the
+# key. That is what keeps every record published before this wave verifying
+# byte for byte.
+OPTIONAL_KIND_EXTRA_FIELDS: dict = {
+    "companion": ("arch", "requires_dashboard"),
+}
 
-def record_fields(kind) -> tuple:
-    """The exact field list the signature covers for this record's kind."""
-    return RECORD_FIELDS + tuple(KIND_EXTRA_FIELDS.get(str(kind or ""), ()))
+
+def record_fields(kind, record: Optional[Mapping[str, Any]] = None) -> tuple:
+    """The exact field list the signature covers for this record's kind.
+
+    With `record`, the optional kind-scoped extras it actually carries are
+    appended. Order is irrelevant (canonical_record sorts keys); presence is
+    not.
+    """
+    base = RECORD_FIELDS + tuple(KIND_EXTRA_FIELDS.get(str(kind or ""), ()))
+    if record is None:
+        return base
+    extras = tuple(
+        field for field in OPTIONAL_KIND_EXTRA_FIELDS.get(str(kind or ""), ())
+        if str(record.get(field) or "").strip()
+    )
+    return base + extras
 
 
 
@@ -110,7 +141,7 @@ def canonical_record(record: Mapping[str, Any]) -> bytes:
     saw. Raises on a missing field: an unsignable record must never
     canonicalise to *something*."""
     out: dict[str, Any] = {}
-    for field in record_fields(record.get("kind", "")):
+    for field in record_fields(record.get("kind", ""), record):
         if field not in record:
             raise KeyError(f"release record is missing {field!r}")
         value = record[field]

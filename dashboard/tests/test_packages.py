@@ -211,10 +211,13 @@ def test_delete_rules(env):
     assert client.delete("/api/v1/admin/packages/windows/0.3.0").status_code == 404
 
 
-def test_publish_does_not_prune_by_default(env):
-    """Publishing must never destroy older build artifacts as a side effect:
-    they are the rollback material, and the standing rule is that nothing is
-    deleted without being asked (see the package auto-prune finding)."""
+def test_prune_can_be_opted_out_of(env):
+    """`?prune=0` still keeps everything. It was the DEFAULT until REL-5
+    (resilience sweep 2026-08-28) on the standing no-deletion rule -- and
+    since neither writer ever passed prune=1, a year of shipping left 50
+    companion exes and 50 onboard exes on the dataset the SQLite database
+    lives on. A full /data is the dashboard going down, which is worse than
+    losing a rollback artefact that can be re-published from the feed."""
     client, conn, settings = env
     as_user(client, "owen")
     publish(client, "0.1.0", body=b"v1", make_current=1)
@@ -223,6 +226,55 @@ def test_publish_does_not_prune_by_default(env):
     versions = {r["version"] for r in dbmod.fetch_companion_packages(conn, "windows")}
     assert versions == {"0.1.0", "0.2.0", "0.3.0", "0.4.0", "0.5.0"}
     assert (settings.packages_path() / "windows" / "ccsync-companion-0.2.0.exe").exists()
+
+
+def test_publish_prunes_by_default(env):
+    """REL-5: the query param is not sent at all, which is what ship and the
+    feed's unattended publisher both do."""
+    client, conn, settings = env
+    as_user(client, "owen")
+    publish(client, "0.1.0", body=b"v1", make_current=1)
+    for i, v in enumerate(["0.2.0", "0.3.0", "0.4.0"]):
+        publish(client, v, body=f"v{i + 2}".encode())
+    body = b"v5"
+    sha = hashlib.sha256(body).hexdigest()
+    r = client.put(
+        f"/api/v1/admin/packages/windows/0.5.0?sha256={sha}"
+        + signed_query("companion", "windows", "0.5.0", body, sha=sha),
+        content=body, headers={"Content-Type": "application/octet-stream"})
+    assert r.status_code == 200
+    versions = {r["version"] for r in dbmod.fetch_companion_packages(conn, "windows")}
+    assert versions == {"0.1.0", "0.4.0", "0.5.0"}
+
+
+def test_a_publish_is_refused_when_the_volume_is_nearly_full(env, monkeypatch):
+    """REL-5: dashboard_update.preflight has refused an APPLY at 507 since WP
+    K, and the route that actually fills /data, 40 MB at a time, had no check
+    at all."""
+    from ccsync_dashboard import dashboard_update
+
+    client, _conn, _settings = env
+    as_user(client, "owen")
+    monkeypatch.setattr(dashboard_update, "data_space",
+                        lambda s: {"free_bytes": 1024, "total_bytes": 10 ** 9,
+                                   "path": "/data", "error": ""})
+    r = publish(client, "0.9.0", body=b"exe")
+    assert r.status_code == 507
+    assert "free" in r.json()["detail"]
+
+
+def test_an_unmeasurable_volume_does_not_block_a_publish(env, monkeypatch):
+    """"Could not measure" must not become "refuse everything": the dashboard
+    is what tells everyone whether their footage is syncing, and it has to
+    keep being updatable."""
+    from ccsync_dashboard import dashboard_update
+
+    client, _conn, _settings = env
+    as_user(client, "owen")
+    monkeypatch.setattr(dashboard_update, "data_space",
+                        lambda s: {"free_bytes": -1, "total_bytes": -1,
+                                   "path": "/data", "error": "no"})
+    assert publish(client, "0.9.0", body=b"exe").status_code == 200
 
 
 def test_prune_opt_in_keeps_current_plus_two(env):

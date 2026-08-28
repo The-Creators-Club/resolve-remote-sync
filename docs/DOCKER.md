@@ -186,6 +186,16 @@ Layout on the data volume:
 /data/backups/<ts>-before-<v>/   the databases, copied with sqlite's backup API
 ```
 
+**All three are bounded** (REL-5, 2026-08-28). `/data/backups` keeps the
+newest 3 per label, 8 in total and 8 GiB, whichever bites first; `/data/code`
+keeps the running tree, the one `current.json` can roll back to, and one more;
+`/data/packages` is pruned on every publish to the current build plus the two
+newest (`?prune=0` opts out). A publish is refused with **507** below the same
+free-space floor an apply already refused at, and `/api/v1/health` and the
+Packages page both carry a `/data` free-space gauge. A full `/data` is a
+SQLite write failure on the database that tells the whole fleet whether its
+footage is syncing, so nothing on this path is allowed to grow without limit.
+
 On every boot `run.sh` runs **`/app/deploy/select_code_root.py`** — the
 IMAGE's copy, with the IMAGE's python, importing the IMAGE's verifier and
 reading the IMAGE's baked `/venv/.runtime-id`. The tree in `/data/code` is
@@ -206,9 +216,14 @@ roots and the reason on stderr:
 | all of the above pass | `/data/code/<version>` |
 
 **The boot watchdog.** `select_code_root.py` increments `boot_attempts.json`
-before it hands a volume tree over; the app clears it once it has been up and
-healthy for 45 s (`dashboard_update.start_boot_watchdog`, armed from the
-lifespan). So the counter only ever survives a boot that did not work, and on
+before it hands a volume tree over; the app clears it once it has been up for
+45 s **and has proved it can serve** — one loopback
+`GET http://127.0.0.1:$DASH_PORT/api/v1/health` that must answer 200 with this
+build's own `version`, retried for up to 45 s more
+(`dashboard_update.start_boot_watchdog`, armed from the lifespan). Before
+2026-08-28 the watchdog only proved the process had not exited, so a tree that
+imported cleanly (exactly what stage-verify tested), bound the port and then
+500'd every request was marked permanently healthy and never reverted (REL-6). So the counter only ever survives a boot that did not work, and on
 the **third** boot with two failures already recorded the script rewrites
 `current.json` to the previous tree (or the image), with `reverted_reason`,
 and boots that. Nobody has to be watching — the thing that failed to boot is
@@ -235,6 +250,16 @@ open in WAL mode) → optional NAS snapshot → rename staging to final → writ
 `current.json` → exit 75. Everything that can fail happens before the live
 tree is touched, so every failure leaves the running dashboard exactly as it
 was.
+
+`current.json` also records the live `user_version` of each database and the
+schema version the applied tree knows (asked of the new code during
+stage-verify, written into its `manifest.json`). That is what makes a
+**rollback** honest: going back to a tree that predates the schema the live
+database is now on is **refused** unless the admin either names a backup to
+restore alongside it (the checkbox on the Packages page) or acknowledges the
+consequence explicitly. Additive columns survive a backwards code swap; a
+rename or a NOT NULL one does not, and before 2026-08-28 nothing checked and
+the UI said nothing (REL-10).
 
 ### uid and gid
 

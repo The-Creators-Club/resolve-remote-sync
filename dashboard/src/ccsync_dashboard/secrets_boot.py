@@ -31,6 +31,15 @@ sidecar has no other way to learn a rotated key.
 
 Never logs a value -- only which of {env, file, generated} each one came
 from.
+
+ONE OF THE FIVE IS NOT LIKE THE OTHERS (DASH-2, resilience sweep 2026-08-28).
+"Rotating one by setting the env var stays possible" is true of all five and
+CHEAP for four of them. `DASH_SESSION_SECRET` also signs every companion's
+machine-identity token, which never expires (CR-86), so changing it 401s the
+whole fleet's reports at once until each editor signs in again at their tray.
+Rotate it with the old value in `DASH_SESSION_SECRET_PREVIOUS` (accept-only,
+comma-separated) and drop that once the fleet page's drain count reaches
+zero -- docs/SECRETS.md, "Rotating DASH_SESSION_SECRET".
 """
 from __future__ import annotations
 

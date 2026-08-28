@@ -168,7 +168,14 @@ $driveMapExit = $LASTEXITCODE
 # either still fails the suite.
 $global:LASTEXITCODE = 9999
 powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\installer\tests\Test-LicenceGate.ps1"
-$installerExit = $(if ($driveMapExit -ne 0) { $driveMapExit } else { $LASTEXITCODE })
+$licenceExit = $LASTEXITCODE
+# The two renames that decide whether a build which will not start leaves the
+# machine on the previous one or with no companion at all (REL-12, 2026-08-28).
+$global:LASTEXITCODE = 9999
+powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\installer\tests\Test-PrevRollback.ps1"
+$installerExit = @($driveMapExit, $licenceExit, $LASTEXITCODE) |
+    Where-Object { $_ -ne 0 } | Select-Object -First 1
+if ($null -eq $installerExit) { $installerExit = 0 }
 $results += @{ Name = "installer"; Outcome = $(if ($installerExit -eq 0) { "PASS" } else { "FAIL (exit $installerExit)" }) }
 
 # The macOS half of the same two checks -- the site-manifest reader, the

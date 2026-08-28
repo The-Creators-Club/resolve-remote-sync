@@ -667,3 +667,234 @@ def test_a_create_with_no_job_id_says_it_could_not_be_waited_on(monkeypatch, cap
     rc, transcript = _real_run(monkeypatch, capsys, cmds)
     assert rc == 0
     assert "could not be waited on" in transcript
+
+
+
+# ---------------------------------------------------------------------------
+# OPS-1 (resilience sweep 2026-08-28): a deploy that never asks whether the
+# dashboard came back.
+#
+# `docker restart` succeeding says the container was recreated and nothing
+# else. A template that moved, a module EXCLUDE_DIRS dropped, a lockfile
+# drift or a bad site.toml value all produce a container that restarts
+# perfectly and answers nothing -- and every path through the redeploy branch
+# ended at "restarted container: ..." and `return 0`, which tools/ship.cmd
+# reads as permission to publish companions to the whole fleet.
+# ---------------------------------------------------------------------------
+
+
+class _FakeBackend:
+    dashboard_container = "ccsync-dashboard-container"
+
+    def restart_stack(self, dry_run):
+        return True, ""
+
+
+@pytest.fixture
+def probe_env(monkeypatch):
+    """The probe with its real body, a fake container and no sleeping."""
+    monkeypatch.setattr(ida, "backend", lambda: _FakeBackend())
+    monkeypatch.setattr(ida.time, "sleep", lambda _s: None)
+    # conftest replaces the probe with a healthy stub for every other test in
+    # the suite; these tests are about the probe itself, so they call the real
+    # function captured at import (_REAL_PROBE) directly.
+    return monkeypatch
+
+
+# Captured before conftest's autouse fixture can swap it out.
+_REAL_PROBE = ida.probe_dashboard_health
+
+
+def _ssh_returning(*answers):
+    """A run_ssh_guarded stand-in that yields these (rc, out, err) in turn and
+    repeats the last one for ever."""
+    seen = []
+
+    def fake(cmd, dry_run, timeout):
+        seen.append(cmd)
+        idx = min(len(seen) - 1, len(answers) - 1)
+        return answers[idx]
+
+    fake.seen = seen
+    return fake
+
+
+def test_the_probe_requires_the_version_this_checkout_deployed(probe_env):
+    """200 alone is not enough: a bind-mount swap without a restart leaves the
+    container serving the PREVIOUS inode, perfectly healthily (2026-07-24)."""
+    probe_env.setattr(ida, "run_ssh_guarded",
+                      _ssh_returning((0, '{"ok": true, "version": "0.7.15"}', "")))
+    ok, health, detail = _REAL_PROBE(8480, "0.7.16", False, budget=0)
+    assert ok is False
+    assert "0.7.15" in detail and "0.7.16" in detail
+    assert health["version"] == "0.7.15"
+
+    probe_env.setattr(ida, "run_ssh_guarded",
+                      _ssh_returning((0, '{"ok": true, "version": "0.7.16"}', "")))
+    ok, health, _ = _REAL_PROBE(8480, "0.7.16", False, budget=0)
+    assert ok is True and health["ok"] is True
+
+
+def test_the_probe_retries_across_a_cold_start(probe_env):
+    """The compose healthcheck allows a 120s start_period for the same boot,
+    so a probe that gave up at the first refusal would report a slow container
+    as a dead one."""
+    fake = _ssh_returning((1, "", "connect: connection refused"),
+                          (1, "", "connect: connection refused"),
+                          (0, '{"ok": true, "version": "0.7.16"}', ""))
+    probe_env.setattr(ida, "run_ssh_guarded", fake)
+    ok, _health, detail = _REAL_PROBE(8480, "0.7.16", False, budget=30)
+    assert ok is True
+    assert len(fake.seen) == 3
+    assert "3 probe(s)" in detail
+
+
+def test_a_container_that_answers_nothing_is_a_failure_with_a_reason(probe_env):
+    probe_env.setattr(ida, "run_ssh_guarded",
+                      _ssh_returning((0, "", "")))
+    ok, health, detail = _REAL_PROBE(8480, "0.7.16", False, budget=0)
+    assert ok is False and health == {}
+    assert "answered nothing" in detail
+
+
+def test_the_probe_reads_health_from_INSIDE_the_container(probe_env):
+    fake = _ssh_returning((0, '{"ok": true, "version": "0.7.16"}', ""))
+    probe_env.setattr(ida, "run_ssh_guarded", fake)
+    _REAL_PROBE(8480, "0.7.16", False, budget=0)
+    cmd = fake.seen[0]
+    assert "docker exec" in cmd and _FakeBackend.dashboard_container in cmd
+    # 127.0.0.1 from inside: an external probe would pass through whatever
+    # else is bound to that port on the NAS.
+    assert "127.0.0.1:8480/api/v1/health" in cmd
+
+
+def test_an_unhealthy_dashboard_names_the_exact_rollback_and_returns_one(
+        monkeypatch, capsys):
+    monkeypatch.setattr(ida, "backend", lambda: _FakeBackend())
+    monkeypatch.setattr(ida, "probe_dashboard_health",
+                        lambda *a, **k: (False, {}, "nothing answered"))
+    monkeypatch.setitem(ida._LAST_OLD_DIRS, "app", "/mnt/pool/ccsync/app.old.20260828")
+
+    class _Args:
+        dry_run = False
+        rollback_on_unhealthy = False
+
+    rc = ida.verify_dashboard_after_restart(8480, "/mnt/pool/ccsync", _Args())
+    err = capsys.readouterr().err
+    assert rc == 1
+    # The exact command, with the tree THIS run renamed aside -- not a glob
+    # over every backup on the box.
+    assert "mv /mnt/pool/ccsync/app /mnt/pool/ccsync/app.failed-" in err
+    assert "mv /mnt/pool/ccsync/app.old.20260828 /mnt/pool/ccsync/app" in err
+    assert f"docker restart {_FakeBackend.dashboard_container}" in err
+    assert "--rollback-on-unhealthy" in err
+
+
+def test_rollback_on_unhealthy_runs_it_and_re_probes(monkeypatch, capsys):
+    monkeypatch.setattr(ida, "backend", lambda: _FakeBackend())
+    probes = []
+
+    def probe(port, expected, dry_run, budget=0):
+        probes.append(expected)
+        # Unhealthy as the new code, healthy again once rolled back.
+        if len(probes) == 1:
+            return False, {}, "nothing answered"
+        return True, {"ok": True, "version": "0.7.15"}, "v0.7.15 after 1 probe(s)"
+
+    ran = []
+    monkeypatch.setattr(ida, "probe_dashboard_health", probe)
+    monkeypatch.setattr(ida, "run_ssh_guarded",
+                        lambda cmd, dry_run, timeout: (ran.append(cmd), (0, "", ""))[1])
+    monkeypatch.setitem(ida._LAST_OLD_DIRS, "app", "/mnt/pool/ccsync/app.old.20260828")
+
+    class _Args:
+        dry_run = False
+        rollback_on_unhealthy = True
+
+    rc = ida.verify_dashboard_after_restart(8480, "/mnt/pool/ccsync", _Args())
+    out = capsys.readouterr().out
+    assert rc == 1, "a rolled-back deploy is still a FAILED deploy"
+    assert len(ran) == 1 and "app.old.20260828" in ran[0]
+    assert "docker restart" in ran[0]
+    assert "UNDONE, not finished" in out
+
+
+def test_a_rollback_with_no_recorded_tree_refuses_rather_than_guessing(
+        monkeypatch, capsys):
+    """Restoring whichever app.old.* sorts last could restore last month's."""
+    monkeypatch.setattr(ida, "backend", lambda: _FakeBackend())
+    monkeypatch.setattr(ida, "run_ssh_guarded",
+                        lambda *a, **k: pytest.fail("nothing may be renamed"))
+    assert ida.roll_back_app_tree("/mnt/pool/ccsync", "", False) is False
+    assert "CANNOT ROLL BACK AUTOMATICALLY" in capsys.readouterr().err
+
+
+def test_install_tree_records_the_tree_it_renamed_aside(monkeypatch, tmp_path):
+    """The rollback line can only name the previous tree because install_tree
+    wrote it down."""
+    monkeypatch.setattr(ida, "backend", lambda: _FakeBackend())
+    monkeypatch.setattr(ida, "make_staging_dir", lambda *a, **k: "/tmp/staging")
+    monkeypatch.setattr(ida, "upload_tree", lambda *a, **k: 1)
+    monkeypatch.setattr(ida, "local_manifest", lambda *a, **k: (1, 10))
+    monkeypatch.setattr(ida, "run_ssh_guarded",
+                        lambda *a, **k: (0, "1\n10\n", ""))
+    ida._LAST_OLD_DIRS.pop("app", None)
+    ida.install_tree("/mnt/pool/ccsync", "app", tmp_path, False)
+    assert ida._LAST_OLD_DIRS["app"].startswith("/mnt/pool/ccsync/app.old.")
+
+
+def test_a_redeploy_that_does_not_come_back_exits_non_zero(monkeypatch, capsys):
+    """THE finding: ship.cmd gates on this exit code before it publishes
+    companions to the whole fleet."""
+    cmds: list = []
+    monkeypatch.setattr(ida, "app_installed", lambda dry_run: True)
+    monkeypatch.setattr(ida, "restart_dashboard_container", lambda dry_run: (True, ""))
+    monkeypatch.setattr(ida, "probe_dashboard_health",
+                        lambda *a, **k: (False, {}, "nothing answered"))
+    rc, transcript = _dry_run(monkeypatch, capsys, cmds)
+    assert rc == 1
+    assert "did not answer /api/v1/health" in transcript
+    assert "ROLL BACK with" in transcript
+
+
+def test_a_redeploy_that_comes_back_still_exits_zero(monkeypatch, capsys):
+    cmds: list = []
+    monkeypatch.setattr(ida, "app_installed", lambda dry_run: True)
+    monkeypatch.setattr(ida, "restart_dashboard_container", lambda dry_run: (True, ""))
+    monkeypatch.setattr(ida, "probe_dashboard_health",
+                        lambda *a, **k: (True, {"ok": True, "version": "9.9.9"},
+                                         "v9.9.9 after 1 probe(s)"))
+    rc, transcript = _dry_run(monkeypatch, capsys, cmds)
+    assert rc == 0
+    assert "restarted container" in transcript
+    # And the real-run success line, from the function itself.
+    monkeypatch.setattr(ida, "backend", lambda: _FakeBackend())
+
+    class _Args:
+        dry_run = False
+        rollback_on_unhealthy = False
+
+    assert ida.verify_dashboard_after_restart(8480, "/mnt/pool/ccsync", _Args()) == 0
+    assert "dashboard is SERVING" in capsys.readouterr().out
+
+
+def test_image_mode_boot_verification_is_no_longer_discarded(monkeypatch, capsys):
+    """verify_image_boot ran on the redeploy path and its answer was thrown
+    away, so a container that came back on the wrong code root printed FAILED
+    and exited 0."""
+    cmds: list = []
+    monkeypatch.setattr(ida, "SITE_STACK_MODE", "image")
+    monkeypatch.setattr(ida, "app_installed", lambda dry_run: True)
+    monkeypatch.setattr(ida, "restart_dashboard_container", lambda dry_run: (True, ""))
+    monkeypatch.setattr(ida, "verify_image_boot", lambda *a, **k: False)
+    monkeypatch.setattr(ida, "probe_dashboard_health",
+                        lambda *a, **k: (True, {"ok": True, "version": "9.9.9"}, "ok"))
+    rc, _transcript = _dry_run(monkeypatch, capsys, cmds)
+    assert rc == 1
+
+
+def test_the_repo_version_is_the_one_the_probe_demands():
+    """Read out of the package rather than imported: server/ does not import
+    ccsync_dashboard (it has no fastapi)."""
+    version = ida.repo_dashboard_version()
+    assert version and version[0].isdigit()

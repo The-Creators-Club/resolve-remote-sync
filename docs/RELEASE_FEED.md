@@ -321,12 +321,19 @@ What it does, per invocation:
     `--allow-shrink`;
   - the local `feed/` dir is still written and signed even when the upload
     is refused, exactly as before.
-- `--retract KIND/PLATFORM/VERSION`: removes one record and any `current`
-  pointer at it, then republishes the channel. The **asset stays** on the
-  release: a dashboard that already holds that record must keep being able to
-  fetch the bytes it verified. Retraction stops the build being *offered*; it
-  does not uninstall it anywhere. Publish a newer build to move machines that
-  already took it.
+- `--retract KIND/PLATFORM/VERSION --reason "..."`: removes one record and any
+  `current` pointer at it, and (since 2026-08-28, REL-3) adds an entry to the
+  channel's signed `retracted` list — `{kind, platform, version, reason, at}`.
+  `--reason` is **required**: every customer dashboard renders it beside the
+  withdrawn build, and an admin whose fleet is being rolled back has nothing
+  else to go on. The recall list is what reaches a dashboard on the default
+  `manual` feed policy, which otherwise never acts on the channel again: it
+  un-currents the row, refuses to serve it, and offers
+  `[ ROLL THE FLEET BACK TO x ]`. The **asset stays** on the release: a
+  dashboard that already holds that record must keep being able to fetch the
+  bytes it verified. A merge never drops a recall entry (a publish from a
+  fresh clone must not re-offer the build the vendor pulled), and publishing a
+  recalled version again is refused unless the same run retracts it.
 - **A record already on the feed is protected twice** (2026-08-21, CR-59
   item 8). Both refusals happen before anything is signed or uploaded, and
   both name the flag that overrides them:

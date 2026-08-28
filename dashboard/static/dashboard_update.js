@@ -156,13 +156,27 @@
 
     if (target.hasAttribute("data-dashupd-rollback")) {
       var to = target.getAttribute("data-dashupd-rollback");
+      // REL-10 (resilience sweep 2026-08-28): restore_db used to be hardcoded
+      // to "", so the one control that keeps the database and the code in step
+      // could not be reached from this page at all.
+      var box = document.getElementById("dashupd-restore-db");
+      var panel = document.getElementById("dashupd-schema");
+      var restoreDb = (box && box.checked) ? (box.value || "") : "";
+      var schemaSafe = !panel || panel.getAttribute("data-safe") === "1";
+      var warning = restoreDb
+        ? "The databases will be restored from " + restoreDb
+          + ", so everything recorded since that backup is discarded."
+        : (schemaSafe
+            ? "The databases are NOT restored: use a backup for that."
+            : "The databases stay where they are, and they are on a NEWER schema "
+              + "than the build you are going back to. Tick the restore box, or "
+              + "this will be refused.");
       if (!window.confirm("Roll this dashboard back to " + (to || "the image's own build") + "?\n\n"
-                          + "It will be offline for about ten seconds. Databases are NOT "
-                          + "restored: use a backup for that.")) {
+                          + "It will be offline for about ten seconds. " + warning)) {
         return;
       }
       progress("rolling back", false);
-      postJson(ROLLBACK_URL, {to_version: to, restore_db: ""})
+      postJson(ROLLBACK_URL, {to_version: to, restore_db: restoreDb})
         .then(function () { return waitForNewVersion(to, ""); })
         .then(function (ok) {
           if (ok) { window.location.reload(); return; }

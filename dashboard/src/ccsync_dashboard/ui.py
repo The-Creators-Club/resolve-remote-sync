@@ -27,6 +27,12 @@ from .api import (
 # says where the rule lives: ONE definition, two callers (COMMERCIAL_READINESS.md
 # §C L1, 2026-08-17). See api.py's "scoping fleet reads" block.
 from .api import tick_capacity_warning
+# The release-channel gate and the recall's fleet write (REL-1 / REL-3,
+# resilience sweep 2026-08-28), imported under names that say they belong to
+# the JSON routes: these htmx twins must apply the SAME refusals, not their
+# own copies of them.
+from .api import make_current_refusal as api_make_current_refusal
+from .api import roll_fleet_back as api_roll_fleet_back_impl
 from .api import _purge_user_credentials as api_purge_user_credentials
 from .api import _scope_editors_view as api_scope_editors_view
 from .api import _scope_projects_view as api_scope_projects_view
@@ -2036,20 +2042,92 @@ async def partial_admin_package_current(
     request: Request, conn: sqlite3.Connection = Depends(get_conn)
 ):
     admin = _require_admin_page(request)
+    settings = request.app.state.settings
     form = await _form(request)
     platform = form.get("platform", "").strip().lower()
     version = form.get("version", "").strip()
     kind = form.get("kind", "companion").strip().lower()
+    # REL-1 (resilience sweep 2026-08-28): the same gate the JSON route is
+    # held to, through the same function -- a soak gate one of the two doors
+    # walks around is not a gate. `force` needs the version typed into the
+    # confirmation box, which is what makes the override a decision rather
+    # than a second click in the same place.
+    force = form.get("force", "") == "1"
+    confirm = form.get("confirm", "").strip()
 
     error = None
-    if not db.set_current_package(conn, platform, version, kind):
+    refusal = api_make_current_refusal(
+        conn, settings, kind=kind, platform=platform, version=version,
+        force=force, confirm=confirm)
+    if refusal is not None:
+        error = refusal[1]
+    elif not db.set_current_package(conn, platform, version, kind):
         error = f"no published {platform} {kind} package {version}"
     else:
         db.audit(conn, admin, "package.make_current", version,
-                 {"kind": kind, "platform": platform, "version": version})
+                 {"kind": kind, "platform": platform, "version": version,
+                  "forced": force})
         conn.commit()
 
     return _render(request, "partials/admin_packages.html", _packages_and_feed(conn, request, error))
+
+
+@router.post("/partials/admin/packages/push-one")
+async def partial_admin_package_push_one(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    """[ PUSH TO ONE MACHINE ] -- the canary click (REL-1, 2026-08-28).
+
+    A STAGED build is published and installable by name but offered to
+    nobody; this asks one chosen machine to take that exact version on its
+    next report, through the per-machine `commands.upgrade` channel that has
+    existed since 2026-08-18 and already bypasses "newer only". Nothing here
+    installs anything: the companion applies the signed offer it verifies for
+    itself, and only when swapping the exe would not kill work in progress.
+    """
+    admin = _require_admin_page(request)
+    form = await _form(request)
+    platform = form.get("platform", "").strip().lower()
+    version = form.get("version", "").strip()
+    target = form.get("target", "").strip()
+    editor, _sep, machine = target.partition("/")
+    editor, machine = editor.strip().lower(), machine.strip()
+    error = None
+    if not editor or not machine:
+        error = "pick a machine to push this build to"
+    elif db.get_package(conn, platform, version, "companion") is None:
+        error = f"no published {platform} companion package {version}"
+    elif not db.request_machine_update(conn, editor, machine, version, admin,
+                                       db.utcnow_iso()):
+        error = f"no machine {machine!r} for {editor!r}"
+    else:
+        db.audit(conn, admin, "package.push_one", version,
+                 {"platform": platform, "version": version,
+                  "editor": editor, "machine": machine})
+        conn.commit()
+    return _render(request, "partials/admin_packages.html",
+                   _packages_and_feed(conn, request, error))
+
+
+@router.post("/partials/admin/packages/roll-fleet-back")
+async def partial_admin_roll_fleet_back(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    """[ ROLL THE FLEET BACK TO x ] (REL-3, 2026-08-28): every machine still
+    running the recalled build is asked to take the named one instead."""
+    admin = _require_admin_page(request)
+    form = await _form(request)
+    platform = form.get("platform", "").strip().lower()
+    from_version = form.get("from_version", "").strip()
+    to_version = form.get("to_version", "").strip()
+    error = None
+    try:
+        api_roll_fleet_back_impl(conn, platform=platform, from_version=from_version,
+                                 to_version=to_version, admin=admin)
+    except HTTPException as exc:
+        error = str(exc.detail)
+    return _render(request, "partials/admin_packages.html",
+                   _packages_and_feed(conn, request, error))
 
 
 @router.post("/partials/admin/machines/update")

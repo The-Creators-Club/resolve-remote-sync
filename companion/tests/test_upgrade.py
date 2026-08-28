@@ -568,27 +568,353 @@ def test_note_version_start_only_fires_on_an_actual_version_change(tmp_path):
     copy to be destroyed before the new build had proven anything, AND fired
     the "Update complete" toast on an unrelated later restart whenever an AV
     hold had deferred the unlink."""
-    import ccsync_companion.upgrade as upgrade_mod
-    from ccsync_companion import config as config_mod
-
     state = tmp_path / "state"
-    # First ever run: no marker -> not an upgrade.
-    assert upgrade_mod.note_version_start(state) is False
+    # First ever run: no record -> not an upgrade.
+    assert upgrade_mod.note_version_start(state)["upgraded"] is False
     # Same version again -> still not an upgrade.
-    assert upgrade_mod.note_version_start(state) is False
+    assert upgrade_mod.note_version_start(state)["upgraded"] is False
     # A different version was recorded -> this start IS the first on a new build.
-    (state / "last_version.txt").write_text("0.0.1", encoding="utf-8")
-    assert upgrade_mod.note_version_start(state) is True
+    upgrade_mod._write_json(upgrade_mod.version_state_path(state), {"version": "0.0.1"})
+    record = upgrade_mod.note_version_start(state)
+    assert record["upgraded"] is True
+    assert record["previous_version"] == "0.0.1"
+    assert upgrade_mod.read_version_state(state)["version"] == config_mod.VERSION
+    assert upgrade_mod.note_version_start(state)["upgraded"] is False
+
+
+def test_note_version_start_adopts_the_legacy_txt_marker_once(tmp_path):
+    """APP-5. A machine upgrading INTO this build has its previous version in
+    `last_version.txt` and nowhere else, and `previous_version` is what the
+    crash-loop guard floor-checks before it restores anything. The .txt is
+    still written afterwards so a deliberate rollback to an older build keeps
+    its own "Update complete" toast."""
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "last_version.txt").write_text("0.9.54", encoding="utf-8")
+
+    record = upgrade_mod.note_version_start(state)
+
+    assert record["upgraded"] is True
+    assert record["previous_version"] == "0.9.54"
+    assert (state / "last_version.json").exists()
     assert (state / "last_version.txt").read_text(encoding="utf-8") == config_mod.VERSION
-    assert upgrade_mod.note_version_start(state) is False
+
+
+def test_note_version_start_counts_starts_and_a_clean_shutdown_resets_them(tmp_path):
+    """APP-5 / REL-2: three starts of the SAME version inside ten minutes is
+    "this build cannot stay up"; a clean shutdown in between is an editor
+    quitting the tray, which must not be counted."""
+    state = tmp_path / "state"
+    first = upgrade_mod.note_version_start(state, now=1000.0)
+    assert (first["starts"], first["crash_loop"]) == (1, False)
+    second = upgrade_mod.note_version_start(state, now=1060.0)
+    assert (second["starts"], second["crash_loop"]) == (2, False)
+    third = upgrade_mod.note_version_start(state, now=1120.0)
+    assert (third["starts"], third["crash_loop"]) == (3, True)
+
+    # A clean exit wipes the streak.
+    upgrade_mod.note_clean_shutdown(state, now=1130.0)
+    fourth = upgrade_mod.note_version_start(state, now=1140.0)
+    assert (fourth["starts"], fourth["crash_loop"]) == (1, False)
+
+
+def test_note_version_start_forgets_starts_older_than_the_window(tmp_path):
+    """Three starts spread over a week say nothing about this build's health."""
+    state = tmp_path / "state"
+    upgrade_mod.note_version_start(state, now=1000.0)
+    upgrade_mod.note_version_start(state, now=1060.0)
+    late = upgrade_mod.note_version_start(state, now=1000.0 + 7 * 86400)
+    assert (late["starts"], late["crash_loop"]) == (1, False)
 
 
 def test_note_version_start_never_raises(tmp_path):
-    import ccsync_companion.upgrade as upgrade_mod
-
     blocker = tmp_path / "blocked"
     blocker.write_text("i am a file, not a directory", encoding="utf-8")
-    assert upgrade_mod.note_version_start(blocker) is False
+    record = upgrade_mod.note_version_start(blocker)
+    assert record["upgraded"] is False and record["crash_loop"] is False
+
+
+# ===========================================================================
+# APP-5 / REL-2: the rollback copy is kept until the build proves itself
+# ===========================================================================
+
+
+class _Clock:
+    """A monotonic clock the test drives. `step` makes every READ advance it,
+    which is what the takeover-grace loops need: a clock that never moves is
+    an infinite loop, in the test and in the field alike."""
+
+    def __init__(self, step=0.0):
+        self.now = 0.0
+        self.step = step
+
+    def __call__(self):
+        value = self.now
+        self.now += self.step
+        return value
+
+
+def test_old_exe_survives_the_first_minutes_and_goes_on_one_accepted_report():
+    """The 60 s timer this replaces deleted `<exe>.old` before any of the
+    faults it exists for could happen."""
+    import threading
+
+    stop = threading.Event()
+    clock = _Clock()
+    healthy = {"yes": False}
+    deleted = []
+
+    def _cleanup():
+        deleted.append(True)
+        return True
+
+    def _healthy():
+        # Five polls in, the dashboard takes a report.
+        clock.now += 60.0
+        if clock.now >= 300.0:
+            healthy["yes"] = True
+        return healthy["yes"]
+
+    reason = upgrade_mod.keep_old_exe_until_healthy(
+        stop, _healthy, poll_seconds=0.0, clock=clock, cleanup=_cleanup)
+
+    assert deleted == [True]
+    assert "report" in reason
+    assert clock.now == 300.0, "it must not have deleted anything at 60 s"
+
+
+def test_old_exe_goes_after_the_uptime_fallback_when_no_report_lands():
+    import threading
+
+    stop = threading.Event()
+    clock = _Clock()
+    deleted = []
+
+    def _tick():
+        clock.now += 600.0
+        return False
+
+    reason = upgrade_mod.keep_old_exe_until_healthy(
+        stop, _tick, poll_seconds=0.0, clock=clock,
+        cleanup=lambda: deleted.append(True) or True)
+
+    assert deleted == [True]
+    assert "up for 60 minutes" in reason
+
+
+def test_old_exe_survives_a_shutdown_before_the_build_proved_itself():
+    """A build that never got a report in and never stayed up an hour is
+    exactly the one whose predecessor must still be on disk next start."""
+    import threading
+
+    stop = threading.Event()
+    stop.set()
+    deleted = []
+
+    reason = upgrade_mod.keep_old_exe_until_healthy(
+        stop, lambda: False, poll_seconds=0.0,
+        cleanup=lambda: deleted.append(True) or True)
+
+    assert reason == "" and deleted == []
+
+
+# ===========================================================================
+# APP-5 / REL-2: the automatic revert
+# ===========================================================================
+
+
+def _crash_loop_tree(tmp_path, previous="0.9.54"):
+    exe = tmp_path / "ccsync-companion.exe"
+    exe.write_bytes(b"the build that keeps crashing")
+    (tmp_path / "ccsync-companion.exe.old").write_bytes(b"the build that worked")
+    state = tmp_path / "state"
+    upgrade_mod._write_json(upgrade_mod.version_state_path(state), {
+        "version": config_mod.VERSION, "previous_version": previous,
+        "starts": 3, "first_start_at": 1000.0, "last_clean_shutdown": None,
+    })
+    return exe, state
+
+
+class _LiveChild:
+    def poll(self):
+        return None
+
+
+def test_revert_restores_the_old_exe_and_records_what_it_came_off(tmp_path):
+    exe, state = _crash_loop_tree(tmp_path)
+    spawned, shut_down = [], []
+
+    restored, refusal = upgrade_mod.revert_to_previous_build(
+        state, {}, request_shutdown=lambda: shut_down.append(True),
+        exe_path=exe, spawn=lambda path: spawned.append(path) or _LiveChild(),
+        clock=_Clock(step=1.0), sleep_fn=lambda _s: None,
+        floor_file=tmp_path / "floor.json", now=2000.0,
+    )
+
+    assert (restored, refusal) == ("0.9.54", "")
+    assert exe.read_bytes() == b"the build that worked"
+    assert not (tmp_path / "ccsync-companion.exe.old").exists()
+    assert spawned == [exe] and shut_down == [True]
+    # The build coming up is the one that has to report and announce it.
+    ledger = upgrade_mod.read_attempts(upgrade_mod.attempts_path(state))
+    assert ledger["reverted_from"] == config_mod.VERSION
+    # ...and it must NOT think it was just upgraded into.
+    assert upgrade_mod.read_version_state(state)["version"] == "0.9.54"
+
+
+def test_revert_refuses_to_go_below_the_downgrade_floor(tmp_path):
+    exe, state = _crash_loop_tree(tmp_path, previous="0.9.0")
+    floor = tmp_path / "floor.json"
+    upgrade_mod.note_floor(floor, "0.9.50")
+
+    restored, refusal = upgrade_mod.revert_to_previous_build(
+        state, {}, exe_path=exe, spawn=lambda path: _LiveChild(),
+        floor_file=floor, now=2000.0,
+    )
+
+    assert restored == ""
+    assert "downgrade floor" in refusal
+    assert exe.read_bytes() == b"the build that keeps crashing"
+    assert (tmp_path / "ccsync-companion.exe.old").exists()
+
+
+def test_revert_refuses_when_it_cannot_name_the_previous_build(tmp_path):
+    exe, state = _crash_loop_tree(tmp_path, previous="")
+
+    restored, refusal = upgrade_mod.revert_to_previous_build(
+        state, {}, exe_path=exe, spawn=lambda path: _LiveChild(),
+        floor_file=tmp_path / "floor.json", now=2000.0,
+    )
+
+    assert restored == "" and "no record" in refusal
+    assert exe.read_bytes() == b"the build that keeps crashing"
+
+
+def test_revert_refuses_when_there_is_no_rollback_copy(tmp_path):
+    exe, state = _crash_loop_tree(tmp_path)
+    (tmp_path / "ccsync-companion.exe.old").unlink()
+
+    restored, refusal = upgrade_mod.revert_to_previous_build(
+        state, {}, exe_path=exe, spawn=lambda path: _LiveChild(),
+        floor_file=tmp_path / "floor.json", now=2000.0,
+    )
+
+    assert restored == "" and "no rollback copy" in refusal
+
+
+def test_revert_keeps_this_build_when_the_restored_one_will_not_start(tmp_path):
+    """The takeover grace applies here for the same reason it does in
+    apply(): standing down over a corpse leaves the machine with nothing."""
+    exe, state = _crash_loop_tree(tmp_path)
+    clock = _Clock(step=1.0)
+
+    class _DeadChild:
+        def poll(self):
+            return 3
+
+    shut_down = []
+    restored, refusal = upgrade_mod.revert_to_previous_build(
+        state, {}, request_shutdown=lambda: shut_down.append(True),
+        exe_path=exe, spawn=lambda path: _DeadChild(),
+        clock=clock, sleep_fn=lambda _s: None,
+        floor_file=tmp_path / "floor.json", now=2000.0,
+    )
+
+    assert restored == "" and "exited with code 3" in refusal
+    assert shut_down == []
+
+
+# ===========================================================================
+# REL-8: the attempt ledger and its back-off
+# ===========================================================================
+
+
+def test_backoff_is_ten_minutes_then_an_hour_then_six(tmp_path):
+    assert upgrade_mod.upgrade_backoff_seconds(0) == 0.0
+    assert upgrade_mod.upgrade_backoff_seconds(1) == 600.0
+    assert upgrade_mod.upgrade_backoff_seconds(2) == 3600.0
+    assert upgrade_mod.upgrade_backoff_seconds(3) == 21600.0
+    assert upgrade_mod.upgrade_backoff_seconds(7) == 21600.0
+
+
+def test_attempts_persist_across_restarts_and_a_new_target_resets_them(tmp_path):
+    path = tmp_path / "upgrade_attempts.json"
+    first = upgrade_mod.note_upgrade_attempt(path, "9.9.9", upgrade_mod.ERROR_SHA, now=100.0)
+    assert (first["attempts"], first["last_error"]) == (1, "sha-mismatch")
+    second = upgrade_mod.note_upgrade_attempt(path, "9.9.9", upgrade_mod.ERROR_DOWNLOAD, now=800.0)
+    assert second["attempts"] == 2
+    # A restart re-reads it rather than starting from zero.
+    assert upgrade_mod.read_attempts(path)["attempts"] == 2
+    # ...and a new build is a new question.
+    fresh = upgrade_mod.note_upgrade_attempt(path, "9.9.10", upgrade_mod.ERROR_EXEC, now=900.0)
+    assert (fresh["version"], fresh["attempts"]) == ("9.9.10", 1)
+
+
+def test_retry_is_not_due_until_the_backoff_has_elapsed(tmp_path):
+    path = tmp_path / "upgrade_attempts.json"
+    upgrade_mod.note_upgrade_attempt(path, "9.9.9", upgrade_mod.ERROR_DOWNLOAD, now=100.0)
+    record = upgrade_mod.read_attempts(path)
+
+    assert upgrade_mod.upgrade_retry_due(record, "9.9.9", now=200.0) is False
+    assert upgrade_mod.upgrade_retry_due(record, "9.9.9", now=100.0 + 600.0) is True
+    # A DIFFERENT version is always due: publishing a fix must reach the machine.
+    assert upgrade_mod.upgrade_retry_due(record, "9.9.10", now=200.0) is True
+    # A clock that went backwards must not park the machine for six hours.
+    assert upgrade_mod.upgrade_retry_due(record, "9.9.9", now=50.0) is True
+
+
+def test_the_machine_gives_up_after_eight_failures(tmp_path):
+    path = tmp_path / "upgrade_attempts.json"
+    for n in range(upgrade_mod.MAX_UPGRADE_ATTEMPTS):
+        record = upgrade_mod.note_upgrade_attempt(
+            path, "9.9.9", upgrade_mod.ERROR_DOWNLOAD, now=100.0 + n)
+        expected = n + 1 >= upgrade_mod.MAX_UPGRADE_ATTEMPTS
+        assert upgrade_mod.upgrade_attempts_exhausted(record, "9.9.9") is expected
+    # Never for a build it has not failed.
+    assert upgrade_mod.upgrade_attempts_exhausted(record, "9.9.10") is False
+    # Coming up ON the build clears the count, however many tries it cost.
+    upgrade_mod.clear_upgrade_attempts(path, "9.9.9")
+    assert upgrade_mod.read_attempts(path).get("attempts") is None
+
+
+def test_clearing_attempts_keeps_a_revert_the_dashboard_has_not_seen(tmp_path):
+    path = tmp_path / "upgrade_attempts.json"
+    upgrade_mod.note_upgrade_attempt(path, "9.9.9", upgrade_mod.ERROR_SHA, now=100.0)
+    upgrade_mod.note_reverted_from(path, "9.9.9", now=110.0)
+
+    upgrade_mod.clear_upgrade_attempts(path, "9.9.9")
+    assert upgrade_mod.read_attempts(path)["reverted_from"] == "9.9.9"
+
+    upgrade_mod.clear_reverted_from(path)
+    assert "reverted_from" not in upgrade_mod.read_attempts(path)
+
+
+def test_upgrade_report_is_always_a_full_shape(tmp_path):
+    empty = upgrade_mod.upgrade_report({}, 1)
+    assert empty == {
+        "version": None, "attempts": 0, "last_error": None,
+        "last_attempt_at": None, "reverted_from": None, "starts_this_version": 1,
+    }
+    path = tmp_path / "upgrade_attempts.json"
+    upgrade_mod.note_upgrade_attempt(path, "9.9.9", upgrade_mod.ERROR_EXEC, now=0.0)
+    report = upgrade_mod.upgrade_report(upgrade_mod.read_attempts(path), 2)
+    assert report["version"] == "9.9.9" and report["last_error"] == "exec-failed"
+    assert report["last_attempt_at"] == "1970-01-01T00:00:00Z"
+    assert report["starts_this_version"] == 2
+
+
+# ===========================================================================
+# REL-16: which binary this machine can run
+# ===========================================================================
+
+
+@pytest.mark.parametrize("machine,expected", [
+    ("AMD64", "x86_64"), ("x86_64", "x86_64"), ("x64", "x86_64"),
+    ("arm64", "arm64"), ("aarch64", "arm64"), ("", "unknown"), ("mips", "mips"),
+])
+def test_arch_key_normalises_the_two_spellings_of_each_cpu(monkeypatch, machine, expected):
+    monkeypatch.setattr(upgrade_mod.platform, "machine", lambda: machine)
+    assert upgrade_mod.arch_key() == expected
 
 
 # ===========================================================================

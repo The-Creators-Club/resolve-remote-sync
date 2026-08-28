@@ -73,6 +73,41 @@ function Write-Step { param([string]$m) Write-Host "[upgrade] $m" }
 function Write-Skip { param([string]$m) Write-Host "[upgrade] (skip) $m" -ForegroundColor DarkGray }
 function Write-Warn2 { param([string]$m) Write-Host "[upgrade] WARNING: $m" -ForegroundColor Yellow }
 
+# --- keeping the build being replaced (REL-12, resilience sweep 2026-08-28) --
+# Two renames on one volume, and the whole difference between "the new build
+# would not start, so this machine is back on the old one" and "this machine
+# has no companion until the editor logs in again". Written as functions so
+# installer\tests\Test-PrevRollback.ps1 can exercise both directions without
+# a machine in any state -- the same slicing trick Test-LicenceGate.ps1 uses.
+function Move-InstalledAside {
+    <# Rename the installed exe to <exe>.prev. $true when there is now a
+       .prev to roll back to. An absent exe is $false, not an error: a first
+       install has nothing to keep. #>
+    param([string]$ExePath, [string]$PrevPath)
+    if (-not (Test-Path -LiteralPath $ExePath)) { return $false }
+    try {
+        Move-Item -LiteralPath $ExePath -Destination $PrevPath -Force -ErrorAction Stop
+        return $true
+    }
+    catch { return $false }
+}
+
+function Restore-InstalledFromPrev {
+    <# Put <exe>.prev back as the installed exe, moving whatever is in its
+       place to $FailedPath first (when one is given and something is there).
+       $true when the exe at $ExePath is now the previous build. #>
+    param([string]$ExePath, [string]$PrevPath, [string]$FailedPath = "")
+    if (-not (Test-Path -LiteralPath $PrevPath)) { return $false }
+    try {
+        if ($FailedPath -and (Test-Path -LiteralPath $ExePath)) {
+            Move-Item -LiteralPath $ExePath -Destination $FailedPath -Force -ErrorAction Stop
+        }
+        Move-Item -LiteralPath $PrevPath -Destination $ExePath -Force -ErrorAction Stop
+        return $true
+    }
+    catch { return $false }
+}
+
 $RunKeyPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 $BinDir = "$env:LOCALAPPDATA\ccsync\bin"
 $CompanionExePath = "$BinDir\ccsync-companion.exe"
@@ -165,13 +200,40 @@ if (-not $DryRun) { Start-Sleep -Milliseconds 800 }  # let the file handle relea
 # script here -- it would leave the editor with the companion already
 # killed and steps 3-5 (autostart, config migration, relaunch) never run,
 # i.e. strictly worse than not upgrading at all.
+#
+# AND THE BUILD IT REPLACES IS KEPT (REL-12, resilience sweep 2026-08-28).
+# This path used to Copy-Item -Force straight over the live exe, so a build
+# that would not start left the machine with no companion and NOTHING to
+# restore -- unlike the self-upgrade path, which keeps <exe>.old and rolls
+# back. A rename on the same volume costs nothing and gives step 5 something
+# to put back.
+$PrevExePath = "$CompanionExePath.prev"
+$PrevVersion = ""
+if (Test-Path -LiteralPath $DestManifest) {
+    try { $PrevVersion = "$((Get-Content -LiteralPath $DestManifest -Raw -Encoding UTF8 | ConvertFrom-Json).version)".Trim() }
+    catch { $PrevVersion = "" }
+}
+$PrevKept = $false
 $copySucceeded = $false
 if ($DryRun) {
-    Write-Step "[dry-run] would copy new exe -> $CompanionExePath"
+    Write-Step "[dry-run] would rename the installed exe to $PrevExePath and copy the new one -> $CompanionExePath"
     $copySucceeded = $true
 }
 else {
     if (-not (Test-Path -LiteralPath $BinDir)) { New-Item -ItemType Directory -Path $BinDir -Force | Out-Null }
+    if (Test-Path -LiteralPath $CompanionExePath) {
+        $PrevKept = Move-InstalledAside -ExePath $CompanionExePath -PrevPath $PrevExePath
+        if ($PrevKept) {
+            Write-Step "kept the build being replaced$(if ($PrevVersion) { " (v$PrevVersion)" }): $PrevExePath"
+        }
+        else {
+            # Not fatal: the copy below overwrites in place exactly as it did
+            # before this change, and an upgrade that cannot be rolled back is
+            # still better than no upgrade. Said out loud, because it is the
+            # difference between step 5 being able to restore and not.
+            Write-Warn2 "could not set the current build aside as $PrevExePath -- upgrading in place, with nothing to roll back to"
+        }
+    }
     $maxAttempts = 5
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
         try {
@@ -186,9 +248,23 @@ else {
                 Start-Sleep -Seconds 2
             }
             else {
-                Write-Warn2 "could not replace $CompanionExePath after $maxAttempts attempts ($($_.Exception.Message)) -- the OLD companion build is still in place. Close anything that might have it open (Explorer preview, AV scan) and re-run this script."
+                Write-Warn2 "could not replace $CompanionExePath after $maxAttempts attempts ($($_.Exception.Message)) -- close anything that might have it open (Explorer preview, AV scan) and re-run this script."
             }
         }
+    }
+    if (-not $copySucceeded -and $PrevKept -and -not (Test-Path -LiteralPath $CompanionExePath)) {
+        # The rename left no exe at all and the copy never landed one. Put the
+        # previous build back rather than leave the machine with none.
+        if (Restore-InstalledFromPrev -ExePath $CompanionExePath -PrevPath $PrevExePath) {
+            $PrevKept = $false
+            Write-Step "restored the previous build$(if ($PrevVersion) { " (v$PrevVersion)" }) -- this machine is where it started"
+        }
+        else {
+            Write-Warn2 "the new exe did not copy AND the previous one could not be put back: it is at $PrevExePath -- rename it to ccsync-companion.exe by hand"
+        }
+    }
+    elseif (-not $copySucceeded) {
+        Write-Warn2 "the OLD companion build is still in place."
     }
 }
 
@@ -415,8 +491,38 @@ else {
         }
         else {
             $relaunchAlive = $false
-            Write-Warn2 "the companion EXITED within ${RelaunchConfirmSeconds}s of being started -- this machine has NO companion running: no sync lanes, no Resolve bridge, no proxy generation, and nothing will retry before the next logon."
+            Write-Warn2 "the companion EXITED within ${RelaunchConfirmSeconds}s of being started."
             Write-Warn2 "run it by hand to see why: `"$CompanionExePath`"  (then check $env:USERPROFILE\.ccsync\companion.log and config.toml)"
+            # REL-12 (2026-08-28): this branch used to stop here, with a blunt
+            # and entirely accurate warning that the machine now had NO
+            # companion -- no lanes, no Resolve bridge -- and nothing to retry
+            # before the next logon. The build that was working ten seconds
+            # ago is one rename away, so put it back and start it.
+            $failedExe = "$CompanionExePath.failed"
+            if ($PrevKept -and (Restore-InstalledFromPrev -ExePath $CompanionExePath `
+                    -PrevPath $PrevExePath -FailedPath $failedExe)) {
+                $PrevKept = $false
+                try {
+                    $back = Start-Process -FilePath $CompanionExePath -WorkingDirectory $BinDir -PassThru
+                    Start-Sleep -Seconds $RelaunchConfirmSeconds
+                    $backUp = $false
+                    try { $backUp = -not $back.HasExited } catch { $backUp = $false }
+                    if ($backUp) {
+                        $relaunchAlive = $true
+                        Write-Step "the new build would not start - this machine is back on$(if ($PrevVersion) { " v$PrevVersion" } else { " the previous build" })"
+                        Write-Step "the build that failed is kept at $failedExe; the version record beside the exe is now WRONG until the next upgrade"
+                    }
+                    else {
+                        Write-Warn2 "the previous build would not start either -- this machine has NO companion running: no sync lanes, no Resolve bridge, and nothing will retry before the next logon."
+                    }
+                }
+                catch {
+                    Write-Warn2 "could not start the restored build ($($_.Exception.Message)) -- this machine has NO companion running, and nothing will retry before the next logon."
+                }
+            }
+            else {
+                Write-Warn2 "there is no kept previous build to roll back to -- this machine has NO companion running: no sync lanes, no Resolve bridge, no proxy generation, and nothing will retry before the next logon."
+            }
         }
     }
 }

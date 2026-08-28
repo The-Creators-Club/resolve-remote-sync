@@ -1734,3 +1734,15 @@ def test_the_liveness_fields_survive_fit_payload():
     lane = calls[0]["lanes"][0]
     assert lane["progress_token"] == "99:1:Projects/2026/FF5/Animals"
     assert lane["state_since"]
+
+
+def test_payload_carries_the_architecture(monkeypatch):
+    """REL-16 (resilience sweep 2026-08-28): `platform` alone offered an Intel
+    Mac the arm64 build, which downloads, verifies, swaps in and cannot
+    exec."""
+    calls = []
+    reporter = DashboardReporter(
+        lambda: [], _cfg(), http_post=lambda u, d, h, t: calls.append(d) or {},
+    )
+    reporter.post_once()
+    assert calls[0]["arch"] in {"x86_64", "arm64"}

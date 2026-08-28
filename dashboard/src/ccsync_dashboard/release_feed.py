@@ -356,6 +356,67 @@ def _record_key(record: dict[str, Any]) -> tuple[str, str, str]:
     return (str(record.get("kind", "")), str(record.get("platform", "")), str(record.get("version", "")))
 
 
+def channel_retractions(channel: Any) -> list[dict[str, str]]:
+    """The channel's `retracted` list: builds the vendor has RECALLED
+    (REL-3, resilience sweep 2026-08-28).
+
+    Shape: [{kind, platform, version, reason, at}]. It lives inside the signed
+    channel document (canonical_channel_bytes covers the whole dict), so the
+    feed host cannot fabricate a recall and cannot suppress one either without
+    breaking the signature -- which matters, because a recall is the one
+    channel message whose SUPPRESSION is the attack.
+
+    Malformed entries are dropped one by one rather than failing the list: a
+    feed carrying one bad entry beside three good ones must still deliver the
+    three. Anything missing kind/platform/version names no build and can
+    therefore do nothing.
+    """
+    raw = channel.get("retracted") if isinstance(channel, dict) else None
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "").strip()
+        platform = str(item.get("platform") or "").strip().lower()
+        version = str(item.get("version") or "").strip()
+        if not (kind and platform and version):
+            continue
+        out.append({
+            "kind": kind, "platform": platform, "version": version,
+            "reason": str(item.get("reason") or "").strip(),
+            "at": str(item.get("at") or "").strip(),
+        })
+    return out
+
+
+def apply_retractions(conn, channel: Any, now: str) -> list[str]:
+    """Honour every recall in the channel, under EVERY policy including
+    `manual` (REL-3).
+
+    Policy governs whether this dashboard takes NEW builds; it has never
+    governed whether it keeps offering one the vendor has withdrawn, and the
+    default policy is `manual`, so a recall that respected policy would reach
+    almost nobody. Un-currenting is the whole action here: the row and the
+    file stay, because the fleet may still be running the build and the admin
+    has to be able to see what they are rolling back from.
+    """
+    applied: list[str] = []
+    for item in channel_retractions(channel):
+        if db.retract_package(conn, item["kind"], item["platform"], item["version"],
+                              item["reason"], now):
+            applied.append(f"{item['kind']}/{item['platform']} {item['version']}")
+            log.warning(
+                "release feed: %s/%s %s has been RECALLED by the vendor%s -- it is no "
+                "longer current and will not be offered to any machine",
+                item["kind"], item["platform"], item["version"],
+                f" ({item['reason']})" if item["reason"] else "")
+    if applied:
+        conn.commit()
+    return applied
+
+
 def _valid_records(channel: dict[str, Any], pubkeys: tuple[str, ...]) -> list[dict[str, Any]]:
     """Every package record in `channel` whose OWN signature verifies.
     Belt-and-braces on top of the channel-level signature: a compromised or
@@ -365,6 +426,13 @@ def _valid_records(channel: dict[str, Any], pubkeys: tuple[str, ...]) -> list[di
     packages = channel.get("packages")
     if not isinstance(packages, list):
         return out
+    # A recalled build is not "available" either (REL-3, 2026-08-28): dropping
+    # it here takes it out of the auto-publish selection AND off the admin
+    # page's [ PUBLISH ] buttons in one place, so a dashboard that has never
+    # published it cannot start now.
+    recalled = {
+        (r["kind"], r["platform"], r["version"]) for r in channel_retractions(channel)
+    }
     dropped = 0
     for rec in packages:
         if not isinstance(rec, dict):
@@ -373,6 +441,12 @@ def _valid_records(channel: dict[str, Any], pubkeys: tuple[str, ...]) -> list[di
         ok, _detail = release_trust.verify_record(rec, str(rec.get("signature", "")), pubkeys)
         if not ok:
             dropped += 1
+            continue
+        key = (str(rec.get("kind", "")), str(rec.get("platform", "")).strip().lower(),
+               str(rec.get("version", "")))
+        if key in recalled:
+            log.warning("release feed: %s/%s %s is in the channel's `retracted` list "
+                        "-- not offering it", *key)
             continue
         # A validly signed record can still be a typo that would brick the
         # channel: min_version above the version it describes raises every
@@ -543,8 +617,27 @@ def check_now(conn, settings, app_state) -> dict[str, Any]:
         last_channel_generated_at=str(channel.get("generated_at") or ""),
     )
     conn.commit()
+    # BEFORE the policy runs, and outside it (REL-3, 2026-08-28): a recall is
+    # honoured under EVERY policy, `manual` included -- policy governs whether
+    # this dashboard takes NEW builds and has never governed whether it keeps
+    # offering one the vendor has withdrawn. Manual is the default, so a
+    # recall that respected policy would reach almost nobody.
+    retracted = apply_retractions(conn, channel, now)
     applied = _apply_policy(conn, settings, app_state, valid_records, now)
-    return {"ok": True, "error": None, "applied": applied}
+    # REL-11 (resilience sweep 2026-08-28): "every dashboard build on offer
+    # needs a new container image" is a state a site can sit in for months
+    # while every check succeeds. Recorded here, where the records are, so the
+    # fleet page's banner can read it from the database. Imported lazily and
+    # never fatal: dashboard_update imports this module, and a feed check must
+    # not fail over a banner.
+    try:
+        from . import dashboard_update
+
+        dashboard_update.record_feed_runtime_mismatch(conn, settings, app_state)
+        conn.commit()
+    except Exception:                                                 # noqa: BLE001
+        log.warning("could not record the feed's runtime-mismatch state", exc_info=True)
+    return {"ok": True, "error": None, "applied": applied, "retracted": retracted}
 
 
 def _apply_policy(conn, settings, app_state, valid_records: list[dict[str, Any]], now: str) -> list[str]:
@@ -712,9 +805,25 @@ def publish_from_feed(
         signed_binary=bool(record.get("signed_binary")),
         signature=str(record.get("signature") or ""),
         pubkey_id=str(record.get("pubkey_id") or ""),
+        # The two SIGNED extras and the two ADVISORY provenance fields
+        # (REL-4/SYS-13, REL-16, REL-13, 2026-08-28). The first two are inside
+        # the signature and are re-verified by store_verified_package, so a
+        # feed host that strips or edits one gets a refusal, not a mis-offered
+        # build; the git pair is advisory and shown, never acted on.
+        requires_dashboard=str(record.get("requires_dashboard") or ""),
+        arch=str(record.get("arch") or ""),
+        git_sha=str(record.get("git_sha") or ""),
+        git_dirty=bool(record.get("git_dirty")),
         published_by=published_by,
         make_current=make_current,
-        prune=False,
+        # REL-5 (resilience sweep 2026-08-28): prune by default on BOTH
+        # publish paths. Nothing on the release path ever pruned, and this one
+        # runs unattended on a daily timer -- a year of it is 50 companion exes
+        # and 50 onboard exes on the dataset the SQLite database lives on, and
+        # a full /data is the dashboard going down. db.prune_companion_packages
+        # keeps the current build plus the two newest, which is the rollback
+        # material anybody actually reaches for.
+        prune=True,
         part_path=part,
     )
     return build_packages_view(conn, settings)
@@ -764,6 +873,11 @@ def build_feed_view(conn, settings, app_state) -> dict[str, Any]:
         "last_channel_generated_at": state.get("last_channel_generated_at"),
         "available": available,
         "sha_conflicts": conflicts,
+        # What the vendor has RECALLED (REL-3, 2026-08-28), whether or not
+        # this dashboard ever published it: an admin reading "0.9.55 was
+        # withdrawn: it corrupts proxies" needs to see it even on a site that
+        # never took 0.9.55, because that is how they know not to hunt for it.
+        "retracted": channel_retractions(channel),
         "image": {
             "tag": str(image.get("tag") or ""),
             "digest": str(image.get("digest") or ""),
@@ -857,6 +971,11 @@ def api_admin_feed_check(request: FastAPIRequest, conn=Depends(get_conn)) -> dic
     # table changing under them.
     return {"ok": result["ok"], "error": result.get("error"),
             "applied": result.get("applied") or [],
+            # What this check RECALLED (REL-3, 2026-08-28). Beside `applied`
+            # for the same reason: an admin pressing Check now must see that a
+            # build was withdrawn from under their fleet, not deduce it from
+            # the current pointer having moved.
+            "retracted": result.get("retracted") or [],
             "view": build_feed_view(conn, settings, request.app.state)}
 
 

@@ -4753,6 +4753,754 @@ persistence, and every failure path being a log line rather than a traceback on
 the reporter thread). `test_hardening.py`'s `_BODY_LIMITS` assertion was widened
 to name the new route.
 
+## Resilience sweep, wave 3: the release pipeline (2026-08-28) - FIXED in repo, unshipped
+
+Wave 3 of `docs/RESILIENCE_SWEEP_2026-08-28.md` (items 7, 14, 29, 30, 31, 32
+plus REL-5/7/9/10/11/12/13/14/15/16 and OPS-12 from the same files), built by
+four builder agents to one contract. Before this wave a build reached every
+machine at once, a companion that crashed at minute five had no way back
+(the rollback copy was deleted at 60 s), a retracted build was never
+withdrawn, "deploy the dashboard before the companions" was a rule in four
+documents and no code, a deploy that left the dashboard dead exited 0, and
+rotating the session secret 401'd the whole fleet with no message.
+
+After it: publish is STAGED by default and MAKE CURRENT is refused until one
+machine has soaked the build (30 min, zero crashes) unless the version is
+typed; a companion keeps `.old` until its first accepted report and puts
+itself back after three crashing starts; a signed `retracted` list is
+honoured under every feed policy with one ROLL THE FLEET BACK button;
+`requires_dashboard` and `arch` are signed into the record and refused at
+MakeCurrent when the dashboard is too old or the architecture wrong; the
+deploy probes `/api/v1/health` and stops the ship on failure; the dashboard's
+own crash-loop watchdog needs a served 200; `DASH_SESSION_SECRET_PREVIOUS`
+drains a rotation and a refused machine is named on the grid.
+
+**OVERLAP CONSTRAINT, read before the next ship:** the two signed extras are
+only verifiable by companions 0.9.55+, so `sign_release.py` drops them unless
+`--emit-kind-extras` (`ship.cmd -EmitKindExtras`) is passed. Turn that on
+only once every machine reports 0.9.55 or newer (docs/RELEASE.md, "The
+overlap cost of the two signed fields"). Companion `REQUIRES_DASHBOARD =
+"0.7.17"` (config.py) is the value it will sign.
+
+Ships as: dashboard first (schema v34 + v35), then companion 0.9.55, then a
+rebuilt installer package (windows_upgrade.ps1's `.prev`, build_editor_
+package.ps1's login-before-build and -EmitKindExtras). New state files on
+the companion: `last_version.json` (adopts `last_version.txt`),
+`~/.ccsync/state/upgrade_attempts.json`. New env: `DASH_SESSION_SECRET_PREVIOUS`,
+`DASH_RELEASE_SOAK_MINUTES`. New tool flags: `--rollback-on-unhealthy`,
+`-Resume`, `-AllowKeyRotation`, `-IReallyMeanDirtyCurrent`, `--retract`.
+
+### APP-5 / REL-2 - an upgraded build that boots and then dies had no way back - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** A published build starts fine, puts a tray icon up, and hits a
+fault three minutes later (a Tk failure in the first dialog, an exception on a
+code path only one editor's config reaches, a lane touching a surrogate path).
+The editor is mid-edit and notices nothing: the tray icon is simply gone. On
+Windows the Run key relaunches it at each logon into the same fault; on macOS
+the LaunchAgent is RunAtLoad-only, so the machine has no companion at all - no
+lanes, no Resolve fixer - and a whole fleet can take that offer at once.
+
+**Cause.** `apply()` only rolls back if the child exits inside 2 s
+(`CHILD_TAKEOVER_GRACE_SECONDS`), and `app.run()` armed
+`threading.Timer(60.0, cleanup_old_exe)` at every start, so from minute one
+there was no `<exe>.old` on disk. Nothing counted restarts: `note_version_start`
+recorded the running version whether or not the run was healthy (AUDIT_2
+CORE-H6 moved it off "did an unlink succeed", but it stayed a single line of
+text).
+
+**Fix.** The rollback copy is now kept on EVIDENCE, not a timer:
+`upgrade.keep_old_exe_until_healthy` (upgrade.py:576) runs on its own daemon
+thread from `app.run()` (app.py:8058) and deletes `<exe>.old` only after one
+dashboard report has been ACCEPTED (`app._note_report_accepted`, app.py:4884,
+on APP-1's channel) or after 60 minutes of uptime; a shutdown before either
+leaves the copy for the next start. `last_version.txt` became
+`last_version.json` (`{version, previous_version, starts, first_start_at,
+last_clean_shutdown}`, atomic; the legacy .txt is adopted once and still
+written for a rollback to an older build): `starts` counts launches of the same
+version and is reset by `note_clean_shutdown` from `CompanionApp.shutdown`
+(app.py:7723). Three starts inside ten minutes with an `.old` present makes
+`crash_loop` true, and `app._revert_crashing_build` (app.py:7794) calls
+`upgrade.revert_to_previous_build` (upgrade.py:637): it floor-checks the
+recorded `previous_version` against `~/.ccsync/upgrade_floor.json` and REFUSES
+below it, restores the binary through the existing `_rollback`, writes the
+marker the next build reads, spawns through `_default_spawn` and stands this
+process down. The restored build toasts "The last update kept crashing, so
+CCSync went back to vX", carries `sync_guard.upgrade.reverted_from` until one
+report is accepted, and shows a Settings line (`tray._reverted_line`).
+
+**Tests.** `companion/tests/test_upgrade.py` - the start record (counting,
+clean-shutdown reset, stale-window reset, legacy .txt adoption, never raises),
+the keeper (`.old` survives past 60 s and goes on the first accepted report,
+the 60-minute fallback, a shutdown keeps it), and the revert (restores and
+records, refuses below the floor, refuses an unnameable `.old`, refuses with no
+`.old`, keeps this build when the restored one will not start).
+`tests/test_app.py` - the revert marker rides the report until one is accepted,
+the guard's refusal is logged, diagnostics.
+
+### REL-8 - a machine that could not take a build retried for ever and nobody was told - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** An editor's AV quarantines every `ccsync-companion.new.exe`, or a
+proxy mangles the download so the sha never matches, or the exe dir is on a
+full disk. The machine pulls ~20 MB off the NAS every ten minutes for ever
+(~2.9 GB/day, over a possibly relayed tailnet link) and rolls back each time,
+and the admin's push shows as pending for ever: the report carried nothing
+about upgrade outcomes, so "hasn't seen the push yet" and "has failed 140
+times" looked identical.
+
+**Cause.** `_run_auto_update` / `_run_pushed_update` re-armed on a flat
+`PUSHED_UPDATE_FAILED_RETRY_SECONDS = 600` timer held in memory only, with no
+attempt cap and no persistence, and the dashboard re-sends the request on every
+report until the machine reports the new version.
+
+**Fix.** A persisted ledger, `~/.ccsync/state/upgrade_attempts.json`
+(upgrade.py:326 onwards): `note_upgrade_attempt` counts failures per TARGET
+version (a new target resets, so publishing a fix always reaches the machine),
+`upgrade_backoff_seconds` is 10 min -> 1 h -> 6 h, and `upgrade_retry_due` is
+measured on the wall clock so a restart does not buy another download.
+`app._upgrade_attempt_blocked` (app.py:4900) gates both update paths, and after
+`MAX_UPGRADE_ATTEMPTS` (8) failures the machine stops trying and says so on
+Settings (`tray._upgrade_line`: "CCSync could not install the update to vX 8
+times, so it has stopped trying. Copy diagnostics for your admin"). WHY it
+failed is distinguished by `UpgradeManager.last_failure`
+(`download-failed`/`sha-mismatch`/`no-space`/`refused`/`swap-failed`/
+`exec-failed`) and rides the report. Coming up ON the attempted version clears
+the count (`app._load_upgrade_state`). A stand-down ("a CCSync window is open")
+is still the short 90 s pause and is not counted: it is not a failed install.
+
+**Tests.** `tests/test_upgrade.py` - the back-off schedule, persistence across
+a restart, a new target resetting, retry-due (including a clock that went
+backwards), the eight-failure cap, and `upgrade_report`'s always-full shape.
+`tests/test_app.py` - a machine that cannot take a build stops after eight
+downloads and reports the reason; `tests/test_tray_guard.py` - the line appears
+only once it has given up.
+
+### REL-16 (companion half) - the channel had no architecture discriminator - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** An Intel Mac reports `platform: macos` and is offered the arm64
+build GitHub's `macos-latest` runner produced. It downloads, verifies, is
+renamed over the running companion, fails to exec and the swap rolls back (the
+guard works) - so the machine keeps running but can never update, and with
+`auto_update` on it retried for ever (REL-8).
+
+**Cause.** The record's `platform` was the only discriminator, and the report
+payload carried no architecture at all - `tools/release_macos.sh` measures the
+arch, puts it in the manifest, and it is dropped at publish.
+
+**Fix.** `upgrade.arch_key()` (upgrade.py:143) normalises `platform.machine()`
+to `x86_64`/`arm64` (anything else is passed through lowercased, which the
+dashboard treats as "offer nothing"), the report carries top-level `arch`
+(`reporter._build_payload`), and `build_diagnostics()` names it. The dashboard
+half - matching `arch` on the signed record and saying "no macos/x86_64 build
+published" - is the RELEASE CHANNEL agent's.
+
+**Tests.** `tests/test_upgrade.py::test_arch_key_normalises_the_two_spellings_of_each_cpu`,
+`tests/test_reporter.py::test_payload_carries_the_architecture`.
+
+### REL-1 / SYS-6 - a build reached every machine at once; there was no canary and no soak - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** One `-MakeCurrent` (or one vendor `current` pointer) handed a
+companion build to every machine in the fleet inside one report interval, and
+on a site with `auto_update` on every machine also took it, unattended. The
+only thing between a bad build and the whole fleet was the companion watching
+its replacement for two seconds.
+
+**Cause.** Nothing in the publish path staged a build against a subset first.
+Every piece of a canary already existed - `publish_package` can publish
+without `make_current`, `db.machine_update_request` can push a build to one
+machine, and every machine reports its running version every 30 s - and
+nothing joined them up.
+
+**Fix.** A publish now writes `rollout='staged'` and `staged_at`
+(`db.py` SCHEMA_V34, `db.insert_companion_package`), and `[ MAKE CURRENT ]`
+goes through one gate that all three doors share
+(`api.make_current_refusal`, used by `api_set_current_package` and
+`ui.partial_admin_package_current`): refused with a 409 until at least one
+machine has been reporting that exact version for `soak_minutes` (site
+setting `release_soak_minutes` / `DASH_RELEASE_SOAK_MINUTES`, default 30)
+with `crashes.count == 0` and no crash-loop revert (`db.soak_state`,
+`db.machines_running_version`). "We could not tell" - an unparseable stamp, a
+companion that never sent a crash counter - counts against passing and says
+so. The override is `force=1` plus the version typed into a confirmation box.
+The soak clock is `machine_state.companion_version_since`, stamped by the
+SERVER's clock in `db.upsert_machine_state` before the row's version is
+overwritten, so a machine's own clock cannot shorten a soak. A build that has
+been current before carries `ever_current` and skips the gate: a rollback is
+the recovery the gate exists to make possible.
+`[ PUSH TO ONE MACHINE ]` (`ui.partial_admin_package_push_one`) writes the
+existing per-machine `commands.upgrade` request for a chosen machine, and the
+Packages page shows "canary: N machines on X for M min, C crashes" beside it.
+Every one of these is audited through `db.audit` (`package.make_current` with
+`forced`, `package.push_one`, `package.roll_fleet_back`, `package.retract`).
+
+**Tests.** `dashboard/tests/test_release_channel.py`: staged by default, the
+refusal before any machine reports, the refusal at 0 minutes, the pass at 45,
+a crashing canary, a machine that never reported its crash counter, the typed
+confirmation, a zero soak, the ungated rollback, push-to-one and its refusal
+for an unpublished version.
+
+### REL-3 - there was no recall; a build already taken could not be pulled back - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** `publish_feed.py --retract` withdrew a build from the vendor
+channel and a customer dashboard on the default `manual` policy never acted
+on it: the bad build stayed published and `is_current`, and its fleet kept
+being offered it. Machines that had already installed it needed a per-machine
+`[ UPDATE NOW ]` click each.
+
+**Cause.** `_apply_policy` returned immediately under `manual`, and nothing
+anywhere consumed a retraction - the channel had no shape for one.
+
+**Fix.** A signed `retracted: [{kind, platform, version, reason, at}]` block
+inside the channel document (so the feed host can neither fabricate nor
+suppress one), parsed by `release_feed.channel_retractions` and applied by
+`release_feed.apply_retractions` from `check_now` BEFORE the policy runs and
+outside it - honoured under every policy, `manual` included. `db.retract_package`
+un-currents the row, stamps `retracted_at`/`retracted_reason` (v34) and is
+idempotent; `db.set_current_package` refuses a retracted row from every door;
+`api._upgrade_info` never serves one; `_valid_records` drops it so it is not
+even offered for publish. The Packages page shows the reason and
+`[ ROLL THE FLEET BACK ]`, which writes an update request for every machine
+still reporting the recalled version (`api.roll_fleet_back`, refusing a
+target that is itself recalled or unpublished), and the fleet grid chips
+`[ RECALLED BUILD ]` on each machine running one
+(`api.build_editors_view` -> `companion_retracted_reason`).
+
+**Tests.** `test_release_channel.py`: the recall under the manual policy with
+a fake feed, idempotence, the recalled record never being published under the
+`current` policy, malformed entries not losing the good ones, the un-current
++ never-offered + cannot-be-re-currented path, the fleet rollback (including
+the machine on another version being left alone) and its two refusals.
+
+### REL-4 / SYS-13 - "deploy the dashboard before the companions" was enforced nowhere - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** A companion record carried `min_version` (its own downgrade
+floor) and nothing about the dashboard it needs, so a site on the `current`
+feed policy could take a companion whose features its three-month-old
+dashboard has no columns for. The rule is stated four times in CLAUDE.md and
+was enforced by a human remembering it: CR-22, CR-27a, CR-49, CR-55, CR-83,
+CR-85 and CR-87 are the same failure.
+
+**Cause.** No `requires_dashboard` field existed in the record format.
+
+**Fix.** `requires_dashboard` is an OPTIONAL kind-scoped signed extra on
+companion records (`release_trust.OPTIONAL_KIND_EXTRA_FIELDS`, mirrored in
+`companion/src/ccsync_companion/release_pubkey.py`), filled by the signing
+tools from the new `REQUIRES_DASHBOARD` constant in the companion's
+`config.py`. `package_store.blocks_on_dashboard_version` is the one
+predicate: `_upgrade_info` never advertises such a build, `make_current_refusal`
+refuses it with a 409 naming both numbers, and `package_store.store_verified_package`
+refuses a publish that asks to make it current in the same act - which covers
+the human PUT and the feed's `current` policy together. An unparseable
+requirement blocks rather than passes. The Packages page chips
+`[ UPDATE THE DASHBOARD FIRST ]`.
+
+**Overlap cost, deliberate.** The two new signed fields are absent from the
+canonical bytes when the record does not carry them, so every record
+published before this wave still verifies byte for byte - but a record that
+DOES carry one is only verifiable by a companion whose `release_pubkey.py`
+mirrors the change. The tools must not emit either field until the fleet is
+on such a build (documented in docs/RELEASE.md).
+
+**Tests.** `test_release_channel.py`: the 409 from make-current and from
+publish-with-make-current, a requirement equal to this dashboard passing, an
+unparseable requirement blocking, and the offer being withheld for a row that
+became current before the dashboard was rolled back.
+
+### REL-16 - the channel had no architecture discriminator - FIXED (dashboard half) in repo 2026-08-28, unshipped
+
+**Symptom.** An Intel Mac reports `platform: macos` and was offered the
+arm64 build GitHub's runner produced: downloaded, verified, renamed over the
+running companion, failed to exec, rolled back - forever, on a ten-minute
+timer with `auto_update` on.
+
+**Cause.** `platform` was the record's only discriminator; `release_macos.sh`
+measures the arch and dropped it at publish.
+
+**Fix.** `arch` is the second optional kind-scoped signed extra, stored in
+v34 and re-served verbatim in the offer. `api._arch_matches` is the rule: an
+absent record arch (every pre-wave record) or an absent machine arch is
+offered everything, `universal2` matches both, and a stated mismatch is
+offered NOTHING rather than a binary that cannot run. `_upgrade_info` takes
+the machine's reported `arch` (read with `getattr` from the report payload,
+which is `extra="allow"`, until the v35 work package stores
+`machine_state.arch`), and the Packages page says "no <platform>/<arch> build
+published" for a reported CPU no current build covers.
+
+**Tests.** `test_release_channel.py`: the matching rules, the Intel Mac
+offered nothing end to end through `/api/v1/report`, an arm64 machine and an
+arch-less companion both still offered, the offer carrying the extras
+verbatim and re-verifying, and a plain record's offer gaining no new keys.
+
+### REL-13 - "+dirty" died at the publish boundary - FIXED (columns half) in repo 2026-08-28, unshipped
+
+**Symptom.** A `ship.cmd -AllowDirty` hotfix published as plain `0.9.55`, and
+the dashboard, the Packages page, every report and every drift check saw a
+version with nothing to say it came from uncommitted code.
+
+**Cause.** `release.ps1` stamps `+dirty` into the MANIFEST; the publish sends
+the clean number, and `companion_packages` had nowhere to put provenance.
+
+**Fix.** v34 adds advisory, deliberately UNSIGNED `git_sha` and `git_dirty`
+columns; the publish route accepts them as optional query fields and
+`release_feed.publish_from_feed` passes them through from the record; the
+Packages page renders `0.9.55 (+dirty, no commit)`. The tooling half (filling
+them in, and what `-AllowDirty` should do about `-MakeCurrent`) belongs to the
+release-tools work package.
+
+**Tests.** `test_release_channel.py::test_git_provenance_is_stored_and_shown`.
+
+### REL-6 - the dashboard's crash-loop watchdog called a boot healthy without asking whether it could serve - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** An applied code bundle imports cleanly (which is exactly what
+stage-verify tested), boots, binds the port, and then 500s every request - a
+template missing from the tarball, a lifespan thread deadlocked. The tree is
+then permanently "healthy": `select_code_root.py` keeps booting it, the
+auto-revert never fires, and the admin cannot roll it back from the dashboard
+because the dashboard is the thing that is broken. Compose's
+`restart: unless-stopped` restarts a *crashed* container, not a wedged one.
+
+**Cause.** `dashboard_update.start_boot_watchdog`'s thread slept
+`BOOT_HEALTHY_SECONDS` and unlinked `boot_attempts.json` regardless of whether
+the process had ever answered a request, so the counter that
+`deploy/select_code_root.py` reverts on could only ever record "the process
+exited".
+
+**Fix.** The same thread now sleeps for uptime as before and then has to PROVE
+it can serve: one loopback `GET http://127.0.0.1:$DASH_PORT/api/v1/health`
+that must answer 200 with this build's own `version`, retried for up to
+`BOOT_HEALTH_PROBE_SECONDS` (`dashboard_update.probe_health` /
+`wait_until_serving` / `start_boot_watchdog`, dashboard_update.py:302-410).
+`ok: false` is deliberately not required - an unreachable Syncthing is not a
+reason to revert code. A boot that never answers leaves the counter standing
+and logs why. The opener is its own function (`_loopback_opener`), a redirect
+is refused, and no credential is sent.
+
+**Tests.** `dashboard/tests/test_dashboard_update.py`:
+`test_a_served_health_route_is_what_marks_a_boot_healthy`,
+`test_a_wedged_dashboard_leaves_the_boot_counter_standing`,
+`test_a_health_route_answering_as_another_version_is_not_this_boot`,
+`test_a_healthy_boot_clears_the_counter` - all through a stubbed opener, never
+`urlopen`.
+
+### REL-9 - the stale-update-flag heal keyed on a pid, and container pids repeat - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** A NAS that loses power while an apply is downloading leaves
+`update_state.json` with `in_progress: true, owner_pid: 7`. The container comes
+back, `run.sh` is pid 1 and uvicorn is pid 7 again - and every apply AND every
+rollback answers 409 for ever, on the appliance shape where the admin has no
+shell to delete the file with. That is the exact failure dash-release-ai-2 was
+written to end.
+
+**Cause.** `_heal_orphaned_progress` treated `owner_pid == os.getpid()` as
+"the worker that owns this flag is alive in THIS process". Container pids are
+small and deterministic, so the collision is not a curiosity.
+
+**Fix.** A per-process nonce (`PROCESS_NONCE`, uuid4 at import) is stamped
+beside the pid by `_set_state`, and a state file whose nonce differs reads as
+interrupted whatever its pid says (dashboard_update.py:120, :455-500). The log
+line names both halves of both identities.
+
+**Tests.** `test_the_same_pid_in_a_new_process_is_still_an_interrupted_update`
+and `test_this_process_still_owns_its_own_flag`
+(`dashboard/tests/test_dashboard_update.py`), alongside the existing
+no-owner-pid case.
+
+### REL-10 - rolling the dashboard's code back left the database migrated forward - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** 0.7.20 applies, migrates `dashboard.db`, misbehaves; the admin
+clicks Rollback without `restore_db` - the safe-looking choice, because it does
+not throw away today's reports. The code goes back to 0.7.19 against a schema
+it does not know. Forward-only additive columns survive that; a rename or a NOT
+NULL one does not, and nothing checked or said anything. The UI could not even
+express the alternative: `static/dashboard_update.js` sent
+`restore_db: ""` as a literal.
+
+**Cause.** The apply recorded nothing about schema on either side, so a
+rollback had nothing to compare.
+
+**Fix.** The stage-verify subprocess now reports the new tree's own
+`db.SCHEMA_VERSION`; the apply writes it into that tree's `manifest.json` and
+writes the live `PRAGMA user_version` of every database, plus the backup
+directory, into `current.json` (dashboard_update.py:757-800, :1290-1330).
+`schema_rollback_check` compares them and `rollback()` refuses with 409 -
+naming the exact backup to restore alongside - unless `restore_db` names one or
+`acknowledge_schema` is sent (`RollbackIn.acknowledge_schema`). Rolling back to
+the IMAGE, or to a tree applied before this landed, is UNKNOWN rather than
+unsafe: it is allowed (the image is the escape hatch of last resort) and the
+page says so instead of implying it is fine. The Packages page grew a real
+restore checkbox and a schema line, and the JS sends what it says
+(`templates/partials/admin_dashboard_update.html:87-120`,
+`static/dashboard_update.js:157-185`).
+
+**Tests.** `test_an_apply_records_the_live_schema_and_the_trees_own`,
+`test_rolling_back_past_a_migration_is_refused_and_names_the_backup`,
+`test_rolling_back_to_the_image_is_never_blocked_by_an_unknown_schema`.
+
+### REL-11 - a feed that has been unreachable for weeks was visible on exactly one admin page - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** A customer's outbound DNS is filtered, or the vendor renames the
+release tag: daily checks fail silently for six weeks and the site quietly
+stops receiving fixes, which is indistinguishable from "no fixes were
+published". The variant with the same shape: every offered bundle's
+`runtime_id` diverges from the customer's image, so every update lands in
+`runtime_updates` behind a NAS click nobody makes.
+
+**Cause.** The poller logged a warning and wrote `feed_state.last_error`, and
+`build_feed_view` (the Packages partial) was the only reader. `/api/v1/health`
+carried no feed fields and no page had a banner.
+
+**Fix.** `dashboard_update.feed_health()` puts `feed: {configured,
+last_checked_at, age_days, last_error, records, stale}` into `/api/v1/health`
+(api.py:1134-1160); never-checked reads as stale, not as fine. The fleet page
+carries two banners built by `api._feed_alarm_block` from durable state: "no
+successful update check for N days" past `FEED_STALE_DAYS` (7), and a distinct
+"every dashboard build on offer needs a new container image" naming the exact
+click `nas_update_hint()` produces. The runtime-mismatch verdict is recorded
+into `meta` by the feed check itself (`dashboard_update.record_feed_runtime_mismatch`,
+called from `release_feed.check_now`) so the fleet page's builder can read it
+from the database rather than a per-process cache.
+
+**Tests.** `test_health_carries_the_feed_age_and_the_data_gauge`
+(`dashboard/tests/test_dashboard_update.py`).
+
+### REL-5 - nothing on the release path ever pruned, and a full /data takes the dashboard down - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** A year of shipping leaves 50 companion exes and 50 onboard exes in
+`/data/packages`, a full copy of every database per dashboard update in
+`/data/backups`, and every code tree ever applied in `/data/code` - on the
+dataset `dashboard.db` lives on. A full `/data` is `sqlite3.OperationalError:
+disk I/O error` on every write, i.e. the dashboard that tells everyone whether
+their footage is syncing going down.
+
+**Cause.** `db.prune_companion_packages` existed and kept current + 2, and
+neither writer called it: `?prune=1` was opt-in and `ship` did not pass it, and
+the feed's unattended publisher hardcoded `prune=False`. Neither publish path
+looked at free space at all, while `dashboard_update.preflight` had refused an
+apply at 507 since WP K.
+
+**Fix.** Prune is now the default on both paths (`api.api_publish_package`'s
+`prune: int = 1`, `?prune=0` to opt out; `release_feed.publish_from_feed`
+passes `prune=True`). `/data/backups` is bounded to the newest 3 per label, 8
+in total and 8 GiB, and `/data/code` to the running tree plus the one
+`current.json` can roll back to plus one, both run after a successful swap
+(`dashboard_update.prune_backups` / `prune_code_trees`). A publish below the
+same free-space floor an apply is held to is refused with 507
+(`api._refuse_publish_without_space`), and "could not measure" never refuses.
+`/api/v1/health` and the Packages page carry a `/data` gauge
+(`dashboard_update.data_space`).
+
+**Tests.** `test_publish_prunes_by_default`, `test_prune_can_be_opted_out_of`,
+`test_a_publish_is_refused_when_the_volume_is_nearly_full`,
+`test_an_unmeasurable_volume_does_not_block_a_publish`
+(`dashboard/tests/test_packages.py`); `test_backups_are_bounded_per_label`,
+`test_old_code_trees_are_pruned_to_running_previous_and_one`,
+`test_the_packages_page_shows_the_data_gauge`.
+
+### DASH-2 - rotating (or losing) DASH_SESSION_SECRET 401s every companion in the fleet - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** The owner rotates `DASH_SESSION_SECRET` (which `secrets_boot`'s
+docstring explicitly says stays possible), or restores `/data` from a snapshot
+taken before `<data>/secrets/dash_session_secret` existed. `X-CCSync-Identity`
+is an HMAC over that secret and never expires (CR-86), so `POST
+/api/v1/report` 401s for the entire fleet at once: the grid goes stale, and the
+halt / pushed-update / lane-B-resume / file-move command channel dies with it.
+The only cure was every editor clicking "Sign in..." at their own tray, with no
+message anywhere saying why - and the grid's only symptom, rows going stale,
+is exactly what a switched-off machine looks like.
+
+**Cause.** One secret, no accept-only predecessor, and a refusal with no
+record: `api_report` raised 401 before anything was written.
+
+**Fix.** `DASH_SESSION_SECRET_PREVIOUS` (comma-separated, newest first,
+ACCEPT-ONLY - nothing is ever minted with one) is read into
+`settings.session_secrets_previous` and consulted by `auth._read_token_any`
+for both purposes, so companion identities and browser sessions both survive a
+rotation (auth.py:369-435, :506-520 - a session id is derived with the secret
+that verified the cookie, or the server-side row could not be found). Every
+accepted report on a retired key is logged and counted
+(`db.record_retired_key_identity`), and the fleet page shows
+`[ N COMPUTER(S) STILL ON A RETIRED SIGNING KEY ]` counting DOWN as editors
+sign in again - the drain, so the operator knows when the old key can go. The
+boot log names the retired keys at every start, and a weak one is refused like
+any other. A report refused ONLY because its identity cannot be verified now
+stamps v35 `machines.report_refused_at` / `report_refused_reason` on the
+EXISTING row and nothing else (`db.stamp_report_refused`, api.py:5990-6040), so
+the grid says `[ BEING REFUSED: SIGN IN ON ITS TRAY ]` with a fleet banner
+beside it; an accepted report clears it. Nothing from the refused body is
+stored. `docs/SECRETS.md` gained the rotation runbook.
+
+**Tests.** `dashboard/tests/test_auth.py` (four: previous-key acceptance for
+both token purposes, accept-only + retired flag, the boot-time floor);
+`dashboard/tests/test_report_endpoint.py`
+(`test_a_refused_identity_is_recorded_against_the_machine`,
+`test_an_accepted_report_clears_the_refusal`,
+`test_a_refused_report_stores_nothing_from_its_body`,
+`test_the_grid_says_a_computer_is_being_refused`,
+`test_the_grid_counts_the_retired_key_drain`);
+`dashboard/tests/test_db.py::test_the_retired_key_ledger_counts_up_and_back_down`.
+
+### REL-8 (dashboard half) - a machine that cannot take a build retried for ever and nobody was told - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** An editor's AV quarantines every downloaded companion exe, or a
+proxy mangles it so the sha never matches. The report payload carried nothing
+about upgrade outcomes, so the dashboard could not tell "has not seen the push
+yet" from "has failed 140 times", and the admin's pushed update showed as
+pending for ever - with no expiry, so the request rode every report
+indefinitely.
+
+**Cause.** No `upgrade` block on the wire, no columns, no expiry on
+`machines.update_requested_*`.
+
+**Fix.** v35 adds `machine_state.arch` and `upgrade_version` /
+`upgrade_attempts` / `upgrade_last_error` / `upgrade_last_attempt_at` /
+`upgrade_reverted_from`, plus `machines.report_refused_at` /
+`report_refused_reason` (db.py SCHEMA_V35). `api.UpgradeIn` declares
+`sync_guard.upgrade` and `ReportIn.arch` the top-level field;
+`db.store_upgrade_state` writes them on the latch rule, except
+`reverted_from`, which the companion sends once and which clears itself when
+the machine reports a build at or above the one it fell back from (two-digit
+minors compared properly - `db.version_tuple`). The grid chips
+`[ UPDATE FAILED x8 ]` and `[ REVERTED FROM 0.9.56 ]`, and the Packages page
+shows attempts and the last error beside the pending request. A
+`machine_update_request` older than 14 days is expired in the prune cycle with
+the reason in the audit ledger (`db.expire_machine_update_requests`).
+
+**Tests.** `dashboard/tests/test_report_endpoint.py` (storage, the unknown-key
+tolerance, the revert marker's own lifecycle, both chips);
+`dashboard/tests/test_db.py::test_a_pushed_update_expires_with_an_audit_row`;
+`server/tests/test_cross_component.py::test_the_upgrade_telemetry_the_dashboard_stores_is_actually_sent`
+- the parity gate in the other direction, so a dashboard chip that no build in
+the field can ever light fails the build instead of reading as "nothing wrong".
+
+### OPS-1 - a bind-mode deploy never checked that the dashboard came back up - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** `tools\ship.cmd` reports "restarted container: ccsync-dashboard",
+exits 0 and goes on to publish companions to the whole fleet, while the
+dashboard itself is down. The only signal is an owner opening a browser.
+
+**Cause.** Every path through `install_dashboard_app.py`'s redeploy branch
+ended at `restart_dashboard_container()` returning True and `return 0`.
+`docker restart` succeeding means the container was recreated and nothing
+more: new code that raises at import (a moved template, a module
+`EXCLUDE_DIRS` dropped, a lockfile drift, a bad `site.toml` value) restarts
+perfectly and answers nothing. In image mode `verify_image_boot` did run, and
+its result was discarded on that same path.
+
+**Fix.** `probe_dashboard_health()` asks `/api/v1/health` from INSIDE the
+container (`/venv/bin/python`, 127.0.0.1, `docker exec`) and requires a 200
+whose `version` equals this checkout's dashboard VERSION, read by regex from
+`dashboard/src/ccsync_dashboard/__init__.py` (`repo_dashboard_version`,
+`install_dashboard_app.py:865-1000`). It retries for 150 s, covering the
+compose healthcheck's own 120 s `start_period`, so a slow cold start is not
+reported as a dead dashboard. `verify_dashboard_after_restart()` prints the
+exact rollback one-liner - `mv <root>/app <root>/app.failed-<ts>; mv
+<root>/app.old.<ts> <root>/app; docker restart <container>`, naming the tree
+THIS run renamed aside (`install_tree` records it in `_LAST_OLD_DIRS`) rather
+than a glob - runs it under the new `--rollback-on-unhealthy`, and returns 1
+either way, because a rolled-back deploy is undone rather than finished. Both
+the redeploy branch (`:4600+`) and the fresh-create path now gate on it, and
+`verify_image_boot`'s result is honoured on the redeploy path too.
+`tools\ship.ps1` already stopped on a non-zero deploy (step 1's
+`if ($LASTEXITCODE -ne 0) { exit 1 }`, verified, unchanged).
+
+**Tests.** `server/tests/test_deploy_resilience.py` (11 new): the probe
+demands the version and not merely a 200, retries across a cold start, reads
+health from inside the container, an unhealthy dashboard prints the exact
+rollback and returns 1, `--rollback-on-unhealthy` runs the rename and
+re-probes, a rollback with no recorded tree refuses rather than guessing,
+`install_tree` records the tree it renamed aside, and a redeploy that does not
+come back exits non-zero while one that does exits 0.
+`server/tests/conftest.py` stubs the probe healthy for every other test (the
+suite's fake `run_ssh` answers "" to everything, which is the wedged-container
+shape).
+
+### OPS-12 - the ship asked for the dashboard password only after the whole build - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** A mistyped password, or a dashboard still restarting from the
+deploy step `ship.cmd` just ran, ends the run after gates, deploy, two
+PyInstaller builds and twenty minutes - in the half-shipped state (dashboard
+deployed, companion not published) this repo has been bitten by before.
+
+**Cause.** `build_editor_package.ps1` prompted and logged in immediately
+before the upload, one attempt, `exit 1` on any failure - while the CR-52
+floor check two hundred lines above makes exactly the opposite argument
+("PyInstaller takes minutes; tell the operator at second 1").
+
+**Fix.** `Connect-Dashboard` runs beside the CR-52 preflight, before the
+build, and the session it opens is the one the uploads use
+(`installer/build_editor_package.ps1:320-420`). It probes `/api/v1/health`
+first, so "cannot reach the dashboard" is said without prompting for a
+password at all; a 401/403 is retried up to three times with "wrong password
+(n of 3)"; anything else refuses with the server's message. The late login
+block is gone.
+
+**Tests.** `tools/tests/test_release_scripts.py::TestThePasswordIsAskedForBeforeTheBuild`
+pins the ordering (login before the PyInstaller section) and both messages.
+
+### REL-7 - a mis-rotated release key stranded the fleet, and the parity check could not see it - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** Everything passes - the new build trusts the new key, the record
+verifies, the dashboard accepts the publish - and every companion in the field
+refuses the offer for ever, logged once, tray silent, recoverable only by a
+hands-on reinstall per machine.
+
+**Cause.** The one guard (`release.ps1:492-527`) compared the signing key with
+the keys baked into **the build being built**, which is the single place the
+two can never disagree. Nothing compared it with the build the fleet is
+actually running.
+
+**Fix.** `release.ps1` now records `baked_pubkey_ids` (plus `requires_dashboard`
+and `arch`) in the release manifest, computing the ids the way
+`release_pubkey.pubkey_id` does. `publish_feed.py` carries them onto the
+channel record and refuses, before signing anything, when the signing key is
+not in the `baked_pubkey_ids` of the record `current` points at
+(`baked_keys_of_current`, `--allow-key-rotation` overrides); a current record
+with no list says the check could not run rather than passing silently.
+`build_editor_package.ps1` does the same against the dashboard for the PUT
+path, comparing this rig's key id with the `pubkey_id` of the current windows
+companion row (`Test-SigningKeyTheFleetTrusts`), refusing with "EVERY MACHINE
+ON v<current> WILL REFUSE THIS BUILD" unless `-AllowKeyRotation`;
+`ship.ps1` passes the flag through and `publish_latest.py` has
+`--allow-key-rotation`. `release_key.py bake` stays warning-only and prints
+the same sentence.
+
+**Tests.** `tools/tests/test_publish_feed.py` (4): a key the current build
+does not trust is refused, a deliberate rotation is allowed and says what it
+costs, the ordinary ship publishes freely, and a pre-2026-08-28 current record
+says the check could not run.
+`tools/tests/test_release_scripts.py::TestAKeyTheFleetDoesNotTrustIsRefused`.
+
+### REL-12 - `windows_upgrade.ps1` overwrote the installed exe with no copy of what it replaced - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** The new build exits inside the relaunch window and the script
+prints an accurate, useless warning: this machine now has no companion, no
+lanes, no Resolve bridge, and nothing retries before the next logon. Unlike
+the self-upgrade path there was no `.old`, so there was nothing to restore
+even by hand.
+
+**Cause.** Step 2 was `Copy-Item -Force` straight over the live exe.
+
+**Fix.** `Move-InstalledAside` renames the installed exe to
+`ccsync-companion.exe.prev` before the copy, and `Restore-InstalledFromPrev`
+puts it back - moving the failed build to `ccsync-companion.exe.failed` first,
+because it is the only evidence of why. The relaunch-failed branch restores,
+relaunches, and says "the new build would not start - this machine is back on
+vX" (the previous version read out of the manifest before it was overwritten);
+a copy that fails all five attempts also restores, so the machine is never
+left with no exe. `.prev` survives until the next upgrade renames over it.
+`installer/windows_upgrade.ps1:76-115, 168-235, 400-460`.
+
+**Tests.** `installer/tests/Test-PrevRollback.ps1` (14 checks), sliced out of
+the script the way `Test-LicenceGate.ps1` slices its helpers; wired into
+`tools/run_all_tests.ps1`'s installer row.
+
+### REL-13 - "+dirty" died at the publish boundary - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** A `ship.cmd -AllowDirty` hotfix reaches the fleet as plain
+"0.9.55". Nothing on the Packages page, in a report or in the drift check says
+it came from uncommitted code - and the real committed 0.9.55 can then never
+be published (same version, different bytes), so the fleet's 0.9.55
+corresponds to no commit, permanently.
+
+**Fix.** `sign_release.py` takes `--git-sha`/`--git-dirty` and puts them in the
+query the publish sends (UNSIGNED: they change nothing about what may be
+installed, and signing them would cost an overlap release); `publish_feed.py`
+reads them from the manifest and records them on the channel record;
+`build_editor_package.ps1` passes them from `ccsync-release.json`, and drops
+them if the manifest describes a different exe. `-MakeCurrent` on a dirty
+build now needs `-IReallyMeanDirtyCurrent` as well - without it the build is
+published STAGED and says so, in both `ship.ps1` (at the dirty gate, before
+anything moves) and `build_editor_package.ps1` (at the publish, from the
+manifest, which is the authority on the exe in hand). The `+dirty` version
+stamp in the manifest is unchanged.
+
+**Tests.** `tools/tests/test_sign_release.py` (the query carries both),
+`tools/tests/test_publish_feed.py::test_provenance_rides_along_unsigned` (and
+that the record still verifies with them present),
+`tools/tests/test_release_scripts.py::TestADirtyBuildIsNotHandedToTheFleetByAccident`.
+
+### REL-14 - `publish_latest` asked a possibly-stale local ref whether a commit is on main - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** A commit is pushed to main, CI goes green, the commit is
+force-pushed away; a rig that has not fetched since signs and publishes a
+build the release branch no longer contains.
+
+**Cause.** `commit_is_on_main` ran `git merge-base --is-ancestor <sha>
+origin/main` with no fetch. The guard's own docstring says a branch label is
+"a claim a force-push can make untrue"; the local remote-tracking ref can be
+untrue the same way.
+
+**Fix.** `remote_head_sha()` asks `git ls-remote origin refs/heads/main`,
+`release_branch_tip()` fetches only when this clone does not already hold that
+commit, and the ancestry test compares against that sha
+(`tools/publish_latest.py:172-230`). A remote that cannot be asked is a
+refusal, not a fallback to the local ref. The tip is printed at the start of
+the run and again in the summary, so the operator sees what was compared.
+
+**Tests.** `tools/tests/test_publish_latest.py::TestTheBranchTipComesFromTheRemote`
+(4): ls-remote is used, an unreachable remote yields nothing, a missing commit
+is fetched before it is trusted, and the ancestry test uses the tip it was
+given.
+
+### REL-15 - ship published the companion and the installer as two independent acts - FIXED in repo 2026-08-28, unshipped
+
+**Symptom.** A dropped connection or a Ctrl-C between the two PUTs leaves the
+companion CURRENT for the whole fleet while the installer channel still serves
+an `onboard.exe` bundling the previous companion, so every fresh install lands
+a version behind. Nothing recorded how far the ship got; the only recovery was
+to read the script and re-run the right half.
+
+**Fix.** Both artefacts are now uploaded STAGED (`make_current=0` on both
+PUTs) and flipped to current in one final step, two calls back to back after
+both uploads (`installer/build_editor_package.ps1`). A refused flip - the
+dashboard's soak gate (REL-1) - prints the dashboard's own words verbatim and
+exits 3; `ship.ps1` treats 3 as "published and staged", not a failed ship, and
+says what to do. `tools\.ship-state.json` (gitignored) records
+`{step, version, installer_version, timestamp, made_current, dashboard_url}`
+at every step, and `ship.cmd -Resume` continues from it, refusing a journal
+that names a different companion version because that is a new ship rather
+than a resumption.
+
+**Tests.** `tools/tests/test_release_scripts.py::TestBothArtefactsBecomeCurrentTogether`
+(5): the uploads are staged, the flip comes after both PUTs, exit 3 is not a
+failed ship, the journal exists with all six steps, and it is gitignored.
+
+### REL-4 / REL-16 / REL-3 (tool halves) - the record could not carry the ordering rule, the architecture, or a recall - FIXED in repo 2026-08-28, unshipped
+
+**Fix (REL-4/REL-16).** `sign_release.py` takes `--requires-dashboard` and
+`--arch` and puts them in the signed record through
+`release_pubkey.OPTIONAL_KIND_EXTRA_FIELDS` (the companion agent's
+optional-extras mechanism: blank reads as ABSENT, so every record published
+before this wave canonicalises byte for byte as it always did and no overlap
+release is owed). The two fail in opposite directions on a checkout whose
+record module does not cover them: a `requires_dashboard` that would be
+dropped is REFUSED (an ordering rule that exists only in the operator's head
+is worse than none), while an `arch` degrades to "offered to every machine on
+that platform" with a note, which is what every earlier record says.
+`release.ps1` measures both (`REQUIRES_DASHBOARD` read from `config.py` by
+regex, arch from `PROCESSOR_ARCHITECTURE`) into the manifest,
+`release_macos.sh` does the same with `uname -m` and passes them to the
+signer, and `publish_feed.py`/`build_editor_package.ps1` carry them from the
+manifest rather than letting anyone retype them.
+
+**Fix (REL-3).** `publish_feed.py --retract KIND/PLATFORM/VERSION` now
+requires `--reason` and writes a signed `retracted` list entry
+`{kind, platform, version, reason, at}` beside removing the record. The list
+is what reaches a dashboard on the default `manual` policy, which otherwise
+never acts on the channel again. `merge_into_published` only ever ADDS recall
+entries, so a publish from a fresh clone cannot re-offer a build the vendor
+pulled, and publishing a recalled version is refused unless the same run
+retracts it (the deliberate withdraw-then-republish path stays open).
+
+**Tests.** `tools/tests/test_sign_release.py` (6): a blank optional extra is
+omitted so pre-wave records keep verifying, declared values are inside the
+signature and tampering breaks it, both ride in the query, an unsignable
+`requires_dashboard` is refused, an unsignable `arch` degrades with a note,
+and an unrankable `requires_dashboard` is refused.
+`tools/tests/test_publish_feed.py` (5): the reason is published and required,
+a recalled version cannot be republished in a later run, a recall survives a
+publish from a feed dir that never saw it, and an arch the record cannot carry
+does not make the build unpublishable.
+
 ## Approving a computer under its own name mints a phantom editor (CR-91, 2026-08-28)
 
 ### CR-91 - "one user, many devices" read as "assign a NEW username per device", and typing the machine name is the B16 unshare - FIXED in repo 2026-08-28 as dashboard 0.7.16, NOT YET DEPLOYED

@@ -48,6 +48,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from typing import Sequence
 
 from fastapi import Request, Response
 
@@ -367,16 +368,70 @@ def _read_token(secret: str, token: str | None, purpose: str, now: float | None 
     return username
 
 
-def read_session_cookie(secret: str, cookie: str | None, now: float | None = None) -> str | None:
+def _read_token_any(
+    secret: str, previous: Sequence[str], token: str | None, purpose: str,
+    now: float | None = None,
+) -> tuple[str | None, str]:
+    """(username, the secret that verified it), trying the CURRENT secret first
+    and then each accept-only one from DASH_SESSION_SECRET_PREVIOUS.
+
+    DASH-2 (resilience sweep 2026-08-28). Rotating DASH_SESSION_SECRET -- or
+    restoring /data from a snapshot taken before <data>/secrets/
+    dash_session_secret was generated, or moving the container to a host whose
+    .env was regenerated -- 401s every companion in the fleet at once: the
+    identity token is an HMAC over that secret and, since CR-86, never
+    expires. The fleet grid then goes stale, and the halt / pushed-update /
+    lane-B-resume / file-move command channel dies with it, until every editor
+    clicks "Sign in..." at their own tray.
+
+    The previous keys are ACCEPT-ONLY: nothing is ever minted with one, so the
+    rotation still drains -- every editor who signs in again moves to the
+    current key, and the caller counts who has not (see
+    db.record_retired_key_identity), which is what makes the drain visible
+    instead of a date the operator has to guess.
+    """
+    username = _read_token(secret, token, purpose, now=now)
+    if username is not None:
+        return username, secret
+    for older in previous:
+        if not older or older == secret:
+            continue
+        username = _read_token(older, token, purpose, now=now)
+        if username is not None:
+            return username, older
+    return None, ""
+
+
+def read_session_cookie(secret: str, cookie: str | None, now: float | None = None,
+                        previous: Sequence[str] = ()) -> str | None:
     """Returns the username, or None for missing/expired/tampered cookies --
     or a cookie that is actually a valid IDENTITY token (see SEC-1)."""
-    return _read_token(secret, cookie, PURPOSE_SESSION, now=now)
+    return _read_token_any(secret, previous, cookie, PURPOSE_SESSION, now=now)[0]
 
 
-def read_identity_token(secret: str, token: str | None, now: float | None = None) -> str | None:
+def read_identity_token(secret: str, token: str | None, now: float | None = None,
+                        previous: Sequence[str] = ()) -> str | None:
     """Returns the username for a valid X-CCSync-Identity token, or None --
     including for a token that is actually a valid SESSION cookie."""
-    return _read_token(secret, token, PURPOSE_IDENTITY, now=now)
+    return _read_token_any(secret, previous, token, PURPOSE_IDENTITY, now=now)[0]
+
+
+def read_identity_token_ex(
+    settings: Settings | None, token: str | None, now: float | None = None,
+) -> tuple[str | None, bool]:
+    """read_identity_token plus "and it was signed with a RETIRED key".
+
+    The pair, because api_report has to do two different things with the two
+    halves: accept the report, and count the machine as still owing its editor
+    one "Sign in..." click (DASH-2)."""
+    secret = getattr(settings, "session_secret", "") or ""
+    username, used = _read_token_any(
+        secret, previous_session_secrets(settings), token, PURPOSE_IDENTITY, now=now)
+    return username, bool(username is not None and used != secret)
+
+
+def previous_session_secrets(settings: Settings | None) -> tuple[str, ...]:
+    return tuple(getattr(settings, "session_secrets_previous", ()) or ())
 
 
 # ------------------------------------------------------------ fastapi glue
@@ -504,10 +559,20 @@ def _resolve_session(request: Request) -> tuple[str | None, str | None, bool]:
     settings = _settings_of(request)
     secret = getattr(settings, "session_secret", "") or ""
     cookie = request.cookies.get(COOKIE_NAME)
-    username = read_session_cookie(secret, cookie)
+    # DASH-2: a browser session signed with the PREVIOUS secret is accepted
+    # too, for the same reason a companion's identity is -- a rotation must
+    # not sign every admin out in the middle of the incident that caused it.
+    # The session id is still derived from the CURRENT secret, so the
+    # server-side row is looked up (and revoked) under one key only.
+    username, used = _read_token_any(
+        secret, previous_session_secrets(settings), cookie, PURPOSE_SESSION)
     if username is None or not cookie:
         return None, None, False
-    sid = session_id_for(secret, cookie)
+    # The session id is derived with the secret that VERIFIED the cookie: the
+    # server-side row was created under that key, and deriving it with the new
+    # one would look up a row that cannot exist -- which is "no row", which is
+    # a logout, which is the thing this accepts an old key to avoid.
+    sid = session_id_for(used or secret, cookie)
     store = session_store(request)
     if store is None:
         return username, sid, False
@@ -641,6 +706,22 @@ def check_boot_secrets(settings: Settings) -> list[str]:
         problem = _placeholder_or_weak("DASH_REPORT_TOKEN", settings.report_token)
         if problem:
             problems.append(problem)
+    # DASH-2: not a refusal -- an accept-only key is a deliberate, temporary
+    # state -- but it is announced at every boot, because a retired key left in
+    # place for ever is a signing key nobody remembers is still trusted.
+    previous = previous_session_secrets(settings)
+    if previous:
+        log.warning(
+            "DASH_SESSION_SECRET_PREVIOUS carries %d retired key(s): companion "
+            "identities and browser sessions signed with them are still ACCEPTED "
+            "(nothing is minted with them). The fleet page counts the machines "
+            "that have not signed in again -- remove this variable once that "
+            "count reaches zero (docs/SECRETS.md).",
+            len(previous))
+        for older in previous:
+            problem = _placeholder_or_weak("DASH_SESSION_SECRET_PREVIOUS", older)
+            if problem:
+                problems.append(problem)
     mode = str(settings.cookie_secure or "auto").strip().lower()
     if mode in ("1", "true", "yes", "on") and not _tls_path_configured(settings):
         problems.append(

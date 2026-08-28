@@ -567,3 +567,46 @@ def test_a_non_ascii_cookie_byte_is_a_no_session_not_a_500():
     assert auth.read_session_cookie(SECRET, head + ".sïg", now=1000.0) is None
     # and a good cookie still reads
     assert auth.read_session_cookie(SECRET, cookie, now=1000.0) == "jsmith"
+
+
+# ---------------------------------------------- DASH-2 (2026-08-28)
+#
+# Rotating DASH_SESSION_SECRET 401s every companion in the fleet at once: the
+# identity token is an HMAC over it and never expires (CR-86).
+
+
+def test_a_previous_secret_still_verifies_an_identity_token():
+    old = auth.make_identity_token("old-secret", "leso")
+    assert auth.read_identity_token("new-secret", old) is None
+    assert auth.read_identity_token("new-secret", old, previous=("old-secret",)) == "leso"
+
+
+def test_a_previous_secret_is_accept_only_and_reported_as_retired():
+    from ccsync_dashboard.settings import Settings
+
+    settings = Settings(session_secret="new-secret",
+                        session_secrets_previous=("old-secret",))
+    user, retired = auth.read_identity_token_ex(
+        settings, auth.make_identity_token("old-secret", "leso"))
+    assert (user, retired) == ("leso", True)
+    user, retired = auth.read_identity_token_ex(
+        settings, auth.make_identity_token("new-secret", "leso"))
+    assert (user, retired) == ("leso", False)
+    # A key that was never trusted is still nothing.
+    assert auth.read_identity_token_ex(
+        settings, auth.make_identity_token("other", "leso")) == (None, False)
+
+
+def test_a_session_cookie_from_a_previous_secret_is_still_a_session():
+    cookie = auth.make_session_cookie("old-secret", "owen")
+    assert auth.read_session_cookie("new-secret", cookie) is None
+    assert auth.read_session_cookie("new-secret", cookie,
+                                    previous=("old-secret",)) == "owen"
+
+
+def test_the_previous_key_list_is_named_at_boot_and_still_held_to_the_floor():
+    from ccsync_dashboard.settings import Settings
+
+    problems = auth.check_boot_secrets(Settings(
+        session_secret="x" * 40, session_secrets_previous=("changeme",)))
+    assert any("DASH_SESSION_SECRET_PREVIOUS" in p for p in problems)

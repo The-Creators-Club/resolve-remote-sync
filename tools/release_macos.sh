@@ -663,6 +663,16 @@ elif [ "$DRY_RUN" != 1 ]; then
 fi
 
 [ -n "$ARTIFACT_ARCH" ] || ARTIFACT_ARCH="$(uname -m 2>/dev/null || echo unknown)"
+# REL-4 / REL-7 (resilience sweep 2026-08-28). Two facts the publish needs and
+# cannot measure for itself: the dashboard version this build requires (absent
+# unless the companion declares one) and the release keys the binary trusts,
+# which is what lets the NEXT release refuse a key the fleet would reject.
+REQUIRES_DASHBOARD="$(capture "$CONFIG_PY" 's/^REQUIRES_DASHBOARD[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p')"
+BAKED_PUBKEY_IDS="$(sed -n 's/^[[:space:]]*"\([A-Za-z0-9+/=]\{40,\}\)",[[:space:]]*$/\1/p' \
+    "$REPO_ROOT/companion/src/ccsync_companion/release_pubkey.py" |
+    while read -r k; do
+        printf '%s' "$k" | base64 -d 2>/dev/null | shasum -a 256 | cut -c1-16
+    done | paste -sd, - 2>/dev/null || true)"
 TESTS_RUN=true
 [ "$SKIP_TESTS" = 1 ] && TESTS_RUN=false
 BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -687,6 +697,8 @@ write_manifest() {
     "git_describe":  "$(json_escape "$GIT_DESCRIBE")",
     "git_dirty":  $GIT_DIRTY,
     "tests_run":  $TESTS_RUN,
+    "requires_dashboard":  "$(json_escape "$REQUIRES_DASHBOARD")",
+    "baked_pubkey_ids":  "$(json_escape "$BAKED_PUBKEY_IDS")",
     "signed_binary":  $SIGNED_BINARY,
     "built_by":  "$(json_escape "$BUILT_BY")",
     "built_with":  "tools/release_macos.sh"
@@ -765,6 +777,19 @@ MIN_VERSION="${CCSYNC_MIN_VERSION:-0.0.0}"
 SIGN_ARGS="--signed-binary"
 [ "$SIGNED_BINARY" = true ] || SIGN_ARGS=""
 # shellcheck disable=SC2086  # SIGN_ARGS is a deliberate single optional flag
+# --arch and --requires-dashboard are only PUBLISHED when the record covers
+# them (sign_release drops the arch with a note, refuses a requires_dashboard
+# it cannot sign). --git-* are unsigned provenance. REL-4/13/16, 2026-08-28.
+[ -n "$REQUIRES_DASHBOARD" ] && SIGN_ARGS="$SIGN_ARGS --requires-dashboard $REQUIRES_DASHBOARD"
+case "$ARTIFACT_ARCH" in
+    x86_64|arm64|universal2) SIGN_ARGS="$SIGN_ARGS --arch $ARTIFACT_ARCH" ;;
+esac
+[ -n "$GIT_COMMIT" ] && SIGN_ARGS="$SIGN_ARGS --git-sha $GIT_COMMIT"
+if [ "$GIT_DIRTY" = true ]; then
+    SIGN_ARGS="$SIGN_ARGS --git-dirty 1"
+else
+    SIGN_ARGS="$SIGN_ARGS --git-dirty 0"
+fi
 SIGN_JSON="$("$SIGN_PY" "$REPO_ROOT/tools/sign_release.py" \
     --artifact "$ARTIFACT" --kind companion --platform macos \
     --version "$VERSION" --min-version "$MIN_VERSION" $SIGN_ARGS 2>/dev/null)" \

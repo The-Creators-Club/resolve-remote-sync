@@ -147,6 +147,19 @@ log = logging.getLogger("ccsync.config")
 # 2026.07.04, which is a version that cannot download at all.
 VERSION = "0.9.55"
 
+# The dashboard version this build needs to be talked to by (REL-4 / SYS-13,
+# resilience sweep 2026-08-28). `tools/release.ps1` / `sign_release.py` copy
+# it into the SIGNED release record as `requires_dashboard`, and a dashboard
+# older than this never advertises this build to anyone and refuses to make it
+# current -- which is "deploy the dashboard before the companions" enforced by
+# the machinery instead of by a human remembering a rule that has caused
+# CR-22, CR-27a, CR-49, CR-55, CR-83, CR-85 and CR-87.
+#
+# RAISE IT whenever this build reads something only a newer dashboard sends or
+# stores; leave it alone otherwise. It is the dashboard version that must
+# already be deployed, not the newest one that exists.
+REQUIRES_DASHBOARD = "0.7.17"
+
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
 

@@ -768,7 +768,9 @@ def test_a_retraction_removes_the_record_and_the_current_pointer(
     signature, _pub = _sign_channel_for(published, release_key_mod.key_path(""))
     gh = PublishedGh(channel=published, signature=signature)
     feed_dir = tmp_path / "feed"
-    rc = pf.main(["--retract", "companion/windows/0.6.1", "--feed-dir", str(feed_dir),
+    rc = pf.main(["--retract", "companion/windows/0.6.1",
+                  "--reason", "every proxy it wrote was zero bytes",
+                  "--feed-dir", str(feed_dir),
                   "--github-repo", GH_REPO, "--github-upload"], runner=gh)
     assert rc == pf.EXIT_OK
     final = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
@@ -778,7 +780,7 @@ def test_a_retraction_removes_the_record_and_the_current_pointer(
 
 
 def test_retract_wants_kind_platform_version(key, tmp_path):
-    assert pf.main(["--retract", "companion/windows",
+    assert pf.main(["--retract", "companion/windows", "--reason", "x",
                     "--feed-dir", str(tmp_path / "feed")]) == pf.EXIT_USAGE
 
 
@@ -887,7 +889,8 @@ def test_a_retracted_version_may_be_republished_with_new_bytes(key, artifact, tm
     other = tmp_path / "rebuilt.exe"
     other.write_bytes(b"MZ" + b"y" * 5000)
     assert _publish(feed_dir, other, "0.8.0",
-                    "--retract", "companion/windows/0.8.0") == pf.EXIT_OK
+                    "--retract", "companion/windows/0.8.0",
+                    "--reason", "the first upload was truncated") == pf.EXIT_OK
     channel = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
     assert [p["size_bytes"] for p in channel["packages"]] == [other.stat().st_size]
 
@@ -951,3 +954,143 @@ def test_a_refused_publish_uploads_nothing(key, artifact, tmp_path):
     assert rc == pf.EXIT_USAGE
     assert (feed_dir / pf.CHANNEL_FILENAME).read_bytes() == before
     assert "release upload" not in gh.verbs()
+
+
+# --- REL-3 / REL-13: the signed recall list and unsigned provenance ---------
+#
+# Removing a record stops the FEED offering a build. It says nothing to a
+# customer dashboard that already published it locally, and on the default
+# `manual` policy that dashboard never looks at the channel again -- which is
+# why a bad build stayed current for a whole fleet with one [ UPDATE NOW ]
+# click per editor as the only cure (resilience sweep 2026-08-28).
+
+
+def test_a_retraction_publishes_a_reason_every_policy_can_read(key, artifact, tmp_path):
+    feed_dir = tmp_path / "feed"
+    assert _publish(feed_dir, artifact, "0.9.55") == pf.EXIT_OK
+    assert pf.main(["--retract", "companion/windows/0.9.55",
+                    "--reason", "it deletes proxies on the second pass",
+                    "--feed-dir", str(feed_dir), "--base-url", BASE_URL]) == pf.EXIT_OK
+    channel = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
+    assert channel["retracted"] == [{
+        "kind": "companion", "platform": "windows", "version": "0.9.55",
+        "reason": "it deletes proxies on the second pass",
+        "at": channel["retracted"][0]["at"],
+    }]
+    assert channel["retracted"][0]["at"].endswith("Z")
+
+
+def test_a_retraction_with_no_reason_is_refused(key, artifact, tmp_path, capsys):
+    feed_dir = tmp_path / "feed"
+    assert _publish(feed_dir, artifact, "0.9.55") == pf.EXIT_OK
+    assert pf.main(["--retract", "companion/windows/0.9.55",
+                    "--feed-dir", str(feed_dir), "--base-url", BASE_URL]) == pf.EXIT_USAGE
+    assert "needs --reason" in capsys.readouterr().err
+
+
+def test_republishing_a_recalled_version_in_a_later_run_is_refused(
+        key, artifact, tmp_path, capsys):
+    feed_dir = tmp_path / "feed"
+    assert _publish(feed_dir, artifact, "0.9.55") == pf.EXIT_OK
+    assert pf.main(["--retract", "companion/windows/0.9.55", "--reason", "bad",
+                    "--feed-dir", str(feed_dir), "--base-url", BASE_URL]) == pf.EXIT_OK
+    other = tmp_path / "rebuilt.exe"
+    other.write_bytes(b"MZ" + b"z" * 4000)
+    assert _publish(feed_dir, other, "0.9.55") == pf.EXIT_USAGE
+    assert "RECALL" in capsys.readouterr().err
+
+
+def test_a_recall_survives_a_publish_from_a_feed_dir_that_never_saw_it():
+    """A fresh clone republishing must not un-retract last month's withdrawal."""
+    published = {"packages": [], "retracted": [
+        {"kind": "companion", "platform": "macos", "version": "0.9.3",
+         "reason": "arm64 binary offered to Intel Macs", "at": "2026-08-28T00:00:00Z"}]}
+    merged = pf.merge_into_published(published, {"packages": [], "retracted": []})
+    assert pf.retracted_keys(merged) == {("companion", "macos", "0.9.3")}
+
+
+def test_provenance_rides_along_unsigned(key, artifact, tmp_path):
+    feed_dir = tmp_path / "feed"
+    assert _publish(feed_dir, artifact, "0.9.55",
+                    "--git-sha", "c245f50", "--git-dirty", "1") == pf.EXIT_OK
+    record = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())["packages"][0]
+    assert record["git_sha"] == "c245f50"
+    assert record["git_dirty"] == "1"
+    # UNSIGNED: the record still verifies against the fields the signature
+    # covers, which is what an old dashboard reconstructs.
+    ok, detail = release_pubkey.verify_record(
+        record, record["signature"], pubkeys=_pubkeys_for(release_key_mod.key_path("")))
+    assert ok, detail
+
+
+def test_a_signed_field_this_build_does_not_know_is_refused_not_dropped(monkeypatch, key, artifact, tmp_path):
+    """REL-4: a requires_dashboard nothing signs is an ordering rule that does
+    not exist, believed by the operator who typed it."""
+    feed_dir = tmp_path / "feed"
+    monkeypatch.setenv("CCSYNC_EMIT_KIND_EXTRAS", "1")
+    rc = _publish(feed_dir, artifact, "0.9.55", "--requires-dashboard", "0.7.17")
+    covered = "requires_dashboard" in (
+        getattr(release_pubkey, "OPTIONAL_KIND_EXTRA_FIELDS", {}).get("companion", ())
+        + release_pubkey.KIND_EXTRA_FIELDS.get("companion", ()))
+    if covered:
+        assert rc == pf.EXIT_OK
+        record = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())["packages"][0]
+        assert record["requires_dashboard"] == "0.7.17"
+        ok, detail = release_pubkey.verify_record(
+            record, record["signature"], pubkeys=_pubkeys_for(release_key_mod.key_path("")))
+        assert ok, detail
+    else:
+        assert rc == pf.EXIT_USAGE
+
+
+# --- REL-7: a key the CURRENT build does not bake in strands the fleet ------
+
+
+def _publish_with_baked(feed_dir, artifact, version, ids, *extra):
+    return _publish(feed_dir, artifact, version, "--baked-pubkey-ids", ids,
+                    "--make-current", *extra)
+
+
+def test_a_key_the_current_build_does_not_trust_is_refused(key, artifact, tmp_path, capsys):
+    feed_dir = tmp_path / "feed"
+    assert _publish_with_baked(feed_dir, artifact, "0.9.54", "aaaa111122223333") == pf.EXIT_OK
+    other = tmp_path / "next.exe"
+    other.write_bytes(b"MZ" + b"n" * 6000)
+    assert _publish(feed_dir, other, "0.9.55") == pf.EXIT_USAGE
+    err = capsys.readouterr().err
+    assert "WILL REFUSE THIS BUILD" in err
+    assert "0.9.54" in err
+    assert "--allow-key-rotation" in err
+
+
+def test_a_deliberate_rotation_is_allowed_and_says_what_it_costs(
+        key, artifact, tmp_path, capsys):
+    feed_dir = tmp_path / "feed"
+    assert _publish_with_baked(feed_dir, artifact, "0.9.54", "aaaa111122223333") == pf.EXIT_OK
+    other = tmp_path / "next.exe"
+    other.write_bytes(b"MZ" + b"n" * 6000)
+    assert _publish(feed_dir, other, "0.9.55", "--allow-key-rotation") == pf.EXIT_OK
+    assert "will refuse this build" in capsys.readouterr().out
+
+
+def test_the_key_this_rig_holds_publishes_freely(key, artifact, tmp_path):
+    """The ordinary ship: the current build bakes the key that signs the next."""
+    feed_dir = tmp_path / "feed"
+    own = release_pubkey.pubkey_id(_pubkeys_for(release_key_mod.key_path(""))[0])
+    assert _publish_with_baked(feed_dir, artifact, "0.9.54", own) == pf.EXIT_OK
+    other = tmp_path / "next.exe"
+    other.write_bytes(b"MZ" + b"n" * 6000)
+    assert _publish(feed_dir, other, "0.9.55", "--baked-pubkey-ids", own) == pf.EXIT_OK
+    channel = json.loads((feed_dir / pf.CHANNEL_FILENAME).read_text())
+    row = [p for p in channel["packages"] if p["version"] == "0.9.55"][0]
+    assert row["baked_pubkey_ids"] == [own]
+
+
+def test_a_current_record_with_no_baked_ids_says_the_check_could_not_run(
+        key, artifact, tmp_path, capsys):
+    feed_dir = tmp_path / "feed"
+    assert _publish(feed_dir, artifact, "0.9.54", "--make-current") == pf.EXIT_OK
+    other = tmp_path / "next.exe"
+    other.write_bytes(b"MZ" + b"n" * 6000)
+    assert _publish(feed_dir, other, "0.9.55") == pf.EXIT_OK
+    assert "key-rotation check could not run" in capsys.readouterr().out

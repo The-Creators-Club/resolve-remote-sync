@@ -92,6 +92,32 @@
                 data-dashupd-rollback="{{ dash_update.current.previous }}">[ ROLLBACK
           {% if dash_update.current.previous %}TO {{ dash_update.current.previous }}{% else %}TO THE IMAGE{% endif %} ]</button>
       </div>
+      {# REL-10 (resilience sweep 2026-08-28): rolling the CODE back leaves the
+         DATABASE migrated forward. Additive columns survive that; a rename or
+         a NOT NULL one does not, and the page used to say nothing at all. The
+         checkbox is what makes RollbackIn.restore_db reachable: it was
+         hardcoded to "" in the JS, so the safe-looking choice was the only
+         one on offer. #}
+      <div class="muted" style="margin-top:0.4rem" id="dashupd-schema"
+           data-safe="{{ 1 if dash_update.schema and dash_update.schema.safe else 0 }}"
+           data-backup="{{ dash_update.schema.backup if dash_update.schema else "" }}">
+        <label>
+          <input type="checkbox" id="dashupd-restore-db"
+                 value="{{ dash_update.schema.backup if dash_update.schema else "" }}"
+                 {{ "disabled" if not (dash_update.schema and dash_update.schema.backup) }}>
+          also restore the databases from
+          <span class="mono-sm">{{ dash_update.schema.backup if dash_update.schema and dash_update.schema.backup else "no backup on record" }}</span>
+        </label>
+        {% if dash_update.schema and not dash_update.schema.safe %}
+          <div class="banner">▲ this database is on schema v{{ dash_update.schema.live }} and the build you would
+            go back to knows v{{ dash_update.schema.target }}. Restore the backup alongside it, or the rollback
+            is refused. Restoring also takes today's reports back to that moment.</div>
+        {% elif dash_update.schema and dash_update.schema.unknown %}
+          <div class="muted">this database is on schema v{{ dash_update.schema.live }}; what the build you would
+            go back to knows is not recorded (the image's own code, or a tree applied before this was tracked).
+            The rollback is allowed and the database stays where it is.</div>
+        {% endif %}
+      </div>
     {% endif %}
 
     {% if dash_update.backups %}

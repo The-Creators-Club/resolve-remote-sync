@@ -228,3 +228,136 @@ class TestTheDowngradeFloorMayNotExceedTheBuild:
     def test_the_refusal_names_the_way_out(self):
         assert "Set CCSYNC_MIN_VERSION to $version or lower" in BUILD_PKG
         assert "CR-52" in BUILD_PKG
+
+
+
+# --- resilience sweep 2026-08-28 -------------------------------------------
+#
+# Same approach and the same reason as everything above: these are PowerShell
+# scripts that drive PyInstaller, a NAS and a live upgrade channel, so their
+# source text is the only thing assertable on any host. Each assertion below
+# is one finding.
+
+UPGRADE = (REPO / "installer" / "windows_upgrade.ps1").read_text(encoding="utf-8")
+
+
+class TestTheShipStopsWhenTheDashboardDidNotComeBack:
+    """OPS-1. install_dashboard_app.py returns non-zero when the dashboard
+    does not answer /api/v1/health as this checkout's VERSION after the
+    restart; that exit code is the only thing between a dashboard that is
+    down and companions being published to the whole fleet."""
+
+    def test_ship_gates_the_rest_of_the_run_on_the_deploy_exit_code(self):
+        deploy = SHIP.index("python server\\install_dashboard_app.py @deployArgs")
+        gate = SHIP.index("if ($LASTEXITCODE -ne 0)", deploy)
+        publish = SHIP.index("& powershell @pkgArgs")
+        assert deploy < gate < publish
+        assert "install_dashboard_app.py exited" in SHIP[gate:gate + 400]
+
+    def test_the_deploy_script_says_what_to_run_to_roll_back(self):
+        ida = (REPO / "server" / "install_dashboard_app.py").read_text(encoding="utf-8")
+        assert "def probe_dashboard_health" in ida
+        assert "def rollback_one_liner" in ida
+        assert "--rollback-on-unhealthy" in ida
+        # The rollback names a directory this run recorded, not a glob.
+        assert "_LAST_OLD_DIRS" in ida
+
+
+class TestThePasswordIsAskedForBeforeTheBuild:
+    """OPS-12: the login used to come after PyInstaller, one attempt, exit 1
+    on a typo -- so a mistyped password cost the whole ship."""
+
+    def test_the_session_is_opened_before_pyinstaller_runs(self):
+        login = BUILD_PKG.index("$script:DashSession = Connect-Dashboard")
+        build = BUILD_PKG.index("optionally rebuild the companion exe")
+        assert login < build
+
+    def test_three_attempts_and_the_two_failures_are_told_apart(self):
+        assert "$attempt -le 3" in BUILD_PKG
+        assert "cannot reach the dashboard at" in BUILD_PKG
+        assert "This is not a password problem" in BUILD_PKG
+        assert "wrong password for" in BUILD_PKG
+
+
+class TestBothArtefactsBecomeCurrentTogether:
+    """REL-15: the companion and the installer were made current by two
+    independent PUTs, so a drop between them left the fleet on a new companion
+    while every fresh install still bundled the previous one."""
+
+    def test_the_uploads_are_staged(self):
+        assert "$mc = 0" in BUILD_PKG
+        assert "make_current=$mc" in BUILD_PKG
+
+    def test_the_flip_is_one_step_after_both_uploads(self):
+        companion_put = BUILD_PKG.index("-InFile $ExePath")
+        onboard_put = BUILD_PKG.index("-InFile $OnboardExePath")
+        flip = BUILD_PKG.index("/current?kind=")
+        assert companion_put < onboard_put < flip
+
+    def test_a_refused_flip_is_not_a_failed_ship(self):
+        assert "exit 3" in BUILD_PKG
+        assert "$pkgRc -eq 3" in SHIP
+        assert "published and STAGED" in SHIP
+
+    def test_the_ship_keeps_a_journal_and_can_resume(self):
+        assert ".ship-state.json" in SHIP
+        assert "function Save-ShipStep" in SHIP
+        for step in ("gates", "dashboard", "build", "publish", "current", "local"):
+            assert f'-Step "{step}"' in SHIP or f'"{step}"' in SHIP
+        assert "made_current" in SHIP
+        gitignore = (REPO / ".gitignore").read_text(encoding="utf-8")
+        assert "tools/.ship-state.json" in gitignore
+
+
+class TestAKeyTheFleetDoesNotTrustIsRefused:
+    """REL-7: the one guard that existed compared the signing key with the
+    build being BUILT, which is the one place the two can never disagree."""
+
+    def test_the_publish_asks_what_signed_the_CURRENT_build(self):
+        assert "Test-SigningKeyTheFleetTrusts" in BUILD_PKG
+        assert "WILL REFUSE THIS BUILD" in BUILD_PKG
+        assert "-AllowKeyRotation" in BUILD_PKG and "-AllowKeyRotation" in SHIP
+
+    def test_the_manifest_records_the_keys_the_build_bakes_in(self):
+        assert "baked_pubkey_ids" in RELEASE
+        assert "requires_dashboard" in RELEASE
+        assert "arch" in RELEASE
+
+    def test_bake_still_only_warns_but_says_what_it_costs(self):
+        key_tool = (TOOLS / "release_key.py").read_text(encoding="utf-8")
+        assert "EVERY MACHINE ON THE CURRENT BUILD WILL REFUSE THIS BUILD" in key_tool
+        assert "--add" in key_tool
+
+
+class TestADirtyBuildIsNotHandedToTheFleetByAccident:
+    """REL-13."""
+
+    def test_make_current_needs_the_second_flag(self):
+        assert "-IReallyMeanDirtyCurrent" in BUILD_PKG
+        assert "-IReallyMeanDirtyCurrent" in SHIP
+        assert "$MakeCurrent = $false" in BUILD_PKG
+
+    def test_the_commit_rides_along_to_the_publish(self):
+        assert "--git-sha" in BUILD_PKG and "--git-dirty" in BUILD_PKG
+
+
+class TestTheReplacedBuildIsKept:
+    """REL-12: windows_upgrade.ps1 copied over the live exe, so a build that
+    would not start left the machine with no companion and nothing to
+    restore."""
+
+    def test_the_installed_exe_is_renamed_not_overwritten(self):
+        aside = UPGRADE.index("function Move-InstalledAside")
+        copy = UPGRADE.index("Copy-Item -LiteralPath $CompanionExe")
+        assert aside < copy
+        assert "$PrevExePath = \"$CompanionExePath.prev\"" in UPGRADE
+
+    def test_a_build_that_will_not_start_is_rolled_back(self):
+        assert "Restore-InstalledFromPrev" in UPGRADE
+        assert "the new build would not start - this machine is back on" in UPGRADE
+
+    def test_no_em_dash_in_the_line_an_editor_reads(self):
+        # Owner rule, 2026-08-18. The rollback line is user-visible copy.
+        line = [ln for ln in UPGRADE.splitlines()
+                if "the new build would not start" in ln][0]
+        assert "\u2014" not in line and chr(8212) not in line

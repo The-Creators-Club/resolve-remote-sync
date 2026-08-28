@@ -95,8 +95,25 @@
     nobody can reproduce what the fleet is running; use it for a deliberate
     hotfix, not out of habit.
 
+.PARAMETER Resume
+    Continue a ship that stopped part-way, from the journal at
+    tools\.ship-state.json (REL-15, 2026-08-28). Steps already recorded as
+    done are skipped; the journal is refused when it describes a different
+    companion version than this tree, because that is a new ship, not a
+    resumption. The journal is gitignored and rewritten at every step.
+
+.PARAMETER IReallyMeanDirtyCurrent
+    Let a +dirty build be made CURRENT for the fleet (REL-13). Without it a
+    dirty ship still publishes, STAGED.
+
+.PARAMETER AllowKeyRotation
+    Publish although this rig's signing key is not one the build the fleet is
+    currently on trusts. Every machine on that build refuses this one (REL-7).
+
 .EXAMPLE
     .\tools\ship.cmd
+.EXAMPLE
+    .\tools\ship.cmd -Resume
 .EXAMPLE
     .\tools\ship.cmd -DashboardOnly
 #>
@@ -116,6 +133,18 @@ param(
     [switch]$SkipLocalUpgrade,
     [switch]$SkipTests,
     [switch]$AllowDirty,
+    # REL-13 (resilience sweep 2026-08-28): -AllowDirty publishes; making that
+    # build CURRENT for the whole fleet is a second decision, because the
+    # committed build of that version can then never be published (same
+    # version, different bytes -> 409) and the fleet's 0.9.55 corresponds to
+    # no commit, permanently.
+    [switch]$IReallyMeanDirtyCurrent,
+    # REL-7: sign with a key the build the fleet is currently on does not
+    # trust. Every machine on it refuses what this publishes.
+    [switch]$AllowKeyRotation,
+    [switch]$EmitKindExtras,
+    # REL-15: continue a ship that stopped part-way, from tools\.ship-state.json.
+    [switch]$Resume,
     # COMMERCIAL_READINESS.md item 4 (2026-08-17): make an exe with no valid
     # Authenticode signature CURRENT for the whole fleet anyway. The upgrade
     # channel's own ed25519 signature is separate and always required; this
@@ -142,6 +171,54 @@ $ErrorActionPreference = "Continue"
 
 function Write-Step { param([string]$m) Write-Host "[ship] $m" }
 function Write-Fail { param([string]$m) Write-Host "[ship] FAILED: $m" -ForegroundColor Red }
+
+# --- the ship journal (REL-15, resilience sweep 2026-08-28) -----------------
+# A ship is six irreversible-ish acts and nothing recorded how far it got, so
+# a network drop or a Ctrl-C between them left the operator to read this
+# script and work out which half to re-run by hand -- the 2026-08-12 state
+# (companion published, installer 409'd) in one sentence. The journal is
+# advisory: it never decides anything on its own, it only lets -Resume skip
+# what is already recorded as done.
+$ShipStatePath = Join-Path $PSScriptRoot ".ship-state.json"
+$ShipSteps = @("gates", "dashboard", "build", "publish", "current", "local")
+$script:ShipMadeCurrent = @()
+
+function Get-ShipState {
+    if (-not (Test-Path -LiteralPath $ShipStatePath)) { return $null }
+    try { return (Get-Content -LiteralPath $ShipStatePath -Raw -Encoding UTF8 | ConvertFrom-Json) }
+    catch { return $null }
+}
+
+function Save-ShipStep {
+    param([string]$Step, [string]$Version, [string]$InstallerVersion = "")
+    $state = [ordered]@{
+        step               = $Step
+        version            = $Version
+        installer_version  = $InstallerVersion
+        timestamp          = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        made_current       = @($script:ShipMadeCurrent)
+        dashboard_url      = $DashboardUrl
+    }
+    try {
+        $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+        [System.IO.File]::WriteAllText($ShipStatePath, ($state | ConvertTo-Json), $utf8NoBom)
+    }
+    catch {
+        # A journal that cannot be written must not stop a ship that is
+        # otherwise fine; it costs -Resume, not the release.
+        Write-Host "[ship] WARNING: could not write $ShipStatePath ($($_.Exception.Message)) -- -Resume will not work for this run" -ForegroundColor Yellow
+    }
+}
+
+function Test-StepDone {
+    # True when -Resume was asked for and the journal records this step (or a
+    # later one) as complete.
+    param([string]$Step)
+    if (-not $script:ResumeFrom) { return $false }
+    $done = [Array]::IndexOf($ShipSteps, "$($script:ResumeFrom)")
+    $want = [Array]::IndexOf($ShipSteps, $Step)
+    return ($done -ge 0 -and $want -ge 0 -and $done -ge $want)
+}
 
 # E:\Projects\x -> /e/Projects/x, for the one command below that runs inside Git
 # bash. MSYS's own drive mapping, not WSL's /mnt/e -- see step 0 for why this
@@ -225,6 +302,15 @@ if (-not $DashboardOnly) {
     }
     if ($dirty.Count -gt 0) {
         Write-Host "[ship] WARNING: publishing from a DIRTY tree (-AllowDirty) -- the build will be stamped +dirty" -ForegroundColor Yellow
+        # REL-13 (2026-08-28): publishing a +dirty build is a hotfix; handing
+        # it to every editor is a second decision, and an irreversible one --
+        # the committed build of this version can never be published
+        # afterwards (same version, different bytes), so the fleet's
+        # v$CompanionVersion would correspond to no commit for good.
+        if (-not $IReallyMeanDirtyCurrent) {
+            Write-Host "[ship] this build will be published STAGED, not made current: pass -IReallyMeanDirtyCurrent" -ForegroundColor Yellow
+            Write-Host "[ship] as well if you really mean the whole fleet to run bytes no commit describes." -ForegroundColor Yellow
+        }
     }
 }
 
@@ -232,6 +318,30 @@ if (-not $DashboardOnly) {
 $DashVersion = (Select-String -Path "dashboard\src\ccsync_dashboard\__init__.py" -Pattern 'VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
 $CompanionVersion = (Select-String -Path "companion\src\ccsync_companion\config.py" -Pattern '^VERSION\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
 Write-Step "repo says: dashboard v$DashVersion, companion v$CompanionVersion"
+
+# --- where did the last ship get to? (REL-15) ------------------------------
+$script:ResumeFrom = ""
+if ($Resume) {
+    $prior = Get-ShipState
+    if (-not $prior) {
+        Write-Fail "-Resume, but there is no journal at $ShipStatePath -- run the ship normally"
+        exit 1
+    }
+    if ("$($prior.version)" -ne $CompanionVersion) {
+        # A journal about another build is not a resumption point: skipping
+        # "publish" because v0.9.54 got that far would leave v0.9.55 unbuilt
+        # and unpublished while the ship reported success.
+        Write-Fail "the journal at $ShipStatePath is for companion v$($prior.version), but this tree is v$CompanionVersion"
+        Write-Step "that is a new ship, not a resumption -- re-run without -Resume (or check out the version the journal names)"
+        exit 1
+    }
+    $script:ResumeFrom = "$($prior.step)"
+    if ($prior.made_current) { $script:ShipMadeCurrent = @($prior.made_current) }
+    Write-Step "-Resume: the last run of v$CompanionVersion got as far as '$($script:ResumeFrom)' at $($prior.timestamp)"
+    if ($script:ShipMadeCurrent.Count -gt 0) {
+        Write-Step "  already made current: $($script:ShipMadeCurrent -join ', ')"
+    }
+}
 
 # --- fail fast if this companion version is already published ---------------
 # The publish guard refuses to reuse a version number for different bytes --
@@ -323,7 +433,10 @@ if (-not $DashboardOnly) {
 # music deploy died inside install_dashboard_app.py's ffmpeg step, and the
 # tests that would now catch its failure modes are in server/tests. It borrows
 # the dashboard's venv (no venv of its own) -- see CLAUDE.md's test table.
-if (-not $SkipTests) {
+if (Test-StepDone "gates") {
+    Write-Step "--- step 0: gates already passed in the resumed run -- skipping ---"
+}
+elseif (-not $SkipTests) {
     Write-Host ""
     Write-Step "--- step 0: server tests (they guard the deploy script step 1 runs) ---"
     $serverPy = Join-Path $RepoRoot "dashboard\.venv\Scripts\python.exe"
@@ -415,6 +528,7 @@ if (-not $SkipTests) {
 else {
     Write-Step "server + onboarding tests skipped (-SkipTests)"
 }
+Save-ShipStep -Step "gates" -Version $CompanionVersion -InstallerVersion $InstallerVersion
 
 # --- which deploy shape is this site? (release-pipeline-3, 2026-08-21) ------
 # ship.ps1 had no idea image mode existed. In image mode the container runs
@@ -465,7 +579,10 @@ Write-Step "dashboard stack mode: $StackMode ([stack] mode in $(Split-Path -Leaf
 
 # --- 1. dashboard -----------------------------------------------------------
 Write-Host ""
-if ($ImageMode -and -not $Recreate) {
+if (Test-StepDone "dashboard") {
+    Write-Step "--- step 1: dashboard already deployed and healthy in the resumed run -- skipping ---"
+}
+elseif ($ImageMode -and -not $Recreate) {
     Write-Step "--- step 1: dashboard (image mode: nothing to deploy from here) ---"
     Write-Step "this site runs the CI image and takes dashboard code OVER THE AIR."
     Write-Step "Neither the container nor its code is touched by a companion ship."
@@ -496,7 +613,7 @@ else {
 # is only reached when something is actually wrong.
 # In image mode nothing was restarted, so one answer is enough and the wait
 # collapses to the first read.
-$deadline = (Get-Date).AddSeconds($(if ($ImageMode) { 10 } else { 90 }))
+$deadline = (Get-Date).AddSeconds($(if ($ImageMode -or (Test-StepDone "dashboard")) { 10 } else { 90 }))
 $live = ""
 $reported = $false
 while ($true) {
@@ -537,6 +654,7 @@ else {
     Write-Fail "dashboard /health says '$live', repo says '$DashVersion' after 90s -- investigate before continuing"
     exit 1
 }
+Save-ShipStep -Step "dashboard" -Version $CompanionVersion -InstallerVersion $InstallerVersion
 if ($DashboardOnly) {
     Write-Step "done (-DashboardOnly)"
     exit 0
@@ -555,14 +673,20 @@ if ($DashboardOnly) {
 # windows_upgrade.ps1 and check_deploy_drift.ps1 read afterwards.
 Write-Host ""
 Write-Step "--- step 2a: build companion (release.ps1: parity, editable install, companion + dashboard suites, PyInstaller, manifest) ---"
-$releaseArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\release.ps1",
-                 "-DashboardUrl", $DashboardUrl)
-if ($AllowDirty) { $releaseArgs += "-AllowDirty" }
-& powershell @releaseArgs
-if ($LASTEXITCODE -ne 0) {
-    Write-Fail "release.ps1 exited $LASTEXITCODE -- nothing has been published; the dashboard deploy in step 1 stands"
-    exit 1
+if (Test-StepDone "build") {
+    Write-Step "(resumed: the exe in companion\dist was built by the earlier run -- not rebuilding)"
 }
+else {
+    $releaseArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools\release.ps1",
+                     "-DashboardUrl", $DashboardUrl)
+    if ($AllowDirty) { $releaseArgs += "-AllowDirty" }
+    & powershell @releaseArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "release.ps1 exited $LASTEXITCODE -- nothing has been published; the dashboard deploy in step 1 stands"
+        exit 1
+    }
+}
+Save-ShipStep -Step "build" -Version $CompanionVersion -InstallerVersion $InstallerVersion
 
 # --- 2b. package + publish the artifact release.ps1 just built --------------
 # NO -RebuildExe: the exe (and its manifest) came out of step 2a, and
@@ -604,10 +728,36 @@ $pkgArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "installer\bui
              "-RebuildOnboard", "-Publish", "-MakeCurrent",
              "-DashboardUrl", $DashboardUrl, "-AdminUser", $AdminUser)
 if ($AllowUnsignedBinary) { $pkgArgs += "-AllowUnsignedBinary" }
-& powershell @pkgArgs
-if ($LASTEXITCODE -ne 0) {
-    Write-Fail "build_editor_package.ps1 exited $LASTEXITCODE -- stopping before the local upgrade"
-    exit 1
+if ($AllowKeyRotation) { $pkgArgs += "-AllowKeyRotation" }
+
+if ($EmitKindExtras) { $pkgArgs += "-EmitKindExtras" }
+if ($IReallyMeanDirtyCurrent) { $pkgArgs += "-IReallyMeanDirtyCurrent" }
+if (Test-StepDone "current") {
+    Write-Step "(resumed: both artefacts were already published AND made current -- skipping step 2b)"
+}
+else {
+    & powershell @pkgArgs
+    $pkgRc = $LASTEXITCODE
+    Save-ShipStep -Step "publish" -Version $CompanionVersion -InstallerVersion $InstallerVersion
+    if ($pkgRc -eq 3) {
+        # NOT a failed ship (REL-1/REL-15): both artefacts are published and
+        # staged, and the dashboard refused only the flip to current -- it
+        # wants the build to have run somewhere first. Its own words were
+        # printed above by the child script; repeating them here in other
+        # words would just make two policies out of one.
+        Write-Host ""
+        Write-Fail "the dashboard would not make v$CompanionVersion current yet (see its refusal above)"
+        Write-Step "BOTH builds are published and STAGED. Nothing is lost and nothing is half-shipped."
+        Write-Step "Push the staged build to one machine from Settings > Packages, let it soak, then"
+        Write-Step "click [ MAKE CURRENT ] there -- or re-run: tools\ship.cmd -Resume"
+        exit 3
+    }
+    if ($pkgRc -ne 0) {
+        Write-Fail "build_editor_package.ps1 exited $pkgRc -- stopping before the local upgrade"
+        exit 1
+    }
+    $script:ShipMadeCurrent = @("companion $CompanionVersion", "onboard $InstallerVersion")
+    Save-ShipStep -Step "current" -Version $CompanionVersion -InstallerVersion $InstallerVersion
 }
 
 # --- 2b2. the VENDOR FEED (release-pipeline-2, 2026-08-21) ------------------
@@ -735,5 +885,6 @@ if ($localDrift.Count -gt 0) {
     Write-Step "the fleet half of this ship stands; fix this machine before verifying anything against it (docs\RELEASE.md)"
     exit 1
 }
+Save-ShipStep -Step "local" -Version $CompanionVersion -InstallerVersion $InstallerVersion
 Write-Step "ship complete. Editors' trays will offer v$CompanionVersion on their next report."
 exit 0

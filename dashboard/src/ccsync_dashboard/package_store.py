@@ -25,9 +25,32 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from . import db, release_trust
+from . import VERSION, db, release_trust
 
 log = logging.getLogger("ccsync.dashboard.package_store")
+
+
+def blocks_on_dashboard_version(kind: str, requires_dashboard: str) -> bool:
+    """Would offering this build break "deploy the dashboard before the
+    companions" (REL-4 / SYS-13, resilience sweep 2026-08-28)?
+
+    True only for a COMPANION record that names a dashboard version strictly
+    above the one running. A record that names nothing (every record published
+    before this wave) blocks nothing -- the field is optional and its absence
+    means "no stated requirement", not "unknown, refuse".
+
+    An UNPARSEABLE requirement blocks: `release_trust.version_above` answers
+    None when it cannot compare, and a companion whose stated requirement
+    cannot be read is exactly the case where guessing "probably fine" is how
+    the B16 shape happens with the arrow reversed.
+    """
+    if str(kind or "") != "companion":
+        return False
+    wanted = str(requires_dashboard or "").strip()
+    if not wanted:
+        return False
+    above = release_trust.version_above(wanted, VERSION)
+    return True if above is None else bool(above)
 
 
 class PackageStoreError(Exception):
@@ -72,6 +95,10 @@ def store_verified_package(
     make_current: bool,
     prune: bool,
     part_path: Path,
+    requires_dashboard: str = "",
+    arch: str = "",
+    git_sha: str = "",
+    git_dirty: bool = False,
 ) -> None:
     """Verify the release signature over the record the CALLER assembled
     (server-chosen filename, server-counted size, server- or feed-computed
@@ -93,6 +120,16 @@ def store_verified_package(
         "sha256": sha256, "size_bytes": size_bytes, "min_version": min_version,
         "published_at": published_at, "signed_binary": bool(signed_binary),
     }
+    # The OPTIONAL signed extras (REL-4/SYS-13, REL-16, 2026-08-28). Added to
+    # the record only when the publisher actually sent one: an empty value
+    # canonicalises as absent (release_trust.record_fields), which is what
+    # keeps every record published before this wave verifying byte for byte.
+    requires_dashboard = str(requires_dashboard or "").strip()
+    arch = str(arch or "").strip()
+    if requires_dashboard:
+        record["requires_dashboard"] = requires_dashboard
+    if arch:
+        record["arch"] = arch
     # BEFORE the signature check, because a validly signed typo is exactly the
     # case this refuses (dash-release-ai-3, 2026-08-21): a record whose
     # min_version is above its own version raises every companion's permanent
@@ -132,6 +169,21 @@ def store_verified_package(
         log.info("publish declared pubkey_id %s but %s is what verified it",
                  pubkey_id, detail)
 
+    # ORDERING (REL-4 / SYS-13, 2026-08-28): a companion build that needs a
+    # newer dashboard than this one may be PUBLISHED here -- an admin who is
+    # about to update the dashboard should be able to stage it -- but it must
+    # never become what the fleet is offered. Checked in package_store rather
+    # than in the two routes so the human PUT and the feed's `current` policy
+    # cannot disagree, exactly as the min_version refusal above is.
+    if make_current and blocks_on_dashboard_version(kind, requires_dashboard):
+        part_path.unlink(missing_ok=True)
+        raise PackageStoreError(
+            409,
+            f"{kind} {version} needs dashboard {requires_dashboard} and this "
+            f"dashboard is {VERSION}. Update the dashboard first, then make this "
+            f"build current. Nothing was published.",
+        )
+
     dest_dir = settings.packages_path() / platform
     dest_dir.mkdir(parents=True, exist_ok=True)
     os.replace(part_path, dest_dir / filename)
@@ -141,6 +193,8 @@ def store_verified_package(
         sha256=sha256, size_bytes=size_bytes, published_by=published_by, now=published_at,
         kind=kind, signature=signature, pubkey_id=detail,
         min_version=min_version, signed_binary=bool(signed_binary),
+        requires_dashboard=requires_dashboard, arch=arch,
+        git_sha=str(git_sha or "").strip(), git_dirty=bool(git_dirty),
     )
     if make_current:
         db.set_current_package(conn, platform, version, kind)

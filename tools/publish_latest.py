@@ -170,15 +170,63 @@ def latest_green_run(workflow: str) -> dict | None:
     return runs[0] if runs else None
 
 
-def commit_is_on_main(sha: str) -> bool:
-    """True when `sha` is an ancestor of origin/main.
+def remote_head_sha() -> str:
+    """The sha `origin` says refs/heads/<RELEASE_BRANCH> is at RIGHT NOW, or "".
+
+    REL-14 (resilience sweep 2026-08-28). commit_is_on_main used to compare
+    against whatever `origin/main` this working copy last fetched, which can
+    be days old and can name a commit a force-push has since removed from the
+    branch -- the exact class of untruth the --branch filter above exists to
+    defeat, one ref removed. This asks the server.
+    """
+    rc, out, _err = run(["git", "-C", str(REPO_ROOT), "ls-remote", "origin",
+                         f"refs/heads/{RELEASE_BRANCH}"])
+    if rc != 0:
+        return ""
+    for line in (out or "").splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == f"refs/heads/{RELEASE_BRANCH}":
+            return parts[0].strip()
+    return ""
+
+
+def have_commit(sha: str) -> bool:
+    """Whether this clone holds that object as a commit."""
+    if not sha:
+        return False
+    rc, _out, _err = run(["git", "-C", str(REPO_ROOT), "cat-file", "-e",
+                          f"{sha}^{{commit}}"])
+    return rc == 0
+
+
+def release_branch_tip() -> str:
+    """The tip this run compares against: the REMOTE head, fetched if needed.
+
+    Returns "" when the remote could not be asked, and the caller then refuses
+    rather than falling back to a local ref -- "could not check" must never
+    render as "fine". A fetch is attempted only when the remote head is not
+    already in this clone, so the ordinary case costs one ls-remote.
+    """
+    tip = remote_head_sha()
+    if not tip:
+        return ""
+    if not have_commit(tip):
+        step(f"fetching origin/{RELEASE_BRANCH} ({tip[:7]}) -- this clone does not have it yet")
+        run(["git", "-C", str(REPO_ROOT), "fetch", "origin", RELEASE_BRANCH])
+    return tip if have_commit(tip) else ""
+
+
+def commit_is_on_main(sha: str, tip: str = "") -> bool:
+    """True when `sha` is an ancestor of the release branch.
 
     --branch above filters by the branch the run was DISPATCHED on, which a
-    force-push or a deleted branch can make a lie; this asks git. Unknown
-    (no origin/main locally) counts as NOT verified -- the caller refuses
-    rather than signs (release-pipeline-7)."""
+    force-push or a deleted branch can make a lie; this asks git. `tip`
+    defaults to the local remote-tracking ref for callers that have not
+    established the remote head; main() always passes the fetched one
+    (REL-14). Unknown counts as NOT verified -- the caller refuses rather
+    than signs (release-pipeline-7)."""
     rc, _out, _err = run(["git", "-C", str(REPO_ROOT), "merge-base",
-                          "--is-ancestor", sha, f"origin/{RELEASE_BRANCH}"])
+                          "--is-ancestor", sha, tip or f"origin/{RELEASE_BRANCH}"])
     return rc == 0
 
 
@@ -250,9 +298,23 @@ def main() -> int:
                          "refused by default (release-pipeline-7)")
     ap.add_argument("--min-version", default=None,
                     help="downgrade floor to stamp into the record")
+    ap.add_argument("--allow-key-rotation", action="store_true",
+                    help="publish even though the signing key is not baked into the build "
+                         "that is CURRENT for that platform. Every machine on the current "
+                         "build will refuse what this publishes, so it is only ever the "
+                         "second half of an overlap release (REL-7)")
     args = ap.parse_args()
 
     preflight()
+    # The tip THE SERVER says main is at, before anything is compared against
+    # it (REL-14). Established once per run and printed, so the operator can
+    # see what the ancestry test actually used.
+    branch_tip = release_branch_tip()
+    if not branch_tip:
+        fail(f"could not read origin/{RELEASE_BRANCH} from the remote -- refusing to sign "
+             "against a possibly stale local ref. Check network/`gh auth`, or run "
+             f"`git fetch origin {RELEASE_BRANCH}` and try again.")
+    step(f"origin/{RELEASE_BRANCH} is at {branch_tip[:7]}")
     # What THE WORLD has, not what this rig's feed/ dir has.
     channel = published_channel()
     already = {(p.get("kind", ""), p.get("platform", ""), p.get("version", ""))
@@ -260,6 +322,8 @@ def main() -> int:
     extra = ["--min-version", args.min_version] if args.min_version else []
     if args.make_current:
         extra.append("--make-current")
+    if args.allow_key_rotation:
+        extra.append("--allow-key-rotation")
 
     wanted = [s for s in SOURCES
               if (args.kind is None or s["kind"] == args.kind)
@@ -283,11 +347,12 @@ def main() -> int:
             # commit is actually IN main (release-pipeline-7). A force-push or
             # a deleted branch makes the first claim a lie, and this rig signs
             # what it publishes.
-            if not commit_is_on_main(run_info["headSha"]):
+            if not commit_is_on_main(run_info["headSha"], branch_tip):
                 fail(f"{wf} run {run_info['databaseId']} is at {run_info['headSha'][:7]}, "
-                     f"which is not an ancestor of origin/{RELEASE_BRANCH} -- "
-                     "refusing to sign a build the release branch does not contain. "
-                     "git fetch origin, then re-run; or merge the commit first.")
+                     f"which is not an ancestor of origin/{RELEASE_BRANCH} as the remote "
+                     f"has it RIGHT NOW ({branch_tip[:7]}) -- refusing to sign a build the "
+                     "release branch does not contain. A force-push can remove a commit CI "
+                     "went green on; merge it again, or re-run the workflow on the tip.")
 
             dest = Path(tmp) / f"{kind}-{plat}"
             dest.mkdir(parents=True, exist_ok=True)
@@ -341,6 +406,7 @@ def main() -> int:
 
     print()
     step("summary")
+    step(f"compared against origin/{RELEASE_BRANCH} @ {branch_tip[:7]}")
     for p in published:
         print(f"   published: {p}")
     for s in skipped:

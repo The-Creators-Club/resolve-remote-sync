@@ -243,3 +243,140 @@ def test_a_report_without_transport_health_still_works(app_env):
     client, _ = app_env
     assert client.post("/api/v1/report", json=payload(),
                        headers=report_headers()).status_code == 200
+
+
+# ------------------------------- the resilience sweep (2026-08-28)
+#
+# DASH-2 (a refused report is recorded, so the grid says so) and REL-8/REL-16
+# (the report finally carries what happened when this machine tried to update,
+# and which CPU it is).
+
+
+def test_a_refused_identity_is_recorded_against_the_machine(app_env):
+    client, conn = app_env
+    # First a good report, so the machines registry row exists.
+    assert client.post("/api/v1/report", json=payload(),
+                       headers=report_headers()).status_code == 200
+    bad = {"X-CCSync-Token": "sekrit",
+           "X-CCSync-Identity": auth.make_identity_token("a-rotated-secret", "jsmith")}
+    assert client.post("/api/v1/report", json=payload(), headers=bad).status_code == 401
+    row = conn.execute("SELECT report_refused_at, report_refused_reason FROM machines "
+                       "WHERE machine='EDIT-PC'").fetchone()
+    assert row["report_refused_at"]
+    assert "session secret" in row["report_refused_reason"]
+
+
+def test_an_accepted_report_clears_the_refusal(app_env):
+    client, conn = app_env
+    client.post("/api/v1/report", json=payload(), headers=report_headers())
+    bad = {"X-CCSync-Token": "sekrit",
+           "X-CCSync-Identity": auth.make_identity_token("rotated", "jsmith")}
+    client.post("/api/v1/report", json=payload(), headers=bad)
+    client.post("/api/v1/report", json=payload(), headers=report_headers())
+    row = conn.execute("SELECT report_refused_at FROM machines "
+                       "WHERE machine='EDIT-PC'").fetchone()
+    assert row["report_refused_at"] is None
+
+
+def test_a_refused_report_stores_nothing_from_its_body(app_env):
+    """The stamp writes two columns on an EXISTING row and nothing else: an
+    unverified body must never create or alter fleet data."""
+    client, conn = app_env
+    bad = {"X-CCSync-Token": "sekrit",
+           "X-CCSync-Identity": auth.make_identity_token("rotated", "jsmith")}
+    assert client.post("/api/v1/report", json=payload(), headers=bad).status_code == 401
+    assert conn.execute("SELECT COUNT(*) FROM machines").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM machine_state").fetchone()[0] == 0
+
+
+def test_the_upgrade_block_and_arch_are_stored_and_chipped(app_env):
+    client, conn = app_env
+    p = payload()
+    p["arch"] = "arm64"
+    p["sync_guard"] = {"upgrade": {
+        "version": "0.9.56", "attempts": 8, "last_error": "sha256 mismatch",
+        "last_attempt_at": "2026-08-28T09:00:00+00:00", "reverted_from": "0.9.56"}}
+    assert client.post("/api/v1/report", json=p,
+                       headers=report_headers()).status_code == 200
+    row = conn.execute("SELECT arch, upgrade_version, upgrade_attempts, "
+                       "upgrade_last_error, upgrade_reverted_from FROM machine_state"
+                       ).fetchone()
+    assert row["arch"] == "arm64"
+    assert row["upgrade_attempts"] == 8
+    assert row["upgrade_last_error"] == "sha256 mismatch"
+    assert row["upgrade_reverted_from"] == "0.9.56"
+
+
+def test_a_revert_marker_clears_once_the_machine_is_on_that_build_or_newer(app_env):
+    client, conn = app_env
+    p = payload()
+    p["sync_guard"] = {"upgrade": {"reverted_from": "0.9.56"}}
+    client.post("/api/v1/report", json=p, headers=report_headers())
+    assert conn.execute(
+        "SELECT upgrade_reverted_from FROM machine_state").fetchone()[0] == "0.9.56"
+
+    # The companion sends it ONCE, so the next report carries no upgrade
+    # section at all -- and the marker still has to survive that...
+    later = payload()
+    later["sync_guard"] = {"crashes": {"count": 0}}
+    client.post("/api/v1/report", json=later, headers=report_headers())
+    assert conn.execute(
+        "SELECT upgrade_reverted_from FROM machine_state").fetchone()[0] == "0.9.56"
+
+    # ...until the machine is actually running that build or better.
+    fixed = payload()
+    fixed["companion_version"] = "0.9.57"
+    fixed["sync_guard"] = {"crashes": {"count": 0}}
+    client.post("/api/v1/report", json=fixed, headers=report_headers())
+    assert conn.execute(
+        "SELECT upgrade_reverted_from FROM machine_state").fetchone()[0] is None
+
+
+def test_an_unknown_upgrade_key_never_rejects_the_report(app_env):
+    client, _ = app_env
+    p = payload()
+    p["sync_guard"] = {"upgrade": {"attempts": 1, "brand_new_counter": 5}}
+    assert client.post("/api/v1/report", json=p,
+                       headers=report_headers()).status_code == 200
+
+
+def _as_admin(client):
+    client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(SECRET, "admin"))
+    return client
+
+
+def test_the_grid_chips_a_failed_update_and_a_revert(app_env):
+    client, _conn = app_env
+    p = payload()
+    p["companion_version"] = "0.9.54"
+    p["sync_guard"] = {"upgrade": {
+        "version": "0.9.56", "attempts": 8, "last_error": "sha256 mismatch",
+        "reverted_from": "0.9.56"}}
+    client.post("/api/v1/report", json=p, headers=report_headers())
+    html = _as_admin(client).get("/partials/fleet").text
+    assert "[ UPDATE FAILED x8 ]" in html
+    assert "[ REVERTED FROM 0.9.56 ]" in html
+
+
+def test_the_grid_says_a_computer_is_being_refused(app_env):
+    client, _conn = app_env
+    client.post("/api/v1/report", json=payload(), headers=report_headers())
+    bad = {"X-CCSync-Token": "sekrit",
+           "X-CCSync-Identity": auth.make_identity_token("rotated", "jsmith")}
+    client.post("/api/v1/report", json=payload(), headers=bad)
+    html = _as_admin(client).get("/partials/fleet").text
+    assert "BEING REFUSED" in html
+    assert "COMPUTER(S) ARE BEING REFUSED" in html
+
+
+def test_the_grid_counts_the_retired_key_drain(app_env, tmp_path):
+    """DASH-2: the operator's "has the rotation finished yet" number."""
+    from ccsync_dashboard import db as dbmod2
+
+    client, conn = app_env
+    client.post("/api/v1/report", json=payload(), headers=report_headers())
+    dbmod2.record_retired_key_identity(conn, "jsmith", "EDIT-PC",
+                                       "2026-08-28T00:00:00+00:00", retired=True)
+    conn.commit()
+    html = _as_admin(client).get("/partials/fleet").text
+    assert "RETIRED SIGNING KEY" in html

@@ -168,9 +168,19 @@ def cmd_bake(args) -> int:
     target.write_text(text, encoding="utf-8")
     print(f"baked {pub} ({release_pubkey.pubkey_id(pub)}) into {target}")
     if existing and not args.add:
+        # Warning, not a refusal (REL-7, resilience sweep 2026-08-28): baking a
+        # replacement is a legitimate thing to do BEFORE the first customer
+        # ship, and refusing here would make that impossible. What was missing
+        # is that the cost was never stated in the terms the operator will
+        # meet it in -- the ship and publish_latest now refuse the PUBLISH
+        # with the same sentence, which is the last moment it can be undone.
         print(f"REPLACED {len(existing)} previously trusted key(s): {', '.join(existing)}")
-        print("Every companion still running an older build trusts the OLD key and")
-        print("will REFUSE builds signed with this one. Use --add for a rotation.")
+        print("EVERY MACHINE ON THE CURRENT BUILD WILL REFUSE THIS BUILD: a companion")
+        print("trusts only the keys baked into the binary it is already running, the")
+        print("refusal is silent, and the recovery is a hands-on reinstall per machine.")
+        print("Use --add for a rotation: ship a build that trusts BOTH keys first, and")
+        print("drop the old one a release later. The publish will refuse this without")
+        print("-AllowKeyRotation / --allow-key-rotation (docs/RELEASE.md, key rotation).")
     print("Rebuild the companion (tools/release.ps1) -- the baked list only")
     print("changes for a machine once it installs a build containing it.")
     return 0

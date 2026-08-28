@@ -87,6 +87,55 @@ already-published version, or a failing `server/` suite. Read the steps to
 understand what it did, or to redo one of them by hand; do not assemble a
 release out of them.
 
+### What changed on 2026-08-28 (resilience sweep: REL-1/7/12/13/15, OPS-1/12)
+
+Five things about the run itself. None of them changes what you type for an
+ordinary ship; all of them change what happens when something goes wrong.
+
+- **A publish is STAGED, and the flip to current is one step at the end.**
+  `ship.cmd` uploads the companion *and* `onboard.exe` staged, then makes both
+  current back to back (REL-15). They used to be two independent PUTs, so a
+  drop between them left the fleet on a new companion while every fresh
+  install still bundled the previous one. The dashboard may refuse the flip
+  until the build has run somewhere for the soak window (REL-1) — its refusal
+  is printed verbatim and `ship.cmd` exits 3. **That is not a failed ship:**
+  both builds are published and staged. Push the staged build to one machine
+  from Settings → Packages, let it soak, and click `[ MAKE CURRENT ]`, or
+  re-run `tools\ship.cmd -Resume`.
+- **The ship keeps a journal.** `tools\.ship-state.json` (gitignored) records
+  the step, the version, the timestamp and what was made current;
+  `tools\ship.cmd -Resume` continues from it and refuses a journal that
+  describes a different companion version, because that is a new ship rather
+  than a resumption.
+- **The dashboard deploy proves it came back.** `install_dashboard_app.py`
+  probes `/api/v1/health` from inside the container after every restart, in
+  both stack modes, and requires a 200 whose `version` is this checkout's
+  (OPS-1). It retries for 150 s — the compose healthcheck allows a 120 s
+  `start_period` — then prints the exact rollback one-liner
+  (`mv <root>/app <root>/app.failed-<ts>; mv <root>/app.old.<ts> <root>/app;
+  docker restart <container>`), and **returns non-zero**, which is what stops
+  `ship.cmd` before it publishes companions against a dashboard that is down.
+  `--rollback-on-unhealthy` runs that one-liner for you; the deploy still
+  fails, because a rolled-back deploy is undone, not finished.
+- **The dashboard password is asked for at second one** (OPS-12), before
+  PyInstaller, with three attempts and a distinct message for "wrong password"
+  and "cannot reach the dashboard". A typo used to cost the whole run.
+- **A `+dirty` build is not handed to the fleet by accident** (REL-13):
+  `-AllowDirty` still publishes, but `-MakeCurrent` on a dirty build needs
+  `-IReallyMeanDirtyCurrent` as well, and without it the build is published
+  STAGED. The commit and dirty flag now ride along to the dashboard as
+  advisory columns, so the Packages page can say which commit `0.9.55` is.
+- **A key the fleet does not trust is refused before the build** (REL-7):
+  the publish asks the dashboard which key signed the build that is currently
+  current, and refuses when this rig's key is not it, spelling out that every
+  machine on that build will refuse this one. `-AllowKeyRotation` /
+  `--allow-key-rotation` is the deliberate override; see "Rotating" below.
+- **`windows_upgrade.ps1` keeps the build it replaces** as
+  `ccsync-companion.exe.prev` (REL-12). When the new build exits inside the
+  relaunch window, the script puts the previous one back, starts it, and says
+  "the new build would not start - this machine is back on vX"; the build that
+  failed is kept as `ccsync-companion.exe.failed`.
+
 ### What a whole release is, as of 2026-08-18
 
 `ship.cmd` is still the one command, but it only serves **this** deployment's
@@ -626,6 +675,18 @@ two-release dance, and skipping the overlap strands the fleet:
    machine on that build, sign with the new key and drop the old one from the
    list in a later release.
 
+Since 2026-08-28 skipping the overlap is **refused rather than warned about**
+(REL-7). `release_key.py bake` still only warns — baking a replacement before
+the first customer ship is legitimate — but it now says what it costs, and the
+publish is where it stops: `build_editor_package.ps1` asks the dashboard which
+key signed the build that is currently current, `publish_feed.py` compares
+against the `baked_pubkey_ids` the current record carries (written into the
+release manifest by `release.ps1`), and both refuse with "every machine on
+v&lt;current&gt; will refuse this build" unless `-AllowKeyRotation` /
+`--allow-key-rotation` is passed. A record published before that date carries
+no key list, and the feed path says the check could not run rather than
+passing it silently.
+
 ### The dashboard side
 
 `DASH_RELEASE_PUBKEYS` unset ⇒ the publish route answers **503** and says so.
@@ -706,6 +767,98 @@ key signed them.
 
 For any other host (S3, a CDN, a bucket) nothing changed: pass `--base-url`
 and copy the directory yourself (`rclone sync .\feed remote:… --checksum`).
+
+---
+
+## Staged rollout, the soak gate, recall, ordering and arch (2026-08-28)
+
+The resilience sweep (REL-1/SYS-6, REL-3, REL-4/SYS-13, REL-16, REL-13) put
+four controls between "a build exists" and "every machine in the fleet has
+it". None of them is new machinery: they are gates on the doors that already
+existed.
+
+**A publish is STAGED.** `PUT /api/v1/admin/packages/...` writes
+`rollout='staged'` and leaves `is_current` alone unless `make_current=1` is
+passed. A staged build is downloadable by name and pushable to ONE machine;
+it is offered to nobody.
+
+**`[ PUSH TO ONE MACHINE ]`** on the Packages page writes the per-machine
+`commands.upgrade` request that has existed since 2026-08-18 — pick the
+canary from the dropdown, and it takes that exact version on its next report.
+
+**`[ MAKE CURRENT ]` is refused (409) until the build has soaked**: at least
+one machine must have been reporting that exact `companion_version` for
+`DASH_RELEASE_SOAK_MINUTES` (default 30; a `meta` row `release_soak_minutes`
+overrides it without a redeploy, and `0` turns the gate off) with
+`sync_guard.crashes.count == 0` and no crash-loop revert. The page shows the
+evidence the click is made on: *"canary: 1 machine on 0.9.55 for 22 min,
+0 crashes"*. The override is `force=1` **plus** the version typed into the
+confirmation box — the JSON route refuses `force=1` on its own.
+
+**A rollback is never gated.** A build that has been current before carries
+`ever_current`, and the gate skips it: the soak asks for evidence that a NEW
+build runs, and a build the fleet already ran has produced it.
+
+**Recall.** `publish_feed.py --retract` puts `retracted:
+[{kind, platform, version, reason, at}]` into the SIGNED channel document.
+Every dashboard honours it **under every policy, `manual` included**: the row
+is un-currented and stamped, it is never served in an upgrade offer, it can
+never be made current again, both admin pages say why, and
+`[ ROLL THE FLEET BACK ]` writes an update request for every machine still
+reporting it. The row and the file stay — the fleet may still be running it.
+
+**Ordering.** A companion record may carry a signed `requires_dashboard`
+(from `REQUIRES_DASHBOARD` in `companion/src/ccsync_companion/config.py`).
+A dashboard older than that never advertises the build and refuses to make it
+current, with a 409 naming both numbers and the Packages page saying "update
+the dashboard first". An unparseable requirement blocks: "could not compare"
+is not "fine".
+
+**Arch.** A companion record may carry a signed `arch`
+(`x86_64` / `arm64` / `universal2`). A machine reporting `arch` is offered
+only a record whose arch matches, is `universal2`, or is absent; the page says
+"no macos/x86_64 build published" when a reported CPU has no build.
+
+**Provenance.** `git_sha` and `git_dirty` are ADVISORY, unsigned columns the
+publish tool fills; a dirty build renders as `0.9.55 (+dirty, no commit)`
+everywhere the version is shown.
+
+### The overlap cost of the two signed fields
+
+**Emission is opt-in.** `tools/sign_release.py` drops `requires_dashboard`
+and `arch` (loudly, on stderr) unless it is given `--emit-kind-extras` (or
+`CCSYNC_EMIT_KIND_EXTRAS=1`); `tools\ship.cmd -EmitKindExtras` and
+`build_editor_package.ps1 -EmitKindExtras` pass it through. Turn it on only
+once every machine on the fleet page reports 0.9.55 or newer: a record that
+carries either field is refused ("release signature rejected") by any older
+companion, and there is no over-the-air recovery from that. Until then a
+build is offered exactly as every record before 2026-08-28 was.
+
+
+`requires_dashboard` and `arch` are OPTIONAL kind-scoped extras
+(`release_trust.OPTIONAL_KIND_EXTRA_FIELDS` / the companion's mirror in
+`release_pubkey.py`): a record that carries neither canonicalises over exactly
+the nine fields it always did, so every record published before this wave
+keeps verifying byte for byte, on the dashboard and on every companion in the
+field. A record that DOES carry one is only verifiable by a companion whose
+`release_pubkey.py` knows the field. **So the signing tools must not start
+filling either field in until the fleet is on a build that mirrors the
+canonicalisation** — otherwise every editor refuses the offer with "release
+signature rejected", which is the overlap release `RECORD_FIELDS`' comment
+warns about.
+
+### The refusals, in one place
+
+| Refusal | Where | Override |
+|---|---|---|
+| unsigned publish | the PUT route (422) | none |
+| `min_version` above the build (CR-52) | four gates | none |
+| same version, different bytes | publish / feed (409) | `--allow-replace`, or a version bump |
+| **not soaked** | `[ MAKE CURRENT ]` (409) | `force=1` + the version typed |
+| **needs a newer dashboard** | make-current AND the feed's auto-publish (409) | update the dashboard |
+| **recalled by the vendor** | make-current (409), the offer, the feed's available list | none |
+| **arch mismatch** | the offer (nothing is served) | publish a build for that arch |
+| unsigned binary | `ship.cmd -MakeCurrent` | `-AllowUnsignedBinary` |
 
 ---
 
@@ -1051,7 +1204,9 @@ and the lock is where it first appears.
 python tools\publish_latest.py                  # THE ship for a CI build: newest green main run -> feed
 python tools\publish_latest.py --dry-run        # ...say what it would do
 python tools\publish_latest.py --kind onboard --make-current   # the INSTALLER channel, both platforms
+.\tools\ship.cmd -Resume                        # continue a ship that stopped part-way
 python tools\publish_feed.py --retract companion/windows/0.6.1 `
+    --reason "it deletes proxies on the second pass" `
     --feed-dir .\feed --github-repo <owner/repo> --github-upload   # withdraw a bad build
 python tools\release_key.py new|pubkey|bake     # the offline release signing key (once, ever)
 .\tools\check_deploy_drift.ps1                  # what is actually running, anywhere

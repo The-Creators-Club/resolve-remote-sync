@@ -151,15 +151,22 @@ def test_a_failed_unattended_download_waits_the_longer_back_off(tmp_path, monkey
     app, calls = _auto_update_app(tmp_path, monkeypatch, ["failed", ""])
     clock = [1000.0]
     monkeypatch.setattr(app_mod.time, "monotonic", lambda: clock[0])
+    # REL-8's back-off is persisted, so it is measured on the wall clock.
+    wall = [10_000.0]
+    monkeypatch.setattr(app_mod.time, "time", lambda: wall[0])
+
+    def _advance(seconds):
+        clock[0] += seconds
+        wall[0] += seconds
 
     app._on_upgrade_available({"version": "9.9.9"})
     _join_upgrade_threads()
-    clock[0] += app_mod.PUSHED_UPDATE_RETRY_SECONDS
+    _advance(app_mod.PUSHED_UPDATE_RETRY_SECONDS)
     app._maybe_auto_update()
     _join_upgrade_threads()
     assert calls == [False]                     # not yet: a failure waits longer
 
-    clock[0] += app_mod.PUSHED_UPDATE_FAILED_RETRY_SECONDS
+    _advance(app_mod.PUSHED_UPDATE_FAILED_RETRY_SECONDS)
     app._maybe_auto_update()
     _join_upgrade_threads()
     assert calls == [False, True]

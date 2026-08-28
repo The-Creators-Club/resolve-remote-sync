@@ -17,7 +17,7 @@ These five live only in the operator's environment and in the NAS:
 | `TRUENAS_PW` | the NAS admin account: SSH `sudo` **and** the REST API. Full control of the pool. | changing the account password on the NAS |
 | `SYNCTHING_API_KEY` | Syncthing's GUI API on the NAS — lane C's folder and device config for the whole fleet | Syncthing GUI → Actions → Settings → API key |
 | `DASH_REPORT_TOKEN` | the fleet report endpoint every companion posts to; also the shared token in every editor's `config.toml` | re-deploy the dashboard, then re-issue editor configs |
-| `DASH_SESSION_SECRET` | dashboard login cookies. A weak or leaked value = a forged admin session | re-deploy; every session is invalidated |
+| `DASH_SESSION_SECRET` | dashboard login cookies **and** every companion's machine-identity token. A weak or leaked value = a forged admin session | re-deploy with the old value in `DASH_SESSION_SECRET_PREVIOUS` — see "Rotating DASH_SESSION_SECRET" below, or the whole fleet 401s at once |
 | `BROLL_INGEST_TOKEN` | the b-roll write path (`/broll` ingest). Optional — a site without the b-roll mount never sets it | re-deploy |
 
 `site.toml` holds addresses, paths and names. **No secret ever goes in it**;
@@ -102,6 +102,46 @@ export TRUENAS_PW="$(vault kv get -field=password ccsync/truenas)"
 The contract `ship.ps1` and the `server/` scripts care about is only "these
 names are in the environment of the process that runs me". Anything that
 satisfies that is fine.
+
+## Rotating `DASH_SESSION_SECRET` without 401ing the whole fleet
+
+Read this **before** changing that one value. It signs two different things:
+the browser session cookie, and the companion's machine-identity token
+(`X-CCSync-Identity`) — and since CR-86 the identity token never expires. So
+the moment the secret changes, every companion's stored identity fails to
+verify and `POST /api/v1/report` answers 401 **for the entire fleet**: the
+grid stops moving, and the halt / pushed-update / lane-B-resume / file-move
+command channel dies with it. Until 2026-08-28 the only cure was every editor
+clicking "Sign in…" at their own tray, with nothing anywhere saying why.
+
+`DASH_SESSION_SECRET_PREVIOUS` (DASH-2, resilience sweep 2026-08-28) is the
+drain. Comma-separated, newest first, **accept-only**: nothing is ever minted
+with a key from it.
+
+```
+DASH_SESSION_SECRET=<the new value>
+DASH_SESSION_SECRET_PREVIOUS=<the old value>
+```
+
+What happens then:
+
+1. Every companion keeps reporting on its old identity, and each one is
+   logged once as "reported with an identity signed by a RETIRED session key".
+2. The fleet page shows `[ N COMPUTER(S) STILL ON A RETIRED SIGNING KEY ]`
+   with their names. The count goes **down** as each editor signs in again at
+   their tray (which mints a token on the new key).
+3. When it reaches zero, remove `DASH_SESSION_SECRET_PREVIOUS` and redeploy.
+   A retired key left in place for ever is a signing key nobody remembers is
+   still trusted; the boot log names it at every start for that reason.
+
+The same list is consulted for browser session cookies, so admins are not
+signed out mid-incident either.
+
+A companion whose identity cannot be verified at all (no previous key
+configured, or one signed by a key that is gone) is still refused — but the
+refusal is now **recorded** on that machine's registry row, so the fleet grid
+says `[ BEING REFUSED: SIGN IN ON ITS TRAY ]` instead of showing a row that
+merely goes stale. Nothing from the refused report body is stored.
 
 ## How the secrets reach the NAS
 

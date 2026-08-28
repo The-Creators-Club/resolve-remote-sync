@@ -55,6 +55,7 @@ import ipaddress
 import json
 import logging
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -100,36 +101,394 @@ CHILD_TAKEOVER_POLL_SECONDS = 0.1
 # stops a download that cannot possibly complete (AUDIT_2 §2-low).
 MAX_DOWNLOAD_BYTES = 300 * 1024 * 1024
 MIN_FREE_BYTES_MARGIN = 200 * 1024 * 1024
+# The legacy one-line marker. Still WRITTEN alongside the JSON record below so
+# a deliberate rollback to a pre-APP-5 build keeps its "Update complete"
+# toast, and READ once when the JSON record is absent (the adoption).
 _VERSION_MARKER = "last_version.txt"
+_VERSION_STATE = "last_version.json"
+# APP-5 / REL-2 (resilience sweep 2026-08-28). A build that boots, puts a tray
+# icon up and dies three minutes later used to leave the machine with a broken
+# exe and no way back: `.old` was deleted on a flat 60 s timer and nothing
+# counted restarts. Three starts of the SAME version inside ten minutes is the
+# signature of a build that cannot stay up (Windows relaunches at each logon,
+# and an editor who sees the tray vanish restarts it by hand faster than
+# that); two would fire on one crash plus one manual restart.
+CRASH_LOOP_STARTS = 3
+CRASH_LOOP_WINDOW_SECONDS = 600.0
+# How long the rollback copy is kept when NO report is ever accepted. The
+# health signal is one accepted dashboard report (app._on_report_response,
+# APP-1's channel); this is the fallback for a machine that is off the tailnet
+# or whose dashboard is down, and it is deliberately long enough to cover the
+# window in which a bad build actually manifests.
+OLD_EXE_KEEP_SECONDS = 3600.0
+OLD_EXE_POLL_SECONDS = 30.0
+# REL-8: how a machine that CANNOT take a build stops hammering the NAS.
+# 10 min -> 1 h -> 6 h, then 6 h onwards, and after MAX_UPGRADE_ATTEMPTS
+# failures of the same version it stops trying and says so on the tray. The
+# counter is persisted because the old flat 600 s timer was in-memory only:
+# a machine whose AV quarantined every download pulled ~20 MB every ten
+# minutes indefinitely, and a restart reset even that.
+ATTEMPTS_FILENAME = "upgrade_attempts.json"
+UPGRADE_BACKOFF_SECONDS = (600.0, 3600.0, 21600.0)
+MAX_UPGRADE_ATTEMPTS = 8
+# The `last_error` codes carried in the report, so the dashboard can tell an
+# AV quarantine from a captive portal from a wrong-arch binary (REL-16)
+# without parsing a log.
+ERROR_DOWNLOAD = "download-failed"
+ERROR_SHA = "sha-mismatch"
+ERROR_SPACE = "no-space"
+ERROR_REFUSED = "refused"
+ERROR_SWAP = "swap-failed"
+ERROR_EXEC = "exec-failed"
 
 
-def note_version_start(state_dir: Path) -> bool:
-    """Record the running version and report whether it CHANGED.
+def arch_key() -> str:
+    """This machine's CPU architecture, normalised (REL-16).
 
-    "Is this the first start on a freshly-upgraded build?" used to be derived
-    from whether cleanup_old_exe() managed to unlink an `.old`. That is wrong
-    twice over: it forced the rollback copy to be destroyed before the new
-    build had proven anything, and when an AV hold deferred the unlink it
-    fired the "Update complete. Now running vX" toast on an unrelated later
-    restart (AUDIT_2 CORE-H6). Never raises; a marker that can't be read or
-    written just means no toast."""
+    platform.machine() spells the same CPU `AMD64` on Windows and `x86_64` on
+    macOS, and `arm64`/`aarch64` for Apple silicon. The channel needs ONE
+    spelling per architecture, because the discriminator used to be `platform`
+    alone: an Intel Mac reported `macos` and was offered the arm64 build
+    GitHub's macos-latest runner produced, which downloads, verifies, swaps in
+    and cannot exec. Anything unrecognised is passed through lowercased rather
+    than guessed at -- the dashboard treats an arch it does not know as "offer
+    nothing", which is the safe direction."""
+    try:
+        machine = (platform.machine() or "").strip().lower()
+    except Exception:
+        return "unknown"
+    if machine in ("amd64", "x86_64", "x64"):
+        return "x86_64"
+    if machine in ("arm64", "aarch64", "armv8", "armv8l"):
+        return "arm64"
+    return machine or "unknown"
+
+
+# ------------------------------------------------- the start record (APP-5)
+
+def _read_json(path: Path) -> dict:
+    """A JSON object off disk, or {}. Never raises: every caller here treats
+    "we know nothing" as a valid answer, and a truncated state file must never
+    be able to stop the companion starting."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_json(path: Path, data: dict) -> bool:
+    """tmp + os.replace, like identity.save_identity: a half-written record
+    that fails to parse reads as "we know nothing", and for the crash-loop
+    counter that is the one answer this file must not invent. Never raises."""
+    try:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+        return True
+    except Exception:
+        log.debug("upgrade: could not write %s", path, exc_info=True)
+        return False
+
+
+def version_state_path(state_dir: Path) -> Path:
+    return Path(state_dir) / _VERSION_STATE
+
+
+def read_version_state(state_dir: Path) -> dict:
+    """The persisted start record, adopting the legacy one-line marker once.
+
+    {version, starts, first_start_at, last_clean_shutdown, previous_version}.
+    An older build wrote only `last_version.txt`, so a machine upgrading INTO
+    this build has its previous version there and nowhere else -- and
+    `previous_version` is what the crash-loop guard checks against the
+    downgrade floor before it restores anything."""
+    state_dir = Path(state_dir)
+    record = _read_json(version_state_path(state_dir))
+    if record.get("version"):
+        return record
+    try:
+        legacy = (state_dir / _VERSION_MARKER).read_text(encoding="utf-8").strip()
+    except Exception:
+        legacy = ""
+    return {"version": legacy} if legacy else {}
+
+
+def note_version_start(state_dir: Path, now: Optional[float] = None) -> dict:
+    """Record this start and answer what it MEANS. Never raises.
+
+    Returns {version, previous_version, starts, first_start_at, upgraded,
+    crash_loop}. `upgraded` is the old boolean return: "is this the first
+    start on a build we have not run before", which drives the "Update
+    complete" toast and must not be derived from whether cleanup_old_exe()
+    managed to unlink an `.old` (AUDIT_2 CORE-H6). `starts` counts launches of
+    the SAME version and resets on a clean shutdown, so `crash_loop` means
+    "this build has come up three times in ten minutes without once shutting
+    down cleanly" -- i.e. it is not staying up (APP-5 / REL-2)."""
+    stamp = time.time() if now is None else float(now)
+    record: dict[str, Any] = {
+        "version": config_mod.VERSION,
+        "previous_version": "",
+        "starts": 1,
+        "first_start_at": stamp,
+        "last_clean_shutdown": None,
+        "upgraded": False,
+        "crash_loop": False,
+    }
     try:
         state_dir = Path(state_dir)
         state_dir.mkdir(parents=True, exist_ok=True)
-        marker = state_dir / _VERSION_MARKER
+        previous = read_version_state(state_dir)
+        prev_version = str(previous.get("version") or "").strip()
+        if prev_version != config_mod.VERSION:
+            # A first-ever run (no record at all) is not an upgrade.
+            record["upgraded"] = bool(prev_version)
+            record["previous_version"] = prev_version
+        else:
+            record["previous_version"] = str(previous.get("previous_version") or "")
+            started = previous.get("first_start_at")
+            started = float(started) if isinstance(started, (int, float)) else None
+            starts = previous.get("starts")
+            starts = int(starts) if isinstance(starts, (int, float)) else 0
+            clean = bool(previous.get("last_clean_shutdown"))
+            # A clean shutdown resets the count: the editor quitting the tray
+            # (or a reboot) is not a crash, and counting it would revert a
+            # perfectly good build on the third normal restart of a morning.
+            # So does a stale window -- three starts spread over a week say
+            # nothing about this build's health.
+            if (clean or starts <= 0 or started is None
+                    or (stamp - started) > CRASH_LOOP_WINDOW_SECONDS):
+                record["starts"] = 1
+                record["first_start_at"] = stamp
+            else:
+                record["starts"] = starts + 1
+                record["first_start_at"] = started
+        record["crash_loop"] = bool(
+            record["starts"] >= CRASH_LOOP_STARTS
+            and (stamp - float(record["first_start_at"])) <= CRASH_LOOP_WINDOW_SECONDS
+        )
+        _write_json(version_state_path(state_dir), {
+            key: record[key] for key in
+            ("version", "previous_version", "starts", "first_start_at",
+             "last_clean_shutdown")
+        })
+        # Still written so a pre-APP-5 build can read it after a rollback.
         try:
-            previous = marker.read_text(encoding="utf-8").strip()
-        except OSError:
-            previous = ""
-        if previous != config_mod.VERSION:
+            marker = state_dir / _VERSION_MARKER
             tmp = marker.with_name(marker.name + ".tmp")
             tmp.write_text(config_mod.VERSION, encoding="utf-8")
             os.replace(tmp, marker)
-        # A first-ever run (no marker) is not an upgrade.
-        return bool(previous) and previous != config_mod.VERSION
+        except Exception:
+            log.debug("upgrade: could not write the legacy version marker", exc_info=True)
     except Exception:
         log.debug("note_version_start failed", exc_info=True)
+    return record
+
+
+def note_clean_shutdown(state_dir: Path, now: Optional[float] = None) -> None:
+    """Stamp this run as having ended on purpose, so the next start does not
+    count it towards the crash loop. Never raises -- it is called from
+    CompanionApp.shutdown(), where an exception would be the process exiting
+    past its own teardown."""
+    stamp = time.time() if now is None else float(now)
+    try:
+        path = version_state_path(Path(state_dir))
+        record = _read_json(path)
+        if str(record.get("version") or "") != config_mod.VERSION:
+            # Not our record (a rollback wrote it for the build coming up):
+            # leave it alone rather than stamping someone else's row.
+            return
+        record["last_clean_shutdown"] = stamp
+        _write_json(path, record)
+    except Exception:
+        log.debug("note_clean_shutdown failed", exc_info=True)
+
+
+# ------------------------------------------- the attempt ledger (REL-8)
+#
+# One record, under the STATE dir (lane scratch that is safe to delete -- an
+# operator who removes it has asked for the retries to start again), covering
+# both update paths: unattended (site [features] auto_update) and the admin's
+# push. The dashboard re-sends a push on EVERY report until the machine
+# reports the new version, so without this the only thing between a machine
+# that cannot take a build and the NAS was a 600 s in-memory timer.
+
+
+def attempts_path(state_dir: Path) -> Path:
+    return Path(state_dir) / ATTEMPTS_FILENAME
+
+
+def read_attempts(path: Path) -> dict:
+    """{version, attempts, last_error, last_attempt_at, reverted_from,
+    reverted_at, reverted_announced}, or {}. Never raises."""
+    return _read_json(path)
+
+
+def note_upgrade_attempt(path: Path, version: Any, error: str,
+                         now: Optional[float] = None) -> dict:
+    """Count one FAILED attempt at `version` and persist it. Returns the
+    record. A different target version resets the count: a new build is a new
+    question, and an admin who publishes a fix must not find the machine still
+    serving out the old build's six-hour back-off."""
+    stamp = time.time() if now is None else float(now)
+    wanted = str(version or "").strip()
+    record = read_attempts(path)
+    if str(record.get("version") or "") != wanted:
+        record = {key: record[key] for key in
+                  ("reverted_from", "reverted_at", "reverted_announced")
+                  if key in record}
+        record["version"] = wanted
+        record["attempts"] = 0
+    try:
+        attempts = int(record.get("attempts") or 0)
+    except (TypeError, ValueError):
+        attempts = 0
+    record["attempts"] = attempts + 1
+    record["last_error"] = str(error or "") or None
+    record["last_attempt_at"] = stamp
+    _write_json(path, record)
+    return record
+
+
+def clear_upgrade_attempts(path: Path, version: Any = None) -> None:
+    """Forget the failures for `version` (or for whatever is recorded when no
+    version is given). Called when the machine comes up ON the version it was
+    trying to take: the attempt succeeded, however many tries it cost. The
+    revert keys are deliberately preserved -- the dashboard has not seen them
+    yet."""
+    record = read_attempts(path)
+    if not record:
+        return
+    wanted = str(version or "").strip()
+    if wanted and str(record.get("version") or "") != wanted:
+        return
+    for key in ("version", "attempts", "last_error", "last_attempt_at"):
+        record.pop(key, None)
+    _write_json(path, record)
+
+
+def upgrade_backoff_seconds(attempts: Any) -> float:
+    """How long to wait after `attempts` consecutive failures: 10 min, then
+    1 h, then 6 h for every failure after that."""
+    try:
+        count = int(attempts or 0)
+    except (TypeError, ValueError):
+        count = 0
+    if count <= 0:
+        return 0.0
+    index = min(count, len(UPGRADE_BACKOFF_SECONDS)) - 1
+    return UPGRADE_BACKOFF_SECONDS[index]
+
+
+def upgrade_attempts_exhausted(record: Any, version: Any) -> bool:
+    """True when this machine has given up on `version` (REL-8's cap).
+
+    Only ever true for the version the failures are recorded against: a new
+    offer is always tried, because the whole point of publishing a fix is that
+    the machine takes it."""
+    if not isinstance(record, dict):
         return False
+    if str(record.get("version") or "") != str(version or "").strip():
+        return False
+    try:
+        return int(record.get("attempts") or 0) >= MAX_UPGRADE_ATTEMPTS
+    except (TypeError, ValueError):
+        return False
+
+
+def upgrade_retry_due(record: Any, version: Any, now: Optional[float] = None) -> bool:
+    """Has the back-off for `version` elapsed? Never raises.
+
+    Wall clock, not monotonic, because the point is that a RESTART does not
+    reset it -- an AV that quarantines every download also tends to come with
+    a machine its owner keeps restarting."""
+    if not isinstance(record, dict):
+        return True
+    if str(record.get("version") or "") != str(version or "").strip():
+        return True
+    last = record.get("last_attempt_at")
+    if not isinstance(last, (int, float)) or isinstance(last, bool):
+        return True
+    stamp = time.time() if now is None else float(now)
+    # A clock that went BACKWARDS (a laptop back from sleep with a bad RTC)
+    # must not park the machine for six hours: a negative age reads as due.
+    age = stamp - float(last)
+    if age < 0:
+        return True
+    return age >= upgrade_backoff_seconds(record.get("attempts"))
+
+
+def note_reverted_from(path: Path, version: Any, now: Optional[float] = None) -> None:
+    """Leave the crash-loop revert where the RESTORED build will find it: it
+    is the build that comes up next which has to toast it and report it, not
+    the one on its way out. Never raises."""
+    stamp = time.time() if now is None else float(now)
+    record = read_attempts(path)
+    record["reverted_from"] = str(version or "")
+    record["reverted_at"] = stamp
+    record["reverted_announced"] = False
+    _write_json(path, record)
+
+
+def clear_reverted_from(path: Path) -> None:
+    """Drop the revert marker once the dashboard has seen it (one accepted
+    report). Never raises."""
+    record = read_attempts(path)
+    if not record.get("reverted_from") and "reverted_at" not in record:
+        return
+    for key in ("reverted_from", "reverted_at", "reverted_announced"):
+        record.pop(key, None)
+    _write_json(path, record)
+
+
+def mark_revert_announced(path: Path) -> None:
+    """The editor has been told once. The marker itself stays until a report
+    carries it."""
+    record = read_attempts(path)
+    if not record.get("reverted_from"):
+        return
+    record["reverted_announced"] = True
+    _write_json(path, record)
+
+
+def upgrade_report(record: Any, starts_this_version: Any = 1) -> dict:
+    """The `sync_guard.upgrade` block (REL-8 telemetry, REL-2's revert).
+
+    Always sent, including the all-zero shape: "this machine has never failed
+    an update" is an answer the fleet grid needs, and an absent section would
+    be indistinguishable from a companion too old to send one."""
+    record = record if isinstance(record, dict) else {}
+    try:
+        attempts = int(record.get("attempts") or 0)
+    except (TypeError, ValueError):
+        attempts = 0
+    try:
+        starts = int(starts_this_version or 1)
+    except (TypeError, ValueError):
+        starts = 1
+    last_at = record.get("last_attempt_at")
+    return {
+        "version": str(record.get("version") or "") or None,
+        "attempts": attempts,
+        "last_error": record.get("last_error") or None,
+        "last_attempt_at": (_iso_utc(last_at)
+                            if isinstance(last_at, (int, float))
+                            and not isinstance(last_at, bool) else None),
+        "reverted_from": str(record.get("reverted_from") or "") or None,
+        "starts_this_version": starts,
+    }
+
+
+def _iso_utc(stamp: Any) -> Optional[str]:
+    """An epoch seconds value as the ISO-8601 UTC spelling the dashboard's own
+    received_at uses (reporter._iso_utc's twin, kept here so upgrade.py stays
+    importable without the reporter)."""
+    try:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(stamp)))
+    except Exception:
+        return None
 
 
 def same_origin(url: str, base_url: str) -> bool:
@@ -480,6 +839,164 @@ def cleanup_old_exe(exe_path: Optional[Path] = None) -> bool:
         return False
 
 
+def old_exe_path(exe_path: Optional[Path] = None) -> Optional[Path]:
+    """Where the rollback copy of the PREVIOUS build lives, or None on a
+    source run. Never raises."""
+    try:
+        if exe_path is None:
+            if not is_frozen():
+                return None
+            exe_path = Path(sys.executable)
+        exe_path = Path(exe_path)
+        return exe_path.with_name(exe_path.name + _OLD_SUFFIX)
+    except Exception:
+        return None
+
+
+def keep_old_exe_until_healthy(
+    stop_event: Any,
+    healthy: Callable[[], bool],
+    *,
+    keep_seconds: float = OLD_EXE_KEEP_SECONDS,
+    poll_seconds: float = OLD_EXE_POLL_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
+    cleanup: Callable[[], bool] = cleanup_old_exe,
+) -> str:
+    """Block until this build has proven itself, then delete `<exe>.old`.
+
+    Returns why the rollback copy became expendable, or "" when the process
+    is shutting down first (the `.old` then survives to the next start, which
+    is the whole point: a build that never got a report in and never stayed up
+    an hour is exactly the one whose predecessor must still be on disk).
+
+    APP-5 / REL-2, replacing `threading.Timer(60.0, cleanup_old_exe)`. Sixty
+    seconds is shorter than every failure mode this guard is for: a Tk fault
+    in the first dialog, an exception on a code path only one editor's config
+    reaches, a lane touching a surrogate path. Never raises."""
+    deadline = clock() + max(0.0, float(keep_seconds))
+    while True:
+        reason = ""
+        try:
+            if healthy():
+                reason = "the dashboard accepted a report from it"
+            elif clock() >= deadline:
+                reason = f"it has been up for {int(keep_seconds // 60)} minutes"
+        except Exception:
+            log.debug("upgrade: health check for the rollback copy failed", exc_info=True)
+        if reason:
+            log.info("upgrade: v%s has proven itself (%s) -- the previous build's "
+                     "rollback copy is expendable now", config_mod.VERSION, reason)
+            try:
+                cleanup()
+            except Exception:
+                log.debug("upgrade: cleanup_old_exe raised", exc_info=True)
+            return reason
+        try:
+            if stop_event.wait(poll_seconds):
+                return ""
+        except Exception:
+            log.debug("upgrade: rollback-copy wait failed", exc_info=True)
+            return ""
+
+
+def revert_to_previous_build(
+    state_dir: Path,
+    cfg: Any = None,
+    *,
+    request_shutdown: Optional[Callable[[], None]] = None,
+    exe_path: Optional[Path] = None,
+    replace_fn: ReplaceFn = os.replace,
+    spawn: Optional[SpawnFn] = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    floor_file: Optional[Path] = None,
+    now: Optional[float] = None,
+) -> tuple[str, str]:
+    """Put `<exe>.old` back and launch it. Returns (restored_version, refusal).
+
+    APP-5 / REL-2's automatic rollback, built out of the machinery the
+    self-upgrade already has: _rollback for the two renames, _default_spawn
+    for the detached hand-off (CCSYNC_REPLACES_PID, the reset _MEI
+    environment), the takeover grace for "did the restored build actually
+    start". The refusal string is never empty on failure and is logged by the
+    caller: "we could not check" must not read as "we rolled back".
+
+    THE FLOOR STILL APPLIES. `previous_version` comes from this machine's own
+    start record -- the version that was running when the upgrade happened --
+    and a revert below the signed downgrade floor is refused here exactly as a
+    dashboard-offered downgrade is, because the floor's whole value is that
+    nothing on the machine can lower it (note_floor)."""
+    stamp = time.time() if now is None else float(now)
+    if not is_frozen() and exe_path is None:
+        return "", "this is a source run, so there is no previous build to restore"
+    try:
+        exe = Path(exe_path) if exe_path is not None else Path(sys.executable)
+        old = exe.with_name(exe.name + _OLD_SUFFIX)
+        if not old.exists():
+            return "", f"there is no rollback copy at {old}"
+        previous = str(read_version_state(state_dir).get("previous_version") or "").strip()
+        if not previous:
+            # An `.old` whose version we cannot name cannot be floor-checked,
+            # and a rollback that cannot be floor-checked is not one we may
+            # perform automatically.
+            return "", ("this machine has no record of which build "
+                        f"{old.name} is, so it will not be restored automatically")
+        floor = read_floor(Path(floor_file) if floor_file else floor_path(cfg))
+        if below_floor(previous, floor):
+            return "", (f"v{previous} is below the downgrade floor v{floor} this "
+                        f"machine has accepted, so the crash loop needs a human")
+        manager = UpgradeManager(
+            cfg or {}, replace_fn=replace_fn, spawn_fn=spawn,
+            clock_fn=clock, sleep_fn=sleep_fn,
+            floor_file=Path(floor_file) if floor_file else floor_path(cfg),
+        )
+        aside = exe.with_name(new_download_name())
+        manager._rollback(old, exe, aside=aside)
+        if old.exists():
+            return "", (f"the rollback copy could not be moved back over {exe.name} "
+                        f"-- it is still at {old}")
+        # BEFORE the spawn, both of them: the restored build starts reading
+        # these files immediately, and a marker written after it has read them
+        # is a marker it never sees.
+        _write_json(version_state_path(Path(state_dir)), {
+            "version": previous,
+            "previous_version": "",
+            "starts": 1,
+            "first_start_at": stamp,
+            "last_clean_shutdown": None,
+        })
+        note_reverted_from(attempts_path(Path(state_dir)), config_mod.VERSION, now=stamp)
+        run = spawn or UpgradeManager._default_spawn
+        try:
+            child = run(exe)
+        except Exception:
+            log.exception("upgrade: could not launch the restored build")
+            return "", "the restored build could not be launched"
+        if child is not None and hasattr(child, "poll"):
+            deadline = clock() + CHILD_TAKEOVER_GRACE_SECONDS
+            while clock() < deadline:
+                code = child.poll()
+                if code is not None:
+                    return "", (f"the restored build exited with code {code} within "
+                                f"{CHILD_TAKEOVER_GRACE_SECONDS:.0f}s of launch")
+                sleep_fn(CHILD_TAKEOVER_POLL_SECONDS)
+        log.warning(
+            "upgrade: v%s has restarted %d times in under %d minutes, so this "
+            "machine has restored v%s and is standing down",
+            config_mod.VERSION, CRASH_LOOP_STARTS,
+            int(CRASH_LOOP_WINDOW_SECONDS // 60), previous,
+        )
+        if request_shutdown is not None:
+            try:
+                request_shutdown()
+            except Exception:
+                log.exception("upgrade: request_shutdown failed after the revert")
+        return previous, ""
+    except Exception:
+        log.exception("upgrade: the crash-loop revert failed")
+        return "", "the automatic rollback failed"
+
+
 def parse_upgrade(resp: Any) -> Optional[dict[str, Any]]:
     """Extract + validate the `upgrade` dict from a report/verify response.
 
@@ -504,7 +1021,13 @@ def parse_upgrade(resp: Any) -> Optional[dict[str, Any]]:
     # they are normalised above and re-asserted below, which means a server
     # that pads them with whitespace fails verification rather than being
     # quietly accommodated.
-    out = {key: info[key] for key in release_pubkey.RECORD_FIELDS if key in info}
+    # record_fields, not RECORD_FIELDS: a record carrying the kind-scoped
+    # signed extras (requires_dashboard / arch, REL-4 / REL-16, 2026-08-28)
+    # is only verifiable with them present -- filtering them out here made
+    # every such offer fail its own signature.
+    out = {key: info[key]
+           for key in release_pubkey.record_fields(info.get("kind"), info)
+           if key in info}
     out.update({
         "version": version,
         "url": url,
@@ -689,6 +1212,12 @@ class UpgradeManager:
         adopt_legacy_floor(cfg, self._floor_file)
         self._transport_note_logged = False
         self._refusal_logged = ""
+        # REL-8: WHY the last attempt did not swap, as one of this module's
+        # ERROR_* codes. The report carries it so an admin can tell an AV
+        # quarantine (sha-mismatch or download-failed on every try) from a
+        # wrong-arch binary (exec-failed) from a full disk, none of which
+        # looked any different from "hasn't seen the push yet".
+        self.last_failure = ""
 
     def _log_transport_once(self, note: str) -> None:
         if note and not self._transport_note_logged:
@@ -801,6 +1330,7 @@ class UpgradeManager:
         # rather than merely the file the server described.
         accepted, reason = self._accept_offer(info)
         if not accepted:
+            self.last_failure = ERROR_REFUSED
             self._log_refusal(info.get("version"), reason)
             return None
         # ORIGIN PINNING (CORE-M10): an absolute URL is only followed when it
@@ -810,16 +1340,19 @@ class UpgradeManager:
                 "upgrade: REFUSING an update URL that isn't on the dashboard's own host "
                 "(%r vs dashboard_url %r)", url, base,
             )
+            self.last_failure = ERROR_REFUSED
             return None
         if url.startswith("/"):
             if not base:
                 log.warning("upgrade: dashboard_url is not configured -- cannot download")
+                self.last_failure = ERROR_REFUSED
                 return None
             url = base + url
         # TRANSPORT (item 4): checked after the origin is resolved, because
         # "which scheme and host will this actually hit" is only settled here.
         ok_transport, note = transport_ok(base)
         if not ok_transport:
+            self.last_failure = ERROR_REFUSED
             self._log_refusal(info.get("version"), note)
             return None
         self._log_transport_once(note)
@@ -845,6 +1378,7 @@ class UpgradeManager:
                     "(+ margin) -- refusing to download it",
                     free / 1_000_000, dest_dir, needed / 1_000_000,
                 )
+                self.last_failure = ERROR_SPACE
                 return None
         except Exception:
             log.debug("upgrade: free-space check failed; continuing", exc_info=True)
@@ -898,10 +1432,12 @@ class UpgradeManager:
                 )
             else:
                 log.warning("upgrade: download failed: %s", exc)
+            self.last_failure = ERROR_DOWNLOAD
             self._unlink_quietly(tmp)
             return None
         if digest.hexdigest() != info.get("sha256"):
             log.warning("upgrade: sha256 mismatch on downloaded build -- discarding it")
+            self.last_failure = ERROR_SHA
             self._unlink_quietly(tmp)
             return None
         self._make_executable(tmp)
@@ -959,6 +1495,9 @@ class UpgradeManager:
 
     def _apply_inner(self, info: dict[str, Any]) -> bool:
         exe = Path(sys.executable)
+        # Cleared here, not on success: every return below this line either
+        # sets a code or is the swap going through (REL-8).
+        self.last_failure = ""
         new = self.download_and_verify(info, exe.parent)
         if new is None:
             return False
@@ -971,12 +1510,14 @@ class UpgradeManager:
             self._replace(exe, old)
         except Exception as exc:
             log.warning("upgrade: could not move the running exe aside: %s", exc)
+            self.last_failure = ERROR_SWAP
             self._unlink_quietly(new)
             return False
         try:
             self._replace(new, exe)
         except Exception as exc:
             log.warning("upgrade: could not move the new exe into place: %s -- rolling back", exc)
+            self.last_failure = ERROR_SWAP
             self._rollback(old, exe, aside=None)
             # The new build is still parked at the .new download and we are not going
             # to run it -- don't leave 20 MB behind.
@@ -986,6 +1527,7 @@ class UpgradeManager:
             child = self._spawn(exe)
         except Exception as exc:
             log.warning("upgrade: could not launch the new build: %s -- rolling back", exc)
+            self.last_failure = ERROR_EXEC
             self._rollback(old, exe, aside=new)
             return False
 
@@ -1006,6 +1548,7 @@ class UpgradeManager:
                         "launch -- rolling back rather than standing down",
                         code, CHILD_TAKEOVER_GRACE_SECONDS,
                     )
+                    self.last_failure = ERROR_EXEC
                     self._rollback(old, exe, aside=new)
                     return False
                 self._sleep(CHILD_TAKEOVER_POLL_SECONDS)

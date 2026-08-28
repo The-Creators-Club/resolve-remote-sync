@@ -62,6 +62,8 @@ import sys
 import tarfile
 import threading
 import time
+import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +96,27 @@ RESTART_EXIT_CODE = 75
 # still counts as a failed boot, short enough that a restart storm cannot
 # outrun it.
 BOOT_HEALTHY_SECONDS = 45.0
+
+# ...and then it has to PROVE it can serve (REL-6, resilience sweep
+# 2026-08-28). Sleeping and unlinking the counter proved only that the process
+# had not exited: a tree that imports cleanly (which is exactly what
+# stage-verify tested), binds the port and then 500s every request -- a
+# template missing from the tarball, a lifespan thread deadlocked -- was
+# marked permanently healthy, so select_code_root kept booting it, the
+# auto-revert never fired, and the admin could not roll it back because the
+# dashboard is the thing that is broken. The probe is one loopback GET of the
+# route the container healthcheck already reads; it must answer 200 with THIS
+# build's version. Retried, because a slow first request on a NAS under load
+# is not a wedged dashboard.
+BOOT_HEALTH_PROBE_SECONDS = 45.0
+BOOT_HEALTH_PROBE_INTERVAL = 3.0
+BOOT_HEALTH_PROBE_TIMEOUT = 10.0
+
+# This process, distinctly from any other that ever had this pid (REL-9).
+# Container pids are small and deterministic -- run.sh is pid 1 and uvicorn is
+# its child -- so `owner_pid == os.getpid()` was true for a NEW process reading
+# a DEAD process's latch, and the 409 that healed on a restart did not.
+PROCESS_NONCE = uuid.uuid4().hex
 
 # Two failed boots of a volume tree revert it. One is not enough (a NAS that
 # lost power mid-boot is not a bad bundle); three would mean two full outages
@@ -311,6 +334,79 @@ def clear_boot_attempts(settings) -> None:
         log.warning("could not clear %s: %s", path, exc)
 
 
+def _loopback_opener():
+    """The opener the health probe uses. Its own function purely as a test
+    seam: the suite stubs THIS, never urlopen (docs/GOTCHAS.md section 12 --
+    no dashboard call may follow a redirect, and a test that patches urlopen
+    is a test that does not exercise the opener the code actually builds)."""
+    return urllib.request.build_opener(_NoLoopbackRedirect)
+
+
+class _NoLoopbackRedirect(urllib.request.HTTPRedirectHandler):
+    """A 30x from our own health route is a misconfiguration, not a hop to
+    follow: the one thing this probe must not do is measure some OTHER
+    server's health."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        return None
+
+
+def dashboard_port(settings) -> int:
+    """The port uvicorn is listening on, as run.sh set it. DASH_PORT wins
+    because it is what the process was actually started with; settings.port
+    is the same value in every deployment and the fallback for a test."""
+    raw = (os.environ.get("DASH_PORT") or "").strip()
+    try:
+        if raw:
+            return int(raw)
+    except ValueError:
+        pass
+    return int(getattr(settings, "port", 0) or 8480)
+
+
+def probe_health(settings, *, timeout: float = BOOT_HEALTH_PROBE_TIMEOUT) -> tuple[bool, str]:
+    """(this dashboard is serving, why not). One loopback GET, no credential:
+    /api/v1/health is in app.py's _OPEN_EXACT for exactly this, and the
+    unauthenticated body carries `ok` and `version`, which is all this asks
+    about. `ok` itself is deliberately NOT required -- an unreachable
+    Syncthing makes it False, and that is not a reason to revert the code."""
+    url = f"http://127.0.0.1:{dashboard_port(settings)}/api/v1/health"
+    try:
+        with _loopback_opener().open(url, timeout=timeout) as resp:
+            code = int(getattr(resp, "status", None) or resp.getcode() or 0)
+            raw = resp.read(64 * 1024)
+    except Exception as exc:                                          # noqa: BLE001
+        return False, f"{url} did not answer ({type(exc).__name__}: {exc})"
+    if code != 200:
+        return False, f"{url} answered {code}"
+    try:
+        body = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        return False, f"{url} answered 200 with something that is not JSON"
+    served = str((body or {}).get("version") or "")
+    if served != VERSION:
+        return False, (f"{url} answered 200 as version {served or '?'}, but this process "
+                       f"is {VERSION}")
+    return True, ""
+
+
+def wait_until_serving(settings, *, deadline_seconds: float = BOOT_HEALTH_PROBE_SECONDS,
+                       interval: float = BOOT_HEALTH_PROBE_INTERVAL) -> tuple[bool, str]:
+    """Probe until it answers or the window closes. The LAST failure is what
+    is returned: an operator reading the log needs the reason it never came
+    up, not the first transient one."""
+    ok, why = probe_health(settings)
+    if ok:
+        return True, ""
+    deadline = time.monotonic() + max(0.0, deadline_seconds)
+    while time.monotonic() < deadline:
+        time.sleep(max(0.1, interval))
+        ok, why = probe_health(settings)
+        if ok:
+            return True, ""
+    return False, why
+
+
 def start_boot_watchdog(settings) -> threading.Thread | None:
     """Arm the "this boot is healthy" timer. Best-effort and daemon: a
     dashboard that cannot write its own state files still has to serve the
@@ -319,10 +415,19 @@ def start_boot_watchdog(settings) -> threading.Thread | None:
         return None
 
     def _run() -> None:
+        # Uptime first (a build that crashes on its first request must still
+        # count as a failed boot), THEN proof that it can serve.
         time.sleep(BOOT_HEALTHY_SECONDS)
+        ok, why = wait_until_serving(settings)
+        if not ok:
+            log.error(
+                "this boot is NOT healthy: %s. Leaving boot_attempts standing -- "
+                "%d failed boots revert /data/code/current.json to the previous tree "
+                "at the next start (REL-6).", why, MAX_BOOT_ATTEMPTS)
+            return
         clear_boot_attempts(settings)
-        log.info("dashboard code boot marked healthy (%s, source=%s)",
-                 VERSION, running_source(settings))
+        log.info("dashboard code boot marked healthy (%s, source=%s): /api/v1/health "
+                 "answered 200 with this version", VERSION, running_source(settings))
 
     thread = threading.Thread(target=_run, name="code-boot-watchdog", daemon=True)
     thread.start()
@@ -362,16 +467,23 @@ def _heal_orphaned_progress(settings, state: dict[str, Any]) -> dict[str, Any]:
     if not state.get("in_progress") or state.get("restart_requested"):
         return state
     owner = state.get("owner_pid")
-    if owner == os.getpid():
+    # REL-9 (resilience sweep 2026-08-28): the pid alone was not "this
+    # process". run.sh is pid 1 and uvicorn is its child, so a container that
+    # lost power mid-download came back and gave the new worker the SAME small
+    # pid the dead one had -- and this guard then read the dead latch as live,
+    # 409ing every apply AND every rollback for ever, on the appliance shape
+    # where there is no shell to delete the file with.
+    if owner == os.getpid() and state.get("owner_nonce") == PROCESS_NONCE:
         return state
     step = str(state.get("step") or "?")
     log.warning("clearing a stale dashboard-update in-progress flag left at step %s "
-                "by pid %s (this process is %s) -- the worker that owned it is gone",
-                step, owner, os.getpid())
+                "by pid %s/%s (this process is %s/%s) -- the worker that owned it is gone",
+                step, owner, state.get("owner_nonce") or "?", os.getpid(), PROCESS_NONCE)
     state.update({
         "step": "failed",
         "in_progress": False,
         "owner_pid": None,
+        "owner_nonce": "",
         "error": f"interrupted by a restart at step {step}",
         "finished_at": db.utcnow_iso(),
         "updated_at": db.utcnow_iso(),
@@ -388,8 +500,11 @@ def _set_state(settings, **fields: Any) -> dict[str, Any]:
     # _heal_orphaned_progress (dash-release-ai-2).
     if fields.get("in_progress"):
         state["owner_pid"] = os.getpid()
+        # ...and WHICH process (REL-9): a pid repeats, this does not.
+        state["owner_nonce"] = PROCESS_NONCE
     elif "in_progress" in fields:
         state["owner_pid"] = None
+        state["owner_nonce"] = ""
     state["updated_at"] = db.utcnow_iso()
     _write_json(update_state_path(settings), state)
     return state
@@ -683,7 +798,18 @@ if targets.get("broll"):
 if targets.get("music"):
     record("migrate music.db (copy)", migrate_music)
 
-print(json.dumps({"ok": ok, "checks": checks}))
+# REL-10: the highest dashboard schema THIS tree knows how to run against.
+# Asked of the new code rather than derived here, because the new code is the
+# only thing that knows -- and it is what a later rollback compares the LIVE
+# database against before going back to an older tree.
+schema_version = 0
+try:
+    from ccsync_dashboard import db as _db
+    schema_version = int(_db.SCHEMA_VERSION)
+except Exception:
+    schema_version = 0
+
+print(json.dumps({"ok": ok, "checks": checks, "schema_version": schema_version}))
 '''
 
 
@@ -778,6 +904,166 @@ def backup_databases(settings, label: str) -> dict[str, Any]:
         "databases": made, "skipped": skipped,
     })
     return {"dir": str(dest_dir), "databases": made, "skipped": skipped}
+
+
+# -------------------------------------------------- schema vs code (REL-10)
+
+def live_schema_versions(settings) -> dict[str, int]:
+    """`PRAGMA user_version` of every database an apply migrates.
+
+    Read at APPLY time into current.json, so that a later rollback can answer
+    "the code you are going back to predates the schema this database is on"
+    without having to know what the old tree would have done. Best-effort per
+    database: one unreadable index must not stop an update."""
+    out: dict[str, int] = {}
+    for name, path in _db_paths(settings).items():
+        try:
+            conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5.0)
+        except sqlite3.Error:
+            continue
+        try:
+            row = conn.execute("PRAGMA user_version").fetchone()
+            out[name] = int(row[0]) if row else 0
+        except sqlite3.Error:
+            pass
+        finally:
+            conn.close()
+    return out
+
+
+def tree_schema_version(settings, version: str) -> int | None:
+    """The dashboard schema an applied tree was built for, from its
+    manifest.json (written at apply time from the stage-verify answer). None
+    means "we cannot tell": a tree applied before REL-10, or the image, whose
+    manifest this dashboard never wrote. None is NOT zero and must never read
+    as "safe" -- see rollback."""
+    if not version:
+        return None
+    manifest = _read_json(version_dir(settings, version) / "manifest.json")
+    value = manifest.get("schema_version")
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def backup_for_version(settings, version: str) -> str:
+    """The newest backup taken BEFORE `version` was applied, by name. This is
+    the directory an admin has to restore alongside a rollback that goes back
+    past a migration, and naming it is the whole point of REL-10: "restore a
+    backup" is not an instruction anybody can act on at 2am."""
+    label = f"before-{version}"
+    for entry in list_backups(settings):
+        if str(entry.get("name", "")).endswith(f"-{label}"):
+            return str(entry["name"])
+    return ""
+
+
+# ------------------------------------------------------ bounded disk (REL-5)
+
+# Nothing on the release path ever pruned, and a full /data is a SQLite write
+# failure -- i.e. the dashboard that tells everyone whether their footage is
+# syncing going down (REL-5, resilience sweep 2026-08-28). A backup per apply
+# and a code tree per version, both kept for ever, are what fills it.
+#
+# Three per label, because the labels are per-version (`before-0.7.19`): the
+# useful history is "the last few updates", and a fourth copy of broll.db is
+# gigabytes. The size budget is the second bound, for a site whose indexes are
+# large enough that even three is too many.
+BACKUPS_KEEP_PER_LABEL = 3
+BACKUPS_KEEP_TOTAL = 8
+BACKUPS_MAX_BYTES = 8 * 1024 * 1024 * 1024
+# The running tree, the one it can roll back to, and one more.
+CODE_TREES_KEEP = 3
+# A publish (a package, or a bundle fetched by the feed) is refused below
+# this, the way an apply already is. Same floor, same reason.
+PUBLISH_MIN_FREE_BYTES = MIN_FREE_BYTES
+
+
+def data_space(settings) -> dict[str, Any]:
+    """The `/data` gauge for /api/v1/health and the Packages page. -1 means
+    "could not measure", which must never be rendered as roomy."""
+    root = data_dir(settings)
+    try:
+        usage = shutil.disk_usage(str(root))
+    except OSError as exc:                                            # noqa: BLE001
+        return {"path": str(root), "free_bytes": -1, "total_bytes": -1,
+                "error": str(exc)}
+    return {"path": str(root), "free_bytes": int(usage.free),
+            "total_bytes": int(usage.total),
+            "used_percent": (round(100.0 * (usage.total - usage.free) / usage.total, 1)
+                             if usage.total else None),
+            "error": ""}
+
+
+def _backup_label(name: str) -> str:
+    """`20260828T101500Z-before-0.7.19` -> `before-0.7.19`."""
+    _, _, label = str(name).partition("-")
+    return label
+
+
+def prune_backups(settings) -> list[str]:
+    """Keep the newest BACKUPS_KEEP_PER_LABEL per label, then trim the whole
+    directory to BACKUPS_KEEP_TOTAL and BACKUPS_MAX_BYTES, newest first.
+
+    Deletes only directories this module wrote (they carry a backup.json), and
+    never the newest one of all -- a bounded history is still a history."""
+    entries = list_backups(settings)                    # newest first
+    removed: list[str] = []
+    per_label: dict[str, int] = {}
+    keep: list[dict[str, Any]] = []
+    for entry in entries:
+        label = _backup_label(entry["name"])
+        per_label[label] = per_label.get(label, 0) + 1
+        if per_label[label] > BACKUPS_KEEP_PER_LABEL:
+            removed.append(entry["name"])
+        else:
+            keep.append(entry)
+    running_bytes = 0
+    for index, entry in enumerate(keep):
+        running_bytes += int(entry.get("size_bytes") or 0)
+        if index == 0:
+            continue
+        if index >= BACKUPS_KEEP_TOTAL or running_bytes > BACKUPS_MAX_BYTES:
+            removed.append(entry["name"])
+    for name in removed:
+        target = backups_dir(settings) / name
+        if not (target / "backup.json").is_file():
+            continue
+        shutil.rmtree(target, ignore_errors=True)
+    if removed:
+        log.info("pruned %d old database backup(s): %s", len(removed), ", ".join(removed))
+    return removed
+
+
+def prune_code_trees(settings) -> list[str]:
+    """Keep the running tree, the one current.json can roll back to, and the
+    next newest. Every other `/data/code/<version>` is a full source tree that
+    nothing can reach any more."""
+    current = _read_json(current_json_path(settings))
+    protected = {str(current.get("version") or ""), str(current.get("previous") or ""),
+                 VERSION}
+    versions: list[str] = []
+    root = code_dir(settings)
+    if not root.is_dir():
+        return []
+    for entry in root.iterdir():
+        if entry.is_dir() and (entry / "manifest.json").is_file():
+            versions.append(entry.name)
+    versions.sort(key=version_tuple, reverse=True)
+    keep = [v for v in versions if v in protected]
+    for version in versions:
+        if len(keep) >= CODE_TREES_KEEP:
+            break
+        if version not in keep:
+            keep.append(version)
+    removed = [v for v in versions if v not in keep]
+    for version in removed:
+        shutil.rmtree(root / version, ignore_errors=True)
+    if removed:
+        log.info("pruned %d old code tree(s) from %s: %s",
+                 len(removed), root, ", ".join(removed))
+    return removed
 
 
 def list_backups(settings) -> list[dict[str, Any]]:
@@ -983,6 +1269,15 @@ def apply(settings, app_state, *, version: str, force: bool = False,
         # deploy/select_code_root.py re-verifies at EVERY boot, so a tree
         # without it is a tree the image will refuse to run.
         _write_json(staging / "record.json", dict(record))
+        # REL-10: what schema this tree knows, from the tree itself (the
+        # stage-verify subprocess asked its db module). Written into the
+        # manifest AFTER verify_extracted_tree has compared the manifest with
+        # the signed record, so it can add nothing to what was verified -- and
+        # read back by a later rollback, which is the only thing that can be
+        # too late to ask.
+        staged_manifest = dict(manifest)
+        staged_manifest["schema_version"] = int(checks.get("schema_version") or 0)
+        _write_json(staging / "manifest.json", staged_manifest)
 
         _set_state(settings, step="swapping", message="swapping the code tree in")
         if final.exists():
@@ -997,10 +1292,25 @@ def apply(settings, app_state, *, version: str, force: bool = False,
             "applied_at": db.utcnow_iso(),
             "applied_by": started_by,
             "record_sha": str(record.get("sha256") or ""),
+            # REL-10: where the live databases stood when this tree took over,
+            # and which backup holds them at that point. A rollback compares
+            # the LIVE user_version against what the target tree knows, and
+            # names this directory when they disagree.
+            "db_user_versions": live_schema_versions(settings),
+            "schema_version": int(checks.get("schema_version") or 0),
+            "backup": str(backup.get("dir") or ""),
         })
         # A fresh counter for the tree about to boot: whatever the last one
         # was about, it was not this.
         boot_attempts_path(settings).unlink(missing_ok=True)
+        # REL-5: bounded, and only now that current.json names what may not be
+        # deleted. Best-effort -- an update must never fail on its own tidying,
+        # and the free-space floor in preflight is the guard that matters.
+        try:
+            prune_backups(settings)
+            prune_code_trees(settings)
+        except OSError as exc:                                        # noqa: BLE001
+            log.warning("could not prune /data after the swap: %s", exc)
         log.warning("dashboard code %s applied (from %s, by %s); restarting",
                     version, VERSION, started_by or "?")
         result = {"version": version, "sha256": sha, "size_bytes": size,
@@ -1015,8 +1325,27 @@ def apply(settings, app_state, *, version: str, force: bool = False,
             shutil.rmtree(staging, ignore_errors=True)
 
 
+def schema_rollback_check(settings, target: str) -> dict[str, Any]:
+    """Is the live dashboard schema above what `target` knows (REL-10)?
+
+    Returns {"safe", "unknown", "live", "target", "backup"}. `target` "" is
+    the image, and a tree applied before REL-10 carries no schema in its
+    manifest either: both are UNKNOWN, which is not the same answer as safe.
+    Unknown does not refuse -- the image is the escape hatch of last resort
+    and blocking it would be worse than the risk it guards -- but it is SAID,
+    on the page and in the confirmation, rather than rendered as fine."""
+    live = int(live_schema_versions(settings).get("dashboard") or 0)
+    known = tree_schema_version(settings, target)
+    current = _read_json(current_json_path(settings))
+    backup = (backup_for_version(settings, str(current.get("version") or ""))
+              or Path(str(current.get("backup") or "")).name)
+    return {"live": live, "target": known, "backup": backup,
+            "unknown": known is None,
+            "safe": known is None or known >= live}
+
+
 def rollback(settings, *, to_version: str = "", restore_db: str = "",
-             started_by: str = "") -> dict[str, Any]:
+             acknowledge_schema: bool = False, started_by: str = "") -> dict[str, Any]:
     """Go back to the previous tree (or the image), optionally restoring a
     named database backup.
 
@@ -1043,6 +1372,26 @@ def rollback(settings, *, to_version: str = "", restore_db: str = "",
         if not (version_dir(settings, target) / "manifest.json").is_file():
             raise DashboardUpdateError(
                 404, f"there is no applied code tree for {target} on this dashboard")
+    # REL-10 (resilience sweep 2026-08-28): the code goes back, the DATABASE
+    # does not. Forward-only additive migrations survive that; a rename or a
+    # NOT NULL column does not, and until now nothing checked and the UI said
+    # nothing. Refused rather than warned, because the safe-looking choice (no
+    # restore_db, so today's reports are kept) is exactly the one that breaks
+    # -- and the refusal names the backup to restore alongside it.
+    schema = schema_rollback_check(settings, target)
+    if not schema["safe"] and not restore_db and not acknowledge_schema:
+        known = f"schema v{schema['target']}"
+        needs = (f"restore backup {schema['backup']} alongside it"
+                 if schema["backup"] else
+                 "restore a database backup taken before that update alongside it")
+        raise DashboardUpdateError(
+            409,
+            f"rolling back to {target or 'the image'} means running {known} against a "
+            f"database that is on schema v{schema['live']}. Additive columns survive "
+            f"that; a renamed or NOT NULL one does not. To go back safely, {needs} - "
+            "which also takes today's reports back to that moment. Send restore_db with "
+            "the backup name, or acknowledge_schema to go back with the database as it "
+            "is.")
     restored = restore_backup(settings, restore_db) if restore_db else {}
     _write_json(current_json_path(settings), {
         "version": target,
@@ -1053,7 +1402,7 @@ def rollback(settings, *, to_version: str = "", restore_db: str = "",
     })
     boot_attempts_path(settings).unlink(missing_ok=True)
     result = {"version": target or "image", "restored": restored,
-              "rolled_back_from": current.get("version")}
+              "rolled_back_from": current.get("version"), "schema": schema}
     _set_state(settings, step="restarting", in_progress=True, version=target,
                message="rolling back", last_applied=result, error="")
     request_restart(settings)
@@ -1162,7 +1511,83 @@ def status(settings, app_state) -> dict[str, Any]:
         "last_error": str(state.get("error") or ""),
         "backups": list_backups(settings),
         "boot_attempts": int(_read_json(boot_attempts_path(settings)).get("attempts") or 0),
+        # REL-5: the volume this dashboard's database lives on. On the page an
+        # admin already visits to publish 40 MB packages onto it.
+        "data": data_space(settings),
+        # REL-10: what a rollback would mean for the database, worked out here
+        # so the page can say it BEFORE the button is pressed rather than
+        # answering 409 after.
+        "schema": schema_rollback_check(settings, str(current.get("previous") or "")),
     }
+
+
+# REL-11 (resilience sweep 2026-08-28): a feed that has been unreachable for
+# weeks was visible on exactly one admin page. A site that quietly stops
+# receiving fixes is indistinguishable from one where no fixes were published,
+# and the customer's outbound DNS filter (or a renamed release tag) is not
+# something anybody goes looking for.
+FEED_STALE_DAYS = 7
+
+
+def _age_days(stamp: str, now: str = "") -> float | None:
+    if not stamp:
+        return None
+    try:
+        then = db.parse_iso(stamp)
+        return max(0.0, (db.parse_iso(now or db.utcnow_iso()) - then).total_seconds() / 86400.0)
+    except (ValueError, TypeError):
+        return None
+
+
+def feed_health(conn, settings, app_state) -> dict[str, Any]:
+    """`feed` for /api/v1/health: when the vendor channel was last read, how
+    long ago that is, why it failed and how many records it carried.
+
+    An unconfigured feed answers `configured: False` and nothing else -- a
+    site that was never pointed at a channel is not a site whose updates are
+    broken, and saying otherwise would train an operator to ignore this."""
+    configured = bool(getattr(settings, "release_feed_url", ""))
+    if not configured:
+        return {"configured": False, "last_checked_at": None, "age_days": None,
+                "last_error": None, "records": 0, "stale": False}
+    state = db.get_feed_state(conn)
+    checked = str(state.get("last_checked_at") or "")
+    age = _age_days(checked)
+    try:
+        records = len(release_feed.verified_records(app_state) or [])
+    except Exception:                                                 # noqa: BLE001
+        records = 0
+    return {
+        "configured": True,
+        "last_checked_at": checked or None,
+        "age_days": None if age is None else round(age, 2),
+        "last_error": str(state.get("last_error") or "") or None,
+        "records": records,
+        # Never checked at all is STALE, not fine: "could not check" must not
+        # render as a reassurance (the sweep's rule).
+        "stale": age is None or age > FEED_STALE_DAYS,
+    }
+
+
+def record_feed_runtime_mismatch(conn, settings, app_state) -> dict[str, Any] | None:
+    """Persist "every dashboard build on offer needs a new container image".
+
+    The condition REL-11 asks for a distinct banner about: the vendor bumped
+    the dependency lock, so every bundle's runtime_id diverges from this
+    customer's image and every update lands in `runtime_updates` behind a NAS
+    click nobody makes. Written into `meta` because the fleet page's builder
+    has a connection and no access to the in-memory feed cache."""
+    view = status(settings, app_state)
+    if view.get("runtime_updates") and not view.get("code_updates"):
+        payload = {
+            "at": db.utcnow_iso(),
+            "versions": [str(u.get("version") or "") for u in view["runtime_updates"]][:5],
+            "nas_hint": view.get("nas_hint") or "",
+        }
+    else:
+        payload = None
+    db.set_feed_runtime_mismatch(conn, payload)
+    return payload
 
 
 def nas_update_hint(settings) -> str:
@@ -1190,6 +1615,9 @@ class ApplyIn(BaseModel):
 class RollbackIn(BaseModel):
     to_version: str = ""
     restore_db: str = ""
+    # REL-10: "yes, I know the database stays where it is". Its own field
+    # rather than `force`, because it acknowledges ONE named consequence.
+    acknowledge_schema: bool = False
 
 
 @router.get("")
@@ -1229,7 +1657,9 @@ def api_dashboard_update_rollback(
     settings = request.app.state.settings
     try:
         result = rollback(settings, to_version=payload.to_version.strip(),
-                          restore_db=payload.restore_db.strip(), started_by=user)
+                          restore_db=payload.restore_db.strip(),
+                          acknowledge_schema=bool(payload.acknowledge_schema),
+                          started_by=user)
     except DashboardUpdateError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
     return {"ok": True, **result}

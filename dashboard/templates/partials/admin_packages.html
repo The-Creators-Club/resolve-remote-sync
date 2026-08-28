@@ -6,6 +6,26 @@
     <div class="banner">▲ {{ error }}</div>
   {% endif %}
 
+  {# REL-5 (resilience sweep 2026-08-28): the volume every package below is
+     written to, on the page that writes them. Nothing measured it before, and
+     a full /data is a SQLite write failure on the database that tells the
+     whole fleet whether its footage is syncing. "could not measure" is said as
+     that, never as a comfortable number. #}
+  {% if packages.data %}
+    {% if packages.data.free_bytes is not none and packages.data.free_bytes < 0 %}
+      <div class="banner">▲ could not measure free space on {{ packages.data.path or "the data volume" }}.</div>
+    {% elif packages.data.free_bytes < 2147483648 %}
+      <div class="banner alarm">⛔ {{ packages.data.free_bytes | human_bytes }} FREE on the data volume
+        ({{ packages.data.path }}). Publishing is refused below a safety floor, and a full volume stops
+        every write this dashboard makes. Old builds are pruned on publish; database backups and old code
+        trees are pruned on each dashboard update.</div>
+    {% else %}
+      <div class="muted">data volume: {{ packages.data.free_bytes | human_bytes }} free
+        of {{ packages.data.total_bytes | human_bytes }}
+        <span class="mono-sm">{{ packages.data.path }}</span></div>
+    {% endif %}
+  {% endif %}
+
   {% if packages.packages %}
     <table class="editors">
       <thead><tr><th>KIND</th><th>VERSION</th><th>PLATFORM</th><th>SIZE</th><th>SHA256</th><th>PUBLISHED</th><th>BY</th><th></th><th></th></tr></thead>
@@ -14,7 +34,16 @@
         <tr class="editor-row">
           <td class="mono-sm muted">{{ p.kind }}</td>
           <td class="mono-sm">{{ p.version }}
+            {# REL-13 (resilience sweep 2026-08-28): "+dirty" used to die at the
+               publish boundary, so the fleet's 0.9.55 could correspond to no
+               commit in the repo, permanently and invisibly. #}
+            {% if p.git_dirty %}<span class="chip amber" title="built from uncommitted code">(+dirty, {{ p.git_sha or "no commit" }})</span>
+            {% elif p.git_sha %}<span class="muted mono-sm" title="the commit this build came from">{{ p.git_sha }}</span>{% endif %}
             {% if p.is_current %}<span class="chip green">[ CURRENT ]</span>{% endif %}
+            {% if p.kind == "companion" and not p.is_current and not p.retracted %}<span class="chip">[ STAGED ]</span>{% endif %}
+            {% if p.arch %}<span class="chip" title="the CPU this binary was built for">{{ p.arch }}</span>{% endif %}
+            {% if p.retracted %}<span class="chip red" title="{{ p.retracted_reason }}">[ RECALLED ]</span>{% endif %}
+            {% if p.ordering_blocked %}<span class="chip red" title="needs dashboard {{ p.requires_dashboard }}, this dashboard is {{ packages.dashboard_version }}">[ UPDATE THE DASHBOARD FIRST ]</span>{% endif %}
             {% if not p.file_exists %}<span class="chip red" title="row exists but the file is gone from the packages dir">[ FILE MISSING ]</span>{% endif %}
             {# COMMERCIAL_READINESS.md item 4, 2026-08-17: a row published before
                release signing exists carries no signature, and every companion
@@ -29,7 +58,31 @@
           <td class="muted">{{ p.published_at | ago }}</td>
           <td class="muted">{{ p.published_by }}</td>
           <td>
-            {% if not p.is_current %}
+            {# REL-1: a build is STAGED first and reaches the fleet only after
+               one machine has actually run it. The canary line is the evidence
+               the click is made on; the override needs the version typed. #}
+            {% if p.soak and not p.is_current and not p.retracted %}
+              <div class="muted mono-sm" style="margin-bottom:0.2rem">
+                canary: {{ p.soak.machines }} machine(s) on {{ p.version }}
+                for {{ p.soak.minutes }} min, {{ p.soak.crashes }} crashes
+                {%- if p.soak.reverted %}, {{ p.soak.reverted }} rolled back{% endif %}
+                (soak {{ p.soak.soak_minutes }} min)
+              </div>
+              <form class="inline-form" hx-post="/partials/admin/packages/push-one"
+                    hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+                <input type="hidden" name="platform" value="{{ p.platform }}">
+                <input type="hidden" name="version" value="{{ p.version }}">
+                <select name="target">
+                  <option value="">pick a machine…</option>
+                  {% for m in packages.machines_by_platform.get(p.platform, []) %}
+                    <option value="{{ m.editor_username }}/{{ m.machine }}">{{ m.editor_username }}/{{ m.machine }} ({{ m.companion_version or "?" }})</option>
+                  {% endfor %}
+                </select>
+                <button class="btn" type="submit"
+                        title="ask one machine to take this build on its next report">[ PUSH TO ONE MACHINE ]</button>
+              </form>
+            {% endif %}
+            {% if not p.is_current and not p.retracted %}
             <form class="inline-form" hx-post="/partials/admin/packages/current"
                   hx-target="closest .admin-packages-box" hx-swap="outerHTML">
               <input type="hidden" name="kind" value="{{ p.kind }}">
@@ -37,6 +90,18 @@
               <input type="hidden" name="version" value="{{ p.version }}">
               <button class="btn" type="submit">[ MAKE CURRENT ]</button>
             </form>
+            {% if p.soak and not p.soak.ok %}
+            <form class="inline-form" hx-post="/partials/admin/packages/current"
+                  hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+              <input type="hidden" name="kind" value="{{ p.kind }}">
+              <input type="hidden" name="platform" value="{{ p.platform }}">
+              <input type="hidden" name="version" value="{{ p.version }}">
+              <input type="hidden" name="force" value="1">
+              <input type="text" name="confirm" placeholder="type {{ p.version }}" size="12">
+              <button class="btn" type="submit"
+                      title="hand this build to the whole fleet without waiting for the soak">[ MAKE CURRENT ANYWAY ]</button>
+            </form>
+            {% endif %}
             {% endif %}
           </td>
           <td>
@@ -58,6 +123,47 @@
     <div class="muted">nothing published yet</div>
   {% endif %}
 
+  {# REL-3 (resilience sweep 2026-08-28): a build the vendor has RECALLED. It
+     is already un-currented and is offered to nobody; what is left is the
+     machines that took it before the recall arrived, which is what the
+     rollback button is for. #}
+  {% for p in packages.retracted %}
+    <div class="banner" style="margin-top:0.8rem">
+      <span class="chip red">[ RECALLED ]</span>
+      <span class="mono-sm">{{ p.kind }} {{ p.version }} {{ p.platform }}</span>
+      was withdrawn by the vendor{% if p.retracted_reason %}: {{ p.retracted_reason }}{% endif %}.
+      {{ p.machines_running }} machine(s) are still running it.
+      {% if p.kind == "companion" and p.machines_running %}
+      <form class="inline-form" hx-post="/partials/admin/packages/roll-fleet-back"
+            hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+        <input type="hidden" name="platform" value="{{ p.platform }}">
+        <input type="hidden" name="from_version" value="{{ p.version }}">
+        <select name="to_version">
+          {% for q in packages.packages %}
+            {% if q.kind == "companion" and q.platform == p.platform and not q.retracted %}
+              <option value="{{ q.version }}" {% if q.is_current %}selected{% endif %}>{{ q.version }}{% if q.is_current %} (current){% endif %}</option>
+            {% endif %}
+          {% endfor %}
+        </select>
+        <button class="btn" type="submit"
+                title="ask every machine still running the recalled build to take the chosen one on its next report">[ ROLL THE FLEET BACK ]</button>
+      </form>
+      {% endif %}
+    </div>
+  {% endfor %}
+
+  {# REL-16: a machine reporting a CPU no published build covers. Silent when
+     nothing is known, because an empty list means "no machine has told us its
+     arch", which is not the same answer as "every machine is covered". #}
+  {% for gap in packages.arch_gaps %}
+    <div class="banner" style="margin-top:0.6rem">
+      ▲ no {{ gap.platform }}/{{ gap.arch }} build published:
+      {{ gap.machines }} machine(s) report that CPU and the current build is for
+      a different one, so they are offered nothing rather than a binary that
+      cannot run.
+    </div>
+  {% endfor %}
+
   <div class="side-head" style="margin-top:1.2rem">[ OUT-OF-DATE MACHINES ]</div>
   {% if packages.outdated_machines %}
     <table class="editors">
@@ -67,7 +173,9 @@
         <tr class="editor-row">
           <td class="who">{{ m.editor_username }}</td>
           <td class="mono-sm">{{ m.machine }}</td>
-          <td class="mono-sm"><span class="chip amber">[ {{ m.companion_version or "?" }} ]</span></td>
+          <td class="mono-sm"><span class="chip amber">[ {{ m.companion_version or "?" }} ]</span>
+            {% if m.upgrade and m.upgrade.upgrade_reverted_from %}<span class="chip amber" title="this computer installed {{ m.upgrade.upgrade_reverted_from }}, could not start it, and put itself back on the build it is running. Do not make that build current.">[ REVERTED FROM {{ m.upgrade.upgrade_reverted_from }} ]</span>{% endif %}
+          </td>
           <td class="muted">{{ m.received_at | ago }}</td>
           {# Pushed update (2026-08-18): the editor does not have to click
              anything. Their companion applies the build it is ALREADY being
@@ -76,6 +184,11 @@
           <td class="mono-sm">
             {% if m.update_requested %}
               <span class="chip">asked for {{ m.update_requested }}</span>
+              {# REL-8: "asked, waiting for its next report" and "has failed
+                 this build eight times" used to render identically here. #}
+              {% if m.upgrade and m.upgrade.upgrade_attempts %}
+                <span class="chip red" title="{% if m.upgrade.upgrade_last_error %}{{ m.upgrade.upgrade_last_error }}{% else %}no error reported{% endif %}{% if m.upgrade.upgrade_last_attempt_at %} (last tried {{ m.upgrade.upgrade_last_attempt_at | ago }}){% endif %}">[ FAILED x{{ m.upgrade.upgrade_attempts }} ]</span>
+              {% endif %}
               <form class="inline-form" hx-post="/partials/admin/machines/update/cancel"
                     hx-target="closest .admin-packages-box" hx-swap="outerHTML">
                 <input type="hidden" name="editor" value="{{ m.editor_username }}">
@@ -190,6 +303,15 @@
         published here as <span class="mono-sm">{{ c.published_sha256[:12] }}</span>,
         the vendor feed now offers <span class="mono-sm">{{ c.feed_sha256[:12] }}</span>.
         Nothing was replaced. Ask the vendor to publish it under a new version number.
+      </div>
+    {% endfor %}
+
+    {% for r in feed.retracted or [] %}
+      <div class="muted" style="margin-top:0.6rem">
+        <span class="chip red">[ RECALLED BY THE VENDOR ]</span>
+        <span class="mono-sm">{{ r.kind }} {{ r.version }} {{ r.platform }}</span>
+        {%- if r.reason %}: {{ r.reason }}{% endif %}.
+        It is not offered here under any policy.
       </div>
     {% endfor %}
 

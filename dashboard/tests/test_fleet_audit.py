@@ -125,8 +125,12 @@ def test_publishing_and_making_current_are_recorded(env):
         conn, version="0.9.99", platform="windows", filename="ccsync-0.9.99.exe",
         sha256="a" * 64, size_bytes=10, published_by="ci", now=now)
     conn.commit()
+    # The soak gate (REL-1, resilience sweep 2026-08-28) refuses a build no
+    # machine has ever run; this test is about the AUDIT ROW, so it takes the
+    # documented override, which is itself audited as forced.
     assert client.post(
-        "/api/v1/admin/packages/windows/0.9.99/current").status_code == 200
+        "/api/v1/admin/packages/windows/0.9.99/current"
+        "?force=1&confirm=0.9.99").status_code == 200
     row = dbmod.fetch_audit(conn)[0]
     assert (row["action"], row["actor"]) == ("package.make_current", "owen")
     assert row["detail"]["platform"] == "windows"

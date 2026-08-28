@@ -482,7 +482,10 @@ change. Deploy the dashboard before the companions, as always.
 **Wave 3, the release pipeline:** 7, 14, 29, 30, 31, 32. After this a bad
 build reaches one machine first, a crash-looping companion puts itself back,
 a dashboard that cannot serve is not called healthy, and the deploy ordering
-is a refusal rather than a memory.
+is a refusal rather than a memory. **BUILT 2026-08-28** by four builder agents
+(plus REL-5/7/9/10/11/12/13/14/15/16 and OPS-12); ledger section "Resilience
+sweep, wave 3" in `KNOWN_BUGS.md`; dashboard schema v34 + v35. Read the
+overlap constraint there before the next ship.
 
 **Wave 4, the human layer:** 15, 24, 25, 27, 35, 38, 41, plus the ten
 confirmation dialogs in `UX.md`. Notices, audit, halt expiry, the "why"

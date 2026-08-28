@@ -722,6 +722,9 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
         pkg = current_pkg_cache[platform]
         return pkg["version"] if pkg is not None else None
 
+    # Which published builds the vendor has recalled (REL-3, 2026-08-28), read
+    # once for the whole grid: (platform, version) -> reason.
+    retracted_versions = db.retracted_packages(conn, kind="companion")
     platforms = db.fetch_platform_map(conn)
     # Per-machine reported build (schema v10). machine_state is one row per
     # (editor, machine) and outlives a lane_report_current prune, so it is the
@@ -779,6 +782,10 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
     # SYS-7 (resilience sweep 2026-08-28): everything the WHY sentence needs
     # that is not already on the row. All four are ONE query for the whole
     # fleet, because this builder runs every 15 s for every open fleet page.
+    # DASH-2 (resilience sweep 2026-08-28): computers that ARE reporting and
+    # are being turned away, which used to look exactly like computers that
+    # had been switched off.
+    refusals = db.report_refusal_map(conn)
     pending_asks = db.pending_diagnostics_requests(conn)
     diag_stamps = db.diagnostics_stamp_map(conn)
     machine_role = db.machine_modes(conn)
@@ -843,6 +850,10 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
         # answer is on the page the owner opens rather than in a message to
         # the editor whose machine is the broken one.
         entry["guard"]["diagnostics_requested"] = key in pending_asks
+        refusal = refusals.get(key)
+        if refusal:
+            entry["guard"]["report_refused_at"] = refusal.get("at")
+            entry["guard"]["report_refused_reason"] = refusal.get("reason")
         entry["diagnostics"] = diag_stamps.get(key) or {}
         entry["mode"] = machine_role.get(key) or "editor"
         entry["plan"] = plans.get(key) or {}
@@ -883,6 +894,12 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
         # so the fleet view can say "unknown build" instead of silently
         # showing "?" next to a green row.
         entry["companion_version_unknown"] = not entry["companion_version"]
+        # REL-3 (resilience sweep 2026-08-28): this machine is RUNNING a build
+        # the vendor has recalled. Un-currenting a recalled build stops it
+        # reaching anyone new and says nothing at all about the machines that
+        # already took it, which are the ones a recall is about.
+        entry["companion_retracted_reason"] = retracted_versions.get(
+            (platform, entry["companion_version"] or ""))
         result.append(entry)
     result.sort(key=lambda e: (e["editor_username"], e["machine"]))
     # Fleet-level rollups for the banner (item 9). Computed here rather than
@@ -890,6 +907,11 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
     # /partials/fleet poll get the same ones.
     tripped = [e for e in result if (e.get("guard") or {}).get("breaker_tripped")]
     halted = [e for e in result if (e.get("guard") or {}).get("halt_active")]
+    refused_rows = [
+        {"editor": e["editor_username"], "machine": e["machine"],
+         "reason": (e.get("guard") or {}).get("report_refused_reason") or ""}
+        for e in result if (e.get("guard") or {}).get("report_refused_at")
+    ]
     # DASH-16: a computer must never leave this page just because a status
     # table aged out. The `machines` registry row survives every prune, and it
     # still carries the sync plan that is still being enforced for a machine
@@ -916,6 +938,15 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
                 for e in halted
             ],
             "fleet_halt": db.get_fleet_halt(conn),
+            # DASH-2 / REL-11 (resilience sweep 2026-08-28). Three states that
+            # are silent everywhere else: computers being refused, the
+            # rotation drain that explains them, and a vendor feed nobody has
+            # been able to reach. Built here rather than in the template so
+            # both the page and its 15 s poll get the same numbers, and so
+            # each is one testable rule.
+            "report_refused": refused_rows,
+            "identity_key_drain": _identity_drain_block(conn),
+            "feed_alarm": _feed_alarm_block(conn, now),
             # THE COLLECTOR'S OWN BRAKES + per-kind notes (DASH-3 / DASH-4 /
             # DASH-14, resilience sweep 2026-08-28). Here rather than in a
             # second builder because both the fleet page and its every-15s
@@ -924,6 +955,56 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
             # item 9's banners are: nothing else on any page can show it.
             # Redacted for non-admins in _scope_editors_view (device ids).
             "collector": db.collector_health(conn)}
+
+
+def _identity_drain_block(conn: sqlite3.Connection) -> dict[str, Any]:
+    """How many computers were last accepted on a RETIRED session key
+    (DASH-2). Zero is the state an operator is waiting for: it is what says
+    the rotation has drained and DASH_SESSION_SECRET_PREVIOUS can go."""
+    try:
+        entries = db.retired_key_identities(conn)
+    except Exception:  # noqa: BLE001
+        log.exception("could not read the retired-key identity ledger")
+        return {"count": 0, "machines": []}
+    return {"count": len(entries),
+            "machines": sorted(entries.keys())[:20]}
+
+
+def _feed_alarm_block(conn: sqlite3.Connection, now: str) -> dict[str, Any]:
+    """REL-11: "this site has not been able to check for updates since <date>"
+    and "every build on offer needs a new container image", as data.
+
+    Read from the database rather than the in-memory feed cache: this builder
+    runs for every fleet page and has a connection, and the durable half is
+    exactly the half that survives the restart that cleared the cache."""
+    from . import dashboard_update
+
+    try:
+        state = db.get_feed_state(conn)
+        mismatch = db.get_feed_runtime_mismatch(conn)
+    except Exception:  # noqa: BLE001
+        log.exception("could not read the release feed state")
+        return {}
+    checked = str(state.get("last_checked_at") or "")
+    age = None
+    if checked:
+        try:
+            age = max(0.0, db.age_seconds(checked, now) / 86400.0)
+        except (ValueError, TypeError):
+            age = None
+    return {
+        "last_checked_at": checked,
+        "age_days": None if age is None else round(age, 1),
+        "last_error": str(state.get("last_error") or ""),
+        # A feed that HAS been read and has gone quiet. Never-checked is left
+        # off this banner deliberately (unlike /api/v1/health's `stale`, which
+        # is a machine-readable field and says so): this builder cannot see
+        # whether a feed is configured at all, and a site that was never
+        # pointed at a channel must not be told its updates are broken.
+        "stale": bool(checked) and age is not None
+        and age > dashboard_update.FEED_STALE_DAYS,
+        "runtime_mismatch": mismatch or None,
+    }
 
 
 # ------------------------------------------------------- scoping fleet reads
@@ -1033,6 +1114,17 @@ def _scope_editors_view(view: dict[str, Any], scope: auth.Scope) -> dict[str, An
     # footage: it goes entirely rather than being trimmed.
     if not scope.admin:
         view.pop("ignored_report_sections", None)
+        # DASH-2 / REL-11: the rotation drain names machines, and "this site
+        # cannot reach the vendor's feed" is an operator's problem, not an
+        # editor's. The per-machine refusal survives on the editor's OWN rows
+        # (guard.report_refused_*), which is where it is actionable: sign in
+        # on that computer's tray.
+        view.pop("identity_key_drain", None)
+        view.pop("feed_alarm", None)
+    view["report_refused"] = [
+        m for m in view.get("report_refused") or []
+        if _scope_shows(scope, str(m.get("editor") or ""))
+    ]
     return view
 
 
@@ -1132,7 +1224,30 @@ def api_health(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -
         # Best-effort: a health route that cannot answer is worse than one
         # that answers without this block.
         "collector_alarms": _collector_alarms_block(conn),
+        # REL-11 / REL-5 (resilience sweep 2026-08-28). A feed that has been
+        # unreachable for six weeks was visible on exactly one admin page, and
+        # nothing anywhere measured the volume the SQLite database lives on --
+        # which fills silently and turns every write, the fleet's own reports
+        # included, into a disk I/O error. Both are best-effort blocks: a
+        # health route that cannot answer them still has to answer.
+        **_feed_and_space_block(request, conn),
     }
+
+
+def _feed_and_space_block(request: Request, conn: sqlite3.Connection) -> dict[str, Any]:
+    from . import dashboard_update
+
+    settings = request.app.state.settings
+    out: dict[str, Any] = {}
+    try:
+        out["feed"] = dashboard_update.feed_health(conn, settings, request.app.state)
+    except Exception:  # noqa: BLE001
+        log.exception("could not read the release feed state")
+    try:
+        out["data"] = dashboard_update.data_space(settings)
+    except Exception:  # noqa: BLE001
+        log.exception("could not measure free space on the data volume")
+    return out
 
 
 def _collector_alarms_block(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -1652,7 +1767,12 @@ def api_verify(
         # companion/src/ccsync_companion/identity.py.
         "role": "base" if auth.is_admin(settings, username) else "editor",
     }
-    upgrade = _upgrade_info(conn, payload.platform, payload.companion_version)
+    # REL-16 (resilience sweep 2026-08-28): getattr, because `arch` is an
+    # optional report field a companion older than this wave never sends and
+    # a ReportIn/VerifyIn that has not declared it yet does not carry -- and
+    # "no arch reported" is offered everything, exactly as before.
+    upgrade = _upgrade_info(conn, payload.platform, payload.companion_version,
+                            getattr(payload, "arch", None))
     if upgrade is not None:
         result["upgrade"] = upgrade
     return result
@@ -4133,8 +4253,31 @@ def _version_at_least(running: str, wanted: str) -> bool:
     return bool(a and b and a >= b)
 
 
+def _arch_matches(record_arch: str, machine_arch: str) -> bool:
+    """May a machine on `machine_arch` be handed a binary built for
+    `record_arch`? (REL-16, resilience sweep 2026-08-28.)
+
+    A record with no arch is every record published before this wave, and the
+    answer for those is YES -- the channel worked on one arch per platform and
+    silently changing that to "offer nothing" would stop every fleet in the
+    field from upgrading. `universal2` is a Mac bundle carrying both slices.
+
+    A machine that reports no arch is likewise offered everything: it is an
+    older companion, and the pre-existing behaviour is the safe one for it.
+    An arch that is stated on BOTH sides and disagrees is the case this
+    exists for: an Intel Mac downloads, verifies and renames an arm64 binary
+    over its running companion, which then cannot exec.
+    """
+    rec = str(record_arch or "").strip().lower()
+    mach = str(machine_arch or "").strip().lower()
+    if not rec or not mach or rec == "universal2":
+        return True
+    return rec == mach
+
+
 def _upgrade_info(
-    conn: sqlite3.Connection, platform: str | None, running: str | None
+    conn: sqlite3.Connection, platform: str | None, running: str | None,
+    arch: str | None = None,
 ) -> dict[str, Any] | None:
     """The conditional `upgrade` key for report/verify responses.
 
@@ -4156,6 +4299,23 @@ def _upgrade_info(
     current = db.get_current_package(conn, plat, kind="companion")
     if current is None or not running or running == current["version"]:
         return None
+    # Three reasons to offer NOTHING rather than this build (resilience sweep
+    # 2026-08-28). Each is silent to the companion on purpose -- there is no
+    # "refused offer" shape in the protocol and inventing one would reach
+    # every build in the field -- and loud on the Packages page, which is
+    # where somebody can act on it.
+    if _row_str(current, "retracted_at"):
+        # REL-3: the vendor recalled this build. Machines already running it
+        # are rolled back by [ ROLL THE FLEET BACK TO x ], not by silence.
+        return None
+    if package_store.blocks_on_dashboard_version(
+            "companion", _row_str(current, "requires_dashboard")):
+        # REL-4 / SYS-13: this build needs a newer dashboard than the one
+        # answering. Offering it is the ordering violation that CR-22, CR-27a,
+        # CR-49, CR-55, CR-83, CR-85 and CR-87 all are.
+        return None
+    if not _arch_matches(_row_str(current, "arch"), arch or ""):
+        return None
     # MIGRATION SHAPE (item 4, 2026-08-17): version/url/sha256/size_bytes are
     # exactly what they were, in the same places, because 0.7.11 companions
     # are in the field right now and parse_upgrade reads those four keys and
@@ -4164,7 +4324,7 @@ def _upgrade_info(
     # response shape it already understands, and verifies every build after
     # that. A row published before this migration serves signature="" and
     # is refused by any companion new enough to look.
-    return {
+    offer = {
         "version": current["version"],
         "url": f"/api/v1/companion/package/{plat}/{current['version']}",
         "sha256": current["sha256"],
@@ -4178,6 +4338,16 @@ def _upgrade_info(
         "signature": _row_str(current, "signature"),
         "pubkey_id": _row_str(current, "pubkey_id"),
     }
+    # The optional SIGNED extras, present in the offer only when the record
+    # carries them (REL-4, REL-16, 2026-08-28). They are inside the signature,
+    # so omitting one from a record that has it serves a build every verifying
+    # companion would refuse; adding an empty one to a record that has not is
+    # the same failure from the other side. Absent stays absent.
+    for field in ("arch", "requires_dashboard"):
+        value = _row_str(current, field)
+        if value:
+            offer[field] = value
+    return offer
 
 
 def _row_value(row: sqlite3.Row | dict[str, Any], key: str) -> Any:
@@ -4197,10 +4367,28 @@ def _row_str(row: sqlite3.Row | dict[str, Any], key: str) -> str:
     return "" if value is None else str(value)
 
 
+def soak_minutes_for(conn: sqlite3.Connection, settings) -> int:
+    """How long a staged build must have run somewhere before it may be made
+    current (REL-1, resilience sweep 2026-08-28).
+
+    A `meta` row wins over the environment so a site can change it without a
+    redeploy, and the floor is ZERO minutes on purpose: an operator who wants
+    the old behaviour back sets it to 0 rather than learning a force flag.
+    """
+    raw = db.meta_get(conn, "release_soak_minutes")
+    if raw is None:
+        raw = getattr(settings, "release_soak_minutes", db.DEFAULT_SOAK_MINUTES)
+    try:
+        return max(0, int(float(str(raw).strip())))
+    except (TypeError, ValueError):
+        return db.DEFAULT_SOAK_MINUTES
+
+
 def build_packages_view(conn: sqlite3.Connection, settings, now: str | None = None) -> dict[str, Any]:
     now = now or db.utcnow_iso()
     packages = []
     current: dict[str, str] = {}
+    soak_minutes = soak_minutes_for(conn, settings)
     for row in db.fetch_companion_packages(conn):
         entry = {
             "kind": row["kind"],
@@ -4222,7 +4410,32 @@ def build_packages_view(conn: sqlite3.Connection, settings, now: str | None = No
             "min_version": _row_str(row, "min_version"),
             "signed_binary": bool(_row_value(row, "signed_binary") or 0),
             "signed": bool(_row_str(row, "signature")),
+            # The release channel's rollout state (REL-1/REL-3/REL-4/REL-13/
+            # REL-16, resilience sweep 2026-08-28). `rollout` is what this
+            # build IS to the fleet; the rest is what an admin needs in front
+            # of them at the moment they click MAKE CURRENT.
+            "rollout": _row_str(row, "rollout") or (
+                "current" if bool(row["is_current"]) else "staged"),
+            "staged_at": _row_str(row, "staged_at"),
+            "requires_dashboard": _row_str(row, "requires_dashboard"),
+            "arch": _row_str(row, "arch"),
+            "git_sha": _row_str(row, "git_sha"),
+            "git_dirty": bool(_row_value(row, "git_dirty") or 0),
+            "retracted_at": _row_str(row, "retracted_at"),
+            "retracted_reason": _row_str(row, "retracted_reason"),
         }
+        entry["retracted"] = bool(entry["retracted_at"])
+        entry["ordering_blocked"] = package_store.blocks_on_dashboard_version(
+            entry["kind"], entry["requires_dashboard"])
+        # The canary line, for a companion build that is not what the fleet is
+        # already being offered: "canary: 1 machine on 0.9.55 for 22 min,
+        # 0 crashes". Computed for the CURRENT build too, because after a
+        # rollback the admin's next question is about the build they came from.
+        if entry["kind"] == "companion":
+            entry["soak"] = db.soak_state(
+                conn, entry["platform"], entry["version"], soak_minutes, now)
+        else:
+            entry["soak"] = None
         # `current` keeps its pre-kind shape (platform -> version) and keeps
         # meaning "the companion the fleet is offered" -- the onboard current
         # is visible per-row via is_current.
@@ -4246,12 +4459,78 @@ def build_packages_view(conn: sqlite3.Connection, settings, now: str | None = No
             "received_at": e["received_at"],
             "update_requested": pending_updates.get(
                 (e["editor_username"], e["machine"])),
+            # REL-8 (resilience sweep 2026-08-28): what happened when this
+            # machine last TRIED. Beside the request, because "asked, waiting
+            # for its next report" and "has failed this build 8 times" looked
+            # identical here, for ever.
+            "upgrade": {
+                k: (e.get("guard") or {}).get(k) for k in (
+                    "upgrade_version", "upgrade_attempts", "upgrade_last_error",
+                    "upgrade_last_attempt_at", "upgrade_reverted_from")
+            },
         }
         for e in editors["editors"]
         if e["companion_outdated"]
     ]
+    # Who [ PUSH TO ONE MACHINE ] can name (REL-1): every machine that has
+    # reported, grouped by the platform whose build it could take. A staged
+    # build is installable by NAME through the per-machine push channel that
+    # already exists (db.machine_update_request) -- that is what makes a
+    # canary a click instead of a trip to somebody's desk.
+    machines_by_platform: dict[str, list[dict[str, Any]]] = {}
+    for e in editors["editors"]:
+        plat = (e.get("platform") or "windows").strip().lower()
+        machines_by_platform.setdefault(plat, []).append({
+            "editor_username": e["editor_username"],
+            "machine": e["machine"],
+            "companion_version": e["companion_version"],
+            "update_requested": pending_updates.get(
+                (e["editor_username"], e["machine"])),
+        })
+    # REL-16: (platform, arch) pairs machines are reporting that the current
+    # build does not cover. `arch` on machine_state is v35's column, so this
+    # is empty until that lands rather than wrong before it -- an empty list
+    # says "nothing known", which is why the page words it as a gap it FOUND
+    # and stays silent otherwise.
+    arch_gaps: list[dict[str, Any]] = []
+    seen_arch: dict[tuple[str, str], int] = {}
+    for e in editors["editors"]:
+        plat = (e.get("platform") or "windows").strip().lower()
+        mach_arch = str((e.get("guard") or {}).get("arch") or e.get("arch") or "").strip().lower()
+        if not mach_arch:
+            continue
+        seen_arch[(plat, mach_arch)] = seen_arch.get((plat, mach_arch), 0) + 1
+    for (plat, mach_arch), count in sorted(seen_arch.items()):
+        row = db.get_current_package(conn, plat, kind="companion")
+        if row is not None and _arch_matches(_row_str(row, "arch"), mach_arch):
+            continue
+        arch_gaps.append({"platform": plat, "arch": mach_arch, "machines": count})
+    retracted = [p for p in packages if p.get("retracted")]
+    # For [ ROLL THE FLEET BACK TO x ]: how many machines are still running a
+    # recalled build, per (platform, version). The recall's whole point is the
+    # machines that already took it.
+    for entry in retracted:
+        entry["machines_running"] = len(
+            db.machines_running_version(conn, entry["platform"], entry["version"]))
     return {"generated_at": now, "packages": packages, "current": current,
-            "outdated_machines": outdated}
+            "outdated_machines": outdated,
+            "soak_minutes": soak_minutes,
+            "machines_by_platform": machines_by_platform,
+            "arch_gaps": arch_gaps,
+            "retracted": retracted,
+            # REL-5: the volume every one of these packages is written to.
+            "data": _data_space_block(settings),
+            "dashboard_version": VERSION}
+
+
+def _data_space_block(settings) -> dict[str, Any]:
+    from . import dashboard_update
+
+    try:
+        return dashboard_update.data_space(settings)
+    except Exception:  # noqa: BLE001
+        log.exception("could not measure free space on the data volume")
+        return {"free_bytes": -1, "total_bytes": -1, "error": "could not measure"}
 
 
 @router.get("/admin/packages")
@@ -4262,6 +4541,29 @@ def api_admin_packages(
     return build_packages_view(conn, request.app.state.settings)
 
 
+def _refuse_publish_without_space(settings, request: Request) -> None:
+    from . import dashboard_update
+
+    space = _data_space_block(settings)
+    free = int(space.get("free_bytes") or -1)
+    if free < 0:
+        return                    # could not measure: do not guess, do not block
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared = 0
+    needed = declared * 3 + dashboard_update.PUBLISH_MIN_FREE_BYTES
+    if free < needed:
+        raise HTTPException(
+            status_code=507,
+            detail=(f"not enough free space on the data volume: "
+                    f"{free // (1024 * 1024)} MiB free, this publish needs about "
+                    f"{needed // (1024 * 1024)} MiB. Old builds are pruned on publish "
+                    "(current plus the two newest are kept); free some space and "
+                    "try again."),
+        )
+
+
 @router.put("/admin/packages/{platform}/{version}")
 async def api_publish_package(
     platform: str,
@@ -4269,13 +4571,22 @@ async def api_publish_package(
     request: Request,
     sha256: str = "",
     make_current: int = 0,
-    prune: int = 0,
+    prune: int = 1,
     kind: str = "companion",
     signature: str = "",
     pubkey_id: str = "",
     min_version: str = "",
     published_at: str = "",
     signed_binary: int = 0,
+    # SIGNED, optional, companion-only (REL-4/SYS-13, REL-16, 2026-08-28):
+    # the dashboard version this build needs and the CPU it was built for.
+    requires_dashboard: str = "",
+    arch: str = "",
+    # ADVISORY and unsigned (REL-13): which commit this build came from.
+    # Unsigned on purpose -- it changes nothing about what may be installed,
+    # and signing it would cost the overlap release the two above already do.
+    git_sha: str = "",
+    git_dirty: int = 0,
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> dict[str, Any]:
     """Publish a companion build: raw exe bytes as the request body (no
@@ -4285,10 +4596,14 @@ async def api_publish_package(
     served file is always complete, and that two publishes in flight at once
     cannot write into (or delete) each other's staging file.
 
-    `?prune=1` opts IN to deleting all but the current build and the two
-    newest non-current ones. It is off by default: publishing must not
-    silently destroy older build artifacts (rollback material) as a side
-    effect, given the standing no-deletion rule.
+    `prune` deletes all but the current build and the two newest non-current
+    ones, and since REL-5 (resilience sweep 2026-08-28) it is ON by default:
+    `?prune=0` opts out. It used to be opt-in, on the standing no-deletion
+    rule, and neither writer passed it -- so a year of shipping left 50
+    companion exes and 50 onboard exes on the dataset the SQLite database
+    lives on, and a full /data takes the whole dashboard down. Current plus
+    two is the rollback material anybody actually reaches for; the older
+    artefacts are re-publishable from the vendor feed.
 
     SIGNATURE REQUIRED (COMMERCIAL_READINESS.md item 4, 2026-08-17). The
     upload must carry `signature`/`pubkey_id`/`min_version`/`published_at`/
@@ -4371,6 +4686,16 @@ async def api_publish_package(
                    f"{bump} and rebuild",
         )
 
+    # REL-5 (resilience sweep 2026-08-28): refuse BEFORE the body is streamed
+    # when the volume cannot take it. dashboard_update.preflight has refused an
+    # apply at 507 since WP K, and this route -- which is what actually fills
+    # /data, 40 MB at a time -- had no free-space check at all. A full /data is
+    # a SQLite write failure, i.e. the dashboard that tells everyone whether
+    # their footage is syncing going down. Content-Length is advisory (a
+    # chunked upload has none), so this is a floor plus 3x the declared body,
+    # not a guarantee -- the running total below is still the real ceiling.
+    _refuse_publish_without_space(settings, request)
+
     dest_dir = settings.packages_path() / platform
     dest_dir.mkdir(parents=True, exist_ok=True)
     filename = _package_filename(kind, platform, version)
@@ -4448,34 +4773,207 @@ async def api_publish_package(
             published_at=published_at, signed_binary=bool(signed_binary),
             signature=signature, pubkey_id=pubkey_id, published_by=user,
             make_current=bool(make_current), prune=bool(prune), part_path=part,
+            requires_dashboard=requires_dashboard.strip(), arch=arch.strip(),
+            git_sha=git_sha.strip(), git_dirty=bool(git_dirty),
         )
     except package_store.PackageStoreError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
     db.audit(conn, user, "package.publish", version,
              {"kind": kind, "platform": platform, "version": version,
               "make_current": bool(make_current), "signed_binary": bool(signed_binary),
-              "min_version": min_version})
+              "min_version": min_version,
+              "requires_dashboard": requires_dashboard.strip(),
+              "arch": arch.strip(), "git_sha": git_sha.strip(),
+              "git_dirty": bool(git_dirty)})
     conn.commit()
     return {"ok": True, "view": build_packages_view(conn, settings)}
+
+
+def make_current_refusal(
+    conn: sqlite3.Connection, settings, *, kind: str, platform: str, version: str,
+    force: bool = False, confirm: str = "", now: str | None = None,
+) -> tuple[int, str] | None:
+    """(status, detail) when this build may NOT be handed to the fleet, else
+    None. THE gate (REL-1/SYS-6, REL-3, REL-4/SYS-13, 2026-08-28).
+
+    One function because there are three doors into "make current" -- the JSON
+    route, the Packages page's htmx twin, and the roll-back button -- and a
+    gate that only two of them pass through is not a gate. Order matters: a
+    recall and an ordering violation are facts about the BUILD and no
+    confirmation overrides them, while the soak is a judgement about
+    EVIDENCE, which an admin is allowed to overrule in front of a typed
+    confirmation.
+    """
+    row = db.get_package(conn, platform, version, kind)
+    if row is None:
+        return 404, f"no published {platform} {kind} package {version}"
+    reason = _row_str(row, "retracted_reason")
+    if _row_str(row, "retracted_at"):
+        return 409, (
+            f"{kind} {version} was RECALLED by the vendor"
+            + (f": {reason}" if reason else "")
+            + ". It cannot be made current. Roll the fleet back to a build "
+              "that was not recalled."
+        )
+    requires = _row_str(row, "requires_dashboard")
+    if package_store.blocks_on_dashboard_version(kind, requires):
+        return 409, (
+            f"{kind} {version} needs dashboard {requires} and this dashboard is "
+            f"{VERSION}. Update the dashboard first, then make this build current."
+        )
+    if _row_value(row, "ever_current"):
+        # A ROLLBACK, not a rollout: this build has been what the fleet was
+        # offered before, so the evidence the soak gate asks for already
+        # exists. Gating it would put the gate in the way of the recovery it
+        # exists to make possible (REL-1, 2026-08-28).
+        return None
+    if kind != "companion" or force:
+        if force and str(confirm or "").strip() != str(version).strip():
+            return 409, (
+                f"to override the soak gate, type the version number "
+                f"({version}) into the confirmation box. Nothing changed."
+            )
+        return None
+    soak = db.soak_state(conn, platform, version,
+                         soak_minutes_for(conn, settings), now)
+    if soak["ok"]:
+        return None
+    if not soak["machines"]:
+        detail = (
+            f"no machine has reported {version} yet, so nothing has run it. "
+            f"Push it to one machine first, leave it for "
+            f"{soak['soak_minutes']} min, then make it current."
+        )
+    elif soak["reverted"]:
+        detail = (
+            f"{soak['reverted']} of the {soak['machines']} machine(s) on {version} "
+            f"had to be rolled back off it by the crash-loop guard."
+        )
+    elif soak["crashes"]:
+        detail = (
+            f"{soak['machines']} machine(s) on {version} have reported "
+            f"{soak['crashes']} crash(es)."
+        )
+    elif not any(d["crash_count"] == 0 for d in soak["detail"]):
+        # "We could not tell" is not "fine" (resilience sweep 2026-08-28): a
+        # companion that never sent a crash section has told us nothing about
+        # whether this build stays up, and a soak is a claim that something
+        # was observed.
+        detail = (
+            f"no machine on {version} has reported its crash counter, so "
+            f"nothing here says the build stays up."
+        )
+    else:
+        detail = (
+            f"{soak['machines']} machine(s) have been on {version} for "
+            f"{soak['minutes']} min; the soak is {soak['soak_minutes']} min."
+        )
+    return 409, (
+        f"{version} has not soaked yet: {detail} Make it current anyway by "
+        f"confirming the override."
+    )
 
 
 @router.post("/admin/packages/{platform}/{version}/current")
 def api_set_current_package(
     platform: str, version: str, request: Request,
     kind: str = "companion",
+    force: int = 0,
+    confirm: str = "",
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> dict[str, Any]:
     """Set (or roll back) which version the fleet is offered (kind=companion)
-    or which installer the download serves (kind=onboard)."""
+    or which installer the download serves (kind=onboard).
+
+    Gated since 2026-08-28 (REL-1): a companion build reaches the whole fleet
+    only after one machine has actually run it for the soak window, or after
+    an admin overrides that in front of a typed confirmation. `force=1`
+    without `confirm=<version>` is refused, so a script cannot pass the gate
+    by accident."""
     admin = _require_admin(request)
+    settings = request.app.state.settings
     platform = platform.strip().lower()
     kind = kind.strip().lower()
+    refusal = make_current_refusal(
+        conn, settings, kind=kind, platform=platform, version=version,
+        force=bool(force), confirm=confirm)
+    if refusal is not None:
+        raise HTTPException(status_code=refusal[0], detail=refusal[1])
     if not db.set_current_package(conn, platform, version, kind):
         raise HTTPException(status_code=404, detail=f"no published {platform} {kind} package {version}")
     db.audit(conn, admin, "package.make_current", version,
-             {"kind": kind, "platform": platform, "version": version})
+             {"kind": kind, "platform": platform, "version": version,
+              "forced": bool(force)})
     conn.commit()
     return {"ok": True, "view": build_packages_view(conn, request.app.state.settings)}
+
+
+def roll_fleet_back(
+    conn: sqlite3.Connection, *, platform: str, from_version: str,
+    to_version: str, admin: str, now: str | None = None,
+) -> dict[str, Any]:
+    """Ask every machine running `from_version` to take `to_version` on its
+    next report (REL-3, resilience sweep 2026-08-28).
+
+    The recall's other half. Un-currenting a recalled build stops it reaching
+    anyone NEW; the machines that already took it are the ones the recall is
+    about, and this is the only channel that reaches them without an editor
+    clicking anything. Nothing here installs: each companion applies the
+    signed offer it is already holding, and the per-machine push channel
+    already bypasses "newer only", which is what makes a rollback possible at
+    all.
+
+    Raises HTTPException on a target this dashboard cannot serve -- a rollback
+    to a build that is not published here, or to one that has itself been
+    recalled, is how a recall turns into a fleet with no working companion.
+    """
+    now = now or db.utcnow_iso()
+    target = db.get_package(conn, platform, to_version, "companion")
+    if target is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no published {platform} companion package {to_version} to roll back to")
+    if _row_str(target, "retracted_at"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{to_version} was recalled too -- pick a build that was not")
+    machines = db.machines_running_version(conn, platform, from_version)
+    asked: list[str] = []
+    for m in machines:
+        if db.request_machine_update(conn, m["editor_username"], m["machine"],
+                                     to_version, admin, now):
+            asked.append(f"{m['editor_username']}/{m['machine']}")
+    db.audit(conn, admin, "package.roll_fleet_back", to_version,
+             {"platform": platform, "from_version": from_version,
+              "to_version": to_version, "machines": asked}, now=now)
+    conn.commit()
+    log.warning("%s rolled %d machine(s) back from %s to %s on %s",
+                admin, len(asked), from_version, to_version, platform)
+    return {"ok": True, "platform": platform, "from_version": from_version,
+            "to_version": to_version, "machines": asked}
+
+
+@router.post("/admin/packages/{platform}/{version}/roll-fleet-back")
+def api_roll_fleet_back(
+    platform: str, version: str, request: Request,
+    to: str = "",
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """`version` is the build to get OFF, `?to=` the one to land on (default:
+    whatever is current for that platform)."""
+    admin = _require_admin(request)
+    platform = platform.strip().lower()
+    target = to.strip()
+    if not target:
+        current = db.get_current_package(conn, platform, kind="companion")
+        if current is None:
+            raise HTTPException(
+                status_code=409,
+                detail="no current companion package is published for that platform, "
+                       "so there is nothing to roll back to")
+        target = current["version"]
+    return roll_fleet_back(conn, platform=platform, from_version=version,
+                           to_version=target, admin=admin)
 
 
 @router.delete("/admin/packages/{platform}/{version}")
@@ -5010,6 +5508,29 @@ class CrashesIn(_BoundedSectionIn):
     newest: str | None = Field(default=None, max_length=256)
 
 
+class UpgradeIn(_BoundedSectionIn):
+    """`sync_guard.upgrade` -- what happened the last time this machine tried
+    to take a build (REL-8 / APP-5, resilience sweep 2026-08-28).
+
+    The report payload carried nothing at all about upgrade outcomes, so a
+    machine whose AV quarantines every downloaded exe (or whose captive-portal
+    proxy mangles it, so the sha never matches) was indistinguishable from one
+    that had simply not seen the push yet: the admin's [ UPDATE NOW ] showed
+    "pending" for ever while the machine downloaded 20 MB every ten minutes.
+
+    `reverted_from` is the crash-loop guard's answer: the build that would not
+    run and was rolled back to `<exe>.old`. The companion clears it after ONE
+    accepted report, so this dashboard keeps it (db.store_upgrade_state) --
+    the grid drops the chip by itself once the machine is running a build at
+    or above the one it fell back from."""
+    version: str | None = Field(default=None, max_length=64)
+    attempts: int | None = Field(default=None, ge=0)
+    last_error: str | None = Field(default=None, max_length=500)
+    last_attempt_at: str | None = Field(default=None, max_length=64)
+    reverted_from: str | None = Field(default=None, max_length=64)
+    starts_this_version: int | None = Field(default=None, ge=0)
+
+
 class SyncConflictsIn(_BoundedSectionIn):
     """Syncthing's `.sync-conflict-*` files in this machine's tree.
 
@@ -5153,6 +5674,8 @@ class SyncGuardIn(BaseModel):
     # Absent leaves health.lane_stall on its 30 min floor.
     rotation_seconds: float | None = Field(default=None, ge=0)
     disk_floor: DiskFloorIn | None = None
+    # v35 (REL-8 / APP-5): the outcome of the last update attempt.
+    upgrade: UpgradeIn | None = None
     # RootGuard's answer as a plain string, including its SYNC-2 fourth one:
     # `present` / `absent` / `misplaced` / `not_answering` / `unknown`.
     # `unknown` is "we could not tell" and must never be rendered as
@@ -5192,6 +5715,7 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
     stalled = guard.stalled
     blocked = guard.blocked
     restarts = guard.restarts
+    upgrade = guard.upgrade
     restart_records = [] if restarts is None else [
         r for r in (restarts.sequencer, restarts.watcher, restarts.media_tree)
         if r is not None
@@ -5270,6 +5794,16 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
         ),
         "restarts_last_error": next(
             (r.last_error for r in restart_records if r.last_error), None),
+        # v35 (REL-8). db.store_upgrade_state writes these, not the upsert's
+        # INSERT -- same reasoning as blocked_*, and this group has a rule of
+        # its own for `reverted_from` (sent once, kept here).
+        "upgrade_version": upgrade.version if upgrade is not None else None,
+        "upgrade_attempts": upgrade.attempts if upgrade is not None else None,
+        "upgrade_last_error": upgrade.last_error if upgrade is not None else None,
+        "upgrade_last_attempt_at": (
+            upgrade.last_attempt_at if upgrade is not None else None),
+        "upgrade_reverted_from": (
+            upgrade.reverted_from if upgrade is not None else None),
     }
 
 
@@ -5681,6 +6215,13 @@ class ReportIn(BaseModel):
     syncthing_device_id: str | None = Field(default=None, max_length=128)
     companion_version: str | None = Field(default=None, max_length=64)
     platform: str | None = Field(default=None, max_length=32)  # 'windows' | 'macos'
+    # REL-16 (resilience sweep 2026-08-28): an Intel Mac and an Apple-silicon
+    # one both report platform `macos`, so the channel had no way to avoid
+    # handing one the other's binary -- it downloads, verifies, is renamed over
+    # the running companion, fails to exec, and rolls back for ever. Absent
+    # from every build before this wave, which reads as "unknown": those
+    # machines keep being offered what they were offered before.
+    arch: str | None = Field(default=None, max_length=32)
     reported_at: str = Field(max_length=64)
     # Generous but bounded (see SEC-4): current companions send exactly the
     # three lanes in LANE_LABELS.
@@ -5843,32 +6384,60 @@ def api_report(
     #
     # BEHAVIOUR CHANGE: pre-upgrade companions that don't send the header are
     # rejected with 401. Sign in on the companion tray to mint one.
+    #
+    # DASH-2 (resilience sweep 2026-08-28): a refusal HERE, and only here, also
+    # stamps machines.report_refused_at/reason. Rotating DASH_SESSION_SECRET
+    # 401s the whole fleet at once -- the identity token is an HMAC over it and
+    # never expires (CR-86) -- and the fleet grid's answer used to be a page
+    # that quietly stopped moving, which is exactly what a switched-off machine
+    # looks like. The stamp writes those two columns on an EXISTING row and
+    # nothing else: this report is unverified, so nothing from its body may
+    # create or alter fleet data.
     identity = request.headers.get("x-ccsync-identity", "")
-    id_user = auth.read_identity_token(settings.session_secret, identity) if identity else None
+    id_user, id_retired_key = (
+        auth.read_identity_token_ex(settings, identity) if identity else (None, False))
+
+    def _refuse_identity(detail: str, reason: str) -> HTTPException:
+        try:
+            if db.stamp_report_refused(conn, editor, machine, reason, received_at):
+                conn.commit()
+        except sqlite3.Error:                                          # noqa: BLE001
+            log.warning("could not stamp the refused report from %s/%s", editor, machine)
+        return HTTPException(status_code=401, detail=detail)
+
     if settings.session_secret:
         if not identity:
-            raise HTTPException(
-                status_code=401,
-                detail="X-CCSync-Identity required -- sign in from the companion tray "
-                       "(Sign in…) to get a machine identity token",
-            )
+            raise _refuse_identity(
+                "X-CCSync-Identity required -- sign in from the companion tray "
+                "(Sign in…) to get a machine identity token",
+                "no machine identity token was sent")
         if id_user is None:
-            raise HTTPException(
-                status_code=401,
-                detail="X-CCSync-Identity is invalid or expired -- sign in again from the "
-                       "companion tray",
-            )
+            raise _refuse_identity(
+                "X-CCSync-Identity is invalid or expired -- sign in again from the "
+                "companion tray",
+                "its machine identity token cannot be verified (the dashboard's "
+                "session secret has changed)")
         if id_user != editor:
-            raise HTTPException(
-                status_code=401,
-                detail="X-CCSync-Identity does not match editor_name",
-            )
+            raise _refuse_identity(
+                "X-CCSync-Identity does not match editor_name",
+                "its machine identity token belongs to a different editor")
     elif identity and id_user is not None and id_user != editor:
-        raise HTTPException(
-            status_code=401,
-            detail="X-CCSync-Identity does not match editor_name",
-        )
+        raise _refuse_identity(
+            "X-CCSync-Identity does not match editor_name",
+            "its machine identity token belongs to a different editor")
     verified = id_user is not None and id_user == editor
+    # This machine IS reporting and IS being accepted: clear yesterday's
+    # refusal, and count (or stop counting) it against the rotation drain.
+    db.clear_report_refused(conn, editor, machine)
+    if verified:
+        db.record_retired_key_identity(conn, editor, machine, received_at,
+                                       retired=bool(id_retired_key))
+        if id_retired_key:
+            log.warning(
+                "%s/%s reported with an identity signed by a RETIRED session key "
+                "(DASH_SESSION_SECRET_PREVIOUS). It is accepted; that editor has to "
+                "sign in once at their tray before the old key can be removed.",
+                editor, machine)
     if verified:
         # A signed identity token is the dashboard's OWN evidence that this
         # is a real editor account -- the one thing that distinguishes an
@@ -6019,6 +6588,13 @@ def api_report(
     # db.store_blocked_state).
     db.store_blocked_state(
         conn, editor, machine, flatten_sync_guard(payload.sync_guard, received_at))
+    # v35 (REL-8 / REL-16): what happened the last time this computer tried to
+    # take a build, and which CPU it is. Same shape and the same reasoning as
+    # store_blocked_state above.
+    db.store_upgrade_state(
+        conn, editor, machine, flatten_sync_guard(payload.sync_guard, received_at),
+        (payload.arch or "").strip().lower() or None,
+        running_version=(payload.companion_version or "").strip() or None)
     # An overridden "Remove from this machine" destroyed a local copy the
     # gate said was not caught up. There is nowhere on the grid for a
     # one-off event, so it goes in the dashboard's log -- which is the only
@@ -6101,7 +6677,8 @@ def api_report(
     # Upgrade channel: piggyback on the report reply so an out-of-date
     # companion learns about the current build with no extra request. Key
     # absent = up to date (or nothing published, or version unreported).
-    upgrade = _upgrade_info(conn, payload.platform, payload.companion_version)
+    upgrade = _upgrade_info(conn, payload.platform, payload.companion_version,
+                            getattr(payload, "arch", None))
     if upgrade is not None:
         result["upgrade"] = upgrade
     # New-project onboarding: the auto-match above already ran, so this is

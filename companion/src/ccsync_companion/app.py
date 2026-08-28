@@ -1197,6 +1197,17 @@ class CompanionApp:
         self._auto_update_applying = ""
         self._auto_update_announced = ""
         self._auto_update_retry_at = 0.0
+        # REL-8 / APP-5 (resilience sweep 2026-08-28): the PERSISTED half of
+        # the same story. `_upgrade_attempts` is the ledger under
+        # state/upgrade_attempts.json (loaded in run(), so a restart does not
+        # reset the back-off), `_upgrade_reverted_from` is the build the
+        # crash-loop guard took this machine off, and `_report_accepted` is
+        # the one health signal both the revert marker and the rollback copy
+        # wait on -- one report the dashboard actually took.
+        self._upgrade_attempts: dict[str, Any] = {}
+        self._upgrade_reverted_from = ""
+        self._version_starts = 1
+        self._report_accepted = threading.Event()
         # macOS took the tree away from us, rather than the editor unplugging
         # it: the ad-hoc-signed companion loses its Full Disk Access grant on
         # every self-upgrade (item 16). Checked once after an upgrade, read by
@@ -1661,6 +1672,12 @@ class CompanionApp:
         """Fan the report response out to every consumer, isolating each --
         the upgrade channel and the new-project prompter both piggyback on
         the same reply."""
+        # FIRST, and unconditionally: getting here at all means the dashboard
+        # accepted a report from this build (APP-5 / REL-2). That is the
+        # health signal the rollback copy waits on, and it is also what
+        # clears the revert marker -- the payload that just landed carried
+        # it, so the dashboard has now seen it once.
+        self._note_report_accepted()
         try:
             self.upgrade.note_report_response(resp)
         except Exception:
@@ -4762,6 +4779,81 @@ class CompanionApp:
             return "failed"
         return ""
 
+    # -- the update ledger (REL-8 / APP-5, resilience sweep 2026-08-28) ----
+    def _upgrade_attempts_path(self) -> Path:
+        return upgrade_mod.attempts_path(self._state_dir)
+
+    def _load_upgrade_state(self) -> None:
+        """Adopt the ledger the last run left behind. Never raises.
+
+        Running AT ALL on the version the ledger was counting failures for
+        means the attempt succeeded, however many tries it cost, so the
+        counter is cleared here rather than anywhere in the success path (the
+        process that swaps the exe is on its way out and cannot write it)."""
+        try:
+            path = self._upgrade_attempts_path()
+            record = upgrade_mod.read_attempts(path)
+            if str(record.get("version") or "") == config_mod.VERSION:
+                upgrade_mod.clear_upgrade_attempts(path, config_mod.VERSION)
+                record = upgrade_mod.read_attempts(path)
+            self._upgrade_attempts = record
+            self._upgrade_reverted_from = str(record.get("reverted_from") or "")
+        except Exception:
+            log.exception("could not read the update ledger")
+
+    def _note_report_accepted(self) -> None:
+        """One accepted dashboard report: this build works well enough to be
+        seen. Never raises -- it runs on the reporter thread."""
+        try:
+            self._report_accepted.set()
+            if self._upgrade_reverted_from:
+                # It rode the payload the dashboard just took, so it has been
+                # seen once and must not ride every report for the life of
+                # the install.
+                self._upgrade_reverted_from = ""
+                upgrade_mod.clear_reverted_from(self._upgrade_attempts_path())
+                self._upgrade_attempts = upgrade_mod.read_attempts(
+                    self._upgrade_attempts_path())
+        except Exception:
+            log.exception("could not clear the crash-loop revert marker")
+
+    def _upgrade_attempt_blocked(self, wanted: str) -> str:
+        """"" when another attempt at `wanted` is due, else why not (REL-8).
+
+        The gate is PERSISTED, not the in-memory retry timer: a machine whose
+        AV quarantines every download restarts too, and until this existed
+        each restart bought the NAS another ~20 MB download every ten
+        minutes for ever."""
+        try:
+            record = self._upgrade_attempts
+            if upgrade_mod.upgrade_attempts_exhausted(record, wanted):
+                return "given up"
+            if not upgrade_mod.upgrade_retry_due(record, wanted):
+                return "backing off"
+        except Exception:
+            log.exception("update back-off check failed")
+        return ""
+
+    def _note_upgrade_failure(self, wanted: str) -> float:
+        """Count one failed install of `wanted` and return the wait before the
+        next try. Never raises."""
+        try:
+            error = str(getattr(self.upgrade, "last_failure", "") or "") or "failed"
+            record = upgrade_mod.note_upgrade_attempt(
+                self._upgrade_attempts_path(), wanted, error)
+            self._upgrade_attempts = record
+            attempts = int(record.get("attempts") or 0)
+            if attempts >= upgrade_mod.MAX_UPGRADE_ATTEMPTS:
+                log.error(
+                    "update to v%s has failed %d times (%s) -- this machine has "
+                    "STOPPED trying. The tray says so; the report carries it",
+                    wanted, attempts, error)
+                return float(upgrade_mod.UPGRADE_BACKOFF_SECONDS[-1])
+            return upgrade_mod.upgrade_backoff_seconds(attempts)
+        except Exception:
+            log.exception("could not record the failed update attempt")
+            return PUSHED_UPDATE_FAILED_RETRY_SECONDS
+
     def transport_health(self) -> dict[str, Any]:
         """Connection-path + orphan diagnostics for the report payload
         (AUDIT_2 C-6).
@@ -4938,6 +5030,19 @@ class CompanionApp:
                 guard["rotation_seconds"] = rotation
         except Exception:
             log.exception("rotation_seconds report failed")
+        try:
+            # REL-8 / APP-5 (resilience sweep 2026-08-28): what this machine's
+            # updates are DOING. Always present, including the all-zero
+            # shape: "this computer has never failed an update" is an answer
+            # the fleet grid needs, and an absent section could only mean "a
+            # companion too old to send one". `reverted_from` rides until one
+            # report has been accepted with it (_note_report_accepted).
+            record = dict(self._upgrade_attempts or {})
+            record["reverted_from"] = self._upgrade_reverted_from
+            guard["upgrade"] = upgrade_mod.upgrade_report(
+                record, self._version_starts)
+        except Exception:
+            log.exception("upgrade report failed")
         try:
             # SYNC-2: the root guard's answer as a plain string, so the grid
             # can tell "the drive is out" from "the drive is wedged" without
@@ -5473,6 +5578,9 @@ class CompanionApp:
                 return              # already on it; the swap takes a few seconds
             if time.monotonic() < self._auto_update_retry_at:
                 return              # stood down a moment ago
+            blocked = self._upgrade_attempt_blocked(wanted)
+            if blocked:
+                return              # REL-8: cap reached, or still backing off
             offer = self.upgrade.available
             if offer is None or str(offer.get("version") or "") != wanted:
                 # Withdrawn, or replaced by an offer _on_upgrade_available
@@ -5509,8 +5617,15 @@ class CompanionApp:
             log.exception("auto-update to v%s raised", wanted)
         finally:
             if outcome:
-                wait = (PUSHED_UPDATE_FAILED_RETRY_SECONDS if outcome in ("failed", "no-offer")
-                        else PUSHED_UPDATE_RETRY_SECONDS)
+                # A stand-down is not a failed install (the editor has a
+                # window open): it keeps the short timer and is not counted
+                # towards REL-8's cap. Only "failed" -- a download, a sha, a
+                # swap or an exec that did not work -- is.
+                if outcome == "failed":
+                    wait = self._note_upgrade_failure(wanted)
+                else:
+                    wait = (PUSHED_UPDATE_FAILED_RETRY_SECONDS if outcome == "no-offer"
+                            else PUSHED_UPDATE_RETRY_SECONDS)
                 self._auto_update_retry_at = time.monotonic() + wait
                 if self._auto_update_applying == wanted:
                     self._auto_update_applying = ""
@@ -5570,6 +5685,13 @@ class CompanionApp:
                 return          # already on it; the swap takes a few seconds
             if self._pushed_update_announced == key and time.monotonic() < self._pushed_update_retry_at:
                 return          # stood down a moment ago; give the editor time to close the window
+            blocked = self._upgrade_attempt_blocked(wanted)
+            if blocked:
+                # REL-8: the request rides EVERY report until this machine
+                # reports the new version, so a machine that cannot take the
+                # build downloaded it every ten minutes for ever. The
+                # dashboard is told through sync_guard.upgrade instead.
+                return
             self._pushed_update_applying = key
             first_attempt = self._pushed_update_announced != key
             if first_attempt:
@@ -5607,8 +5729,12 @@ class CompanionApp:
             log.exception("pushed update to v%s raised", wanted)
         finally:
             if outcome:
-                wait = (PUSHED_UPDATE_FAILED_RETRY_SECONDS if outcome in ("failed", "no-offer")
-                        else PUSHED_UPDATE_RETRY_SECONDS)
+                # Same split as the auto path (REL-8).
+                if outcome == "failed":
+                    wait = self._note_upgrade_failure(wanted)
+                else:
+                    wait = (PUSHED_UPDATE_FAILED_RETRY_SECONDS if outcome == "no-offer"
+                            else PUSHED_UPDATE_RETRY_SECONDS)
                 self._pushed_update_retry_at = time.monotonic() + wait
                 if self._pushed_update_applying == key:
                     self._pushed_update_applying = ""
@@ -6071,6 +6197,10 @@ class CompanionApp:
         section("time", lambda: time.strftime("%Y-%m-%d %H:%M:%S %z"))
         section("companion version", lambda: config_mod.VERSION)
         section("platform", lambda: f"{sys.platform} / {os.name}")
+        # REL-16: which BINARY this machine can run. An Intel Mac offered the
+        # arm64 build downloads it, verifies it, swaps it in and cannot exec
+        # it, and nothing on the machine said which architecture it was.
+        section("arch", upgrade_mod.arch_key)
         section("frozen exe", upgrade_mod.is_frozen)
         section("config file", lambda: config_mod.CONFIG_PATH)
         section("log file", lambda: self.log_path)
@@ -6096,6 +6226,30 @@ class CompanionApp:
             str(self.config.get("rclone_path", "rclone"))))
         section("resolve project", lambda: getattr(self.watcher, "last_resolve_project", None))
         section("resolve bridge", self._resolve_bridge_text)
+
+        out.append("")
+        out.append("-- updates --")
+        try:
+            report = upgrade_mod.upgrade_report(
+                dict(self._upgrade_attempts or {},
+                     reverted_from=self._upgrade_reverted_from),
+                self._version_starts)
+            out.append(f"  starts on this version: {report['starts_this_version']}")
+            out.append(f"  last attempted build: {report['version'] or 'none'}")
+            out.append(f"  failed attempts: {report['attempts']}"
+                       + (f" (last error: {report['last_error']}"
+                          f" at {report['last_attempt_at']})"
+                          if report["attempts"] else ""))
+            if report["attempts"] >= upgrade_mod.MAX_UPGRADE_ATTEMPTS:
+                out.append("  GIVEN UP on that build: it has failed "
+                           f"{report['attempts']} times")
+            if report["reverted_from"]:
+                out.append("  rolled back automatically from v"
+                           f"{report['reverted_from']} (it kept crashing)")
+            old = upgrade_mod.old_exe_path()
+            out.append(f"  rollback copy: {old if old and old.exists() else 'none'}")
+        except Exception as exc:
+            out.append(f"  <failed: {exc}>")
 
         out.append("")
         out.append("-- config problems (these STOP syncing) --")
@@ -7709,6 +7863,14 @@ class CompanionApp:
             ui_dispatch.stop()
         except Exception:
             log.exception("shutdown: failed to stop the UI dispatcher")
+        # APP-5: reaching the end of teardown is what makes this run a clean
+        # one, so the next start does not count it towards the crash loop. An
+        # editor quitting the tray three times in a morning is not a build
+        # that cannot stay up.
+        try:
+            upgrade_mod.note_clean_shutdown(self._state_dir)
+        except Exception:
+            log.exception("shutdown: could not record the clean shutdown")
         self._arm_ui_shutdown_backstop()
 
     def _arm_ui_shutdown_backstop(self) -> None:
@@ -7750,6 +7912,34 @@ class CompanionApp:
         )
         _hard_exit(1)
 
+    def _revert_crashing_build(self) -> bool:
+        """This build has come up three times in ten minutes: put the previous
+        one back (APP-5 / REL-2, resilience sweep 2026-08-28).
+
+        True means the previous build is running and this process must exit.
+        False means nothing was restored -- no rollback copy, an unknown
+        previous version, the downgrade floor, or a restore that failed -- and
+        the reason is logged rather than swallowed: a machine stuck in a crash
+        loop with no way back is exactly the machine whose log an admin reads
+        next. Never raises."""
+        try:
+            restored, refusal = upgrade_mod.revert_to_previous_build(
+                self._state_dir, self.config,
+                request_shutdown=self._stop_event.set,
+            )
+            if restored:
+                return True
+            log.error(
+                "v%s has restarted %d times in under %d minutes and looks like it "
+                "cannot stay up, but this machine did NOT roll back: %s",
+                config_mod.VERSION, self._version_starts,
+                int(upgrade_mod.CRASH_LOOP_WINDOW_SECONDS // 60),
+                refusal or "no reason given",
+            )
+        except Exception:
+            log.exception("the crash-loop guard failed")
+        return False
+
     def run(self) -> None:
         try:
             setup_logging(self.config)
@@ -7762,8 +7952,18 @@ class CompanionApp:
         # marker file, NOT from whether an `.old` happened to be unlinkable.
         # The old derivation fired the "Update complete" toast on an unrelated
         # later restart whenever an AV hold had deferred the unlink (AUDIT_2
-        # CORE-H6).
-        just_upgraded = upgrade_mod.note_version_start(self._state_dir)
+        # CORE-H6). Since APP-5 the same record also counts STARTS, which is
+        # what makes a build that boots and dies three minutes later
+        # recoverable without an admin.
+        start_record = upgrade_mod.note_version_start(self._state_dir)
+        just_upgraded = bool(start_record.get("upgraded"))
+        self._version_starts = int(start_record.get("starts") or 1)
+        self._load_upgrade_state()
+        if start_record.get("crash_loop") and self._revert_crashing_build():
+            # The previous build is back on disk and running; this process is
+            # the one that could not stay up. Nothing has been started yet, so
+            # returning IS the shutdown.
+            return
 
         # A half-configured install is the single most common failure mode and
         # is otherwise completely silent — nothing syncs and no lane says why.
@@ -7873,6 +8073,23 @@ class CompanionApp:
                         daemon=True,
                     ).start()
 
+            if self._upgrade_reverted_from and not self._upgrade_attempts.get(
+                    "reverted_announced"):
+                # APP-5: this build IS the rollback. Same 3 s delay as the
+                # update toast below, and for the same reason -- the tray icon
+                # thread has only just started.
+                bad = self._upgrade_reverted_from
+                upgrade_mod.mark_revert_announced(self._upgrade_attempts_path())
+                self._upgrade_attempts["reverted_announced"] = True
+                revert_timer = threading.Timer(3.0, lambda: self._notify_tray(
+                    f"The last update kept crashing, so CCSync went back to "
+                    f"v{config_mod.VERSION}.",
+                    "ccsync-companion",
+                ))
+                revert_timer.daemon = True
+                revert_timer.start()
+                log.warning("this build is a crash-loop rollback from v%s", bad)
+
             if just_upgraded:
                 log.info("self-upgrade to v%s completed", config_mod.VERSION)
                 # Slight delay: the tray icon thread has only just started and
@@ -7896,12 +8113,23 @@ class CompanionApp:
             # constructed itself, validated config, started its lanes and put
             # a tray icon on screen. Deleting it as run()'s third statement
             # meant a build that crashed one line later left the machine with
-            # a broken exe and no way back (AUDIT_2 CORE-H6). Deferred again
-            # by 60 s so an AV hold on the freshly-renamed file has time to
-            # clear, and retried on every subsequent start regardless.
-            cleanup_timer = threading.Timer(60.0, upgrade_mod.cleanup_old_exe)
-            cleanup_timer.daemon = True
-            cleanup_timer.start()
+            # a broken exe and no way back (AUDIT_2 CORE-H6).
+            #
+            # ...and 60 s after that was still far too early (APP-5 / REL-2,
+            # resilience sweep 2026-08-28). The faults this rollback copy
+            # exists for -- a Tk failure in the first dialog, an exception on
+            # a code path only one editor's config reaches, a lane touching a
+            # surrogate path -- happen minutes in, by which time the timer had
+            # long since deleted the only way back. The signal is EVIDENCE
+            # now: one report the dashboard accepted, or an hour of uptime for
+            # a machine that cannot reach it. A shutdown before either leaves
+            # the `.old` on disk, and the next start tries again.
+            cleanup_thread = threading.Thread(
+                target=upgrade_mod.keep_old_exe_until_healthy,
+                args=(self._stop_event, self._report_accepted.is_set),
+                name="ccsync-old-exe", daemon=True,
+            )
+            cleanup_thread.start()
 
             dispatcher = ui_dispatch.active()
             if dispatcher is not None:

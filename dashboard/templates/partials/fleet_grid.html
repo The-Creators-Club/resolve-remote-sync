@@ -78,6 +78,41 @@
 </div>
 {% endif %}
 
+{# DASH-2 (resilience sweep 2026-08-28): computers that ARE reporting and are
+   being turned away. Rotating DASH_SESSION_SECRET 401s the whole fleet at
+   once, and the grid's only symptom used to be rows going stale -- which is
+   exactly what a switched-off machine looks like. #}
+{% if fleet.report_refused %}
+<div class="banner alarm">⛔ {{ fleet.report_refused | length }} COMPUTER(S) ARE BEING REFUSED:
+  {% for m in fleet.report_refused %}{{ m.editor }}/{{ m.machine }}{{ ", " if not loop.last }}{% endfor %}.
+  They are reporting and the dashboard is turning them away{% if fleet.report_refused[0].reason %} ({{ fleet.report_refused[0].reason }}){% endif %}.
+  Have each editor click "Sign in..." on that computer's tray.
+</div>
+{% endif %}
+{% if fleet.identity_key_drain and fleet.identity_key_drain.count %}
+<div class="banner">ℹ️ [ {{ fleet.identity_key_drain.count }} COMPUTER(S) STILL ON A RETIRED SIGNING KEY ]
+  <span class="mono-sm muted">They are accepted because DASH_SESSION_SECRET_PREVIOUS still carries the old key:
+  {% for m in fleet.identity_key_drain.machines %}{{ m }}{{ ", " if not loop.last }}{% endfor %}.
+  Each one clears when its editor signs in again at the tray. Remove that variable once this reaches zero.</span>
+</div>
+{% endif %}
+{# REL-11: a site whose update check has been failing for weeks looks exactly
+   like a site where nothing has been published. #}
+{% if fleet.feed_alarm and fleet.feed_alarm.stale %}
+<div class="banner">▲ [ NO SUCCESSFUL UPDATE CHECK FOR {{ fleet.feed_alarm.age_days }} DAYS ]
+  <span class="mono-sm muted">last checked {{ fleet.feed_alarm.last_checked_at | ago }}{% if fleet.feed_alarm.last_error %} - {{ fleet.feed_alarm.last_error }}{% endif %}.
+  This site is not receiving fixes, which looks the same as no fixes having been published.</span>
+</div>
+{% endif %}
+{% if fleet.feed_alarm and fleet.feed_alarm.runtime_mismatch %}
+<div class="banner">▲ [ EVERY DASHBOARD BUILD ON OFFER NEEDS A NEW CONTAINER IMAGE ]
+  <span class="mono-sm muted">{% for v in fleet.feed_alarm.runtime_mismatch.versions %}{{ v }}{{ ", " if not loop.last }}{% endfor %}
+  {{ "brings" if fleet.feed_alarm.runtime_mismatch.versions | length == 1 else "bring" }} dependencies this container does not have,
+  so no update can be applied from this dashboard. Apply it in your NAS's own UI:
+  {{ fleet.feed_alarm.runtime_mismatch.nas_hint }}.</span>
+</div>
+{% endif %}
+
 <div class="side-head" style="margin-top:2rem">[ COMPANIONS ]</div>
 <div class="rule">{{ "─" * 100 }}</div>
 {# An editor sees their own machines; the rest of the fleet is a COUNT, never a
@@ -154,6 +189,17 @@
         {# APP-6: crash_report.py writes these and its own docstring names
            "the tray stayed up with a dead lane" as the failure to fix. #}
         {% if e.guard.crash_count %}<span class="chip amber" title="{{ e.guard.crash_count }} background task(s) on this computer have crashed and written a report{% if e.guard.crash_newest %} (newest: {{ e.guard.crash_newest }}){% endif %}. The tray stays up and the lanes look normal, so ask the editor for Copy diagnostics.">[ CRASHES: {{ e.guard.crash_count }} ]</span>{% endif %}
+        {# DASH-2: this computer is talking to us and we are refusing it. On the
+           row as well as in the banner, because the fix is on THAT machine. #}
+        {% if e.guard.report_refused_at %}<span class="chip red" title="the last report from this computer was refused {{ e.guard.report_refused_at | ago }}: {{ e.guard.report_refused_reason }}. Nothing below is current. The editor has to click Sign in... on this computer's tray.">[ BEING REFUSED: SIGN IN ON ITS TRAY ]</span>{% endif %}
+        {# REL-8: a machine that cannot take a build used to retry for ever
+           with nobody told. The count is what separates "has not seen the push
+           yet" from "has failed this build eight times". #}
+        {% if e.guard.upgrade_attempts %}<span class="chip red" title="this computer has tried to install {{ e.guard.upgrade_version or "an update" }} {{ e.guard.upgrade_attempts }} time(s) and failed{% if e.guard.upgrade_last_attempt_at %}, last {{ e.guard.upgrade_last_attempt_at | ago }}{% endif %}{% if e.guard.upgrade_last_error %}: {{ e.guard.upgrade_last_error }}{% endif %}. Antivirus quarantine, a proxy mangling the download and a full disk all look like this.">[ UPDATE FAILED x{{ e.guard.upgrade_attempts }} ]</span>{% endif %}
+        {# APP-5: the crash-loop guard put this machine back on its previous
+           build. The chip goes when the machine is running something at or
+           above what it fell back from, so it needs no clearing. #}
+        {% if e.guard.upgrade_reverted_from %}<span class="chip amber" title="this computer installed {{ e.guard.upgrade_reverted_from }}, could not start it, and put itself back on {{ e.companion_version }}. That build should not be made current for the fleet.">[ REVERTED FROM {{ e.guard.upgrade_reverted_from }} ]</span>{% endif %}
         {% if e.guard.folders_unfiltered %}<span class="chip amber" title="{{ e.guard.folders_unfiltered }} Syncthing folder(s) on this computer have no ignore filter written{% if e.guard.folders_unfiltered_names %}: {{ e.guard.folders_unfiltered_names }}{% endif %}. Without it, lane C carries camera originals both ways.">[ UNFILTERED FOLDERS: {{ e.guard.folders_unfiltered }} ]</span>{% endif %}
         {% if e.guard.sync_conflicts %}<span class="chip amber" title="{{ e.guard.sync_conflicts }} Syncthing sync-conflict file(s) in this machine's tree. Two people saved one project file; nothing was lost, but somebody's edit is sitting in a renamed copy.">[ CONFLICTS: {{ e.guard.sync_conflicts }} ]</span>{% endif %}
         {# SYS-5 (resilience sweep 2026-08-28): a full drive used to show as
@@ -210,6 +256,11 @@
       <td class="mono-sm muted">{{ e.companion_version or "?" }}
         {% if e.companion_version_unknown %}<span class="chip amber" title="this companion has never reported its version -- it predates the upgrade channel">[ VERSION UNKNOWN ]</span>
         {% elif e.companion_outdated %}<span class="chip amber" title="{{ e.platform }}: running {{ e.companion_version }}, current is {{ e.current_companion_version }}">[ OUT OF DATE: {{ e.current_companion_version }} ]</span>{% endif %}
+        {# REL-3 (resilience sweep 2026-08-28): this machine is RUNNING a build
+           the vendor recalled. Un-currenting it says nothing about the
+           machines that already took it, which are the ones a recall is
+           about; Packages has the button that rolls them back. #}
+        {% if e.companion_retracted_reason is not none %}<span class="chip red" title="{{ e.companion_retracted_reason or 'no reason given' }}">[ RECALLED BUILD ]</span>{% endif %}
       </td>
       <td class="muted">{{ e.received_at | ago }}</td>
     </tr>

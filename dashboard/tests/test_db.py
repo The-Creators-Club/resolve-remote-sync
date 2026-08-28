@@ -778,3 +778,43 @@ def test_meta_get_json_survives_a_corrupt_value(conn):
     dbmod.meta_set(conn, dbmod.META_ENFORCE_REFUSAL, "{not json")
     assert dbmod.meta_get_json(conn, dbmod.META_ENFORCE_REFUSAL) is None
     assert dbmod.collector_alarms(conn)["enforce_refusal"] is None
+
+
+# ------------------------------- REL-8 (resilience sweep 2026-08-28)
+
+
+def test_a_pushed_update_expires_with_an_audit_row(tmp_path):
+    conn = dbmod.connect(tmp_path / "d.db")
+    dbmod.migrate(conn)
+    now = "2026-09-20T00:00:00+00:00"
+    conn.execute("INSERT INTO machines(editor_username, machine, first_seen, last_seen) "
+                 "VALUES('leso','MBP','2026-08-01T00:00:00+00:00','2026-08-01T00:00:00+00:00')")
+    dbmod.request_machine_update(conn, "leso", "MBP", "0.9.56", "owen",
+                              "2026-08-01T00:00:00+00:00")
+    assert dbmod.machine_update_request(conn, "leso", "MBP") is not None
+
+    assert dbmod.expire_machine_update_requests(conn, now) == 1
+    assert dbmod.machine_update_request(conn, "leso", "MBP") is None
+    actions = [r["action"] for r in conn.execute("SELECT action FROM fleet_audit")]
+    assert "machine.update_push_expired" in actions
+    # ...and a request made today is left alone.
+    dbmod.request_machine_update(conn, "leso", "MBP", "0.9.56", "owen", now)
+    assert dbmod.expire_machine_update_requests(conn, now) == 0
+    conn.close()
+
+
+def test_the_retired_key_ledger_counts_up_and_back_down(tmp_path):
+    conn = dbmod.connect(tmp_path / "d.db")
+    dbmod.migrate(conn)
+    now = "2026-08-28T00:00:00+00:00"
+    dbmod.record_retired_key_identity(conn, "leso", "MBP", now, retired=True)
+    dbmod.record_retired_key_identity(conn, "ruskin", "PC", now, retired=True)
+    assert len(dbmod.retired_key_identities(conn)) == 2
+    dbmod.record_retired_key_identity(conn, "leso", "MBP", now, retired=False)
+    assert list(dbmod.retired_key_identities(conn)) == ["ruskin/PC"]
+    conn.close()
+
+
+def test_version_tuple_handles_two_digit_minors():
+    assert dbmod.version_tuple("0.10.0") > dbmod.version_tuple("0.9.9")
+    assert dbmod.version_tuple("nonsense") == ()

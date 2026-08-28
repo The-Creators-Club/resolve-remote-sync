@@ -52,6 +52,10 @@ private/
 feed/
 dist/
 
+# The ship journal (tools/ship.ps1 -Resume, REL-15 2026-08-28): how far the
+# last ship on THIS rig got. Per-machine, per-run state, never shared.
+tools/.ship-state.json
+
 # Per-run output of broll/indexer/tools/make_own_proxies.py and the
 # backcatalogue runner: a scan of one machine's drives (absolute Q:\ paths,
 # one line per clip). Reproducible from the tree; never the same twice.

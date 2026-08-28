@@ -859,6 +859,192 @@ def parse_health_line(text: str) -> dict:
     return {}
 
 
+# The app tree the LAST install_tree("app", ...) renamed out of the way, so a
+# rollback line can name the exact directory rather than a glob (OPS-1,
+# resilience sweep 2026-08-28). Module-level because install_tree computes it
+# and main() prints it, and threading it through six call sites for one
+# string would be worse.
+_LAST_OLD_DIRS: dict = {}
+
+# How long to keep asking the container whether it is serving. The compose
+# healthcheck allows a 120 s start_period for the same boot, and a probe that
+# gives up sooner would report a slow cold start as a dead dashboard -- which
+# is the failure it exists to prevent, inverted.
+HEALTH_PROBE_SECONDS = 150
+HEALTH_PROBE_INTERVAL = 5
+
+
+def repo_dashboard_version() -> str:
+    """The VERSION this checkout would deploy, or "".
+
+    Read by regex out of the package's __init__.py rather than imported:
+    server/ deliberately does not import ccsync_dashboard (see
+    expected_runtime_id), and a partial import would drag in fastapi.
+    """
+    init = (Path(__file__).resolve().parents[1] / "dashboard" / "src" /
+            "ccsync_dashboard" / "__init__.py")
+    try:
+        text = init.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    m = re.search(r'^VERSION\s*=\s*"([^"]+)"', text, re.MULTILINE)
+    return m.group(1) if m else ""
+
+
+def health_probe_command(port: int) -> str:
+    """The in-container one-liner that prints {"ok":..., "version":...}.
+
+    /venv/bin/python, not curl: the image is not guaranteed to carry curl or
+    wget, and the venv's python is the one thing a dashboard container
+    definitely has.
+    """
+    return (
+        "/venv/bin/python -c \"import json,urllib.request;"
+        f"print(json.dumps(json.load(urllib.request.urlopen("
+        f"'http://127.0.0.1:{port}/api/v1/health', timeout=5))))\"")
+
+
+def probe_dashboard_health(port: int, expected_version: str, dry_run: bool,
+                           budget: int = HEALTH_PROBE_SECONDS) -> tuple:
+    """(ok, health, detail) -- did the dashboard come back, serving OUR code?
+
+    OPS-1 (resilience sweep 2026-08-28). Every deploy path used to end at
+    "restarted container: ..." and `return 0`: `docker restart` succeeding
+    says the container was recreated, not that the code inside it imports.
+    A template that moved, a module EXCLUDE_DIRS dropped, a lockfile drift or
+    a bad site.toml value all produce a container that restarts perfectly and
+    answers nothing -- and ship.cmd then went on to publish companions to the
+    whole fleet against a dashboard that was down.
+
+    Two conditions, both required: HTTP 200 (the request answered at all) and
+    `version` equal to the VERSION this checkout just shipped. The second is
+    what distinguishes "the new code is serving" from "the container is still
+    serving the previous inode", which is precisely what a bind-mount swap
+    without a restart leaves behind (2026-07-24).
+
+    Retries until `budget` seconds have passed, because a cold container
+    legitimately takes longer than one check: the compose healthcheck's own
+    start_period is 120 s.
+    """
+    container = backend().dashboard_container
+    if dry_run:
+        print(f"[dry-run] would probe /api/v1/health inside {container} on port "
+              f"{port} (up to {budget}s) and require version == "
+              f"{expected_version or '<the repo VERSION>'}")
+        return True, {}, "dry run"
+    probe = health_probe_command(port)
+    deadline = time.time() + budget
+    detail = "the probe never ran"
+    health: dict = {}
+    attempt = 0
+    while True:
+        attempt += 1
+        rc, out, err = run_ssh_guarded(
+            f'echo "$SUDO_PW" | sudo -S -p "" docker exec {shell_quote(container)} '
+            f'sh -c {shell_quote(probe)}', False, 60)
+        health = parse_health_line(out) if rc == 0 else {}
+        if health:
+            live = str(health.get("version") or "")
+            if not expected_version or live == expected_version:
+                return True, health, f"v{live} after {attempt} probe(s)"
+            detail = (f"the container is serving v{live}, but this checkout "
+                      f"deployed v{expected_version}")
+        elif rc != 0:
+            detail = (err or out or "").strip()[:200] or f"docker exec exited {rc}"
+        else:
+            detail = "/api/v1/health answered nothing a JSON object could be read from"
+        if time.time() >= deadline:
+            return False, health, detail
+        time.sleep(HEALTH_PROBE_INTERVAL)
+
+
+def rollback_one_liner(root: str, old_dir: str = "") -> str:
+    """The exact command that puts the previous app tree back.
+
+    Printed rather than run unless --rollback-on-unhealthy: "the dashboard is
+    not answering after a deploy" is a decision -- the cause may be the NAS,
+    the port, or a secret -- and this file's standing rule is to hand the
+    operator the command rather than automate a privileged rename they did
+    not ask for (docs/DOCKER.md).
+    """
+    container = backend().dashboard_container
+    stamp = time.strftime("%Y%m%d%H%M%S")
+    previous = old_dir or f"{root}/app.old.<ts>"
+    return (f"mv {root}/app {root}/app.failed-{stamp}; "
+            f"mv {previous} {root}/app; "
+            f"docker restart {container}")
+
+
+def roll_back_app_tree(root: str, old_dir: str, dry_run: bool) -> bool:
+    """Run the rollback one-liner on the NAS. True when it came back healthy.
+
+    Refuses when there is no recorded previous tree: a rollback that guesses
+    which app.old.<ts> to restore could restore last month's.
+    """
+    if not old_dir:
+        print("CANNOT ROLL BACK AUTOMATICALLY: this run never renamed an app "
+              "tree aside (nothing was pushed, or the swap did not get that "
+              "far), so there is no previous tree to name. Restore by hand "
+              "from the newest <host-root>/app.old.* you trust.",
+              file=sys.stderr)
+        return False
+    cmd = rollback_one_liner(root, old_dir)
+    print(f"--rollback-on-unhealthy: running\n    {cmd}")
+    rc, _out, err = run_ssh_guarded(
+        'echo "$SUDO_PW" | sudo -S -p "" sh -c ' + shell_quote(cmd), dry_run, 300)
+    if rc != 0:
+        print(f"THE ROLLBACK ITSELF FAILED ({err.strip()[:300]}) -- the app "
+              f"tree may now be at {root}/app.failed-*. Fix it by hand, and "
+              f"do not run another deploy until the dashboard answers.",
+              file=sys.stderr)
+        return False
+    return True
+
+
+def verify_dashboard_after_restart(port: int, root: str, args) -> int:
+    """0 when the dashboard is serving this checkout's code, 1 when it is not.
+
+    THE point of OPS-1: this return value is what stops tools/ship.cmd going
+    on to publish companions to the whole fleet against a dashboard that is
+    down. Called after EVERY restart, in both stack modes.
+    """
+    expected = repo_dashboard_version()
+    ok, health, detail = probe_dashboard_health(port, expected, args.dry_run)
+    if ok:
+        if args.dry_run:
+            return 0
+        print(f"dashboard is SERVING: v{health.get('version', '?')} "
+              f"ok={health.get('ok')} ({detail})")
+        return 0
+    old_dir = _LAST_OLD_DIRS.get("app", "")
+    print(f"\nFAILED: the dashboard did not answer /api/v1/health from inside "
+          f"the container as v{expected or '<unknown>'} within "
+          f"{HEALTH_PROBE_SECONDS}s: {detail}", file=sys.stderr)
+    print(f"  The container restarted; the CODE in it is not serving. Nothing "
+          f"was deleted: the tree it replaced is still on the NAS.",
+          file=sys.stderr)
+    print(f"  ROLL BACK with:\n    {rollback_one_liner(root, old_dir)}",
+          file=sys.stderr)
+    print(f"  Then read the container's log in the NAS UI (or `docker logs "
+          f"{backend().dashboard_container}`): an import error names the file.",
+          file=sys.stderr)
+    if getattr(args, "rollback_on_unhealthy", False):
+        if roll_back_app_tree(root, old_dir, args.dry_run):
+            back_ok, back_health, back_detail = probe_dashboard_health(
+                port, "", args.dry_run)
+            if back_ok:
+                print(f"rolled back: the dashboard is answering again as "
+                      f"v{back_health.get('version', '?')} ({back_detail}). "
+                      f"This deploy is UNDONE, not finished.")
+            else:
+                print(f"rolled back, but the dashboard still does not answer "
+                      f"({back_detail}) -- the fault is not this deploy's app "
+                      f"tree.", file=sys.stderr)
+    else:
+        print("  (--rollback-on-unhealthy does the above for you.)", file=sys.stderr)
+    return 1
+
+
 def verify_image_boot(port: int, expected: str, dry_run: bool) -> bool:
     """Report what the image-mode container actually booted. True = as expected.
 
@@ -3315,6 +3501,9 @@ def install_tree(root: str, target_name: str, source: Path, dry_run: bool,
               file=sys.stderr)
         return False
 
+    # OPS-1: the rollback line a failed health probe prints has to name the
+    # exact directory this run renamed aside, not a glob over every backup.
+    _LAST_OLD_DIRS[target_name] = old_dir_raw
     swap = build_swap_script(root, staging, new_dir_raw, old_dir_raw,
                              expected_count, expected_bytes, target_dir=target)
     rc, _, err = run_ssh_guarded(
@@ -3617,6 +3806,13 @@ def main():
                          "conveys a GPLv3 binary, which obliges you to supply "
                          "corresponding source or a written offer -- the notice "
                          "it prints says how.")
+    ap.add_argument("--rollback-on-unhealthy", action="store_true",
+                    help="if the dashboard does not answer /api/v1/health as this "
+                         "checkout's VERSION after the restart, put the previous app "
+                         "tree back and restart again (OPS-1). Off by default: the "
+                         "cause may be the NAS, the port or a secret rather than the "
+                         "code, so the rollback command is PRINTED and the deploy "
+                         "exits non-zero either way")
     ap.add_argument("--recreate", action="store_true",
                     help="delete and re-create the app so compose changes (env vars, "
                          "mounts, ports) take effect; host app/ and data/ dirs survive")
@@ -4501,11 +4697,30 @@ def main():
         else:
             print(f"NOTE: docker restart failed ({err.strip()[:200]}); restart the "
                   f"{APP_NAME!r} app from the TrueNAS UI to pick up the new code.")
+        # image mode's boot facts (which code root, which runtime) -- and its
+        # RESULT is honoured now (OPS-1, 2026-08-28): it used to be called and
+        # thrown away on this path, so a container that came back on the wrong
+        # code root printed FAILED and still exited 0.
+        boot_ok = True
         if image_mode and restarted:
-            verify_image_boot(args.port, expected_runtime_id(), args.dry_run)
+            boot_ok = verify_image_boot(args.port, expected_runtime_id(), args.dry_run)
+        # AND: did the dashboard actually come back? Every path through this
+        # branch used to end at "restarted container: ..." and `return 0`,
+        # which says the restart command succeeded and nothing more -- while
+        # tools/ship.cmd read that 0 as permission to publish companions to
+        # the whole fleet.
+        health_rc = 0
+        if restarted:
+            health_rc = verify_dashboard_after_restart(args.port, root, args)
+        elif not args.dry_run:
+            # The restart itself failed. The note above says what to click;
+            # this is still not a successful deploy, and ship must not go on.
+            health_rc = 1
         # The redeploy path's FINAL line: whether the app tree that was just
         # swapped has a point-in-time behind it (OPS-9, 2026-08-28).
         print(snapshot_verdict())
+        if health_rc != 0 or not boot_ok:
+            return 1
         return 0
 
     # The create itself is the backend's: a custom_app POST on TrueNAS Apps,
@@ -4600,6 +4815,12 @@ def main():
     # reverts anything (docs/DOCKER.md).
     if image_mode and not verify_image_boot(args.port, expected_runtime_id(),
                                             args.dry_run):
+        return 1
+
+    # A fresh create is a container start like any other (OPS-1): the app is
+    # only installed if it serves.
+    if verify_dashboard_after_restart(args.port, root, args) != 0:
+        print(snapshot_verdict())
         return 1
 
     print(f"installed custom app: {APP_NAME} on port {args.port}")

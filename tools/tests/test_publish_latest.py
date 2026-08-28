@@ -140,3 +140,58 @@ class TestFindManifest:
         assert pl.find_manifest(tmp_path, "ccsync-onboard.json").name == "ccsync-onboard.json"
         assert pl.find_manifest(tmp_path, "ccsync-release.json").name == "ccsync-release.json"
         assert pl.find_manifest(tmp_path, "nothing.json") is None
+
+
+class TestTheBranchTipComesFromTheRemote:
+    """REL-14 (resilience sweep 2026-08-28): the ancestry test used to compare
+    against whatever origin/main this working copy last saw, which a
+    force-push makes as untrue as the branch label the check exists to
+    distrust."""
+
+    def test_the_remote_head_is_read_with_ls_remote(self, monkeypatch):
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if "ls-remote" in cmd:
+                return 0, f"{'d' * 40}\trefs/heads/main\n", ""
+            return 0, "", ""
+
+        monkeypatch.setattr(pl, "run", fake_run)
+        assert pl.remote_head_sha() == "d" * 40
+        assert "ls-remote" in calls[0]
+
+    def test_a_remote_that_cannot_be_asked_yields_nothing(self, monkeypatch):
+        monkeypatch.setattr(pl, "run", lambda cmd, **kw: (128, "", "no route"))
+        assert pl.remote_head_sha() == ""
+        assert pl.release_branch_tip() == ""
+
+    def test_a_missing_remote_commit_is_fetched_before_it_is_trusted(self, monkeypatch):
+        calls = []
+        have = {"yet": False}
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if "ls-remote" in cmd:
+                return 0, f"{'e' * 40}\trefs/heads/main\n", ""
+            if "cat-file" in cmd:
+                return (0, "", "") if have["yet"] else (1, "", "missing")
+            if "fetch" in cmd:
+                have["yet"] = True
+                return 0, "", ""
+            return 0, "", ""
+
+        monkeypatch.setattr(pl, "run", fake_run)
+        assert pl.release_branch_tip() == "e" * 40
+        assert any("fetch" in c for c in calls)
+
+    def test_the_ancestry_test_uses_the_tip_it_was_given(self, monkeypatch):
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            seen["cmd"] = cmd
+            return 0, "", ""
+
+        monkeypatch.setattr(pl, "run", fake_run)
+        assert pl.commit_is_on_main("b" * 40, "f" * 40) is True
+        assert seen["cmd"][-1] == "f" * 40

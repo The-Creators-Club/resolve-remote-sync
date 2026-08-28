@@ -72,6 +72,14 @@ class Settings:
     # Only a deployment with NEITHER set fails, loudly, with the NAS's error.
     smb_host: str = ""
     session_secret: str = ""            # required for login; stable across deploys
+    # Accept-only retired signing keys, newest first (DASH-2, resilience sweep
+    # 2026-08-28). Nothing is ever MINTED with one: they exist so that rotating
+    # DASH_SESSION_SECRET does not 401 every companion in the fleet at once --
+    # an identity token is an HMAC over that secret and never expires (CR-86),
+    # so before this the only cure was every editor clicking "Sign in..." at
+    # their own tray, with the command channel dead in the meantime. Drop the
+    # old value from here once the admin banner's count reaches zero.
+    session_secrets_previous: tuple[str, ...] = ()
     admin_users: frozenset[str] = frozenset()  # lowercase usernames
     # Secure flag on the session cookie. "auto" (the default) sets it only on
     # https requests, so today's plain-http LAN/tailnet deployment keeps
@@ -348,6 +356,14 @@ class Settings:
     # lifespan (guarded by release_feed_url being set). Default matches "we
     # check daily, and on demand" from the plan.
     release_feed_interval: float = 86400.0
+    # REL-1 (resilience sweep 2026-08-28): how long a staged companion build
+    # must have been RUNNING on at least one machine, crash-free, before
+    # [ MAKE CURRENT ] will hand it to the whole fleet. A `meta` row
+    # (release_soak_minutes) overrides this without a redeploy; 0 turns the
+    # gate off for a site that wants the pre-2026-08-28 behaviour back, which
+    # is deliberately a NUMBER an admin sets rather than a flag every click
+    # has to carry.
+    release_soak_minutes: int = 30
 
     # Serve the b-roll search UI at /broll from inside this process, so editors
     # get one URL and one login instead of a second service to reach and sign
@@ -551,6 +567,10 @@ class Settings:
             auth_method=env.get("DASH_AUTH_METHOD", "smb"),
             smb_host=env.get("DASH_SMB_HOST", ""),
             session_secret=env.get("DASH_SESSION_SECRET", ""),
+            session_secrets_previous=tuple(
+                s.strip() for s in env.get("DASH_SESSION_SECRET_PREVIOUS", "").split(",")
+                if s.strip()
+            ),
             admin_users=frozenset(
                 u.strip().lower() for u in env.get("DASH_ADMIN_USERS", "").split(",") if u.strip()
             ),
@@ -628,6 +648,7 @@ class Settings:
             release_feed_url=env.get("DASH_RELEASE_FEED_URL", "").strip(),
             release_feed_policy=(env.get("DASH_RELEASE_FEED_POLICY", "").strip().lower() or "manual"),
             release_feed_interval=num("DASH_RELEASE_FEED_INTERVAL", 86400.0),
+            release_soak_minutes=int(num("DASH_RELEASE_SOAK_MINUTES", 30.0)),
             projects_dir=env.get("DASH_PROJECTS_DIR", ""),
             syncthing_data_prefix=env.get("DASH_SYNCTHING_DATA_PREFIX", "/data/Projects"),
             syncthing_assets_prefix=env.get("DASH_SYNCTHING_ASSETS_PREFIX", "/data/Assets"),

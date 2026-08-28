@@ -1938,14 +1938,22 @@ def test_a_failed_download_waits_longer_before_the_next_try(tmp_path, monkeypatc
                                         "requested_at": "2026-08-19T10:00:00Z"}}}
     clock = [1000.0]
     monkeypatch.setattr(app_mod.time, "monotonic", lambda: clock[0])
+    # The back-off is PERSISTED since REL-8 (resilience sweep 2026-08-28) and
+    # therefore measured on the wall clock: a restart must not reset it.
+    wall = [10_000.0]
+    monkeypatch.setattr(app_mod.time, "time", lambda: wall[0])
+
+    def _advance(seconds):
+        clock[0] += seconds
+        wall[0] += seconds
 
     app._apply_pushed_update(command)
     _join_upgrade_threads()
-    clock[0] += app_mod.PUSHED_UPDATE_RETRY_SECONDS + 1
+    _advance(app_mod.PUSHED_UPDATE_RETRY_SECONDS + 1)
     app._apply_pushed_update(command)
     _join_upgrade_threads()
     assert calls == [False]                       # a stand-down pause is not enough
-    clock[0] += app_mod.PUSHED_UPDATE_FAILED_RETRY_SECONDS
+    _advance(app_mod.PUSHED_UPDATE_FAILED_RETRY_SECONDS)
     app._apply_pushed_update(command)
     _join_upgrade_threads()
     assert calls == [False, True]
@@ -4309,11 +4317,13 @@ def test_the_check_only_runs_after_an_upgrade(tmp_path, monkeypatch):
     monkeypatch.setattr("ccsync_companion.tray.start_tray", lambda _a: _FakeTray())
     app._stop_event.set()
 
-    monkeypatch.setattr(app_mod.upgrade_mod, "note_version_start", lambda _d: False)
+    monkeypatch.setattr(app_mod.upgrade_mod, "note_version_start",
+                        lambda _d, **_kw: {"upgraded": False, "starts": 1})
     app.run()
     assert calls == []
 
-    monkeypatch.setattr(app_mod.upgrade_mod, "note_version_start", lambda _d: True)
+    monkeypatch.setattr(app_mod.upgrade_mod, "note_version_start",
+                        lambda _d, **_kw: {"upgraded": True, "starts": 1})
     app._stop_event.set()
     app.run()
     assert calls == ["checked"]
@@ -6512,3 +6522,129 @@ def test_the_resume_button_clears_a_disk_park_too(tmp_path):
     ok, message = app.resume_lane_b(by="tray")
     assert ok, message
     assert not app.disk_floor.parked
+
+
+# ---------------------------------------------------------------------------
+# REL-8 / APP-5 (resilience sweep 2026-08-28): the update ledger, the tray
+# telemetry and the crash-loop rollback, from the app's side.
+# ---------------------------------------------------------------------------
+
+
+def test_a_machine_that_cannot_take_a_build_stops_downloading_it(tmp_path, monkeypatch):
+    """REL-8. An AV that quarantines every download, or a proxy that mangles
+    it, used to buy the NAS a ~20 MB download every ten minutes for ever --
+    with nothing on the report to say so."""
+    from ccsync_companion import app as app_mod
+    from ccsync_companion import upgrade as upgrade_mod
+
+    app, calls, _ = _refusing_update_app(tmp_path, monkeypatch, ["failed"] * 20)
+    command = {"commands": {"upgrade": {"apply": True, "version": "9.9.9",
+                                        "requested_at": "2026-08-19T10:00:00Z"}}}
+    clock = [1000.0]
+    wall = [10_000.0]
+    monkeypatch.setattr(app_mod.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(app_mod.time, "time", lambda: wall[0])
+
+    for _ in range(12):
+        app._apply_pushed_update(command)
+        _join_upgrade_threads()
+        clock[0] += 7 * 3600
+        wall[0] += 7 * 3600
+
+    assert len(calls) == upgrade_mod.MAX_UPGRADE_ATTEMPTS
+    guard = upgrade_mod.upgrade_report(app._upgrade_attempts, 1)
+    assert guard["attempts"] == upgrade_mod.MAX_UPGRADE_ATTEMPTS
+    assert guard["version"] == "9.9.9"
+    # ...and WHY, so an admin can tell a quarantine from a full disk.
+    assert guard["last_error"]
+    assert app._upgrade_attempt_blocked("9.9.9") == "given up"
+    # A newly published build is always tried: the point of a fix is that it
+    # reaches the machine.
+    assert app._upgrade_attempt_blocked("9.9.10") == ""
+
+
+def test_the_failure_reason_reaches_the_report(tmp_path, monkeypatch):
+    from ccsync_companion import app as app_mod
+    from ccsync_companion import upgrade as upgrade_mod
+
+    app, _calls, _ = _refusing_update_app(tmp_path, monkeypatch, ["failed"])
+    app.upgrade.last_failure = upgrade_mod.ERROR_SHA
+    monkeypatch.setattr(app_mod.time, "time", lambda: 10_000.0)
+
+    app._apply_pushed_update({"commands": {"upgrade": {"apply": True, "version": "9.9.9"}}})
+    _join_upgrade_threads()
+
+    assert app._upgrade_attempts["last_error"] == "sha-mismatch"
+
+
+def test_the_report_carries_the_upgrade_block_even_on_a_healthy_machine(tmp_path):
+    """An absent section could only mean "a companion too old to send one",
+    so the all-zero shape is sent."""
+    app = _make_app(tmp_path)
+    block = app.sync_guard().get("upgrade")
+    assert block is not None
+    assert block["attempts"] == 0 and block["reverted_from"] is None
+    assert block["starts_this_version"] >= 1
+
+
+def test_a_crash_loop_rollback_rides_the_report_until_it_is_accepted(tmp_path):
+    """APP-5 / REL-2: `reverted_from` is what tells the fleet grid that this
+    machine took itself off a bad build, and it clears after ONE accepted
+    report -- not after the report that was refused."""
+    from ccsync_companion import upgrade as upgrade_mod
+
+    app = _make_app(tmp_path)
+    upgrade_mod.note_reverted_from(app._upgrade_attempts_path(), "9.9.9", now=100.0)
+    app._load_upgrade_state()
+
+    assert app.sync_guard()["upgrade"]["reverted_from"] == "9.9.9"
+
+    app._on_report_response({})
+
+    assert app.sync_guard()["upgrade"]["reverted_from"] is None
+    assert app._report_accepted.is_set()
+    assert "reverted_from" not in upgrade_mod.read_attempts(app._upgrade_attempts_path())
+
+
+def test_running_the_build_it_was_trying_to_install_clears_the_failures(tmp_path):
+    from ccsync_companion import config as config_mod
+    from ccsync_companion import upgrade as upgrade_mod
+
+    app = _make_app(tmp_path)
+    upgrade_mod.note_upgrade_attempt(
+        app._upgrade_attempts_path(), config_mod.VERSION, upgrade_mod.ERROR_DOWNLOAD)
+
+    app._load_upgrade_state()
+
+    assert app._upgrade_attempts.get("attempts") is None
+
+
+def test_the_crash_loop_guard_reverts_and_says_so_when_it_cannot(tmp_path, monkeypatch, caplog):
+    from ccsync_companion import app as app_mod
+
+    app = _make_app(tmp_path)
+    monkeypatch.setattr(app_mod.upgrade_mod, "revert_to_previous_build",
+                        lambda *a, **kw: ("0.9.54", ""))
+    assert app._revert_crashing_build() is True
+
+    monkeypatch.setattr(app_mod.upgrade_mod, "revert_to_previous_build",
+                        lambda *a, **kw: ("", "there is no rollback copy"))
+    with caplog.at_level("ERROR"):
+        assert app._revert_crashing_build() is False
+    assert "did NOT roll back" in caplog.text
+
+
+def test_diagnostics_name_the_architecture_and_the_update_state(tmp_path):
+    from ccsync_companion import upgrade as upgrade_mod
+
+    app = _make_app(tmp_path)
+    upgrade_mod.note_upgrade_attempt(
+        app._upgrade_attempts_path(), "9.9.9", upgrade_mod.ERROR_EXEC)
+    app._load_upgrade_state()
+
+    text = app.build_diagnostics()
+
+    assert "arch:" in text
+    assert "-- updates --" in text
+    assert "last attempted build: 9.9.9" in text
+    assert "exec-failed" in text

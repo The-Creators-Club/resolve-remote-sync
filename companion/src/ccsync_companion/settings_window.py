@@ -268,6 +268,9 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
                  # SYS-2 (same sweep): the watchdog restarting one thread over
                  # and over is a self-healing machine that still needs a human.
                  tray_mod._restarts_line(guard),
+                 # REL-8 / APP-5 (same sweep): the update this computer has
+                 # given up on, and the build it rolled itself back off.
+                 tray_mod._upgrade_line(guard), tray_mod._reverted_line(guard),
                  # SYNC-1 (same sweep, CR-91): a wedged rclone the companion
                  # had to kill. The machine it happened ON said nothing at
                  # all about it before this line existed.

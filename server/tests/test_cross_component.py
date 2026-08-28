@@ -1345,6 +1345,38 @@ def test_every_sync_guard_section_the_companion_sends_is_declared():
     )
 
 
+def test_the_upgrade_telemetry_the_dashboard_stores_is_actually_sent():
+    """The parity gate in the OTHER direction (REL-8 / REL-16, resilience
+    sweep 2026-08-28).
+
+    The two gates above catch a companion that sends something the dashboard
+    drops. This one catches the mirror image: a dashboard that grew columns,
+    chips and a "this machine has failed the update 8 times" line against a
+    report field no build in the field ever fills. Both halves shipped in the
+    same sweep, and a chip that can never light is worse than no chip -- it
+    reads as "nothing wrong here".
+    """
+    from ccsync_dashboard.api import ReportIn, SyncGuardIn
+
+    sent_top = _dict_keys_built_in(COMPANION_REPORTER_SRC, "_build_payload", "payload")
+    assert "arch" in sent_top and "arch" in ReportIn.model_fields, (
+        "the dashboard offers builds per (platform, arch) and stores "
+        "machine_state.arch, but the companion's report does not carry `arch` -- "
+        "so an Intel Mac and an Apple-silicon one stay indistinguishable and "
+        "one of them keeps being handed the other's binary (REL-16)."
+    )
+
+    sent_guard = _dict_keys_built_in(COMPANION_APP_SRC, "sync_guard", "guard")
+    sent_guard |= _dict_keys_built_in(COMPANION_RCLONE_SRC, "sync_guard_report", "out")
+    assert "upgrade" in sent_guard and "upgrade" in SyncGuardIn.model_fields, (
+        "the dashboard stores machine_state.upgrade_* and chips [ UPDATE FAILED "
+        "xN ] / [ REVERTED FROM x ] from them, but the companion's sync_guard "
+        "does not carry an `upgrade` block -- the admin's pushed update would go "
+        "back to showing 'pending' for ever while the machine fails it every ten "
+        "minutes (REL-8)."
+    )
+
+
 def test_the_dashboard_accepts_extras_rather_than_dropping_them_silently():
     """The runtime half of SYS-3: the two models must not go back to
     extra='ignore', which is what made the three losses silent."""

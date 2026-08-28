@@ -507,6 +507,26 @@ if ($bakedKeys.Count -eq 0) {
     exit 1
 }
 Write-Step "release keys baked into the companion: $($bakedKeys.Count) ($($bakedKeys[0].Substring(0,12))...)"
+
+# The IDS of those keys, for the manifest (REL-7, resilience sweep 2026-08-28).
+# Same recipe as release_pubkey.pubkey_id: first 16 hex of sha256 over the RAW
+# 32 bytes. They go into the manifest and from there onto the published record,
+# so the NEXT release can ask "would the fleet on the current build accept a
+# build signed with this key?" -- the question the check below cannot answer,
+# because it compares the signing key against the artifact being built, which
+# is the one place the two can never disagree.
+function Get-PubkeyId {
+    param([string]$Base64)
+    try {
+        $raw = [Convert]::FromBase64String($Base64)
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try { $hash = $sha.ComputeHash($raw) } finally { $sha.Dispose() }
+        return (($hash | ForEach-Object { $_.ToString("x2") }) -join "").Substring(0, 16)
+    }
+    catch { return "" }
+}
+$BakedPubkeyIds = @($bakedKeys | ForEach-Object { Get-PubkeyId $_ } | Where-Object { $_ })
+Write-Step "baked pubkey ids: $($BakedPubkeyIds -join ', ')"
 $SigningKeyPath = "$env:CCSYNC_RELEASE_KEY".Trim()
 if (-not $SigningKeyPath) { $SigningKeyPath = Join-Path $env:USERPROFILE ".ccsync-release\release.key" }
 if (Test-Path -LiteralPath $SigningKeyPath) {
@@ -525,6 +545,24 @@ if (Test-Path -LiteralPath $SigningKeyPath) {
 }
 else {
     Write-Warn2 "no release signing key at $SigningKeyPath -- the publish step will fail (python tools\release_key.py new)"
+}
+
+# REL-4 (2026-08-28): the DASHBOARD VERSION this companion needs, read out of
+# the same config.py the companion's own VERSION comes from. Optional -- a
+# build that declares nothing is offered to everyone, which is what every
+# record published before this sweep says -- but when it IS declared, it is
+# SIGNED into the record and a dashboard below it refuses to advertise the
+# build at all, instead of a fleet taking a companion whose columns its
+# dashboard does not have (the B16 unshare-the-fleet shape, arrow reversed).
+$RequiresDashboard = Get-Capture -Path $ConfigPy -Pattern '^REQUIRES_DASHBOARD\s*=\s*"([^"]+)"'
+if ($RequiresDashboard) { Write-Step "requires dashboard >= v$RequiresDashboard" }
+
+# REL-16: the channel had no architecture discriminator at all, so an Intel Mac
+# was offered the arm64 binary CI builds. PyInstaller does not cross-compile,
+# so the arch of THIS build is the arch of this machine.
+$BuildArch = "x86_64"
+if ("$env:PROCESSOR_ARCHITECTURE" -eq "ARM64" -or "$env:PROCESSOR_ARCHITEW6432" -eq "ARM64") {
+    $BuildArch = "arm64"
 }
 
 # The dashboard ships separately (Docker) and carries its own VERSION; it is
@@ -735,6 +773,14 @@ $manifest = [ordered]@{
     git_describe   = "$GitDescribe".Trim()
     git_dirty      = $IsDirty
     tests_run      = (-not $SkipTests)
+    # Provenance the publish tools consume (resilience sweep 2026-08-28):
+    # baked_pubkey_ids -> the REL-7 rotation refusal, requires_dashboard ->
+    # REL-4's ordering rule, arch -> REL-16's discriminator. All three are
+    # MEASURED here; retyping any of them at the publish is how a signed
+    # record ends up describing a build other than the one in hand.
+    baked_pubkey_ids   = $BakedPubkeyIds
+    requires_dashboard = "$RequiresDashboard"
+    arch               = $BuildArch
     # Authenticode, NOT the release-record signature (item 4, 2026-08-17).
     # build_editor_package.ps1 re-derives this from the file itself before it
     # signs the record -- the manifest is provenance, never the authority.
@@ -757,6 +803,8 @@ else {
     Write-Step "  sha256  : $Sha"
     Write-Step "  size    : $([int]($SizeBytes/1KB)) KB"
     Write-Step "  commit  : $("$GitDescribe".Trim())"
+    Write-Step "  arch    : $BuildArch$(if ($RequiresDashboard) { ", needs dashboard >= v$RequiresDashboard" })"
+    Write-Step "  keys    : $($BakedPubkeyIds -join ', ')"
 }
 
 # --- 5. what to do next ----------------------------------------------------

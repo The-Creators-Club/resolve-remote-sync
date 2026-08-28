@@ -1058,6 +1058,87 @@ CREATE INDEX IF NOT EXISTS ix_diagnostics_machine
 CREATE INDEX IF NOT EXISTS ix_diagnostics_received ON diagnostics(received_at);
 """
 
+# v35: what happened when this computer last tried to take a build, and what
+# happened when it last tried to report (REL-8 / DASH-2 / REL-16, resilience
+# sweep 2026-08-28).
+#
+# `arch` is the report's new top-level field: an Intel Mac and an Apple-silicon
+# one both report platform `macos`, so the channel had no way to avoid handing
+# one the other's binary (REL-16). It is a property of the box, so it is
+# COALESCEd like `platform`.
+#
+# upgrade_* is `sync_guard.upgrade` flattened (REL-8). The report payload
+# carried NOTHING about upgrade outcomes, so a machine whose AV quarantines
+# every downloaded exe looked exactly like one that had not seen the push yet:
+# the admin's [ UPDATE NOW ] sat "pending" for ever while the machine
+# downloaded 20 MB every ten minutes. `upgrade_reverted_from` is the crash-loop
+# guard's answer (APP-5) and is sent ONCE, so it is kept (COALESCE) rather than
+# latched -- the grid stops showing it by itself once the machine is running a
+# build at or above the one it fell back from.
+#
+# The two `machines` columns are DASH-2's: a report refused ONLY because its
+# identity token cannot be verified writes them and nothing else, so a fleet
+# whose DASH_SESSION_SECRET was rotated says "this computer is trying to report
+# and being refused" instead of showing a grid that quietly stops moving.
+SCHEMA_V35 = """
+ALTER TABLE machine_state ADD COLUMN arch TEXT;
+ALTER TABLE machine_state ADD COLUMN upgrade_version TEXT;
+ALTER TABLE machine_state ADD COLUMN upgrade_attempts INTEGER;
+ALTER TABLE machine_state ADD COLUMN upgrade_last_error TEXT;
+ALTER TABLE machine_state ADD COLUMN upgrade_last_attempt_at TEXT;
+ALTER TABLE machine_state ADD COLUMN upgrade_reverted_from TEXT;
+ALTER TABLE machines ADD COLUMN report_refused_at TEXT;
+ALTER TABLE machines ADD COLUMN report_refused_reason TEXT;
+"""
+
+# v34: the release channel grows a rollout, a recall and two discriminators
+# (REL-1/SYS-6, REL-3, REL-4/SYS-13, REL-16, REL-13; resilience sweep
+# 2026-08-28).
+#
+# `rollout` is what a build IS to this fleet, not merely what it is pointed
+# at: 'staged' means published and installable by name (a per-machine push)
+# but offered to nobody, 'current' means the whole fleet is being offered it.
+# is_current stays the served pointer -- one column, one meaning, and no
+# dangling-pointer window -- and rollout is kept in step with it. Every row
+# published before this migration was either current or superseded, which is
+# exactly the two values, so the backfill below is lossless.
+#
+# `staged_at` starts the soak clock. The gate on MAKE CURRENT reads it
+# together with machine_state.companion_version_since, which is the first
+# report that carried THIS version from a machine (server clock, not the
+# companion's: a wrong clock on a canary must not be able to shorten a soak).
+#
+# `requires_dashboard` and `arch` are the two SIGNED extras (release_trust.
+# OPTIONAL_KIND_EXTRA_FIELDS) stored so they can be re-served verbatim in the
+# offer -- the signature covers them, so a stored copy that differs by one
+# character is a build no companion will install.
+#
+# `git_sha`/`git_dirty` are ADVISORY and deliberately unsigned (REL-13): they
+# say which commit a build came from, and "+dirty" used to die at the publish
+# boundary, leaving the fleet on a 0.9.55 that corresponds to no commit in the
+# repo, permanently and invisibly.
+#
+# `retracted_at`/`retracted_reason` are the recall (REL-3). A retracted row is
+# never served, never made current and says why on both admin pages; the row
+# and its file stay, because the fleet may still be running it and an admin
+# has to be able to see what they are rolling back FROM.
+SCHEMA_V34 = """
+ALTER TABLE companion_packages ADD COLUMN rollout TEXT NOT NULL DEFAULT 'staged';
+ALTER TABLE companion_packages ADD COLUMN staged_at TEXT;
+ALTER TABLE companion_packages ADD COLUMN requires_dashboard TEXT;
+ALTER TABLE companion_packages ADD COLUMN arch TEXT;
+ALTER TABLE companion_packages ADD COLUMN git_sha TEXT;
+ALTER TABLE companion_packages ADD COLUMN git_dirty INTEGER;
+ALTER TABLE companion_packages ADD COLUMN ever_current INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE companion_packages ADD COLUMN retracted_at TEXT;
+ALTER TABLE companion_packages ADD COLUMN retracted_reason TEXT;
+ALTER TABLE machine_state ADD COLUMN companion_version_since TEXT;
+UPDATE companion_packages SET rollout='current', ever_current=1 WHERE is_current=1;
+UPDATE companion_packages SET staged_at=published_at WHERE staged_at IS NULL;
+UPDATE machine_state SET companion_version_since=COALESCE(received_at, reported_at)
+ WHERE companion_version_since IS NULL AND companion_version IS NOT NULL;
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -1101,6 +1182,11 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # pair of the same sweep, numbered in advance for the same reason.
     (32, SCHEMA_V32),
     (33, SCHEMA_V33),
+    # 34 (the release channel: staged rollout, recall, ordering, arch) and 35
+    # (dashboard self-update / auth) are the third pair of the same sweep,
+    # numbered in advance so two work packages could land without renumbering.
+    (34, SCHEMA_V34),
+    (35, SCHEMA_V35),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -2169,17 +2255,32 @@ def insert_companion_package(
     pubkey_id: str = "",
     min_version: str = "",
     signed_binary: bool = False,
+    requires_dashboard: str = "",
+    arch: str = "",
+    git_sha: str = "",
+    git_dirty: bool = False,
+    staged_at: str = "",
 ) -> None:
     # `now` is the SIGNER's published_at, not the server's clock: it is one of
     # the fields the release signature covers, so storing anything else would
     # serve a record that no longer verifies (item 4, 2026-08-17).
+    #
+    # rollout ALWAYS starts 'staged' (REL-1, 2026-08-28), even when the caller
+    # is about to make this build current in the same transaction: publishing
+    # is what puts a build on the shelf, and set_current_package is the one
+    # place that hands it to the fleet. `staged_at` is the server's clock and
+    # not `now`, because it starts a SOAK -- a signer's published_at hours in
+    # the past would hand a fresh build a soak it never served.
     conn.execute(
         """INSERT INTO companion_packages
              (kind, version, platform, filename, sha256, size_bytes, published_at,
-              published_by, signature, pubkey_id, min_version, signed_binary)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+              published_by, signature, pubkey_id, min_version, signed_binary,
+              rollout, staged_at, requires_dashboard, arch, git_sha, git_dirty)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'staged', ?, ?, ?, ?, ?)""",
         (kind, version, platform, filename, sha256, size_bytes, now, published_by,
-         signature, pubkey_id, min_version, 1 if signed_binary else 0),
+         signature, pubkey_id, min_version, 1 if signed_binary else 0,
+         staged_at or utcnow_iso(), requires_dashboard, arch, git_sha,
+         1 if git_dirty else 0),
     )
 
 
@@ -2219,19 +2320,200 @@ def set_current_package(
     conn: sqlite3.Connection, platform: str, version: str, kind: str = "companion"
 ) -> bool:
     """Point `current` at (kind, platform, version). False if that version is
-    unknown. Currency is per (kind, platform): making an onboard build current
-    never touches which companion the fleet is offered, and vice versa."""
-    if get_package(conn, platform, version, kind) is None:
+    unknown, or has been RETRACTED by the vendor. Currency is per (kind,
+    platform): making an onboard build current never touches which companion
+    the fleet is offered, and vice versa.
+
+    The retraction check is here, in the one writer, rather than only in the
+    routes (REL-3, 2026-08-28): a recalled build must be un-currentable from
+    every door, including the feed's `current` policy re-pointing at a version
+    the vendor has since pulled.
+
+    `rollout` moves with `is_current` in the same two statements: a build that
+    is no longer offered to the fleet is back on the shelf, not current.
+    """
+    row = get_package(conn, platform, version, kind)
+    if row is None or _row_value(row, "retracted_at"):
         return False
     conn.execute(
-        "UPDATE companion_packages SET is_current=0 WHERE kind=? AND platform=?",
+        "UPDATE companion_packages SET is_current=0, rollout='staged' "
+        "WHERE kind=? AND platform=?",
         (kind, platform),
     )
     conn.execute(
-        "UPDATE companion_packages SET is_current=1 WHERE kind=? AND platform=? AND version=?",
+        # `ever_current` is what makes a ROLLBACK cheap (REL-1): the soak gate
+        # asks for evidence that a build the fleet has never been offered
+        # actually runs, and a build it HAS been offered has already produced
+        # that evidence -- refusing to go back to it would be the gate working
+        # against the recovery it exists to make possible.
+        "UPDATE companion_packages SET is_current=1, rollout='current', ever_current=1 "
+        "WHERE kind=? AND platform=? AND version=?",
         (kind, platform, version),
     )
     return True
+
+
+def _row_value(row: Any, key: str) -> Any:
+    """A column an older database may not have yet. sqlite3.Row raises
+    IndexError -- not KeyError -- for an unknown key, and this module is read
+    by code that can meet a DB opened by a concurrently-starting older process
+    during a redeploy (same reason api._row_value exists)."""
+    try:
+        return row[key]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
+def retract_package(
+    conn: sqlite3.Connection, kind: str, platform: str, version: str,
+    reason: str, now: str, actor: str = "release-feed",
+) -> bool:
+    """Recall one published build (REL-3, resilience sweep 2026-08-28).
+
+    Un-currents it, stamps why and when. The ROW AND THE FILE STAY: machines
+    in the field are still running this build, and both admin pages have to be
+    able to name what the fleet is being rolled back FROM. False when this
+    dashboard never published that version -- a recall for a build nobody here
+    holds is a no-op, not an error.
+
+    Idempotent: a feed carrying the same retraction every day must not
+    re-stamp it, or `retracted_at` would say "recalled 30 seconds ago" forever.
+    """
+    row = get_package(conn, platform, version, kind)
+    if row is None:
+        return False
+    if _row_value(row, "retracted_at"):
+        return False
+    conn.execute(
+        "UPDATE companion_packages SET is_current=0, rollout='staged', "
+        "retracted_at=?, retracted_reason=? "
+        "WHERE kind=? AND platform=? AND version=?",
+        (now, str(reason or ""), kind, platform, version),
+    )
+    audit(conn, actor, "package.retract", version,
+          {"kind": kind, "platform": platform, "version": version,
+           "reason": str(reason or "")}, now=now)
+    return True
+
+
+def retracted_packages(
+    conn: sqlite3.Connection, kind: str = "companion"
+) -> dict[tuple[str, str], str]:
+    """(platform, version) -> reason, for every recalled build of this kind.
+
+    The fleet grid reads it to chip a machine that is RUNNING a recalled
+    build, which is the whole point of a recall: the machines already holding
+    it are the ones nobody could see.
+    """
+    rows = conn.execute(
+        "SELECT platform, version, retracted_reason FROM companion_packages "
+        "WHERE kind=? AND retracted_at IS NOT NULL AND retracted_at != ''",
+        (kind,),
+    ).fetchall()
+    return {
+        (r["platform"], r["version"]): str(r["retracted_reason"] or "")
+        for r in rows
+    }
+
+
+DEFAULT_SOAK_MINUTES = 30
+
+
+def soak_state(
+    conn: sqlite3.Connection, platform: str, version: str,
+    soak_minutes: float, now: str | None = None,
+) -> dict[str, Any]:
+    """"canary: N machines on X for M min, C crashes" -- and whether that is
+    enough to hand this build to the whole fleet (REL-1/SYS-6, 2026-08-28).
+
+    A build passes when at least ONE machine has been reporting this exact
+    version for `soak_minutes` with no crashes and no crash-loop revert. Not
+    an average and not a majority: the question the gate answers is "has this
+    build run somewhere real for long enough to have failed", and one machine
+    that has is the whole evidence there is.
+
+    Every "we could not tell" counts AGAINST passing (an unparseable
+    companion_version_since, a machine that has never reported a crash
+    section): a soak is a claim that something was observed, so an absence of
+    observation can never satisfy it.
+    """
+    now = now or utcnow_iso()
+    machines = machines_running_version(conn, platform, version)
+    best_minutes = 0.0
+    crashes = 0
+    reverted = 0
+    passed = 0
+    for m in machines:
+        crash_count = m.get("crash_count")
+        crashes += int(crash_count or 0)
+        if m.get("reverted_from"):
+            reverted += 1
+        try:
+            minutes = age_seconds(str(m.get("since") or ""), now) / 60.0
+        except (ValueError, TypeError):
+            minutes = 0.0
+        minutes = max(0.0, minutes)
+        m["minutes"] = minutes
+        best_minutes = max(best_minutes, minutes)
+        if (minutes >= float(soak_minutes)
+                and crash_count == 0
+                and not m.get("reverted_from")):
+            passed += 1
+    return {
+        "version": version,
+        "platform": platform,
+        "machines": len(machines),
+        "minutes": int(best_minutes),
+        "crashes": crashes,
+        "reverted": reverted,
+        "soak_minutes": int(soak_minutes),
+        "passed": passed,
+        "ok": passed > 0,
+        "detail": [
+            {"editor_username": m["editor_username"], "machine": m["machine"],
+             "minutes": int(m.get("minutes") or 0), "crash_count": m.get("crash_count"),
+             "reverted_from": m.get("reverted_from")}
+            for m in machines
+        ],
+    }
+
+
+def machines_running_version(
+    conn: sqlite3.Connection, platform: str, version: str
+) -> list[dict[str, Any]]:
+    """Every machine whose LAST report said it is running this exact build.
+
+    What [ ROLL THE FLEET BACK TO x ] iterates (REL-3) and what the soak gate
+    counts (REL-1). Platform-scoped: a macOS recall must never write an update
+    request onto a Windows box.
+    """
+    # SELECT * on purpose: `upgrade_reverted_from` is v35's column and this
+    # function has to work on a v34 database, where naming it would be a
+    # sqlite error rather than a missing answer.
+    rows = conn.execute(
+        """SELECT * FROM machine_state
+            WHERE companion_version = ?
+              AND LOWER(COALESCE(platform, 'windows')) = LOWER(?)""",
+        (version, platform),
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        entry = {
+            "editor_username": r["editor_username"],
+            "machine": r["machine"],
+            "companion_version": r["companion_version"],
+            "since": r["companion_version_since"] or r["received_at"] or r["reported_at"],
+            "crash_count": r["crash_count"],
+            # v35's column (the dashboard-self-update work package lands it
+            # after this one): read defensively so this works before it
+            # exists. A build the crash-loop guard had to undo is not a
+            # successful soak, and "we could not tell" must not read as "no
+            # revert" -- but a schema that has not grown the column yet
+            # genuinely has no answer, which is what None says here.
+            "reverted_from": _row_value(r, "upgrade_reverted_from"),
+        }
+        out.append(entry)
+    return out
 
 
 def delete_companion_package(
@@ -2643,6 +2925,216 @@ def store_blocked_state(
          guard.get("restarts_last_at"), guard.get("restarts_last_error"),
          editor, machine),
     )
+
+
+def version_tuple(text: Any) -> tuple[int, ...]:
+    """Dotted-numeric to a comparable tuple; () for anything else, which sorts
+    below every real version. Two-digit minors compare correctly (0.9.9 <
+    0.10.0), which a string compare does not -- the companion's own versioning
+    rule, and the reason this is not `<` on the text."""
+    raw = str(text or "").strip()
+    parts = raw.split(".")
+    out: list[int] = []
+    for part in parts:
+        if not part.isdigit():
+            return ()
+        out.append(int(part))
+    return tuple(out) if out else ()
+
+
+def store_upgrade_state(
+    conn: sqlite3.Connection, editor: str, machine: str,
+    guard: Mapping[str, Any] | None, arch: str | None,
+    running_version: str | None = None,
+) -> None:
+    """Write `sync_guard.upgrade` + the report's top-level `arch` onto the
+    machine's row (v35, REL-8 / REL-16, resilience sweep 2026-08-28).
+
+    Its own UPDATE for the reason store_blocked_state gives: the big INSERT is
+    edited by every work package that touches the report, and this group has
+    rules of its own.
+
+    THE LATCH RULE for attempts/error/version (an absent `upgrade` section is
+    how a companion that has nothing to say spells "no failed update", and a
+    COALESCE could never express that, so "8 attempts failed" would have
+    outlived the fix). `reverted_from` is the exception: the companion sends it
+    ONCE and then clears it, so keeping it is the only way the grid can show
+    the revert at all -- and the chip takes itself off once the machine is
+    running a build at or above the one it fell back from (see the template).
+    `arch` is a property of the box: COALESCEd like `platform`, because a
+    build too old to report it must not blank it.
+    """
+    if guard is None or not guard.get("at"):
+        if arch:
+            conn.execute(
+                "UPDATE machine_state SET arch=? WHERE editor_username=? AND machine=?",
+                (arch, editor, machine),
+            )
+        return
+    conn.execute(
+        """UPDATE machine_state
+              SET arch=COALESCE(?, arch),
+                  upgrade_version=?, upgrade_attempts=?, upgrade_last_error=?,
+                  upgrade_last_attempt_at=?,
+                  upgrade_reverted_from=COALESCE(?, upgrade_reverted_from)
+            WHERE editor_username=? AND machine=?""",
+        (arch, guard.get("upgrade_version"), guard.get("upgrade_attempts"),
+         guard.get("upgrade_last_error"), guard.get("upgrade_last_attempt_at"),
+         guard.get("upgrade_reverted_from"), editor, machine),
+    )
+    # ...and the revert marker takes itself off once this machine is running a
+    # build at or above the one it fell back from: the incident is over, and a
+    # chip that needs a human to clear it is a chip that stays on the grid for
+    # ever (the lesson the breaker's own latch rule is written from).
+    row = conn.execute(
+        "SELECT upgrade_reverted_from FROM machine_state "
+        "WHERE editor_username=? AND machine=?", (editor, machine)).fetchone()
+    reverted = row["upgrade_reverted_from"] if row else None
+    if reverted and running_version:
+        running = version_tuple(running_version)
+        if running and running >= version_tuple(reverted):
+            conn.execute(
+                "UPDATE machine_state SET upgrade_reverted_from=NULL "
+                "WHERE editor_username=? AND machine=?", (editor, machine))
+
+
+# -- DASH-2: a report refused only because its identity cannot be verified ---
+#
+# Rotating DASH_SESSION_SECRET (or restoring /data from before it was
+# generated) 401s every companion in the fleet: the identity token is an HMAC
+# over that secret and never expires. Until this, the grid simply went stale --
+# the same shape as a machine that had been switched off. The stamp says the
+# opposite: this computer IS talking to us and we are turning it away.
+#
+# Nothing from the body is stored: the row is found by (editor, machine) and
+# only these two columns are written, because at this point in api_report the
+# report is UNVERIFIED and must not be able to create or alter fleet data.
+
+def stamp_report_refused(
+    conn: sqlite3.Connection, editor: str, machine: str, reason: str, now: str,
+) -> bool:
+    cur = conn.execute(
+        """UPDATE machines SET report_refused_at=?, report_refused_reason=?
+            WHERE editor_username=? AND machine=?""",
+        (now, reason[:200], editor, machine),
+    )
+    return cur.rowcount > 0
+
+
+def clear_report_refused(conn: sqlite3.Connection, editor: str, machine: str) -> None:
+    """An accepted report is what clears it. Called on every accepted report:
+    the alternative -- clearing it only when it is set -- needs a read first,
+    and this runs once per machine per 30 s either way."""
+    conn.execute(
+        """UPDATE machines SET report_refused_at=NULL, report_refused_reason=NULL
+            WHERE editor_username=? AND machine=? AND report_refused_at IS NOT NULL""",
+        (editor, machine),
+    )
+
+
+def report_refusal_map(
+    conn: sqlite3.Connection,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    return {
+        (r["editor_username"], r["machine"]): {
+            "at": r["report_refused_at"], "reason": r["report_refused_reason"]}
+        for r in conn.execute(
+            "SELECT editor_username, machine, report_refused_at, report_refused_reason "
+            "FROM machines WHERE report_refused_at IS NOT NULL").fetchall()
+    }
+
+
+# The rotation drain (DASH-2): which machines were last accepted on a RETIRED
+# key. `meta` rather than a column, because it is one small current picture
+# with no history worth keeping and a schema version is a shared resource.
+META_RETIRED_KEY_IDENTITIES = "identity_retired_key_machines"
+
+
+def record_retired_key_identity(
+    conn: sqlite3.Connection, editor: str, machine: str, now: str, *, retired: bool,
+) -> None:
+    """Remember (or forget) that this machine's identity token was signed with
+    a key that is now only in DASH_SESSION_SECRET_PREVIOUS. `retired=False` on
+    an accepted CURRENT-key report is what makes the banner count DOWN as the
+    fleet signs back in -- an operator has to be able to see the drain finish."""
+    entries = meta_get_json(conn, META_RETIRED_KEY_IDENTITIES)
+    entries = entries if isinstance(entries, dict) else {}
+    key = f"{editor}/{machine}"
+    if retired:
+        entries[key] = now
+    elif key not in entries:
+        return
+    else:
+        entries.pop(key, None)
+    # Bounded: a fleet is tens of machines, and a meta value is not a table.
+    if len(entries) > 200:
+        entries = dict(sorted(entries.items(), key=lambda kv: kv[1], reverse=True)[:200])
+    meta_set_json(conn, META_RETIRED_KEY_IDENTITIES, entries)
+
+
+def retired_key_identities(conn: sqlite3.Connection) -> dict[str, str]:
+    entries = meta_get_json(conn, META_RETIRED_KEY_IDENTITIES)
+    return entries if isinstance(entries, dict) else {}
+
+
+# REL-11: the vendor feed's own age, for the banner. feed_state already holds
+# the durable half; this is the derived question the banner asks.
+META_FEED_RUNTIME_MISMATCH = "feed_runtime_mismatch"
+
+
+def set_feed_runtime_mismatch(conn: sqlite3.Connection, payload: Any) -> None:
+    """Written by the feed check: "every dashboard build on offer needs a new
+    container image". None clears it."""
+    if payload is None:
+        meta_delete(conn, META_FEED_RUNTIME_MISMATCH)
+        return
+    meta_set_json(conn, META_FEED_RUNTIME_MISMATCH, payload)
+
+
+def get_feed_runtime_mismatch(conn: sqlite3.Connection) -> dict[str, Any] | None:
+    value = meta_get_json(conn, META_FEED_RUNTIME_MISMATCH)
+    return value if isinstance(value, dict) else None
+
+
+# How long an admin's pushed update may sit unanswered before the dashboard
+# stops asking (REL-8). Long enough for a machine that is away for a fortnight;
+# short enough that a request nobody can satisfy does not ride every report for
+# ever, showing "pending" on the Packages page and re-arming a download loop on
+# a machine that has failed it 2000 times.
+MACHINE_UPDATE_REQUEST_MAX_AGE_DAYS = 14
+
+
+def expire_machine_update_requests(conn: sqlite3.Connection, now: str) -> int:
+    """Drop pushed-update requests older than MACHINE_UPDATE_REQUEST_MAX_AGE_DAYS,
+    with the reason in the audit ledger -- an admin has to be able to find out
+    why the request they made is no longer there."""
+    cutoff = (parse_iso(now) - dt.timedelta(
+        days=MACHINE_UPDATE_REQUEST_MAX_AGE_DAYS)).isoformat()
+    rows = conn.execute(
+        """SELECT editor_username, machine, update_requested_version,
+                  update_requested_at, update_requested_by
+             FROM machines
+            WHERE update_requested_version IS NOT NULL
+              AND update_requested_at IS NOT NULL
+              AND update_requested_at < ?""",
+        (cutoff,),
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            """UPDATE machines
+                  SET update_requested_version=NULL, update_requested_at=NULL,
+                      update_requested_by=NULL
+                WHERE editor_username=? AND machine=?""",
+            (row["editor_username"], row["machine"]),
+        )
+        audit(conn, "system", "machine.update_push_expired", row["machine"],
+              {"editor": row["editor_username"], "machine": row["machine"],
+               "version": row["update_requested_version"],
+               "requested_at": row["update_requested_at"],
+               "requested_by": row["update_requested_by"],
+               "reason": f"not taken within {MACHINE_UPDATE_REQUEST_MAX_AGE_DAYS} days"},
+              now=now)
+    return len(rows)
 
 
 def plan_summary_map(
@@ -3651,6 +4143,20 @@ def upsert_machine_state(
     # flatten_music_ingest()'s dict (v21). Same None-leaves-it-alone rule as
     # `ingest`, and the same exception for its `active` flag.
     m = dict(music or {})
+    # REL-1 (resilience sweep 2026-08-28): when THIS build first appeared on
+    # this machine, by the SERVER's clock. It has to be stamped before the
+    # upsert overwrites `companion_version`, which is the only way to tell a
+    # version change from another report of the same one -- and it is the
+    # soak gate's whole input, so a machine's own clock (which SYS-4 proved
+    # can be days out) must never be able to shorten a soak.
+    if companion_version:
+        conn.execute(
+            """UPDATE machine_state SET companion_version_since=?
+                WHERE editor_username=? AND machine=?
+                  AND (companion_version_since IS NULL
+                       OR companion_version IS NOT ?)""",
+            (now, editor, machine, companion_version),
+        )
     conn.execute(
         """INSERT INTO machine_state
              (editor_username, machine, detected_project_root, reported_at,
@@ -3933,6 +4439,16 @@ def upsert_machine_state(
          g.get("stalled_lane"), g.get("stalled_seconds"),
          g.get("stalled_killed"), g.get("stalled_at")),
     )
+    # A machine reporting for the FIRST time has no row for the stamp above to
+    # update, so its soak clock starts here instead (REL-1). Both halves are
+    # "when this server first saw this version on this machine".
+    if companion_version:
+        conn.execute(
+            """UPDATE machine_state SET companion_version_since=?
+                WHERE editor_username=? AND machine=?
+                  AND companion_version_since IS NULL""",
+            (now, editor, machine),
+        )
     evict_extra_machines(conn, editor)
 
 
@@ -3997,6 +4513,16 @@ def fetch_sync_guard_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict
             "restarts_count_24h": r["restarts_count_24h"],
             "restarts_last_at": r["restarts_last_at"],
             "restarts_last_error": r["restarts_last_error"],
+            # v35 (REL-8 / REL-16, resilience sweep 2026-08-28). The report
+            # payload carried nothing at all about upgrade outcomes, so a
+            # machine that has failed the same build 140 times was
+            # indistinguishable from one that had not seen the push yet.
+            "arch": r["arch"],
+            "upgrade_version": r["upgrade_version"],
+            "upgrade_attempts": r["upgrade_attempts"],
+            "upgrade_last_error": r["upgrade_last_error"],
+            "upgrade_last_attempt_at": r["upgrade_last_attempt_at"],
+            "upgrade_reverted_from": r["upgrade_reverted_from"],
         }
         for r in conn.execute(
             """SELECT editor_username, machine, breaker_tripped, breaker_reason,
@@ -4011,7 +4537,9 @@ def fetch_sync_guard_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict
                       disk_system_free_bytes, disk_at, rotation_seconds,
                       stalled_lane, stalled_seconds, stalled_killed, stalled_at,
                       blocked_reason, blocked_detail, blocked_since,
-                      restarts_count_24h, restarts_last_at, restarts_last_error
+                      restarts_count_24h, restarts_last_at, restarts_last_error,
+                      arch, upgrade_version, upgrade_attempts, upgrade_last_error,
+                      upgrade_last_attempt_at, upgrade_reverted_from
                FROM machine_state"""
         )
     }
@@ -4659,6 +5187,12 @@ def prune(conn: sqlite3.Connection, now: str) -> None:
         "DELETE FROM active_transfers WHERE updated_at < ?",
         (cutoff(seconds=ACTIVE_TRANSFER_STALE_SECONDS),),
     )
+    # REL-8 (resilience sweep 2026-08-28): a pushed update nobody could take
+    # rode every report for ever and showed as "pending" on the Packages page
+    # with no way to tell it from one made this morning. Expiring it here, in
+    # the cycle that already bounds every other row, with the reason in the
+    # audit ledger.
+    expire_machine_update_requests(conn, now)
     purge_nas_media_for_inactive(conn)
 
 

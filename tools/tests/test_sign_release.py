@@ -303,3 +303,112 @@ class TestTheFloorMayNotExceedTheBuild:
         for version, min_version, expected in cases:
             assert release_trust.min_version_exceeds_version(version, min_version) is expected, (
                 version, min_version)
+
+
+# --- REL-4 / REL-16 / REL-13 (resilience sweep 2026-08-28) ------------------
+#
+# Three facts the record could not carry: the dashboard version a companion
+# needs ("deploy the dashboard before the companions", stated in four docs and
+# checked in no code), the architecture it was built for (an Intel Mac was
+# offered CI's arm64 binary), and which commit it came from.
+
+
+def _pub_of(key_path) -> str:
+    return base64.b64encode(
+        ed25519.public_key(release_key_mod.read_secret(key_path))).decode("ascii")
+
+
+def _optional(kind):
+    return getattr(release_pubkey, "OPTIONAL_KIND_EXTRA_FIELDS", {}).get(kind, ())
+
+
+def test_an_optional_extra_is_omitted_when_blank(key, artifact):
+    """Blank must read as ABSENT: a record with arch="" canonicalises
+    differently from one published before the field existed, and every one of
+    those has to keep verifying."""
+    out = _run(["--artifact", str(artifact), "--kind", "companion",
+                "--platform", "windows", "--version", "0.9.55"])
+    assert "arch" not in out
+    assert "requires_dashboard" not in out
+    ok, detail = release_pubkey.verify_record(out, out["signature"],
+                                              pubkeys=[_pub_of(key)])
+    assert ok, detail
+
+
+@pytest.mark.skipif(not _optional("companion"),
+                    reason="this build's record carries no optional companion extras")
+def test_the_declared_values_are_inside_the_signature(key, artifact):
+    out = _run(["--artifact", str(artifact), "--kind", "companion",
+                "--platform", "windows", "--version", "0.9.55",
+                "--emit-kind-extras", "--requires-dashboard", "0.7.17", "--arch", "x86_64"])
+    assert out["requires_dashboard"] == "0.7.17"
+    assert out["arch"] == "x86_64"
+    ok, detail = release_pubkey.verify_record(out, out["signature"],
+                                              pubkeys=[_pub_of(key)])
+    assert ok, detail
+    # Tampering with either one breaks the signature, which is the whole point
+    # of signing them rather than sending them beside the record.
+    tampered = dict(out)
+    tampered["requires_dashboard"] = "0.0.1"
+    ok, _ = release_pubkey.verify_record(tampered, out["signature"],
+                                         pubkeys=[_pub_of(key)])
+    assert not ok
+
+
+@pytest.mark.skipif(not _optional("companion"),
+                    reason="this build's record carries no optional companion extras")
+def test_the_signed_extras_ride_in_the_query_the_caller_puts_on_the_put(key, artifact):
+    out = _run(["--artifact", str(artifact), "--kind", "companion",
+                "--platform", "windows", "--version", "0.9.55",
+                "--emit-kind-extras", "--requires-dashboard", "0.7.17", "--arch", "arm64",
+                "--git-sha", "c245f50", "--git-dirty", "1"])
+    assert "requires_dashboard=0.7.17" in out["query"]
+    assert "arch=arm64" in out["query"]
+    assert "git_sha=c245f50" in out["query"]
+    assert "git_dirty=1" in out["query"]
+
+
+def test_a_requires_dashboard_nothing_signs_is_refused(key, artifact, monkeypatch):
+    """Dropping it silently leaves an ordering rule that exists only in the
+    operator's head."""
+    monkeypatch.setattr(release_pubkey, "OPTIONAL_KIND_EXTRA_FIELDS", {}, raising=False)
+    with pytest.raises(SystemExit) as exc:
+        sign_release.main(["--artifact", str(artifact), "--kind", "companion",
+                           "--platform", "windows", "--version", "0.9.55",
+                           "--emit-kind-extras", "--requires-dashboard", "0.7.17"])
+    assert "does not cover" in str(exc.value)
+
+
+def test_an_arch_nothing_signs_degrades_to_offer_it_to_everyone(key, artifact, monkeypatch, capsys):
+    """The opposite direction on purpose: an absent arch means what it has
+    always meant, and refusing would make the build unpublishable."""
+    monkeypatch.setattr(release_pubkey, "OPTIONAL_KIND_EXTRA_FIELDS", {}, raising=False)
+    assert sign_release.main(["--artifact", str(artifact), "--kind", "companion",
+                              "--platform", "windows", "--version", "0.9.55",
+                              "--emit-kind-extras", "--arch", "arm64"]) == 0
+    assert "offered to every machine on that platform" in capsys.readouterr().err
+
+
+def test_a_requires_dashboard_that_cannot_be_ranked_is_refused(key, artifact):
+    with pytest.raises(SystemExit) as exc:
+        sign_release.main(["--artifact", str(artifact), "--kind", "companion",
+                           "--platform", "windows", "--version", "0.9.55",
+                           "--emit-kind-extras", "--requires-dashboard", "0.7.17-rc1"])
+    assert "dotted-numeric" in str(exc.value)
+
+
+def test_the_extras_are_dropped_loudly_unless_emission_is_opted_in(key, artifact, capsys):
+    """OVERLAP CONSTRAINT (2026-08-28): a record carrying requires_dashboard
+    or arch is refused by every companion older than 0.9.55, with no OTA
+    recovery, so signing them in is opt-in (--emit-kind-extras). Without
+    the flag both are dropped and stderr says why."""
+    out = _run(["--artifact", str(artifact), "--kind", "companion",
+                "--platform", "windows", "--version", "0.9.55",
+                "--requires-dashboard", "0.7.17", "--arch", "x86_64"])
+    err = capsys.readouterr().err
+    assert "--emit-kind-extras" in err
+    assert not out.get("requires_dashboard")
+    assert not out.get("arch")
+    ok, detail = release_pubkey.verify_record(out, out["signature"],
+                                              pubkeys=[_pub_of(key)])
+    assert ok, detail

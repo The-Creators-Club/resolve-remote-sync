@@ -222,3 +222,30 @@ def test_the_fingerprint_moves_when_a_stall_is_recorded():
         "lane": "B", "seconds": 60, "killed": True,
         "at": "2026-08-28T10:00:00+00:00"}})
     assert before != after
+
+
+# -- REL-8 / APP-5 (resilience sweep 2026-08-28) ----------------------------
+
+
+def test_the_update_line_appears_only_once_the_machine_has_given_up():
+    from ccsync_companion import upgrade as upgrade_mod
+    from ccsync_companion.tray import _upgrade_line
+
+    assert _upgrade_line({}) is None
+    assert _upgrade_line({"upgrade": {"version": "9.9.9", "attempts": 3}}) is None
+
+    line = _upgrade_line({"upgrade": {
+        "version": "9.9.9", "attempts": upgrade_mod.MAX_UPGRADE_ATTEMPTS,
+        "last_error": "sha-mismatch"}})
+    assert line is not None
+    assert "9.9.9" in line and "8 times" in line
+    assert "\u2014" not in line
+
+
+def test_the_rollback_line_names_the_build_that_kept_crashing():
+    from ccsync_companion.tray import _reverted_line
+
+    assert _reverted_line({"upgrade": {"attempts": 0}}) is None
+    line = _reverted_line({"upgrade": {"reverted_from": "9.9.9"}})
+    assert line is not None and "v9.9.9" in line
+    assert "\u2014" not in line

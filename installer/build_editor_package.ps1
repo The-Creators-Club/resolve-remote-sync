@@ -72,9 +72,20 @@
     every run (SHIP-8).
 
 .PARAMETER MakeCurrent
-    With -Publish: immediately make the uploaded version the one offered to
-    the fleet. Without it the build is staged and you flip [ MAKE CURRENT ]
-    on the dashboard's admin page when ready.
+    With -Publish: after BOTH artefacts have been uploaded staged, flip both
+    to current in one final step (REL-15, 2026-08-28: they used to be two
+    independent PUTs, so a drop between them left the fleet on a new companion
+    while every fresh install still bundled the old one). The dashboard may
+    refuse the flip -- a build has to soak on one machine first (REL-1) -- and
+    that refusal is printed verbatim and exits 3: the build IS published and
+    staged, and [ MAKE CURRENT ] on the Packages page is the rest of it.
+
+.PARAMETER AllowKeyRotation
+    Publish although the signing key is not baked into the build the fleet is
+    currently on. Every machine on that build will refuse this one (REL-7).
+
+.PARAMETER IReallyMeanDirtyCurrent
+    Allow -MakeCurrent for a build made from an uncommitted tree (REL-13).
 
 .PARAMETER DashboardUrl
     Dashboard base URL. REQUIRED with -Publish -- there is no default any
@@ -117,6 +128,19 @@ param(
     # here (installer-onboard-tools-1, 2026-08-21). ship.ps1 passes this
     # through when it was given -AllowUnsignedBinary.
     [switch]$AllowUnsignedBinary,
+    # REL-7 (resilience sweep 2026-08-28): publish even though this rig's
+    # signing key is not one the build the fleet is CURRENTLY on trusts. That
+    # is an overlap release, and until the fleet has taken a build carrying
+    # both keys, every machine refuses what this publishes.
+    [switch]$AllowKeyRotation,
+    # Sign requires_dashboard/arch into the record. OPT-IN: a record carrying them
+    # is only verifiable by companions 0.9.55+ (tools/sign_release.py, REL-4/16).
+    [switch]$EmitKindExtras,
+    # REL-13: making a +dirty build CURRENT means the fleet runs bytes that
+    # correspond to no commit, for ever (the same version can never be
+    # republished from the committed tree -- same version, different bytes).
+    # -MakeCurrent on a dirty build needs this second, deliberate flag.
+    [switch]$IReallyMeanDirtyCurrent,
     # Both REQUIRED for -Publish, and both without a default since 2026-08-17
     # (WP0): they used to name one deployment's dashboard and one person's
     # account. $env:CCSYNC_DASHBOARD_URL / $env:CCSYNC_ADMIN_USER are the
@@ -301,6 +325,161 @@ if ($Publish) {
         Write-Warn2 "Set CCSYNC_MIN_VERSION to $preflightVersion or lower (or clear it) and re-run."
         exit 1
     }
+}
+
+# --- the dashboard session is opened BEFORE the build (OPS-12, 2026-08-28) --
+# It used to be prompted for after PyInstaller, one attempt, `exit 1` on a
+# mistyped password -- so a typo (or a dashboard still restarting from the
+# deploy step ship.cmd just ran) cost the WHOLE run: gates, deploy, two
+# builds, twenty minutes, and left the half-shipped state this file has been
+# bitten by before. Same argument the CR-52 preflight above makes, and the
+# session opened here is the one the uploads use.
+$script:DashSession = $null
+
+function Test-DashboardReachable {
+    param([string]$Url)
+    try {
+        $null = Invoke-RestMethod -Method Get -Uri "$Url/api/v1/health" -TimeoutSec 20
+        return $true
+    }
+    catch {
+        # A 401/403 still proves something answered; only a transport failure
+        # means "cannot reach". $_.Exception.Response is $null for the latter.
+        return ($null -ne $_.Exception.Response)
+    }
+}
+
+function Connect-Dashboard {
+    param([string]$Url, [string]$User)
+    if (-not (Test-DashboardReachable -Url $Url)) {
+        Write-Warn2 "cannot reach the dashboard at $Url -- NOT publishing, and nothing was built."
+        Write-Warn2 "This is not a password problem: /api/v1/health did not answer at all."
+        Write-Warn2 "If ship.cmd just deployed it, give the container a moment and re-run;"
+        Write-Warn2 "otherwise check the address (-DashboardUrl / CCSYNC_DASHBOARD_URL) and the tailnet."
+        exit 1
+    }
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $securePw = Read-Host "dashboard password for '$User'" -AsSecureString
+        $pw = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+            [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePw))
+        $session = $null
+        try {
+            $login = Invoke-RestMethod -Method Post -Uri "$Url/api/v1/login" `
+                -ContentType "application/json" `
+                -Body (@{ username = $User; password = $pw } | ConvertTo-Json) `
+                -SessionVariable session
+        }
+        catch {
+            $status = 0
+            try { $status = [int]$_.Exception.Response.StatusCode } catch {}
+            if ($status -eq 401 -or $status -eq 403) {
+                if ($attempt -lt 3) {
+                    Write-Warn2 "wrong password for '$User' ($attempt of 3) -- try again"
+                    continue
+                }
+                Write-Warn2 "wrong password for '$User' three times -- NOT publishing, nothing was built"
+                exit 1
+            }
+            Write-Warn2 "the dashboard refused the login for a reason that is not the password: $($_.Exception.Message)"
+            Write-Warn2 "NOT publishing, and nothing was built."
+            exit 1
+        }
+        if (-not $login.is_admin) {
+            Write-Warn2 "'$User' is not a dashboard admin (DASH_ADMIN_USERS) -- NOT publishing, nothing was built"
+            exit 1
+        }
+        return $session
+    }
+    return $null
+}
+
+function Get-PubkeyId {
+    # release_pubkey.pubkey_id: first 16 hex of sha256 over the RAW key bytes.
+    param([string]$Base64)
+    try {
+        $raw = [Convert]::FromBase64String($Base64)
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try { $hash = $sha.ComputeHash($raw) } finally { $sha.Dispose() }
+        return (($hash | ForEach-Object { $_.ToString("x2") }) -join "").Substring(0, 16)
+    }
+    catch { return "" }
+}
+
+function Test-SigningKeyTheFleetTrusts {
+    <#
+      REL-7 (2026-08-28). A companion trusts exactly the keys baked into the
+      binary it is ALREADY RUNNING. Sign with a key the current build does not
+      carry and every machine on it refuses the offer -- silently, logged once,
+      tray unchanged, with no over-the-air way back and a hands-on reinstall
+      per machine as the only cure. The one check that existed compared the
+      signing key against the build being BUILT, which is the single place the
+      two can never disagree.
+
+      What the dashboard can tell us is which key SIGNED the build that is
+      current, which in the ordinary bake-build-sign flow is one of the keys
+      that build bakes in. It is a proxy, so it warns when it cannot answer
+      and refuses only on a definite mismatch.
+    #>
+    param([string]$Url, $Session, [string]$SigningId)
+    if (-not $SigningId) {
+        Write-Warn2 "could not compute this rig's signing key id -- the key-rotation check did not run (REL-7)"
+        return
+    }
+    $view = $null
+    try { $view = Invoke-RestMethod -Method Get -Uri "$Url/api/v1/admin/packages" -WebSession $Session }
+    catch { $view = $null }
+    if (-not $view) {
+        Write-Warn2 "could not read the packages view -- the key-rotation check did not run (REL-7)"
+        return
+    }
+    $current = $view.packages | Where-Object {
+        $_.platform -eq "windows" -and $_.kind -eq "companion" -and $_.is_current
+    } | Select-Object -First 1
+    if (-not $current) {
+        Write-Step "no current windows companion published yet -- nothing for the signing key to strand (REL-7)"
+        return
+    }
+    $currentKey = "$($current.pubkey_id)"
+    if (-not $currentKey) {
+        Write-Warn2 "the current build (v$($current.version)) records no signing key, so the key-rotation check could not run (REL-7)"
+        return
+    }
+    if ($currentKey -eq $SigningId) {
+        Write-Step "release key $SigningId also signed the current build (v$($current.version)) -- the fleet trusts it"
+        return
+    }
+    if ($AllowKeyRotation) {
+        Write-Warn2 "-AllowKeyRotation: EVERY MACHINE ON v$($current.version) WILL REFUSE THIS BUILD"
+        Write-Warn2 "  (it was signed with $currentKey; this rig signs with $SigningId)"
+        return
+    }
+    Write-Warn2 "this rig signs with key $SigningId, but the build the fleet is CURRENTLY on"
+    Write-Warn2 "(v$($current.version)) was signed with $currentKey."
+    Write-Warn2 "EVERY MACHINE ON v$($current.version) WILL REFUSE THIS BUILD: a companion trusts"
+    Write-Warn2 "only the keys baked into the binary it is already running, the refusal is silent,"
+    Write-Warn2 "and the recovery is a hands-on reinstall per machine."
+    Write-Warn2 "A rotation costs an overlap release: python tools\release_key.py bake --add,"
+    Write-Warn2 "ship THAT build (it trusts both keys), and drop the old key a release later."
+    Write-Warn2 "Pass -AllowKeyRotation if this IS that deliberate step. Nothing was built."
+    exit 1
+}
+
+if ($Publish -and -not $DryRun) {
+    $script:DashSession = Connect-Dashboard -Url $DashboardUrl -User $AdminUser
+    Write-Step "dashboard session opened as $AdminUser (before the build -- OPS-12)"
+    $keyProbePy = ""
+    foreach ($candidate in @((Join-Path $CompanionDir ".venv\Scripts\python.exe"), "python")) {
+        if ($candidate -eq "python" -or (Test-Path -LiteralPath $candidate)) { $keyProbePy = $candidate; break }
+    }
+    $signingPub = ""
+    if ($keyProbePy) {
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try { $signingPub = "$(& $keyProbePy (Join-Path $RepoRoot "tools\release_key.py") "pubkey" "--quiet" 2>$null)".Trim() }
+        finally { $ErrorActionPreference = $prevEap }
+    }
+    Test-SigningKeyTheFleetTrusts -Url $DashboardUrl -Session $script:DashSession `
+        -SigningId (Get-PubkeyId $signingPub)
 }
 
 # --- optionally rebuild the companion exe ---------------------------------
@@ -714,11 +893,25 @@ if ($Publish) {
     # Advisory only -- publishing must stay possible when the exe was built by
     # hand -- but "which commit is the fleet running?" should have an answer.
     $relManifest = Join-Path $CompanionDir "dist\ccsync-release.json"
+    # Carried onto the publish since 2026-08-28 (REL-13/REL-4/REL-16): the
+    # commit is UNSIGNED provenance, the other two are SIGNED into the record.
+    $provGitSha = ""
+    $provGitDirty = $false
+    $provRequiresDashboard = ""
+    $provArch = ""
     if (Test-Path -LiteralPath $relManifest) {
         try {
             $rel = Get-Content -LiteralPath $relManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+            $provGitSha = "$($rel.git_commit)".Trim()
+            $provGitDirty = [bool]$rel.git_dirty
+            $provRequiresDashboard = "$($rel.requires_dashboard)".Trim()
+            $provArch = "$($rel.arch)".Trim()
             if ("$($rel.sha256)" -ne $sha) {
                 Write-Warn2 "ccsync-release.json describes a different exe than the one being published -- rebuild with tools\release.ps1"
+                # The manifest is about some other exe, so nothing in it may be
+                # published about THIS one.
+                $provGitSha = ""; $provGitDirty = $false
+                $provRequiresDashboard = ""; $provArch = ""
             }
             elseif ($rel.git_dirty) {
                 Write-Warn2 "publishing $($rel.version_stamp) -- built from an UNCOMMITTED tree ($($rel.git_describe)); nobody will be able to reproduce what the fleet runs"
@@ -735,7 +928,25 @@ if ($Publish) {
         Write-Warn2 "no ccsync-release.json in companion\dist -- this exe's provenance is unrecorded (build with tools\release.ps1)"
     }
 
-    $mc = if ($MakeCurrent) { 1 } else { 0 }
+    # REL-13 (2026-08-28): a +dirty build made CURRENT means the whole fleet
+    # runs bytes that correspond to no commit -- permanently, because the real
+    # committed build of that version can then never be published (same
+    # version, different bytes -> 409). Staging it is fine; handing it to
+    # everyone needs a second, deliberate flag.
+    if ($MakeCurrent -and $provGitDirty -and -not $IReallyMeanDirtyCurrent) {
+        Write-Warn2 "this build came from an UNCOMMITTED tree, so it will be published STAGED, not current."
+        Write-Warn2 "Making it current would put the fleet on bytes no commit describes, and the"
+        Write-Warn2 "committed build of v$version could then never be published under that number."
+        Write-Warn2 "Commit and rebuild, or re-run with -IReallyMeanDirtyCurrent for a deliberate hotfix."
+        $MakeCurrent = $false
+    }
+
+    # REL-15 (2026-08-28): the upload is ALWAYS staged. The companion and the
+    # installer used to be made current by two independent PUTs, so a dropped
+    # connection between them left the fleet on a new companion while every
+    # fresh install still bundled the previous one. Both are flipped together
+    # at the end of this script instead.
+    $mc = 0
 
     # --- sign the release record (COMMERCIAL_READINESS.md item 4, 2026-08-17) ---
     # The dashboard REFUSES an unsigned publish, so this is not optional and
@@ -784,6 +995,16 @@ if ($Publish) {
         "--version", $version, "--min-version", $minVersion
     )
     if ($signedBinary) { $signArgs += "--signed-binary" }
+    # Measured by tools\release.ps1, never retyped here: a signed record that
+    # describes a different build than the one in hand is the --runtime-id
+    # lesson (ZERO_TOUCH_PLAN.md WP K).
+    if ($EmitKindExtras) { $signArgs += "--emit-kind-extras" }
+    if ($provRequiresDashboard) { $signArgs += @("--requires-dashboard", $provRequiresDashboard) }
+    if ($provArch -and @("x86_64", "arm64", "universal2") -contains $provArch) {
+        $signArgs += @("--arch", $provArch)
+    }
+    if ($provGitSha) { $signArgs += @("--git-sha", $provGitSha) }
+    $signArgs += @("--git-dirty", $(if ($provGitDirty) { "1" } else { "0" }))
     # sign_release.py writes advisories (min_version 0.0.0, unsigned binary) to
     # stderr and JSON to stdout, so this MUST merge the streams -- and native
     # stderr redirection under $ErrorActionPreference='Stop' turns the first
@@ -961,22 +1182,12 @@ if ($Publish) {
         Write-Step "[dry-run] would then check the macos INSTALLER and COMPANION channels against the repo versions (both are built on the Mac: tools/build_onboard_macos.sh --publish / tools/release_macos.sh --publish)"
     }
     else {
-        $securePw = Read-Host "dashboard password for '$AdminUser'" -AsSecureString
-        $pw = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-            [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePw))
-        try {
-            $login = Invoke-RestMethod -Method Post -Uri "$DashboardUrl/api/v1/login" `
-                -ContentType "application/json" `
-                -Body (@{ username = $AdminUser; password = $pw } | ConvertTo-Json) `
-                -SessionVariable dashSession
-        }
-        catch {
-            Write-Warn2 "dashboard login failed: $($_.Exception.Message) -- NOT publishing"
-            exit 1
-        }
-        if (-not $login.is_admin) {
-            Write-Warn2 "'$AdminUser' is not a dashboard admin (DASH_ADMIN_USERS) -- NOT publishing"
-            exit 1
+        # The session was opened BEFORE the build (OPS-12): a mistyped password
+        # must not cost twenty minutes of PyInstaller. Re-opened here only if
+        # something cleared it, which cannot happen on the -Publish path.
+        $dashSession = $script:DashSession
+        if (-not $dashSession) {
+            $dashSession = Connect-Dashboard -Url $DashboardUrl -User $AdminUser
         }
         $result = $null
         try {
@@ -1022,7 +1233,7 @@ if ($Publish) {
             }
         }
         if ($result) {
-            Write-Step "published v$version to $DashboardUrl$(if ($MakeCurrent) { ' and made it CURRENT' })"
+            Write-Step "published v$version to $DashboardUrl (STAGED)"
             try {
                 $retained = ($result.view.packages | Where-Object { $_.platform -eq "windows" -and $_.kind -eq "companion" } |
                     ForEach-Object { "$($_.version)$(if ($_.is_current) { '*' })" }) -join ", "
@@ -1041,7 +1252,7 @@ if ($Publish) {
             try {
                 $null = Invoke-RestMethod -Method Put -Uri $onboardUri -InFile $OnboardExePath `
                     -ContentType "application/octet-stream" -WebSession $dashSession
-                Write-Step "published installer v$onboardVersion (kind=onboard)$(if ($MakeCurrent) { ' and made it CURRENT' }) -- the dashboard's [ INSTALLER ] download now serves it"
+                Write-Step "published installer v$onboardVersion (kind=onboard, STAGED) -- the dashboard's [ INSTALLER ] download serves it once it is current"
             }
             catch {
                 $status = 0
@@ -1070,6 +1281,54 @@ if ($Publish) {
                     Write-Warn2 "installer publish failed: $($_.Exception.Message)"
                     Set-Failed "the onboarding installer upload failed"
                 }
+            }
+        }
+
+        # --- BOTH artefacts become current together (REL-15, 2026-08-28) ----
+        # They used to be made current by the two PUTs above, independently.
+        # A drop, a Ctrl-C or a 409 between them left the fleet on a new
+        # companion while the installer channel still served an onboard.exe
+        # bundling the previous one, so every fresh install landed a version
+        # behind and immediately self-upgraded -- and nothing recorded how far
+        # the ship had got. Two calls back to back at the END is not a
+        # transaction, but it is the smallest window this protocol allows, and
+        # what fails now fails with both builds already published and staged.
+        if ($MakeCurrent) {
+            $flipFailed = ""
+            $flips = @(@{ Kind = "companion"; Version = $version })
+            if (-not $onboardSkipReason -and $onboardVersion) {
+                $flips += @{ Kind = "onboard"; Version = $onboardVersion }
+            }
+            foreach ($flip in $flips) {
+                $flipUri = "$DashboardUrl/api/v1/admin/packages/windows/$($flip.Version)/current?kind=$($flip.Kind)"
+                try {
+                    $null = Invoke-RestMethod -Method Post -Uri $flipUri -WebSession $dashSession
+                    Write-Step "$($flip.Kind) v$($flip.Version) is now CURRENT"
+                }
+                catch {
+                    $status = 0
+                    try { $status = [int]$_.Exception.Response.StatusCode } catch {}
+                    # The dashboard's own words, verbatim: the soak gate (REL-1)
+                    # names the numbers it wants and there is no point in this
+                    # script paraphrasing a policy it does not own.
+                    $detail = ""
+                    try {
+                        $stream = $_.Exception.Response.GetResponseStream()
+                        $reader = New-Object System.IO.StreamReader($stream)
+                        $detail = ($reader.ReadToEnd() | ConvertFrom-Json).detail
+                    } catch {}
+                    if (-not $detail) { $detail = $_.Exception.Message }
+                    Write-Warn2 "the dashboard refused to make $($flip.Kind) v$($flip.Version) current (HTTP $status):"
+                    Write-Warn2 "  $detail"
+                    $flipFailed = $detail
+                }
+            }
+            if ($flipFailed) {
+                Write-Step "BOTH builds are PUBLISHED and STAGED. Nothing was lost: push the staged"
+                Write-Step "build to one machine from the dashboard's Packages page, let it soak, and"
+                Write-Step "click [ MAKE CURRENT ] there - or re-run this with the override the"
+                Write-Step "message above names."
+                exit 3
             }
         }
 

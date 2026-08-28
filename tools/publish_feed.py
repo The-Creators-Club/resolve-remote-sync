@@ -177,7 +177,8 @@ def canonical_channel_bytes(channel: dict[str, Any]) -> bytes:
 
 def _sign_artifact(artifact: Path, *, kind: str, platform: str, version: str,
                    min_version: str, signed_binary: bool, published_at: str, key: str,
-                   runtime_id: str = "") -> dict:
+                   runtime_id: str = "", requires_dashboard: str = "",
+                   arch: str = "", git_sha: str = "", git_dirty: str = "") -> dict:
     """Run sign_release.main in-process and capture its JSON -- the SAME
     record shape and the SAME key file tools/sign_release.py uses everywhere
     else, imported rather than duplicated (see the module docstring)."""
@@ -185,6 +186,17 @@ def _sign_artifact(artifact: Path, *, kind: str, platform: str, version: str,
             "--version", version, "--min-version", min_version]
     if runtime_id:
         argv += ["--runtime-id", runtime_id]
+    # REL-4 / REL-16 / REL-13 (2026-08-28). Passed through rather than
+    # re-derived: sign_release.py owns which of these the signature covers for
+    # a given kind, and it refuses a value it would have to drop.
+    if requires_dashboard:
+        argv += ["--requires-dashboard", requires_dashboard]
+    if arch:
+        argv += ["--arch", arch]
+    if git_sha:
+        argv += ["--git-sha", git_sha]
+    if git_dirty:
+        argv += ["--git-dirty", git_dirty]
     if signed_binary:
         argv.append("--signed-binary")
     if published_at:
@@ -281,6 +293,14 @@ def merge_into_published(published: dict[str, Any], local: dict[str, Any]) -> di
     current.update({k: v for k, v in (local.get("current") or {}).items() if v})
     if current:
         merged["current"] = current
+    # A recall is only ever ADDED to (REL-3, 2026-08-28): a publish run from a
+    # fresh clone whose feed dir knows nothing about last month's withdrawal
+    # must not un-retract it -- that would re-offer the exact build the vendor
+    # pulled, correctly signed, under every feed policy.
+    for entry in local.get("retracted", []):
+        note_retracted(merged, str(entry.get("kind") or ""), str(entry.get("platform") or ""),
+                       str(entry.get("version") or ""), str(entry.get("reason") or ""),
+                       str(entry.get("at") or ""))
     return merged
 
 
@@ -332,6 +352,27 @@ def published_floor(channel: dict[str, Any], kind: str, platform: str) -> str:
         if sign_release.version_tuple(candidate) > sign_release.version_tuple(best):
             best = candidate
     return best
+
+
+def current_version(channel: dict[str, Any], kind: str, platform: str) -> str:
+    """The version this channel points `current` at for (kind, platform)."""
+    return str((channel.get("current") or {}).get(f"{kind}/{platform}") or "")
+
+
+def baked_keys_of_current(channel: dict[str, Any], kind: str, platform: str) -> tuple[str, list]:
+    """(version, baked pubkey ids) of the record customers are on today.
+
+    Empty list when the current record predates REL-7 and carries no list --
+    "could not check" is then said out loud rather than passed as a check.
+    """
+    version = current_version(channel, kind, platform)
+    if not version:
+        return "", []
+    record = existing_package(channel, kind, platform, version) or {}
+    ids = record.get("baked_pubkey_ids")
+    if isinstance(ids, str):
+        ids = [part.strip() for part in ids.split(",") if part.strip()]
+    return version, [str(i) for i in (ids or [])]
 
 
 def upsert_record(channel: dict[str, Any], record: dict[str, Any]) -> None:
@@ -646,6 +687,39 @@ def set_current(channel: dict[str, Any], kind: str, platform: str, version: str)
     channel["current"] = current
 
 
+def retracted_keys(channel: dict[str, Any]) -> set[tuple[str, str, str]]:
+    """(kind, platform, version) for every entry on the signed recall list."""
+    return {(str(r.get("kind") or ""), str(r.get("platform") or ""),
+             str(r.get("version") or "")) for r in channel.get("retracted", [])}
+
+
+def note_retracted(channel: dict[str, Any], kind: str, platform: str, version: str,
+                   reason: str, at: str) -> None:
+    """Add one entry to the channel's signed `retracted` list (REL-3, 2026-08-28).
+
+    Removing the record (retract_record, below) stops the feed OFFERING the
+    build. It does not reach a customer dashboard that already published it
+    locally: on the default `manual` feed policy that dashboard never acts on
+    the channel again, so a bad build stayed `is_current` for its whole fleet
+    and recovery was one [ UPDATE NOW ] click per editor. This list is what
+    the dashboard reads under EVERY policy to un-current the row, refuse to
+    serve it and show the admin WHY -- so the reason travels with the
+    withdrawal, signed, rather than living in a release note nobody fetches.
+
+    Replace-or-append by (kind, platform, version): re-retracting with a
+    better reason must not leave two entries disagreeing about one build.
+    """
+    entry = {"kind": kind, "platform": platform, "version": version,
+             "reason": reason, "at": at}
+    entries = channel.setdefault("retracted", [])
+    for i, existing in enumerate(entries):
+        if ((existing.get("kind"), existing.get("platform"), existing.get("version"))
+                == (kind, platform, version)):
+            entries[i] = entry
+            return
+    entries.append(entry)
+
+
 def retract_record(channel: dict[str, Any], kind: str, platform: str,
                    version: str) -> bool:
     """Remove one package record and any `current` pointer at it.
@@ -740,6 +814,36 @@ def _apply_manifest(args: argparse.Namespace, manifest: dict, manifest_dir: Path
             args.artifact = str(manifest_dir / name)
     if args.signed_binary is None and "signed_binary" in manifest:
         args.signed_binary = bool(manifest.get("signed_binary"))
+    # The builder MEASURED these; retyping them is how a signed record ends up
+    # describing a different build than the one in hand (the --runtime-id
+    # lesson, WP K). REL-4 / REL-16 / REL-13, 2026-08-28.
+    if not args.requires_dashboard:
+        args.requires_dashboard = str(manifest.get("requires_dashboard") or "")
+    if not args.arch:
+        # Normalised, and dropped when it is not a value the record knows: the
+        # builders measure it with `uname -m` / PROCESSOR_ARCHITECTURE, which
+        # can legitimately say "unknown" on an old manifest, and an arch
+        # nothing recognises must degrade to "offer it to everyone" rather
+        # than make the build unpublishable (REL-16, 2026-08-28).
+        measured = str(manifest.get("arch") or "").strip().lower()
+        measured = {"amd64": "x86_64", "x64": "x86_64", "aarch64": "arm64",
+                    "universal": "universal2"}.get(measured, measured)
+        if measured and measured not in sign_release.ARCHITECTURES:
+            print(f"[publish-feed] NOTE: the manifest says arch={measured!r}, which is not "
+                  f"one of {', '.join(sign_release.ARCHITECTURES)} -- publishing without an "
+                  "arch, i.e. offered to every machine on that platform (REL-16).",
+                  file=sys.stdout)
+            measured = ""
+        args.arch = measured
+    if not args.git_sha:
+        args.git_sha = str(manifest.get("git_commit") or "")
+    if not args.git_dirty and "git_dirty" in manifest:
+        args.git_dirty = "1" if manifest.get("git_dirty") else "0"
+    if not args.baked_pubkey_ids:
+        ids = manifest.get("baked_pubkey_ids") or []
+        if isinstance(ids, str):
+            ids = [part for part in ids.split(",") if part.strip()]
+        args.baked_pubkey_ids = ",".join(str(i).strip() for i in ids if str(i).strip())
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -781,6 +885,29 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                          "The asset stays on the release; only the record and any `current` "
                          "pointer at it go. Combine with nothing else and it is a pure "
                          "withdrawal.")
+    ap.add_argument("--reason", default="",
+                    help="why a --retract happened, in one sentence an admin will read on "
+                         "the Packages page of every customer dashboard. Required with "
+                         "--retract: a recall with no reason gets ignored (REL-3).")
+    ap.add_argument("--requires-dashboard", default="",
+                    help="the oldest dashboard VERSION this build works against; SIGNED into "
+                         "the record. Read from the manifest when --manifest is given (REL-4)")
+    ap.add_argument("--arch", default="", choices=("",) + sign_release.ARCHITECTURES,
+                    help="the architecture the artifact runs on; SIGNED. From the manifest "
+                         "when --manifest is given (REL-16)")
+    ap.add_argument("--git-sha", default="",
+                    help="short commit the build came from. UNSIGNED provenance (REL-13)")
+    ap.add_argument("--git-dirty", default="", choices=("", "0", "1"),
+                    help="1 when the build came from an uncommitted tree (REL-13)")
+    ap.add_argument("--baked-pubkey-ids", default="",
+                    help="comma-separated pubkey ids the ARTIFACT itself trusts "
+                         "(tools/release.ps1 writes them into the manifest). Recorded on "
+                         "the channel so the NEXT publish can tell whether the fleet on "
+                         "the current build would accept a build signed with this key (REL-7)")
+    ap.add_argument("--allow-key-rotation", action="store_true",
+                    help="publish even though the signing key is not one the CURRENT build "
+                         "bakes in. A deliberate rotation, and it costs an overlap release: "
+                         "every machine still on the current build refuses this one (REL-7)")
     ap.add_argument("--allow-shrink", action="store_true",
                     help="permit an upload whose package/artefact set is a strict subset of "
                          "the published one. Needed only when you MEAN to drop records; "
@@ -894,14 +1021,27 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
             if len(parts) != 3:
                 raise PublishFeedError(
                     f"--retract wants KIND/PLATFORM/VERSION, got {args.retract!r}", EXIT_USAGE)
+            if not args.reason.strip():
+                # REL-3 (2026-08-28): the reason is the whole difference between
+                # a build that vanished and a build the vendor pulled. It is
+                # rendered on every customer Packages and Fleet page beside the
+                # machines still running it.
+                raise PublishFeedError(
+                    f"--retract {args.retract} needs --reason: every customer dashboard "
+                    "shows it beside the withdrawn build, and an admin whose fleet is "
+                    "being rolled back has nothing else to go on.", EXIT_USAGE)
             r_kind, r_platform, r_version = parts
+            note_retracted(channel, r_kind, r_platform, r_version,
+                           args.reason.strip(), sign_release.utcnow_iso())
             if retract_record(channel, r_kind, r_platform, r_version):
                 print(f"[publish-feed] RETRACTED {r_kind}/{r_platform} {r_version} -- it is no "
-                      "longer offered. Dashboards that already installed it keep running it; "
-                      "publish a newer build to move them.", file=out)
+                      "longer offered, and the recall list now carries the reason so every "
+                      "dashboard un-currents it under any feed policy.", file=out)
             else:
-                print(f"[publish-feed] NOTE: {args.retract} was not in the channel -- nothing "
-                      "to retract", file=out)
+                print(f"[publish-feed] NOTE: {args.retract} was not a record on this channel; "
+                      "the recall entry is published anyway -- a dashboard that published it "
+                      "locally is exactly who needs to hear about it.", file=out)
+            print(f"[publish-feed]   reason: {args.reason.strip()}", file=out)
             retracted.add((r_kind, r_platform, r_version))
             published_something = True
 
@@ -931,12 +1071,21 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
                 min_version=args.min_version, signed_binary=bool(args.signed_binary),
                 published_at=args.published_at, key=args.key,
                 runtime_id=args.runtime_id.strip(),
+                requires_dashboard=args.requires_dashboard.strip(),
+                arch=args.arch.strip(),
+                git_sha=args.git_sha.strip(), git_dirty=args.git_dirty.strip(),
             )
-            # record_fields, not RECORD_FIELDS: a `dashboard` record's
-            # signature also covers `runtime_id` (ZERO_TOUCH_PLAN.md WP K), and
-            # a channel that carried the signature but dropped the field would
-            # fail verification at every customer with no way to tell why.
-            record = {k: signed[k] for k in release_pubkey.record_fields(args.kind)}
+            # record_fields(kind, signed), not RECORD_FIELDS: a record's
+            # signature covers its kind's extras -- runtime_id always for a
+            # dashboard bundle, and arch/requires_dashboard when a companion
+            # record carries them (2026-08-28) -- and a channel that carried
+            # the signature but dropped a field would fail verification at
+            # every customer with no way to tell why.
+            try:
+                fields = release_pubkey.record_fields(args.kind, signed)
+            except TypeError:  # a checkout predating the optional extras
+                fields = release_pubkey.record_fields(args.kind)
+            record = {k: signed[k] for k in fields}
             record["signature"] = signed["signature"]
             record["pubkey_id"] = signed["pubkey_id"]
             base = args.base_url.rstrip("/")
@@ -950,8 +1099,51 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
             record["url"] = (f"{base}/{record['filename']}" if args.github_repo
                              else f"{base}/{args.platform}/{record['filename']}")
             record["notes"] = args.notes
+            # UNSIGNED at the record level, signed with the channel (REL-13):
+            # provenance, so "0.9.55" on a Packages page can say which commit
+            # it is, and say +dirty when it is no commit at all.
+            if args.git_sha.strip():
+                record["git_sha"] = args.git_sha.strip()
+            if args.git_dirty.strip():
+                record["git_dirty"] = args.git_dirty.strip()
+            if args.baked_pubkey_ids.strip():
+                record["baked_pubkey_ids"] = [
+                    part.strip() for part in args.baked_pubkey_ids.split(",") if part.strip()]
             print(f"[publish-feed] signed {args.kind}/{args.platform} v{args.version} "
                   f"(pubkey_id {signed['pubkey_id']}, min_version {signed['min_version']})", file=out)
+
+            # --- would the fleet on the CURRENT build accept this key? -----
+            # REL-7 (2026-08-28). A companion only ever trusts keys baked into
+            # the binary it is ALREADY RUNNING, so signing with a key the
+            # current build does not carry strands every machine on it: the
+            # offer is refused, logged once, the tray says nothing, and there
+            # is no over-the-air way back. The one guard that existed compared
+            # the signing key against the build being BUILT -- the one place
+            # the two can never disagree.
+            cur_version, cur_keys = baked_keys_of_current(channel, args.kind, args.platform)
+            if cur_keys and signed["pubkey_id"] not in cur_keys:
+                if not args.allow_key_rotation:
+                    raise PublishFeedError(
+                        f"this build is signed with key {signed['pubkey_id']}, which the build "
+                        f"currently CURRENT for {args.kind}/{args.platform} (v{cur_version}) "
+                        f"does not trust -- it bakes in {', '.join(cur_keys)}.\n"
+                        f"EVERY MACHINE ON v{cur_version} WILL REFUSE THIS BUILD, silently and "
+                        "permanently: a companion trusts only the keys inside the binary it is "
+                        "already running, so the recovery is a hands-on reinstall per machine.\n"
+                        "A rotation costs an overlap release: `python tools/release_key.py bake "
+                        "--add`, ship THAT (it trusts both keys), and only then drop the old "
+                        "one. Pass --allow-key-rotation if this is that deliberate step. "
+                        "Nothing was uploaded.",
+                        EXIT_USAGE)
+                print(f"[publish-feed] WARNING: --allow-key-rotation -- every machine on "
+                      f"v{cur_version} will refuse this build (it trusts "
+                      f"{', '.join(cur_keys)}, this is signed with {signed['pubkey_id']})",
+                      file=out)
+            elif cur_version and not cur_keys:
+                print(f"[publish-feed] NOTE: v{cur_version} is current for "
+                      f"{args.kind}/{args.platform} but records no baked key ids, so the "
+                      "key-rotation check could not run (REL-7). Records published from "
+                      "2026-08-28 carry them.", file=out)
 
             # --- what this record would do to one ALREADY on the feed ------
             # CR-59 item 8 (2026-08-21). `channel` here is the published
@@ -960,6 +1152,16 @@ def main(argv: list[str] | None = None, runner: Runner = run_command) -> int:
             # same records a customer's dashboard would. A --retract earlier
             # in this same run has already removed the record, which is the
             # deliberate withdraw-then-republish path and stays open.
+            if ((args.kind, args.platform, args.version) in retracted_keys(channel)
+                    and (args.kind, args.platform, args.version) not in retracted):
+                raise PublishFeedError(
+                    f"{args.kind}/{args.platform} {args.version} is on this channel RECALL "
+                    "list -- it was withdrawn on purpose and every dashboard has been told to "
+                    "stop offering it. Publishing it again re-offers the exact build that was "
+                    "pulled. Bump the version, or re-run this command with --retract "
+                    f"{args.kind}/{args.platform}/{args.version} --reason ... if the "
+                    "withdrawal itself was the mistake. Nothing was uploaded.",
+                    EXIT_USAGE)
             prior = existing_package(channel, args.kind, args.platform, args.version)
             if (prior is not None and str(prior.get("sha256") or "") != record["sha256"]
                     and not args.allow_replace):

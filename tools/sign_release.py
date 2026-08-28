@@ -35,6 +35,7 @@ import base64
 import datetime as dt
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -66,6 +67,40 @@ RUNTIME_ID_KINDS = tuple(
     kind for kind, fields in release_pubkey.KIND_EXTRA_FIELDS.items()
     if "runtime_id" in fields
 )
+
+# REL-4 / REL-16 (resilience sweep 2026-08-28). Two more kind-scoped fields,
+# both optional in MEANING and mandatory in the CANONICAL BYTES: whatever
+# release_pubkey.KIND_EXTRA_FIELDS says a kind's record covers, every record
+# of that kind must carry, because canonical_record raises on a missing field.
+# So an unknown value is the EMPTY STRING inside the signature, never an
+# absent key -- "absent means offer it to everyone" is a decision the
+# dashboard makes about a stored record, not a shape the signer may produce.
+#   requires_dashboard  the oldest dashboard VERSION this build works against
+#                       ("deploy the dashboard before the companions", which
+#                       CLAUDE.md states four times and nothing checked)
+#   arch                x86_64 / arm64 / universal2, measured by the builder
+#                       (tools/release_macos.sh has measured it since the
+#                       macOS port and dropped it at the publish)
+OPTIONAL_EXTRA_FIELDS = ("requires_dashboard", "arch")
+ARCHITECTURES = ("x86_64", "arm64", "universal2")
+
+
+def optional_fields_for(kind: str) -> tuple:
+    """The OPTIONAL kind-scoped signed fields, read from the record module.
+
+    Optional means the signature covers the field only when the record
+    carries a non-empty value, so every record published before this wave
+    canonicalises exactly as it always did and no overlap release is owed.
+    An older checkout of release_pubkey.py has no such table; there the
+    answer is "none", and main() then says what it is not publishing.
+    """
+    table = getattr(release_pubkey, "OPTIONAL_KIND_EXTRA_FIELDS", {})
+    return tuple(table.get(str(kind or ""), ()))
+
+
+def mandatory_fields_for(kind: str) -> tuple:
+    """The kind-scoped fields EVERY record of that kind must carry."""
+    return tuple(release_pubkey.KIND_EXTRA_FIELDS.get(str(kind or ""), ()))
 
 
 def package_filename(kind: str, platform: str, version: str, head: bytes = b"") -> str:
@@ -152,6 +187,8 @@ def build_record(
     published_at: str,
     signed_binary: bool,
     runtime_id: str = "",
+    requires_dashboard: str = "",
+    arch: str = "",
 ) -> dict:
     data_head = b""
     digest = hashlib.sha256()
@@ -181,21 +218,57 @@ def build_record(
     # Only for the kinds whose canonical record covers it: putting a
     # runtime_id on a companion record would change bytes every companion in
     # the field verifies (release_pubkey.KIND_EXTRA_FIELDS).
-    if kind in RUNTIME_ID_KINDS:
-        record["runtime_id"] = str(runtime_id or "")
+    extra = {
+        "runtime_id": runtime_id,
+        "requires_dashboard": requires_dashboard,
+        "arch": arch,
+    }
+    for field in mandatory_fields_for(kind):
+        # A field this signer has never heard of must stop the release here,
+        # where the fix is one line, rather than produce a record every
+        # companion in the field refuses.
+        if field not in extra:
+            raise SystemExit(
+                f"release_pubkey.KIND_EXTRA_FIELDS says a {kind!r} record covers "
+                f"{field!r}, which tools/sign_release.py cannot fill in. Teach it "
+                f"that field (and the flag that carries it) before publishing.")
+        record[field] = str(extra[field] or "")
+    # OPTIONAL extras are OMITTED when blank, never written as "" (REL-4 /
+    # REL-16, 2026-08-28): the canonical bytes of a record without the key and
+    # a record with an empty one are different, and "absent" is what every
+    # record published before this wave says.
+    for field in optional_fields_for(kind):
+        value = str(extra.get(field) or "").strip()
+        if value:
+            record[field] = value
     return record
 
 
-def query_suffix(record: dict, signature: str, pubkey_id: str) -> str:
+def query_suffix(record: dict, signature: str, pubkey_id: str,
+                 provenance: dict | None = None) -> str:
     from urllib.parse import quote
 
-    return (
+    suffix = (
         f"&signature={quote(signature, safe='')}"
         f"&pubkey_id={quote(pubkey_id, safe='')}"
         f"&min_version={quote(record['min_version'], safe='')}"
         f"&published_at={quote(record['published_at'], safe='')}"
         f"&signed_binary={'1' if record['signed_binary'] else '0'}"
     )
+    # Every SIGNED field the server would otherwise have to guess at. Sent
+    # even when empty (REL-4/REL-16, 2026-08-28): the dashboard re-derives the
+    # canonical bytes from what it stored, so a field inside the signature and
+    # absent from the query is a publish that verifies nowhere.
+    for field in OPTIONAL_EXTRA_FIELDS:
+        if field in record:
+            suffix += f"&{field}={quote(str(record[field]), safe='')}"
+    # UNSIGNED provenance (REL-13): advisory columns the Packages page and the
+    # drift check render, so "0.9.55" can never again mean two different sets
+    # of bytes with no way to tell which commit the fleet is on.
+    for field, value in sorted((provenance or {}).items()):
+        if str(value) != "":
+            suffix += f"&{field}={quote(str(value), safe='')}"
+    return suffix
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -220,6 +293,27 @@ def main(argv: list[str] | None = None) -> int:
                          "built against (tools/build_dashboard_bundle.py prints it, and it "
                          "is inside the bundle's manifest.json). It is SIGNED, because it "
                          "is what decides whether a dashboard may apply the bundle at all")
+    ap.add_argument("--requires-dashboard", default="",
+                    help="the OLDEST dashboard VERSION this build works against. SIGNED. "
+                         "A dashboard below it refuses to advertise the build at all "
+                         "(REL-4: 'deploy the dashboard before the companions' was a "
+                         "sentence in four docs and a check in no code). Read from the "
+                         "companion's REQUIRES_DASHBOARD constant by the build scripts")
+    ap.add_argument("--emit-kind-extras", action="store_true",
+                    help="sign requires_dashboard/arch into the record (only once every "
+                         "companion in the fleet is 0.9.55+; see the overlap note in "
+                         "docs/RELEASE.md)")
+    ap.add_argument("--arch", default="", choices=("",) + ARCHITECTURES,
+                    help="the architecture the artifact runs on, as measured by the "
+                         "builder. SIGNED. Blank means 'unknown' and is offered to every "
+                         "machine of that platform, which is what every record published "
+                         "before 2026-08-28 says (REL-16)")
+    ap.add_argument("--git-sha", default="",
+                    help="short commit the artifact was built from. UNSIGNED provenance, "
+                         "passed through to the publish (REL-13)")
+    ap.add_argument("--git-dirty", default="", choices=("", "0", "1"),
+                    help="1 when the build came from an uncommitted tree. UNSIGNED "
+                         "provenance (REL-13)")
     ap.add_argument("--key", default="", help="release key file (default ~/.ccsync-release/release.key)")
     ap.add_argument("--out", default="", help="also write the JSON here")
     args = ap.parse_args(argv)
@@ -240,6 +334,60 @@ def main(argv: list[str] | None = None) -> int:
             "it, so publishing this refuses the build, every earlier build, and the "
             "corrected republish too -- recoverable only by hand on each machine "
             "(KNOWN_BUGS CR-52). Pass --min-version at or below --version.")
+    if args.requires_dashboard.strip() and not version_tuple(args.requires_dashboard):
+        raise SystemExit(
+            f"--requires-dashboard must be dotted-numeric, got "
+            f"{args.requires_dashboard!r}: it is compared against the dashboard's own "
+            "VERSION, and a value that cannot be ranked would be ranked wrong (CR-52's "
+            "lesson about min_version).")
+    # A field the signature does not cover cannot be published, and the two
+    # values fail in OPPOSITE directions (REL-4 / REL-16, 2026-08-28).
+    #
+    # requires_dashboard is a SAFETY CONSTRAINT: dropping it silently leaves
+    # the operator believing an ordering rule exists while every customer's
+    # companions take a build their dashboard has no columns for. Refuse.
+    #
+    # arch is a NARROWING: dropping it means "offered to every machine of that
+    # platform", which is exactly what every record published before this
+    # sweep says and what the fleet already lives with. Say so and continue --
+    # refusing would make the build unpublishable on a checkout where the
+    # record module has not been taught the field yet.
+    # OVERLAP CONSTRAINT (REL-4 / REL-16, 2026-08-28): the kind-scoped extras
+    # are absent from the canonical bytes when unset, so every record without
+    # them verifies on every companion ever shipped -- but a record that
+    # CARRIES one is only verifiable by a companion whose release_pubkey.py
+    # knows the field (0.9.55+). Emitting them while any machine in the fleet
+    # is older makes that machine refuse the build with "release signature
+    # rejected", and there is no over-the-air recovery from that (REL-7).
+    # So emission is opt-in: --emit-kind-extras (or CCSYNC_EMIT_KIND_EXTRAS=1)
+    # once every machine reports 0.9.55 or newer. Until then the values are
+    # dropped LOUDLY and the fleet keeps today's behaviour.
+    emit_extras = bool(args.emit_kind_extras) or (
+        os.environ.get("CCSYNC_EMIT_KIND_EXTRAS", "").strip() == "1")
+    if not emit_extras and (args.requires_dashboard.strip() or args.arch.strip()):
+        print(
+            "NOTE: requires_dashboard/arch NOT signed into this record: pass "
+            "--emit-kind-extras once every companion in the fleet is on 0.9.55 or "
+            "newer (older builds refuse a record that carries them: release "
+            "signature rejected, no OTA recovery). Until then this build is offered "
+            "to every machine on the platform with no dashboard-ordering check, as "
+            "every record before 2026-08-28 was.", file=sys.stderr)
+        args.requires_dashboard = ""
+        args.arch = ""
+    covered = optional_fields_for(args.kind) + mandatory_fields_for(args.kind)
+    if args.requires_dashboard.strip() and "requires_dashboard" not in covered:
+        raise SystemExit(
+            f"--requires-dashboard was given, but a {args.kind!r} record's signature does "
+            "not cover it in this build (release_pubkey.KIND_EXTRA_FIELDS). Publishing "
+            "would drop the constraint silently and the ordering rule would exist only in "
+            "your head. Add the field there first, or drop the flag.")
+    if args.arch.strip() and "arch" not in covered:
+        print(
+            f"NOTE: --arch {args.arch.strip()} is not part of a {args.kind!r} record's "
+            "signature in this build, so it is NOT published: this build will be offered "
+            "to every machine on that platform, as every record before 2026-08-28 was "
+            "(REL-16).", file=sys.stderr)
+        args.arch = ""
     if args.kind in RUNTIME_ID_KINDS and not args.runtime_id.strip():
         # Refused rather than defaulted to "": a dashboard record with a blank
         # runtime_id verifies fine and is then refused by every customer as a
@@ -259,6 +407,8 @@ def main(argv: list[str] | None = None) -> int:
         published_at=args.published_at.strip() or utcnow_iso(),
         signed_binary=args.signed_binary,
         runtime_id=args.runtime_id.strip(),
+        requires_dashboard=args.requires_dashboard.strip(),
+        arch=args.arch.strip(),
     )
     signature = base64.b64encode(
         ed25519.sign(secret, release_pubkey.canonical_record(record))
@@ -276,7 +426,14 @@ def main(argv: list[str] | None = None) -> int:
     out = dict(record)
     out["signature"] = signature
     out["pubkey_id"] = key_id
-    out["query"] = query_suffix(record, signature, key_id)
+    out["query"] = query_suffix(
+        record, signature, key_id,
+        provenance={"git_sha": args.git_sha.strip(),
+                    "git_dirty": args.git_dirty.strip()})
+    # Echoed OUTSIDE the record so the caller can render them without having
+    # to know which fields the signature happens to cover this release.
+    out["git_sha"] = args.git_sha.strip()
+    out["git_dirty"] = args.git_dirty.strip()
     text = json.dumps(out, indent=2, sort_keys=True)
     if args.out:
         Path(args.out).write_text(text + "\n", encoding="utf-8")

@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -787,3 +788,212 @@ def test_rollback_is_possible_again_after_an_interrupted_apply(real_bundle_world
     _orphan_the_flag(settings, version="9.9.10")
     result = dashboard_update.rollback(settings)
     assert result["rolled_back_from"] == NEW_VERSION
+
+
+# ------------------------------------- the resilience sweep (2026-08-28)
+#
+# REL-6 (the boot watchdog has to prove it can SERVE), REL-9 (a pid is not a
+# process), REL-10 (rolling the code back leaves the database migrated
+# forward) and REL-5 (nothing on this path ever pruned).
+
+
+class _FakeResponse:
+    def __init__(self, status: int, body: bytes) -> None:
+        self.status = status
+        self._body = body
+
+    def read(self, _n: int = 0) -> bytes:
+        return self._body
+
+    def getcode(self) -> int:
+        return self.status
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeOpener:
+    """Stands in for the opener the probe builds -- never urlopen (GOTCHAS
+    section 12: a test that patches urlopen does not exercise the opener the
+    code actually builds)."""
+
+    def __init__(self, answers) -> None:
+        self.answers = list(answers)
+        self.urls: list[str] = []
+
+    def open(self, url, timeout=None):
+        self.urls.append(url)
+        answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        if isinstance(answer, Exception):
+            raise answer
+        return _FakeResponse(*answer)
+
+
+def _patch_probe(monkeypatch, opener):
+    monkeypatch.setattr(dashboard_update, "_loopback_opener", lambda: opener)
+    return opener
+
+
+def test_a_served_health_route_is_what_marks_a_boot_healthy(world, monkeypatch):
+    from ccsync_dashboard import VERSION
+
+    body = json.dumps({"ok": True, "version": VERSION}).encode()
+    opener = _patch_probe(monkeypatch, _FakeOpener([(200, body)]))
+    ok, why = dashboard_update.probe_health(world["settings"])
+    assert ok and why == ""
+    assert opener.urls[0].startswith("http://127.0.0.1:")
+    assert opener.urls[0].endswith("/api/v1/health")
+
+
+def test_a_wedged_dashboard_leaves_the_boot_counter_standing(world, monkeypatch):
+    """The REL-6 hole: the tree imported, bound the port and then 500'd every
+    request. The old watchdog called that healthy for ever."""
+    settings = world["settings"]
+    path = dashboard_update.boot_attempts_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"version": NEW_VERSION, "attempts": 1}))
+    _patch_probe(monkeypatch, _FakeOpener([(500, b"nope")]))
+    monkeypatch.setattr(dashboard_update, "BOOT_HEALTHY_SECONDS", 0.0)
+    monkeypatch.setattr(dashboard_update, "BOOT_HEALTH_PROBE_SECONDS", 0.0)
+
+    thread = dashboard_update.start_boot_watchdog(settings)
+    assert thread is not None
+    thread.join(timeout=10)
+    assert path.exists(), "a boot that never served must not clear the counter"
+
+
+def test_a_health_route_answering_as_another_version_is_not_this_boot(world, monkeypatch):
+    body = json.dumps({"ok": True, "version": "0.0.1"}).encode()
+    _patch_probe(monkeypatch, _FakeOpener([(200, body)]))
+    ok, why = dashboard_update.probe_health(world["settings"])
+    assert ok is False
+    assert "0.0.1" in why
+
+
+def test_a_healthy_boot_clears_the_counter(world, monkeypatch):
+    from ccsync_dashboard import VERSION
+
+    settings = world["settings"]
+    path = dashboard_update.boot_attempts_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"version": NEW_VERSION, "attempts": 1}))
+    body = json.dumps({"ok": False, "version": VERSION}).encode()   # ok:False is fine
+    _patch_probe(monkeypatch, _FakeOpener([(200, body)]))
+    monkeypatch.setattr(dashboard_update, "BOOT_HEALTHY_SECONDS", 0.0)
+
+    thread = dashboard_update.start_boot_watchdog(settings)
+    thread.join(timeout=10)
+    assert not path.exists()
+
+
+def test_the_same_pid_in_a_new_process_is_still_an_interrupted_update(world):
+    """REL-9: run.sh is pid 1 and uvicorn is its child, so a container that
+    came back after a power cut handed the new worker the same small pid --
+    and the dead latch then survived every apply and every rollback."""
+    settings = world["settings"]
+    dashboard_update._write_json(dashboard_update.update_state_path(settings), {
+        "step": "downloading", "in_progress": True, "version": NEW_VERSION,
+        "owner_pid": os.getpid(), "owner_nonce": "some-other-process",
+    })
+    assert dashboard_update.read_state(settings)["in_progress"] is False
+
+
+def test_this_process_still_owns_its_own_flag(world):
+    settings = world["settings"]
+    dashboard_update._set_state(settings, in_progress=True, step="downloading",
+                                version=NEW_VERSION)
+    raw = json.loads(dashboard_update.update_state_path(settings).read_text(encoding="utf-8"))
+    assert raw["owner_nonce"] == dashboard_update.PROCESS_NONCE
+    assert dashboard_update.read_state(settings)["in_progress"] is True
+
+
+def test_an_apply_records_the_live_schema_and_the_trees_own(real_bundle_world):
+    settings = real_bundle_world["settings"]
+    dashboard_update.apply(settings, real_bundle_world["app"].state, version=NEW_VERSION)
+    current = json.loads(
+        (dashboard_update.code_dir(settings) / "current.json").read_text(encoding="utf-8"))
+    assert current["db_user_versions"]["dashboard"] == dbmod.SCHEMA_VERSION
+    assert current["schema_version"] == dbmod.SCHEMA_VERSION
+    manifest = json.loads(
+        (dashboard_update.version_dir(settings, NEW_VERSION) / "manifest.json")
+        .read_text(encoding="utf-8"))
+    assert manifest["schema_version"] == dbmod.SCHEMA_VERSION
+
+
+def test_rolling_back_past_a_migration_is_refused_and_names_the_backup(real_bundle_world):
+    """REL-10: the admin's safe-looking choice (no restore_db, keep today's
+    reports) is the one that leaves old code against a newer schema."""
+    settings = real_bundle_world["settings"]
+    dashboard_update.apply(settings, real_bundle_world["app"].state, version=NEW_VERSION)
+    finish_the_restart(real_bundle_world)
+    # As if the tree we are going back to knew an older schema than the live DB.
+    manifest_path = dashboard_update.version_dir(settings, NEW_VERSION) / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = 1
+    dashboard_update._write_json(manifest_path, manifest)
+
+    with pytest.raises(dashboard_update.DashboardUpdateError) as exc:
+        dashboard_update.rollback(settings, to_version=NEW_VERSION)
+    assert exc.value.status_code == 409
+    assert "schema v1" in exc.value.detail
+    backup = dashboard_update.list_backups(settings)[0]["name"]
+    assert backup in exc.value.detail
+
+    # ...and it is not a wall: acknowledging it goes through.
+    result = dashboard_update.rollback(settings, to_version=NEW_VERSION,
+                                       acknowledge_schema=True)
+    assert result["version"] == NEW_VERSION
+
+
+def test_rolling_back_to_the_image_is_never_blocked_by_an_unknown_schema(real_bundle_world):
+    """The image is the escape hatch of last resort: unknown is SAID (status()
+    carries it), never a refusal."""
+    settings = real_bundle_world["settings"]
+    dashboard_update.apply(settings, real_bundle_world["app"].state, version=NEW_VERSION)
+    finish_the_restart(real_bundle_world)
+    result = dashboard_update.rollback(settings)
+    assert result["version"] == "image"
+    assert result["schema"]["unknown"] is True
+
+
+def test_backups_are_bounded_per_label(world, monkeypatch):
+    settings = world["settings"]
+    monkeypatch.setattr(dashboard_update, "BACKUPS_KEEP_PER_LABEL", 2)
+    for stamp in ("20260101T000000Z", "20260102T000000Z", "20260103T000000Z"):
+        made = dashboard_update.backups_dir(settings) / f"{stamp}-before-9.9.9"
+        made.mkdir(parents=True)
+        dashboard_update._write_json(made / "backup.json", {"created_at": stamp})
+    dashboard_update.prune_backups(settings)
+    left = {b["name"] for b in dashboard_update.list_backups(settings)}
+    assert left == {"20260103T000000Z-before-9.9.9", "20260102T000000Z-before-9.9.9"}
+
+
+def test_old_code_trees_are_pruned_to_running_previous_and_one(world):
+    settings = world["settings"]
+    code = dashboard_update.code_dir(settings)
+    for version in ("1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4"):
+        (code / version).mkdir(parents=True)
+        dashboard_update._write_json(code / version / "manifest.json", {"version": version})
+    dashboard_update._write_json(dashboard_update.current_json_path(settings),
+                                 {"version": "1.0.4", "previous": "1.0.1"})
+    removed = dashboard_update.prune_code_trees(settings)
+    left = {p.name for p in code.iterdir() if p.is_dir()}
+    assert "1.0.4" in left and "1.0.1" in left
+    assert len(left) == dashboard_update.CODE_TREES_KEEP
+    assert removed
+
+
+def test_health_carries_the_feed_age_and_the_data_gauge(world):
+    body = world["client"].get("/api/v1/health").json()
+    assert body["feed"]["configured"] is True
+    # Never checked reads as stale, not as fine.
+    assert body["feed"]["stale"] is True
+    assert body["data"]["free_bytes"] > 0
+
+
+def test_the_packages_page_shows_the_data_gauge(world):
+    html = world["client"].get("/admin/packages").text
+    assert "data volume:" in html or "FREE on the data volume" in html

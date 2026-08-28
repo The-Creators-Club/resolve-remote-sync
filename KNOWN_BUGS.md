@@ -3027,6 +3027,64 @@ browser with no confirm(), is exactly the old behaviour: re-attach and the
 loud toast (which now names [ CANCEL SEARCH ]). Harness scenarios in
 `tests/test_static_app.py`. Needs a dashboard deploy.
 
+## Approving a computer under its own name mints a phantom editor (CR-91, 2026-08-28)
+
+### CR-91 - "one user, many devices" read as "assign a NEW username per device", and typing the machine name is the B16 unshare - FIXED in repo 2026-08-28 as dashboard 0.7.16, NOT YET DEPLOYED
+**Seen** (owner, 2026-08-28): signed a second computer (`Razer`) into the
+existing `alex` account; the Users page listed it under [ DEVICES AWAITING
+APPROVAL ] with a free-text box headed `ASSIGN USERNAME` and, in the column
+immediately to its left, `CURRENT NAME: Razer`. Reported as "to approve it you
+need to assign a username, which creates a new user, thus making the point of
+1 user - multiple devices pointless."
+
+**Not what it looked like.** Approving does not create an account.
+`api_admin_approve_device` only names the Syncthing device and calls
+`db.record_known_editor`, an `INSERT OR IGNORE`; typing the OWNER's existing
+username is a no-op on an editor who already exists, and one editor owning
+several devices is the design - every device map in the system is keyed by
+deviceID, never by name (`collector.py` `editor_devices` is `editor -> set()`,
+and `machine_devices[(editor, machine)]` addresses the exact device), so two
+Syncthing devices both labelled `alex` is correct, not a collision.
+
+**The real defect** is that the panel invites the machine name, and the machine
+name is the one answer that breaks the fleet. Being a KNOWN editor is exactly
+what promotes a device from UNMAPPED to mapped in `db.resolve_editor_username`,
+and `record_known_editor` is what makes a name known. So approving `Razer` as
+`razer` mints an editor with no `selections` rows, and the next enforce cycle
+computes `desired` without that device and unshares it from every folder it is
+on. That is B16 - the failure the whole known-editors mechanism was built to
+prevent - reached through the supported admin UI instead of a hand-edited
+Syncthing config. `db.py:1036` already names the hazard ("machine names look
+exactly like usernames"); nothing stopped the dialog from manufacturing the
+knowledge that defeats it. The blast-radius brake catches this only for a
+device on many folders; a device on one or two sails under the limit.
+
+**Fix.** The column is `COMPUTER NAME`, the box is `OWNER (EDITOR)` backed by a
+`<datalist>` of the editors the dashboard already knows, with the standing
+sentence "One editor can own several computers, so a second machine takes the
+SAME username as their first." Both approve paths - the htmx partial a human
+uses and its JSON twin - refuse a username that is not already known unless
+`create_new` is set, which is what [ CREATE NEW EDITOR ] sends. Picker and
+guard share ONE definition, `api.approvable_editor_usernames`, so the page can
+never offer a name the POST refuses; it is deliberately local-only (no NAS
+call) so a backend blip cannot read as "this editor does not exist". The guard
+runs AFTER the device-id shape check so a truncated paste still reports DASH-1.
+
+**And the guessing is removed where it can be.** A companion self-reports
+`machines.syncthing_device_id` as soon as it has a local Syncthing, normally
+before an admin opens this page at all - so in the ordinary case the registry
+already holds the answer the admin was being asked to guess.
+`_pending_owner_hint` reads `db.machine_by_device_id` and the row arrives with
+the owner already in the box, its real machine name in the COMPUTER NAME
+column and a green [ REPORTED ] chip; approving is one click. A device the
+registry has never seen (added by hand in the Syncthing GUI, or one that has
+never reported) falls back to the datalist, which is the old behaviour minus
+the free-text trap.
+
+Tests: `dashboard/tests/test_admin_users.py` (refusal on the machine name, the
+JSON twin, the second-computer-same-username case, the picker, and the
+registry prefill).
+
 ## Settings, Sessions 500'd for three days on one hand-minted row (CR-89, 2026-08-27)
 
 ### CR-89 - `ago` refused a timestamp with no offset, and the 2026-08-24 ship left one behind - LIVE-FIXED on the NAS 2026-08-27 (row deleted), filter hardened and SHIPPED 2026-08-28 in dashboard 0.7.15

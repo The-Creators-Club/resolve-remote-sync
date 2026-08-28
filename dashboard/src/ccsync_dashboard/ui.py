@@ -18,10 +18,10 @@ from fastapi.templating import Jinja2Templates
 from . import (auth, dashboard_update, db, local_users, oidc, package_store, provision,
                release_feed, site_store)
 from .api import (
-    build_admin_users_view, build_editors_view, build_packages_view, build_presence_view,
-    build_project_view, build_projects_view, build_queue_view, build_report_tokens_view,
-    build_transfers_view, delete_user_everywhere, forget_machine_everywhere, get_conn,
-    normalize_device_id,
+    approve_username_error, build_admin_users_view, build_editors_view,
+    build_packages_view, build_presence_view, build_project_view, build_projects_view,
+    build_queue_view, build_report_tokens_view, build_transfers_view,
+    delete_user_everywhere, forget_machine_everywhere, get_conn, normalize_device_id,
 )
 # The fleet-read redaction the JSON API applies, imported under a name that
 # says where the rule lives: ONE definition, two callers (COMMERCIAL_READINESS.md
@@ -1404,6 +1404,9 @@ async def partial_admin_approve_device(
     form = await _form(request)
     device_id = form.get("device_id", "").strip()
     username = form.get("username", "").strip().lower()
+    # An unchecked HTML checkbox is simply absent from the form body, so the
+    # default is the safe one without a falsy-string dance.
+    create_new = form.get("create_new", "") != ""
 
     error = None
     if not settings.syncthing_url:
@@ -1418,6 +1421,14 @@ async def partial_admin_approve_device(
             # lowercased paste came back as a generic 502, or created a device
             # that can never connect (KNOWN_BUGS DASH-1, 2026-08-11).
             device_id = normalize_device_id(device_id)
+            # After the shape check on purpose: a truncated paste must still
+            # report the DASH-1 message rather than be masked by this one.
+            # The human path into the B16 shape, since the machine name is
+            # printed in the column beside the box (CR-91). Same guard, same
+            # wording as the JSON twin.
+            unknown = approve_username_error(conn, username, create_new)
+            if unknown:
+                raise ValueError(unknown)
             syncthing = SyncthingClient.from_settings(settings)
             # See the ui.py blocking-handlers finding: blocking Syncthing
             # REST call off the event loop.

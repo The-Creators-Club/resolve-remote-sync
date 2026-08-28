@@ -2719,6 +2719,7 @@ def _build_admin_users_view(settings, conn: sqlite3.Connection) -> dict[str, Any
         # accounts, device approval) simply has nothing to show.
         result.update({"truenas_configured": False, "editors": [], "pending_devices": [],
                        "error": None, "truenas_error": None, "syncthing_error": None,
+                       "known_editors": sorted(approvable_editor_usernames(conn)),
                        "fleet_only_editors": sorted(known - account_names)})
         return result
 
@@ -2763,6 +2764,7 @@ def _build_admin_users_view(settings, conn: sqlite3.Connection) -> dict[str, Any
                         "device_id": d["deviceID"],
                         "current_name": d.get("name") or "",
                         "status": "unmapped",
+                        **_pending_owner_hint(conn, d["deviceID"]),
                     })
             for device_id, info in (syncthing.pending_devices() or {}).items():
                 if device_id in configured_ids:
@@ -2771,6 +2773,7 @@ def _build_admin_users_view(settings, conn: sqlite3.Connection) -> dict[str, Any
                     "device_id": device_id,
                     "current_name": (info or {}).get("name") or "",
                     "status": "pending",
+                    **_pending_owner_hint(conn, device_id),
                 })
         except SyncthingError as exc:
             syncthing_error = f"syncthing: {exc}"
@@ -2782,6 +2785,12 @@ def _build_admin_users_view(settings, conn: sqlite3.Connection) -> dict[str, Any
         "truenas_configured": True,
         "editors": editor_rows,
         "pending_devices": pending,
+        # The valid answers to "who owns this computer", offered as a datalist
+        # on each pending row so the OWNER is one click and the machine name is
+        # not the path of least resistance (CR-91). Union, not just the NAS
+        # accounts: an editor whose account was removed at the NAS by hand still
+        # owns their computers, and a local-auth site has no NAS list at all.
+        "known_editors": sorted(approvable_editor_usernames(conn)),
         # kept as one string for existing callers/tests; the per-backend keys
         # are what the template renders each half's empty state from
         "error": "; ".join(e for e in (truenas_error, syncthing_error) if e) or None,
@@ -2846,6 +2855,77 @@ class SetPasswordIn(BaseModel):
 class ApproveDeviceIn(BaseModel):
     device_id: str = Field(min_length=1, max_length=128)
     username: str = Field(min_length=1, max_length=32)
+    # Off by default so an existing integration cannot mint an editor by
+    # accident; see approve_username_error (CR-91).
+    create_new: bool = False
+
+
+def _pending_owner_hint(conn: sqlite3.Connection, device_id: str) -> dict[str, str]:
+    """Who the REGISTRY already says owns this device, for the approve row.
+
+    A companion self-reports `machines.syncthing_device_id` as soon as it has a
+    local Syncthing, which is normally BEFORE an admin gets to this page (see
+    collector.py's unapproved-device warning). So in the ordinary case the
+    dashboard already knows the answer it was making the admin guess, and
+    guessing is what produced CR-91. When the registry has no row - a device
+    that has never reported, or one added by hand in the Syncthing GUI - both
+    keys are empty and the admin picks from the datalist as before.
+    """
+    known = db.machine_by_device_id(conn, device_id)
+    if not known:
+        return {"suggested_owner": "", "suggested_machine": ""}
+    return {
+        "suggested_owner": str(known.get("editor_username") or ""),
+        "suggested_machine": str(known.get("machine") or ""),
+    }
+
+
+def approvable_editor_usernames(conn: sqlite3.Connection) -> set[str]:
+    """The usernames a device may be approved under without CREATE NEW EDITOR.
+
+    ONE definition, two callers -- the picker on the page and the guard on the
+    POST -- so the page can never offer a name the POST then refuses (CR-91).
+
+    Deliberately LOCAL-only: no NAS call. The guard runs on every approve, and
+    making it depend on a reachable NAS would turn a backend blip into "this
+    editor does not exist". A NAS account the fleet has no record of is a real
+    "new to this dashboard" case, and ticking the box is what records it.
+    """
+    names = set(db.known_editor_usernames(conn))
+    try:
+        names |= {str(u.get("username") or "").lower() for u in local_users.list_users(conn)}
+    except sqlite3.Error:
+        # Local accounts are one source among several, not a precondition.
+        pass
+    return {n for n in names if n}
+
+
+# Approving a device RECORDS its label as a known editor (record_known_editor,
+# below), and being KNOWN is exactly what promotes a device from UNMAPPED to
+# mapped in db.resolve_editor_username. So typing the COMPUTER's name here --
+# which the row openly invites, printing CURRENT NAME "Razer" beside a box
+# labelled ASSIGN USERNAME -- mints an editor who owns no selections rows, and
+# the next enforce cycle computes `desired` without that device and unshares it
+# from every folder it is on. That is the B16 failure shape, reached through the
+# supported admin UI rather than through a hand-edited Syncthing config
+# (CR-91, 2026-08-28).
+#
+# resolve_editor_username already refuses to map a label that is not a known
+# editor; this stops the approve dialog from manufacturing the knowledge that
+# defeats it. A genuinely new editor is still approvable -- the admin just has
+# to say that is what they mean.
+def approve_username_error(
+    conn: sqlite3.Connection, username: str, create_new: bool
+) -> str | None:
+    """None if `username` may be approved, else the reason it may not."""
+    if create_new or username in approvable_editor_usernames(conn):
+        return None
+    return (
+        f"'{username}' is not an editor this dashboard knows. Pick the OWNER of "
+        "this computer: one editor can own several computers, so a second "
+        "machine takes the same username as the first. Tick CREATE NEW EDITOR "
+        "if this really is a new person."
+    )
 
 
 # Intentional copy of server/accept_device.py's DEVICE_ID_RE: 8 dash-separated
@@ -3690,6 +3770,11 @@ def api_admin_approve_device(
         device_id = normalize_device_id(payload.device_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # After the device-id shape check, so the two paths report the same reason
+    # first for the same bad input (CR-91).
+    unknown = approve_username_error(conn, username, payload.create_new)
+    if unknown:
+        raise HTTPException(status_code=422, detail=unknown)
     syncthing = SyncthingClient.from_settings(settings)
     try:
         syncthing.approve_device(device_id, username)

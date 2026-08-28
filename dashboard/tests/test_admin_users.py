@@ -19,6 +19,17 @@ def as_user(client, user):
     return client
 
 
+def record_known_editor(client, name: str) -> None:
+    """Make `name` an editor the dashboard has a positive record of, the way a
+    companion report does. CR-91's guard reads exactly this."""
+    conn = dbmod.connect(client.app.state.settings.db_path)
+    try:
+        dbmod.record_known_editor(conn, name, "report")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def known_editors(client) -> set[str]:
     conn = dbmod.connect(client.app.state.settings.db_path)
     try:
@@ -234,7 +245,9 @@ def test_approve_pending_device(env):
 
     as_user(client, "owen")
     resp = client.post("/api/v1/admin/devices/approve", json={
-        "device_id": new_id, "username": "newbie",
+        # 'newbie' is nobody the dashboard knows yet, so approving them is the
+        # deliberate create-an-editor case since CR-91.
+        "device_id": new_id, "username": "newbie", "create_new": True,
     })
     assert resp.status_code == 200, resp.text
 
@@ -253,7 +266,7 @@ def test_approve_renames_already_configured_unmapped_device(env):
     client, _truenas, syncthing = env
     as_user(client, "owen")
     resp = client.post("/api/v1/admin/devices/approve", json={
-        "device_id": EDITOR2_ID, "username": "rsmith",
+        "device_id": EDITOR2_ID, "username": "rsmith", "create_new": True,
     })
     assert resp.status_code == 200, resp.text
     renamed = next(d for d in syncthing.state["devices"] if d["deviceID"] == EDITOR2_ID)
@@ -423,7 +436,7 @@ def test_partial_approve_device_end_to_end(env):
     syncthing.state["pending_devices"] = {new_id: {"name": "", "address": "100.9.9.9:22000"}}
     as_user(client, "owen")
     resp = client.post("/partials/admin/users/approve",
-                       data={"device_id": new_id, "username": "newbie"})
+                       data={"device_id": new_id, "username": "newbie", "create_new": "1"})
     assert resp.status_code == 200
     added = next(d for d in syncthing.state["devices"] if d["deviceID"] == new_id)
     assert added["name"] == "newbie"
@@ -443,7 +456,8 @@ def test_partial_approve_shape_checks_the_device_id(env):
     before = list(syncthing.state["devices"])
 
     resp = client.post("/partials/admin/users/approve",
-                       data={"device_id": "NEWDEVX-NEWDEVX", "username": "newbie"})
+                       data={"device_id": "NEWDEVX-NEWDEVX", "username": "newbie",
+                             "create_new": "1"})
     assert resp.status_code == 200
     assert "is not a Syncthing device ID" in resp.text
     assert syncthing.state["devices"] == before          # nothing reached Syncthing
@@ -453,7 +467,7 @@ def test_partial_approve_shape_checks_the_device_id(env):
     # exactly as normalize_device_id does for the JSON API.
     lower = "newdevx-newdevx-newdevx-newdevx-newdevx-newdevx-newdevx-newdevx"
     resp = client.post("/partials/admin/users/approve",
-                       data={"device_id": lower, "username": "newbie"})
+                       data={"device_id": lower, "username": "newbie", "create_new": "1"})
     assert resp.status_code == 200
     added = next(d for d in syncthing.state["devices"] if d["deviceID"] == lower.upper())
     assert added["name"] == "newbie"
@@ -502,3 +516,109 @@ def test_truenas_not_configured_is_read_only(tmp_path, syncthing):
         body = client.get("/api/v1/admin/users").json()
         assert body["truenas_configured"] is False
         assert body["editors"] == []
+
+
+# --------------------------------------------------------------- CR-91
+# Approving a device RECORDS its label as a known editor, and being known is
+# what promotes a device from UNMAPPED to mapped. The row prints the computer's
+# hostname in the column beside the box, so the machine name was the easiest
+# thing to type -- and that mints an editor with no selections rows, which the
+# next enforce cycle reads as "ticked for nothing" and unshares the device from
+# every folder it is on. B16, reached through the supported admin UI.
+
+def test_approving_under_the_machine_name_is_refused(env):
+    client, _truenas, syncthing = env
+    new_id = "NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX"
+    syncthing.state["pending_devices"] = {new_id: {"name": "Razer", "address": "100.9.9.9:22000"}}
+    as_user(client, "owen")
+    before = list(syncthing.state["devices"])
+
+    resp = client.post("/partials/admin/users/approve",
+                       data={"device_id": new_id, "username": "razer"})
+    assert resp.status_code == 200
+    assert "is not an editor this dashboard knows" in resp.text
+    # Nothing reached Syncthing, and no phantom editor was recorded: those two
+    # together are what enforce would otherwise act on.
+    assert syncthing.state["devices"] == before
+    assert "razer" not in known_editors(client)
+
+
+def test_json_approve_refuses_an_unknown_editor_too(env):
+    """The JSON twin is reachable by script and by the same admin session, so
+    the guard cannot live only in the htmx partial."""
+    client, _truenas, syncthing = env
+    new_id = "NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX"
+    syncthing.state["pending_devices"] = {new_id: {"name": "Razer", "address": "100.9.9.9:22000"}}
+    as_user(client, "owen")
+    resp = client.post("/api/v1/admin/devices/approve",
+                       json={"device_id": new_id, "username": "razer"})
+    assert resp.status_code == 422
+    assert "is not an editor this dashboard knows" in resp.json()["detail"]
+    assert "razer" not in known_editors(client)
+
+
+def test_a_second_computer_takes_the_owners_existing_username(env):
+    """The point of the whole feature: one editor, several computers. jsmith
+    already owns EDITOR_ID; their laptop is approved under the SAME username,
+    needs no create_new, and creates no second editor."""
+    client, _truenas, syncthing = env
+    laptop = "NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX"
+    syncthing.state["pending_devices"] = {laptop: {"name": "Razer", "address": "100.9.9.9:22000"}}
+    # jsmith is known because their FIRST computer's companion has reported --
+    # the ordinary way a second machine gets onboarded.
+    record_known_editor(client, "jsmith")
+    as_user(client, "owen")
+    editors_before = known_editors(client)
+    assert "jsmith" in editors_before
+
+    resp = client.post("/partials/admin/users/approve",
+                       data={"device_id": laptop, "username": "jsmith"})
+    assert resp.status_code == 200
+
+    # Two devices, both labelled jsmith. Nothing keys a device map by NAME --
+    # deviceID is the key everywhere -- so the duplicate label is the design,
+    # not a collision.
+    named = [d["deviceID"] for d in syncthing.state["devices"] if d.get("name") == "jsmith"]
+    assert set(named) == {EDITOR_ID, laptop}
+    assert known_editors(client) == editors_before      # no new user
+
+
+def test_known_editors_feeds_the_owner_picker(env):
+    """The datalist behind the OWNER box. Without it the admin is back to
+    free-typing, which is how the machine name got in there."""
+    client, _truenas, _syncthing = env
+    record_known_editor(client, "jsmith")
+    as_user(client, "owen")
+    body = client.get("/api/v1/admin/users").json()
+    assert "jsmith" in body["known_editors"]
+    # The page offers them, so the owner is one click rather than a guess.
+    page = client.get("/partials/admin/users").text
+    assert 'list="known-editors"' in page
+    assert "<option value=\"jsmith\">" in page
+
+
+def test_pending_row_is_prefilled_from_the_machine_registry(env):
+    """CR-91's other half: the companion self-reports its Syncthing device id
+    before an admin ever sees this page, so the dashboard already knows whose
+    computer it is. Making the admin retype it is what produced the bug."""
+    client, _truenas, syncthing = env
+    laptop = "NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX-NEWDEVX"
+    syncthing.state["pending_devices"] = {laptop: {"name": "Razer", "address": "100.9.9.9:22000"}}
+    conn = dbmod.connect(client.app.state.settings.db_path)
+    try:
+        dbmod.record_known_editor(conn, "jsmith", "report")
+        dbmod.upsert_machine(conn, "jsmith", "Razer", dbmod.utcnow_iso(),
+                             machine_id="mid-1", platform="windows",
+                             syncthing_device_id=laptop)
+        conn.commit()
+    finally:
+        conn.close()
+
+    as_user(client, "owen")
+    row = next(d for d in client.get("/api/v1/admin/users").json()["pending_devices"]
+               if d["device_id"] == laptop)
+    assert row["suggested_owner"] == "jsmith"
+    assert row["suggested_machine"] == "Razer"
+    # ...and the page ships it as the box's value, so [ APPROVE ] is one click.
+    page = client.get("/partials/admin/users").text
+    assert 'value="jsmith"' in page

@@ -1713,7 +1713,16 @@ def api_login(payload: LoginIn, request: Request, response: Response) -> dict[st
     # Mints the cookie AND the revocable server-side session row (HttpOnly,
     # SameSite=Lax, Secure per auth.cookie_secure) -- see auth.start_session.
     auth.start_session(request, response, username)
-    return {"ok": True, "user": username, "is_admin": auth.is_admin(settings, username)}
+    # The caller's OWN csrf token rides the login answer (2026-08-29, phase 0
+    # of the fleet job API): a non-browser client -- tools/jobs.py, and
+    # Timeline Cards later -- has no page to read the hidden field off, and
+    # the alternative was making the JSON write routes CSRF-exempt, which is
+    # the wrong direction entirely. It is not a secret from the session it
+    # belongs to: it is an HMAC over that session's own id, a browser on
+    # another origin cannot read this response body (no CORS headers are
+    # sent anywhere), and it is worthless without the cookie.
+    return {"ok": True, "user": username, "is_admin": auth.is_admin(settings, username),
+            "csrf": auth.csrf_token(request)}
 
 
 @router.post("/logout")

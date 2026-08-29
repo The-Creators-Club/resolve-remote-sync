@@ -97,13 +97,18 @@ def resolve(cfg: dict[str, Any], root: str, rel_path: str) -> Path:
         raise JobPathError(
             f"this machine has no {name or '(unnamed)'} root configured or "
             f"reachable (it has: {', '.join(sorted(have)) or 'none'})")
-    rel = str(rel_path or "").strip().replace("\\", "/").strip("/")
-    if not rel:
+    raw = str(rel_path or "").strip().replace("\\", "/")
+    if not raw:
         raise JobPathError("the job named no path inside the root")
-    if os.path.isabs(rel) or (len(rel) > 1 and rel[1] == ":"):
+    # The RAW value decides, before any stripping: `/vault/2026/...` is how
+    # the Timeline Cards container spells the vault, and silently reading it
+    # as relative would put the work in the wrong place on every machine that
+    # is not that container.
+    if raw.startswith("/") or os.path.isabs(raw) or (len(raw) > 1 and raw[1] == ":"):
         raise JobPathError(
             f"a job's path must be RELATIVE to its root, and {rel_path!r} is "
             f"absolute (docs/TIMELINE-CARDS-INTO-CCSYNC.md section 4.1)")
+    rel = raw.strip("/")
     base = have[name].resolve()
     target = (base / rel).resolve()
     try:

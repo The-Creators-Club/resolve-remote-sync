@@ -545,6 +545,113 @@ that would otherwise have to be built for the dashboard too.
 
 ---
 
+## 7a. PHASE 0 BUILT (2026-08-29/30)
+
+Status of the document above: §1-§5 and §7 are unchanged. §6's phase 0 is
+**built** on branch `timeline-cards-port`; phases 1-4 are not. Timeline Cards
+itself is untouched -- it is a CLIENT of this API and calls nothing yet.
+
+### What exists now
+
+| Piece | Where |
+|---|---|
+| the `jobs` table (schema **v41**) + lease helpers | `dashboard/src/ccsync_dashboard/db.py` -- `create_job`, `queued_jobs`, `claim_job` (the compare-and-set), `claim_next_job`, `heartbeat_job`, `finish_job`, `fail_job`, `expire_leases`, `prune_jobs`, `job_requirements_met` |
+| the scheduler | `dashboard/src/ccsync_dashboard/jobs.py` -- capability match -> policy -> rank -> offer, plus `explain()` |
+| the routes | `api.py`: `POST/GET /api/v1/jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/why` (admin session); `POST /jobs/claim`, `/jobs/{id}/heartbeat`, `/jobs/{id}/result` (fleet token + signed identity). Carve-outs in `app.py`, per suffix |
+| the offer channel | the report reply's `commands.jobs = {offered:[ids]}` |
+| capabilities (schema **v42**) | `companion/src/ccsync_companion/capabilities.py` -> the report's `capabilities` section -> sixteen flat columns on `machine_state` -> `db.machine_capabilities` |
+| root mapping | `companion/src/ccsync_companion/job_paths.py` -- `tree`/`vault`/`media`, `resolve(cfg, root, rel_path)` |
+| the runner | `companion/src/ccsync_companion/jobs_runner.py` -- claim, run `pipeline.py transcribe`, heartbeat every 30 s, post the result |
+| the fleet grid | `[ GPU 10G ]`, `[ WHISPER ]`, `[ WHISPER: JOB 12 ]` |
+| submit / list / why / watch | `tools/jobs.py`, documented in `docs/API.md` §6c |
+| config | `jobs_*` keys, `docs/CONFIG.md` §3 |
+
+Tests: `dashboard/tests/test_jobs.py` (the table, the lease, two claimants,
+expiry/reclaim, retry->abandon, the offer filter, `why`, the routes),
+`dashboard/tests/test_capabilities_report.py`,
+`dashboard/tests/test_jobs_contract.py` (**the wire between the two
+deployment units**, the way `test_packages.py` pins the release record),
+`companion/tests/test_capabilities.py`, `companion/tests/test_jobs_runner.py`,
+`tools/tests/test_jobs_cli.py`.
+
+### How to submit one
+
+```
+python tools/jobs.py submit --kind whisper --root vault \
+    --rel "Vault/2026/FF5/Civil Defence/Youtube/Interview 3" \
+    --episode "Vault/2026/FF5/Civil Defence" --watch
+python tools/jobs.py why 12        # "unschedulable, and why", per machine
+```
+
+The receipt already says whether anything can run it. A queue that never
+moves is the failure mode of every scheduler, and `why` is how it is told
+apart from a fleet with nothing to do.
+
+### Decisions this build made, that the plan left open
+
+* **Flat `jobs_*` config keys**, not a `[timeline_cards]` TOML table: every
+  other feature in `config.py` is flat (`broll_ingest_*`, `proxy_gen_*`), and
+  one table would be the only place in that file where a key's name depends
+  on where it sits.
+* **A running job is NOT killed when the editor returns.** proxy_gen kills
+  ffmpeg in ~2 s because a proxy costs seconds and resumes trivially; a
+  whisper pass is minutes of GPU work that resumes from nothing. No NEW job
+  is claimed while somebody is at the machine, which is the half that
+  protects them. A fleet halt does stop a running one.
+* **An expired lease counts as an attempt**, so a machine that claims and
+  dies three times is not re-offered the same job for ever.
+* **`POST /api/v1/login` returns the caller's own `csrf` token**, so a
+  non-browser client can use the session write routes. The alternative was
+  exempting them from CSRF, which is the wrong direction.
+* **Resolve's version, timeline uid and unlocked flag are NOT reported.**
+  Every one needs a scripting call, and a capabilities probe on a 30 s cadence
+  must never be the thing that calls `scriptapp()` (CR-68). The two kinds
+  that would need them are pinned and unschedulable anyway.
+* **`claude` is reported but nothing schedules on it** (an env key or a
+  binary on PATH). Decision 7.6 stands: the answer that will matter is the
+  dashboard's `ai_providers`.
+
+### What is NOT there yet
+
+* **No second job kind.** `proxy-480p`, `audio-extract`, `peaks`,
+  `claude-run` are phase 1; `conform` and `resolve-edit` are pinned for ever
+  (§4.2).
+* **No ranking worth the name.** Priority then age, and every capable idle
+  machine is offered the same job -- the compare-and-set sorts it out. Prefer
+  nvenc / prefer the machine next to the media / least-loaded is phase 4.
+* **No pinning fallback.** §4.4 rule 5's "then pin it to the NAS worker" is
+  not built: a job past its retry budget is `abandoned` and visible, not
+  handed to a server-side executor (there is no job executor in the
+  container).
+* **No admin page.** The queue is `tools/jobs.py` and the API; the fleet grid
+  shows a chip for a job in flight and nothing else. No cancel route either
+  -- an admin's lever today is the fleet halt.
+* **No provisioning of the whisper venv.** `sidecar_tools.py`'s pinned
+  static-binary pattern is the precedent and it is not small (§6's own risk
+  note). Today a machine either has the venv and the checkout, or reports no
+  capability.
+* **Timeline Cards is unchanged** and calls none of this.
+* **Nothing is deployed.** No dashboard deploy, no companion publish. The
+  companion is bumped to 0.9.56 with `REQUIRES_DASHBOARD = 0.7.18` (dashboard
+  0.7.18), so the release machinery already knows the dashboard must go
+  first -- and it must: a 0.9.56 companion sends a section only v42 can
+  store.
+
+### What Alex has to do before any of it runs
+
+1. **Deploy the dashboard (0.7.18) before publishing the companion.** The
+   version floor enforces it, but the order is the rule either way.
+2. **Point creator-1's `~/.ccsync/config.toml` at the two paths** --
+   `jobs_whisper_python = "C:\Users\alex\tools\whisper\.venv\Scripts\python.exe"`,
+   `jobs_mulcam_pipeline = "E:\Projects\Editing\Resolve\MulticamPipeline"`,
+   `jobs_vault_root = "X:\\"`. Until then the fleet grid will show creator-1
+   with `[ GPU 10G ]` and no `[ WHISPER ]`, and `why` will say so per machine.
+3. **Decide whether an editor's machine should ever take one.** Today any
+   machine with the venv, the vault and 300 s of idleness will. There is no
+   per-machine opt-in beyond `jobs_enabled`.
+
+---
+
 ## 8. Verdict
 
 **Do it, in this order, and do not skip phase 0.**

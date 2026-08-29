@@ -350,6 +350,17 @@ def test_submit_list_and_why_are_admin_only(env):
     assert client.get("/api/v1/jobs/4242").status_code == 404
 
 
+def test_login_hands_a_non_browser_client_its_own_csrf_token(env):
+    """tools/jobs.py has no page to read the hidden field off, and the
+    alternative -- making the JSON write routes CSRF-exempt -- is the wrong
+    direction. The token is an HMAC over the caller's OWN session id."""
+    client, _conn, _settings = env
+    r = client.post("/api/v1/login", json={"username": "owen", "password": "x"})
+    if r.status_code != 200:
+        pytest.skip("no local credential backend in this environment")
+    assert r.json()["csrf"]
+
+
 def test_the_fleet_routes_need_a_token_and_an_identity(env):
     client, conn, _settings = env
     assert client.post("/api/v1/jobs/claim",

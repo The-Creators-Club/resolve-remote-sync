@@ -990,6 +990,132 @@ Status codes are §6a's, with two music-specific 409 reasons: `model_mismatch`
 
 ---
 
+## 6c. Fleet jobs -- `/api/v1/jobs`
+
+Added 2026-08-29 (`docs/TIMELINE-CARDS-INTO-CCSYNC.md` phase 0). A general
+queue of work the fleet can do: one row, a set of hard requirements, and a
+lease. One kind today, `whisper` (MulticamPipeline's corpus stage over a
+folder in the vault).
+
+Two audiences and two credentials, and the split is the design:
+
+| Who | Routes | Credential |
+|---|---|---|
+| an **admin** at a browser or `tools/jobs.py` | `POST/GET /jobs`, `GET /jobs/{id}`, `GET /jobs/{id}/why` | the session cookie, admin only. A job is work on somebody else's computer |
+| a **companion** with nobody at the keyboard | `POST /jobs/claim`, `POST /jobs/{id}/heartbeat`, `POST /jobs/{id}/result` | `X-CCSync-Token` **plus** a signed `X-CCSync-Identity`, both fail-closed -- §6a's posture exactly |
+
+`login_gate` carves out the three fleet shapes **per suffix**
+(`^/api/v1/jobs/(claim|\d+/(heartbeat|result))$`), never the prefix: a leaked
+fleet token can neither read the queue nor put work on it.
+
+### A job
+
+```json
+{"id": 12, "kind": "whisper", "created_at": "...", "created_by": "owen",
+ "priority": 0,
+ "inputs":   {"root": "vault", "rel_path": "Vault/2026/FF5/Ep/Youtube/A",
+              "episode_rel": "Vault/2026/FF5/Ep", "speakers": false},
+ "requires": {"whisper": true, "mount": "vault", "gpu_vram_gb": 6},
+ "state": "queued|claimed|running|done|failed|abandoned",
+ "claimed_by": null, "claimed_machine": null, "lease_expires_at": null,
+ "heartbeat_at": null, "attempts": 0, "last_error": "",
+ "result": {"files": ["Clips/A/A_words.json"], "seconds": 214.0, "realtime": 11.4}}
+```
+
+**PATHS ARE (ROOT NAME, RELATIVE PATH) PAIRS AND NEVER ABSOLUTE.** The vault
+is `X:\` on creator-1, `/vault` inside the Timeline Cards container and a UNC
+path on the wire, so a path on the wire would be right on exactly one machine.
+Root names are `tree` (the project tree, `local_root`), `vault` and `media`;
+the claimant resolves them through its own config
+(`companion/src/ccsync_companion/job_paths.py`) and **refuses** anything
+absolute or climbing. Results name paths relative to the episode root for the
+same reason. Nothing streams through the dashboard: the output is in the
+vault, which every machine shares.
+
+`requires` is the HARD filter, evaluated against the machine's reported
+capabilities (§ the report's `capabilities` section). Four shapes:
+`gpu_vram_gb`/`cpu_count` (a number, `>=`), `mount` (a name that must appear
+in `capabilities.mounts`), and anything else compared for equality
+(`whisper: true`). **Anything the dashboard does not understand is a
+refusal** -- an unknown requirement must never read as satisfied.
+
+### The admin routes (session)
+
+| Route | Body | Answer |
+|---|---|---|
+| `POST /api/v1/jobs` | `{kind, inputs, requires, cost, priority}` | `{ok, job, why}` -- the receipt carries the scheduling answer, so a job nothing can run says so at submit time |
+| `GET /api/v1/jobs?state=open\|queued\|…&kind=&limit=` | -- | `{jobs:[…], kinds:["whisper"]}` |
+| `GET /api/v1/jobs/{id}` | -- | `{job}` |
+| `GET /api/v1/jobs/{id}/why` | -- | `{job, schedulable, summary, machines:[{editor, machine, ok, reason, why}]}` |
+
+`why` is **"unschedulable, and why", per machine**, and it exists from the
+first commit on purpose: a scheduler that quietly assigns nothing looks
+exactly like a fleet with nothing to do. Reasons are
+`capability | fleet_halt | machine_halt | upgrading | lane_b_breaker |
+already_holds_a_job | not_idle | no_capabilities_reported | kind_unknown`.
+
+These are session routes, so a non-browser client sends the CSRF token
+`POST /api/v1/login` now returns as `csrf` (it is an HMAC over that session's
+own id -- worthless without the cookie, and the alternative was exempting the
+write routes, which is the wrong direction).
+
+### The companion routes (fleet)
+
+| Route | Body | Answer |
+|---|---|---|
+| `POST /api/v1/jobs/claim` | `{machine, machine_id?, capabilities, kinds?}` | `{job, lease_seconds}` or `{job: null, offered: […]}` |
+| `POST /api/v1/jobs/{id}/heartbeat` | `{machine, note?}` | `{ok, lease_seconds}`, or **410** |
+| `POST /api/v1/jobs/{id}/result` | `{machine, ok, retryable, error, result}` | `{ok, state}`, or **410** |
+
+The claim is a **compare-and-set** (`db.claim_job`): two machines offered the
+same job both arrive, SQLite serialises the writes, and the loser is told the
+truth. The capabilities in the claim body are re-checked there and then --
+an offer rode a report reply up to a report interval ago, and an editor who
+has come back to their desk in that interval must not be handed a transcode.
+
+**410 GONE, never 403**, on heartbeat and result: "your claim is over" is the
+answer to every way they can fail (the lease expired and the job was
+re-queued, another machine has it, it finished), and the companion's response
+to all of them is the same one -- stop, quietly.
+
+Leases: 300 s, heartbeat every 30 s. An expiry re-queues the job **and counts
+as an attempt**; past the per-kind retry budget (3 for `whisper`) it becomes
+`abandoned` rather than ping-ponging around the fleet for ever. `ok: false,
+retryable: false` is the runner saying the fault is in the JOB, which no
+other machine will fix.
+
+### The offer, on the report reply
+
+```json
+{"commands": {"jobs": {"offered": [12, 13]}}}
+```
+
+Present only while something is on offer (the `broll_ingest` rule: an empty
+list is not an instruction, and this rides every tick of every machine).
+**Offer, do not push** -- the ids are an invitation and the claim is the
+decision. Computed by `ccsync_dashboard/jobs.py`: capability match, then
+policy (not halted, not mid-upgrade, breaker not tripped, not already holding
+a job, idle enough for this kind -- the base rig exempt, because nobody sits
+at it), then rank.
+
+`idle_seconds` keeps `idle.py`'s contract end to end: **null means cannot
+tell means NOT IDLE**, on the machine and on the server.
+
+### Submitting from the command line
+
+```
+python tools/jobs.py submit --kind whisper --root vault \
+    --rel "Vault/2026/FF5/Civil Defence/Youtube/Interview 3" \
+    --episode "Vault/2026/FF5/Civil Defence" [--speakers] [--watch]
+python tools/jobs.py list [--state open] | why <id> | watch <id>
+```
+
+`--dashboard-url` / `--admin-user` (or `CCSYNC_DASHBOARD_URL` /
+`CCSYNC_ADMIN_USER`); the password is prompted or `--password-stdin`, never
+argv and never the environment.
+
+---
+
 ## 7. The companion loopback API
 
 Separate service, separate trust model, separate document:

@@ -177,6 +177,24 @@ run alongside the tray app — it would hold port 8899.
   command names a VERSION and the bytes come from the signed offer already in
   hand, `apply_upgrade`'s stand-down test still refuses mid-popup/consolidate,
   and auto-update never rolls a machine backwards.
+- **The fleet can be given a JOB** (2026-08-29,
+  `docs/TIMELINE-CARDS-INTO-CCSYNC.md` phase 0, `docs/API.md` §6c): `jobs`
+  (v41) is a general queue with ytdl's lease generalised -- compare-and-set
+  claim, `(editor, MACHINE)` key, possession EXPIRES. The dashboard OFFERS
+  ids on the report reply (`commands.jobs`) and the companion CLAIMS on a
+  fleet route; two machines cannot both hold one. `dashboard/jobs.py` is the
+  whole scheduler: capability match -> policy (halt, upgrade, breaker, one
+  job at a time, an idle floor the base rig is exempt from) -> rank. A job's
+  paths are **(root name, relative path) pairs, never absolute** -- the vault
+  is a drive letter here, a container mount there -- resolved per machine by
+  `companion/job_paths.py`. `idle_seconds` keeps idle.py's contract end to
+  end: **null means cannot tell means NOT IDLE**, on both sides. One kind
+  today (`whisper`, `companion/jobs_runner.py`); `conform` and `resolve-edit`
+  must NEVER become schedulable (§4.2 -- a synthetic keystroke moved to
+  another machine is a keystroke into the wrong timeline). `GET
+  /api/v1/jobs/<id>/why` answers "unschedulable, and why" per machine,
+  because a scheduler that quietly assigns nothing looks exactly like a fleet
+  with nothing to do.
 - The 8899 loopback is origin-allow-listed (`loopback_guard.py`,
   2026-08-17): only the configured dashboard origin gets CORS headers, and a
   POST needs that origin or the `~/.ccsync/loopback-token` header. If

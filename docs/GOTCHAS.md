@@ -1262,3 +1262,38 @@ these machines:
 Proving any of this needs a subprocess - the failure kills the interpreter
 running the test. `companion/tests/test_tk_release_native.py` is the pattern:
 run the shape in a child, assert on its exit code.
+
+---
+
+## 19. A fleet job's path (root + rel), and two traps in it (phase 0, 2026-08-29)
+
+`docs/TIMELINE-CARDS-INTO-CCSYNC.md` §4.1: a job on the queue never carries
+an absolute path. The tree is spelled the same everywhere on purpose (`P:\`),
+and the two roots a Timeline Cards job needs are not: the vault is `X:\` on
+creator-1, `/vault` inside the Timeline Cards container, and a UNC path on
+the wire. So the queue carries `("vault", "Vault/2026/FF5/...")` and the
+machine that claims the job resolves it (`companion/job_paths.py`).
+
+**Trap 1: `/vault/2026/...` looks relative if you strip before you check.**
+The obvious implementation -- `value.strip("/")` and then "is it absolute?"
+-- accepts the container's own spelling and silently turns it into a path
+under whatever `jobs_vault_root` is. It cost nothing here because a CLI test
+caught it, but the failure it would have produced is the worst kind: a job
+that runs, succeeds, and writes in the wrong place. **Test the RAW value**,
+in `tools/jobs.py:check_relative` and in `job_paths.resolve`, before any
+normalisation. Both refuse a leading `/`, a drive letter, and `..`.
+
+**Trap 2: a root that is CONFIGURED is not a root that is THERE.** An
+external drive gets unplugged and a `subst` does not always run at login.
+`job_paths.roots()` checks existence, so an absent root is not reported as a
+mount, is not offered work that requires it, and is refused if a job arrives
+anyway. Reporting a configured-but-absent root is exactly how a job gets
+claimed by the one machine that cannot read a single file of it.
+
+**And a third thing, about credentials rather than paths:** the job submit
+routes are SESSION routes, so a non-browser client needs a CSRF token and
+has no page to read one off. `POST /api/v1/login` returns the caller's own
+(`csrf`) since 2026-08-29 -- an HMAC over that session's id, worthless
+without the cookie. Do NOT reach for the other answer (exempting the write
+route): `_CSRF_EXEMPT_*` is for bearer-token routes, and a session route in
+it is a session route anyone's browser can be made to call.

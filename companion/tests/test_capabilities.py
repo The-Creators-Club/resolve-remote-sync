@@ -73,6 +73,18 @@ def test_an_absolute_path_is_refused(tmp_path):
     assert "RELATIVE" in str(exc.value)
 
 
+def test_a_posix_absolute_path_is_refused_too(tmp_path):
+    """`/vault/2026/...` is how the Timeline Cards container spells the vault.
+    Reading it as relative would put the work in the wrong place on every
+    machine that is not that container."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    c = cfg(tmp_path, jobs_vault_root=str(vault))
+    with pytest.raises(job_paths.JobPathError) as exc:
+        job_paths.resolve(c, "vault", "/vault/2026/FF5")
+    assert "RELATIVE" in str(exc.value)
+
+
 def test_a_path_that_climbs_out_is_refused(tmp_path):
     vault = tmp_path / "vault"
     vault.mkdir()

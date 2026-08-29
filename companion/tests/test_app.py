@@ -2251,6 +2251,10 @@ def test_build_diagnostics_covers_the_audits_checklist(tmp_path):
         "CCSYNC DIAGNOSTICS", "companion version", "platform", "effective mode",
         "signed in as", "config problems", "sequencer", "lanes", "syncthing",
         "rclone available", "last 40 log lines",
+        # Phase 0 (2026-08-29): the GATE is the whole answer to "why is this
+        # machine taking no fleet work", and it is the one thing the
+        # dashboard cannot see -- the offer is theirs, the refusal is ours.
+        "fleet jobs", "gate:", "idle seconds:",
     ):
         assert expected in text, f"diagnostics missing {expected!r}"
 

@@ -6994,6 +6994,29 @@ class CompanionApp:
             out.append(f"  selected project rels: <failed: {exc}>")
 
         out.append("")
+        out.append("-- fleet jobs (docs/TIMELINE-CARDS-INTO-CCSYNC.md) --")
+        try:
+            if self.job_runner is None:
+                out.append("  runner: not built")
+            else:
+                status = self.job_runner.status()
+                # The GATE is the whole answer to "why is this machine taking
+                # no work", and it is the one thing an admin cannot see from
+                # the dashboard: the offer is theirs, the refusal is ours.
+                out.append(f"  gate: {status['state']}")
+                out.append(f"  offered: {status['offered']}")
+                out.append(f"  holding: {status['job'] or 'nothing'}")
+                caps = self.job_capabilities()
+                out.append(f"  whisper: {caps.get('whisper')}"
+                           + (f" ({caps.get('whisper_detail')})"
+                              if caps.get("whisper_detail") else ""))
+                out.append(f"  mounts: {caps.get('mounts')}")
+                out.append(f"  idle seconds: {caps.get('idle_seconds')}"
+                           " (None = cannot tell = not idle)")
+        except Exception as exc:
+            out.append(f"  <failed: {exc}>")
+
+        out.append("")
         out.append("-- lanes --")
         try:
             for status in self.lane_statuses():

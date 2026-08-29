@@ -379,6 +379,20 @@ class Settings:
     # itself reads, so the two can never disagree.
     broll_ingest_token: str = ""
 
+    # The Timeline Cards server this dashboard tunnels the agent protocol to
+    # (docs/TIMELINE-CARDS-INTO-CCSYNC.md phase 2, 2026-08-30). Today that is
+    # the separate custom app on :8800; phase 3 makes it in-process and these
+    # two go away. Blank is a normal state -- a fleet that does not use
+    # Timeline Cards has no server -- and the three /cards/agent/* routes then
+    # answer 503 naming the variable rather than 404, which would read as an
+    # old dashboard.
+    #
+    # `cards_token` is the server's own CARDS_TOKEN and NEVER leaves this
+    # container: cards_tunnel attaches it outbound, so no editor's machine
+    # holds it (which is the point of the tunnel).
+    cards_server_url: str = ""
+    cards_token: str = ""
+
     # Auto-provisioning: when projects_dir is a mounted copy of the server's
     # Projects tree, the collector creates a Syncthing folder (and shares it
     # with every known editor device) for any project dir that lacks one.
@@ -645,6 +659,8 @@ class Settings:
             site_feature_auto_update=env.get("DASH_SITE_AUTO_UPDATE", "") == "1",
             broll_enabled=env.get("DASH_BROLL_ENABLED", "") == "1",
             broll_ingest_token=env.get("BROLL_INGEST_TOKEN", "").strip(),
+            cards_server_url=env.get("DASH_CARDS_SERVER_URL", "").strip().rstrip("/"),
+            cards_token=env.get("DASH_CARDS_TOKEN", "").strip(),
             packages_dir=env.get("DASH_PACKAGES_DIR", ""),
             # Only entries that actually decode to a 32-byte Ed25519 key are
             # kept: the shipped compose sets "REPLACE_ME", and a placeholder

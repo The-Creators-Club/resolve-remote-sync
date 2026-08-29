@@ -29,7 +29,8 @@ from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 
 from . import (
-    ai_providers, api, assignments, auth, broll, cli_tools, crash_report,
+    ai_providers, api, assignments, auth, broll, cards_tunnel, cli_tools,
+    crash_report,
     dashboard_update, db, internal_sftp, local_users, music, notices, oidc,
     release_feed,
     secrets_boot, sessions, setup_api, setup_routes, site_store, ui, ytdl,
@@ -125,7 +126,13 @@ _CSRF_EXEMPT_PREFIXES = ("/api/v1/selection/", "/api/v1/admin/packages/",
 # routes with no session cookie behind them, which is the first of the two
 # classes above -- and NOT a prefix: POST /api/v1/jobs (an admin submitting
 # work) is a session route and keeps its CSRF token.
-_CSRF_EXEMPT_RE = re.compile(r"^/api/v1/jobs/(claim|\d+/(heartbeat|result))$")
+# ...and the Timeline Cards agent tunnel (phase 2, 2026-08-30): the same
+# class again -- a companion holding a fleet token and no session cookie,
+# pushing the timeline it has open. Per suffix: `/cards/` itself is the page
+# (phase 3) and stays session-gated.
+_CSRF_EXEMPT_RE = re.compile(
+    r"^(/api/v1/jobs/(claim|\d+/(heartbeat|result))"
+    r"|/cards/agent/(state|result))$")
 _CSRF_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 
 # Hard ceiling on a companion report body, enforced from Content-Length BEFORE
@@ -135,6 +142,10 @@ _CSRF_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 # with a multi-GB body (see the unbounded-report finding). A full report with
 # the maximum permitted manifest is well under 8 MB.
 MAX_REPORT_BODY_BYTES = 8 * 1024 * 1024
+# One swept timeline from the Timeline Cards agent (phase 2). See _BODY_LIMITS.
+MAX_CARDS_STATE_BODY_BYTES = 6 * 1024 * 1024
+# ...and the answer to one edit, which is five short fields and a rename map.
+MAX_CARDS_RESULT_BODY_BYTES = 1 * 1024 * 1024
 # Companion builds are single-file PyInstaller exes; the current one is ~40 MB
 # and this is a deliberately generous ceiling on top of it. Without a cap the
 # publish route streamed an unbounded body straight to the /data dataset (an
@@ -157,11 +168,20 @@ MAX_UPLOAD_BODY_BYTES = 512 * 1024 * 1024
 # field still cannot put a megabyte in a TEXT column.
 MAX_DIAGNOSTICS_BODY_BYTES = 256 * 1024
 _BODY_LIMITS = {"/api/v1/report": ("POST", MAX_REPORT_BODY_BYTES),
-                "/api/v1/diagnostics": ("POST", MAX_DIAGNOSTICS_BODY_BYTES)}
+                "/api/v1/diagnostics": ("POST", MAX_DIAGNOSTICS_BODY_BYTES),
+                # A swept timeline: ~900 cards with their transcript text on a
+                # two-episode cut. Bigger than the 4 MB default because the
+                # default would refuse a real state push, and smaller than the
+                # report's 8 MB because nothing here streams.
+                "/cards/agent/state": ("POST", MAX_CARDS_STATE_BODY_BYTES),
+                "/cards/agent/result": ("POST", MAX_CARDS_RESULT_BODY_BYTES)}
 # Companion-authenticated POSTs: the token check runs BEFORE the body is read,
 # so no unauthenticated caller can spend the single-worker container's memory
 # on a body it will refuse anyway (B15).
-_COMPANION_TOKEN_PATHS = ("/api/v1/report", "/api/v1/diagnostics")
+_COMPANION_TOKEN_PATHS = ("/api/v1/report", "/api/v1/diagnostics",
+                          # Same B15 reasoning for the tunnel: the credential
+                          # is checked before a timeline-sized body is read.
+                          "/cards/agent/state", "/cards/agent/result")
 # (path prefix, method, limit) -- the packages route has the platform and
 # version in its path, so it can't be matched exactly. These are declaration
 # checks ONLY: api_publish_package streams its body to disk and counts the
@@ -878,6 +898,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # read the queue nor put work on it.
     _jobs_fleet_re = re.compile(r"^/api/v1/jobs/(claim|\d+/(heartbeat|result))$")
 
+    # The TIMELINE CARDS agent tunnel (TIMELINE-CARDS-INTO-CCSYNC.md phase 2,
+    # 2026-08-30). The fourth instance of the same posture, and the one with
+    # the tightest latency budget: the companion that has Resolve open pushes
+    # its swept timeline and long-polls for the next edit, while the browser
+    # driving it is on a phone somewhere else entirely. No session, a fleet
+    # token plus a SIGNED identity, and cards_tunnel re-checks both.
+    #
+    # Per suffix, never per prefix, and this one matters more than most:
+    # `/cards/` is where phase 3 mounts the PAGE, which is a whole cut of a
+    # documentary and stays fully session-gated. Widening this to the prefix
+    # would publish it to anything holding a fleet token.
+    _cards_fleet_re = re.compile(r"^/cards/agent/(state|pending|result)$")
+
     @app.middleware("http")
     async def login_gate(request, call_next):
         path = request.url.path
@@ -934,6 +967,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # ...and a machine claiming, heartbeating or finishing a FLEET JOB
             # (TIMELINE-CARDS-INTO-CCSYNC.md §4.4 "offer, don't push")
             or (_jobs_fleet_re.match(path) is not None and _companion_token_ok(request))
+            # ...and the machine with Resolve open serving the Timeline Cards
+            # page (TIMELINE-CARDS-INTO-CCSYNC.md phase 2)
+            or (_cards_fleet_re.match(path) is not None and _companion_token_ok(request))
             # the setup wizard's own API (ZERO_TOUCH_PLAN.md WP D). Open at
             # THIS layer only -- every route under it re-checks via
             # setup_routes.require_setup_access, which is the actual gate
@@ -952,8 +988,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # downloader SPA POLLS api/jobs/{id} every 1.5s, so a session that
             # expired mid-pipeline would hand it a login page to JSON.parse
             # once per tick.
+            # /cards/agent/ is the Timeline Cards agent tunnel (phase 2):
+            # a companion with an expired or missing credential must be told
+            # so in JSON, not handed a login DOCUMENT to json.loads -- its
+            # pull loop would print "Expecting value: line 1 column 1" every
+            # 25 s and never say what was actually wrong.
             if path.startswith(("/api/", "/broll/api/", "/broll/media/",
-                                "/music/api/", "/ytdl/api/")):
+                                "/music/api/", "/ytdl/api/", "/cards/agent/")):
                 return JSONResponse({"detail": "login required"}, status_code=401)
             # Preserve the destination through login (e.g. the companion's
             # /project-setup deep link) -- ui.py's _safe_next re-validates it.
@@ -1054,6 +1095,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # mean a misconfigured issuer produced a 404 -- indistinguishable from an
     # old build -- instead of a message naming the missing variable.
     app.include_router(oidc.router)
+    # The Timeline Cards agent tunnel (phase 2, 2026-08-30). Always mounted,
+    # inert without DASH_CARDS_SERVER_URL: the three routes then answer 503
+    # naming the variable, which is a state an admin can act on -- a 404 reads
+    # as an old dashboard and sends them to the release notes instead.
+    #
+    # Registered BEFORE any future `/cards` page mount so the agent protocol
+    # can never be shadowed by it (phase 3 replaces the proxy with an
+    # in-process call and leaves these three routes exactly where they are).
+    app.include_router(cards_tunnel.router)
 
     # Mounted AFTER the routers so a b-roll route can never shadow a dashboard
     # one, and behind a flag so the fleet dashboard never depends on the b-roll

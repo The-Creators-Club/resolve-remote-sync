@@ -88,6 +88,27 @@ ytdl = [
     "yt-dlp>=2026.8.19",
 ]
 
+# Runtime deps of the Timeline Cards page (multicam_pipeline/cards, imported
+# out of the checkout shipped to <host-root>/cards-web and mounted read-only
+# at /cards-app), mounted in-process at /cards on the same terms as the three
+# above. ccsync_dashboard imports none of it either -- but `cards.py` does at
+# mount time, and a missing one is a feature that reports itself absent.
+#
+# `a2wsgi` is the WSGI<->ASGI shim under that mount: Timeline Cards' page is a
+# `BaseHTTPRequestHandler` with ~70 hand-dispatched routes and its own
+# Range/gzip code, and the phase-3 decision was to keep them byte for byte
+# rather than rewrite them as an APIRouter (docs/TIMELINE-CARDS-INTO-CCSYNC.md
+# §3.2). Pure Python, no dependencies of its own, ~30 KB. Floor pin, not
+# exact, like every other line here.
+#
+# NOTE what is NOT here: `psycopg2` (the project library reader is optional --
+# without it the page serves what an agent pushes), and node + the Claude CLI,
+# which the standalone image bundles and this one deliberately does not
+# (decision 7.6: the three Claude features go through `ai_providers`).
+cards = [
+    "a2wsgi>=1.10",
+]
+
 # The YouTube "unblock" plugin -- SEPARATE from `ytdl` above, and deliberately
 # not part of it (2026-08-17, docs/COMMERCIAL_READINESS.md items 2/3, CI run
 # 32041222871's licence gate). `bgutil-ytdlp-pot-provider` is GPLv3, and

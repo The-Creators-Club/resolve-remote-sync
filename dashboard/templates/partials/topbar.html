@@ -94,6 +94,14 @@
          took -- an absent or degraded ytdl tree gets no link. #}
       <a class="drawer-item{{ ' drawer-current' if nav_current == 'ytdl' }}" href="/ytdl/">[ YOUTUBE ]</a>
     {% endif %}
+    {% if cards_mounted %}
+      {# THE TRAILING SLASH IS LOAD BEARING here more than anywhere: every fetch
+         in the Timeline Cards page is document-relative (`api/state?v=-1`), so
+         at /cards (no slash) they would resolve against the dashboard root and
+         the page would poll /api/state forever. Starlette's redirect_slashes
+         sends /cards -> /cards/ as well; this link simply never asks it to. #}
+      <a class="drawer-item{{ ' drawer-current' if nav_current == 'cards' }}" href="/cards/">[ CARDS ]</a>
+    {% endif %}
     {% if session_is_admin %}
       <a class="drawer-item{{ ' drawer-current' if nav_current in SETTINGS_PAGES }}" href="/admin/settings">[ SETTINGS ]</a>
     {% else %}

@@ -393,6 +393,29 @@ class Settings:
     cards_server_url: str = ""
     cards_token: str = ""
 
+    # --- the Timeline Cards PAGE, hosted here (phase 3, 2026-08-30) --------
+    # `cards_src` is the MulticamPipeline checkout `multicam_pipeline.cards`
+    # is imported from -- /cards-app in the container, the way /broll-app and
+    # /music-app already are. Blank means the feature is OFF and /cards is
+    # DISABLED with a reason; a path that does not import is ABSENT. Neither
+    # is ever fatal (cards.py, the /broll contract).
+    #
+    # Everything else here is what `server.main` gives the NAS engine on the
+    # command line, under its CARDS_* names, one dashboard variable each --
+    # EXCEPT the browser key, which is RETIRED: behind the dashboard login a
+    # `?key=...` in a URL is strictly worse auth than the session cookie, and
+    # there is no second gate to keep in step.
+    cards_enabled: bool = False
+    cards_src: str = ""
+    cards_vault_root: str = ""
+    cards_root: str = ""
+    cards_project: str = ""
+    cards_db_host: str = ""
+    cards_db_name: str = ""
+    cards_db_write_allow: str = ""
+    cards_db_backups: str = ""
+    cards_media_map: str = ""
+
     # Auto-provisioning: when projects_dir is a mounted copy of the server's
     # Projects tree, the collector creates a Syncthing folder (and shares it
     # with every known editor device) for any project dir that lacks one.
@@ -661,6 +684,17 @@ class Settings:
             broll_ingest_token=env.get("BROLL_INGEST_TOKEN", "").strip(),
             cards_server_url=env.get("DASH_CARDS_SERVER_URL", "").strip().rstrip("/"),
             cards_token=env.get("DASH_CARDS_TOKEN", "").strip(),
+            # "1" and nothing else, matching DASH_BROLL_ENABLED.
+            cards_enabled=env.get("DASH_CARDS_ENABLED", "") == "1",
+            cards_src=env.get("DASH_CARDS_SRC", "").strip(),
+            cards_vault_root=env.get("DASH_CARDS_VAULT_ROOT", "").strip(),
+            cards_root=env.get("DASH_CARDS_ROOT", "").strip(),
+            cards_project=env.get("DASH_CARDS_PROJECT", "").strip(),
+            cards_db_host=env.get("DASH_CARDS_DB_HOST", "").strip(),
+            cards_db_name=env.get("DASH_CARDS_DB_NAME", "").strip(),
+            cards_db_write_allow=env.get("DASH_CARDS_DB_WRITE_ALLOW", "").strip(),
+            cards_db_backups=env.get("DASH_CARDS_DB_BACKUPS", "").strip(),
+            cards_media_map=env.get("DASH_CARDS_MEDIA_MAP", "").strip(),
             packages_dir=env.get("DASH_PACKAGES_DIR", ""),
             # Only entries that actually decode to a 32-byte Ed25519 key are
             # kept: the shipped compose sets "REPLACE_ME", and a placeholder

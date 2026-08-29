@@ -633,7 +633,11 @@ def test_deploy_requirements_match_pyproject_dependencies():
     # "oidc" joins them 2026-08-17 on the same terms as "synology": PyJWT is
     # not imported by ccsync_dashboard at module scope (oidc.verify_id_token
     # imports it lazily), but the container is where an OIDC sign-in runs.
-    for group in ("broll", "music", "ytdl", "synology", "oidc"):
+    # "cards" joins them 2026-08-30 (phase 3): a2wsgi is imported by
+    # ccsync_dashboard.cards at MOUNT time, not at module scope, so a
+    # container without it reports /cards absent rather than failing to boot
+    # -- which is exactly why it must not be forgotten in this file.
+    for group in ("broll", "music", "ytdl", "synology", "oidc", "cards"):
         declared.update({
             _requirement_name(d): d.strip()
             for d in pyproject["project"].get("optional-dependencies", {}).get(group, [])

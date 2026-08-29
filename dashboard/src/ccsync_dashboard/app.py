@@ -29,7 +29,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 
 from . import (
-    ai_providers, api, assignments, auth, broll, cards_tunnel, cli_tools,
+    ai_providers, api, assignments, auth, broll, cards, cards_tunnel, cli_tools,
     crash_report,
     dashboard_update, db, internal_sftp, local_users, music, notices, oidc,
     release_feed,
@@ -133,6 +133,15 @@ _CSRF_EXEMPT_PREFIXES = ("/api/v1/selection/", "/api/v1/admin/packages/",
 _CSRF_EXEMPT_RE = re.compile(
     r"^(/api/v1/jobs/(claim|\d+/(heartbeat|result))"
     r"|/cards/agent/(state|result))$")
+# The mounted Timeline Cards PAGE (phase 3). Its forty-odd POST routes are
+# the sub-app's own fetches and carry no CSRF token, exactly like the three
+# mounts in _CSRF_EXEMPT_PREFIXES above -- but this one drives a Resolve
+# timeline (delete, trim, conform), so it is not simply exempted: the ORIGIN
+# check still applies. A browser attaches `Origin` to every cross-site POST,
+# so that alone stops the whole class, and a same-origin fetch from the page
+# passes. When the page starts sending X-CSRF-Token this constant is deleted
+# and `/cards/` becomes an ordinary session route.
+_CSRF_ORIGIN_ONLY_PREFIXES = ("/cards/",)
 _CSRF_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 
 # Hard ceiling on a companion report body, enforced from Content-Length BEFORE
@@ -587,6 +596,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             watchdog.stop()
             if collector is not None:
                 collector.stop()
+            # The Timeline Cards engine's threads (the library sweep, the
+            # ffmpeg worker, the translation runs). They are daemons, so this
+            # is not what ends the process -- it is what stops a sweep from
+            # running against a database the next process is opening, and it
+            # is the only shutdown hook a mounted app gets (cards.py).
+            cards.stop_engine(app)
             if feed_poller is not None:
                 feed_poller.stop()
             # ...and the other half: an update that has finished staging asks
@@ -765,6 +780,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         path = request.url.path
         if (path in _CSRF_EXEMPT_EXACT or path.startswith(_CSRF_EXEMPT_PREFIXES)
                 or _CSRF_EXEMPT_RE.match(path) is not None):
+            return await call_next(request)
+        if path.startswith(_CSRF_ORIGIN_ONLY_PREFIXES):
+            if _origin_mismatch(request):
+                log.warning("CSRF refusal (origin): %s %s from %s",
+                            request.method, path, auth.client_ip(request))
+                return JSONResponse(
+                    {"error": "this request came from another site"},
+                    status_code=403,
+                )
             return await call_next(request)
         # Only sessions THIS server minted are checked -- see
         # auth._resolve_session. In a deployment that is every session there
@@ -993,8 +1017,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # so in JSON, not handed a login DOCUMENT to json.loads -- its
             # pull loop would print "Expecting value: line 1 column 1" every
             # 25 s and never say what was actually wrong.
+            # ...and the Timeline Cards page (phase 3): its fetches are
+            # `api/...` relative to /cards/, and its lane's <audio> and
+            # <video> srcs are `audio?mp=` and `video?mp=` -- a media element
+            # handed a 303 to an HTML login page fails opaquely, which on
+            # that page reads as "this clip has no audio".
             if path.startswith(("/api/", "/broll/api/", "/broll/media/",
-                                "/music/api/", "/ytdl/api/", "/cards/agent/")):
+                                "/music/api/", "/ytdl/api/", "/cards/agent/",
+                                "/cards/api/", "/cards/audio", "/cards/video",
+                                "/cards/peaks")):
                 return JSONResponse({"detail": "login required"}, status_code=401)
             # Preserve the destination through login (e.g. the companion's
             # /project-setup deep link) -- ui.py's _safe_next re-validates it.
@@ -1137,6 +1168,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # from the session cookie with settings.session_secret. See ytdl.py.
     app.state.ytdl_status = ytdl.mount_ytdl(app, settings)
     app.state.ytdl_mounted = app.state.ytdl_status == ytdl.MOUNTED
+
+    # And Timeline Cards (phase 3, 2026-08-30), LAST of the four and after
+    # cards_tunnel's router above -- so the three `/cards/agent/*` fleet
+    # routes keep answering on their own credential and this mount can never
+    # shadow them. Same contract as the other three: tri-state, never fatal,
+    # and no nav link unless it fully took. It is the only one that carries
+    # an ENGINE with background threads, which is why the lifespan stops it
+    # (Starlette runs no lifespan for a mounted app).
+    app.state.cards_status, app.state.cards_detail = cards.mount_cards(app, settings)
+    app.state.cards_mounted = app.state.cards_status == cards.MOUNTED
+    if app.state.cards_status != cards.MOUNTED:
+        log.info("Timeline Cards is %s: %s", app.state.cards_status,
+                 app.state.cards_detail)
     if STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

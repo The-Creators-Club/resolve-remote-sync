@@ -98,6 +98,20 @@ yt-dlp>=2026.8.19
 # `DASH_SITE_YOUTUBE_UNBLOCK=1` (see that file for the measured "why this
 # package at all" case). Do not put it back here.
 
+# --- Timeline Cards (mounted at /cards) -------------------------------------
+# The WSGI<->ASGI shim the page is mounted through. Timeline Cards' ~70 routes
+# are a hand-written BaseHTTPRequestHandler with their own Range, ETag and gzip
+# code that browsers have been seeking video through for weeks; phase 3 chose
+# to keep them byte for byte and put a shim under them rather than rewrite each
+# one as an APIRouter route with no test on this side to catch a
+# mistranslation (docs/TIMELINE-CARDS-INTO-CCSYNC.md §3.2 problem 1).
+# Pure Python, no dependencies, ~30 KB. Installed on every site like paramiko
+# and PyJWT: one file, one image, and run.sh re-runs pip only when this file's
+# hash changes. A site that never sets DASH_CARDS_ENABLED simply never
+# imports it -- cards.py imports it INSIDE mount_cards, so a container without
+# it reports the mount absent with the ImportError in the reason.
+a2wsgi>=1.10
+
 # --- the Synology NAS backend (DASH_NAS_KIND=synology) ----------------------
 # DSM exposes NO API for writing an editor's ~/.ssh/authorized_keys, and a file
 # written through FileStation is owned by the admin -- sshd's StrictModes then

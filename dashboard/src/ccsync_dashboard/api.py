@@ -1266,7 +1266,25 @@ def api_health(request: Request, conn: sqlite3.Connection = Depends(get_conn)) -
         # nobody has acted on. Beside open_alerts on purpose -- one is what we
         # would send, the other is what we found.
         "notices": _open_notices_block(conn),
+        # The Timeline Cards mount (phase 3, 2026-08-30): its tri-state with
+        # the reason, the vault it is rooted at, and whether the three Claude
+        # features can run -- which in THIS container is a different answer
+        # from the standalone one, because no CLI is bundled here (§7d).
+        # Deliberately NOT part of `ok`: an absent optional feature is not an
+        # unhealthy dashboard, and the healthcheck restarts on `ok`.
+        "cards": _cards_block(request),
     }
+
+
+def _cards_block(request: Request) -> dict[str, Any]:
+    """What /health says about /cards, best-effort (cards.health_block)."""
+    from . import cards
+
+    try:
+        return cards.health_block(request.app)
+    except Exception as e:  # noqa: BLE001 - a health route always answers
+        log.exception("could not describe the Timeline Cards mount")
+        return {"status": "unknown", "detail": f"{type(e).__name__}: {e}"}
 
 
 def _open_notices_block(conn: sqlite3.Connection) -> dict[str, int]:

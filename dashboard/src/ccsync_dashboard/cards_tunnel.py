@@ -45,8 +45,15 @@ Four rules, each with its reason:
     "the cards server is not running" in the companion log are the same
     incident and say so.
 
-Phase 3 replaces `_forward` with an in-process call when the page is mounted
-here; the routes, the credential and the name rule do not change.
+PHASE 3 DID EXACTLY THAT (2026-08-30). When `cards.mount_cards` has put an
+engine on `app.state.cards_engine`, the three routes call it DIRECTLY --
+`engine.agent_state(body)`, `engine.agent_pending(wait)`,
+`engine.agent_result(body)`, each followed by `engine.tick()`, which is
+`handler.py`'s own sequence -- and there is no HTTP hop, no upstream token
+and no `DASH_CARDS_SERVER_URL` to configure. With no mount the module is
+exactly what phase 2 shipped: a credential swap and a proxy to the separate
+container. The routes, the credential and the name rule do not change either
+way, which is what §7.4's "both origins during the transition" needs.
 """
 from __future__ import annotations
 
@@ -96,6 +103,35 @@ def _opener():
 def configured(settings: Any) -> bool:
     """Is there a Timeline Cards server to tunnel to at all?"""
     return bool(str(getattr(settings, "cards_server_url", "") or "").strip())
+
+
+def local_engine(request: Request) -> Any:
+    """The in-process engine, or None. -> phase 3.
+
+    None is the ordinary state on a dashboard that has not mounted the page
+    (no checkout, no vault, or the feature off), and it is the state this
+    module was written for.
+    """
+    return getattr(request.app.state, "cards_engine", None)
+
+
+def _local(engine: Any, what: str, *args: Any) -> Any:
+    """One call into the mounted engine, on handler.py's own terms.
+
+    Its `do_GET`/`do_POST` wrap `agent_state` and `agent_result` in a
+    try/except that answers `{"error": str(exc)}` with a 200, because the
+    AGENT is the caller and a 500 would only make its five-retry loop repeat
+    a request that cannot succeed. Kept identical here: a companion must not
+    be able to tell which side of the mount it is talking to.
+    """
+    try:
+        out = getattr(engine, what)(*args)
+        engine.tick()
+    except Exception as exc:  # noqa: BLE001 - handler.py's own contract
+        log.warning("cards engine: %s raised (%s: %s)", what,
+                    type(exc).__name__, exc)
+        return {"error": str(exc)}
+    return out
 
 
 def _upstream(request: Request) -> tuple[str, str]:
@@ -210,6 +246,9 @@ def cards_agent_state(
     body.pop("token", None)
     body["name"] = agent_name(editor, body.get("machine") or body.get("name") or "")
     body.pop("machine", None)
+    engine = local_engine(request)
+    if engine is not None:
+        return _clean(_local(engine, "agent_state", body))
     return _clean(_forward(request, "POST", "/agent/state", body))
 
 
@@ -228,6 +267,27 @@ def cards_agent_pending(
     """
     _require_fleet_caller(request, conn)
     seconds = max(0.0, min(float(wait or 0.0), MAX_WAIT_SECONDS))
+    engine = local_engine(request)
+    if engine is not None:
+        # `agent_pending` takes the RAW query value and parses it itself
+        # (handler.py hands it `parse_qs(...)["wait"][0]`), so it is handed a
+        # string here too -- the clamp above is this side's, not a change of
+        # type. The route stays a blocking `def`, so the long poll waits in
+        # the threadpool and not on the event loop.
+        out = _clean(_local(engine, "agent_pending", str(int(seconds))))
+        try:
+            json.dumps(out, ensure_ascii=False)
+        except (TypeError, ValueError):
+            # handler.py hands the edit BACK to the queue when the answer
+            # cannot leave the process ("the socket had gone, and the edit
+            # was in this answer's mouth"). The failure mode here is
+            # different -- FastAPI would serialise it, not a socket -- and
+            # the consequence is the same: an edit nobody will ever apply.
+            unhand = getattr(engine, "unhand", None)
+            if callable(unhand):
+                unhand(out)
+            raise
+        return out
     query = urllib.parse.urlencode({"wait": int(seconds)})
     return _clean(_forward(request, "GET", "/agent/pending", query=query,
                            timeout=seconds + POLL_MARGIN_SECONDS))
@@ -242,4 +302,7 @@ def cards_agent_result(
     _require_fleet_caller(request, conn)
     body = dict(payload or {})
     body.pop("token", None)
+    engine = local_engine(request)
+    if engine is not None:
+        return _clean(_local(engine, "agent_result", body))
     return _clean(_forward(request, "POST", "/agent/result", body))

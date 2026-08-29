@@ -166,6 +166,11 @@ def _render(request: Request, name: str, context: dict) -> HTMLResponse:
     # ...and for the YouTube downloader (ytdl.MOUNTED only). Same rule a third
     # time: absent tree or unusable YTDL_DATA_ROOT means no nav link.
     context.setdefault("ytdl_mounted", getattr(request.app.state, "ytdl_mounted", False))
+    # ...and Timeline Cards (phase 3), on the same rule a fourth time. Its
+    # "degraded" is spelt `absent` (cards.py's tri-state has no fourth state:
+    # an engine that could not be built is not mounted at all), so this is
+    # simply "did it fully take".
+    context.setdefault("cards_mounted", getattr(request.app.state, "cards_mounted", False))
     # UX-10 (2026-08-28): how many problems the server has found, in the bar
     # that is on every page. FULL PAGES ONLY -- the partials re-render on 2 s
     # and 15 s timers, and a count on each of those would be one extra

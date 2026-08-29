@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from . import VERSION, auth, db, health, links, local_users, package_store, release_trust
+from . import jobs as jobs_mod
 from .nas import EDITORS_GROUP, NasBackend, NasError, is_valid_username, looks_like_ssh_pubkey
 from .nas import factory as nas_factory
 from .syncthing_client import SyncthingClient, SyncthingError
@@ -768,6 +769,11 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
     # companion has always sent and this dashboard has never stored (v20).
     ingest = db.fetch_broll_ingest_map(conn)
     music_ingest = db.fetch_music_ingest_map(conn)
+    # Which machines are holding a FLEET JOB right now (phase 0). Read from
+    # the queue rather than from a report section: a job is the SERVER's fact
+    # about a machine, and a machine that has stopped reporting entirely is
+    # exactly when you want to see that it is still holding one.
+    running_jobs = db.fetch_running_jobs_map(conn)
     proxies = db.fetch_proxy_coverage_map(conn)
     # Which machines have an admin's "resume proxy download" still in flight
     # (v26, CR-45), so the button can say "asked" rather than inviting a
@@ -888,6 +894,7 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
             entry["why"]["out_of_tree"] = out_of_tree
         entry["ingest"] = ingest.get(key) or {}
         entry["music_ingest"] = music_ingest.get(key) or {}
+        entry["job"] = running_jobs.get(key) or {}
         entry["proxy"] = proxies.get(key) or {}
         entry["companion_version"] = (
             (machine_versions.get(key) or {}).get("companion_version")
@@ -7562,6 +7569,26 @@ def api_report(
         db.mark_resolve_undos_delivered(
             conn, [u["id"] for u in pending_undos], received_at)
         conn.commit()
+    # FLEET JOBS THIS MACHINE MAY CLAIM (TIMELINE-CARDS-INTO-CCSYNC.md §4.4,
+    # phase 0). OFFER, DO NOT PUSH: the reply names ids and nothing else, and
+    # the companion takes one on the claim route with a compare-and-set. Two
+    # machines can be offered the same job; only one can hold it.
+    #
+    # Present only while something is on offer, on the broll_ingest rule
+    # rather than the halt rule: an empty list is not an instruction, and this
+    # rides every tick of every machine in the fleet. A companion that sees no
+    # key does nothing, which is also what an older dashboard's silence means.
+    #
+    # Best-effort in the strongest sense: this is the last thing computed on
+    # the report path, and a scheduler that throws must not cost a machine its
+    # place on the fleet grid (the lanes, presence and transfers in this same
+    # report are already written).
+    try:
+        offers = jobs_mod.offers_for_machine(conn, editor, machine, now=received_at)
+        if offers["offered"]:
+            result["commands"]["jobs"] = {"offered": offers["offered"]}
+    except Exception:                                              # noqa: BLE001
+        log.exception("could not work out which jobs %s/%s may claim", editor, machine)
     return result
 
 
@@ -7966,3 +7993,270 @@ def api_machine_resolve_undo(
     log.info("%s asked %s/%s to undo the clip-path changes in %s",
              admin, editor, machine, journal)
     return {"ok": True, "id": request_id}
+
+
+# ======================================================================
+# THE FLEET JOB API (docs/TIMELINE-CARDS-INTO-CCSYNC.md phase 0, 2026-08-29)
+#
+# Two credentials, two audiences, and the split is the point:
+#
+#   ADMIN + SESSION   POST/GET /jobs, GET /jobs/{id}, GET /jobs/{id}/why.
+#                     Submitting work and looking at the queue.
+#   THE FLEET TOKEN   POST /jobs/claim, /jobs/{id}/heartbeat, /jobs/{id}/result.
+#                     A companion acting while its editor is away and no
+#                     browser is open. Same posture as ytdl's routes_fleet:
+#                     the token proves "a machine in this fleet" and NOTHING
+#                     about which, so a SIGNED X-CCSync-Identity rides beside
+#                     it and is what every ownership check uses.
+#
+# app.py's login_gate carves out exactly the three fleet suffixes (per suffix,
+# never per prefix): a leaked fleet token can neither read the queue nor put
+# work on it.
+# ======================================================================
+
+# What one machine may be offered on one report reply. Small on purpose: it
+# rides every tick of every machine, and a companion claims one job at a time.
+MAX_JOB_OFFERS = 8
+
+
+def _require_fleet_caller(request: Request, conn: sqlite3.Connection) -> str:
+    """The VERIFIED editor behind a fleet job call, or an HTTPException.
+
+    Both gates, in the order they fail closed, exactly as ytdl's
+    require_fleet_caller does them (H5, ytdl-web-1):
+
+      * a companion credential -- the shared report token, or a per-editor
+        cce1 token which IS an identity and must then agree with the header;
+      * the dashboard's own signed identity token, which is the only name
+        allowed to decide anything. A self-asserted name in the body would
+        let any token holder claim, finish or poison another editor's work.
+
+    An unconfigured session secret is a REFUSAL, not an open door: fleet jobs
+    stop, which costs a transcription, and nothing else changes.
+    """
+    settings = request.app.state.settings
+    token = request.headers.get("x-ccsync-token", "")
+    auth_kind, token_editor = resolve_companion_credential(settings, conn, token)
+    if auth_kind == AUTH_NONE:
+        raise HTTPException(status_code=403, detail="missing or invalid X-CCSync-Token")
+    if not settings.session_secret:
+        log.warning("a fleet job call arrived but DASH_SESSION_SECRET is not set, "
+                    "so no identity can be verified -- refusing")
+        raise HTTPException(status_code=403, detail="identity cannot be verified here")
+    identity = request.headers.get("x-ccsync-identity", "")
+    editor = auth.read_identity_token(settings.session_secret, identity) if identity else None
+    if not editor:
+        raise HTTPException(
+            status_code=403,
+            detail="X-CCSync-Identity required - sign in from the companion tray")
+    if auth_kind == AUTH_EDITOR and token_editor != editor:
+        log.warning("fleet job call refused: the report token is bound to %r but the "
+                    "identity header says %r", token_editor, editor)
+        raise HTTPException(
+            status_code=403,
+            detail="this report token belongs to a different editor")
+    return str(editor).strip().lower()
+
+
+class JobIn(BaseModel):
+    """One submitted job.
+
+    `inputs` is (root name, relative path) PAIRS and never an absolute path
+    (§4.1): the vault is a drive letter on one machine, a container mount on
+    another and a UNC path on the wire. Nothing here can prove a value is
+    relative on every platform in the fleet, so the model bounds it and
+    docs/API.md states the contract; the claimant resolves it locally and
+    refuses what it cannot place.
+    """
+    kind: str = Field(min_length=1, max_length=32)
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    requires: dict[str, Any] = Field(default_factory=dict)
+    cost: dict[str, Any] = Field(default_factory=dict)
+    # Higher runs first. An int, not a name, because the only two things a
+    # queue this small needs are "the usual" and "before the usual".
+    priority: int = Field(default=0, ge=-100, le=100)
+
+
+class JobClaimIn(BaseModel):
+    """A companion asking for work. It says WHICH computer it is (the name
+    the report uses, so the two agree) and what it can do RIGHT NOW.
+
+    The capabilities are re-checked here rather than trusted from the last
+    report: the offer rode a reply up to a report interval ago, and a machine
+    whose editor has come back must not be handed a GPU job on the strength of
+    a stale idle answer.
+    """
+    machine: str = Field(min_length=1, max_length=128)
+    machine_id: str | None = Field(default=None, max_length=64)
+    capabilities: dict[str, Any] = Field(default_factory=dict)
+    kinds: list[str] | None = Field(default=None, max_length=16)
+
+
+class JobHeartbeatIn(BaseModel):
+    machine: str = Field(min_length=1, max_length=128)
+    note: str | None = Field(default=None, max_length=500)
+
+
+class JobResultIn(BaseModel):
+    """How a job ended, from the machine that ran it.
+
+    `ok=false` with `retryable=false` is the runner saying the fault is in the
+    JOB (a folder with no audio in it), which no other machine will fix.
+    """
+    machine: str = Field(min_length=1, max_length=128)
+    ok: bool
+    retryable: bool = True
+    error: str = Field(default="", max_length=2000)
+    result: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/jobs")
+def api_create_job(
+    payload: JobIn, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    """Queue a job. Admin only: a job is work on somebody else's computer."""
+    admin = _require_admin(request)
+    job_id = db.create_job(
+        conn, payload.kind, payload.inputs, payload.requires, payload.cost,
+        created_by=admin, priority=payload.priority)
+    conn.commit()
+    log.info("job #%s (%s) queued by %s: %s", job_id, payload.kind, admin, payload.inputs)
+    job = db.get_job(conn, job_id)
+    # The WHY comes back with the receipt (phase 4's risk, answered in phase
+    # 0): a submitter who queues a job no machine can run learns it here,
+    # instead of watching a queue that never moves.
+    return {"ok": True, "job": job, "why": jobs_mod.explain(conn, job_id)}
+
+
+@router.get("/jobs")
+def api_list_jobs(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn),
+    state: str | None = None, kind: str | None = None, limit: int = 200,
+) -> dict[str, Any]:
+    _require_admin(request)
+    return {"jobs": db.list_jobs(conn, state=state, kind=kind, limit=limit),
+            "kinds": list(db.JOB_KINDS)}
+
+
+@router.get("/jobs/{job_id}")
+def api_get_job(
+    job_id: int, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    _require_admin(request)
+    job = db.get_job(conn, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="no such job")
+    return {"job": job}
+
+
+@router.get("/jobs/{job_id}/why")
+def api_job_why(
+    job_id: int, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    """UNSCHEDULABLE, AND WHY -- per machine, in words.
+
+    Here from the first commit deliberately (§6 phase 4's risk): a scheduler
+    that quietly assigns nothing looks exactly like a fleet with nothing to
+    do, and "no machine has a GPU" and "everyone is at their desk" are
+    different problems with the same symptom.
+    """
+    _require_admin(request)
+    answer = jobs_mod.explain(conn, job_id)
+    if answer is None:
+        raise HTTPException(status_code=404, detail="no such job")
+    return answer
+
+
+@router.post("/jobs/claim")
+def api_claim_job(
+    payload: JobClaimIn, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    """Take the next job this machine may do, or answer that there is none.
+
+    THE COMPARE-AND-SET IS THE WHOLE MECHANISM (db.claim_job): two machines
+    offered the same job both arrive here, SQLite serialises the writes, and
+    the loser is told the truth and moves on. Nothing needs to co-ordinate
+    anything.
+
+    The policy filter runs again here, over the capabilities in THIS request:
+    an offer is up to a report interval old, and an editor who has come back
+    to their desk in that interval must not be handed a transcode.
+    """
+    editor = _require_fleet_caller(request, conn)
+    machine = payload.machine.strip()
+    now = db.utcnow_iso()
+    # Expire first: a job whose holder died is claimable by this caller, and
+    # the alternative is waiting for a page load to notice (BROLL/ytdl both
+    # sweep on the way in for the same reason).
+    for expired in db.expire_leases(conn, now):
+        log.warning("job #%s: the lease held by %s/%s expired -- it is %s",
+                    expired["id"], expired["claimed_by"], expired["claimed_machine"],
+                    expired["state"])
+    offers = jobs_mod.offers_for_machine(
+        conn, editor, machine, payload.capabilities, now, limit=MAX_JOB_OFFERS)
+    job = db.claim_next_job(
+        conn, editor, machine, payload.capabilities, now=now,
+        allowed_ids=offers["offered"], kinds=payload.kinds)
+    conn.commit()
+    if job is None:
+        return {"job": None, "offered": offers["offered"]}
+    log.info("job #%s (%s) claimed by %s/%s", job["id"], job["kind"], editor, machine)
+    return {"job": job, "lease_seconds": db.JOB_LEASE_SECONDS}
+
+
+@router.post("/jobs/{job_id}/heartbeat")
+def api_heartbeat_job(
+    job_id: int, payload: JobHeartbeatIn, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """Keep a lease alive, and learn whether it is still yours.
+
+    410 GONE and not 403 (ytdl's _leaseholder_or_410, same reasoning): "your
+    claim is over" is the answer to every way this can fail -- the lease
+    expired and the job was re-queued, somebody else has it, it finished --
+    and the companion's response to all of them is the same one: stop,
+    quietly. A 403 would read as "fix your credentials".
+    """
+    editor = _require_fleet_caller(request, conn)
+    machine = payload.machine.strip()
+    now = db.utcnow_iso()
+    ok = db.heartbeat_job(conn, job_id, editor, machine, now, note=payload.note)
+    conn.commit()
+    if not ok:
+        job = db.get_job(conn, job_id)
+        raise HTTPException(
+            status_code=410,
+            detail={"detail": "this job is no longer yours", "job_id": job_id,
+                    "state": (job or {}).get("state")})
+    return {"ok": True, "lease_seconds": db.JOB_LEASE_SECONDS}
+
+
+@router.post("/jobs/{job_id}/result")
+def api_job_result(
+    job_id: int, payload: JobResultIn, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """How it went. The row records PATHS, never bytes (§4.4 rule 6): the
+    output is in the vault, which every machine shares, and nothing streams a
+    transcript through the dashboard."""
+    editor = _require_fleet_caller(request, conn)
+    machine = payload.machine.strip()
+    now = db.utcnow_iso()
+    if payload.ok:
+        moved = db.finish_job(conn, job_id, editor, machine, payload.result, now)
+        state = db.JOB_DONE
+    else:
+        state = db.fail_job(conn, job_id, editor, machine, payload.error, now,
+                            retryable=payload.retryable)
+        moved = state is not None
+    conn.commit()
+    if not moved:
+        job = db.get_job(conn, job_id)
+        raise HTTPException(
+            status_code=410,
+            detail={"detail": "this job is no longer yours", "job_id": job_id,
+                    "state": (job or {}).get("state")})
+    log.info("job #%s reported %s by %s/%s%s", job_id,
+             "done" if payload.ok else state, editor, machine,
+             "" if payload.ok else f": {payload.error[:200]}")
+    return {"ok": True, "state": state}

@@ -121,6 +121,11 @@ _CSRF_EXEMPT_EXACT = {"/login", "/api/v1/login", "/api/v1/logout", "/api/v1/repo
                       "/api/v1/diagnostics"}
 _CSRF_EXEMPT_PREFIXES = ("/api/v1/selection/", "/api/v1/admin/packages/",
                          "/broll/", "/music/", "/ytdl/")
+# The fleet job claim/heartbeat/result (phase 0, 2026-08-29). Bearer-token
+# routes with no session cookie behind them, which is the first of the two
+# classes above -- and NOT a prefix: POST /api/v1/jobs (an admin submitting
+# work) is a session route and keeps its CSRF token.
+_CSRF_EXEMPT_RE = re.compile(r"^/api/v1/jobs/(claim|\d+/(heartbeat|result))$")
 _CSRF_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 
 # Hard ceiling on a companion report body, enforced from Content-Length BEFORE
@@ -738,7 +743,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if request.method not in _CSRF_METHODS:
             return await call_next(request)
         path = request.url.path
-        if path in _CSRF_EXEMPT_EXACT or path.startswith(_CSRF_EXEMPT_PREFIXES):
+        if (path in _CSRF_EXEMPT_EXACT or path.startswith(_CSRF_EXEMPT_PREFIXES)
+                or _CSRF_EXEMPT_RE.match(path) is not None):
             return await call_next(request)
         # Only sessions THIS server minted are checked -- see
         # auth._resolve_session. In a deployment that is every session there
@@ -859,6 +865,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         r"(claim|heartbeat|release|items/[0-9a-f]{32}/(status|result|uploaded))$"
     )
 
+    # The FLEET JOB routes (docs/TIMELINE-CARDS-INTO-CCSYNC.md phase 0,
+    # 2026-08-29): claim, heartbeat, result. The same posture as the three
+    # blocks above and for the same reason -- a companion claims a job while
+    # its editor is away and no browser is open, so there is no session to
+    # gate on; the routes re-check the fleet token AND a signed identity
+    # inside api.py.
+    #
+    # Per-suffix, never per-prefix, exactly as ytdl's is: GET /api/v1/jobs and
+    # POST /api/v1/jobs (the admin's queue view and submit) stay fully
+    # session-gated behind _require_admin, so a leaked fleet token can neither
+    # read the queue nor put work on it.
+    _jobs_fleet_re = re.compile(r"^/api/v1/jobs/(claim|\d+/(heartbeat|result))$")
+
     @app.middleware("http")
     async def login_gate(request, call_next):
         path = request.url.path
@@ -912,6 +931,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # and the same for a claimed MUSIC ingest batch
             # (docs/MUSIC_INGEST_PLAN.md step 2)
             or (_music_fleet_re.match(path) is not None and _companion_token_ok(request))
+            # ...and a machine claiming, heartbeating or finishing a FLEET JOB
+            # (TIMELINE-CARDS-INTO-CCSYNC.md §4.4 "offer, don't push")
+            or (_jobs_fleet_re.match(path) is not None and _companion_token_ok(request))
             # the setup wizard's own API (ZERO_TOUCH_PLAN.md WP D). Open at
             # THIS layer only -- every route under it re-checks via
             # setup_routes.require_setup_access, which is the actual gate

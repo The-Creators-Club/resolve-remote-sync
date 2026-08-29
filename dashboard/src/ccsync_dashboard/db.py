@@ -28,6 +28,7 @@ EDITOR_MEDIA_CAP = 2000          # per-file disk-manifest rows per (editor, mach
 MEDIA_TREE_CAP = 4000            # Resolve-bin clip rows per (editor, machine, project)
 MEDIA_REPORT_MAX_AGE_DAYS = 14   # drop an editor's media rows after it stops reporting
 ACTIVE_TRANSFER_STALE_SECONDS = 120  # a transfer row is "live" only this long past updated_at
+JOBS_MAX_AGE_DAYS = 30           # how long a FINISHED fleet job is kept (v41)
 
 # v5: media presence + live transfers. The NAS filesystem walk (nas_media) is
 # the authoritative "what exists"; editors report their own disk manifest,
@@ -1334,6 +1335,52 @@ CREATE INDEX IF NOT EXISTS ix_resolve_undo_machine
 ALTER TABLE machine_state ADD COLUMN resolve_journals TEXT;
 """
 
+# v41: the FLEET JOB QUEUE (docs/TIMELINE-CARDS-INTO-CCSYNC.md §4.1, phase 0,
+# 2026-08-29). Until now this dashboard had exactly one job concept -- ytdl's
+# download lease -- and it is welded to that feature's own table. This is the
+# general one: a row of work, a set of hard requirements, and a lease.
+#
+# The lease columns are ytdl's, deliberately, down to their names
+# (`claimed_by` + `claimed_machine` + `lease_expires_at`): possession EXPIRES
+# rather than being released, because the holder can vanish without telling
+# anyone, and the key is (editor, MACHINE) because one person's laptop and
+# desktop are two executors (CR-66).
+#
+# `inputs_json` carries (root name, relative path) PAIRS and never an absolute
+# path (§4.1). The vault is X:\ on one machine, /vault in a container and
+# a UNC path on the wire; a path on the wire would be right on exactly one
+# computer. Same discipline as POST /music/send's {action, share, rel_path}.
+#
+# `requires_json` is the hard capability filter and `cost_json` an estimate
+# nothing is yet allowed to schedule on -- both JSON because they are the
+# fields whose shape is still being learned, and neither is ever sorted or
+# alarmed on. Everything the grid or the scheduler reads IS a column.
+SCHEMA_V41 = """
+CREATE TABLE IF NOT EXISTS jobs (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind             TEXT    NOT NULL,
+  created_at       TEXT    NOT NULL,
+  created_by       TEXT    NOT NULL DEFAULT '',
+  priority         INTEGER NOT NULL DEFAULT 0,
+  inputs_json      TEXT    NOT NULL DEFAULT '{}',
+  requires_json    TEXT    NOT NULL DEFAULT '{}',
+  cost_json        TEXT    NOT NULL DEFAULT '{}',
+  state            TEXT    NOT NULL DEFAULT 'queued',
+  claimed_by       TEXT,
+  claimed_machine  TEXT,
+  lease_expires_at TEXT,
+  heartbeat_at     TEXT,
+  attempts         INTEGER NOT NULL DEFAULT 0,
+  last_error       TEXT    NOT NULL DEFAULT '',
+  result_json      TEXT,
+  updated_at       TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_jobs_state_kind ON jobs(state, kind, priority, id);
+CREATE INDEX IF NOT EXISTS ix_jobs_holder
+  ON jobs(claimed_by, claimed_machine, state);
+CREATE INDEX IF NOT EXISTS ix_jobs_lease ON jobs(state, lease_expires_at);
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -1413,6 +1460,10 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # the recovery package moved down into 40 when the panel gave it up.
     (39, SCHEMA_V39),
     (40, SCHEMA_V40),
+    # 41 is the fleet job queue (TIMELINE-CARDS-INTO-CCSYNC.md phase 0). The
+    # number wave 5's protection panel gave up is taken here rather than left
+    # as a hole -- THE LIST MUST STAY GAPLESS (test_db's ordering test).
+    (41, SCHEMA_V41),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -6536,6 +6587,15 @@ def prune(conn: sqlite3.Connection, now: str) -> None:
     # the cycle that already bounds every other row, with the reason in the
     # audit ledger.
     expire_machine_update_requests(conn, now)
+    # FLEET JOBS (phase 0): a lease whose holder has gone is re-queued here as
+    # well as on the way into a claim. Both, deliberately -- the claim path
+    # only runs when some OTHER machine asks for work, and a fleet with one
+    # busy machine would otherwise leave a dead claim standing until somebody
+    # opened a page. Finished rows age out after JOBS_MAX_AGE_DAYS; queued
+    # ones never do, because a job nobody can run is the thing phase 0 exists
+    # to make visible.
+    expire_leases(conn, now)
+    prune_jobs(conn, now, JOBS_MAX_AGE_DAYS)
     purge_nas_media_for_inactive(conn)
 
 
@@ -7181,3 +7241,473 @@ def fetch_collector_status(
         "collector_stale": stale,
         "folder_errors": folder_errors,
     }
+
+
+# ======================================================================
+# THE FLEET JOB QUEUE (v41, docs/TIMELINE-CARDS-INTO-CCSYNC.md phase 0)
+#
+# One row of work that some machine on the fleet may do. Everything here is
+# the ytdl download lease generalised (`ytdl/web/ytdlweb/db.py` claim_download
+# / heartbeat_download / expire_lease), because that queue is the one this box
+# has actually run in anger -- including the evening it survived (CR-80).
+#
+# Three rules carried over verbatim, each of them paid for:
+#
+#   * EVERY WRITE IS A COMPARE-AND-SET with the whole rule in its WHERE
+#     clause. Read-then-write is a race between two claimants, and "which
+#     machine is transcribing this folder" is not a question two answers may
+#     be given to.
+#   * POSSESSION EXPIRES. A claimant can vanish without telling anyone (a
+#     laptop lid, a power cut mid-encode), so the lease is a deadline the
+#     holder must keep pushing, never a lock it must remember to drop.
+#   * THE KEY IS (editor, MACHINE). One person's laptop and desktop are two
+#     executors (CR-66/data-model-7); keying on the person is how both ended
+#     up doing the same work.
+#
+# What is deliberately NOT here: any notion of which machine SHOULD do a job.
+# That is jobs.py (capability match -> policy -> rank -> offer), so that this
+# file stays "the queue" and the scheduler stays a thing with an opinion that
+# can be tested without a database full of fleet state.
+# ======================================================================
+
+JOB_QUEUED = "queued"
+JOB_CLAIMED = "claimed"
+JOB_RUNNING = "running"
+JOB_DONE = "done"
+JOB_FAILED = "failed"
+JOB_ABANDONED = "abandoned"
+
+# Held by a machine right now: a claim that has not yet been heartbeated as
+# running is still possession, which is why both are in here.
+JOB_HELD_STATES = (JOB_CLAIMED, JOB_RUNNING)
+# Nothing will ever pick these up again.
+JOB_TERMINAL_STATES = (JOB_DONE, JOB_FAILED, JOB_ABANDONED)
+
+# The kinds this build knows. A job of any other kind is accepted into the
+# table (a newer submitter must not be refused by an older dashboard) but is
+# never offered to anybody -- see jobs.explain, which says exactly that.
+JOB_KIND_WHISPER = "whisper"
+JOB_KINDS = (JOB_KIND_WHISPER,)
+
+# How long a claim is good for without a heartbeat. Five minutes, against the
+# companion's 30 s heartbeat: ten missed beats is a machine that has gone,
+# not a machine that is briefly busy. A whisper pass on an hour of audio runs
+# for many multiples of this, which is exactly why the lease is refreshed
+# rather than sized to the work.
+JOB_LEASE_SECONDS = 300
+
+# Attempts before a job is ABANDONED rather than re-queued. Per kind, because
+# "how many times is it worth sending this to a machine that might not be the
+# problem" is a property of the work: a whisper run that dies twice on two
+# different machines is a bad input, not bad luck.
+JOB_RETRY_BUDGET = {JOB_KIND_WHISPER: 3}
+JOB_RETRY_BUDGET_DEFAULT = 3
+
+# Ceiling on one submitted job's JSON fields. A queue row is written by an
+# authenticated admin, so this is a sanity bound and not a security one -- but
+# `inputs` is (root, rel_path) pairs and nothing legitimate is near it.
+JOB_JSON_MAX_BYTES = 16 * 1024
+
+
+def job_retry_budget(kind: str) -> int:
+    return int(JOB_RETRY_BUDGET.get(str(kind or ""), JOB_RETRY_BUDGET_DEFAULT))
+
+
+def _job_json(value: Any) -> str:
+    """A job's JSON column, bounded. Never a raise on a value that will not
+    serialise: a submitter that sends something exotic gets an empty object
+    and a job that cannot run, not a 500 on the queue everything else uses."""
+    try:
+        text = json.dumps(value if value is not None else {},
+                          separators=(",", ":"), sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return "{}"
+    return text if len(text) <= JOB_JSON_MAX_BYTES else "{}"
+
+
+def _job_loads(text: Any) -> Any:
+    try:
+        return json.loads(text) if text else None
+    except (TypeError, ValueError):
+        return None
+
+
+def job_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    """A job row with its JSON fields parsed, or None.
+
+    A damaged blob reads as an EMPTY requirement set and an empty input set,
+    never as a raise: the page that lists jobs is the page you open when one
+    has gone wrong."""
+    if row is None:
+        return None
+    job = dict(row)
+    job["inputs"] = _job_loads(job.get("inputs_json")) or {}
+    job["requires"] = _job_loads(job.get("requires_json")) or {}
+    job["cost"] = _job_loads(job.get("cost_json")) or {}
+    job["result"] = _job_loads(job.get("result_json"))
+    return job
+
+
+def create_job(
+    conn: sqlite3.Connection, kind: str, inputs: Mapping[str, Any],
+    requires: Mapping[str, Any] | None = None,
+    cost: Mapping[str, Any] | None = None,
+    created_by: str = "", priority: int = 0, now: str | None = None,
+) -> int:
+    """Queue one job. -> its id.
+
+    `inputs` must spell paths as (root name, relative path) pairs; nothing
+    here enforces that, because "is this an absolute path" is a question with
+    a different answer on every platform in the fleet. The submitters
+    (tools/jobs.py, and Timeline Cards later) build them, api.py's model
+    bounds them, and docs/API.md is the contract."""
+    now = now or utcnow_iso()
+    cur = conn.execute(
+        """INSERT INTO jobs (kind, created_at, created_by, priority, inputs_json,
+                             requires_json, cost_json, state, attempts, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
+        (str(kind), now, str(created_by or ""), int(priority),
+         _job_json(dict(inputs or {})), _job_json(dict(requires or {})),
+         _job_json(dict(cost or {})), JOB_QUEUED, now),
+    )
+    return int(cur.lastrowid)
+
+
+def get_job(conn: sqlite3.Connection, job_id: int) -> dict[str, Any] | None:
+    return job_row(
+        conn.execute("SELECT * FROM jobs WHERE id=?", (int(job_id),)).fetchone())
+
+
+def list_jobs(
+    conn: sqlite3.Connection, state: str | None = None, kind: str | None = None,
+    machine: str | None = None, editor: str | None = None, limit: int = 200,
+) -> list[dict[str, Any]]:
+    """Newest first. `state='open'` is the useful one: everything unfinished."""
+    where: list[str] = []
+    args: list[Any] = []
+    if state == "open":
+        where.append("state NOT IN (%s)" % ",".join("?" * len(JOB_TERMINAL_STATES)))
+        args.extend(JOB_TERMINAL_STATES)
+    elif state:
+        where.append("state=?")
+        args.append(state)
+    if kind:
+        where.append("kind=?")
+        args.append(kind)
+    if editor:
+        where.append("claimed_by=?")
+        args.append(editor)
+    if machine:
+        where.append("claimed_machine=?")
+        args.append(machine)
+    sql = "SELECT * FROM jobs"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(max(1, min(int(limit), 1000)))
+    return [job_row(r) for r in conn.execute(sql, args)]  # type: ignore[misc]
+
+
+def queued_jobs(
+    conn: sqlite3.Connection, kinds: Iterable[str] | None = None, limit: int = 200,
+) -> list[dict[str, Any]]:
+    """The candidates, in the order a scheduler should consider them: highest
+    priority first, then oldest -- so a job that has been waiting is not
+    starved by one submitted a second ago at the same priority."""
+    sql = "SELECT * FROM jobs WHERE state=?"
+    args: list[Any] = [JOB_QUEUED]
+    kinds = list(kinds) if kinds is not None else None
+    if kinds is not None:
+        if not kinds:
+            return []
+        sql += " AND kind IN (%s)" % ",".join("?" * len(kinds))
+        args.extend(kinds)
+    sql += " ORDER BY priority DESC, id ASC LIMIT ?"
+    args.append(max(1, min(int(limit), 1000)))
+    return [job_row(r) for r in conn.execute(sql, args)]  # type: ignore[misc]
+
+
+def job_requirements_met(
+    requires: Mapping[str, Any] | None, capabilities: Mapping[str, Any] | None,
+) -> tuple[bool, str]:
+    """Does this machine meet a job's HARD requirements? -> (ok, why not).
+
+    Pure, and deliberately in db.py rather than in the scheduler: it is what
+    claim_next_job's compare-and-set consults, and the claim route must never
+    be able to hand out a job on a looser rule than the one the offer was
+    computed with.
+
+    Four shapes, and everything unrecognised is a REFUSAL: a dashboard that
+    does not understand a requirement must not decide it is satisfied. That
+    is the difference between "no machine can run this yet" (visible, on the
+    why page) and "we ran a GPU job on a machine with no GPU".
+
+        gpu_vram_gb: 6        a number, >=
+        cpu_count:   8        a number, >=
+        mount: "vault"        a name that must appear in capabilities["mounts"]
+        <anything else>: true/false/str   equality against the capability
+    """
+    caps = dict(capabilities or {})
+    for key, want in dict(requires or {}).items():
+        if key in ("mount", "mounts"):
+            names = [str(m) for m in (caps.get("mounts") or [])]
+            wanted = [want] if isinstance(want, str) else list(want or [])
+            missing = [str(w) for w in wanted if str(w) not in names]
+            if missing:
+                return False, "this machine has no %s mount" % ", ".join(missing)
+            continue
+        have = caps.get(key)
+        if isinstance(want, bool):
+            if bool(have) != want:
+                return False, "%s is %s on this machine" % (
+                    key, "not available" if want else "set")
+            continue
+        if isinstance(want, (int, float)):
+            try:
+                if have is None or float(have) < float(want):
+                    return False, f"{key} is {have!r}, the job needs at least {want}"
+            except (TypeError, ValueError):
+                return False, f"{key} is {have!r}, the job needs at least {want}"
+            continue
+        if str(have or "") != str(want):
+            return False, f"{key} is {have!r}, the job needs {want!r}"
+    return True, ""
+
+
+def _job_lease_until(now: str, seconds: float) -> str:
+    """now + seconds in the exact shape utcnow_iso() produces, which is what
+    makes comparing these timestamps as STRINGS sound: one producer, one
+    offset, one resolution, so lexicographic order is chronological order."""
+    return (parse_iso(now) + dt.timedelta(seconds=max(0, int(seconds)))).isoformat()
+
+
+def claim_job(
+    conn: sqlite3.Connection, job_id: int, editor: str, machine: str,
+    now: str | None = None, lease_seconds: float = JOB_LEASE_SECONDS,
+) -> bool:
+    """THE compare-and-set. -> did this caller get it.
+
+    The whole rule is in the WHERE clause: the job must still be QUEUED. Two
+    machines offered the same job both call this; SQLite serialises the
+    writes, the second matches no row, and it moves on to the next candidate
+    rather than being told a lie."""
+    now = now or utcnow_iso()
+    cur = conn.execute(
+        """UPDATE jobs SET state=?, claimed_by=?, claimed_machine=?,
+                           lease_expires_at=?, heartbeat_at=?, updated_at=?
+            WHERE id=? AND state=?""",
+        (JOB_CLAIMED, str(editor), str(machine),
+         _job_lease_until(now, lease_seconds), now, now, int(job_id), JOB_QUEUED),
+    )
+    return bool(cur.rowcount)
+
+
+def claim_next_job(
+    conn: sqlite3.Connection, editor: str, machine: str,
+    capabilities: Mapping[str, Any] | None = None,
+    now: str | None = None, lease_seconds: float = JOB_LEASE_SECONDS,
+    allowed_ids: Iterable[int] | None = None,
+    kinds: Iterable[str] | None = None,
+) -> dict[str, Any] | None:
+    """Claim the best queued job this machine can actually do, or None.
+
+    `capabilities` is re-checked HERE and not merely at offer time: the offer
+    rode a report reply up to a report interval ago, and the machine acting on
+    it must not be handed work on the strength of a stale answer.
+
+    `allowed_ids` narrows the candidates to what the scheduler offered (the
+    policy filter -- halt, idleness, upgrades -- lives there); None means
+    "capability match alone", which is what a caller with no fleet state in
+    hand can honestly ask for.
+    """
+    now = now or utcnow_iso()
+    allowed = None if allowed_ids is None else {int(i) for i in allowed_ids}
+    for job in queued_jobs(conn, kinds=kinds):
+        if allowed is not None and int(job["id"]) not in allowed:
+            continue
+        ok, _why = job_requirements_met(job.get("requires"), capabilities)
+        if not ok:
+            continue
+        if claim_job(conn, int(job["id"]), editor, machine, now, lease_seconds):
+            return get_job(conn, int(job["id"]))
+    return None
+
+
+def heartbeat_job(
+    conn: sqlite3.Connection, job_id: int, editor: str, machine: str,
+    now: str | None = None, lease_seconds: float = JOB_LEASE_SECONDS,
+    note: str | None = None,
+) -> bool:
+    """Extend a LIVE lease, and move a claim to `running`. -> did it happen.
+
+    Deliberately NOT a re-claim (ytdl's heartbeat_download, and its reason):
+    an expired lease is not extended here, because by then the job may have
+    been re-queued and another machine may already be doing it. The companion
+    is told the truth -- 410 -- and stops.
+    """
+    now = now or utcnow_iso()
+    cur = conn.execute(
+        """UPDATE jobs SET state=?, lease_expires_at=?, heartbeat_at=?,
+                           updated_at=?, last_error=COALESCE(?, last_error)
+            WHERE id=? AND claimed_by=? AND claimed_machine=?
+              AND state IN (?, ?) AND lease_expires_at > ?""",
+        (JOB_RUNNING, _job_lease_until(now, lease_seconds), now, now, note,
+         int(job_id), str(editor), str(machine), JOB_CLAIMED, JOB_RUNNING, now),
+    )
+    return bool(cur.rowcount)
+
+
+def finish_job(
+    conn: sqlite3.Connection, job_id: int, editor: str, machine: str,
+    result: Mapping[str, Any] | None = None, now: str | None = None,
+) -> bool:
+    """Record a job DONE. -> did this caller still hold it.
+
+    An expired lease may still finish a job: the work was done, the files are
+    in the vault, and refusing the result would mean doing it twice. What an
+    expired lease loses is the right to keep others off it, not the right to
+    say what happened -- and the CAS on `state` stops a late finisher from
+    overwriting a job another machine has since completed."""
+    now = now or utcnow_iso()
+    cur = conn.execute(
+        """UPDATE jobs SET state=?, result_json=?, lease_expires_at=NULL,
+                           heartbeat_at=?, updated_at=?
+            WHERE id=? AND claimed_by=? AND claimed_machine=? AND state IN (?, ?)""",
+        (JOB_DONE, _job_json(dict(result or {})), now, now,
+         int(job_id), str(editor), str(machine), JOB_CLAIMED, JOB_RUNNING),
+    )
+    return bool(cur.rowcount)
+
+
+def fail_job(
+    conn: sqlite3.Connection, job_id: int, editor: str, machine: str,
+    error: str = "", now: str | None = None, retryable: bool = True,
+) -> str | None:
+    """One attempt failed. -> the job's new state, or None if this caller did
+    not hold it.
+
+    RETRY UNTIL THE BUDGET, THEN ABANDON. A job no machine can do must not
+    ping-pong around the fleet for ever (§4.4 rule 5, and ytdl's breaker
+    before it); a job that failed because one laptop went to sleep must not be
+    lost. `retryable=False` is the runner saying the fault is in the JOB -- a
+    folder with no audio in it -- which no number of machines will fix.
+    """
+    now = now or utcnow_iso()
+    row = conn.execute(
+        "SELECT kind, attempts FROM jobs WHERE id=? AND claimed_by=? "
+        " AND claimed_machine=? AND state IN (?, ?)",
+        (int(job_id), str(editor), str(machine), JOB_CLAIMED, JOB_RUNNING),
+    ).fetchone()
+    if row is None:
+        return None
+    attempts = int(row["attempts"] or 0) + 1
+    spent = attempts >= job_retry_budget(row["kind"])
+    state = JOB_FAILED if not retryable else (JOB_ABANDONED if spent else JOB_QUEUED)
+    conn.execute(
+        """UPDATE jobs SET state=?, attempts=?, last_error=?, claimed_by=NULL,
+                           claimed_machine=NULL, lease_expires_at=NULL, updated_at=?
+            WHERE id=? AND claimed_by=? AND claimed_machine=?""",
+        (state, attempts, str(error or "")[:2000], now,
+         int(job_id), str(editor), str(machine)),
+    )
+    return state
+
+
+def expire_leases(
+    conn: sqlite3.Connection, now: str | None = None,
+) -> list[dict[str, Any]]:
+    """Re-queue (or abandon) every job whose holder has gone quiet.
+
+    -> the jobs that moved, so the caller can log WHICH machine dropped what.
+    An expiry COUNTS AS AN ATTEMPT: a machine that claims a job and dies three
+    times running is a machine that cannot do it, and without the attempt the
+    job would be re-offered to it for ever."""
+    now = now or utcnow_iso()
+    moved: list[dict[str, Any]] = []
+    rows = conn.execute(
+        "SELECT * FROM jobs WHERE state IN (?, ?) AND lease_expires_at IS NOT NULL "
+        " AND lease_expires_at <= ?", (JOB_CLAIMED, JOB_RUNNING, now)).fetchall()
+    for row in rows:
+        attempts = int(row["attempts"] or 0) + 1
+        spent = attempts >= job_retry_budget(row["kind"])
+        state = JOB_ABANDONED if spent else JOB_QUEUED
+        cur = conn.execute(
+            """UPDATE jobs SET state=?, attempts=?, claimed_by=NULL,
+                               claimed_machine=NULL, lease_expires_at=NULL,
+                               last_error=?, updated_at=?
+                WHERE id=? AND state IN (?, ?) AND lease_expires_at <= ?""",
+            (state, attempts,
+             f"the lease held by {row['claimed_by']}/{row['claimed_machine']} "
+             f"expired at {row['lease_expires_at']}", now,
+             row["id"], JOB_CLAIMED, JOB_RUNNING, now),
+        )
+        if cur.rowcount:
+            job = dict(row)
+            job["state"] = state
+            job["attempts"] = attempts
+            moved.append(job)
+    return moved
+
+
+def machine_live_jobs(
+    conn: sqlite3.Connection, editor: str, machine: str,
+) -> list[dict[str, Any]]:
+    """What this computer is holding right now. ONE AT A TIME is enforced on
+    both sides: the runner refuses to claim a second, and the scheduler offers
+    nothing to a machine that already holds one."""
+    return [
+        job_row(r) for r in conn.execute(  # type: ignore[misc]
+            "SELECT * FROM jobs WHERE claimed_by=? AND claimed_machine=? "
+            " AND state IN (?, ?) ORDER BY id",
+            (str(editor), str(machine), JOB_CLAIMED, JOB_RUNNING))
+    ]
+
+
+def fetch_running_jobs_map(
+    conn: sqlite3.Connection,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """(editor, machine) -> the job that machine is holding, for the fleet
+    grid's chip. The grid's other chips read machine_state; this one reads the
+    queue, because a job is the SERVER's fact about a machine and not
+    something the machine reports about itself."""
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for r in conn.execute(
+        "SELECT id, kind, state, claimed_by, claimed_machine, heartbeat_at, "
+        "       lease_expires_at, inputs_json FROM jobs "
+        " WHERE state IN (?, ?) ORDER BY id", (JOB_CLAIMED, JOB_RUNNING)
+    ):
+        key = (r["claimed_by"] or "", r["claimed_machine"] or "")
+        inputs = _job_loads(r["inputs_json"]) or {}
+        out[key] = {
+            "id": r["id"], "kind": r["kind"], "state": r["state"],
+            "at": r["heartbeat_at"], "lease_expires_at": r["lease_expires_at"],
+            "rel_path": (str(inputs.get("rel_path") or "")
+                         if isinstance(inputs, dict) else ""),
+        }
+    return out
+
+
+def prune_jobs(conn: sqlite3.Connection, now: str, max_age_days: int = 30) -> int:
+    """Drop finished jobs older than `max_age_days`. -> how many went.
+
+    Finished ONLY: a queued job nobody can run is the thing this whole phase
+    exists to make visible, and pruning it would hide it."""
+    cutoff = (parse_iso(now) - dt.timedelta(days=max(1, int(max_age_days)))).isoformat()
+    cur = conn.execute(
+        "DELETE FROM jobs WHERE state IN (%s) AND updated_at < ?"
+        % ",".join("?" * len(JOB_TERMINAL_STATES)),
+        (*JOB_TERMINAL_STATES, cutoff))
+    return int(cur.rowcount or 0)
+
+
+def machine_capabilities(
+    conn: sqlite3.Connection, editor: str, machine: str,
+) -> dict[str, Any]:
+    """What this computer last told us it can do, or {} if it never has.
+
+    {} is "unknown", which the scheduler reads as "offer it nothing that has
+    a requirement" -- never as "it can do everything". A companion older than
+    the capabilities section reports none, and must not be handed GPU work on
+    the strength of a silence.
+    """
+    return {}

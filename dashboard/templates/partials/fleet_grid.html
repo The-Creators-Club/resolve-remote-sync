@@ -239,6 +239,12 @@
            without reading their tray. #}
         {% if e.ingest.active %}<span class="chip {{ "amber" if e.ingest.warning else "green" }}" title="b-roll batch {{ e.ingest.batch[:8] if e.ingest.batch else "?" }}{% if e.ingest.clip %} - {{ e.ingest.clip }}{% endif %}{% if e.ingest.state %} ({{ e.ingest.state }}{% if e.ingest.gate %}: {{ e.ingest.gate }}{% endif %}){% endif %}{% if e.ingest.tier %} · {{ e.ingest.tier }} model{% endif %}{% if e.ingest.percent %} · {{ e.ingest.percent }}% of this clip{% endif %}{% if e.ingest.failed %} · {{ e.ingest.failed }} failed{% endif %} · reported {{ e.ingest.at | ago }}">[ INDEXING B-ROLL: {{ e.ingest.done }}/{{ e.ingest.total }} ]</span>{% endif %}
         {% if e.ingest.warning %}<span class="chip amber" title="{{ e.ingest.warning }}">[ VRAM ]</span>{% endif %}
+        {# A FLEET JOB this computer is holding (TIMELINE-CARDS-INTO-CCSYNC.md
+           phase 0, 2026-08-29), on the b-roll chip's pattern. It comes from
+           the jobs table and not from a report section, so a machine that has
+           gone quiet still shows what it took with it -- which is precisely
+           the state the lease exists to end. #}
+        {% if e.job.id %}<span class="chip green" title="job #{{ e.job.id }} ({{ e.job.kind }}, {{ e.job.state }}){% if e.job.rel_path %} - {{ e.job.rel_path }}{% endif %}{% if e.job.at %} · last heartbeat {{ e.job.at | ago }}{% endif %}{% if e.job.lease_expires_at %} · lease until {{ e.job.lease_expires_at }}{% endif %}">[ {{ e.job.kind | upper }}: JOB {{ e.job.id }} ]</span>{% endif %}
         {# Music ingest (MUSIC_INGEST_PLAN.md step 3, 2026-08-18). Its OWN
            chip beside b-roll's rather than one shared one: music needs no GPU,
            so a machine can be embedding an album and indexing a camera card at

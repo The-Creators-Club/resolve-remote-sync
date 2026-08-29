@@ -796,3 +796,26 @@ ignored_resolve_projects = ["Untitled Project", "New Doc"]
 # jobs_idle_seconds = 300
 # jobs_skip_while_resolve_running = true
 # jobs_poll_seconds = 20
+
+# --------------------------------------------------------------------------
+# THE TIMELINE CARDS PAGE, SERVED FROM THIS COMPUTER'S RESOLVE
+# --------------------------------------------------------------------------
+# docs/TIMELINE-CARDS-INTO-CCSYNC.md phase 2. With this on, the companion runs
+# the Timeline Cards engine in a thread of its own and long-polls the
+# dashboard for edits, so a phone on the sofa can re-order a cut in the
+# Resolve that is open here.
+#
+# ONE MACHINE. ONE RESOLVE CLIENT. Turn it on only on the computer you stage
+# cuts from, and stop the standalone `reorder_web.py --agent` first -- the
+# companion refuses to start beside one, because two clients on one machine
+# kill scripting for both of them for the whole Resolve session
+# (docs/GOTCHAS.md section 15).
+#
+# The engine itself is imported from the checkout jobs_mulcam_pipeline names
+# above, so a page fix over there is a git pull and not a companion release.
+# cards_agent = false
+
+# The vault the page reads. Defaults to jobs_vault_root; its own key exists so
+# a machine can transcode for the fleet out of one root and serve cards out of
+# another.
+# cards_vault_root = ""

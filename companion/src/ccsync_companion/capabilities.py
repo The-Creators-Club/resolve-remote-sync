@@ -199,6 +199,7 @@ def build(
     idle_probe: Any = None,
     resolve_running_fn: Optional[Callable[[], bool]] = None,
     resolve_project_fn: Optional[Callable[[], Optional[str]]] = None,
+    cards_agent_fn: Optional[Callable[[], dict[str, Any]]] = None,
     use_cache: bool = True,
 ) -> dict[str, Any]:
     """The `capabilities` report section. Never raises.
@@ -218,6 +219,10 @@ def build(
             # is exactly the stale answer the claim path re-checks against.
             answer["idle_seconds"] = _idle_seconds(idle_probe)
             answer["resolve"] = _resolve_block(resolve_running_fn, resolve_project_fn)
+            # ...and the cards role, for the same reason: it starts, refuses
+            # and stops while a cached hardware answer sits still, and the
+            # grid chip is meant to say which timeline is on screen NOW.
+            answer["cards_agent"] = _cards_block(cards_agent_fn)
             return answer
 
     cfg = cfg or {}
@@ -247,6 +252,7 @@ def build(
     }
     section["idle_seconds"] = _idle_seconds(idle_probe)
     section["resolve"] = _resolve_block(resolve_running_fn, resolve_project_fn)
+    section["cards_agent"] = _cards_block(cards_agent_fn)
     with _lock:
         _cache = (now, dict(section))
     return section
@@ -263,6 +269,29 @@ def _idle_seconds(idle_probe: Any) -> Optional[float]:
         log.debug("capabilities: idle probe failed", exc_info=True)
         return None
     return None if value is None else float(value)
+
+
+def _cards_block(fn: Optional[Callable[[], dict[str, Any]]]) -> dict[str, Any]:
+    """Is this machine serving the Timeline Cards page from its Resolve?
+
+    (TIMELINE-CARDS-INTO-CCSYNC.md phase 2.) Four small fields, from the
+    role's own status -- no scripting call, no process probe, nothing that
+    could make a 30 s capabilities tick expensive. `connected` false with a
+    `state` is the interesting case: it names the refusal, which is the
+    difference between "nobody turned it on" and "a standalone agent is
+    still running there".
+    """
+    block: dict[str, Any] = {"connected": False, "state": "disabled",
+                             "timeline": "", "version": 0, "since": None}
+    if fn is None:
+        return block
+    try:
+        answer = fn() or {}
+    except Exception:
+        log.debug("capabilities: cards_agent_fn failed", exc_info=True)
+        return block
+    block.update({k: answer.get(k, block[k]) for k in block})
+    return block
 
 
 def _resolve_block(

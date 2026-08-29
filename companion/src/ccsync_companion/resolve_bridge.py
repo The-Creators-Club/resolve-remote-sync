@@ -165,6 +165,23 @@ def bridge_activity() -> dict[str, Any]:
     return {"call": name, "seconds": max(0.0, time.monotonic() - started)}
 
 
+def api_call(name: str) -> "_bridge_call":
+    """Take _API_LOCK for a named call, from OUTSIDE this module.
+
+    The one supported way for another part of the companion to be inside
+    Resolve. Added for the Timeline Cards role (TIMELINE-CARDS-INTO-CCSYNC.md
+    phase 2), which drives edits this module knows nothing about -- moves,
+    trims and conforms sent as synthetic keystrokes -- and must still queue
+    behind the watcher rather than beside it: fusionscript.dll is not
+    documented as thread-safe and faults 0xc0000005 when it is treated as if
+    it were, which takes the whole windowed companion down with no log.
+
+    `name` is what the wedge warning reports, so give it the caller's own
+    word for the work ("cards.sweep", "cards.conform"), not the module's.
+    """
+    return _bridge_call(name)
+
+
 def reset_bridge_activity() -> None:
     """Forget the in-flight call and the wedge-warning cooldown -- tests only."""
     global _call_in_flight, _last_wedge_warning_at

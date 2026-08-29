@@ -798,6 +798,24 @@ DEFAULTS: dict[str, Any] = {
     # How often the runner looks at what it was offered. The offers themselves
     # ride the report reply, so this is only the tick that acts on them.
     "jobs_poll_seconds": 20,
+
+    # -- THE TIMELINE CARDS AGENT (phase 2, 2026-08-30) -------------------
+    #
+    # OFF by default and off on every machine in the fleet: switching it on
+    # is switching on a second thing that drives Resolve, and only the one
+    # machine an editor stages cuts from wants it (creator-1 today). Flat
+    # keys, like `jobs_*` above and for the same reason.
+    #
+    # The role refuses to start if a standalone `reorder_web.py --agent` is
+    # already running here -- ONE Resolve client per machine, and it does not
+    # kill what a human started (docs/TIMELINE-CARDS-INTO-CCSYNC.md §3.1).
+    # The engine itself is imported from `jobs_mulcam_pipeline`, which the
+    # whisper runner already names.
+    "cards_agent": False,
+    # The vault the page reads. Defaults to `jobs_vault_root`; its own key
+    # exists so a machine can transcode for the fleet out of one root and
+    # serve cards out of another.
+    "cards_vault_root": "",
 }
 
 # Profile defaults applied by load_config when mode is set and the file does
@@ -1419,6 +1437,14 @@ ignored_resolve_projects = ["Untitled Project", "New Doc"]
 # jobs_idle_seconds = 300
 # jobs_skip_while_resolve_running = true
 # jobs_poll_seconds = 20
+
+# --------------------------------------------------- THE TIMELINE CARDS PAGE
+# Serve the Timeline Cards page from THIS machine's Resolve (phase 2). Off
+# everywhere by default. Turn it on only on the computer you stage cuts from,
+# and stop the standalone agent first -- one Resolve client per machine, or
+# scripting dies for all of them (docs/GOTCHAS.md section 15).
+# cards_agent = false
+# cards_vault_root = ""
 """
 
 

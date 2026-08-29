@@ -33,6 +33,7 @@ from . import broll_server as broll_server_mod
 from . import canon
 from . import capabilities as capabilities_mod
 from . import jobs_runner as jobs_runner_mod
+from . import timeline_cards_role as cards_role_mod
 from . import config as config_mod
 from . import crash_report
 from . import eula as eula_mod
@@ -1789,6 +1790,17 @@ class CompanionApp:
         except Exception:
             log.exception("failed to build the fleet job runner")
             self.job_runner = None
+
+        # The Timeline Cards role (TIMELINE-CARDS-INTO-CCSYNC.md phase 2):
+        # this machine's Resolve serving the cards page, through the
+        # dashboard's tunnel. Built on EVERY machine so `status()` can say why
+        # it is not running; it starts on exactly the ones with `cards_agent`
+        # set AND no standalone agent already holding Resolve.
+        self.cards_role: Any = cards_role_mod.build(
+            cfg,
+            identity_token_fn=lambda: self.identity.token,
+            halted_fn=lambda: bool(self.halt.active),
+        )
 
         self.watcher = TimelineWatcher(
             local_root=cfg["local_root"],
@@ -5213,6 +5225,8 @@ class CompanionApp:
                 resolve_running_fn=resolve_prefs_mod.resolve_is_running,
                 resolve_project_fn=lambda: getattr(
                     self.watcher, "last_resolve_project", None),
+                cards_agent_fn=(self.cards_role.report_block
+                                if self.cards_role is not None else None),
             )
         except Exception:
             log.exception("could not build the capabilities section")
@@ -7479,6 +7493,15 @@ class CompanionApp:
                 self.job_runner.start()
         except Exception:
             log.exception("failed to start the proxy generator")
+        # ...and the Timeline Cards role, behind its OWN try: it is the only
+        # thing here that can decide it must not run at all (a standalone
+        # agent already has Resolve), and that decision must never be able to
+        # stop the lanes starting.
+        try:
+            if self.cards_role is not None:
+                self.cards_role.start()
+        except Exception:
+            log.exception("failed to start the Timeline Cards role")
         # Next to it, and behind its own try for the same reason: it needs no
         # lanes and no sign-in (the clips are already on this disk), only a
         # project open in Resolve.
@@ -8533,6 +8556,14 @@ class CompanionApp:
                 self.job_runner.stop()
         except Exception:
             log.exception("failed to stop the fleet job runner")
+        # Beside it, and before the lanes: it is holding Resolve open for a
+        # page somebody may be looking at, and letting go is the polite half
+        # of "one Resolve client per machine".
+        try:
+            if self.cards_role is not None:
+                self.cards_role.stop()
+        except Exception:
+            log.exception("failed to stop the Timeline Cards role")
         try:
             if self.broll_ingestor is not None:
                 self.broll_ingestor.stop()

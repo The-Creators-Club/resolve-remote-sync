@@ -8343,7 +8343,10 @@ def api_claim_job(
     # Expire first: a job whose holder died is claimable by this caller, and
     # the alternative is waiting for a page load to notice (BROLL/ytdl both
     # sweep on the way in for the same reason).
-    for expired in db.expire_leases(conn, now):
+    settings = request.app.state.settings
+    for expired in db.expire_leases(
+            conn, now, pin=jobs_mod.can_pin(request.app),
+            cooldown_seconds=settings.jobs_cooldown_seconds):
         log.warning("job #%s: the lease held by %s/%s expired -- it is %s",
                     expired["id"], expired["claimed_by"], expired["claimed_machine"],
                     expired["state"])
@@ -8403,8 +8406,15 @@ def api_job_result(
         moved = db.finish_job(conn, job_id, editor, machine, payload.result, now)
         state = db.JOB_DONE
     else:
-        state = db.fail_job(conn, job_id, editor, machine, payload.error, now,
-                            retryable=payload.retryable)
+        state = db.fail_job(
+            conn, job_id, editor, machine, payload.error, now,
+            retryable=payload.retryable,
+            cooldown_seconds=request.app.state.settings.jobs_cooldown_seconds,
+            # RETRY, THEN PIN (§4.4 rule 5): with an executor in this
+            # container a media job the fleet cannot finish is handed to it
+            # rather than abandoned. `can_pin` is false when there is none,
+            # and then this is exactly phase 1's behaviour.
+            pin=jobs_mod.can_pin(request.app))
         moved = state is not None
     conn.commit()
     if not moved:

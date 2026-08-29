@@ -114,10 +114,18 @@ class Collector:
         settings: Settings,
         client: SyncthingClient | None = None,
         now_fn: Callable[[], str] = db.utcnow_iso,
+        pin_fn: Callable[[], bool] | None = None,
     ):
         self.settings = settings
         self.client = client or SyncthingClient.from_settings(settings)
         self.now_fn = now_fn
+        # IS THERE AN EXECUTOR IN THIS CONTAINER (phase 4, §4.4 rule 5). The
+        # prune cycle is one of the two places a job's retry budget can run
+        # out (the other is the claim route), and both have to reach the same
+        # verdict: pinned where there is a worker, abandoned where there is
+        # not. A collector built with no answer says no, which is phase 1's
+        # behaviour.
+        self.pin_fn = pin_fn or (lambda: False)
         self._stop = threading.Event()
         # nudge(): the loop's sleep is interrupted and these kinds run on the
         # next wake (<= ~5s) instead of waiting out their intervals. Ticking
@@ -1838,7 +1846,13 @@ class Collector:
             db.replace_missing_files(conn, project_id, device_row, files, truncated, now)
 
     def _run_prune(self, conn) -> None:
-        db.prune(conn, self.now_fn())
+        pin = False
+        try:
+            pin = bool(self.pin_fn())
+        except Exception:  # noqa: BLE001 - never let this stop the prune
+            log.debug("collector: could not ask whether jobs may be pinned",
+                      exc_info=True)
+        db.prune(conn, self.now_fn(), pin=pin)
 
     def _run_invariants(self, conn) -> str | None:
         """The continuous invariant checker (SYS-9, resilience sweep wave 5,

@@ -345,6 +345,22 @@ def max_running(kind: str, caps: Mapping[str, int] | None = None) -> int:
         return db.JOB_MAX_RUNNING_DEFAULT
 
 
+def can_pin(app: Any = None) -> bool:
+    """Is there an executor in this container at all? (§4.4 rule 5.)
+
+    The answer decides between `pinned` and `abandoned` for a job whose retry
+    budget is gone, and it must be FALSE by default: a job pinned into a
+    queue nothing drains is worse than an abandoned one, because an abandoned
+    one is visible and says so.
+    """
+    executor = getattr(getattr(app, "state", None), "pinned_executor", None)
+    try:
+        return bool(executor is not None and executor.available())
+    except Exception:                                              # noqa: BLE001
+        log.debug("jobs: could not ask the pinned executor", exc_info=True)
+        return False
+
+
 def idle_floor(kind: str) -> int:
     return int(JOB_IDLE_FLOOR_SECONDS.get(str(kind or ""), JOB_IDLE_FLOOR_DEFAULT))
 

@@ -40,6 +40,24 @@ def _parse_kind_limits(raw: str) -> dict:
     return out
 
 
+def _parse_roots(raw: str) -> dict:
+    """`"vault=/vault,media=/media"` -> `{"vault": "/vault", ...}`.
+
+    The FIRST '=' splits a pair so a Windows path keeps its colon, and a
+    trailing slash goes: '/media/' + '/Projects' is an absolute path that
+    os.path.join throws the prefix away for, whose symptom is every clip
+    quietly having no audio (cards.parse_media_map's lesson).
+    """
+    out: dict = {}
+    for pair in str(raw or "").replace(";", ",").split(","):
+        name, sep, path = pair.partition("=")
+        name, path = name.strip().lower(), path.strip()
+        if not sep or not name or not path:
+            continue
+        out[name] = path.rstrip("/\\") or path
+    return out
+
+
 def _looks_like_ed25519_pubkey(value: str) -> bool:
     """base64 of exactly 32 bytes (COMMERCIAL_READINESS.md item 4, 2026-08-17)."""
     import base64
@@ -410,6 +428,13 @@ class Settings:
     # (DASH_JOBS_COOLDOWN_SECONDS, 0 disables). Without it the machine with
     # the broken ffmpeg is first in the queue for every retry.
     jobs_cooldown_seconds: float = 120.0
+    # What THIS container calls the fleet's root names, for the jobs it runs
+    # itself when the fleet has given up on one (phase 4's pin):
+    # `DASH_JOBS_ROOTS="vault=/vault,media=/media"`. The vault and the tree
+    # fall back to values this deployment already has; `media` does not,
+    # because the footage share is a separate bind mount and guessing it from
+    # DASH_CARDS_MEDIA_MAP would be guessing which side of a pair is which.
+    jobs_roots: dict = field(default_factory=dict)
 
     # The Timeline Cards server this dashboard tunnels the agent protocol to
     # (docs/TIMELINE-CARDS-INTO-CCSYNC.md phase 2, 2026-08-30). Today that is
@@ -717,6 +742,7 @@ class Settings:
             jobs_max_running=_parse_kind_limits(
                 env.get("DASH_JOBS_MAX_RUNNING", "")),
             jobs_cooldown_seconds=num("DASH_JOBS_COOLDOWN_SECONDS", 120.0),
+            jobs_roots=_parse_roots(env.get("DASH_JOBS_ROOTS", "")),
             cards_server_url=env.get("DASH_CARDS_SERVER_URL", "").strip().rstrip("/"),
             cards_token=env.get("DASH_CARDS_TOKEN", "").strip(),
             # "1" and nothing else, matching DASH_BROLL_ENABLED.

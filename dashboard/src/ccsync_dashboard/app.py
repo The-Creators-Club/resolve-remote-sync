@@ -29,10 +29,10 @@ from fastapi.staticfiles import StaticFiles
 from starlette.requests import ClientDisconnect
 
 from . import (
-    ai_providers, api, assignments, auth, broll, cards, cards_tunnel, cli_tools,
-    crash_report,
-    dashboard_update, db, internal_sftp, local_users, music, notices, oidc,
-    release_feed,
+    ai_providers, api, assignments, auth, broll, cards, cards_exec, cards_tunnel,
+    cli_tools, crash_report,
+    dashboard_update, db, internal_sftp, jobs, local_users, music, notices,
+    oidc, release_feed,
     secrets_boot, sessions, setup_api, setup_routes, site_store, ui, ytdl,
 )
 from .collector import Collector
@@ -558,7 +558,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # without bound on /data otherwise. run_cycle() skips every
         # Syncthing-backed kind in that configuration (see
         # collector.SYNCTHING_FREE_KINDS).
-        collector = Collector(settings)
+        # THE DASHBOARD'S OWN EXECUTOR for jobs the fleet gave up on (phase
+        # 4, §4.4 rule 5, cards_exec.py). It exists only when /cards is
+        # mounted -- the Timeline Cards engine IS the worker -- and when
+        # there is none, a job whose retry budget runs out is abandoned
+        # exactly as it was in phase 1. Started before the collector because
+        # the collector's prune cycle asks it whether pinning is possible.
+        executor = cards_exec.PinnedExecutor(
+            settings, getattr(app.state, "cards_engine", None))
+        app.state.pinned_executor = executor
+        if executor.available():
+            conn = db.connect(settings.db_path)
+            try:
+                # A container that went down mid-encode left rows marked in
+                # hand with nothing running. Released here, at boot, because
+                # the window this covers is exactly the one a restart opens.
+                released = db.release_pinned_jobs(conn)
+                conn.commit()
+                if released:
+                    log.info("released %d pinned job(s) held by a previous "
+                             "run of this container", released)
+            except Exception:  # noqa: BLE001 - never block boot over a job
+                log.exception("could not release this container's pinned jobs")
+            finally:
+                conn.close()
+            executor.start()
+        else:
+            log.info("fleet jobs are never pinned here: %s", executor.why_not())
+        collector = Collector(settings, pin_fn=lambda: jobs.can_pin(app))
         collector.start()
         app.state.collector = collector
         # ...and the thing that notices when it stops (ops-efficiency-6,
@@ -601,6 +628,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # is not what ends the process -- it is what stops a sweep from
             # running against a database the next process is opening, and it
             # is the only shutdown hook a mounted app gets (cards.py).
+            # The pinned executor BEFORE the engine it hands work to: the
+            # other order would leave a job mid-ffmpeg against a stopped
+            # worker.
+            executor.stop()
             cards.stop_engine(app)
             if feed_poller is not None:
                 feed_poller.stop()

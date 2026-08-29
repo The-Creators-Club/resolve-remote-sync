@@ -6635,7 +6635,7 @@ def record_poll_run(
     )
 
 
-def prune(conn: sqlite3.Connection, now: str) -> None:
+def prune(conn: sqlite3.Connection, now: str, pin: bool = False) -> None:
     def cutoff(days: int = 0, hours: int = 0, seconds: int = 0) -> str:
         return (parse_iso(now) - dt.timedelta(days=days, hours=hours, seconds=seconds)).isoformat()
 
@@ -6729,7 +6729,7 @@ def prune(conn: sqlite3.Connection, now: str) -> None:
     # opened a page. Finished rows age out after JOBS_MAX_AGE_DAYS; queued
     # ones never do, because a job nobody can run is the thing phase 0 exists
     # to make visible.
-    expire_leases(conn, now)
+    expire_leases(conn, now, pin=pin)
     prune_jobs(conn, now, JOBS_MAX_AGE_DAYS)
     purge_nas_media_for_inactive(conn)
 
@@ -8063,6 +8063,119 @@ def fetch_running_jobs_map(
                          if isinstance(inputs, dict) else ""),
         }
     return out
+
+
+# ------------------------------------------------- the pinned worker (v45)
+#
+# §4.4 rule 5: "N attempts, then mode_lock-style pinning to the NAS worker so
+# a job that no machine can do does not ping-pong for ever". Phase 1 shipped
+# the first half and wrote down why it could not ship the second: an
+# abandoned job was visible, and there was no NAS-side executor to hand it
+# to. Phase 3 built one -- the Timeline Cards engine runs IN THIS CONTAINER
+# when /cards is mounted, with the vault and the footage share attached and
+# its own single ffmpeg worker.
+#
+# THE PIN IS ONE-WAY. A pinned job never goes back to the fleet: `queued_jobs`
+# only ever reads `queued`, so there is no path from here to an offer, and
+# that is deliberate. The fleet has already spent the budget on it; putting it
+# back would be the ping-pong the rule exists to end.
+#
+# The holder columns are re-used to mark "this container has it in hand"
+# (PIN_HOLDER), so a restart mid-encode leaves a row that says WHO, and the
+# same CAS discipline as a machine's claim decides between two ticks.
+
+PIN_HOLDER = "(dashboard)"
+
+
+def pinned_jobs(conn: sqlite3.Connection, limit: int = 50) -> list[dict[str, Any]]:
+    """Pinned and not yet in hand, oldest first. The queue's own order
+    (priority then age) does not apply: everything here has already waited
+    through a whole retry budget."""
+    return [job_row(r) for r in conn.execute(  # type: ignore[misc]
+        "SELECT * FROM jobs WHERE state=? AND (claimed_machine IS NULL "
+        "   OR claimed_machine='') ORDER BY id ASC LIMIT ?",
+        (JOB_PINNED, max(1, min(int(limit), 500))))]
+
+
+def take_pinned_job(
+    conn: sqlite3.Connection, job_id: int, now: str | None = None,
+) -> bool:
+    """Mark a pinned job as in hand HERE. -> did this caller get it.
+
+    A compare-and-set like every other write in this file, for the same
+    reason: two ticks of the executor (a restarted thread, a second worker
+    somebody adds later) must not both start the same ffmpeg."""
+    now = now or utcnow_iso()
+    cur = conn.execute(
+        """UPDATE jobs SET claimed_by=?, claimed_machine=?, heartbeat_at=?,
+                           updated_at=?
+            WHERE id=? AND state=?
+              AND (claimed_machine IS NULL OR claimed_machine='')""",
+        (PIN_HOLDER, PIN_HOLDER, now, now, int(job_id), JOB_PINNED))
+    return bool(cur.rowcount)
+
+
+def pin_progress(
+    conn: sqlite3.Connection, job_id: int, progress: Any = None,
+    now: str | None = None,
+) -> None:
+    """How far through the pinned worker is. NO LEASE IS EXTENDED: this job
+    is not on a lease, it is on this process, and inventing one would let
+    expire_leases hand a job back to a fleet that already gave up on it."""
+    now = now or utcnow_iso()
+    conn.execute(
+        "UPDATE jobs SET progress=COALESCE(?, progress), heartbeat_at=?, "
+        "       updated_at=? WHERE id=? AND state=?",
+        (clamp_progress(progress), now, now, int(job_id), JOB_PINNED))
+
+
+def finish_pinned_job(
+    conn: sqlite3.Connection, job_id: int, result: Mapping[str, Any] | None = None,
+    now: str | None = None,
+) -> bool:
+    """The pinned worker finished it. -> did the row move.
+
+    `done` and not a state of its own: the Timeline Cards client polling this
+    row from another server has no idea which machine made the file, and
+    should not have to -- the whole contract is "the row says done, now look
+    on disk" (§7b.4)."""
+    now = now or utcnow_iso()
+    cur = conn.execute(
+        """UPDATE jobs SET state=?, result_json=?, heartbeat_at=?, updated_at=?
+            WHERE id=? AND state=?""",
+        (JOB_DONE, _job_json(dict(result or {})), now, now,
+         int(job_id), JOB_PINNED))
+    return bool(cur.rowcount)
+
+
+def fail_pinned_job(
+    conn: sqlite3.Connection, job_id: int, error: str = "",
+    now: str | None = None,
+) -> bool:
+    """The last executor failed it too. ABANDONED, always: there is nowhere
+    else for it to go, and a pinned job that went back to the fleet would be
+    the ping-pong rule 5 exists to end."""
+    now = now or utcnow_iso()
+    cur = conn.execute(
+        """UPDATE jobs SET state=?, last_error=?, attempts=attempts+1,
+                           claimed_by=NULL, claimed_machine=NULL, updated_at=?
+            WHERE id=? AND state=?""",
+        (JOB_ABANDONED, str(error or "")[:2000], now, int(job_id), JOB_PINNED))
+    return bool(cur.rowcount)
+
+
+def release_pinned_jobs(conn: sqlite3.Connection, now: str | None = None) -> int:
+    """Put every in-hand pinned job back in the executor's queue. -> how many.
+
+    Called at BOOT, not on a timer: a container that went down mid-encode
+    leaves rows marked in-hand with nothing running, and the alternative to
+    releasing them here is a job that is pinned for ever with no worker. The
+    `.partial` discipline is what makes re-running one safe."""
+    now = now or utcnow_iso()
+    cur = conn.execute(
+        "UPDATE jobs SET claimed_by=NULL, claimed_machine=NULL, updated_at=? "
+        " WHERE state=? AND claimed_machine=?", (now, JOB_PINNED, PIN_HOLDER))
+    return int(cur.rowcount or 0)
 
 
 # ------------------------------------------------------------ cancel (v45)

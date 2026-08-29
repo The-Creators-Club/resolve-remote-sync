@@ -32,6 +32,7 @@ from . import music_ingest as music_ingest_mod
 from . import broll_server as broll_server_mod
 from . import canon
 from . import capabilities as capabilities_mod
+from . import jobs_runner as jobs_runner_mod
 from . import config as config_mod
 from . import crash_report
 from . import eula as eula_mod
@@ -1764,6 +1765,31 @@ class CompanionApp:
             # lanes keep working and the tray stays green.
             notify=self._notify_tray,
         )
+        # The fleet job runner (TIMELINE-CARDS-INTO-CCSYNC.md phase 0): work
+        # the DASHBOARD queued that this machine may do while nobody is at it.
+        # Its own thread and its own gate, exactly like the proxy generator
+        # and the two ingestors, and behind its own try for the same reason --
+        # a feature that runs when nobody is here must never be why a
+        # companion fails to construct.
+        self.job_runner: Any = None
+        try:
+            self.job_runner = jobs_runner_mod.JobRunner(
+                cfg,
+                editor_fn=self.editor_identity,
+                identity_token_fn=lambda: self.identity.token,
+                capabilities_fn=self.job_capabilities,
+                # THE SAME PROBE the capabilities section reports from: what
+                # this machine tells the dashboard and what it will agree to
+                # do must not be two different answers.
+                idle_probe=self._jobs_idle_probe,
+                resolve_running_fn=resolve_prefs_mod.resolve_is_running,
+                halted_fn=lambda: bool(self.halt.active),
+                notify=self._notify_tray,
+            )
+        except Exception:
+            log.exception("failed to build the fleet job runner")
+            self.job_runner = None
+
         self.watcher = TimelineWatcher(
             local_root=cfg["local_root"],
             canonical_prefix=cfg["canonical_prefix"],
@@ -1819,6 +1845,14 @@ class CompanionApp:
                 self.broll_ingestor.note_report_response(resp)
             except Exception:
                 log.exception("broll_ingest.note_report_response failed")
+        # Which fleet jobs this machine has been OFFERED (phase 0). Ids only:
+        # the claim is a separate call whose compare-and-set is what actually
+        # decides, so a duplicated or stale reply costs nothing.
+        if self.job_runner is not None:
+            try:
+                self.job_runner.note_report_reply(resp)
+            except Exception:
+                log.exception("jobs_runner.note_report_reply failed")
         # The fleet halt rides the same reply (item 9, 2026-08-17) -- see
         # _apply_fleet_halt for why it is not its own request.
         self._apply_fleet_halt(resp)
@@ -7415,6 +7449,11 @@ class CompanionApp:
             # and nothing to do on a machine nobody drops music on.
             if self.music_ingestor is not None:
                 self.music_ingestor.start()
+            # ...and the fleet job runner: same shape again, and it does
+            # nothing at all until a dashboard offers this machine work it
+            # has the capability and the idleness to take.
+            if self.job_runner is not None:
+                self.job_runner.start()
         except Exception:
             log.exception("failed to start the proxy generator")
         # Next to it, and behind its own try for the same reason: it needs no
@@ -8462,6 +8501,15 @@ class CompanionApp:
         # a llama-server holding 4-12 GB of VRAM, and an rclone pushing a 40 GB
         # original. Its batch's lease then expires and this machine re-claims
         # it from the last checkpoint on the next start (plan §6).
+        # BEFORE the ingestors, and first among the job-shaped things: it may
+        # be holding a GPU with a whisper child on it, and its lease expires
+        # by itself -- so stopping it hands the job back to the fleet rather
+        # than losing it.
+        try:
+            if self.job_runner is not None:
+                self.job_runner.stop()
+        except Exception:
+            log.exception("failed to stop the fleet job runner")
         try:
             if self.broll_ingestor is not None:
                 self.broll_ingestor.stop()

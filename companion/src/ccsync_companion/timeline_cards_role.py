@@ -72,7 +72,6 @@ STATE_RUNNING = "running"
 # The engine's own long-poll ceiling (cards config AGENT_WAIT_S). The
 # dashboard clamps to the same number.
 AGENT_WAIT_SECONDS = 25.0
-HTTP_TIMEOUT_SECONDS = 90.0
 # How often the standalone-agent probe is re-run while the role is refusing.
 # It shells out, so not per tick.
 PROBE_CACHE_SECONDS = 60.0

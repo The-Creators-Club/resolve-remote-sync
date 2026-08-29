@@ -46,7 +46,7 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
-from . import library, resolve_bridge, script_server
+from . import resolve_bridge, script_server
 
 log = logging.getLogger("ccsync.cards")
 
@@ -113,13 +113,11 @@ class CardsBridge:
         connect_fn: Optional[Callable[[], Any]] = None,
         ready_fn: Optional[Callable[[], bool]] = None,
         items_fn: Optional[Callable[[str], Optional[list[dict]]]] = None,
-        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.cfg = cfg or {}
         self._connect = connect_fn or resolve_bridge.connect
         self._ready = ready_fn or script_server.ready_to_connect
         self._items = items_fn
-        self._clock = clock
         self._stats_lock = threading.Lock()
         self._takes = 0
         self._total_held = 0.0

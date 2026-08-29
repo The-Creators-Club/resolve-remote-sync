@@ -80,9 +80,27 @@ jobs:
           set -euo pipefail
           version="v1.75.0"
           sha256="35e8f2a666ce789b29111db0dd843ddabc0d59c6b609d07bcaae5d1a07cba6f8"
-          url="https://downloads.rclone.org/$version/rclone-$version-osx-arm64.zip"
+          # TWO SOURCES, ONE CHECKSUM (2026-08-29). downloads.rclone.org went
+          # down mid-afternoon and took every CI run AND both release builds
+          # with it, before a single test had run: four red runs about
+          # somebody else's web server. The GitHub release carries the
+          # byte-identical asset (verified: same sha256), so it is tried
+          # second. The pin is still the trust anchor - a mirror that serves
+          # different bytes fails exactly as loudly as a corrupt download.
+          asset="rclone-$version-osx-arm64.zip"
           zip="$RUNNER_TEMP/rclone.zip"
-          curl -fsSL "$url" -o "$zip"
+          ok=""
+          for url in "https://downloads.rclone.org/$version/$asset"                      "https://github.com/rclone/rclone/releases/download/$version/$asset"; do
+            if curl -fsSL --connect-timeout 20 --max-time 300 "$url" -o "$zip"; then
+              ok="yes"
+              break
+            fi
+            echo "rclone: $url unreachable -- trying the next source" >&2
+          done
+          if [ -z "$ok" ]; then
+            echo "could not download rclone from any source" >&2
+            exit 1
+          fi
           actual="$(shasum -a 256 "$zip" | awk '{print $1}')"
           if [ "$actual" != "$sha256" ]; then
             echo "rclone download hash mismatch: expected $sha256, got $actual" >&2

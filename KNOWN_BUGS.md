@@ -3090,6 +3090,17 @@ macOS runner. The fake now behaves like a real child: it blocks up to
 beyond its own fix - **a wave-1 change to production code silently disarmed
 a fake that four tests rely on**, and only a slower machine ever said so.
 
+**...and then rclone.org fell over.** The very next run, and both release
+builds with it, went red at `install pinned rclone` before a single test
+ran: `curl: (28) Failed to connect to downloads.rclone.org port 443 after
+75025 ms`. Not the runners - the host was unreachable from the base rig too.
+Every CI run and every release build hung off one third-party web server
+being up. All four steps now try `downloads.rclone.org` first and the
+byte-identical GitHub release asset second (verified here: both are
+sha256 `35e8f2a6...` for osx-arm64). The pin is unchanged and is still the
+trust anchor, so a mirror serving different bytes fails exactly as loudly as
+a corrupt download would.
+
 **The lesson, and it is the CI one.** "Green on the base rig" is a claim
 about one Windows box. Three of these four had been broken for a day or more
 and two of them were latent races that this hardware simply kept winning.

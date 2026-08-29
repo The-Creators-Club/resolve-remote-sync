@@ -127,9 +127,30 @@ jobs:
         run: |
           $version = "v1.75.0"
           $sha256  = "203581f0a7baeae873f2347483a798c79e2eaf5c384a4e9d866aa374f1c89ac0"
-          $url     = "https://downloads.rclone.org/$version/rclone-$version-windows-amd64.zip"
+          # TWO SOURCES, ONE CHECKSUM (2026-08-29). downloads.rclone.org went
+          # down mid-afternoon and took every CI run AND both release builds
+          # with it, before a single test had run: four red runs about
+          # somebody else's web server. The GitHub release carries the
+          # byte-identical asset (verified: same sha256), so it is tried
+          # second. The pin is still the trust anchor - a mirror that serves
+          # different bytes fails exactly as loudly as a corrupt download.
+          $asset   = "rclone-$version-windows-amd64.zip"
+          $urls    = @(
+            "https://downloads.rclone.org/$version/$asset",
+            "https://github.com/rclone/rclone/releases/download/$version/$asset"
+          )
           $zip     = Join-Path $env:RUNNER_TEMP "rclone.zip"
-          Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing -TimeoutSec 600
+          $ok = $false
+          foreach ($url in $urls) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing -TimeoutSec 300 -ErrorAction Stop
+              $ok = $true
+              break
+            } catch {
+              Write-Host "rclone: $url unreachable ($($_.Exception.Message)) -- trying the next source"
+            }
+          }
+          if (-not $ok) { throw "could not download rclone from any source" }
           $actual = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLower()
           if ($actual -ne $sha256) {
             throw "rclone download hash mismatch: expected $sha256, got $actual"

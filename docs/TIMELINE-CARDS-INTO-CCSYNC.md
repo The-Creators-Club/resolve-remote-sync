@@ -1235,6 +1235,382 @@ until the work above is done.
 
 ---
 
+## 7d. PHASE 3 BUILT, ccsync side (2026-08-30)
+
+Status: §6's phase 3 is **built on the CC Sync side** on branch
+`timeline-cards-port`. The page, its engine and its Claude features are hosted
+IN the dashboard container at `/cards`, behind the dashboard login, on the
+same contract `/broll` and `/music` have. **Timeline Cards itself is still
+untouched**, and -- the good surprise of this phase -- it barely needs to
+change: §7e's audit found the page is ALREADY document-relative, so the "real,
+mechanical, boring day of work" §3.2 problem 2 predicted does not exist.
+Nothing is deployed and nothing is retired: the standalone `timeline-cards`
+custom app on :8800 keeps serving, and the tunnel keeps forwarding to it until
+a dashboard is deployed with the mount configured.
+
+### What exists now
+
+| Piece | Where |
+|---|---|
+| the mount | `dashboard/src/ccsync_dashboard/cards.py` -- `mount_cards()`, the tri-state, `build_engine`, `CardsGate`, `stop_engine`, `health_block` |
+| the shim | `cards_wsgi.py` -- one `BaseHTTPRequestHandler` class -> one STREAMING WSGI app; `a2wsgi.WSGIMiddleware` makes it ASGI |
+| the Claude seam | `cards_ai.py` -- `Runner.run()/status()` over `ai_providers`, injected as `engine.claude_runner` (§7d.1) |
+| its settings | `settings.py` -- `cards_enabled`, `cards_src`, `cards_vault_root`, `cards_root`, `cards_project`, `cards_db_{host,name,write_allow,backups}`, `cards_media_map`, beside phase 2's `cards_server_url`/`cards_token` |
+| the gates | `app.py` -- the mount after the routers, the JSON-401 prefixes (`/cards/api/`, `/cards/audio`, `/cards/video`, `/cards/peaks`), `_CSRF_ORIGIN_ONLY_PREFIXES`, and `cards.stop_engine(app)` in the lifespan's `finally` |
+| the tunnel, in-process | `cards_tunnel.py` -- `local_engine(request)`; with a mount the three routes call `agent_state` / `agent_pending` / `agent_result` directly, with no HTTP hop and no upstream token |
+| the health line | `GET /api/v1/health` -> `cards: {status, detail, root, agent, claude:{ok,why}}`, authenticated callers only |
+| the nav | `[ CARDS ]` in the drawer, `/cards/` **with the trailing slash**, only when the mount fully took |
+| the deploy | `dashboard/deploy/compose.yaml` + `compose.image.yaml` (the `DASH_CARDS_*` block, `/cards-app`), `server/install_dashboard_app.py` (`[timeline_cards]`, the ship step, the two per-site mounts, `group_add`), `site.example.toml`, `docs/DOCKER.md` "The Timeline Cards mounts" |
+| the dependency | `a2wsgi>=1.10`, pinned in `deploy/requirements.lock` at 1.10.10, in pyproject's new `cards` extra and in `test_hardening`'s group list |
+
+Tests: `dashboard/tests/test_cards_mount.py` (31 -- the tri-state, the gate,
+the shim, the Range pass-through, the in-process tunnel, the shutdown hook,
+the health line) and `dashboard/tests/test_cards_page_prefix.py` (5, against
+the REAL checkout when one is reachable: §7e's audit, and our media-map parser
+diffed against the real `split_pairs` in a subprocess).
+
+### The tri-state, and what each state means
+
+`mount_cards()` returns `(status, detail)` and never raises. The order of the
+checks IS the diagnosis, and each answer names the variable to fix:
+
+| state | when | `detail` |
+|---|---|---|
+| `disabled` | `DASH_CARDS_ENABLED` is not `1` (and no `CARDS_SRC` in the environment) | "DASH_CARDS_ENABLED is not 1" |
+| `disabled` | enabled, no checkout configured | "no Timeline Cards checkout is configured (DASH_CARDS_SRC)" |
+| `disabled` | enabled, no vault configured | "no vault is mounted here (DASH_CARDS_VAULT_ROOT)" |
+| `absent` | the checkout path is not a directory | "the configured checkout is not there (\<path\>)" |
+| `absent` | the vault path is not a directory **in this container** | "the vault root is not mounted (\<path\>)" |
+| `absent` | the import raised | "the checkout did not import (ImportError: ...)" |
+| `absent` | the engine's constructor or `start()` raised | "the engine did not start (...)" |
+| `mounted` | -- | "serving \<vault root\>" |
+
+`disabled` is "this deployment did not ask for it" and logs at INFO;
+`absent` is "it was asked for and something is not there" and logs at WARNING.
+There is no fourth `degraded` state, unlike b-roll's: an engine that could not
+be built is not mounted at all, because there is nothing to serve requests
+with.
+
+### Where the engine gets its settings
+
+`build_engine()` constructs exactly what `server.main`'s `--remote-agent`
+branch does -- `ProjectAgentEngine(project, root, token, db_host=, db_name=,
+write_allow=, backup_dir=)` -- from `DASH_CARDS_*`, one dashboard variable for
+each `CARDS_*` the standalone container takes. Then three assignments the
+command line makes too: `access_key`, `media_map`, and (new) `claude_runner`.
+
+Two of those are decisions rather than translations:
+
+* **`CARDS_KEY` IS RETIRED.** `engine.access_key = None`, explicitly, with no
+  setting behind it. §7.4 said the session cookie is strictly better auth than
+  `?key=...` in a URL; under this mount it is also the ONLY auth, and a second
+  gate could only ever disagree with the first. **This is the answer to §7.4's
+  open question, and it makes the phone case sign in to CC Sync once.**
+* **`/api/restart` IS BLOCKED BY THE GATE.** In the standalone server that
+  route closes the listener and re-execs; `restart_server` ends in
+  `os._exit(0)`. In this process that is the dashboard, and the whole fleet
+  would go down because somebody pressed the reload button on a page. The
+  gate answers it `{"error": "...cannot restart itself..."}`, and the
+  handler's `self.server` is an object whose `shutdown()` refuses and logs --
+  two locks, because this one is unrecoverable.
+
+### The shim, and why not a router rewrite
+
+§3.2 problem 1's decision stands: **keep the ~70 routes byte for byte.**
+`cards_wsgi.handler_wsgi()` builds the handler with `__new__` (there is no
+socket, and exactly one request per call), feeds it a synthesised request head
+plus the WSGI input as its `rfile`, and gives it a `wfile` that parses the
+status line and headers out of the first bytes, calls `start_response` once,
+and hands every later chunk to the WSGI `write()` callable.
+
+**IT STREAMS.** a2wsgi's `write()` puts each chunk on an asyncio queue of ten
+and blocks until the event loop has taken it, so a 480p proxy of an hour-long
+interview flows through at the browser's pace instead of into this container's
+memory -- the same backpressure the real socket gave it. `Date` and `Server`
+are dropped (uvicorn writes its own; two `Date` headers is a malformed
+response). A handler that raises is a 500 and a handler that writes nothing is
+a 502, neither of which can happen today and both of which now have an answer
+instead of a hung request.
+
+`WSGIMiddleware(..., workers=24)` rather than its default ten: one open page
+holds a poll and a media stream at once and a phone on the sofa is a second
+pair, and a full pool is a stall with no error message.
+
+### CSRF: exempt from the TOKEN, not from the ORIGIN
+
+`/broll/`, `/music/` and `/ytdl/` are outright CSRF-exempt prefixes because
+their SPAs do not send the token yet. `/cards/` is not simply added to that
+list: its POSTs delete clips, trim them and run conforms in somebody's open
+timeline. It is exempt from the token and still subject to `_origin_mismatch`,
+which is the half that actually stops the attack -- a browser attaches
+`Origin` to every cross-site POST. `_CSRF_ORIGIN_ONLY_PREFIXES` disappears the
+day the page sends `X-CSRF-Token`.
+
+### The tunnel is in-process when the page is here
+
+Phase 2's three routes are unchanged in shape, credential and name rule. They
+now ask `app.state.cards_engine` first: with a mount they call the engine
+directly (`agent_state` / `agent_pending` / `agent_result`, each followed by
+`tick()`, which is `handler.py`'s own sequence, including its
+`{"error": str(exc)}`-with-a-200 contract and its `unhand()` on an answer that
+cannot leave the process). With no mount they forward to
+`DASH_CARDS_SERVER_URL` exactly as before -- which is what lets both origins
+run side by side during the transition (§7.4).
+
+### Decisions this build made, that the plan left open
+
+* **The checkout is a MOUNT and a SETTING, not a `PYTHONPATH` entry.** The
+  other three sub-apps are on `PYTHONPATH` in `run.sh`; this tree is another
+  repo's, is never in the vendor image and is never in an over-the-air code
+  bundle, and `select_code_root.py` re-derives that path list on every
+  image-mode boot. `cards.py` appends `DASH_CARDS_SRC` to `sys.path` itself,
+  so the path entry and the mount are one decision instead of two that can
+  disagree. It is also the only code mount that survives IMAGE MODE.
+* **`CARDS_SRC` in the environment is taken as consent.** A developer pointing
+  it at a checkout should not also have to set the enable flag; a deployment
+  never has it set.
+* **No identity headers.** `BrollGate` and `MusicGate` mint
+  `X-CCSync-User`/`X-CCSync-Admin` from the session because those sub-apps
+  make per-user decisions. Timeline Cards has no per-editor state -- the cut,
+  the plans and the notes are one document per episode that everyone with a
+  login is editing together -- so there is nothing here for a header to say,
+  and a header the sub-app trusts because we sent it is not something to add
+  speculatively.
+* **The vault being absent is `disabled`, not `degraded`.** "Blank = /cards
+  says no vault mounted" was the requirement; an engine rooted at a path that
+  is not there would answer every request with an empty episode, which is
+  worse than a mount that is honestly off.
+* **The Claude seam is an OBJECT injected at mount time**, not a config flag
+  the other side reads (§7d.1). The dashboard is where the credential, the
+  chain and the site's feature flag live; the engine should ask, not decide.
+* **The fleet (`FleetJobs`, §7b) is NOT wired up in the mounted engine.**
+  Submitting a job is an admin-session call and this engine would be signing
+  in to the dashboard it is running inside. The in-process ffmpeg worker --
+  which §7b.4 keeps as the fallback anyway -- is what makes the proxies here.
+  Worth revisiting only when somebody wants the NAS's `/cards` to farm work
+  out to the fleet as well.
+
+### What is NOT there yet
+
+* **Nothing is deployed and nothing is retired.** Dashboard **0.7.21**. The
+  `timeline-cards` custom app still runs on :8800; its retirement is a runbook
+  step below, deliberately not done.
+* **`claude-run` as a FLEET JOB is still not built** (§7b's fourth kind), and
+  after this phase it is unlikely ever to be: the answer is a dashboard-side
+  executor, and this is it.
+* **The page still polls.** Mounting it in-process removed the HTTP hop for
+  the AGENT protocol, not for the browser: `/cards/api/state?v=N` is still one
+  request a second per open page, now against the dashboard's event loop with
+  24 shim workers behind it.
+* **No admin view of the mount** beyond the health line and the nav link.
+* **The Timeline Cards side has one line to change** (§7e) and one seam to
+  implement (§7d.1), and both are optional in the sense that the mount works
+  without them -- with `scope: "/"` an installed home-screen app claims the
+  whole dashboard origin, and with no `claude_runner` the three Claude
+  features report themselves unavailable in a container that has no CLI.
+
+### What Alex has to do before any of it runs
+
+1. **Chown the vault on the NAS**, once, before the first deploy with
+   `[timeline_cards]` set: `docs/DOCKER.md`, "The chown, and why it is needed
+   BEFORE the first deploy". `group_add` without it is a page whose every save
+   is refused, and the symptom is only visible in the container log.
+2. **Decide the Claude credential**: an `ANTHROPIC_API_KEY` on Settings -> AI
+   providers (the vendor path, metered), or `[features] ai_cli_providers = true`
+   plus installing the CLI from that page (the subscription path, whose ToS
+   consequences are the customer's own -- `CLI_TOS_NOTE`). With neither,
+   translate / semantic search / summaries stay dimmed and say why.
+3. **Fill in `[timeline_cards]` in `site.toml`** -- `src`, `vault_host`,
+   `media_host` + `media_map`, `db_host`/`db_name`, and `enabled = true` -- and
+   deploy the dashboard (0.7.21).
+4. **Retire the custom app, when the mounted one has been used for real**
+   (and not before -- see the runbook step below).
+
+### The runbook step for retiring `timeline-cards` (NOT DONE)
+
+In this order, on the NAS:
+
+1. Open `/cards` on the dashboard and use it for a session: the cards, the
+   lane's audio and video, a plan save, a translate run, and one edit through
+   an agent (which now reaches Resolve via `/cards/agent/*` with no
+   `CARDS_TOKEN` on the editor's machine at all).
+2. Point the phone at `https://<dashboard>/cards/` and re-add it to the home
+   screen. The old install's `start_url` is the other origin and it will keep
+   working -- which is the point of leaving the app up until this step.
+3. Only then: stop and delete the `timeline-cards` custom app in the TrueNAS
+   UI. Its `/data` volume (`cards_pick.json`, `cards_mirror.json`,
+   `cards_ui.json`, `library_backups/`) is **per-server UI state with no
+   owner and no migration** (§2.3) -- the mounted server starts with its own,
+   so expect the picker and the mirror to be empty once, not wrong.
+4. Clear `DASH_CARDS_SERVER_URL` from the dashboard's compose (or
+   `[timeline_cards] server_url`) so the three tunnel routes stop offering to
+   forward to a container that is gone.
+
+---
+
+## 7d.1 The Claude seam (the spec for the Timeline Cards side)
+
+Written so it can be implemented from this document alone, in
+`multicam_pipeline/cards/library_engine.py`. **The mount already injects it;
+until this lands, the engine's own `_run_claude` is what runs -- and in this
+container it finds no `claude` on PATH, so `claude_status()` says so and the
+page dims the three buttons. That is the honest failure and it is the state
+today.**
+
+### The seam
+
+```python
+class LibraryEngine:
+    claude_runner = None      # class attribute; the mount sets an instance one
+```
+
+One optional attribute. When it is None, EVERYTHING BELOW IS UNCHANGED -- the
+CLI path stays exactly as it is, which is what `reorder_web.py 8800` on the PC
+and the standalone container both keep using.
+
+### What the runner is
+
+```python
+runner.run(prompt: str, model: str = "", timeout: float = 900,
+           think: bool = True, json_out: str = "") -> dict
+runner(...)                     # __call__ is run
+runner.status() -> {"ok": bool, "why": str}
+```
+
+`run()` returns, always, never raising across the seam:
+
+```python
+{"ok": True,  "text": "<the model's reply>", "data": <parsed JSON or None>,
+ "provider": "anthropic_api" | "claude_code", "error": ""}
+{"ok": False, "text": "", "data": None, "provider": "...", "error": "<one sentence>"}
+```
+
+### The three call sites
+
+| method | today | with a runner |
+|---|---|---|
+| `_run_claude(prompt, model, timeout, think)` | `subprocess.run(claude_argv() + ...)` -> `CompletedProcess` | `self.claude_runner.run(prompt, model, timeout, think)`; on `ok` behave as `returncode == 0` with `stdout = text`, on failure raise `RuntimeError(error)` |
+| `_run_claude_json(prompt, out, model, timeout)` | run agentically, then `json.load(open(out))` | `run(prompt, model, timeout, json_out=out)`; on `ok` return `data` (the file at `out` has also been written), on failure raise `RuntimeError(error)` |
+| `claude_status()` | is there a `claude` on PATH | `self.claude_runner.status()` when there is one |
+
+`_run_claude` is a `@classmethod` today and the runner is per-instance, so it
+becomes an instance method (or takes the runner as an argument). Its two
+`CompletedProcess`-shaped uses -- `proc.stdout` and `proc.returncode` in
+`_tx_chunk` and `start_summary` -- are the only things that have to move.
+
+### The model names it may pass
+
+Unchanged, and passed straight through: `TX_MODEL =
+"claude-haiku-4-5-20251001"` (translate), `SEM_MODEL = SUM_MODEL =
+"claude-sonnet-5"` (semantic search, summaries). A name this API does not know
+comes back as `{"ok": false, "error": "this API does not know the model
+claude-sonnet-5: ..."}` -- with the name in it, because the alternative is a
+bare `NotFoundError` in a worker thread.
+
+### The JSON contract, and the one thing that changes
+
+**THE MODEL NEVER GETS FILE TOOLS.** `_run_claude_json`'s prompt asks for an
+agentic run that writes a file; the runner instead appends one line to the
+prompt --
+
+```
+OUTPUT: reply with the JSON object alone -- no prose before or after it, no
+code fence. (If you have file tools you may also write it to <path>; the reply
+is what is read.)
+```
+
+-- parses the first `{...}` block out of the reply, and writes `<path>` itself
+(`.partial` then `os.replace`). A file the CLI wrote anyway is honoured first,
+because it is the one the model meant. So `out` exists and parses on every
+`ok`, whichever provider answered, and an agent binary with filesystem tools
+never runs inside a container that mounts the vault read-write.
+
+Which means the SEM_PROMPT / SUM_PROMPT wording does not have to change --
+but if it is ever reworded, "write your answer to the file" must stay
+acceptable rather than required.
+
+### Errors, and what the page shows
+
+`error` is one sentence, already phrased for a human, and the existing
+`{"error": ...}` slots the page reads are where it goes:
+
+* no credential -> "no provider has a working credential" (the site's chain
+  found nothing);
+* a non-Claude provider -> "this site's AI provider is OpenAI API, and
+  Timeline Cards' translate, semantic search and summaries are written for
+  Claude...";
+* a refused key -> "the site's ANTHROPIC_API_KEY was refused for model X: ...";
+* a CLI that is not signed in -> "Claude Code exited 1: ..." with its own
+  stderr.
+
+`status()` NEVER PROBES (a CLI probe is a real one-token call), so it is safe
+on the state publish that happens every second.
+
+---
+
+## 7e. The URL spec for the page (the audit, and it is nearly empty)
+
+§3.2 problem 2 predicted "a real, mechanical, boring day of work... the single
+most likely thing to be skipped and then discovered live". **It was already
+done.** Audited on 2026-08-30 against
+`multicam_pipeline/cards/page/` in the fork, counting every quoted, backticked
+or parenthesised URL beginning `/api`, `/audio`, `/video`, `/peaks`, `/agent`,
+`/icon.svg` or `/manifest.webmanifest`:
+
+| file | absolute URLs |
+|---|---|
+| `cards.html` | **0** (`<link rel="manifest" href="manifest.webmanifest">`) |
+| `cards.css` | **0** |
+| `01-state.js` | **0** (every fetch is `fetch('api/...')`) |
+| `02-markers.js` .. `10-look.js` | **0** each |
+| **total in `page/`** | **0** |
+
+The one absolute URL in the whole page is not in `page/` at all:
+
+| file | line | what | fix |
+|---|---|---|---|
+| `page.py` `render_manifest()` | `"scope": "/"` | claims the WHOLE dashboard origin for the installed home-screen app | `"scope": "."` |
+
+`start_url` is already `"."` and the icons are already `"icon.svg"`, both
+relative, and for the right reason (an install had to keep whatever `?key=`
+the browser was let in with). `scope` was missed because nothing before this
+served the page under a prefix: a scope of `/` is legal while the page IS the
+origin, and under `/cards/` it means an installed app that captures every
+dashboard URL.
+
+### The test the Timeline Cards side should add
+
+The dashboard already carries this check, so the TC side's copy is a mirror
+rather than a discovery: `dashboard/tests/test_cards_page_prefix.py`. It skips
+when no checkout is reachable and runs against the real one otherwise
+(`CARDS_REAL_SRC`, else this machine's fork), and it is GREEN today except for
+one `xfail` -- the manifest's `scope`, which flips green the day that
+character changes.
+
+Over there it should be `tests/test_mounted_prefix.py`, matching what
+`broll/web` and `music/web` each carry:
+
+```python
+ABSOLUTE = re.compile(r"""["'`(]\s*(/(?:api|audio|video|peaks|agent"""
+                      r"""|icon\.svg|manifest\.webmanifest)[\w./?=&-]*)""")
+
+def test_the_page_is_document_relative():
+    for name in PAGE_FILES:                    # cards.html, cards.css, 01..10
+        assert not ABSOLUTE.findall(read(name)), name
+
+def test_the_manifest_scope_is_relative():
+    assert json.loads(render_manifest())["scope"] == "."
+```
+
+**Why it must exist over there and not only here**: the page's goldens
+(`tests/golden/page.html`, byte-identical, `.gitattributes eol=lf`) make any
+edit to `page/` a deliberate act -- but they pin the bytes, not the shape, so
+a new `fetch('/api/whatever')` would sail through a golden UPDATE without
+anybody noticing, and the failure is invisible until somebody opens the page
+under a prefix and it says "connecting..." for ever.
+
+---
+
 ## 8. Verdict
 
 **Do it, in this order, and do not skip phase 0.**

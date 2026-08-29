@@ -53,6 +53,20 @@ run alongside the tray app — it would hold port 8899.
   the library is at `P:\Assets\Music` there. **Editors need a republished
   companion before any of this exists for them** — the deployed build 404s on
   `/music/*`.
+- The dashboard mounts **Timeline Cards** at `/cards`
+  (`dashboard/src/ccsync_dashboard/cards.py`, 2026-08-30) on the same contract
+  again — in-process, behind the login, tri-state, never fatal. Three things
+  make it unlike the other three mounts and all three are load-bearing: its
+  code is **another repo's checkout** (`DASH_CARDS_SRC` → `/cards-app`,
+  appended to `sys.path` by the mount rather than put on `PYTHONPATH`, because
+  it is never in the image or an OTA bundle); its app is a
+  `BaseHTTPRequestHandler`, not ASGI, so `cards_wsgi.py` + `a2wsgi` carry its
+  ~70 routes byte for byte (**do not "tidy" them into an APIRouter**); and it
+  owns background threads that `cards.stop_engine` must stop with the app.
+  `POST /cards/api/restart` is refused at the gate — in the standalone server
+  it re-execs the process, and here that process is the dashboard.
+  Its three Claude features go through `ai_providers` (`cards_ai.py`), never a
+  bundled CLI.
 - **The music web package is `musicweb`, deliberately NOT `app`.** `broll/web`
   is deployed by putting its tree on PYTHONPATH and importing it as top-level
   `app`; a second package of that name would collide in `sys.modules` and one

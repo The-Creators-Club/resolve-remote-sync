@@ -1254,6 +1254,49 @@ read timeout is that plus 20 s. The route is a blocking `def`, so it runs in
 the threadpool: one worker per connected agent, and there is one agent per
 machine.
 
+**Since phase 3 (2026-08-30) there may be no upstream at all.** When the page
+is mounted in this container (`DASH_CARDS_ENABLED=1`, below), these three
+routes call the engine IN THIS PROCESS -- no HTTP hop, no `X-Cards-Token`, and
+`DASH_CARDS_SERVER_URL`/`DASH_CARDS_TOKEN` are not read. Nothing else about
+them changes: same paths, same credential, same verified-identity name rule,
+same `{"error": ...}`-with-a-200 for an engine that refused. A dashboard
+WITHOUT the mount still forwards to the separate cards server exactly as
+described above, which is what lets both origins run side by side while the
+old app is retired.
+
+### 6e. `/cards/*` -- the Timeline Cards page (phase 3)
+
+The whole cut, mounted in-process at `/cards` behind the dashboard login
+(`docs/TIMELINE-CARDS-INTO-CCSYNC.md` §7d), on the same contract as `/broll`
+and `/music`. **Its ~70 routes are Timeline Cards' own and are not documented
+here** -- they are a `BaseHTTPRequestHandler` in that repo, served byte for
+byte through a WSGI shim, and this document would go stale the first time
+somebody added one over there.
+
+What IS this repo's contract:
+
+| | |
+|---|---|
+| auth | the dashboard session, for every path under `/cards/` except the three `/cards/agent/*` suffixes above. There is **no `?key=`**: the standalone server's browser gate is retired under this login |
+| a logged-out fetch | **401 JSON** for `/cards/api/`, `/cards/audio`, `/cards/video`, `/cards/peaks` (the page's fetches and its `<audio>`/`<video>` srcs); a 303 to `/login` for the document itself |
+| CSRF | the page sends no token, like `/broll` and `/ytdl`, so the POSTs are exempt from the TOKEN -- but **not** from the ORIGIN check. A cross-site POST to `/cards/api/delete` is a 403 |
+| `/cards` with no slash | **307 to `/cards/`**. Every URL in the page is document-relative, so without the slash they would resolve against the dashboard root |
+| `POST /cards/api/restart` | **refused** with `{"error": "...cannot restart itself..."}`. In the standalone server that route re-execs the process; here that process is the dashboard |
+| `GET /cards/agent/<anything else>` | 404 naming the three real routes |
+| Range requests | passed through unchanged: `/cards/audio?mp=...` answers 206 with `Content-Range`, `ETag` and `If-Range` exactly as the standalone server does, and the body streams rather than buffering |
+| when it is not mounted | every path under `/cards/` except the agent three is a 404, and `GET /api/v1/health` says why in one sentence |
+
+`GET /api/v1/health` (authenticated) carries the mount's state:
+
+```json
+"cards": {"status": "mounted|absent|disabled", "detail": "<one sentence>",
+          "root": "/vault", "agent": true,
+          "claude": {"ok": false, "why": "no provider has a working credential"}}
+```
+
+`status` is never part of `ok`: an optional feature that is off is not an
+unhealthy dashboard, and the container healthcheck restarts on `ok`.
+
 ---
 
 ## 7. The companion loopback API

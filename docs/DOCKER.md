@@ -278,6 +278,103 @@ shares over SMB find files they cannot open.
 
 ---
 
+## The Timeline Cards mounts (`/cards`)
+
+New 2026-08-30 (`docs/TIMELINE-CARDS-INTO-CCSYNC.md` phase 3). The dashboard
+now hosts the Timeline Cards page in-process at `/cards`, on the same terms as
+`/broll` and `/music` — and it is the only mount that needs **shares this
+container never had**: the vault it writes into, and the footage share it
+reads audio out of. All of it is optional; a site that configures none of it
+gets `/cards: {"status": "disabled"}` on `GET /api/v1/health` and no other
+change at all.
+
+| what | where it comes from | mount |
+|---|---|---|
+| the code (another repo's checkout) | `CARDS_SRC` / `[timeline_cards] src` → `<host-root>/cards-web` | `/cards-app:ro` |
+| the vault | `[timeline_cards] vault_host` | `/vault:rw` |
+| the footage share | `[timeline_cards] media_host` | `/media:ro` |
+
+Three things about that table are load-bearing:
+
+* **`/cards-app` is a mount in IMAGE MODE TOO** — the only code mount that is.
+  The image carries `/app`, `/broll-app`, `/music-app` and `/ytdl-app` as
+  layers; it cannot carry a tree from a different repository. It is also
+  **not on `PYTHONPATH`**: `select_code_root.py` re-derives those four roots on
+  every image-mode boot and knows nothing about this one, so
+  `ccsync_dashboard.cards` appends `DASH_CARDS_SRC` to `sys.path` itself.
+* **`/media` is useless without `media_map`, and vice versa.** The agent names
+  each clip as WINDOWS sees it (`P:\Projects\…`); the map is how the container
+  finds the same bytes. Set one alone and the symptom is a lane with no audio
+  on every clip that has no rendered WAV — which looks like a broken clip.
+* **`/vault` is `rw` on purpose.** `Script Docs/` is where the draft, the saved
+  plans, the notes and the translation caches are written. A `:ro` mount there
+  loses every plan at the moment of saving.
+
+### The chown, and why it is needed BEFORE the first deploy
+
+The dashboard runs as **3000:3001** (`broll:editors`). The vault —
+`tank/web` on this NAS — is **Alex's own SMB share**, `3003:3000`, because
+files the page writes should look like his own writes (Timeline Cards'
+`docs/TRUENAS-APP-PLAN.md` §0.1, which is why its standalone container ran as
+3003:3000 in the first place). Two different uids, one share, and an
+unprivileged container cannot setuid or setgid itself.
+
+So the deploy adds the vault's **group** to the container
+(`group_add: ["3000"]`, from `[timeline_cards] vault_gid`), and the host has to
+make that group able to write. **On the NAS, once, as root:**
+
+```bash
+# 1. Everything under the vault belongs to the group the container joins.
+#    (Ownership of the FILES is left alone -- they stay Alex's.)
+chgrp -R 3000 /mnt/tank/web
+
+# 2. The group may write, and NEW directories keep the group (setgid) --
+#    without the setgid bit, a folder the page creates would belong to the
+#    container's primary group and Alex would be locked out of his own vault
+#    over SMB the next day.
+chmod -R g+w /mnt/tank/web
+find /mnt/tank/web -type d -exec chmod g+s {} +
+```
+
+On a dataset with NFSv4 ACLs (TrueNAS SCALE's default), `aclmode` can ignore
+`chmod` outright — check with `getfacl` afterwards, and if the mode bits did
+not take, grant it as an ACL instead:
+
+```bash
+setfacl -R -m group:3000:modify_set:fd:allow /mnt/tank/web
+getfacl /mnt/tank/web | head            # ...and READ what it says
+```
+
+**Neither half works alone**: `group_add` without the group's write bit is a
+page whose every save is refused with `EACCES`, and the chmod without
+`group_add` changes nothing at all. The failure is quiet on both sides — the
+page shows "the plan did not save" and the container log shows a permission
+error nobody is watching — which is why this is a step in the runbook rather
+than a note.
+
+### ffmpeg
+
+Already there, and nothing new is needed: `/opt/ffmpeg` is on `PATH`
+(`run.sh`), and Timeline Cards' `media.ffmpeg_path()` / `ffprobe_path()` look
+on `PATH` first. Both binaries are used — ffmpeg for the lane's Opus copies,
+the `.peaks` and the audio pulled out of a clip's own media, ffprobe to prove
+an extraction came out the length it went in.
+
+### node and the Claude CLI: still not here
+
+The standalone Timeline Cards image bundles node 22 and a pinned
+`@anthropic-ai/claude-code`. **This one does not, and will not**
+(`COMMERCIAL_READINESS.md` item 1). Its three Claude features — the exact
+`→EN` translations, the transcript's semantic search and the overview's
+section summaries — are routed through `ai_providers` instead, which is the
+site's own `ANTHROPIC_API_KEY` through the SDK, or the customer's own Claude
+Code CLI when `[features] ai_cli_providers` is on and an admin has installed
+one from the Settings page. With neither, `/cards` reports
+`claude: {ok: false, why: "…"}` and the page dims those three buttons, which
+is exactly what it does on a machine with no CLI today.
+
+---
+
 ## Migrating between the modes
 
 **Two commands, one each way** (2026-08-18). `server/install_dashboard_app.py`

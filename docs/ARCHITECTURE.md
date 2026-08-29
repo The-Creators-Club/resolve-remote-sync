@@ -131,10 +131,11 @@ flowchart TB
         BR["/broll  (broll/web)"]
         MU["/music  (music/web)"]
         YT["/ytdl   (ytdl/web)"]
+        CA["/cards  (MulticamPipeline)"]
         COL[["collector thread"]]
         DB[("dashboard.db<br/>SQLite WAL")]
     end
-    GATE --> API & UI & BR & MU & YT
+    GATE --> API & UI & BR & MU & YT & CA
     API <--> DB
     COL <--> DB
     COL <-- "REST" --> SY[Syncthing on the NAS]
@@ -153,15 +154,27 @@ best-effort:
   `DASH_MUSIC_ENABLED`: ship the tree or don't.
 - **`/ytdl`** (`ytdl.py`) — mounted **only** when
   `[features] youtube_download` is on.
+- **`/cards`** (`cards.py`, 2026-08-30) — Timeline Cards: the cut list, the
+  lane and the phone's edit view for a Resolve timeline. The odd one out three
+  times over, and each is documented where it bites: the code is **another
+  repo's** (`[timeline_cards] src` → `/cards-app`, the only code mount that
+  survives image mode), the app is a `BaseHTTPRequestHandler` rather than a
+  FastAPI one (`cards_wsgi.py` is the streaming WSGI shim under
+  `a2wsgi`, so its ~70 routes keep their bytes), and it carries an **engine
+  with background threads** that the dashboard's own shutdown stops. It also
+  needs two shares nothing else here mounts — the vault `rw` and the footage
+  share `ro` (`docs/DOCKER.md`). Off unless `DASH_CARDS_ENABLED=1`.
 
-Three rules hold for all three, and they are load-bearing:
+Three rules hold for all four, and they are load-bearing:
 
 1. **A broken or absent mount must never stop the dashboard booting.** Each
    `mount_*` returns `mounted` / `absent` / `degraded` / `disabled`, and only a
    fully working mount is advertised in the nav.
 2. **Frontend URLs are document-relative.** A root-relative `/api|/media|/static`
    URL in a mounted SPA breaks it under its prefix; both `broll/web` and
-   `music/web` have a test that pins this.
+   `music/web` have a test that pins this, and
+   `dashboard/tests/test_cards_page_prefix.py` audits Timeline Cards' page the
+   same way from this side of the repo boundary.
 3. **The music package is `musicweb`, not `app`.** `broll/web` is deployed by
    putting its tree on `PYTHONPATH` and importing it as top-level `app`; a
    second package of that name would collide in `sys.modules`.

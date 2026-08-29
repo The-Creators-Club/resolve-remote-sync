@@ -1398,3 +1398,47 @@ nobody asked for. The companion's shutdown is what lets go of Resolve.
 project. Run them on FF5lab from the standalone agent BEFORE turning
 `cards_agent` on. Do not port an unexercised path and change its host in the
 same week.
+
+---
+
+## 22. Mounting somebody else's HTTP server inside yours (Timeline Cards, phase 3, 2026-08-30)
+
+`/cards` is not a FastAPI sub-app like `/broll`, `/music` and `/ytdl`. It is a
+`BaseHTTPRequestHandler` from another repository, with ~70 hand-dispatched
+routes and its own Range/ETag/gzip code, mounted through
+`dashboard/src/ccsync_dashboard/cards_wsgi.py` + `a2wsgi`. Four things about
+that are not obvious and one of them takes the whole fleet down.
+
+**1. `POST /api/restart` would `os._exit(0)` THE DASHBOARD.** In the
+standalone server that route closes its listener and re-execs the process --
+the page's ⟳ button, for picking up code edits. Mounted here, "the process" is
+the container that every companion reports to. `cards.CardsGate` refuses the
+path before the handler sees it, and the handler's `self.server` is a
+`_NoServer` whose `shutdown()` logs a refusal. Two locks, because the failure
+is unrecoverable and the button is right there in the header.
+
+**2. Do not buffer the response.** `/audio` and `/video` serve whole media
+files; a 480p proxy of an hour-long interview is hundreds of megabytes. The
+shim parses the status line and headers out of the handler's first `wfile`
+write, calls `start_response` once, and hands every later chunk to the WSGI
+`write()` callable -- which a2wsgi puts on an asyncio queue of ten and blocks
+on. That block IS the backpressure the real socket used to provide. A shim
+that collected the chunks into a list would work in every test and OOM the
+container the first time somebody scrubbed a lane on a phone.
+
+**3. `Date` and `Server` come out twice otherwise.** `send_response` emits
+both and uvicorn emits both again. Two `Date` headers is a malformed response
+and which one a proxy believes is undefined; the shim drops the handler's.
+
+**4. The engine's threads are yours to stop.** Starlette runs **no lifespan
+for a mounted app** -- the same trap `broll._init_broll_storage` exists for on
+the other side (nobody creates the data dirs either). `mount_cards` starts the
+engine and `app.py`'s lifespan `finally` calls `cards.stop_engine`. They are
+all daemon threads, so this is not what ends the process: it is what stops a
+library sweep from running against a database the next process is opening.
+
+And the one that is not about HTTP at all: **an unprivileged container cannot
+setuid**, so the page cannot write a share owned by somebody else without
+`group_add` AND a group-writable, setgid vault on the host. Neither half works
+alone and both fail quietly -- `docs/DOCKER.md`, "The chown, and why it is
+needed BEFORE the first deploy".

@@ -7810,24 +7810,12 @@ def store_machine_capabilities(
     )
 
 
-def machine_capabilities(
-    conn: sqlite3.Connection, editor: str, machine: str,
-) -> dict[str, Any]:
-    """What this computer last told us it can do, or {} if it never has.
+def _capabilities_of(row: sqlite3.Row | None) -> dict[str, Any]:
+    """One machine_state row -> the capabilities dict, or {}.
 
-    {} is "unknown", which the scheduler reads as "offer it nothing that has
-    a requirement" -- never as "it can do everything". A companion older than
-    the capabilities section reports none, and must not be handed GPU work on
-    the strength of a silence.
-    """
-    row = conn.execute(
-        """SELECT cap_at, cap_gpu_present, cap_gpu_name, cap_gpu_vram_gb,
-                  cap_nvenc, cap_ffmpeg, cap_whisper, cap_whisper_detail,
-                  cap_claude, cap_mounts, cap_cpu_count, cap_idle_seconds,
-                  cap_load, cap_resolve_running, cap_resolve_project,
-                  cap_jobs_enabled
-             FROM machine_state WHERE editor_username=? AND machine=?""",
-        (str(editor), str(machine))).fetchone()
+    Split out so the per-machine read and the whole-fleet map are ONE
+    decoding: two of them is how "gpu_vram_gb" ends up a string in one place
+    and a float in the other, and the scheduler compares it with >=."""
     if row is None or not row["cap_at"]:
         return {}
     try:
@@ -7854,6 +7842,28 @@ def machine_capabilities(
     }
 
 
+_CAPABILITY_COLUMNS = """cap_at, cap_gpu_present, cap_gpu_name, cap_gpu_vram_gb,
+       cap_nvenc, cap_ffmpeg, cap_whisper, cap_whisper_detail, cap_claude,
+       cap_mounts, cap_cpu_count, cap_idle_seconds, cap_load,
+       cap_resolve_running, cap_resolve_project, cap_jobs_enabled"""
+
+
+def machine_capabilities(
+    conn: sqlite3.Connection, editor: str, machine: str,
+) -> dict[str, Any]:
+    """What this computer last told us it can do, or {} if it never has.
+
+    {} is "unknown", which the scheduler reads as "offer it nothing that has
+    a requirement" -- never as "it can do everything". A companion older than
+    the capabilities section reports none, and must not be handed GPU work on
+    the strength of a silence.
+    """
+    return _capabilities_of(conn.execute(
+        f"SELECT {_CAPABILITY_COLUMNS} FROM machine_state "
+        " WHERE editor_username=? AND machine=?",
+        (str(editor), str(machine))).fetchone())
+
+
 def fetch_capabilities_map(
     conn: sqlite3.Connection,
 ) -> dict[tuple[str, str], dict[str, Any]]:
@@ -7861,10 +7871,9 @@ def fetch_capabilities_map(
 
     One query for the whole fleet: this builder runs every 15 s for every open
     fleet page (the same rule fetch_broll_ingest_map follows)."""
-    out: dict[tuple[str, str], dict[str, Any]] = {}
-    for row in conn.execute(
-        "SELECT editor_username, machine FROM machine_state WHERE cap_at IS NOT NULL"
-    ).fetchall():
-        key = (row["editor_username"], row["machine"])
-        out[key] = machine_capabilities(conn, key[0], key[1])
-    return out
+    return {
+        (row["editor_username"], row["machine"]): _capabilities_of(row)
+        for row in conn.execute(
+            f"SELECT editor_username, machine, {_CAPABILITY_COLUMNS} "
+            " FROM machine_state WHERE cap_at IS NOT NULL")
+    }

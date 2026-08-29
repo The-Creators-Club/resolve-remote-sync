@@ -55,7 +55,12 @@ def test_login_logout_flow(client):
     assert client.post("/api/v1/login", json={"username": "jsmith", "password": "wrong"}).status_code == 401
     resp = client.post("/api/v1/login", json={"username": "JSmith", "password": "pw1"})
     assert resp.status_code == 200
-    assert resp.json() == {"ok": True, "user": "jsmith", "is_admin": False}
+    body = resp.json()
+    # `csrf` joined this answer on 2026-08-29 (the fleet job API): a
+    # non-browser client has no page to read the hidden field off. It is an
+    # HMAC over this session's own id and worthless without the cookie.
+    assert body.pop("csrf")
+    assert body == {"ok": True, "user": "jsmith", "is_admin": False}
     assert auth.COOKIE_NAME in resp.cookies
     me = client.get("/api/v1/me").json()
     assert me["user"] == "jsmith" and me["is_admin"] is False

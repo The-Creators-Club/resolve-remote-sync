@@ -76,7 +76,9 @@ def test_login_flow_local_mode(tmp_path):
         good = c.post("/api/v1/login",
                       json={"username": "jsmith", "password": "correct-horse-battery-jsmi"})
         assert good.status_code == 200
-        assert good.json() == {"ok": True, "user": "jsmith", "is_admin": False}
+        body = good.json()
+        assert body.pop("csrf")          # see test_auth's login flow
+        assert body == {"ok": True, "user": "jsmith", "is_admin": False}
         assert auth.COOKIE_NAME in good.cookies
         me = c.get("/api/v1/me").json()
         assert me == {"user": "jsmith", "is_admin": False}

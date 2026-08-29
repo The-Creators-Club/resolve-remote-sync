@@ -1209,3 +1209,56 @@ Rules:
   not. A mismatch presents as "most of it synced", never as "nothing works".
 * **Test with a real pair.** `dashboard/tests/test_unicode_paths.py` carries
   the actual NFC/NFD spellings taken off the NAS and off that MacBook.
+
+## 18. A Tk root freed on the wrong thread kills the process (CR-93, 2026-08-29)
+
+A `tk.Tk()` root owns a Tcl interpreter. `_tkinter` frees that interpreter in
+`Tkapp_Dealloc` - **inline, on whatever thread drops the last Python
+reference**, with none of the marshaling an ordinary Tk call gets. Tcl
+answers an interpreter deleted from a thread other than its creator with
+
+```
+Tcl_AsyncDelete: async handler deleted by the wrong thread
+```
+
+which is `Tcl_Panic`, which is `abort()`. Note what that costs you: **no
+exception, no `finally`, no `atexit`, no `sys.excepthook`, no crash file, and
+nothing in the log.** The process is gone mid-instruction. On Windows the
+only trace is the Event Log:
+
+```
+Faulting module name: tcl86t.dll   Exception code: 0x80000003
+```
+
+The companion builds every dialog on the thread that wanted it (win32; see
+`ui_dispatch`'s docstring, and it must stay that way), so this is live for
+any Tk object that outlives its thread. It cost the base rig seven silent
+deaths in eleven days before anyone read the Event Log, because "the tray
+keeps closing itself" does not sound like a crash.
+
+Rules for any window in this package - and for any other Python tray app on
+these machines:
+
+* **A window that keeps widgets in ATTRIBUTES must drop them on its own
+  thread**, then end the root through `ui_dispatch.release_root(root)`. That
+  is `_drop_widgets()` + `self.root = None` + `release_root`, in that order.
+  A window whose widgets are all frame LOCALS is already safe: they die with
+  the frame, on that thread, whatever happens.
+* **It is not only widgets.** A `tk.StringVar`, a `ttk.Style` and a
+  `PhotoImage` each hold the interpreter as firmly as a Button does. The
+  fixer popup's leak was one StringVar per row.
+* **A bound method is a reference to the whole window.** Handing
+  `self.publish` to a worker thread hands it the widgets too, and a worker
+  joined with a timeout can easily be the last holder.
+* **Do not "fix" it by keeping the root alive in a module global.**
+  Interpreter shutdown clears module globals from the main thread, so that
+  just moves the abort to exit (measured: exit code 3). `release_root` parks
+  a leaked root with a real extra refcount (`Py_IncRef` through ctypes),
+  which finalisation cannot undo, and reclaims it on the owning thread later.
+* **`release_root` names the holder in the log** rather than letting the
+  process vanish. If you see "closed with its Tcl interpreter still
+  referenced", the types it lists are the bug.
+
+Proving any of this needs a subprocess - the failure kills the interpreter
+running the test. `companion/tests/test_tk_release_native.py` is the pattern:
+run the shape in a child, assert on its exit code.

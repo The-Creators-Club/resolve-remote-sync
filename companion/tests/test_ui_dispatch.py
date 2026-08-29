@@ -781,3 +781,147 @@ def test_serving_reports_whether_the_mainloop_is_up(monkeypatch):
     with serving() as (live, _root, _ident):
         assert live.serving is True
     assert live.serving is False
+
+
+# ---------------------------------------------------------------------------
+# release_root: the interpreter dies on the thread that built it (CR-93)
+# ---------------------------------------------------------------------------
+#
+# Still no real tkinter here (conftest forbids it): a Tk root is, for this
+# purpose, an object with a `.tk` nobody else may outlive and a destroy().
+# The REAL abort -- Tcl_AsyncDelete, exception 0x80000003 in tcl86t.dll -- is
+# proven in test_tk_release_native.py, which needs a display and a subprocess
+# because the failure it demonstrates kills the interpreter.
+
+
+class FakeInterp:
+    """Stands in for the Tcl interpreter object (`root.tk`)."""
+
+
+class FakeTkRoot:
+    def __init__(self, fail_destroy: bool = False) -> None:
+        self.tk = FakeInterp()
+        self.destroyed = 0
+        self._fail_destroy = fail_destroy
+
+    def title(self):
+        return "CCSYNC.EXE"
+
+    def destroy(self):
+        self.destroyed += 1
+        if self._fail_destroy:
+            raise RuntimeError("already gone")
+
+
+@pytest.fixture(autouse=True)
+def _empty_graveyard():
+    ui_dispatch._reset_graveyard_for_tests()
+    yield
+    ui_dispatch._reset_graveyard_for_tests()
+
+
+def test_release_root_destroys_and_reports_a_clean_release():
+    root = FakeTkRoot()
+    assert ui_dispatch.release_root(root) is True
+    assert root.destroyed == 1
+    assert ui_dispatch.parked_roots() == []
+
+
+def test_release_root_drops_the_window_icon_image():
+    """apply_window_icon parks a PhotoImage on the root, and it is bound to
+    this interpreter -- left in place it is a holder of exactly the kind the
+    check is looking for."""
+    root = FakeTkRoot()
+    root._ccsync_icon_image = object()
+    ui_dispatch.release_root(root)
+    assert "_ccsync_icon_image" not in root.__dict__
+
+
+def test_release_root_survives_a_root_that_cannot_be_destroyed():
+    root = FakeTkRoot(fail_destroy=True)
+    assert ui_dispatch.release_root(root) is True  # nothing else holds it
+
+
+def test_release_root_parks_a_root_whose_interpreter_is_still_held(caplog):
+    """The whole point: another thread must never be the one to free it."""
+    import logging
+
+    root = FakeTkRoot()
+    leaked_widget_reference = root.tk  # a widget/StringVar someone kept
+    with caplog.at_level(logging.WARNING, logger="ccsync.ui"):
+        assert ui_dispatch.release_root(root, "the fixer popup") is False
+    assert root.destroyed == 1
+    assert root in ui_dispatch.parked_roots()
+    message = " ".join(r.getMessage() for r in caplog.records)
+    assert "the fixer popup" in message and "CR-93" in message
+    assert leaked_widget_reference is not None  # keep the holder alive
+
+
+def test_a_parked_root_is_reclaimed_by_the_next_release_on_that_thread():
+    holder = []
+
+    def _open_and_close_a_window():
+        # In its own frame, like every real call site: once this returns, the
+        # graveyard is the ONLY thing holding the root.
+        root = FakeTkRoot()
+        holder.append(root.tk)
+        assert ui_dispatch.release_root(root) is False
+
+    _open_and_close_a_window()
+    assert len(ui_dispatch.parked_roots()) == 1
+
+    holder.clear()  # whatever kept the widget has let go
+    # The sweep runs at the START of the next release, on this same thread --
+    # which is the only thread allowed to free it.
+    ui_dispatch.release_root(FakeTkRoot())
+    assert ui_dispatch.parked_roots() == []
+
+
+def test_a_parked_root_the_caller_still_holds_stays_parked():
+    """The sweep frees only what nothing else wants. A root still referenced
+    somewhere would otherwise be freed here and then AGAIN by its holder --
+    and that second free is on whatever thread the holder happens to be."""
+    root = FakeTkRoot()
+    keep_the_widget = root.tk
+    assert ui_dispatch.release_root(root) is False
+    ui_dispatch.release_root(FakeTkRoot())
+    assert ui_dispatch.parked_roots() == [root]
+    assert keep_the_widget is not None
+
+
+def test_the_graveyard_is_per_thread():
+    """A root parked by the watcher thread must not be freed by the tray's."""
+    parked_idents = {}
+
+    def _park():
+        root = FakeTkRoot()
+        _keep = root.tk  # noqa: F841 - the holder is the point
+        ui_dispatch.release_root(root)
+        parked_idents[threading.get_ident()] = ui_dispatch.parked_roots(
+            threading.get_ident())
+        # a second release on THIS thread must not free the other thread's
+        ui_dispatch.release_root(FakeTkRoot())
+
+    threads = [threading.Thread(target=_park) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+    assert len(parked_idents) == 2
+    assert all(len(roots) == 1 for roots in parked_idents.values())
+    assert len(ui_dispatch.parked_roots()) == 2
+
+
+def test_a_deep_graveyard_says_so_out_loud(caplog):
+    """Parking is a deliberate leak; it stops being a rounding error somewhere,
+    and an admin reading the log should be told where."""
+    import logging
+
+    holders = []
+    with caplog.at_level(logging.ERROR, logger="ccsync.ui"):
+        for _ in range(ui_dispatch.GRAVEYARD_WARN_AT):
+            root = FakeTkRoot()
+            holders.append(root.tk)
+            ui_dispatch.release_root(root)
+    assert len(ui_dispatch.parked_roots()) == ui_dispatch.GRAVEYARD_WARN_AT
+    assert any("never reclaimed" in r.getMessage() for r in caplog.records)

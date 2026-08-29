@@ -1932,3 +1932,86 @@ def test_dedupe_still_carries_bare_objects_when_the_walk_had_them():
 def test_dedupe_drops_an_item_with_neither_object_nor_uid():
     items = [{"file_path": r"C:\x\a.mov", "media_pool_item": None, "media_pool_uid": ""}]
     assert dedupe_out_of_tree_items(items)[0]["media_pool_items"] == []
+
+
+# ===========================================================================
+# CR-93: a dialog's Tcl interpreter dies on the thread that built it
+# ===========================================================================
+
+
+def test_the_fixer_popup_lets_go_of_every_widget_when_it_closes(monkeypatch):
+    """FIX ALL runs on a daemon thread holding this dialog's bound methods, so
+    the dialog routinely outlives the thread that built its window. Whatever
+    thread drops it last would free the Tcl interpreter -- and a Tk
+    interpreter freed on the wrong thread is Tcl_AsyncDelete: abort(), no
+    traceback, the tray gone (CR-93). So show() ends holding no Tk at all."""
+    from ccsync_companion import popup, ui_dispatch
+
+    dialog = _bare_dialog([_row("A")])
+    dialog._vars = [("A", _FakeWidget())]
+    dialog._file_label = dialog._file_bar = _FakeWidget()
+    dialog._batch_label = dialog._batch_bar = _FakeWidget()
+    root = dialog.root
+    released = []
+    monkeypatch.setattr(ui_dispatch, "run_dialog", lambda r: None)
+    monkeypatch.setattr(ui_dispatch, "release_root",
+                        lambda r, label=None: released.append((r, label)) or True)
+
+    dialog.show()
+
+    assert released and released[0][0] is root
+    assert dialog.root is None
+    assert dialog._vars == []
+    assert all(getattr(dialog, name) is None
+               for name in popup.PopupDialog.WIDGET_ATTRS)
+
+
+def test_the_fixer_popup_lets_go_even_when_its_mainloop_raises(monkeypatch):
+    from ccsync_companion import ui_dispatch
+
+    dialog = _bare_dialog([_row("A")])
+    dialog._vars = []
+    released = []
+
+    def _boom(_root):
+        raise RuntimeError("display went away")
+
+    monkeypatch.setattr(ui_dispatch, "run_dialog", _boom)
+    monkeypatch.setattr(ui_dispatch, "release_root",
+                        lambda r, label=None: released.append(r) or True)
+    with pytest.raises(RuntimeError):
+        dialog.show()
+    assert released and dialog.root is None
+
+
+def test_the_copy_progress_window_drops_its_bars_on_its_own_thread():
+    """ProgressWindow's worker holds `publish`/`should_stop`, and run() joins
+    it with a TIMEOUT -- so the last reference to the window can be a frame on
+    the worker thread. It must hold no widgets by then (CR-93)."""
+    from ccsync_companion import popup
+
+    window = popup.ProgressWindow("COPYING")
+    for name in ("_file_label", "_file_bar", "_batch_label", "_batch_bar",
+                 "_stop_btn", "_skip_btn", "_cancel_btn"):
+        setattr(window, name, _FakeWidget())
+    window._drop_widgets()
+    assert all(getattr(window, name) is None
+               for name in ("_file_label", "_file_bar", "_batch_label",
+                            "_batch_bar", "_stop_btn", "_skip_btn", "_cancel_btn"))
+
+
+def test_every_window_class_here_releases_its_root_through_ui_dispatch():
+    """A source-level check, because these teardowns cannot be run without a
+    display: each of the three windows that keep widgets in ATTRIBUTES ends
+    its root through release_root, which is what parks it rather than letting
+    another thread free it."""
+    import inspect
+
+    from ccsync_companion import popup
+
+    for builder in (popup.PopupDialog.show,
+                    popup.ProgressWindow._show,
+                    popup.WorkProgressWindow._build_and_show_unpatched):
+        source = inspect.getsource(builder)
+        assert "release_root" in source, f"{builder.__qualname__} frees its own root"
+        assert "_drop_widgets" in source, f"{builder.__qualname__} keeps its widgets"

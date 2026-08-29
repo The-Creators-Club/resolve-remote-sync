@@ -414,6 +414,21 @@ Full runbook, including what each version number means and how to roll back:
   the companion answers `retrying` and is re-sent the command until done or
   blocked, so deploy the dashboard BEFORE companion 0.9.55 or the retry
   never happens (`docs/FILE_MOVES.md`).
+- **A Tk root must be freed on the thread that built it** (CR-93,
+  2026-08-29, `docs/GOTCHAS.md` section 18). `_tkinter` deletes the Tcl
+  interpreter in `Tkapp_Dealloc`, inline, on whatever thread drops the last
+  reference; from any other thread Tcl answers `Tcl_Panic` - `abort()`, no
+  traceback, no `finally`, nothing in the log, the whole tray gone (seven
+  silent deaths on the base rig before the Event Log was read). Every
+  dialog here still builds its root on the thread that wanted it, so a
+  window that keeps widgets in ATTRIBUTES must clear them and end its root
+  with `ui_dispatch.release_root()`, which parks a still-held interpreter
+  instead of letting another thread free it and NAMES the holder in the
+  log. Widgets that are frame locals need none of this. A `StringVar`, a
+  `ttk.Style` and a `PhotoImage` count as widgets. Since the same commit a
+  death nobody asked for is no longer silent: `crash_report.install_native`
+  (faulthandler + a run marker cleared at the top of `shutdown()`) turns it
+  into an `UncleanExit` crash file on the next start.
 - **Never call `scriptapp("Resolve")` outside `resolve_bridge.connect()`**
   (CR-68, 2026-08-21). Resolve's script server (`fuscript.exe`, TCP 1144)
   exits when its last client leaves, and a client that connects before

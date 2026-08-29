@@ -10,6 +10,7 @@ fixture exists for.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 
@@ -353,3 +354,107 @@ def test_install_logs_what_an_earlier_run_left_behind(tmp_path, caplog):
     with caplog.at_level("WARNING", logger="ccsync.crash"):
         crash_report.install(cfg)
     assert any("from an earlier run" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# the native half: a death no Python hook can see (CR-93)
+# ---------------------------------------------------------------------------
+
+
+def test_install_native_claims_a_run_marker(tmp_path):
+    cfg = _cfg(tmp_path)
+    crash_report.install_native(cfg)
+    marker = json.loads(crash_report.run_marker_path(cfg).read_text(encoding="utf-8"))
+    assert marker["pid"] == os.getpid()
+    assert marker["version"] == config_mod.VERSION
+    # A first run on a clean machine is not a crash.
+    assert crash_report.crash_summary(cfg)["count"] == 0
+
+
+def test_faulthandler_writes_where_the_crash_files_live(tmp_path):
+    """A Tcl_Panic is an abort, not an exception: the only thing that can
+    describe it is faulthandler's own dump, and it has to land somewhere an
+    admin is already being pointed at."""
+    import faulthandler
+
+    cfg = _cfg(tmp_path)
+    crash_report.install_native(cfg)
+    assert faulthandler.is_enabled()
+    assert crash_report.native_log_path(cfg).is_file()
+    assert crash_report.native_log_path(cfg).parent == crash_report.crash_dir(cfg)
+
+
+def test_a_run_that_never_reached_shutdown_is_reported_on_the_next_start(tmp_path):
+    cfg = _cfg(tmp_path)
+    crash_report.install_native(cfg)          # run 1 claims the marker
+    crash_report._reset_for_tests()
+    crash_report.install_native(cfg)          # run 2 finds it still there
+
+    files = sorted(crash_report.crash_dir(cfg).glob("*.json"))
+    assert len(files) == 1, "an unclean exit should write exactly one report"
+    report = json.loads(files[0].read_text(encoding="utf-8"))
+    assert report["exception"]["type"] == "UncleanExit"
+    assert str(os.getpid()) in report["exception"]["message"]
+    assert report["previous_run"]["version"] == config_mod.VERSION
+    # And it reaches the surfaces APP-6 built: the tray line, the diagnostics
+    # bundle and the dashboard all read these two.
+    assert crash_report.crash_summary(cfg)["count"] == 1
+    assert crash_report.recent_reports(cfg)[0]["type"] == "UncleanExit"
+
+
+def test_mark_clean_exit_is_what_makes_the_next_start_quiet(tmp_path):
+    cfg = _cfg(tmp_path)
+    crash_report.install_native(cfg)
+    crash_report.mark_clean_exit(cfg)
+    assert not crash_report.run_marker_path(cfg).exists()
+
+    crash_report._reset_for_tests()
+    crash_report.install_native(cfg)
+    assert crash_report.crash_summary(cfg)["count"] == 0
+
+
+def test_mark_clean_exit_on_a_machine_that_never_started_is_harmless(tmp_path):
+    """shutdown() can run before install_native ever did (a config so broken
+    the app gives up early), and a crash handler may not become the crash."""
+    crash_report.mark_clean_exit(_cfg(tmp_path))
+
+
+def test_the_native_log_does_not_grow_without_bound(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    path = crash_report.native_log_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("x" * 2048, encoding="utf-8")
+    monkeypatch.setattr(crash_report, "NATIVE_LOG_MAX_BYTES", 1024)
+    crash_report.install_native(cfg)
+    assert path.stat().st_size < 2048
+
+
+def test_an_unclean_exit_carries_the_native_dump_and_the_log_tail(tmp_path):
+    cfg = _cfg(tmp_path)
+    log_path = config_mod.resolved_log_path(cfg)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("2026-08-29 13:19:15,813 INFO tray: opening dashboard\n",
+                        encoding="utf-8")
+    crash_report.install_native(cfg)
+    crash_report.native_log_path(cfg).write_text(
+        "Fatal Python error: Aborted\n\nThread 0x00001234 (most recent call first):\n",
+        encoding="utf-8")
+    crash_report._reset_for_tests()
+    crash_report.install_native(cfg)
+
+    report = json.loads(sorted(crash_report.crash_dir(cfg).glob("*.json"))[0]
+                        .read_text(encoding="utf-8"))
+    assert "Fatal Python error" in report["exception"]["traceback"]
+    assert any("opening dashboard" in line for line in report["log_tail"])
+
+
+def test_an_unclean_exit_with_no_native_dump_says_where_else_to_look(tmp_path):
+    """A Tcl_Panic on Windows reaches WER, not faulthandler. The report has to
+    say so, or the next person reads "no traceback" as "no information"."""
+    cfg = _cfg(tmp_path)
+    crash_report.install_native(cfg)
+    crash_report._reset_for_tests()
+    crash_report.install_native(cfg)
+    report = json.loads(sorted(crash_report.crash_dir(cfg).glob("*.json"))[0]
+                        .read_text(encoding="utf-8"))
+    assert "0x80000003" in report["exception"]["traceback"]

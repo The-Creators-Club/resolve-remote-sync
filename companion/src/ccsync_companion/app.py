@@ -213,6 +213,44 @@ def setup_logging(cfg: dict[str, Any]) -> None:
 # machine has no companion until someone finds a terminal (2026-08-05).
 UI_SHUTDOWN_GRACE_SECONDS = 10.0
 
+# How long a thread that is about to let go of a work-progress window waits
+# for that window's OWN thread to finish tearing it down (CR-93, 2026-08-29).
+# A Tk root's Tcl interpreter must be freed on the thread that made it, and a
+# window still holding its widgets when another thread drops the last
+# reference is Tcl_AsyncDelete -- an abort, not an exception. Bounded because
+# a window that will not close must not stall the click that replaced it, and
+# must not stall shutdown; the graveyard in ui_dispatch.release_root is what
+# covers the case where the wait was not enough.
+WORK_WINDOW_CLOSE_WAIT_SECONDS = 3.0
+
+
+def _close_work_window(window: Any, what: str) -> None:
+    """Close a work-progress window and WAIT for it to finish tearing itself
+    down, before this thread lets go of it.
+
+    The wait is the point (CR-93). That window's Tk root was built on its own
+    thread, and a Tcl interpreter freed anywhere else calls Tcl_Panic --
+    abort(), no traceback, the whole tray gone. `close()` only ASKS; the
+    window's thread does the destroying, and `wait_closed` is how we know it
+    has. Both callers reach here from another thread entirely: a tray click
+    replacing one window with another, and shutdown() on the main thread.
+
+    getattr for `wait_closed`: the doubles tests inject implement close() and
+    nothing else, and a missing method must not turn "close the window" into
+    a swallowed AttributeError.
+    """
+    try:
+        window.close()
+        waiter = getattr(window, "wait_closed", None)
+        if waiter is not None and not waiter(WORK_WINDOW_CLOSE_WAIT_SECONDS):
+            log.warning(
+                "%s did not finish closing within %.0fs -- letting go of it "
+                "anyway. If its Tk objects are still up, ui_dispatch's "
+                "graveyard is what stops that becoming a CR-93 abort.",
+                what, WORK_WINDOW_CLOSE_WAIT_SECONDS)
+    except Exception:
+        log.debug("could not close %s", what, exc_info=True)
+
 # How often the licence offer is retried while the gate is live and the
 # dialog has never actually been SHOWN (KNOWN_BUGS CR-27, 2026-08-18). It is
 # not a nag interval: the loop stops the moment the document has been put in
@@ -6984,7 +7022,9 @@ class CompanionApp:
                     root.clipboard_append(text)
                     root.update()
                 finally:
-                    root.destroy()
+                    # Destroy AND make sure the interpreter dies here, on the
+                    # tray worker that built it (CR-93).
+                    ui_dispatch.release_root(root, "the clipboard root")
 
             ui_dispatch.dispatch(_copy_via_tk)
             log.info("diagnostics copied to clipboard (%d chars)", len(text))
@@ -7535,10 +7575,7 @@ class CompanionApp:
             if existing is not None and existing[0] == key and existing[1].is_open():
                 return
             if existing is not None:
-                try:
-                    existing[1].close()
-                except Exception:
-                    log.debug("could not close the open work window", exc_info=True)
+                _close_work_window(existing[1], "the open work window")
             window = popup.WorkProgressWindow(title, subtitle, snapshot_fn, action_fn)
             self._work_window = (key, window)
         try:
@@ -7550,10 +7587,7 @@ class CompanionApp:
         with self._work_window_lock:
             existing, self._work_window = self._work_window, None
         if existing is not None:
-            try:
-                existing[1].close()
-            except Exception:
-                log.debug("could not close the work window", exc_info=True)
+            _close_work_window(existing[1], "the work window")
 
     def show_ingest_progress(self) -> None:
         """Tray action / automatic on a batch start: the b-roll window."""
@@ -8239,6 +8273,11 @@ class CompanionApp:
                 log.debug("shutdown() already ran -- ignoring the repeat call")
                 return
             self._shutdown_started = True
+        # FIRST, before any teardown can wedge: this process has now DECIDED
+        # to stop, so the next start must not report it as a crash. Everything
+        # after this line -- including the hard-exit backstop for a thread that
+        # will not join -- is a deliberate exit (CR-93).
+        crash_report.mark_clean_exit(self.config)
         self._stop_event.set()
         # BEFORE the guards below: its whole job is to START threads, and one
         # tick landing during teardown would spawn a sequencer into a process
@@ -8802,6 +8841,12 @@ def run() -> None:
     if not acquire_single_instance():
         _warn_already_running()
         return
+    # AFTER the single-instance lock, deliberately: install_native writes a
+    # run marker for THIS pid, and the instance that just lost the race is
+    # about to exit -- it must not touch the live one's marker (CR-93). From
+    # here on, a death that never reaches shutdown() is reported on the next
+    # start, and a native abort leaves its thread dump in <crashes>/native.log.
+    crash_report.install_native(cfg)
     try:
         app = CompanionApp(cfg)
         app.run()

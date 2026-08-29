@@ -7003,3 +7003,99 @@ def test_skipped_clips_survive_a_tray_restart(tmp_path, monkeypatch):
     assert restarted.resolve_health()["skipped_ever"] == 1
     # ...and the session set is genuinely empty, so the clip is offered again.
     assert restarted.resolve_health()["ignored_this_session"] == 0
+
+
+# ---------------------------------------------------------------------------
+# CR-93: a work window's Tk must die on the thread that built it
+# ---------------------------------------------------------------------------
+
+
+class _WaitableWindow:
+    """A work window that records the order it was closed and waited on."""
+
+    def __init__(self, closes_cleanly: bool = True) -> None:
+        self.events: list = []
+        self._closes_cleanly = closes_cleanly
+        self._open = False
+
+    def open(self):
+        self._open = True
+        return True
+
+    def is_open(self):
+        return self._open
+
+    def close(self):
+        self.events.append("close")
+        self._open = False
+
+    def wait_closed(self, timeout=5.0):
+        self.events.append(("wait", timeout))
+        return self._closes_cleanly
+
+
+def test_letting_go_of_a_work_window_waits_for_its_own_thread(tmp_path, monkeypatch):
+    """close() only ASKS; the window's own thread does the destroying. Drop
+    the last reference before that finishes and the Tcl interpreter is freed
+    on THIS thread, which is an abort, not an exception (CR-93)."""
+    from ccsync_companion import popup
+
+    windows = []
+    monkeypatch.setattr(popup, "WorkProgressWindow",
+                        lambda *a, **k: windows.append(_WaitableWindow()) or windows[-1])
+    app = _make_app(tmp_path)
+    app.show_ingest_progress()
+    app.close_work_window()
+
+    from ccsync_companion import app as app_mod
+
+    assert windows[0].events == [
+        "close", ("wait", app_mod.WORK_WINDOW_CLOSE_WAIT_SECONDS)]
+
+
+def test_replacing_one_work_window_with_another_waits_too(tmp_path, monkeypatch):
+    from ccsync_companion import popup
+
+    windows = []
+    monkeypatch.setattr(popup, "WorkProgressWindow",
+                        lambda *a, **k: windows.append(_WaitableWindow()) or windows[-1])
+    app = _make_app(tmp_path)
+    app.show_ingest_progress()
+    app.show_proxy_progress()
+
+    assert windows[0].events[0] == "close"
+    assert windows[0].events[1][0] == "wait"
+
+
+def test_a_work_window_that_will_not_close_is_named_not_waited_on_forever(
+        tmp_path, monkeypatch, caplog):
+    """The wait is bounded: a window stuck open must not stall shutdown. The
+    graveyard in ui_dispatch is what keeps that from becoming the abort."""
+    import logging
+
+    from ccsync_companion import popup
+
+    windows = []
+    monkeypatch.setattr(
+        popup, "WorkProgressWindow",
+        lambda *a, **k: windows.append(_WaitableWindow(closes_cleanly=False))
+        or windows[-1])
+    app = _make_app(tmp_path)
+    app.show_ingest_progress()
+    with caplog.at_level(logging.WARNING, logger="ccsync.app"):
+        app.close_work_window()
+    assert any("did not finish closing" in r.getMessage() for r in caplog.records)
+
+
+def test_shutdown_records_that_this_exit_was_deliberate(tmp_path):
+    """The run marker is what tells the NEXT start "the last one died". A
+    shutdown that leaves it behind reports every restart as a crash; one that
+    clears it too late reports a wedged teardown as clean. It goes at the
+    top of shutdown(), which is where the decision is made (CR-93)."""
+    from ccsync_companion import crash_report
+
+    app = _make_app(tmp_path)
+    crash_report.write_run_marker(app.config)
+    assert crash_report.run_marker_path(app.config).exists()
+    app.shutdown()
+    assert not crash_report.run_marker_path(app.config).exists()

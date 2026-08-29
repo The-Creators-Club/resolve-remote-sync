@@ -680,10 +680,10 @@ class PopupDialog:
             # -- which is what strands the sign-in and update dialogs
             # (AUDIT_2 CORE-M3 -> CORE-H8). show_popup()'s except branch only
             # sees the exception; it never had a handle on the root.
-            try:
-                self.root.destroy()
-            except Exception:
-                pass
+            root, self.root = self.root, None
+            self._drop_widgets()
+            ui_dispatch.release_root(root, "the fixer popup (failed build)")
+            del root
             raise
 
     def _build(self, tk, ttk, theme, rows, local_root) -> None:
@@ -1271,8 +1271,45 @@ class PopupDialog:
             self.on_done([])
         self.root.destroy()
 
+    # Every widget this dialog keeps a handle on. Cleared on the Tk thread
+    # when the window closes -- see show() (CR-93).
+    WIDGET_ATTRS = (
+        "status_label", "_progress_frame", "_file_label", "_file_bar",
+        "_batch_label", "_batch_bar", "_fix_btn", "_ignore_btn", "_folder_btn",
+        "_retry_btn", "_stop_btn", "_skip_btn", "_cancel_btn",
+    )
+
+    def _drop_widgets(self) -> None:
+        # `_vars` first and by name: a tk.StringVar holds the interpreter just
+        # as firmly as a widget does, and there is one per row -- this dialog
+        # opens with 40 of them on a bad day.
+        self._vars = []
+        for name in self.WIDGET_ATTRS:
+            try:
+                setattr(self, name, None)
+            except Exception:
+                pass
+
     def show(self) -> None:
-        ui_dispatch.run_dialog(self.root)
+        """Run the dialog, then let its interpreter die HERE.
+
+        The teardown is not tidiness. FIX ALL runs on a daemon thread that
+        holds bound methods of this dialog (`_publish`, `_fix_done`), so this
+        object routinely outlives the thread that built its window -- and
+        whichever thread drops it last would otherwise free the Tcl
+        interpreter, which is the CR-93 abort: no traceback, no log, the
+        whole tray gone. After this returns the dialog holds no Tk at all,
+        so a late worker callback finds `self.root is None` and takes the
+        same path it already takes for a closed window.
+        """
+        try:
+            ui_dispatch.run_dialog(self.root)
+        finally:
+            root, self.root = self.root, None
+            self._drop_widgets()
+            if root is not None:
+                ui_dispatch.release_root(root, "the fixer popup")
+            del root
 
 
 class ProgressWindow:
@@ -1310,6 +1347,27 @@ class ProgressWindow:
         self._rate = RateEstimator()
         self._done = threading.Event()
         self.root = None
+        # Declared here so _drop_widgets has something to clear even when the
+        # build never got as far as making them (CR-93).
+        self._file_label = self._file_bar = None
+        self._batch_label = self._batch_bar = None
+        self._stop_btn = self._skip_btn = self._cancel_btn = None
+
+    def _drop_widgets(self) -> None:
+        """Forget every widget reference, ON the thread that made them.
+
+        This object outlives its window: `run()` joins the worker with a
+        TIMEOUT, and the worker holds `self.publish`/`self.should_stop`, so
+        the last reference to this ProgressWindow can easily be a frame on
+        the worker thread. If the widgets were still attached, the Tcl
+        interpreter would be freed there -- the CR-93 abort.
+        """
+        for name in ("_file_label", "_file_bar", "_batch_label", "_batch_bar",
+                     "_stop_btn", "_skip_btn", "_cancel_btn"):
+            try:
+                setattr(self, name, None)
+            except Exception:
+                pass
 
     # -- worker-facing (thread-safe, never touches Tk) ------------------
     def publish(self, info: dict[str, Any]) -> None:
@@ -1424,11 +1482,10 @@ class ProgressWindow:
                 root.after(250, self._tick)
                 ui_dispatch.run_dialog(root)
             finally:
-                try:
-                    root.destroy()
-                except Exception:
-                    pass
+                self._drop_widgets()
                 self.root = None
+                ui_dispatch.release_root(root, "the copy progress window")
+                del root
 
         ui_dispatch.dispatch(_build_and_show)
 
@@ -1835,20 +1892,14 @@ class WorkProgressWindow:
             # thread. Tcl answers that with Tcl_Panic ("Tcl_AsyncDelete: async
             # handler deleted by the wrong thread"), exception 0x80000003 in
             # tcl86t.dll, and the whole tray exits with no Python traceback.
+            # Attributes first, THEN the root: release_root reads what is
+            # still holding the interpreter and parks the root if anything
+            # is, so a reference we could have dropped ourselves would show
+            # up as a leak we cannot explain (CR-93).
             self._drop_widgets()
-            try:
-                del root._ccsync_icon_image
-            except Exception:
-                pass
-            try:
-                root.destroy()
-            except Exception:
-                pass
             self.root = None
+            ui_dispatch.release_root(root, "the work progress window")
             del root
-            import gc
-
-            gc.collect()
 
     def _drop_widgets(self) -> None:
         """Forget every widget reference so nothing Tk-owned survives the
@@ -1973,6 +2024,10 @@ def confirm_dialog(title: str, body: str, ok_label: str = "PROCEED") -> bool:
         theme.neon_button(tk, btn_bar, "CANCEL", _cancel, primary=False).pack(side="left", padx=(0, 18))
         theme.neon_button(tk, btn_bar, ok_label, _ok, primary=True).pack(side="left")
         root.protocol("WM_DELETE_WINDOW", _cancel)
+        # No release_root() here on purpose: every Tk object this dialog makes
+        # is a LOCAL of this frame, so they all die together on this thread
+        # when it returns. See ui_dispatch's CR-93 note -- the guard is for
+        # windows that keep widgets in ATTRIBUTES and outlive their thread.
         ui_dispatch.run_dialog(root)
 
     # tk.Tk() itself can raise/wedge when other Tk roots have run on sibling
@@ -2118,6 +2173,7 @@ def licence_dialog(title: str, intro: str, document: str,
             side="left", padx=(0, 18))
         theme.neon_button(tk, btn_bar, accept_label, _ok, primary=True).pack(side="left")
         root.protocol("WM_DELETE_WINDOW", _cancel)
+        # Frame-local widgets only, like confirm_dialog above (CR-93).
         ui_dispatch.run_dialog(root)
 
     try:
@@ -2187,10 +2243,7 @@ def _tk_pick(kind: str) -> Any:
             return filedialog.askopenfilenames(
                 parent=root, title="Choose clips to index")
         finally:
-            try:
-                root.destroy()
-            except Exception:
-                pass
+            ui_dispatch.release_root(root, "the ingest file picker")
 
     return ui_dispatch.dispatch(_ask)
 

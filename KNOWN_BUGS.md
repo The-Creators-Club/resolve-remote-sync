@@ -3027,6 +3027,102 @@ browser with no confirm(), is exactly the old behaviour: re-attach and the
 loud toast (which now names [ CANCEL SEARCH ]). Harness scenarios in
 `tests/test_static_app.py`. Needs a dashboard deploy.
 
+## The tray "kept closing itself": a Tk root freed on the wrong thread (CR-93, 2026-08-29)
+
+### CR-93 - Tcl_AsyncDelete aborts the whole companion, with no traceback and no log line - FIXED in repo 2026-08-29 as companion 0.9.55, NOT YET SHIPPED
+**Reported** by the owner 2026-08-29, on the base rig: "ccsync companion seems
+to keep closing itself in this version". The tray icon disappears, sync stops,
+and `companion.log` shows nothing at all - its last line is whatever the
+companion happened to be doing, then a gap, then the next `starting` line
+from whoever relaunched it.
+
+**It was not closing itself. It was aborting.** Windows Event Log, seven
+times between 2026-08-18 17:16 and 2026-08-29 13:20 (three of them in the
+five minutes of a restart on 08-28), every one in the same fault bucket:
+
+```
+Faulting application name: ccsync-companion.exe
+Faulting module name: tcl86t.dll 8.6.15
+Exception code: 0x80000003     Fault offset: 0xfee74
+```
+
+All seven minidumps in `%LOCALAPPDATA%\CrashDumps` carry a byte-identical
+faulting stack: `tcl86t.dll` (the panic) <- `_tkinter.pyd+0x3ea7`
+(Tkapp_Dealloc -> Tcl_DeleteInterp) <- an ordinary refcount-driven dealloc
+chain in `python312.dll`. Reproduced locally in six lines, which is what
+names it:
+
+```
+Tcl_AsyncDelete: async handler deleted by the wrong thread
+```
+
+**Cause.** A `tk.Tk()` root owns a Tcl interpreter, and `_tkinter` frees that
+interpreter in `Tkapp_Dealloc` - inline, on whatever thread drops the last
+Python reference, with none of the marshaling an ordinary Tk call gets. Tcl
+answers an interpreter deleted from a thread other than its creator with
+`Tcl_Panic`, i.e. `abort()`: the process is gone mid-instruction, so no
+`finally`, no `atexit`, no `sys.excepthook`, no crash file, nothing in the
+log. On win32 this companion builds every dialog on whatever thread wanted it
+(`ui_dispatch`'s inline mode, deliberately - see its docstring), so ANY Tk
+object that outlives its thread is the loaded gun: a widget in an attribute,
+a per-row `StringVar`, a `ttk.Style`, the icon `PhotoImage`. Half the fix was
+already there and undated as such: `WorkProgressWindow._drop_widgets` was
+written for this exact abort on 2026-08-18 (the b-roll window closing, the
+music window's build overwriting its widget attributes on a new thread) -
+but it was treated as one window's bug rather than the class it is.
+
+The three windows that keep widgets in ATTRIBUTES and outlive their thread:
+`PopupDialog` (FIX ALL runs on a daemon thread holding `self._publish` /
+`self._fix_done`, and the dialog kept one `tk.StringVar` PER ROW),
+`ProgressWindow` (`run()` joins its worker with a 1 s TIMEOUT, and the worker
+holds `publish`/`should_stop`), and `WorkProgressWindow` (the app holds it in
+`_work_window`; a tray click or `shutdown()` on the MAIN thread could drop
+the last reference while its own thread was still tearing the window down -
+which is why three of the seven crashes are on restarts).
+
+**Fixed** in `ui_dispatch.release_root()`: destroy the window, drop the icon
+image, `gc.collect()`, then read `sys.getrefcount(root.tk)`. Baseline 2 means
+the interpreter dies here, on the thread that built it. Anything more is a
+leak, and the log line NAMES the holders' types instead of the process
+vanishing - then the root is PARKED (with an immortal reference, `Py_IncRef`
+via ctypes: module globals are cleared from the main thread during
+interpreter shutdown, so a graveyard that is only a list aborts on the way
+out - measured) and reclaimed by the next release on that same thread once
+its holder lets go. Parking leaks a few hundred KB; the alternative leaks the
+tray. Call sites: all three window classes clear their widget attributes
+first (`_drop_widgets`, `_vars = []`, `self.root = None`), `_tk_pick` and
+`copy_diagnostics` release their hidden roots, and `app._close_work_window`
+now WAITS (3 s, bounded) for a work window's own thread to finish before
+letting go of it. The dialogs whose widgets are all frame LOCALS
+(`confirm_dialog`, the licence dialog, the tray's sign-in/update/credentials
+forms) are safe by construction and deliberately do not call it - a live
+frame's locals read as holders and would park for nothing.
+
+**And the silence is fixed too**, because the next native abort of any kind
+must not cost a dump-parsing session: `crash_report.install_native()` enables
+`faulthandler` into `~/.ccsync/crashes/native.log` and writes a RUN MARKER
+for the live pid, cleared at the top of `shutdown()` (the moment the process
+DECIDES to stop, so the hard-exit backstop is not slandered as a crash). A
+start that finds a marker writes a normal crash report, type `UncleanExit`,
+carrying the native dump and the log tail - which means an abort, a kill and
+a power cut all reach the tray line, the diagnostics bundle and the dashboard
+through the machinery APP-6 already built. A Tcl_Panic reaches WER rather
+than faulthandler, so that report also says where to look (Event Log,
+0x80000003, tcl86t.dll).
+
+Tests: `tests/test_tk_release_native.py` runs the real thing in a SUBPROCESS
+(the disease aborts, the cure exits 0, including through interpreter
+shutdown) because the failure kills the interpreter it is tested in;
+`test_ui_dispatch.py` covers the parking, the per-thread graveyard and the
+sweep against fake roots; `test_popup.py` covers the three teardowns;
+`test_app.py` the close-and-wait and the clean-exit marker;
+`test_crash_report.py` the marker, the report and the native log.
+
+Ships as: companion 0.9.55 (the same unshipped build CR-92 and the resilience
+sweep are on). Nothing dashboard-side. **Until it ships, every editor's tray
+can still abort this way** - the symptom to ask about is "the tray icon is
+gone and the log just stops".
+
 ## Pulling the sync drive mid-upload looked exactly like pulling it after a finished day (CR-92, 2026-08-28)
 
 ### CR-92 - the unplug balloon never said whether anything was still owed, and nothing ever reminded the editor - FIXED in repo 2026-08-28 as companion 0.9.55, NOT YET SHIPPED

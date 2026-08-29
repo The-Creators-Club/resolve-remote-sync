@@ -422,10 +422,210 @@ def install(cfg: Optional[dict[str, Any]] = None) -> None:
     init_sender(cfg)
 
 
+# -- the half a Python hook can never see: native aborts (CR-93) ------------
+#
+# Everything above starts from an exception object. A Tcl_Panic does not have
+# one: it calls abort(), the process is gone mid-instruction, and no hook,
+# `finally` or atexit runs. That is exactly how CR-93 hid for eleven days --
+# the tray vanished, companion.log's last line was whatever it had been
+# doing, and only the Windows Event Log knew there had been a crash at all.
+#
+# Two cheap things close that gap, and neither can fail loudly:
+#
+#   faulthandler writes the C-level and Python stack of every thread into
+#   <crashes>/native.log when the process dies on a fatal signal (SIGABRT
+#   among them, which is what abort() raises). It costs nothing while
+#   nothing is wrong.
+#
+#   A RUN MARKER says "a companion with this pid was alive and had not
+#   decided to exit". Deleted the moment shutdown() starts, so it survives
+#   only a death nobody asked for. The NEXT start finds it and writes a
+#   normal crash report -- which means an unclean exit reaches the tray, the
+#   diagnostics bundle and the dashboard through the machinery APP-6 already
+#   built, instead of nowhere.
+#
+# A pulled power cord and a `taskkill /f` land here too, and that is correct:
+# the report says the companion did not shut down tidily, which is true, and
+# names the native.log that distinguishes the cases.
+NATIVE_LOG_FILENAME = "native.log"
+NATIVE_LOG_MAX_BYTES = 512_000
+# Deliberately NOT a .json name: this directory's *.json files ARE the
+# crash reports -- _crash_files() counts them and _prune() deletes the
+# oldest, so a marker with that suffix would report itself as a crash on
+# every start and then be pruned away by a busy one.
+RUN_MARKER_FILENAME = "running.marker"
+# How much of native.log rides along in the report for an unclean exit. A
+# faulthandler dump of 50 threads is long; the top of it is the answer.
+NATIVE_TAIL_LINES = 120
+
+_native_handle: Any = None
+
+
+def native_log_path(cfg: Optional[dict[str, Any]] = None) -> Path:
+    return crash_dir(cfg) / NATIVE_LOG_FILENAME
+
+
+def run_marker_path(cfg: Optional[dict[str, Any]] = None) -> Path:
+    return crash_dir(cfg) / RUN_MARKER_FILENAME
+
+
+def _read_run_marker(cfg: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
+    try:
+        data = json.loads(run_marker_path(cfg).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - absent, empty or half-written: no marker
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_run_marker(cfg: Optional[dict[str, Any]] = None) -> Optional[Path]:
+    """Claim "a companion is running" for this pid. Never raises."""
+    try:
+        directory = crash_dir(cfg)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = run_marker_path(cfg)
+        payload = {
+            "pid": os.getpid(),
+            "version": getattr(config_mod, "VERSION", "?"),
+            "started": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "frozen": bool(getattr(sys, "frozen", False)),
+        }
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def mark_clean_exit(cfg: Optional[dict[str, Any]] = None) -> None:
+    """"This process MEANT to stop." Called at the top of shutdown(), not at
+    the bottom: everything after that decision -- including app.py's hard-exit
+    backstop for a wedged thread -- is a deliberate exit, and reporting it as
+    a crash on the next start would bury the ones that are. Never raises."""
+    try:
+        run_marker_path(cfg).unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _native_tail(cfg: Optional[dict[str, Any]] = None) -> list[str]:
+    path = native_log_path(cfg)
+    try:
+        if not path.is_file() or path.stat().st_size == 0:
+            return []
+    except Exception:  # noqa: BLE001
+        return []
+    return _tail(path, NATIVE_TAIL_LINES)
+
+
+def _log_tail(cfg: Optional[dict[str, Any]] = None) -> list[str]:
+    """The end of companion.log, or nothing. Never raises -- this runs during
+    startup, where a bad log_path is already handled elsewhere."""
+    try:
+        return _tail(config_mod.resolved_log_path(cfg or {}))
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _report_unclean_exit(marker: dict[str, Any],
+                         cfg: Optional[dict[str, Any]] = None) -> Optional[Path]:
+    """One crash file for a previous run that never reached shutdown()."""
+    native = _native_tail(cfg)
+    detail = (
+        f"a companion (pid {marker.get('pid', '?')}, version "
+        f"{marker.get('version', '?')}, started {marker.get('started', '?')}) "
+        "stopped without ever starting a shutdown"
+    )
+    report = {
+        "schema": 1,
+        "when": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "version": getattr(config_mod, "VERSION", "?"),
+        "thread": "process",
+        "frozen": bool(getattr(sys, "frozen", False)),
+        "platform": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+            "python": platform.python_version(),
+        },
+        "exception": {
+            # A TYPE, so recent_reports() and the diagnostics section that
+            # reads it show something an admin can act on rather than
+            # "<unknown>". It is not a Python exception and does not pretend
+            # to be one.
+            "type": "UncleanExit",
+            "message": redact(detail),
+            "traceback": redact("\n".join(native)) if native else
+                         "no native.log entry -- the process was killed, lost "
+                         "power, or died somewhere faulthandler could not "
+                         "report (a Tcl_Panic on Windows reaches WER, not us: "
+                         "check the Event Log for exception 0x80000003 in "
+                         "tcl86t.dll, which is CR-93)",
+        },
+        "previous_run": {k: marker.get(k) for k in ("pid", "version", "started", "frozen")},
+        "log_tail": _log_tail(cfg),
+    }
+    path = write_report(report, cfg)
+    log.error("the previous companion did not shut down cleanly: %s%s", detail,
+              f" -- report written to {path}" if path else "")
+    return path
+
+
+def install_native(cfg: Optional[dict[str, Any]] = None) -> None:
+    """faulthandler + the run marker. Call ONCE, after the single-instance
+    lock is held: the marker is one file for the machine, and a second
+    instance that is about to exit must not touch the live one's. Never
+    raises -- a companion that cannot write a marker still syncs.
+    """
+    global _native_handle
+    cfg = cfg or {}
+    try:
+        marker = _read_run_marker(cfg)
+        if marker is not None:
+            _report_unclean_exit(marker, cfg)
+    except Exception:  # noqa: BLE001
+        log.debug("could not check the previous run's marker", exc_info=True)
+    try:
+        directory = crash_dir(cfg)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = native_log_path(cfg)
+        # Truncate rather than rotate: this file is only ever read right after
+        # a native death, one dump is what matters, and a rotation scheme is
+        # more code than the thing it protects.
+        try:
+            if path.is_file() and path.stat().st_size > NATIVE_LOG_MAX_BYTES:
+                path.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+        import faulthandler  # noqa: PLC0415 - stdlib, but only needed here
+
+        # Held in a module global for the life of the process ON PURPOSE:
+        # faulthandler keeps the fd, and a closed file would make the dump
+        # land nowhere at the one moment it is wanted.
+        _native_handle = open(path, "a", encoding="utf-8", errors="replace")
+        faulthandler.enable(file=_native_handle, all_threads=True)
+    except Exception:  # noqa: BLE001
+        log.debug("faulthandler could not be enabled", exc_info=True)
+    write_run_marker(cfg)
+
+
 def _reset_for_tests() -> None:
     """The module-level `_installed`/`_sentry` latches are process-global; the
     suite installs hooks many times over. Not part of the public surface."""
-    global _installed, _sentry
+    global _installed, _sentry, _native_handle
     _installed = False
     _sentry = None
+    handle, _native_handle = _native_handle, None
+    if handle is not None:
+        try:
+            import faulthandler
+
+            faulthandler.disable()
+            handle.close()
+            # Back to the default sink rather than off: pytest's own
+            # faulthandler runs for the whole session, and a suite that
+            # silently took it away would hide the next hang in some other
+            # test. Raises under a windowed build (no stderr) -- test-only
+            # code, so that is the caller's problem and not ours.
+            faulthandler.enable()
+        except Exception:  # noqa: BLE001
+            pass
     invalidate_summary()

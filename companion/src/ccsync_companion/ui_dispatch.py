@@ -60,6 +60,7 @@ by the CALLER, outside dispatch(). This is a transport, not a lock.
 
 from __future__ import annotations
 
+import gc
 import logging
 import sys
 import threading
@@ -575,6 +576,229 @@ def run_dialog(root: Any) -> None:
         root.wait_window(root)
     finally:
         dispatcher.forget_dialog(root)
+
+
+# -- letting a root DIE on the thread that built it (CR-93) -----------------
+#
+# THE FAILURE THIS PREVENTS. A `tk.Tk()` root owns a Tcl interpreter, and
+# _tkinter frees that interpreter in Tkapp_Dealloc -- inline, on whatever
+# thread happens to drop the last Python reference, with none of the
+# marshaling an ordinary Tk call gets. Tcl checks: an interpreter deleted
+# from a thread other than the one that created it is
+#
+#     Tcl_AsyncDelete: async handler deleted by the wrong thread
+#
+# a Tcl_Panic, i.e. abort(). The process is GONE -- no Python traceback, no
+# `finally`, no log line, no crash file. On Windows it surfaces only in the
+# Event Log as exception 0x80000003 in tcl86t.dll, and to the editor as "the
+# tray keeps closing itself" (CR-93: seven of these between 2026-08-18 and
+# 2026-08-29 on the base rig, every one with a byte-identical stack).
+#
+# On win32 every dialog in this package builds its own root on whatever
+# thread wanted it (see the module docstring), so ANY Tk object that outlives
+# its thread is a loaded gun: a widget kept in an attribute, a StringVar, a
+# ttk.Style, a PhotoImage. The root itself surviving is the same gun.
+#
+# THE RULE, and it is the only one that works: the Tcl interpreter must be
+# freed on the thread that made it. release_root() is how a dialog ends. It
+# destroys the window, checks whether anything still holds the interpreter,
+# and -- when something does -- PARKS the root here rather than letting the
+# unknown holder free it somewhere else later. A parked root costs a few
+# hundred KB and is reclaimed by the next release on that same thread; an
+# unparked one costs the whole tray.
+#
+# WHERE IT IS CALLED, AND WHERE IT IS NOT. A dialog that keeps every widget
+# in LOCALS (confirm_dialog, the licence dialog, the tray's sign-in/update/
+# credentials forms) is already safe: those locals die with the frame, on
+# this thread, whatever happens. The guard is for the windows that keep
+# widgets in ATTRIBUTES and hand themselves to a worker thread -- the fixer
+# popup (FIX ALL holds `self._publish`), ProgressWindow (`run()` joins its
+# worker with a TIMEOUT) and WorkProgressWindow (the app holds it in
+# `_work_window` and any thread may close it). Calling it from a frame that
+# still holds widget locals is not wrong, only noisy: they read as holders
+# and the root is parked for nothing.
+
+# What `sys.getrefcount(root.tk)` reads for an interpreter nothing else holds:
+# the root's own __dict__, plus getrefcount's argument. Measured, not guessed
+# (2026-08-29) -- and it is stable because destroy() clears root.children.
+TK_INTERP_BASELINE_REFS = 2
+# The ROOT's own refcount is deliberately NOT part of the verdict. Every
+# dialog in this package closes over `root` in its _ok/_cancel callbacks, so
+# a live frame legitimately holds it four or five times over -- and those
+# cells die with the frame, on this thread, harmlessly. What actually kills
+# the process is another Tk OBJECT (a widget, a StringVar, a ttk.Style, a
+# PhotoImage) holding the interpreter past the frame, and that is exactly
+# what the count above sees.
+#
+# refs a PARKED root reads when nothing else wants it: the graveyard list,
+# the sweep's loop variable, and getrefcount's argument -- plus the immortal
+# reference below, when it could be taken.
+PARKED_ROOT_BASELINE_REFS = 3
+# Parking is a leak by design, so say so once it stops being a rounding error.
+GRAVEYARD_WARN_AT = 8
+
+_graveyard_lock = threading.Lock()
+# thread ident -> [(root, immortal?)] for destroyed roots whose interpreter
+# someone else still holds.
+_graveyard: dict[int, list] = {}
+
+
+def _immortalise(obj: Any) -> bool:
+    """Add a reference nothing can take back but us. Returns whether it stuck.
+
+    A parked root needs to survive INTERPRETER SHUTDOWN as well as its
+    holder: finalisation clears module globals from the main thread, so a
+    graveyard that is only a list hands the last reference to the main
+    thread and aborts on the way out (measured 2026-08-29 -- exit code 3,
+    same Tcl_AsyncDelete, just at a moment nobody was watching). An extra
+    refcount is invisible to finalisation, and _mortalise() gives it back
+    when the owning thread is ready to do the free itself.
+    """
+    try:
+        import ctypes  # noqa: PLC0415 - only needed on the parking path
+
+        ctypes.pythonapi.Py_IncRef(ctypes.py_object(obj))
+        return True
+    except Exception:  # noqa: BLE001 - no ctypes: park anyway, list-only
+        log.debug("UI dispatch: could not pin a parked root", exc_info=True)
+        return False
+
+
+def _mortalise(obj: Any) -> None:
+    try:
+        import ctypes  # noqa: PLC0415
+
+        ctypes.pythonapi.Py_DecRef(ctypes.py_object(obj))
+    except Exception:  # noqa: BLE001
+        log.debug("UI dispatch: could not unpin a parked root", exc_info=True)
+
+
+def _holder_names(obj: Any, limit: int = 6) -> str:
+    """Types still referencing `obj`, for the log line that names the leak.
+
+    This is the whole point of the check: the abort it replaces named
+    nothing at all, so every previous occurrence cost a dump-parsing session
+    to attribute. `Tk` and `dict` are expected (the root, and this module's
+    graveyard); anything else is the bug.
+    """
+    try:
+        names = sorted({type(ref).__name__ for ref in gc.get_referrers(obj)})
+    except Exception:  # noqa: BLE001 - a diagnostic may not become the failure
+        return "<unknown>"
+    return ", ".join(names[:limit]) or "<none>"
+
+
+def _sweep_graveyard(ident: int) -> int:
+    """Free whatever this thread parked earlier and can now safely drop.
+
+    Called at the START of release_root, so reclamation happens on the one
+    thread that is allowed to do it, at the one moment we know is safe. A
+    root whose holder has since let go reads the baseline again and dies
+    here; one still held stays parked. Returns how many were freed.
+    """
+    with _graveyard_lock:
+        parked = _graveyard.get(ident)
+        if not parked:
+            return 0
+        keep: list = []
+        freed = 0
+        for item, immortal in parked:
+            baseline = PARKED_ROOT_BASELINE_REFS + (1 if immortal else 0)
+            try:
+                still_held = (sys.getrefcount(item) > baseline
+                              or sys.getrefcount(item.tk) > TK_INTERP_BASELINE_REFS)
+            except Exception:  # noqa: BLE001 - an unreadable root stays parked
+                still_held = True
+            if still_held:
+                keep.append((item, immortal))
+                continue
+            if immortal:
+                _mortalise(item)
+            freed += 1
+        _graveyard[ident] = keep
+    if freed:
+        log.info("UI dispatch: released %d parked Tk root(s) on the thread that "
+                 "built them", freed)
+    # `parked` and `item` go out of scope HERE, on the owning thread. That is
+    # the entire mechanism; do not move this into a helper that returns them.
+    return freed
+
+
+def release_root(root: Any, label: Optional[str] = None) -> bool:
+    """End a dialog: destroy `root` and make sure its Tcl interpreter dies on
+    THIS thread. Returns True if it did, False if the root had to be parked.
+
+    Call it with the root in exactly one local, having already cleared every
+    attribute that held it or one of its widgets (`self.root = None`, the
+    window classes' `_drop_widgets()`); otherwise the reference you kept is
+    read as a leak and the root is parked, which is safe but wasteful.
+
+    Never raises: a dialog that is already gone, a Tk that is half torn down
+    and a display that vanished all mean the same thing here.
+    """
+    ident = threading.get_ident()
+    _sweep_graveyard(ident)
+    name = label or window_label(root)
+    try:
+        # apply_window_icon parks a PhotoImage on the root so Tk does not drop
+        # the icon; it is bound to this interpreter and must go with it.
+        root.__dict__.pop("_ccsync_icon_image", None)
+    except Exception:  # noqa: BLE001
+        pass
+    _destroy_quietly(root, name)
+    try:
+        # Deterministic before the count: Tk widgets are cyclic
+        # (master <-> children), and a cycle waiting for the collector reads
+        # exactly like a foreign holder.
+        gc.collect()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        interp_refs = sys.getrefcount(root.tk)
+    except Exception:  # noqa: BLE001 - no .tk means nothing to free
+        return True
+    if interp_refs <= TK_INTERP_BASELINE_REFS:
+        return True
+    log.warning(
+        "UI dispatch: %s closed with its Tcl interpreter still referenced "
+        "(%d refs, baseline %d, held by: %s). Parking it here rather than "
+        "letting another thread free it -- that is the abort CR-93 was: "
+        "Tcl_AsyncDelete, exception 0x80000003 in tcl86t.dll, the whole tray "
+        "gone with no traceback. Whatever is named above should have been "
+        "dropped by the window's own _drop_widgets().",
+        name, interp_refs, TK_INTERP_BASELINE_REFS, _holder_names(root.tk),
+    )
+    immortal = _immortalise(root)
+    with _graveyard_lock:
+        parked = _graveyard.setdefault(ident, [])
+        parked.append((root, immortal))
+        depth = len(parked)
+    if depth >= GRAVEYARD_WARN_AT:
+        log.error(
+            "UI dispatch: %d Tk root(s) parked on this thread and never "
+            "reclaimed -- something keeps a widget for the life of the "
+            "process. Each one holds a Tcl interpreter's memory; the leak is "
+            "deliberate (it beats the abort) but it is still a leak.", depth)
+    return False
+
+
+def parked_roots(ident: Optional[int] = None) -> list:
+    """What release_root has parked, for tests and diagnostics."""
+    with _graveyard_lock:
+        if ident is None:
+            return [root for roots in _graveyard.values() for root, _ in roots]
+        return [root for root, _ in _graveyard.get(ident, ())]
+
+
+def _reset_graveyard_for_tests() -> None:
+    """Give back every pin and forget the roots. Only the suite calls this --
+    a released pin in production is a root the wrong thread can free."""
+    with _graveyard_lock:
+        entries = [entry for roots in _graveyard.values() for entry in roots]
+        _graveyard.clear()
+    for root, immortal in entries:
+        if immortal:
+            _mortalise(root)
 
 
 def stop() -> None:

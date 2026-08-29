@@ -764,3 +764,35 @@ ignored_resolve_projects = ["Untitled Project", "New Doc"]
 # library_db_name = ""
 # library_db_user = ""
 # library_db_password = ""
+
+# ---------------------------------------------------------------- FLEET JOBS
+# Work the dashboard queued that THIS computer may do while nobody is at it
+# (docs/TIMELINE-CARDS-INTO-CCSYNC.md). One kind today: `whisper`, which runs
+# MulticamPipeline's transcription over a folder in the vault and writes the
+# sidecars back there, where every machine can see them.
+#
+# NOTHING HAPPENS UNTIL THE TWO PATHS BELOW ARE SET. With either blank this
+# machine reports "no whisper here", is never offered a transcription, and
+# says so on the fleet grid -- absent is "no capability", never "try and
+# fail". Both are per-machine facts, which is why they are commented out
+# here rather than filled in: only a rig that HAS them should claim the work.
+#
+# The gates are the proxy generator's, deliberately: claim only after
+# jobs_idle_seconds of no keyboard or mouse, and not while Resolve is open
+# (true here where the generator's equivalent is false -- a whisper pass
+# wants the whole GPU, which is what a Resolve render is using). One job at
+# a time, and a fleet halt stops it like everything else.
+# jobs_enabled = true
+# jobs_whisper_python = "C:\\Users\\you\\tools\\whisper\\.venv\\Scripts\\python.exe"
+# jobs_mulcam_pipeline = "E:\\Projects\\Editing\\Resolve\\MulticamPipeline"
+
+# The two roots that are NOT the project tree. A job's inputs are (root name,
+# relative path) pairs -- never an absolute path, because the vault is a drive
+# letter here, a container mount there and a UNC path on the wire -- so a root
+# this machine cannot place is a job it never claims.
+# jobs_vault_root = "X:\\"
+# jobs_media_root = ""
+
+# jobs_idle_seconds = 300
+# jobs_skip_while_resolve_running = true
+# jobs_poll_seconds = 20

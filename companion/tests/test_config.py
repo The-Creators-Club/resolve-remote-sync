@@ -218,6 +218,16 @@ def test_default_toml_text_documents_every_default_key():
         # for what Resolve normally tells us (plus one secret).
         "library_walk", "library_db_host", "library_db_port",
         "library_db_name", "library_db_user", "library_db_password",
+        # Fleet jobs (docs/TIMELINE-CARDS-INTO-CCSYNC.md phase 0, 2026-08-29).
+        # Same class as the b-roll ingest knobs above, with one difference
+        # that matters: the two PATH keys are per-machine facts (a whisper
+        # venv and a MulticamPipeline checkout that exist on one rig today),
+        # and writing a blank one into every first-run file would document a
+        # feature as broken rather than as absent. The gates are measured
+        # defaults a later re-tune has to be able to reach.
+        "jobs_enabled", "jobs_whisper_python", "jobs_mulcam_pipeline",
+        "jobs_vault_root", "jobs_media_root", "jobs_idle_seconds",
+        "jobs_skip_while_resolve_running", "jobs_poll_seconds",
     }
     for key in config_mod.DEFAULTS:
         if key in commented_out:
@@ -299,6 +309,15 @@ EXAMPLE_COMMENTED_OUT = {
     # anyone might copy about.
     "library_walk", "library_db_host", "library_db_port", "library_db_name",
     "library_db_user", "library_db_password",
+    # Fleet jobs (docs/TIMELINE-CARDS-INTO-CCSYNC.md phase 0, 2026-08-29).
+    # The two PATH keys are per-machine facts -- a whisper venv and a
+    # MulticamPipeline checkout that exist on one rig today -- so a blank one
+    # copied into every config.toml would document the feature as broken
+    # rather than as absent; the gates are measured defaults a later re-tune
+    # has to be able to reach.
+    "jobs_enabled", "jobs_whisper_python", "jobs_mulcam_pipeline",
+    "jobs_vault_root", "jobs_media_root", "jobs_idle_seconds",
+    "jobs_skip_while_resolve_running", "jobs_poll_seconds",
 }
 
 # Read straight off the loaded config with .get() and DELIBERATELY absent from

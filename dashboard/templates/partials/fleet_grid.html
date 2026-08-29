@@ -244,6 +244,14 @@
            the jobs table and not from a report section, so a machine that has
            gone quiet still shows what it took with it -- which is precisely
            the state the lease exists to end. #}
+        {# WHAT THIS COMPUTER CAN DO (TIMELINE-CARDS-INTO-CCSYNC.md §4.3,
+           2026-08-29). Shown even with nothing running, on the [ VRAM ]
+           chip's reasoning: "which machines could take this work" is a
+           question an admin has to be able to answer while the queue is
+           empty, and until now the GPU probe's answer never left the
+           machine it ran on. #}
+        {% if e.capabilities.gpu_present %}<span class="chip" title="{{ e.capabilities.gpu_name or "an NVIDIA GPU" }}{% if e.capabilities.nvenc %}, with nvenc{% endif %}{% if e.capabilities.at %} · reported {{ e.capabilities.at | ago }}{% endif %}">[ GPU{% if e.capabilities.gpu_vram_gb %} {{ e.capabilities.gpu_vram_gb | round | int }}G{% endif %} ]</span>{% endif %}
+        {% if e.capabilities.whisper %}<span class="chip" title="this computer has the whisper venv and the pipeline checkout the transcription jobs need">[ WHISPER ]</span>{% endif %}
         {% if e.job.id %}<span class="chip green" title="job #{{ e.job.id }} ({{ e.job.kind }}, {{ e.job.state }}){% if e.job.rel_path %} - {{ e.job.rel_path }}{% endif %}{% if e.job.at %} · last heartbeat {{ e.job.at | ago }}{% endif %}{% if e.job.lease_expires_at %} · lease until {{ e.job.lease_expires_at }}{% endif %}">[ {{ e.job.kind | upper }}: JOB {{ e.job.id }} ]</span>{% endif %}
         {# Music ingest (MUSIC_INGEST_PLAN.md step 3, 2026-08-18). Its OWN
            chip beside b-roll's rather than one shared one: music needs no GPU,

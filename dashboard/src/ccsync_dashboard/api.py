@@ -774,6 +774,9 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
     # about a machine, and a machine that has stopped reporting entirely is
     # exactly when you want to see that it is still holding one.
     running_jobs = db.fetch_running_jobs_map(conn)
+    # ...and what each machine says it can do (v42), for the [ GPU ] /
+    # [ WHISPER ] chips. One query for the fleet, like every other map here.
+    capabilities = db.fetch_capabilities_map(conn)
     proxies = db.fetch_proxy_coverage_map(conn)
     # Which machines have an admin's "resume proxy download" still in flight
     # (v26, CR-45), so the button can say "asked" rather than inviting a
@@ -895,6 +898,7 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
         entry["ingest"] = ingest.get(key) or {}
         entry["music_ingest"] = music_ingest.get(key) or {}
         entry["job"] = running_jobs.get(key) or {}
+        entry["capabilities"] = capabilities.get(key) or {}
         entry["proxy"] = proxies.get(key) or {}
         entry["companion_version"] = (
             (machine_versions.get(key) or {}).get("companion_version")
@@ -6556,6 +6560,48 @@ class BrollIngestIn(_ReportSectionIn):
     at: str = Field(default="", max_length=64)
 
 
+class ResolveCapabilityIn(_ReportSectionIn):
+    """What is knowable about Resolve WITHOUT talking to it (phase 0).
+
+    No version, no timeline uid, no unlocked flag: every one of those needs a
+    scripting call, and a capability probe on a 30 s cadence must never be
+    the thing that calls scriptapp() (CR-68). The two job kinds that would
+    need them are pinned to their own machine and are never scheduled.
+    """
+    running: bool = False
+    project: str = Field(default="", max_length=255)
+
+
+class CapabilitiesIn(_ReportSectionIn):
+    """The companion's `capabilities` section (TIMELINE-CARDS-INTO-CCSYNC.md
+    §4.3, 2026-08-29): what this computer can DO.
+
+    Scalars and one list of root NAMES. Every field optional, on the same
+    terms as the ingest sections: an older companion sends nothing (which
+    reads as "unknown", and the scheduler offers unknown machines nothing),
+    and a newer one that grows a field must never 422 its whole report.
+
+    `idle_seconds` IS NULLABLE AND NULL IS NOT ZERO. Null is "this machine
+    cannot tell", which every reader treats as NOT IDLE; zero is "somebody is
+    typing". idle.py's contract, carried end to end.
+    """
+    gpu_present: bool = False
+    gpu_name: str = Field(default="", max_length=128)
+    gpu_vram_gb: float | None = Field(default=None, ge=0, le=1024)
+    nvenc: bool = False
+    ffmpeg: bool = False
+    whisper: bool = False
+    whisper_detail: str = Field(default="", max_length=255)
+    claude: bool = False
+    mounts: list[str] | None = Field(default=None, max_length=16)
+    cpu_count: int | None = Field(default=None, ge=0, le=4096)
+    idle_seconds: float | None = Field(default=None, ge=0)
+    load: float | None = Field(default=None, ge=0)
+    jobs_enabled: bool = True
+    jobs_idle_seconds: float | None = Field(default=None, ge=0)
+    resolve: ResolveCapabilityIn | None = None
+
+
 class MusicIngestIn(BrollIngestIn):
     """The companion's `music_ingest` section (MUSIC_INGEST_PLAN.md step 3,
     2026-08-18) -- one local music indexing batch, as the tray sees it.
@@ -6660,6 +6706,7 @@ _TOLERANT_SECTIONS: dict[str, type[BaseModel]] = {
     "youtube_import": YoutubeImportIn,
     "broll_ingest": BrollIngestIn,
     "music_ingest": MusicIngestIn,
+    "capabilities": CapabilitiesIn,
 }
 
 
@@ -6949,6 +6996,11 @@ class ReportIn(BaseModel):
     # shipped and reached nobody; broll_ingest is new (BROLL_INGEST_PLAN.md
     # §3.2) and is what lets an admin see which computers are indexing
     # b-roll and how far along they are.
+    # What this machine can DO (phase 0). Absent from every companion below
+    # 0.9.56, and absent is UNKNOWN: db.store_machine_capabilities writes
+    # nothing, and the scheduler offers a machine with no capabilities
+    # nothing at all rather than guessing it can do everything.
+    capabilities: CapabilitiesIn | None = None
     proxy_coverage: ProxyCoverageIn | None = None
     youtube_import: YoutubeImportIn | None = None
     broll_ingest: BrollIngestIn | None = None
@@ -6998,7 +7050,7 @@ class ReportIn(BaseModel):
         return [lane for lane in lanes if lane.name in LANE_LABELS]
 
     @field_validator("proxy_coverage", "youtube_import", "broll_ingest",
-                     "music_ingest", mode="before")
+                     "music_ingest", "capabilities", mode="before")
     @classmethod
     def _a_bad_section_never_422s(cls, value, info):
         """A diagnostic section that will not parse is DROPPED, not fatal.
@@ -7327,6 +7379,15 @@ def api_report(
         conn, editor, machine,
         None if payload.resolve_journals is None
         else [j.model_dump() for j in payload.resolve_journals])
+    # What this machine can do (v42). Its own statement rather than sixteen
+    # more columns in the upsert above, for the reason the journals write is:
+    # this pair has a rule of its own (wholesale replace on a report that
+    # carried the section, untouched on one that did not) and every work
+    # package that touches the report edits that INSERT.
+    db.store_machine_capabilities(
+        conn, editor, machine,
+        None if payload.capabilities is None else payload.capabilities.model_dump(),
+        received_at)
 
     # -- media presence (all optional; absent field ⇒ table untouched) --
     # (`mode` is read above, with the machine_state write that now stores it.)
@@ -7584,7 +7645,14 @@ def api_report(
     # place on the fleet grid (the lanes, presence and transfers in this same
     # report are already written).
     try:
-        offers = jobs_mod.offers_for_machine(conn, editor, machine, now=received_at)
+        offers = jobs_mod.offers_for_machine(
+            conn, editor, machine,
+            # THIS report's capabilities, not the stored ones: they are the
+            # same row we have just written, and passing them explicitly is
+            # what makes the offer and the claim (which re-checks against the
+            # capabilities in the claim body) two readings of the same rule.
+            None if payload.capabilities is None else payload.capabilities.model_dump(),
+            now=received_at)
         if offers["offered"]:
             result["commands"]["jobs"] = {"offered": offers["offered"]}
     except Exception:                                              # noqa: BLE001

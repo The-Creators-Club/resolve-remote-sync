@@ -1381,6 +1381,46 @@ CREATE INDEX IF NOT EXISTS ix_jobs_holder
 CREATE INDEX IF NOT EXISTS ix_jobs_lease ON jobs(state, lease_expires_at);
 """
 
+# v42: WHAT EACH MACHINE CAN DO (TIMELINE-CARDS-INTO-CCSYNC.md §4.3, phase 0,
+# 2026-08-29). Flat columns on machine_state, exactly as v20 did for b-roll
+# ingest and for the same stated reason: the grid sorts and alarms on this,
+# and "which computers have a GPU" is a fleet question a JSON blob cannot be
+# asked.
+#
+# The companion has been able to answer most of this since the b-roll indexer
+# shipped -- `broll_vlm_sidecar.gpu()`, `proxy_gen._has_nvenc`,
+# `idle.seconds_idle()` -- and none of it has ever reached this database
+# except as a refusal string in `ingest_warning`. That is the gap this
+# migration closes, and it is what makes the job scheduler's first filter
+# possible at all.
+#
+# `cap_idle_seconds` IS NULLABLE ON PURPOSE and null is not zero: null means
+# the machine cannot tell how long it has been idle, which every reader must
+# treat as NOT IDLE (idle.py's contract). Zero means somebody is typing right
+# now. A schema that folded them together would be the difference between
+# using idle machines and transcoding under an editor's hands.
+#
+# `cap_at` is the marker column the write rule turns on: a report carrying the
+# section replaces every value, a report without one changes nothing.
+SCHEMA_V42 = """
+ALTER TABLE machine_state ADD COLUMN cap_at TEXT;
+ALTER TABLE machine_state ADD COLUMN cap_gpu_present INTEGER;
+ALTER TABLE machine_state ADD COLUMN cap_gpu_name TEXT;
+ALTER TABLE machine_state ADD COLUMN cap_gpu_vram_gb REAL;
+ALTER TABLE machine_state ADD COLUMN cap_nvenc INTEGER;
+ALTER TABLE machine_state ADD COLUMN cap_ffmpeg INTEGER;
+ALTER TABLE machine_state ADD COLUMN cap_whisper INTEGER;
+ALTER TABLE machine_state ADD COLUMN cap_whisper_detail TEXT;
+ALTER TABLE machine_state ADD COLUMN cap_claude INTEGER;
+ALTER TABLE machine_state ADD COLUMN cap_mounts TEXT;
+ALTER TABLE machine_state ADD COLUMN cap_cpu_count INTEGER;
+ALTER TABLE machine_state ADD COLUMN cap_idle_seconds REAL;
+ALTER TABLE machine_state ADD COLUMN cap_load REAL;
+ALTER TABLE machine_state ADD COLUMN cap_resolve_running INTEGER;
+ALTER TABLE machine_state ADD COLUMN cap_resolve_project TEXT;
+ALTER TABLE machine_state ADD COLUMN cap_jobs_enabled INTEGER;
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -1464,6 +1504,11 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # number wave 5's protection panel gave up is taken here rather than left
     # as a hole -- THE LIST MUST STAY GAPLESS (test_db's ordering test).
     (41, SCHEMA_V41),
+    # 42: the capabilities the scheduler filters on. It ships WITH 41 in
+    # phase 0, but as its own step: the queue is useful with no capability
+    # reported (every job simply waits, visibly), and the columns are useful
+    # with no queue.
+    (42, SCHEMA_V42),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -7700,6 +7745,71 @@ def prune_jobs(conn: sqlite3.Connection, now: str, max_age_days: int = 30) -> in
     return int(cur.rowcount or 0)
 
 
+
+
+# ------------------------------------------------- machine capabilities (v42)
+#
+# What each computer can DO, flattened onto machine_state exactly as v20 did
+# for b-roll ingest and for the same stated reason: the grid sorts and alarms
+# on this, and a JSON blob cannot be asked "which machines have a GPU".
+#
+# WRITTEN WHOLESALE, never merged. `cap_at` is the marker: a report that
+# carried the section replaces every column, and one that did not leaves them
+# all alone. Merging would make "this machine no longer has a vault mounted"
+# unsayable -- and a stale mount is how a job gets claimed by the one machine
+# that cannot read a single file of it.
+
+CAPABILITY_MOUNTS_MAX = 16
+
+
+def store_machine_capabilities(
+    conn: sqlite3.Connection, editor: str, machine: str,
+    caps: Mapping[str, Any] | None, now: str,
+) -> None:
+    """The companion's `capabilities` section -> machine_state's flat columns.
+
+    None (no section on this report) writes NOTHING: a companion too old to
+    send one must not have its known hardware blanked, and an empty answer
+    from a machine mid-restart must not take it off the offer list for a
+    report interval.
+    """
+    if caps is None:
+        return
+    caps = dict(caps)
+    resolve = caps.get("resolve") if isinstance(caps.get("resolve"), Mapping) else {}
+    mounts = [str(m)[:32] for m in (caps.get("mounts") or [])][:CAPABILITY_MOUNTS_MAX]
+    conn.execute(
+        """UPDATE machine_state SET
+             cap_at=?, cap_gpu_present=?, cap_gpu_name=?, cap_gpu_vram_gb=?,
+             cap_nvenc=?, cap_ffmpeg=?, cap_whisper=?, cap_whisper_detail=?,
+             cap_claude=?, cap_mounts=?, cap_cpu_count=?, cap_idle_seconds=?,
+             cap_load=?, cap_resolve_running=?, cap_resolve_project=?,
+             cap_jobs_enabled=?
+            WHERE editor_username=? AND machine=?""",
+        (now,
+         int(bool(caps.get("gpu_present"))),
+         str(caps.get("gpu_name") or "")[:128],
+         caps.get("gpu_vram_gb"),
+         int(bool(caps.get("nvenc"))),
+         int(bool(caps.get("ffmpeg"))),
+         int(bool(caps.get("whisper"))),
+         str(caps.get("whisper_detail") or "")[:255],
+         int(bool(caps.get("claude"))),
+         json.dumps(mounts, separators=(",", ":")),
+         caps.get("cpu_count"),
+         # NULL means "this machine cannot tell", which every reader must
+         # treat as NOT IDLE (idle.py's contract, carried end to end). It is
+         # deliberately not coerced to 0: zero is "somebody is typing", and
+         # the two must not become the same row.
+         caps.get("idle_seconds"),
+         caps.get("load"),
+         int(bool((resolve or {}).get("running"))),
+         str((resolve or {}).get("project") or "")[:255],
+         int(bool(caps.get("jobs_enabled", True))),
+         str(editor), str(machine)),
+    )
+
+
 def machine_capabilities(
     conn: sqlite3.Connection, editor: str, machine: str,
 ) -> dict[str, Any]:
@@ -7710,4 +7820,51 @@ def machine_capabilities(
     the capabilities section reports none, and must not be handed GPU work on
     the strength of a silence.
     """
-    return {}
+    row = conn.execute(
+        """SELECT cap_at, cap_gpu_present, cap_gpu_name, cap_gpu_vram_gb,
+                  cap_nvenc, cap_ffmpeg, cap_whisper, cap_whisper_detail,
+                  cap_claude, cap_mounts, cap_cpu_count, cap_idle_seconds,
+                  cap_load, cap_resolve_running, cap_resolve_project,
+                  cap_jobs_enabled
+             FROM machine_state WHERE editor_username=? AND machine=?""",
+        (str(editor), str(machine))).fetchone()
+    if row is None or not row["cap_at"]:
+        return {}
+    try:
+        mounts = json.loads(row["cap_mounts"]) if row["cap_mounts"] else []
+    except (TypeError, ValueError):
+        mounts = []
+    return {
+        "at": row["cap_at"],
+        "gpu_present": bool(row["cap_gpu_present"]),
+        "gpu_name": row["cap_gpu_name"] or "",
+        "gpu_vram_gb": row["cap_gpu_vram_gb"],
+        "nvenc": bool(row["cap_nvenc"]),
+        "ffmpeg": bool(row["cap_ffmpeg"]),
+        "whisper": bool(row["cap_whisper"]),
+        "whisper_detail": row["cap_whisper_detail"] or "",
+        "claude": bool(row["cap_claude"]),
+        "mounts": [str(m) for m in mounts] if isinstance(mounts, list) else [],
+        "cpu_count": row["cap_cpu_count"],
+        "idle_seconds": row["cap_idle_seconds"],
+        "load": row["cap_load"],
+        "jobs_enabled": bool(row["cap_jobs_enabled"]),
+        "resolve": {"running": bool(row["cap_resolve_running"]),
+                    "project": row["cap_resolve_project"] or ""},
+    }
+
+
+def fetch_capabilities_map(
+    conn: sqlite3.Connection,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """(editor, machine) -> capabilities, for the fleet grid's chips.
+
+    One query for the whole fleet: this builder runs every 15 s for every open
+    fleet page (the same rule fetch_broll_ingest_map follows)."""
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in conn.execute(
+        "SELECT editor_username, machine FROM machine_state WHERE cap_at IS NOT NULL"
+    ).fetchall():
+        key = (row["editor_username"], row["machine"])
+        out[key] = machine_capabilities(conn, key[0], key[1])
+    return out

@@ -31,6 +31,7 @@ from . import broll_ingest as broll_ingest_mod
 from . import music_ingest as music_ingest_mod
 from . import broll_server as broll_server_mod
 from . import canon
+from . import capabilities as capabilities_mod
 from . import config as config_mod
 from . import crash_report
 from . import eula as eula_mod
@@ -1697,6 +1698,13 @@ class CompanionApp:
                 get_current_project=lambda: getattr(self.watcher, "last_resolve_project", None),
             )
 
+        # ONE idle probe for the fleet-job half of this companion: the
+        # capabilities section reports what it says, and the job runner gates
+        # on what it says. Two probes would be two answers to "is anybody
+        # here", and the machine would advertise itself as free while
+        # refusing to work (or worse, the other way round).
+        self._jobs_idle_probe = idle_mod.make_idle_probe(True)
+
         self.reporter = DashboardReporter(
             self.lane_statuses, cfg,
             get_queue_info=self._queue_info if self._managed else None,
@@ -1732,6 +1740,11 @@ class CompanionApp:
             # this and neither should wait for a heavy cycle.
             get_broll_ingest=self.broll_ingest_status,
             get_music_ingest=self.music_ingest_status,
+            # What this computer CAN DO (TIMELINE-CARDS-INTO-CCSYNC.md §4.3).
+            # Every tick, light ones included: `idle_seconds` is what the
+            # dashboard's job scheduler decides on and it changes second by
+            # second.
+            get_capabilities=self.job_capabilities,
             # The safety latches (item 9). Every tick, not just the heavy
             # ones: a tripped breaker and a halted machine are the two states
             # an admin must not learn about a report interval late.
@@ -5150,6 +5163,27 @@ class CompanionApp:
         return health
 
     # -- the safety latches (COMMERCIAL_READINESS.md item 9, 2026-08-17) ----
+    def job_capabilities(self) -> dict[str, Any]:
+        """The `capabilities` report section (phase 0). Never raises.
+
+        The idle probe is THE SAME OBJECT the job runner gates on, so what
+        this machine tells the dashboard and what it will actually agree to do
+        cannot drift apart. Resolve is asked only whether its PROCESS is
+        running (resolve_prefs, fails closed) -- nothing here goes near
+        scriptapp() on a 30 s cadence (CR-68).
+        """
+        try:
+            return capabilities_mod.build(
+                self.config,
+                idle_probe=self._jobs_idle_probe,
+                resolve_running_fn=resolve_prefs_mod.resolve_is_running,
+                resolve_project_fn=lambda: getattr(
+                    self.watcher, "last_resolve_project", None),
+            )
+        except Exception:
+            log.exception("could not build the capabilities section")
+            return {}
+
     def sync_guard(self) -> dict[str, Any]:
         """The `sync_guard` report section: breaker, trash, halt, and lane A's
         "skipped, exists" counter.

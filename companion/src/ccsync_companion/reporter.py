@@ -395,6 +395,7 @@ class DashboardReporter:
         get_broll_ingest: Optional[GetBrollIngestFn] = None,
         get_music_ingest: Optional[GetMusicIngestFn] = None,
         get_file_moves_applied: Optional[Callable[[], list[dict[str, Any]]]] = None,
+        get_capabilities: Optional[Callable[[], dict[str, Any]]] = None,
         get_resolve_journals: Optional[Callable[[], list[dict[str, Any]]]] = None,
         get_resolve_undo_applied: Optional[Callable[[], list[dict[str, Any]]]] = None,
         notify: Optional[Callable[[str], None]] = None,
@@ -412,6 +413,12 @@ class DashboardReporter:
         # them"), the answers are a DRAIN like the file moves' are.
         self._get_resolve_journals = get_resolve_journals
         self._get_resolve_undo_applied = get_resolve_undo_applied
+        # What this machine CAN DO (TIMELINE-CARDS-INTO-CCSYNC.md §4.3,
+        # 2026-08-29). Rides every tick, light ones included, and is not
+        # omittable: `idle_seconds` is the field the job scheduler decides on,
+        # it changes second by second, and a suppressed-because-unchanged
+        # section would hand work to a machine somebody came back to.
+        self._get_capabilities = get_capabilities
         self.cfg = cfg
         self._http_post = http_post or default_http_post
         self.timeout = timeout
@@ -913,6 +920,18 @@ class DashboardReporter:
             # carried the section).
             if journals is not None:
                 payload["resolve_journals"] = journals
+        if self._get_capabilities is not None:
+            try:
+                caps = self._get_capabilities()
+            except Exception:
+                log.exception("get_capabilities() failed")
+                caps = None
+            # Sent whenever the getter answered at all, empty dict included:
+            # unlike the ingest sections, silence here does not mean "nothing
+            # is happening", it means the dashboard keeps yesterday's answer
+            # about hardware that may have changed.
+            if caps is not None:
+                payload["capabilities"] = caps
         if self._get_broll_ingest is not None:
             try:
                 ingest = self._get_broll_ingest()

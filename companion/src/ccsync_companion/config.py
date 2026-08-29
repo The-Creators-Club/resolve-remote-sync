@@ -145,7 +145,7 @@ log = logging.getLogger("ccsync.config")
 # sidecar once when the signature says the binary rather than the video. The
 # other half of CR-83 is the dashboard's, 0.7.11: the fleet's yt-dlp floor was
 # 2026.07.04, which is a version that cannot download at all.
-VERSION = "0.9.55"
+VERSION = "0.9.56"
 
 # The dashboard version this build needs to be talked to by (REL-4 / SYS-13,
 # resilience sweep 2026-08-28). `tools/release.ps1` / `sign_release.py` copy
@@ -158,7 +158,7 @@ VERSION = "0.9.55"
 # RAISE IT whenever this build reads something only a newer dashboard sends or
 # stores; leave it alone otherwise. It is the dashboard version that must
 # already be deployed, not the newest one that exists.
-REQUIRES_DASHBOARD = "0.7.17"
+REQUIRES_DASHBOARD = "0.7.18"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -762,6 +762,42 @@ DEFAULTS: dict[str, Any] = {
     # Resolve's own default password, which is what every library in the
     # fleet uses.
     "library_db_password": "",
+    # ---------------------------------------------------------------- FLEET JOBS
+    # docs/TIMELINE-CARDS-INTO-CCSYNC.md phase 0 (2026-08-29). This machine
+    # doing work the dashboard queued -- today, one kind: `whisper`.
+    #
+    # FLAT KEYS, not a [timeline_cards] table, because every other feature
+    # here is flat (broll_ingest_*, proxy_gen_*, music_ingest_*) and one TOML
+    # table would be the only place in this file where a key's name depends
+    # on where it sits.
+    #
+    # The two PATH keys are what actually turn the capability on: with either
+    # absent this machine reports `whisper: false` and the dashboard never
+    # offers it a transcription. Absent is the default everywhere, including
+    # on creator-1 until somebody sets them -- an unset path must read as "no
+    # capability", never as "try and fail".
+    "jobs_enabled": True,
+    # The whisper venv's python (faster-whisper installed into it), e.g.
+    # C:\Users\<you>\tools\whisper\.venv\Scripts\python.exe
+    "jobs_whisper_python": "",
+    # The MulticamPipeline checkout whose pipeline.py does the work.
+    "jobs_mulcam_pipeline": "",
+    # The two roots that are NOT the project tree. A job's inputs are
+    # (root name, relative path) pairs, so a root this machine cannot place
+    # is a job it never claims -- see job_paths.py.
+    "jobs_vault_root": "",
+    "jobs_media_root": "",
+    # Seconds of no keyboard or mouse before this machine will CLAIM a job.
+    # proxy_gen's own default, deliberately: an editor should not have to
+    # learn two meanings of "away".
+    "jobs_idle_seconds": 300,
+    # Do not claim while Resolve is open. True here where proxy_gen's
+    # equivalent defaults false: a whisper pass wants the whole GPU, which is
+    # exactly what a Resolve render is using.
+    "jobs_skip_while_resolve_running": True,
+    # How often the runner looks at what it was offered. The offers themselves
+    # ride the report reply, so this is only the tick that acts on them.
+    "jobs_poll_seconds": 20,
 }
 
 # Profile defaults applied by load_config when mode is set and the file does
@@ -1364,6 +1400,25 @@ ignored_resolve_projects = ["Untitled Project", "New Doc"]
 # library_db_name = ""
 # library_db_user = ""
 # library_db_password = ""
+
+# ------------------------------------------------------------- FLEET JOBS
+# Work the dashboard queued that THIS machine may do while you are away
+# (docs/TIMELINE-CARDS-INTO-CCSYNC.md). One kind today: `whisper`, which runs
+# MulticamPipeline's transcription over a folder in the vault.
+#
+# Nothing happens until the two paths below are set: with either blank this
+# machine reports "no whisper here" and is never offered a transcription. It
+# claims only while you are away from the keyboard (jobs_idle_seconds) and
+# with Resolve closed, it does one job at a time, and a fleet halt stops it
+# like everything else.
+# jobs_enabled = true
+# jobs_whisper_python = "C:\\\\Users\\\\you\\\\tools\\\\whisper\\\\.venv\\\\Scripts\\\\python.exe"
+# jobs_mulcam_pipeline = "E:\\\\Projects\\\\Editing\\\\Resolve\\\\MulticamPipeline"
+# jobs_vault_root = "X:\\\\"
+# jobs_media_root = ""
+# jobs_idle_seconds = 300
+# jobs_skip_while_resolve_running = true
+# jobs_poll_seconds = 20
 """
 
 

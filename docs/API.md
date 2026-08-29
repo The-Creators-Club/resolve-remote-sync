@@ -992,10 +992,42 @@ Status codes are §6a's, with two music-specific 409 reasons: `model_mismatch`
 
 ## 6c. Fleet jobs -- `/api/v1/jobs`
 
-Added 2026-08-29 (`docs/TIMELINE-CARDS-INTO-CCSYNC.md` phase 0). A general
-queue of work the fleet can do: one row, a set of hard requirements, and a
-lease. One kind today, `whisper` (MulticamPipeline's corpus stage over a
-folder in the vault).
+Added 2026-08-29 (`docs/TIMELINE-CARDS-INTO-CCSYNC.md` phase 0), extended
+2026-08-30 (phase 1). A general queue of work the fleet can do: one row, a set
+of hard requirements, and a lease.
+
+### The kinds
+
+| kind | what it does | requirements | idle floor | retries | preferred machine |
+|---|---|---|---|---|---|
+| `whisper` | MulticamPipeline's corpus stage over a folder in the vault (a subprocess) | the submitter's: `{whisper, gpu_vram_gb, mount}` | 300 s | 3 | one with a GPU |
+| `proxy-480p` | `<clip>.480p.mp4`, what Timeline Cards' video window plays | `{ffmpeg, ffprobe, mount:[<root>, <out_root>]}` | 300 s | 3 | one with **nvenc** |
+| `audio-extract` | `<clip>.m4a` (aac copy) or `.ogg` (mono Opus), what the lane plays | same | **60 s** | 2 | the **base rig** |
+| `peaks` | `<clip>.peaks`, the waveform under the lane | same | **60 s** | 2 | the **base rig** |
+
+`conform` and `resolve-edit` are **not here and never will be** (section 4.2):
+every edit is a synthetic keystroke into whatever Resolve has open on ONE
+machine, and a scheduler that moved one to an idle machine has moved it into
+the wrong timeline. A job of an unknown kind is accepted into the table (a
+newer submitter must not be refused by an older dashboard) and offered to
+nobody -- `why` says exactly that.
+
+The three media kinds are the Timeline Cards recipes, run byte-compatibly on a
+machine that is not the one serving the page
+(`companion/src/ccsync_companion/jobs_media.py`; the argv is pinned verbatim
+against `library_engine.py` by `companion/tests/test_jobs_media.py`).
+
+**The idle floor is per kind because the cost is.** A whisper pass or an x264
+encode is minutes; an audio copy is `-c:a copy` on one file and a peaks pass
+is an 8 kHz decode. Making a laptop wait five minutes of stillness before it
+will copy an audio track is how a lane sits on a spinner while a fleet of
+capable machines does nothing.
+
+**`requires` may be left empty for the three media kinds** and the dashboard
+fills in the standard set (`jobs.default_requires`): ffmpeg, ffprobe, and both
+of the roots the job names. An explicit `requires` always wins. Whisper's
+stays the submitter's, because a VRAM floor is a property of the model they
+chose.
 
 Two audiences and two credentials, and the split is the design:
 
@@ -1022,6 +1054,34 @@ fleet token can neither read the queue nor put work on it.
  "result": {"files": ["Clips/A/A_words.json"], "seconds": 214.0, "realtime": 11.4}}
 ```
 
+A media job:
+
+```json
+{"id": 31, "kind": "proxy-480p",
+ "inputs": {"root": "media", "rel_path": "FF5/Civil Defence/Interview 3.mp4",
+            "out_root": "vault",
+            "out_rel": "Vault/2026/FF5/CD/Script Docs/remote_audio/source",
+            "out_stem": "Interview 3"},
+ "requires": {"ffmpeg": true, "ffprobe": true, "mount": ["media", "vault"]},
+ "progress": 0.62,
+ "result": {"files": ["Vault/2026/.../remote_audio/source/Interview 3.480p.mp4"],
+            "out_root": "vault", "seconds": 3.3, "realtime": 11.0,
+            "skipped": false}}
+```
+
+`root`/`rel_path` name the SOURCE media, `out_root`/`out_rel` the DIRECTORY
+the file goes in (for Timeline Cards: `<episode>/Script Docs/remote_audio/
+source` for an extraction or a proxy, `<episode>/Script Docs/remote_audio` for
+peaks). `out_stem` is the name the page knows the clip by -- its multicam
+name, which is not always the media file's own stem; the default is the
+file's stem. Nothing anywhere guesses where a cache belongs in somebody's
+vault: a media job with no `out_rel` is refused with a sentence.
+
+`result.files` are relative to `result.out_root`, and `skipped: true` means
+the file was already there and current (the same `mtime >= source mtime` test
+the page uses) -- a success, and one with no `realtime` figure, because there
+is nothing honest to divide.
+
 **PATHS ARE (ROOT NAME, RELATIVE PATH) PAIRS AND NEVER ABSOLUTE.** The vault
 is `X:\` on creator-1, `/vault` inside the Timeline Cards container and a UNC
 path on the wire, so a path on the wire would be right on exactly one machine.
@@ -1044,7 +1104,7 @@ refusal** -- an unknown requirement must never read as satisfied.
 | Route | Body | Answer |
 |---|---|---|
 | `POST /api/v1/jobs` | `{kind, inputs, requires, cost, priority}` | `{ok, job, why}` -- the receipt carries the scheduling answer, so a job nothing can run says so at submit time |
-| `GET /api/v1/jobs?state=open\|queued\|…&kind=&limit=` | -- | `{jobs:[…], kinds:["whisper"]}` |
+| `GET /api/v1/jobs?state=open\|queued\|…&kind=&limit=` | -- | `{jobs:[…], kinds:[…]}` -- `kinds` is what THIS dashboard can schedule |
 | `GET /api/v1/jobs/{id}` | -- | `{job}` |
 | `GET /api/v1/jobs/{id}/why` | -- | `{job, schedulable, summary, machines:[{editor, machine, ok, reason, why}]}` |
 
@@ -1052,7 +1112,8 @@ refusal** -- an unknown requirement must never read as satisfied.
 first commit on purpose: a scheduler that quietly assigns nothing looks
 exactly like a fleet with nothing to do. Reasons are
 `capability | fleet_halt | machine_halt | upgrading | lane_b_breaker |
-already_holds_a_job | not_idle | no_capabilities_reported | kind_unknown`.
+already_holds_a_job | not_idle | no_capabilities_reported | kind_unknown |
+another_machine_is_preferred`.
 
 These are session routes, so a non-browser client sends the CSRF token
 `POST /api/v1/login` now returns as `csrf` (it is an HMAC over that session's
@@ -1064,7 +1125,7 @@ write routes, which is the wrong direction).
 | Route | Body | Answer |
 |---|---|---|
 | `POST /api/v1/jobs/claim` | `{machine, machine_id?, capabilities, kinds?}` | `{job, lease_seconds}` or `{job: null, offered: […]}` |
-| `POST /api/v1/jobs/{id}/heartbeat` | `{machine, note?}` | `{ok, lease_seconds}`, or **410** |
+| `POST /api/v1/jobs/{id}/heartbeat` | `{machine, note?, progress?}` | `{ok, lease_seconds}`, or **410** |
 | `POST /api/v1/jobs/{id}/result` | `{machine, ok, retryable, error, result}` | `{ok, state}`, or **410** |
 
 The claim is a **compare-and-set** (`db.claim_job`): two machines offered the
@@ -1072,6 +1133,15 @@ same job both arrive, SQLite serialises the writes, and the loser is told the
 truth. The capabilities in the claim body are re-checked there and then --
 an offer rode a report reply up to a report interval ago, and an editor who
 has come back to their desk in that interval must not be handed a transcode.
+
+`progress` is **0..1 and optional**, and null is not zero: a runner with no
+honest fraction to report (a peaks pass reads its input in one gulp) sends
+none, and the fleet chip then shows the job id instead of a machine that looks
+wedged at 0%. A media recipe gets its fraction from ffmpeg's `-progress`
+stream against the source duration and publishes it at most once a second; the
+heartbeat carries the latest every 30 s. The column is `COALESCE`d, so a
+silent heartbeat does not erase the last number. The chip reads
+`[ PROXY 480p: 62% ]`.
 
 **410 GONE, never 403**, on heartbeat and result: "your claim is over" is the
 answer to every way they can fail (the lease expired and the job was
@@ -1098,6 +1168,17 @@ policy (not halted, not mid-upgrade, breaker not tripped, not already holding
 a job, idle enough for this kind -- the base rig exempt, because nobody sits
 at it), then rank.
 
+**Rank is a preference, never a gate** (phase 1). For the first
+`RANK_GRACE_SECONDS` (60 s, two report intervals) a job is offered only to the
+best-placed machines -- capability for the kind (nvenc for a proxy, a GPU for
+whisper, the base rig for the two cheap kinds), then least loaded, then
+longest idle; a TIE is offered to all of them, because the compare-and-set is
+what decides between equals. After that every capable machine is offered it.
+A scheduler that can starve a queue is worse than one with no opinion at all,
+because the symptom is identical to a fleet with nothing to do. `why` reports
+each able machine's `rank`, so "three machines could and it went to the one
+without the encoder" is an answerable question.
+
 `idle_seconds` keeps `idle.py`'s contract end to end: **null means cannot
 tell means NOT IDLE**, on the machine and on the server.
 
@@ -1107,8 +1188,17 @@ tell means NOT IDLE**, on the machine and on the server.
 python tools/jobs.py submit --kind whisper --root vault \
     --rel "Vault/2026/FF5/Civil Defence/Youtube/Interview 3" \
     --episode "Vault/2026/FF5/Civil Defence" [--speakers] [--watch]
+python tools/jobs.py submit --kind proxy-480p --root media \
+    --rel "FF5/Civil Defence/Interview 3.mp4" --out-root vault \
+    --out-rel "Vault/2026/FF5/CD/Script Docs/remote_audio/source" \
+    [--out-stem "Interview 3"] [--watch]
+
 python tools/jobs.py list [--state open] | why <id> | watch <id>
 ```
+
+`watch` prints the percentage while a recipe runs, and says "already
+made" rather than "0 file(s) written" for a job that found its output
+current.
 
 `--dashboard-url` / `--admin-user` (or `CCSYNC_DASHBOARD_URL` /
 `CCSYNC_ADMIN_USER`); the password is prompted or `--password-stdin`, never

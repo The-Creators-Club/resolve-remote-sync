@@ -548,7 +548,8 @@ that would otherwise have to be built for the dashboard too.
 ## 7a. PHASE 0 BUILT (2026-08-29/30)
 
 Status of the document above: §1-§5 and §7 are unchanged. §6's phase 0 is
-**built** on branch `timeline-cards-port`; phases 1-4 are not. Timeline Cards
+**built** on branch `timeline-cards-port`; phase 1's ccsync half followed on
+2026-08-30 and is §7b. Timeline Cards
 itself is untouched -- it is a CLIENT of this API and calls nothing yet.
 
 ### What exists now
@@ -613,12 +614,12 @@ apart from a fleet with nothing to do.
 
 ### What is NOT there yet
 
-* **No second job kind.** `proxy-480p`, `audio-extract`, `peaks`,
-  `claude-run` are phase 1; `conform` and `resolve-edit` are pinned for ever
-  (§4.2).
+* **No second job kind.** `proxy-480p`, `audio-extract` and `peaks` are
+  phase 1 and were built on 2026-08-30 (§7b); `claude-run` is not built;
+  `conform` and `resolve-edit` are pinned for ever (§4.2).
 * **No ranking worth the name.** Priority then age, and every capable idle
-  machine is offered the same job -- the compare-and-set sorts it out. Prefer
-  nvenc / prefer the machine next to the media / least-loaded is phase 4.
+  machine is offered the same job -- the compare-and-set sorts it out. (Phase
+  1 added the rank, as a 60 s grace period rather than a filter: §7b.)
 * **No pinning fallback.** §4.4 rule 5's "then pin it to the NAS worker" is
   not built: a job past its retry budget is `abandoned` and visible, not
   handed to a server-side executor (there is no job executor in the
@@ -649,6 +650,244 @@ apart from a fleet with nothing to do.
 3. **Decide whether an editor's machine should ever take one.** Today any
    machine with the venv, the vault and 300 s of idleness will. There is no
    per-machine opt-in beyond `jobs_enabled`.
+
+---
+
+## 7b. PHASE 1 BUILT, ccsync side (2026-08-30)
+
+Status: §6's phase 1 is **built on the CC Sync side** on branch
+`timeline-cards-port`. Phases 2-4 are not. **Timeline Cards itself is still
+untouched** -- it is a CLIENT of this API and calls nothing yet; §7b.4 below is
+the spec for the builder who makes it one.
+
+### What exists now
+
+| Piece | Where |
+|---|---|
+| three new kinds | `db.py` -- `JOB_KIND_PROXY_480P`, `JOB_KIND_AUDIO_EXTRACT`, `JOB_KIND_PEAKS`, with `JOB_KIND_LABELS` for the grid and per-kind retry budgets |
+| the recipes | `companion/src/ccsync_companion/jobs_media.py` -- `MediaJob.run(kind, source, out_dir, stem)`, the argv builders, the peaks binning, rule 2 |
+| the dispatch | `jobs_runner.py` -- `runnable_kinds()`, `_execute` by kind, `_execute_media`, `_media_paths`, a heartbeat thread carrying progress |
+| the requirements | `jobs.default_requires(kind, inputs)`, applied by `POST /api/v1/jobs` only when the submitter sent none |
+| the rank | `jobs.py` -- `fleet_facts` (five queries for the whole fleet), `rank_key`, `ranked_machines`, `first_refusal`, `RANK_GRACE_SECONDS` |
+| progress (schema **v43**) | `jobs.progress` (0..1, nullable) + `cap_ffprobe`; `heartbeat_job(..., progress=)`, `clamp_progress`, `fetch_running_jobs_map` -> `{label, percent}` |
+| the chip | `[ PROXY 480p: 62% ]` on the fleet grid, falling back to `[ PEAKS: JOB 31 ]` where nothing measured a fraction |
+| `ffprobe` | `capabilities.py` -- its own capability, probed on `ffmpeg_tools.ffprobe_for`'s answer |
+| submit / watch | `tools/jobs.py submit --kind proxy-480p --root media --rel ... --out-root vault --out-rel ...`; `watch` prints the percentage |
+
+### The kinds, as built
+
+| kind | requirements | idle floor | retries | preferred |
+|---|---|---|---|---|
+| `whisper` | the submitter's (`whisper`, `gpu_vram_gb`, `mount`) | 300 s | 3 | a GPU |
+| `proxy-480p` | `ffmpeg`, `ffprobe`, `mount:[root, out_root]` | 300 s | 3 | **nvenc** |
+| `audio-extract` | same | 60 s | 2 | the **base rig** |
+| `peaks` | same | 60 s | 2 | the **base rig** |
+
+`conform` and `resolve-edit` remain unschedulable and absent from
+`tools/jobs.py`'s parser as well as from `JOB_KINDS`.
+
+### Recipe fidelity, and the one deliberate difference
+
+The argv builders reproduce `library_engine.py` line for line and
+`companion/tests/test_jobs_media.py` pins each one verbatim. THE ONE CHANGE IS
+`-f`: Timeline Cards writes `out + ".tmp.m4a"` and lets ffmpeg pick its muxer
+from the extension, and this writes `out + ".partial"` -- the suffix every
+sync lane in this repo already excludes in both directions -- which has no
+extension ffmpeg knows. `-f ipod` is exactly what `.m4a` resolves to and
+`-f mp4` exactly what `.mp4` does; both were measured BYTE-IDENTICAL against
+the Timeline Cards command on 2026-08-30. The ogg differs only in its random
+Ogg stream serial, which the muxer re-rolls on every run of any argv at all.
+
+nvenc is the phase-1 win: `-c:v h264_nvenc -preset p4 -cq 26` replaces
+`-c:v libx264 -preset veryfast -crf 26` and NOTHING ELSE changes -- the GOP,
+the scale filter, the pixel format, the audio and the faststart are identical,
+so the page cannot tell which machine made a file.
+
+`.peaks` is the one output that must be byte-identical rather than merely
+equivalent, because the page reads it as raw bytes: `b"PK"`, the rate byte
+(200), a zero, then one byte a bin. The rate byte is what makes a rate change
+survivable, and both the numpy and the `array` branch produce the same bytes,
+including at -32768 where the arithmetic exceeds 255.
+
+### Rule 2, adopted wholesale
+
+`proxy_gen`'s "never two writers on one proxy", applied to all three recipes:
+every output is written as `<final>.partial`, claimed in a process-wide set
+keyed on the OUTPUT path (normcased), and moved with `os.replace` only after
+RE-CHECKING that no finished file has appeared meanwhile. The fleet lease
+stops two MACHINES claiming one JOB; what it cannot stop is a Timeline Cards
+server making the same file locally at the same moment, which is exactly the
+shape lane B + the Blackmagic Proxy Generator had. FIRST WRITER WINS and we
+discard ours -- and the job still reports SUCCESS, because the file the caller
+asked for is there.
+
+One thing that bit during the build and is worth knowing: **peaks needs its
+own "already made" test in the publish re-check, not just the mtime one.** A
+`.peaks` written at the old 50/s rate is NEWER than its source, so the bare
+`mtime >= source mtime` check let a stale file refuse every remake for ever.
+`_with_partial` takes an `already_made` predicate for exactly this.
+
+### Decisions this build made, that the plan left open
+
+* **Rank is a GRACE PERIOD, not a filter.** §4.4 rule 3 says "prefer nvenc,
+  prefer the machine next to the media". Implemented as: for the first 60 s a
+  job is offered only to the best-placed machines (ties together), and after
+  that to every capable one. A preference that could starve a queue would be
+  worse than no preference, because the symptom is identical to a fleet with
+  nothing to do -- and `why` now reports each able machine's `rank` so the
+  order is visible while the queue is still moving.
+* **"Next to the media" is read as THE BASE RIG.** Every machine offered a
+  media job has the media mount already (it is a hard requirement), so mount
+  adjacency carries no information; `mode == "base"` does. Nobody sits at the
+  base rig, so an audio copy that runs there costs an editor nothing.
+* **`requires` is defaulted for the media kinds only.** Phase 0 decided the
+  submitter states the requirements. That stays true where there is a
+  judgement to make (whisper's VRAM floor) and is wrong where there is not:
+  three recipes with one right answer, the same on every clip, is a thing to
+  keep in one place rather than in every future caller.
+* **`progress` is a COLUMN, not the heartbeat's `note`.** The note lands in
+  `last_error`, which is right for a sentence about a failure and wrong for a
+  number the fleet page renders every 15 s. Null is not zero, both ways:
+  `COALESCE` on write, and the chip shows the job id when nothing measured a
+  fraction.
+* **The media recipes run IN-PROCESS**, unlike whisper's subprocess: a recipe
+  is ffmpeg plus about forty lines of binning, and the companion already owns
+  an ffmpeg discovery and a `.partial` discipline. Shelling out to a second
+  Python would mean a second copy of both.
+* **A media job must NAME its output directory.** No default, no derivation
+  from the source path: the page decides where its cache goes (`source/` for
+  extractions and proxies, one level up for peaks), and nothing on this side
+  guesses where a cache belongs in somebody's vault.
+
+### What is NOT there yet
+
+* **`claude-run` is still phase 1's fourth kind on paper and is not built.**
+  Decision 7.6 stands and the answer is the dashboard's `ai_providers`, which
+  is a dashboard-side executor and not a fleet job at all.
+* **No pinning fallback** (§4.4 rule 5's "then pin it to the NAS worker"), no
+  admin page, no cancel route. Unchanged from phase 0.
+* **Nothing is deployed.** Dashboard 0.7.19 (schema v43), companion 0.9.57
+  with `REQUIRES_DASHBOARD = 0.7.19`. The order is enforced by the machinery
+  and is the rule either way: a 0.9.57 companion reports `capabilities.ffprobe`
+  and heartbeats `progress`, and only v43 can store either.
+* **Timeline Cards calls none of this.** §7b.4.
+
+---
+
+## 7b.4 What the Timeline Cards side must do next
+
+This is the spec for a builder in `E:\Projects\Editing\Resolve\MulticamPipeline`.
+It is written so it can be implemented from this document alone.
+
+### The three call sites
+
+`multicam_pipeline/cards/library_engine.py`, all on the HTTP thread:
+
+| Method | Line (2026-08-30) | Today | After |
+|---|---|---|---|
+| `src_state(mp_uid)` | :1439 | appends to `self._src_q`, starts `_src_worker` | enqueue an `audio-extract` job, or fall back |
+| `vid_state(mp_uid)` | :1583 | appends to `self._vid_q` | enqueue a `proxy-480p` job, or fall back |
+| `peaks_state(mp_uid)` | :1159 | spawns `_peaks_make` on its own thread | enqueue a `peaks` job, or fall back |
+
+Each already returns a `(state, path)` pair the page understands:
+`ready | making | failed | none | noffmpeg | off`. **KEEP THAT CONTRACT
+EXACTLY.** A fleet job in flight is `making`; nothing in `page/` changes.
+
+### What to send
+
+```
+POST <dashboard>/api/v1/jobs        (admin session; see "the credential")
+{
+  "kind":   "audio-extract" | "proxy-480p" | "peaks",
+  "inputs": {
+    "root":     "media",          # the root the RUSH is under
+    "rel_path": "<clip>",         #   relative to it
+    "out_root": "vault",
+    "out_rel":  "<episode>/Script Docs/remote_audio/source",   # peaks: one level up
+    "out_stem": "<self._mp_names[mp_uid]>"                     # the MULTICAM name
+  },
+  "requires": {},                 # leave empty: the dashboard fills it in
+  "priority": 1                   # audio ahead of video, as _src_worker already is
+}
+```
+
+Three things to get right, each of which is a whole class of bug:
+
+1. **NEVER SEND AN ABSOLUTE PATH.** `media_path(mp_uid)` gives you
+   `/media/...` inside the container or `Y:\...` on a PC; the job needs the
+   part BELOW the root and the root's NAME. `CARDS_MEDIA_MAP` is the existing
+   mapping to invert. Both ends refuse an absolute value rather than guessing.
+2. **`out_stem` is `self._mp_names.get(mp_uid, mp_uid)`,** which is what
+   `_src_out`/`_lite_out` already use -- NOT the media file's stem. Get this
+   wrong and the file lands beside the one the page is looking for.
+3. **`out_rel` differs per kind**: `remote_audio/source` for `audio-extract`
+   and `proxy-480p` (`src_dir()`), `remote_audio` for `peaks` (`lite_dir()`).
+
+### Polling the row
+
+`GET /api/v1/jobs/<id>` -> `{job}`. Map it onto the existing states:
+
+| job `state` | what `*_state` returns |
+|---|---|
+| `queued`, `claimed`, `running` | `("making", None)` -- and `job.progress` (0..1 or null) is the number for the placeholder, which today says "N of M" |
+| `done` | re-run the EXISTING `src_ready`/`vid_ready`/peaks-header check against the vault and return `("ready", path)` from that, NOT from `result.files` |
+| `failed`, `abandoned` | `("failed", job.last_error)` -- the same slot `_src_fail` fills today |
+
+**Read the answer off the DISK, not out of the row.** The job's result names
+paths relative to `result.out_root`, which is useful for logging and for a
+future admin page, but the file is in the vault and the vault is what the page
+serves from. Re-checking the disk is also what makes a job that came back
+`skipped: true` (the file was already current) indistinguishable from one that
+did work, which is what you want.
+
+Cache the id per output path so a second `*_state` call for the same clip
+polls the existing job instead of queueing a second one -- the same job
+`self._src_jobs` does today. A queued id survives a page reload; it does not
+need to survive a server restart (the row is still there, and a re-queue costs
+one duplicate job that finds its output already made and returns `skipped`).
+
+### The fallback, which is not optional
+
+`_src_worker` STAYS, and stays the default when any of these is true:
+
+* no dashboard is configured or reachable (a connection error, any 5xx, a
+  timeout -- treat all of them as "no fleet");
+* the dashboard answered but `why.schedulable` is false and
+  `why.summary` says nothing can run it (`POST /api/v1/jobs` returns `why` on
+  the receipt precisely so this is decidable at submit time, without polling);
+* the media share is not mounted anywhere else, which is the case §6 calls out
+  explicitly: on a single-machine setup the in-process worker is not a
+  fallback, it is the only path.
+
+Fall back by doing exactly what the code does today -- append to `_src_q` /
+`_vid_q` / spawn `_peaks_make`. Do not fail the lane. A job that was queued and
+then abandoned should also fall back rather than showing `failed` for ever,
+with ONE exception: a result whose error is a permanent property of the input
+("no audio track", "no video track") is the same answer the local worker would
+give, so record it in `_src_fail`/`_vid_fail` as today and do not retry
+locally.
+
+### The credential
+
+`POST /api/v1/jobs` is an ADMIN SESSION route (a job is work on somebody
+else's computer). A server-side caller signs in once with
+`POST /api/v1/login`, keeps the cookie, and sends the `csrf` token that reply
+carries on every write -- `tools/jobs.py`'s `Client` is 40 lines and is the
+reference implementation. Do NOT reach for the fleet token: it is for
+companions claiming work and the login gate carves out only the three claim /
+heartbeat / result suffixes.
+
+### What must NOT change
+
+* The recipes. If `_src_make`, `_vid_make` or `_peaks_make` changes, the copy
+  in `jobs_media.py` changes in the same week, or half the vault is made one
+  way and half the other. `companion/tests/test_jobs_media.py` pins the argv
+  verbatim so the diff is loud.
+* `PEAK_RATE`. It is in the file's header on both sides.
+* The `.tmp` -> `os.replace` discipline in the local worker. The fleet path
+  uses `.partial` and the local one keeps `.tmp.m4a`; either is atomic, and
+  the reason they differ is that `.partial` is what CC Sync's sync lanes
+  exclude and Timeline Cards has no sync lanes.
 
 ---
 

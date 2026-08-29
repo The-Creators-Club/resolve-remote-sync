@@ -188,8 +188,16 @@ run alongside the tray app — it would hold port 8899.
   paths are **(root name, relative path) pairs, never absolute** -- the vault
   is a drive letter here, a container mount there -- resolved per machine by
   `companion/job_paths.py`. `idle_seconds` keeps idle.py's contract end to
-  end: **null means cannot tell means NOT IDLE**, on both sides. One kind
-  today (`whisper`, `companion/jobs_runner.py`); `conform` and `resolve-edit`
+  end: **null means cannot tell means NOT IDLE**, on both sides. Four kinds
+  since 2026-08-30 (phase 1): `whisper`, plus the three Timeline Cards media
+  recipes `proxy-480p` / `audio-extract` / `peaks`
+  (`companion/jobs_media.py`), which reproduce `library_engine.py`'s ffmpeg
+  argv VERBATIM -- a page in the other repo reads those files -- and adopt
+  `proxy_gen`'s rule 2 wholesale (`.partial`, atomic rename, first writer
+  wins, and we are happy to lose). The idle floor is per kind (60 s for the
+  two cheap ones) and the rank is a 60 s GRACE PERIOD, never a filter: a
+  preference that can starve a queue looks exactly like a fleet with nothing
+  to do. `conform` and `resolve-edit`
   must NEVER become schedulable (§4.2 -- a synthetic keystroke moved to
   another machine is a keystroke into the wrong timeline). `GET
   /api/v1/jobs/<id>/why` answers "unschedulable, and why" per machine,

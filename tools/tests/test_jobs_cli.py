@@ -199,3 +199,140 @@ def test_a_missing_dashboard_url_is_a_usage_error(capsys, monkeypatch):
     monkeypatch.delenv(jobs_cli.DASHBOARD_URL_ENV, raising=False)
     assert jobs_cli.main(["list"], FakeHttp({})) == jobs_cli.EXIT_USAGE
     assert "--dashboard-url" in capsys.readouterr().err
+
+
+# --------------------------------------------------- phase 1 (2026-08-30)
+
+MEDIA_ARGV = ["submit", "--kind", "proxy-480p", "--root", "media",
+              "--rel", "FF5/Civil Defence/Interview 3.mp4",
+              "--out-root", "vault",
+              "--out-rel",
+              "Vault/2026/FF5/Civil Defence/Script Docs/remote_audio/source"]
+
+
+def test_a_media_job_names_a_source_and_an_output_directory(capsys):
+    """Four values and not one path: the root the rush is under, the rush, the
+    root the cache goes in, and the directory inside it. The vault is `X:\\` on
+    creator-1 and `/vault` in a container, so a path on the wire would be
+    right on exactly one machine."""
+    code, http = run(MEDIA_ARGV,
+                     {("POST", "/api/v1/login"): (200, LOGIN_OK),
+                      ("POST", "/api/v1/jobs"): (200, {
+                          "ok": True,
+                          "job": a_job(kind="proxy-480p"),
+                          "why": {"summary": "1 machine(s) can take this job",
+                                  "machines": []}})})
+    assert code == jobs_cli.EXIT_OK
+    body = http.calls[-1][3]
+    assert body["kind"] == "proxy-480p"
+    assert body["inputs"] == {
+        "root": "media", "rel_path": "FF5/Civil Defence/Interview 3.mp4",
+        "out_root": "vault",
+        "out_rel": "Vault/2026/FF5/Civil Defence/Script Docs/remote_audio/source"}
+    # EMPTY on purpose: a media recipe's requirements have one right answer,
+    # the same on every clip, and the dashboard fills them in
+    # (jobs.default_requires) so no submitter can forget ffprobe.
+    assert body["requires"] == {}
+
+
+@pytest.mark.parametrize("kind", ["audio-extract", "peaks"])
+def test_the_other_two_media_kinds_submit_the_same_way(kind):
+    argv = ["submit", "--kind", kind, "--root", "media", "--rel", "A/b.mp4",
+            "--out-rel", "V/Ep/Script Docs/remote_audio"]
+    _code, http = run(argv, {("POST", "/api/v1/login"): (200, LOGIN_OK),
+                             ("POST", "/api/v1/jobs"): (200, {"job": a_job(kind=kind),
+                                                              "why": {}})})
+    assert http.calls[-1][3]["kind"] == kind
+    assert http.calls[-1][3]["inputs"]["out_root"] == "vault"
+
+
+def test_the_page_may_name_the_clip_itself():
+    """`--out-stem` is the name the PAGE knows this clip by (its multicam
+    name), which is not always the media file's own stem."""
+    _code, http = run(MEDIA_ARGV + ["--out-stem", "Interview 3 (cam B)"],
+                      {("POST", "/api/v1/login"): (200, LOGIN_OK),
+                       ("POST", "/api/v1/jobs"): (200, {"job": a_job(), "why": {}})})
+    assert http.calls[-1][3]["inputs"]["out_stem"] == "Interview 3 (cam B)"
+
+
+def test_a_media_job_with_no_output_directory_is_refused_before_anything_is_sent(
+        capsys):
+    """Nothing anywhere guesses where a cache belongs in somebody's vault, and
+    the useful place to be told is the one where a person can retype it."""
+    code, http = run(
+        ["submit", "--kind", "peaks", "--root", "media", "--rel", "A/b.mp4"],
+        {("POST", "/api/v1/login"): (200, LOGIN_OK)})
+    assert code == jobs_cli.EXIT_USAGE
+    assert [c for c in http.calls if c[1].endswith("/jobs")] == []
+    assert "--out-rel is required" in capsys.readouterr().err
+
+
+def test_an_absolute_output_directory_is_refused_too(capsys):
+    """`/vault/2026/...` is exactly how the Timeline Cards container spells
+    the vault, and quietly reading it as relative would queue a job that lands
+    in the wrong place on every machine that is not that container."""
+    code, _http = run(
+        ["submit", "--kind", "peaks", "--root", "media", "--rel", "A/b.mp4",
+         "--out-rel", "/vault/2026/FF5"],
+        {("POST", "/api/v1/login"): (200, LOGIN_OK)})
+    assert code == jobs_cli.EXIT_USAGE
+    assert "must be RELATIVE" in capsys.readouterr().err
+
+
+def test_the_pinned_kinds_cannot_be_submitted_at_all(capsys):
+    """Section 4.2's last two rows are not a runtime refusal, they are absent
+    from the parser: every edit is a synthetic keystroke into whatever Resolve
+    has open on ONE machine."""
+    with pytest.raises(SystemExit):
+        jobs_cli.build_parser().parse_args(
+            ["submit", "--kind", "resolve-edit", "--rel", "a"])
+    assert "conform" not in jobs_cli.KINDS
+    assert "resolve-edit" not in jobs_cli.KINDS
+
+
+def test_watch_shows_the_percentage_a_running_recipe_reports(capsys):
+    states = iter([
+        {"job": a_job(kind="proxy-480p", state="running",
+                      claimed_machine="BASE-RIG", progress=0.62)},
+        {"job": a_job(kind="proxy-480p", state="done", claimed_machine="BASE-RIG",
+                      result={"seconds": 3.3, "realtime": 11.0, "out_root": "vault",
+                              "files": ["V/Ep/Script Docs/remote_audio/source/"
+                                        "Interview 3.480p.mp4"]})},
+    ])
+    http = FakeHttp({("POST", "/api/v1/login"): (200, LOGIN_OK),
+                     ("GET", "/api/v1/jobs/12"): (200, lambda: next(states))})
+    code = jobs_cli.watch(jobs_cli.Client(http, URL), 12, timeout=60,
+                          sleep=lambda _s: None)
+    out = capsys.readouterr().out
+    assert code == jobs_cli.EXIT_OK
+    assert "running on BASE-RIG 62%" in out
+    assert "Interview 3.480p.mp4" in out
+
+
+def test_watch_says_nothing_about_a_percentage_nobody_measured(capsys):
+    """None, never 0: a peaks pass has no fraction to report and must not look
+    wedged at 0%."""
+    states = iter([
+        {"job": a_job(kind="peaks", state="running", claimed_machine="BASE-RIG",
+                      progress=None)},
+        {"job": a_job(kind="peaks", state="done", claimed_machine="BASE-RIG",
+                      result={"seconds": 1.0, "files": ["V/Ep/a.peaks"]})},
+    ])
+    http = FakeHttp({("POST", "/api/v1/login"): (200, LOGIN_OK),
+                     ("GET", "/api/v1/jobs/12"): (200, lambda: next(states))})
+    jobs_cli.watch(jobs_cli.Client(http, URL), 12, timeout=60, sleep=lambda _s: None)
+    out = capsys.readouterr().out
+    assert "running on BASE-RIG\n" in out
+    assert "%" not in out
+
+
+def test_a_job_that_found_its_file_already_made_says_so(capsys):
+    """A fleet that re-encodes what it already has is doing nothing useful
+    loudly, and "0 file(s) written" would read as a failure."""
+    http = FakeHttp({("POST", "/api/v1/login"): (200, LOGIN_OK),
+                     ("GET", "/api/v1/jobs/12"): (200, {
+                         "job": a_job(kind="peaks", state="done",
+                                      result={"seconds": 0.1, "skipped": True,
+                                              "files": ["V/Ep/a.peaks"]})})})
+    jobs_cli.watch(jobs_cli.Client(http, URL), 12, timeout=60, sleep=lambda _s: None)
+    assert "already made" in capsys.readouterr().out

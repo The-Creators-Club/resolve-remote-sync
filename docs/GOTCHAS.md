@@ -1297,3 +1297,52 @@ has no page to read one off. `POST /api/v1/login` returns the caller's own
 without the cookie. Do NOT reach for the other answer (exempting the write
 route): `_CSRF_EXEMPT_*` is for bearer-token routes, and a session route in
 it is a session route anyone's browser can be made to call.
+
+
+## 20. Renaming an ffmpeg output changes the FILE (phase 1, 2026-08-30)
+
+Two things bit while moving Timeline Cards' three media recipes onto the
+fleet (`companion/src/ccsync_companion/jobs_media.py`). Both are about the
+same mistake: treating a derived file's NAME as cosmetic.
+
+**ffmpeg picks its muxer from the output's extension, so `.partial` breaks
+it.** Timeline Cards writes `<out>.tmp.m4a` and lets `.m4a` select the `ipod`
+muxer; this repo writes `<out>.partial`, because `.partial` is the suffix
+every sync lane already excludes in both directions and a half-written proxy
+must never reach another machine. `<name>.m4a.partial` has no extension
+ffmpeg knows, and the command fails with "Unable to find a suitable output
+format" -- or, worse on some builds, picks something plausible. So the argv
+has to say it: **`-f ipod` for `.m4a`, `-f mp4` for `.mp4`, `-f ogg` for
+`.ogg`** (Timeline Cards already passed the last one). Those are exactly what
+the three extensions resolve to; the m4a and the mp4 were measured
+byte-identical against the Timeline Cards command on 2026-08-30, and the ogg
+differs only in its random Ogg stream serial, which the muxer re-rolls on
+every run of any argv at all.
+
+If you ever change where a recipe writes, check the muxer, not just the path.
+
+**A derived file can be NEWER than its source and still be stale.** Both
+Timeline Cards and this module decide "already made" with
+`mtime(out) >= mtime(src)`, which is right for a proxy and wrong for a
+`.peaks`: the file's THIRD BYTE is the rate it was made at (200/s since
+2026-08-28, 50/s before), and a file at the old rate is newer than the rush it
+came from. The entry check knew that; the `os.replace` re-check -- rule 2's
+"has a finished file appeared while we worked?" -- did not, so it discarded
+every freshly-made 200/s file in favour of the stale 50/s one, for ever. The
+fix is that `_with_partial` takes an `already_made` predicate and peaks passes
+its own. **Wherever you re-check before publishing, re-check with the SAME
+question the entry check asked**, or the two disagree and the disagreement is
+invisible: the job succeeds, the page redraws, and nothing changes.
+
+**And a third, from the same afternoon: a report field the dashboard's model
+does not declare is dropped SILENTLY.** `CapabilitiesIn` is a pydantic model
+with `extra` ignored, deliberately -- a newer companion that grows a field
+must never 422 its whole report and vanish from the fleet grid. The cost is
+that adding a capability is TWO changes, and forgetting the second one
+produces no error anywhere: companion 0.9.57 reported `ffprobe: true`, the
+model dropped it, the column stored `0`, and every machine in the fleet was
+correctly and invisibly refused all three media kinds. The pin is in
+`dashboard/tests/test_jobs_contract.py`, which now asserts that EVERY scalar
+the companion's `capabilities.build()` produces comes back out of
+`db.machine_capabilities` unchanged -- so the next field cannot be added to
+one side only.

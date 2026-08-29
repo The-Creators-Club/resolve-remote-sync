@@ -613,33 +613,51 @@ The music half is the same six keys under `music_ingest_*`, plus
 depend on in §2.5b, because the one thing music ingest cannot work without
 (`DASH_RELEASE_FEED_URL`) is set on the dashboard, not here.
 
-### Fleet jobs (`docs/TIMELINE-CARDS-INTO-CCSYNC.md` phase 0, 2026-08-29)
+### Fleet jobs (`docs/TIMELINE-CARDS-INTO-CCSYNC.md` phases 0 and 1)
 
 Work the **dashboard** queued that this computer may do while nobody is at
-it. One kind today: `whisper`, which runs MulticamPipeline's transcription
-over a folder in the vault and writes the sidecars back there.
+it. Four kinds:
 
-**Nothing happens until the two path keys are set.** With either blank the
-machine reports `whisper: false` in its capabilities section, is never
-offered a transcription, and says so on the fleet grid. Absent is "no
-capability", never "try and fail" -- so the shipped default on every machine
-is a companion that takes no jobs at all.
+* `whisper` (phase 0, 2026-08-29) runs MulticamPipeline's transcription over
+  a folder in the vault and writes the sidecars back there, as a subprocess.
+* `proxy-480p`, `audio-extract` and `peaks` (phase 1, 2026-08-30) are the
+  three Timeline Cards media recipes, run in-process by `jobs_media.py`:
+  the 480p proxy the video window plays, the audio the lane plays, and the
+  waveform under it. All three write into the vault.
+
+**NO KEY HERE TURNS A CAPABILITY ON -- it points at something that is either
+there or not.** With `jobs_whisper_python` / `jobs_mulcam_pipeline` blank the
+machine reports `whisper: false`; with no ffmpeg (or no ffprobe beside it) it
+reports `ffmpeg`/`ffprobe` false; with no `jobs_media_root` it reports no
+`media` mount. In every case it is never offered that work and the fleet grid
+says why. Absent is "no capability", never "try and fail" -- so the shipped
+default on every machine is a companion that takes no jobs at all.
+
+**The media kinds need `jobs_media_root` AND `jobs_vault_root`** (or whatever
+two roots the submitter names): reading the rush and writing the cache are
+two different filesystems here, and a machine with one but not the other
+fails halfway rather than at the start.
 
 | Key | Default | Notes |
 |---|---|---|
-| `jobs_enabled` | `true` | The kill switch. Inert anyway without the two paths below |
+| `jobs_enabled` | `true` | The kill switch. Inert anyway without the paths below |
 | `jobs_whisper_python` | `""` | The whisper venv's interpreter (faster-whisper installed into it). On creator-1: `C:\Users\alex\tools\whisper\.venv\Scripts\python.exe` |
 | `jobs_mulcam_pipeline` | `""` | The MulticamPipeline checkout whose `pipeline.py transcribe` does the work |
 | `jobs_vault_root` | `""` | The `vault` root. A job's inputs are (root name, relative path) pairs, so a root this machine cannot place is a job it never claims |
-| `jobs_media_root` | `""` | The `media` root, where the footage share is mounted separately from the tree |
-| `jobs_idle_seconds` | `300` | Seconds away from the keyboard before this machine will **claim**. `proxy_gen_idle_seconds`'s number deliberately: an editor should not have to learn two meanings of "away" |
+| `jobs_media_root` | `""` | The `media` root, where the footage share is mounted separately from the tree. **Required for the three media kinds** where the job names `media` as its source root |
+| `ffmpeg_path` | `"ffmpeg"` | Not a jobs key, but it is the one the media recipes use, and `ffprobe` is found BESIDE it (`ffmpeg_tools.ffprobe_for`) -- including the pinned static pair `sidecar_tools` installs on a machine that has neither on PATH |
+| `jobs_idle_seconds` | `300` | Seconds away from the keyboard before this machine will **claim**. `proxy_gen_idle_seconds`'s number deliberately: an editor should not have to learn two meanings of "away". THE DASHBOARD HAS ITS OWN FLOOR PER KIND (300 s for whisper and proxies, 60 s for audio and peaks) and both have to pass -- this key is the machine's own answer and it is never loosened by the server's |
 | `jobs_skip_while_resolve_running` | `true` | Do not claim while Resolve is open. True here where `proxy_gen_skip_while_resolve_running` is false: a whisper pass wants the whole GPU, which is what a Resolve render is using |
 | `jobs_poll_seconds` | `20` | How often the runner acts on what it was offered. The offers themselves ride the report reply |
 
-A **running** job is not killed when the editor comes back (unlike an ffmpeg
-proxy, which costs seconds and resumes trivially): no new job is claimed
-while somebody is here, which is the half that matters. A **fleet halt**
-stops it -- the child is terminated and the job handed back.
+A **running** job is not killed when the editor comes back (unlike
+`proxy_gen`'s own ffmpeg, which costs seconds and resumes trivially): no new
+job is claimed while somebody is here, which is the half that matters. A
+media recipe runs at BELOW NORMAL priority for the same reason
+`proxy_gen`'s encoder does. A **fleet halt** stops any of them -- the child
+is terminated, and a media recipe's `.partial` is discarded rather than
+published, because a half-written proxy that reached the vault would be a
+file the page plays.
 
 The roots a machine can place are reported as `capabilities.mounts` by NAME,
 never as paths, and a configured root that is not actually there (an unplugged

@@ -9,6 +9,11 @@ routes tomorrow (§4: it stays its own repo and is a CLIENT of this API).
     python tools/jobs.py submit --kind whisper --root vault \\
         --rel "Vault/2026/FF5/Civil Defence/Youtube/Interview 3" \\
         --episode "Vault/2026/FF5/Civil Defence" [--speakers]
+
+    python tools/jobs.py submit --kind proxy-480p --root media \\
+        --rel "FF5/Civil Defence/Interview 3.mp4" --out-root vault \\
+        --out-rel "Vault/2026/FF5/Civil Defence/Script Docs/remote_audio/source"
+
     python tools/jobs.py list [--state open]
     python tools/jobs.py why 12
     python tools/jobs.py watch 12
@@ -186,6 +191,35 @@ def check_relative(label: str, value: str) -> str:
     return rel
 
 
+# The kinds this tool can submit. `conform` and `resolve-edit` are absent on
+# purpose and must stay absent (section 4.2): every edit is a synthetic
+# keystroke into whatever Resolve has open on ONE machine, and a scheduler
+# that helpfully moved one to an idle machine has moved it into the wrong
+# timeline.
+KINDS = ("whisper", "proxy-480p", "audio-extract", "peaks")
+MEDIA_KINDS = ("proxy-480p", "audio-extract", "peaks")
+
+
+def media_job(args: argparse.Namespace) -> dict:
+    """The body for one of the three Timeline Cards recipes.
+
+    `requires` is left EMPTY here and filled in by the dashboard
+    (`jobs.default_requires`): unlike whisper's VRAM floor, a media recipe's
+    requirements have exactly one right answer -- ffmpeg, ffprobe, and both of
+    the roots the job names -- it is the same on every clip, and the place to
+    keep one answer is the one place every submitter goes through.
+    """
+    inputs = {"root": args.root, "rel_path": check_relative("--rel", args.rel),
+              "out_root": args.out_root,
+              "out_rel": check_relative("--out-rel", args.out_rel)}
+    if args.out_stem:
+        # The name the PAGE knows this clip by (its multicam name), which is
+        # not always the media file's own stem. Default: the file's stem.
+        inputs["out_stem"] = args.out_stem
+    return {"kind": args.kind, "inputs": inputs, "requires": {},
+            "priority": int(args.priority)}
+
+
 def whisper_job(args: argparse.Namespace) -> dict:
     """The body for a whisper submission.
 
@@ -209,10 +243,22 @@ def whisper_job(args: argparse.Namespace) -> dict:
 
 # ----------------------------------------------------------------- commands
 def cmd_submit(client: Client, args: argparse.Namespace) -> int:
-    if args.kind != "whisper":
-        raise JobsError(f"this tool only submits `whisper` jobs today "
-                        f"(asked for {args.kind!r})", EXIT_USAGE)
-    answer = client.call("POST", "/api/v1/jobs", whisper_job(args))
+    if args.kind in MEDIA_KINDS:
+        if not args.out_rel:
+            raise JobsError(
+                f"--out-rel is required for a {args.kind} job: it is the "
+                f"directory the file goes in (for Timeline Cards, "
+                f"'<episode>/Script Docs/remote_audio/source' for an "
+                f"extraction or a proxy, '<episode>/Script Docs/remote_audio' "
+                f"for peaks). Nothing anywhere guesses where a cache belongs "
+                f"in somebody's vault.", EXIT_USAGE)
+        body = media_job(args)
+    elif args.kind == "whisper":
+        body = whisper_job(args)
+    else:                                                     # pragma: no cover
+        raise JobsError(f"unknown kind {args.kind!r} -- this tool submits "
+                        f"{', '.join(KINDS)}", EXIT_USAGE)
+    answer = client.call("POST", "/api/v1/jobs", body)
     job = answer.get("job") or {}
     why = answer.get("why") or {}
     print(f"job #{job.get('id')} queued ({job.get('kind')})")
@@ -276,16 +322,23 @@ def watch(client: Client, job_id: int, timeout: float, sleep=time.sleep,
         job = client.call("GET", f"/api/v1/jobs/{job_id}").get("job") or {}
         state = str(job.get("state") or "?")
         held = (f" on {job.get('claimed_machine')}" if job.get("claimed_machine") else "")
-        line = f"{state}{held}"
+        # The percentage a running recipe heartbeats (phase 1). Absent, never
+        # zero, when nothing measured it -- a peaks pass has no fraction to
+        # report and must not look wedged at 0%.
+        progress = job.get("progress")
+        pct = "" if progress is None else f" {int(round(float(progress) * 100))}%"
+        line = f"{state}{held}{pct}"
         if line != last:
             print(f"  #{job_id}: {line}")
             last = line
         if state == "done":
             result = job.get("result") or {}
             files = result.get("files") or []
+            written = ("nothing to do, it was already made"
+                       if result.get("skipped")
+                       else f"{len(files)} file(s) written")
             print(f"  #{job_id}: done in {result.get('seconds', '?')}s"
-                  f" ({result.get('realtime') or '?'}x realtime), "
-                  f"{len(files)} file(s) written")
+                  f" ({result.get('realtime') or '?'}x realtime), {written}")
             for path in files[:20]:
                 print(f"    {path}")
             return EXIT_OK
@@ -313,7 +366,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="command", required=True)
 
     s = sub.add_parser("submit", help="queue a job")
-    s.add_argument("--kind", default="whisper")
+    s.add_argument("--kind", default="whisper", choices=KINDS)
     s.add_argument("--root", default="vault", choices=ROOTS,
                    help="the ROOT NAME the paths are relative to")
     s.add_argument("--rel", required=True, metavar="REL_PATH",
@@ -322,6 +375,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="the episode root the transcripts land under, relative "
                         "to the same root (default: the folder's parent)")
     s.add_argument("--speakers", action="store_true", help="also diarise")
+    s.add_argument("--out-root", default="vault", choices=ROOTS,
+                   help="the ROOT NAME the output directory is relative to "
+                        "(the three media kinds)")
+    s.add_argument("--out-rel", default="", metavar="REL_PATH",
+                   help="the directory the file goes in, relative to "
+                        "--out-root (the three media kinds)")
+    s.add_argument("--out-stem", default="", metavar="NAME",
+                   help="the name the page knows this clip by; default: the "
+                        "media file's own stem")
     s.add_argument("--vram", type=float, default=6.0,
                    help="GPU VRAM (GB) this job needs; the scheduler filters on it")
     s.add_argument("--priority", type=int, default=0)

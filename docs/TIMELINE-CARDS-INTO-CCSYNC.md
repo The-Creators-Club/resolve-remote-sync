@@ -1055,6 +1055,13 @@ better place to find out.
   and is the rule either way.
 * **No in-process page** (phase 3), no `claude-run`, no admin view of the
   agent beyond the chip and the diagnostics bundle.
+* **Whether a FROZEN companion can import the engine is untested.** The
+  shipped build is one-file PyInstaller carrying its own dependencies, and
+  the cards package pulls in whatever the MulticamPipeline checkout needs. A
+  missing one is an import refusal with a sentence, not a crash -- but the
+  answer to it is a decision (bundle them, or run the companion from source
+  on creator-1), so try the role from a SOURCE run of the companion the first
+  time it is switched on.
 
 ### What Alex has to do before any of it runs
 

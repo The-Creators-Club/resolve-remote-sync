@@ -33,6 +33,16 @@ diagnostics bundle carries:
   * the engine is older than the bridge contract (§7c). Named as a version,
     not discovered as an AttributeError in the middle of a conform.
 
+A FROZEN COMPANION MAY NOT BE ABLE TO IMPORT IT, and that is an import
+failure with a sentence, not a crash. The shipped companion is a PyInstaller
+one-file build carrying only its own dependencies; the cards engine pulls in
+whatever MulticamPipeline's checkout needs. If those are missing, `start()`
+refuses with "the Timeline Cards engine at <path> could not be imported
+(ModuleNotFoundError: ...)" and the tray app carries on. THE FIRST TIME THIS
+ROLE IS SWITCHED ON, TRY IT FROM A SOURCE RUN OF THE COMPANION FIRST -- the
+answer to a missing dependency is a decision (bundle it, or run the companion
+from source on that one machine), not a hotfix.
+
 THE HANDSHAKE HAS NEVER RUN LIVE. `release`/`reload` -- SaveProject,
 CloseProject, LoadProject, SetCurrentTimeline -- are routed through the
 bridge like any other edit, and TRUENAS-APP-PLAN.md §0 says twice that those

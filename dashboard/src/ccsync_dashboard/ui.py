@@ -2367,6 +2367,96 @@ async def partial_admin_set_fleet_halt(
     return _fleet_halt_render(request, conn)
 
 
+# ------------------------------------------------------------- fleet jobs
+#
+# TIMELINE-CARDS-INTO-CCSYNC.md phase 4 (2026-08-30). §6 names this phase's
+# risk exactly: "the failure mode is invisible -- a scheduler that quietly
+# assigns nothing looks exactly like a fleet with nothing to do. It needs an
+# 'unschedulable, and why' view from the first commit, the way [ VRAM ] is
+# shown even with nothing running." `/api/v1/jobs/<id>/why` was that view for
+# anyone holding a terminal; this is it for the person who noticed a lane
+# spinning, which is not the same person.
+
+
+def _jobs_context(request: Request, conn, *, error: str | None = None,
+                  notice: str | None = None) -> dict:
+    from . import jobs as jobs_mod
+
+    settings = request.app.state.settings
+    caps = jobs_mod.fleet_caps(settings)
+    running = db.count_running_by_kind(conn)
+    executor = getattr(request.app.state, "pinned_executor", None)
+    rows = []
+    for job in db.list_jobs(conn, state="open", limit=100):
+        # The WHY, per job, computed here rather than in the template: it is
+        # five queries for the whole fleet (jobs.fleet_facts) and the template
+        # must not be where a page decides how many of those to run.
+        answer = jobs_mod.explain(conn, int(job["id"]), caps) or {}
+        fraction = db.clamp_progress(job.get("progress"))
+        rows.append({
+            **job,
+            "label": db.job_label(job["kind"]),
+            "percent": None if fraction is None else int(round(fraction * 100)),
+            "why": answer.get("summary", ""),
+            "machines": answer.get("machines", []),
+        })
+    return {
+        "jobs": rows,
+        "depth": db.queue_depth(conn),
+        "kinds": [{"kind": kind, "label": db.job_label(kind),
+                   "running": running.get(kind, 0),
+                   "cap": jobs_mod.max_running(kind, caps)}
+                  for kind in db.JOB_KINDS],
+        "pinning": {"available": jobs_mod.can_pin(request.app),
+                    "why_not": (executor.why_not() if executor is not None
+                                else "no executor is configured here")},
+        "error": error, "notice": notice,
+    }
+
+
+@router.get("/admin/jobs")
+def page_admin_jobs(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    _require_admin_page(request)
+    return _render(request, "admin_jobs.html", {
+        **_sidebar_context(request, conn, None),
+        **_jobs_context(request, conn),
+        "nav_current": "jobs",
+    })
+
+
+@router.get("/partials/admin/jobs")
+def partial_admin_jobs(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    _require_admin_page(request)
+    return _render(request, "partials/admin_jobs.html", _jobs_context(request, conn))
+
+
+@router.post("/partials/admin/jobs/{job_id}/cancel")
+def partial_admin_cancel_job(
+    job_id: int, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    """[ CANCEL ]. The same three answers the API route gives, in a sentence.
+
+    A job a MACHINE is running is not stopped here: the request rides that
+    machine's next report and the companion kills its child. Saying "stopped"
+    on this page while an ffmpeg is still writing into the vault would be the
+    one lie this page cannot afford."""
+    admin = _require_admin_page(request)
+    state = db.request_job_cancel(conn, job_id, admin)
+    conn.commit()
+    if state is None:
+        return _render(request, "partials/admin_jobs.html",
+                       _jobs_context(request, conn,
+                                     error=f"job #{job_id} has already finished"))
+    log.warning("job #%s cancelled from the jobs page by %s (%s)",
+                job_id, admin, state)
+    notice = (f"job #{job_id} is over"
+              if state == db.JOB_FAILED else
+              f"job #{job_id} will stop on its next report - the machine "
+              f"running it is the only thing that can end it")
+    return _render(request, "partials/admin_jobs.html",
+                   _jobs_context(request, conn, notice=notice))
+
+
 # --------------------------------------------------------- installer download
 
 # The drawer's [ INSTALLER ] entry points at /download. It serves the CURRENT

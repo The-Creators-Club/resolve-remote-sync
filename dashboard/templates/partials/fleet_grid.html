@@ -261,12 +261,15 @@
            diagnostics bundle, because "cards_agent is not set" is true of
            every computer and would be a chip on all of them. #}
         {% if e.capabilities.cards_agent and e.capabilities.cards_agent.connected %}<span class="chip green" title="this computer is serving the Timeline Cards page from its own Resolve{% if e.capabilities.cards_agent.timeline %} - {{ e.capabilities.cards_agent.timeline }}{% endif %}{% if e.capabilities.at %} · reported {{ e.capabilities.at | ago }}{% endif %}">[ CARDS{% if e.capabilities.cards_agent.timeline %}: {{ e.capabilities.cards_agent.timeline }}{% endif %}{% if e.capabilities.cards_agent.version %} v{{ e.capabilities.cards_agent.version }}{% endif %} ]</span>{% endif %}
-        {# The chip shows HOW FAR THROUGH where the runner can say (phase 1: ffmpeg's
+        {# A LINK since phase 4 (2026-08-30): the chip is where an admin
+   notices a job, and the jobs page is where they can see why it is stuck and
+   stop it. The other chips stay spans -- they are facts, not places.
+   The chip shows HOW FAR THROUGH where the runner can say (phase 1: ffmpeg's
    -progress stream against the source duration) and the job id where it
    cannot. A percentage is what tells a watching admin the difference between
    a machine working and a machine wedged; `percent` is null, never 0, when
    nothing measured it. #}
-        {% if e.job.id %}<span class="chip green" title="job #{{ e.job.id }} ({{ e.job.kind }}, {{ e.job.state }}){% if e.job.rel_path %} - {{ e.job.rel_path }}{% endif %}{% if e.job.at %} · last heartbeat {{ e.job.at | ago }}{% endif %}{% if e.job.lease_expires_at %} · lease until {{ e.job.lease_expires_at }}{% endif %}">[ {{ e.job.label or e.job.kind | upper }}: {% if e.job.percent is not none %}{{ e.job.percent }}%{% else %}JOB {{ e.job.id }}{% endif %} ]</span>{% endif %}
+        {% if e.job.id %}<a class="chip green" href="/admin/jobs" title="job #{{ e.job.id }} ({{ e.job.kind }}, {{ e.job.state }}){% if e.job.rel_path %} - {{ e.job.rel_path }}{% endif %}{% if e.job.at %} · last heartbeat {{ e.job.at | ago }}{% endif %}{% if e.job.lease_expires_at %} · lease until {{ e.job.lease_expires_at }}{% endif %}">[ {{ e.job.label or e.job.kind | upper }}: {% if e.job.percent is not none %}{{ e.job.percent }}%{% else %}JOB {{ e.job.id }}{% endif %} ]</a>{% endif %}
         {# Music ingest (MUSIC_INGEST_PLAN.md step 3, 2026-08-18). Its OWN
            chip beside b-roll's rather than one shared one: music needs no GPU,
            so a machine can be embedding an album and indexing a camera card at

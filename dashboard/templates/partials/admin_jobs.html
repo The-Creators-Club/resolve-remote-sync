@@ -1,0 +1,79 @@
+{# THE OPERATOR'S VIEW OF THE FLEET QUEUE (TIMELINE-CARDS-INTO-CCSYNC.md
+   phase 4, 2026-08-30).
+
+   Phase 4's stated risk is that the failure mode of a scheduler is INVISIBLE:
+   "a scheduler that quietly assigns nothing looks exactly like a fleet with
+   nothing to do". `GET /api/v1/jobs/<id>/why` has answered that since phase 0
+   for anyone with a terminal; this is the same answer on a page, inline, next
+   to the row it is about -- because the person who notices a lane spinning is
+   not holding a terminal.
+
+   Open jobs only, newest first. A finished one is history and ages out on its
+   own (JOBS_MAX_AGE_DAYS); a queued one nobody can run is the whole reason
+   this page exists and never ages out at all. #}
+<div id="admin-jobs">
+  {% if error %}<div class="banner">▲ {{ error }}</div>{% endif %}
+  {% if notice %}<div class="banner">{{ notice }}</div>{% endif %}
+
+  <div class="admin-users-box">
+    <div class="side-head">[ THE QUEUE ]
+      <span class="muted">{{ depth.queued }} queued, {{ depth.running }} running{% if depth.pinned %}, {{ depth.pinned }} pinned here{% endif %}{% if depth.oldest_age_s is not none %} · the oldest has waited {{ depth.oldest_age_s | round | int }}s{% endif %}</span></div>
+    <div class="mono-sm" style="margin-top:0.4rem">
+      {% for row in kinds %}
+        <span class="chip{{ ' amber' if row.running >= row.cap }}" title="{{ row.running }} of at most {{ row.cap }} {{ row.kind }} jobs are running across the whole fleet{% if row.running >= row.cap %} - the next one waits for a free slot{% endif %}">[ {{ row.label }}: {{ row.running }}/{{ row.cap }} ]</span>
+      {% endfor %}
+      {# "Is there anywhere for a job the fleet gives up on to go" -- the
+         question phase 1 could only ever answer "no" to. #}
+      {% if pinning.available %}
+        <span class="chip green" title="a media job the fleet cannot finish is handed to this dashboard's own Timeline Cards worker instead of being abandoned">[ PIN: THIS SERVER ]</span>
+      {% else %}
+        <span class="chip" title="{{ pinning.why_not }}. A job whose retry budget runs out is abandoned, which is visible and honest, rather than pinned into a queue nothing drains.">[ NO PINNING HERE ]</span>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if not jobs %}
+    <p class="muted" style="margin-top:0.8rem">Nothing is queued or running.</p>
+  {% else %}
+  <table class="editors" style="margin-top:0.8rem">
+    <thead><tr>
+      <th>JOB</th><th>KIND</th><th>STATE</th><th>WHERE</th>
+      <th>PROGRESS</th><th>AGE</th><th>WHY</th><th></th>
+    </tr></thead>
+    <tbody>
+    {% for job in jobs %}
+      <tr class="editor-row">
+        <td class="mono-sm">#{{ job.id }}</td>
+        <td class="mono-sm">{{ job.label }}</td>
+        <td class="mono-sm">{{ job.state | upper }}{% if job.cancel_requested_at %} <span class="muted">(cancelling)</span>{% endif %}</td>
+        <td class="who">{% if job.claimed_machine %}{{ job.claimed_by }}/{{ job.claimed_machine }}{% else %}<span class="muted">nobody</span>{% endif %}</td>
+        {# A percentage where the runner measured one, the job id where it
+           could not: null is not zero, and a peaks pass that reads its input
+           in one gulp must not look wedged at 0%. #}
+        <td class="mono-sm">{% if job.percent is not none %}{{ job.percent }}%{% else %}<span class="muted">-</span>{% endif %}</td>
+        <td class="muted mono-sm">{{ job.created_at | ago }}</td>
+        <td class="mono-sm">{{ job.why }}{% if job.attempts %} <span class="muted">({{ job.attempts }} attempt{{ "s" if job.attempts != 1 }}{% if job.last_error %}: {{ job.last_error[:120] }}{% endif %})</span>{% endif %}</td>
+        <td>
+          <form class="inline-form" hx-post="/partials/admin/jobs/{{ job.id }}/cancel"
+                hx-target="#admin-jobs" hx-swap="outerHTML"
+                hx-confirm="Stop job #{{ job.id }}? A job a machine is running is killed there and not retried anywhere.">
+            <button class="btn" type="submit">[ CANCEL ]</button>
+          </form>
+        </td>
+      </tr>
+      <tr class="editor-row">
+        {# THE PER-MACHINE ANSWER, INLINE. "Nothing can run this" and "three
+           machines could but all three have somebody sitting at them" are
+           different problems with the same symptom (an empty grid). #}
+        <td></td>
+        <td colspan="7" class="mono-sm muted">
+          {% for m in job.machines %}
+            {{ "yes" if m.ok else "no " }} {{ m.editor }}/{{ m.machine }}: {{ m.why }}<br>
+          {% endfor %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>

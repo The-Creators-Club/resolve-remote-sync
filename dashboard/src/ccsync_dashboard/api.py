@@ -8280,7 +8280,9 @@ def api_create_job(
     # The WHY comes back with the receipt (phase 4's risk, answered in phase
     # 0): a submitter who queues a job no machine can run learns it here,
     # instead of watching a queue that never moves.
-    return {"ok": True, "job": job, "why": jobs_mod.explain(conn, job_id)}
+    return {"ok": True, "job": job,
+            "why": jobs_mod.explain(
+                conn, job_id, jobs_mod.fleet_caps(request.app.state.settings))}
 
 
 @router.get("/jobs")
@@ -8291,6 +8293,34 @@ def api_list_jobs(
     _require_admin(request)
     return {"jobs": db.list_jobs(conn, state=state, kind=kind, limit=limit),
             "kinds": list(db.JOB_KINDS)}
+
+
+# REGISTERED BEFORE /jobs/{job_id}: FastAPI matches routes in the order
+# they were added, and "queue" read as a job id is a 422 on a page an
+# admin opened.
+@router.get("/jobs/queue")
+def api_job_queue(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    """The depth signal, for a person. The same numbers the report reply
+    carries to a companion, plus what each kind is doing -- so "the fleet is
+    quiet" and "the fleet is at its cap" can be told apart without opening
+    the queue itself."""
+    _require_admin(request)
+    caps = jobs_mod.fleet_caps(request.app.state.settings)
+    running = db.count_running_by_kind(conn)
+    executor = getattr(request.app.state, "pinned_executor", None)
+    return {
+        "queue": db.queue_depth(conn),
+        "kinds": [{"kind": kind, "running": running.get(kind, 0),
+                   "cap": jobs_mod.max_running(kind, caps)}
+                  for kind in db.JOB_KINDS],
+        # "is there anywhere for a job the fleet gives up on to go" -- the
+        # question phase 1 could only answer "no" to.
+        "pinning": {"available": jobs_mod.can_pin(request.app),
+                    "why_not": (executor.why_not() if executor is not None
+                                else "no executor is configured")},
+    }
 
 
 @router.get("/jobs/{job_id}")
@@ -8316,10 +8346,46 @@ def api_job_why(
     different problems with the same symptom.
     """
     _require_admin(request)
-    answer = jobs_mod.explain(conn, job_id)
+    answer = jobs_mod.explain(
+        conn, job_id, jobs_mod.fleet_caps(request.app.state.settings))
     if answer is None:
         raise HTTPException(status_code=404, detail="no such job")
     return answer
+
+
+@router.post("/jobs/{job_id}/cancel")
+def api_cancel_job(
+    job_id: int, request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    """Stop a job. Admin only, like submitting one.
+
+    WHAT IT MEANS DEPENDS ON WHO HAS IT, and the three answers are different
+    on purpose (db.request_job_cancel):
+
+      queued   the row is this dashboard's own: it is `failed` immediately,
+               with the admin's name on it, and never retried.
+      held     only the machine running it can stop it. The request is
+               recorded, `commands.jobs.cancel` carries the id on that
+               machine's next report, and the companion kills its child and
+               posts failed(cancelled). NOTHING HERE FORCES THE ROW TERMINAL
+               BEHIND A LIVE FFMPEG -- a job whose machine never answers
+               stays "cancelling" until its lease expires, because lying
+               about the state while a child is still writing into the vault
+               is how a half-made proxy gets published.
+      pinned   this container's own worker has it, and its should_stop()
+               reads the same flag within a second.
+    """
+    admin = _require_admin(request)
+    state = db.request_job_cancel(conn, job_id, admin)
+    conn.commit()
+    if state is None:
+        job = db.get_job(conn, job_id)
+        raise HTTPException(
+            status_code=404 if job is None else 409,
+            detail="no such job" if job is None else
+                   f"this job is already {job['state']}")
+    log.info("job #%s cancelled by %s (%s)", job_id, admin, state)
+    return {"ok": True, "state": state, "job": db.get_job(conn, job_id)}
 
 
 @router.post("/jobs/claim")

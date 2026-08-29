@@ -17,6 +17,8 @@ routes tomorrow (§4: it stays its own repo and is a CLIENT of this API).
     python tools/jobs.py list [--state open]
     python tools/jobs.py why 12
     python tools/jobs.py watch 12
+    python tools/jobs.py queue
+    python tools/jobs.py cancel 12
 
 PATHS ARE (ROOT NAME, RELATIVE PATH) PAIRS AND NOTHING ELSE (§4.1). The vault
 is `X:\\` on creator-1, `/vault` in the Timeline Cards container and a UNC
@@ -297,9 +299,54 @@ def cmd_why(client: Client, args: argparse.Namespace) -> int:
     job = answer.get("job") or {}
     print(f"job #{job.get('id')} ({job.get('kind')}, {job.get('state')})")
     print(f"  {answer.get('summary')}")
+    if answer.get("reason_code"):
+        # The CODE as well as the sentence: it is what Timeline Cards branches
+        # on, and a person debugging that branch has to be able to see it.
+        print(f"  [{answer['reason_code']}]"
+              + (" (transient: the fleet will get to it)"
+                 if answer.get("transient") else ""))
     for machine in (answer.get("machines") or []):
         mark = "yes" if machine["ok"] else "no "
         print(f"    [{mark}] {machine['editor']}/{machine['machine']}: {machine['why']}")
+    return EXIT_OK
+
+
+def cmd_cancel(client: Client, args: argparse.Namespace) -> int:
+    """Stop a job. What that MEANS depends on who has it (phase 4).
+
+    A queued job is over when this returns. A job a machine is RUNNING is not:
+    the request rides that machine's next report and the companion kills its
+    child, so this prints "will stop" rather than "stopped". Claiming
+    otherwise while an ffmpeg is still writing into the vault would be the one
+    lie a tool like this cannot afford.
+    """
+    answer = client.call("POST", f"/api/v1/jobs/{args.job_id}/cancel")
+    job = answer.get("job") or {}
+    if answer.get("state") == "failed":
+        print(f"job #{args.job_id} is over ({job.get('last_error')})")
+        return EXIT_OK
+    print(f"job #{args.job_id} will stop on {job.get('claimed_machine') or 'the worker'}"
+          f"'s next report; it is not retried anywhere")
+    return EXIT_OK
+
+
+def cmd_queue(client: Client, args: argparse.Namespace) -> int:
+    """How deep the queue is, per kind -- the same signal the report reply
+    carries to every companion so it can back off by itself."""
+    answer = client.call("GET", "/api/v1/jobs/queue")
+    depth = answer.get("queue") or {}
+    oldest = depth.get("oldest_age_s")
+    print(f"{depth.get('queued', 0)} queued, {depth.get('running', 0)} running, "
+          f"{depth.get('pinned', 0)} pinned"
+          + ("" if oldest is None else f"; the oldest has waited {oldest:.0f}s"))
+    for row in (answer.get("kinds") or []):
+        mark = " AT THE LIMIT" if row["running"] >= row["cap"] else ""
+        print(f"  {row['kind']:<14} {row['running']}/{row['cap']}{mark}")
+    pinning = answer.get("pinning") or {}
+    print("  pinning: " + ("this dashboard's own worker takes what the fleet "
+                           "gives up on"
+                           if pinning.get("available")
+                           else f"none ({pinning.get('why_not')})"))
     return EXIT_OK
 
 
@@ -342,6 +389,9 @@ def watch(client: Client, job_id: int, timeout: float, sleep=time.sleep,
             for path in files[:20]:
                 print(f"    {path}")
             return EXIT_OK
+        # `pinned` is not an end: the fleet gave up and this dashboard's own
+        # worker has it, so the watch keeps going and the job still finishes
+        # `done` (§4.4 rule 5).
         if state in ("failed", "abandoned"):
             print(f"  #{job_id}: {state}: {job.get('last_error')}")
             return EXIT_JOB_FAILED
@@ -398,6 +448,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("why", help="why a job is not running")
     s.add_argument("job_id", type=int)
 
+    s = sub.add_parser("cancel", help="stop a job")
+    s.add_argument("job_id", type=int)
+
+    sub.add_parser("queue", help="how deep the queue is, and the per-kind caps")
+
     s = sub.add_parser("watch", help="follow a job to its end")
     s.add_argument("job_id", type=int)
     s.add_argument("--timeout", type=float, default=3600)
@@ -405,7 +460,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"submit": cmd_submit, "list": cmd_list, "why": cmd_why,
-            "watch": cmd_watch}
+            "watch": cmd_watch, "cancel": cmd_cancel, "queue": cmd_queue}
 
 
 def main(argv: list[str] | None = None, http: Http | None = None) -> int:

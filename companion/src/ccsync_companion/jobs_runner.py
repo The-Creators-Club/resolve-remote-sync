@@ -94,6 +94,11 @@ OUTPUT_TAIL_CHARS = 4000
 # offers ride the report anyway, and the report interval is 5-60 s.
 IDLE_BACKOFF = 4.0
 IDLE_BACKOFF_MAX_SECONDS = 120.0
+# What a job that an admin stopped is handed back as. NOT RETRYABLE, always:
+# another machine picking up work a person just stopped is the one outcome
+# nobody asked for, and the dashboard's own word for it is the same string
+# (db.JOB_CANCELLED_ERROR).
+CANCELLED_ERROR = "cancelled"
 # "(12 written, 0 failed, 3 skipped) (41.2 min audio in 3.6 min, 11.4x
 # realtime overall)" -- whisper_corpus's own summary line.
 _REALTIME_RE = re.compile(r"([0-9.]+)x realtime")
@@ -232,6 +237,16 @@ class JobRunner:
         except Exception:
             log.debug("jobs: resolve_running_fn failed", exc_info=True)
             return True
+
+    def _cancel_requested(self, job_id: int) -> bool:
+        """Has an admin asked this machine to stop this job? (Phase 4.)
+
+        The id rides `commands.jobs.cancel` on the report reply and keeps
+        riding it until this machine answers with a result -- so a click that
+        lands while a laptop is asleep is a click that still happens.
+        """
+        with self._lock:
+            return int(job_id) in self._cancel
 
     def _halted(self) -> bool:
         if self._halted_fn is None:
@@ -465,7 +480,11 @@ class JobRunner:
         if not ok:
             self._post_result(job_id, False, error or "the transcription failed",
                               result={"seconds": elapsed, "output": output},
-                              retryable=True)
+                              # A CANCELLED JOB IS NOT RETRIED (phase 4): an
+                              # admin stopped it, and handing it to the next
+                              # idle machine would be the fleet arguing with
+                              # a person.
+                              retryable=error != CANCELLED_ERROR)
             return
         result = {
             "seconds": elapsed,
@@ -514,7 +533,12 @@ class JobRunner:
         def on_progress(fraction: Optional[float]) -> None:
             latest["fraction"] = fraction
 
+        cancelled: dict[str, bool] = {"yes": False}
+
         def should_stop() -> str:
+            if self._cancel_requested(job_id):
+                cancelled["yes"] = True
+                return CANCELLED_ERROR
             if lease_lost.is_set():
                 return "the lease was lost"
             if self._halted():
@@ -552,7 +576,8 @@ class JobRunner:
             log.warning("jobs: job #%s (%s) failed: %s", job_id, kind, exc)
             self._post_result(job_id, False, str(exc),
                               result={"seconds": round(self._clock() - started, 1)},
-                              retryable=bool(getattr(exc, "retryable", True)))
+                              retryable=(bool(getattr(exc, "retryable", True))
+                                         and not cancelled["yes"]))
             return
         except Exception as exc:                                # noqa: BLE001
             finished.set()
@@ -661,6 +686,11 @@ class JobRunner:
                     if not self._heartbeat(job_id):
                         _terminate(proc)
                         return False, _tail(chunks), "the lease was lost"
+                if self._cancel_requested(job_id):
+                    log.warning("jobs: job #%s was cancelled -- stopping the child",
+                                job_id)
+                    _terminate(proc)
+                    return False, _tail(chunks), CANCELLED_ERROR
                 if self._halted():
                     log.warning("jobs: a fleet halt arrived -- stopping job #%s",
                                 job_id)

@@ -1421,6 +1421,26 @@ ALTER TABLE machine_state ADD COLUMN cap_resolve_project TEXT;
 ALTER TABLE machine_state ADD COLUMN cap_jobs_enabled INTEGER;
 """
 
+# v43: HOW FAR THROUGH A JOB IS, and one more capability (phase 1,
+# 2026-08-30).
+#
+# `progress` is 0..1 and NULLABLE, and null is not zero: a runner that cannot
+# say (a peaks pass reads its input in one gulp) leaves it null, and the grid
+# then shows the job id rather than an invented "0%". It is a column and not
+# the heartbeat's `note` because the note lands in `last_error` -- fine for a
+# sentence about a failure, wrong for a number the fleet page renders every
+# 15 s.
+#
+# `cap_ffprobe` is separate from `cap_ffmpeg` because the two recipes here
+# need BOTH and they can genuinely be apart: ffprobe is what decides the
+# proxy's GOP from the source's frame rate and what proves the extracted
+# audio came out the same length it went in, and a machine with ffmpeg alone
+# would claim the work and then guess.
+SCHEMA_V43 = """
+ALTER TABLE jobs ADD COLUMN progress REAL;
+ALTER TABLE machine_state ADD COLUMN cap_ffprobe INTEGER;
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -1509,6 +1529,11 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # reported (every job simply waits, visibly), and the columns are useful
     # with no queue.
     (42, SCHEMA_V42),
+    # 43: phase 1's two columns. One step, not two, because they ship
+    # together and neither is useful before the other: a media job with no
+    # ffprobe capability is never offered, and a job that is never offered
+    # has no progress to report.
+    (43, SCHEMA_V43),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -7332,7 +7357,29 @@ JOB_TERMINAL_STATES = (JOB_DONE, JOB_FAILED, JOB_ABANDONED)
 # table (a newer submitter must not be refused by an older dashboard) but is
 # never offered to anybody -- see jobs.explain, which says exactly that.
 JOB_KIND_WHISPER = "whisper"
-JOB_KINDS = (JOB_KIND_WHISPER,)
+# Phase 1 (2026-08-30): the three Timeline Cards media recipes. The names are
+# the ones the plan's §4.2 table uses, hyphenated, and they are what a job row
+# carries for ever -- renaming one later would strand every queued job written
+# by an older submitter.
+JOB_KIND_PROXY_480P = "proxy-480p"
+JOB_KIND_AUDIO_EXTRACT = "audio-extract"
+JOB_KIND_PEAKS = "peaks"
+JOB_KINDS = (JOB_KIND_WHISPER, JOB_KIND_PROXY_480P, JOB_KIND_AUDIO_EXTRACT,
+             JOB_KIND_PEAKS)
+
+# What the fleet grid calls a kind. Data rather than a chain of ifs in the
+# template, and NOT `kind.upper()`: "PROXY-480P" is the shape of a database
+# value, and the chip is read by a person ("[ PROXY 480p: 62% ]").
+JOB_KIND_LABELS = {
+    JOB_KIND_WHISPER: "WHISPER",
+    JOB_KIND_PROXY_480P: "PROXY 480p",
+    JOB_KIND_AUDIO_EXTRACT: "AUDIO",
+    JOB_KIND_PEAKS: "PEAKS",
+}
+
+
+def job_label(kind: str) -> str:
+    return JOB_KIND_LABELS.get(str(kind or ""), str(kind or "JOB").upper())
 
 # How long a claim is good for without a heartbeat. Five minutes, against the
 # companion's 30 s heartbeat: ten missed beats is a machine that has gone,
@@ -7345,7 +7392,16 @@ JOB_LEASE_SECONDS = 300
 # "how many times is it worth sending this to a machine that might not be the
 # problem" is a property of the work: a whisper run that dies twice on two
 # different machines is a bad input, not bad luck.
-JOB_RETRY_BUDGET = {JOB_KIND_WHISPER: 3}
+# The three media kinds get TWO, not three: a recipe is deterministic and
+# cheap, so a second machine failing the same clip the same way is evidence
+# about the CLIP (a file with no audio track, a rush half-written by a copy
+# still in flight) and a third attempt only costs another editor's evening.
+JOB_RETRY_BUDGET = {
+    JOB_KIND_WHISPER: 3,
+    JOB_KIND_PROXY_480P: 3,
+    JOB_KIND_AUDIO_EXTRACT: 2,
+    JOB_KIND_PEAKS: 2,
+}
 JOB_RETRY_BUDGET_DEFAULT = 3
 
 # Ceiling on one submitted job's JSON fields. A queue row is written by an
@@ -7578,10 +7634,28 @@ def claim_next_job(
     return None
 
 
+def clamp_progress(value: Any) -> float | None:
+    """0..1, or None for "this runner cannot say".
+
+    None is NOT zero (the cap_idle_seconds rule again): a peaks pass reads its
+    input in one gulp and has no honest fraction to report, and a grid showing
+    it as 0% would say the machine is stuck when it is working.
+    """
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number:                                  # NaN
+        return None
+    return max(0.0, min(1.0, number))
+
+
 def heartbeat_job(
     conn: sqlite3.Connection, job_id: int, editor: str, machine: str,
     now: str | None = None, lease_seconds: float = JOB_LEASE_SECONDS,
-    note: str | None = None,
+    note: str | None = None, progress: Any = None,
 ) -> bool:
     """Extend a LIVE lease, and move a claim to `running`. -> did it happen.
 
@@ -7593,10 +7667,12 @@ def heartbeat_job(
     now = now or utcnow_iso()
     cur = conn.execute(
         """UPDATE jobs SET state=?, lease_expires_at=?, heartbeat_at=?,
-                           updated_at=?, last_error=COALESCE(?, last_error)
+                           updated_at=?, last_error=COALESCE(?, last_error),
+                           progress=COALESCE(?, progress)
             WHERE id=? AND claimed_by=? AND claimed_machine=?
               AND state IN (?, ?) AND lease_expires_at > ?""",
         (JOB_RUNNING, _job_lease_until(now, lease_seconds), now, now, note,
+         clamp_progress(progress),
          int(job_id), str(editor), str(machine), JOB_CLAIMED, JOB_RUNNING, now),
     )
     return bool(cur.rowcount)
@@ -7718,14 +7794,19 @@ def fetch_running_jobs_map(
     out: dict[tuple[str, str], dict[str, Any]] = {}
     for r in conn.execute(
         "SELECT id, kind, state, claimed_by, claimed_machine, heartbeat_at, "
-        "       lease_expires_at, inputs_json FROM jobs "
+        "       lease_expires_at, inputs_json, progress FROM jobs "
         " WHERE state IN (?, ?) ORDER BY id", (JOB_CLAIMED, JOB_RUNNING)
     ):
         key = (r["claimed_by"] or "", r["claimed_machine"] or "")
         inputs = _job_loads(r["inputs_json"]) or {}
+        fraction = clamp_progress(r["progress"])
         out[key] = {
             "id": r["id"], "kind": r["kind"], "state": r["state"],
+            "label": job_label(r["kind"]),
             "at": r["heartbeat_at"], "lease_expires_at": r["lease_expires_at"],
+            # None, never 0, when the runner cannot say -- the chip then shows
+            # the job id instead of a percentage nobody measured.
+            "percent": None if fraction is None else int(round(fraction * 100)),
             "rel_path": (str(inputs.get("rel_path") or "")
                          if isinstance(inputs, dict) else ""),
         }
@@ -7781,7 +7862,8 @@ def store_machine_capabilities(
     conn.execute(
         """UPDATE machine_state SET
              cap_at=?, cap_gpu_present=?, cap_gpu_name=?, cap_gpu_vram_gb=?,
-             cap_nvenc=?, cap_ffmpeg=?, cap_whisper=?, cap_whisper_detail=?,
+             cap_nvenc=?, cap_ffmpeg=?, cap_ffprobe=?, cap_whisper=?,
+             cap_whisper_detail=?,
              cap_claude=?, cap_mounts=?, cap_cpu_count=?, cap_idle_seconds=?,
              cap_load=?, cap_resolve_running=?, cap_resolve_project=?,
              cap_jobs_enabled=?
@@ -7792,6 +7874,7 @@ def store_machine_capabilities(
          caps.get("gpu_vram_gb"),
          int(bool(caps.get("nvenc"))),
          int(bool(caps.get("ffmpeg"))),
+         int(bool(caps.get("ffprobe"))),
          int(bool(caps.get("whisper"))),
          str(caps.get("whisper_detail") or "")[:255],
          int(bool(caps.get("claude"))),
@@ -7829,6 +7912,7 @@ def _capabilities_of(row: sqlite3.Row | None) -> dict[str, Any]:
         "gpu_vram_gb": row["cap_gpu_vram_gb"],
         "nvenc": bool(row["cap_nvenc"]),
         "ffmpeg": bool(row["cap_ffmpeg"]),
+        "ffprobe": bool(row["cap_ffprobe"]),
         "whisper": bool(row["cap_whisper"]),
         "whisper_detail": row["cap_whisper_detail"] or "",
         "claude": bool(row["cap_claude"]),
@@ -7843,8 +7927,8 @@ def _capabilities_of(row: sqlite3.Row | None) -> dict[str, Any]:
 
 
 _CAPABILITY_COLUMNS = """cap_at, cap_gpu_present, cap_gpu_name, cap_gpu_vram_gb,
-       cap_nvenc, cap_ffmpeg, cap_whisper, cap_whisper_detail, cap_claude,
-       cap_mounts, cap_cpu_count, cap_idle_seconds, cap_load,
+       cap_nvenc, cap_ffmpeg, cap_ffprobe, cap_whisper, cap_whisper_detail,
+       cap_claude, cap_mounts, cap_cpu_count, cap_idle_seconds, cap_load,
        cap_resolve_running, cap_resolve_project, cap_jobs_enabled"""
 
 

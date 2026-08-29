@@ -6599,6 +6599,12 @@ class CapabilitiesIn(_ReportSectionIn):
     gpu_vram_gb: float | None = Field(default=None, ge=0, le=1024)
     nvenc: bool = False
     ffmpeg: bool = False
+    # ITS OWN FIELD, not a corollary of `ffmpeg` (phase 1, 2026-08-30): the
+    # three media recipes need both, and ffprobe is what decides a proxy's GOP
+    # from the source's frame rate and proves an extracted track came out the
+    # length it went in. A machine reporting ffmpeg alone would be offered
+    # work it could only guess at.
+    ffprobe: bool = False
     whisper: bool = False
     whisper_detail: str = Field(default="", max_length=255)
     claude: bool = False
@@ -8172,6 +8178,10 @@ class JobClaimIn(BaseModel):
 class JobHeartbeatIn(BaseModel):
     machine: str = Field(min_length=1, max_length=128)
     note: str | None = Field(default=None, max_length=500)
+    # 0..1, and OPTIONAL: a runner with no honest fraction to report (a peaks
+    # pass reads its input in one gulp) sends none, and the fleet grid shows
+    # the job id rather than an invented 0%.
+    progress: float | None = Field(default=None, ge=0, le=1)
 
 
 class JobResultIn(BaseModel):
@@ -8193,8 +8203,16 @@ def api_create_job(
 ) -> dict[str, Any]:
     """Queue a job. Admin only: a job is work on somebody else's computer."""
     admin = _require_admin(request)
+    # A blank `requires` on a kind this dashboard has an opinion about gets
+    # the standard one (jobs.default_requires): the media recipes need ffmpeg,
+    # ffprobe and both of the roots the job names, on every clip, and a
+    # submitter that forgot one would queue work a machine claims and then
+    # cannot finish. An explicit `requires` is never touched -- phase 0's
+    # decision stands, the requirements are the submitter's to state.
+    requires = payload.requires or jobs_mod.default_requires(
+        payload.kind, payload.inputs)
     job_id = db.create_job(
-        conn, payload.kind, payload.inputs, payload.requires, payload.cost,
+        conn, payload.kind, payload.inputs, requires, payload.cost,
         created_by=admin, priority=payload.priority)
     conn.commit()
     log.info("job #%s (%s) queued by %s: %s", job_id, payload.kind, admin, payload.inputs)
@@ -8297,7 +8315,8 @@ def api_heartbeat_job(
     editor = _require_fleet_caller(request, conn)
     machine = payload.machine.strip()
     now = db.utcnow_iso()
-    ok = db.heartbeat_job(conn, job_id, editor, machine, now, note=payload.note)
+    ok = db.heartbeat_job(conn, job_id, editor, machine, now, note=payload.note,
+                          progress=payload.progress)
     conn.commit()
     if not ok:
         job = db.get_job(conn, job_id)

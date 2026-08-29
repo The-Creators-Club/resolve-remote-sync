@@ -40,8 +40,82 @@ log = logging.getLogger("ccsync.dashboard.jobs")
 # Seconds of no keyboard or mouse before a machine may be given work of this
 # kind. proxy_gen's own default is 300 s and this matches it deliberately: an
 # editor should not have to learn two different meanings of "away".
-JOB_IDLE_FLOOR_SECONDS: dict[str, int] = {db.JOB_KIND_WHISPER: 300}
+#
+# THE FLOOR IS PER KIND BECAUSE THE COST IS (phase 1, 2026-08-30). A whisper
+# pass is minutes of GPU work; an audio extraction is `-c:a copy` on one file
+# and a peaks pass is an 8 kHz decode, both of them seconds and both of them
+# I/O bound. Making somebody's laptop wait five minutes of stillness before it
+# will copy an audio track is how a lane sits on a spinner while a fleet of
+# capable machines does nothing -- so the cheap kinds get 60 s, which is still
+# long enough that it is not happening under an editor's hands mid-sentence.
+JOB_IDLE_FLOOR_SECONDS: dict[str, int] = {
+    db.JOB_KIND_WHISPER: 300,
+    db.JOB_KIND_PROXY_480P: 300,
+    db.JOB_KIND_AUDIO_EXTRACT: 60,
+    db.JOB_KIND_PEAKS: 60,
+}
 JOB_IDLE_FLOOR_DEFAULT = 300
+
+# What a kind NEEDS, when the submitter does not say. The requirements are a
+# property of the WORK, so phase 0 made the submitter state them (see
+# tools/jobs.py's whisper_job) -- but the three media kinds have exactly one
+# right answer, it is the same on every clip, and asking every future caller
+# (Timeline Cards' LibraryEngine, next) to repeat it is asking for the day one
+# of them forgets `ffprobe` and a machine claims work it cannot finish. An
+# explicit `requires` from the submitter always wins; this only fills a blank.
+#
+# `mount` takes BOTH roots the job names: reading the rush and writing the
+# cache are two different filesystems here (the footage share is read-only in
+# the Timeline Cards container), and a machine that has one but not the other
+# is a machine that fails halfway.
+_MEDIA_REQUIRES = {"ffmpeg": True, "ffprobe": True}
+
+
+def default_requires(kind: str, inputs: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The hard requirements for a job of this kind, from its inputs. {} when
+    this dashboard has no opinion (a kind it does not know, or `whisper`,
+    whose VRAM floor is the submitter's to state)."""
+    if str(kind) not in (db.JOB_KIND_PROXY_480P, db.JOB_KIND_AUDIO_EXTRACT,
+                         db.JOB_KIND_PEAKS):
+        return {}
+    inputs = dict(inputs or {})
+    mounts: list[str] = []
+    for key in ("root", "out_root"):
+        name = str(inputs.get(key) or "").strip().lower()
+        if name and name not in mounts:
+            mounts.append(name)
+    requires = dict(_MEDIA_REQUIRES)
+    if mounts:
+        requires["mount"] = mounts
+    return requires
+
+
+# Which machine is PREFERRED for a kind, as a table rather than a chain of
+# ifs (§4.4 rule 3). Every capable machine is still offered the job in the
+# end -- see RANK_GRACE_SECONDS -- so a preference can never be the reason a
+# queue stops moving; it only decides who gets first refusal.
+#
+#   nvenc   the phase-1 win. The NAS container measured 11-33x realtime on
+#           libx264 veryfast; a machine with an NVIDIA encoder does the same
+#           480p proxy without spending a core on it.
+#   gpu     whisper's model has to fit somewhere.
+#   base    the base rig for the cheap I/O-bound kinds: it is the machine
+#           next to the media, nobody sits at it, and an audio copy that runs
+#           there costs an editor nothing at all.
+PREFERRED_FOR_KIND: dict[str, tuple[str, ...]] = {
+    db.JOB_KIND_WHISPER: ("gpu",),
+    db.JOB_KIND_PROXY_480P: ("nvenc",),
+    db.JOB_KIND_AUDIO_EXTRACT: ("base",),
+    db.JOB_KIND_PEAKS: ("base",),
+}
+
+# How long a job waits for its preferred machine before EVERY capable machine
+# is offered it. A preference that could starve a queue would be worse than
+# no preference at all (§6 phase 4's risk: an idle queue and a busy fleet look
+# identical), and 60 s is two report intervals -- long enough for the machine
+# with the encoder to have been asked twice, short enough that nobody watching
+# a lane notices.
+RANK_GRACE_SECONDS = 60.0
 
 # Reasons, as constants, because the fleet page and the tests both name them.
 REFUSE_KIND_UNKNOWN = "kind_unknown"
@@ -53,6 +127,7 @@ REFUSE_BREAKER = "lane_b_breaker"
 REFUSE_BUSY_WITH_JOB = "already_holds_a_job"
 REFUSE_NOT_IDLE = "not_idle"
 REFUSE_NO_CAPABILITIES = "no_capabilities_reported"
+REFUSE_NOT_PREFERRED = "another_machine_is_preferred"
 
 
 def idle_floor(kind: str) -> int:
@@ -85,6 +160,146 @@ def machine_facts(
         "live_jobs": db.machine_live_jobs(conn, editor, machine),
         "fleet_halt": bool(db.get_fleet_halt(conn)["active"]),
     }
+
+
+def fleet_facts(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
+    """policy()'s answer for EVERY machine, in five queries.
+
+    machine_facts is the honest per-machine read and stays the one the claim
+    route uses (it re-checks against the capabilities in the request). This is
+    the bulk form, and it exists because ranking is a question about the
+    fleet: "is anyone better placed for this job than the machine that just
+    reported" cannot be answered one row at a time, and doing it with
+    machine_facts in a loop would put five queries per machine per job on the
+    path every report of every machine takes (the N+1 that commit 6f14dd2
+    already had to take out of the capabilities map).
+    """
+    caps_map = db.fetch_capabilities_map(conn)
+    halted = bool(db.get_fleet_halt(conn)["active"])
+    upgrading = {
+        (row["editor_username"], row["machine"])
+        for row in conn.execute(
+            "SELECT editor_username, machine FROM machines "
+            " WHERE update_requested_version IS NOT NULL "
+            "   AND update_requested_version != ''")
+    }
+    live: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in conn.execute(
+        "SELECT id, kind, claimed_by, claimed_machine FROM jobs "
+        " WHERE state IN (?, ?) ORDER BY id", db.JOB_HELD_STATES
+    ):
+        live.setdefault((row["claimed_by"] or "", row["claimed_machine"] or ""),
+                        []).append({"id": row["id"], "kind": row["kind"]})
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in conn.execute(
+        "SELECT editor_username, machine, mode, halt_active, breaker_tripped "
+        "  FROM machine_state ORDER BY editor_username, machine"
+    ):
+        key = (row["editor_username"], row["machine"])
+        out[key] = {
+            "editor": key[0], "machine": key[1],
+            "capabilities": caps_map.get(key, {}),
+            "mode": (row["mode"] or "editor"),
+            "halt_active": bool(row["halt_active"]),
+            "breaker_tripped": bool(row["breaker_tripped"]),
+            "upgrading": key in upgrading,
+            "live_jobs": live.get(key, []),
+            "fleet_halt": halted,
+        }
+    return out
+
+
+def rank_key(facts: Mapping[str, Any], kind: str) -> tuple[float, ...]:
+    """How good a home this machine is for this kind of work. BIGGER IS
+    BETTER, and the order is §4.4 rule 3's: capability, then least loaded,
+    then longest idle.
+
+    Every component is a fact this dashboard already stores, and none of them
+    is a tie-breaker on a name -- ranking machines alphabetically is how one
+    computer ends up doing all the work of a fleet.
+    """
+    caps = dict(facts.get("capabilities") or {})
+    preference = 0
+    for name in PREFERRED_FOR_KIND.get(str(kind), ()):
+        if name == "nvenc" and caps.get("nvenc"):
+            preference += 1
+        elif name == "gpu" and caps.get("gpu_present"):
+            preference += 1
+        elif name == "base" and str(facts.get("mode") or "editor") == "base":
+            preference += 1
+    try:
+        load = float(caps.get("load"))
+    except (TypeError, ValueError):
+        # None means this platform has no load average (Windows). NOT a
+        # penalty: it would rank every Windows machine below every Mac for a
+        # reason that says nothing about how busy either is.
+        load = 0.0
+    try:
+        idle = float(caps.get("idle_seconds"))
+    except (TypeError, ValueError):
+        # Unreachable in practice: policy_refusal already refused a machine
+        # that cannot say. Zero here keeps the contract anyway -- an unknown
+        # idle answer must never rank ABOVE a known one.
+        idle = 0.0
+    return (float(preference), -float(len(facts.get("live_jobs") or [])),
+            -load, idle)
+
+
+def ranked_machines(
+    job: Mapping[str, Any], fleet: Mapping[tuple[str, str], Mapping[str, Any]],
+) -> list[tuple[tuple[str, str], tuple[float, ...]]]:
+    """Every machine that could take this job right now, best first.
+
+    Capability AND policy, because a preference for a machine that is halted
+    is not a preference, it is a stall.
+    """
+    kind = str(job["kind"])
+    able: list[tuple[tuple[str, str], tuple[float, ...]]] = []
+    for key, facts in fleet.items():
+        ok, _why = db.job_requirements_met(job.get("requires"), facts["capabilities"])
+        if not ok:
+            continue
+        reason, _sentence = policy_refusal(facts, kind)
+        if reason:
+            continue
+        able.append((key, rank_key(facts, kind)))
+    able.sort(key=lambda pair: pair[1], reverse=True)
+    return able
+
+
+def job_age_seconds(job: Mapping[str, Any], now: str) -> float:
+    """How long this job has been waiting. 0 when either timestamp is
+    unreadable -- which makes the grace period expire IMMEDIATELY rather than
+    never, because a preference that outlives a broken clock is a queue that
+    stops."""
+    try:
+        return max(0.0, (db.parse_iso(now)
+                         - db.parse_iso(str(job["created_at"]))).total_seconds())
+    except Exception:
+        log.debug("jobs: unreadable timestamps on job #%s", job.get("id"),
+                  exc_info=True)
+        return RANK_GRACE_SECONDS
+
+
+def first_refusal(
+    job: Mapping[str, Any], key: tuple[str, str],
+    fleet: Mapping[tuple[str, str], Mapping[str, Any]], now: str,
+) -> bool:
+    """May THIS machine be offered this job yet? (§4.4 rule 3.)
+
+    Rank is a preference and never a gate: past RANK_GRACE_SECONDS every
+    capable machine is offered the job, so the worst a wrong preference can
+    cost is a minute. Ties are offered TOGETHER -- two machines with the same
+    encoder are equally right, and the compare-and-set is what decides between
+    them, which is the whole reason the claim is a CAS.
+    """
+    if job_age_seconds(job, now) >= RANK_GRACE_SECONDS:
+        return True
+    able = ranked_machines(job, fleet)
+    if not able:
+        return True
+    best = able[0][1]
+    return any(k == key for k, score in able if score == best)
 
 
 def policy_refusal(facts: Mapping[str, Any], kind: str) -> tuple[str, str]:
@@ -145,11 +360,16 @@ def offers_for_machine(
     the why page. The list is SMALL on purpose: it rides every report of every
     machine in the fleet, and a companion claims one job at a time anyway.
 
-    The same job is offered to every machine that could do it. That is the
-    design ("offer, don't push"): the compare-and-set decides, and a fleet
-    where one machine's reply was lost still gets the work done.
+    The same job is offered to every machine that could do it, EXCEPT for the
+    first RANK_GRACE_SECONDS, when it is offered to the best-placed machines
+    only (§4.4 rule 3, phase 1). That is still "offer, don't push": the
+    compare-and-set decides, a tie is offered to both, and a fleet where one
+    machine's reply was lost still gets the work done a minute later.
     """
+    now = now or db.utcnow_iso()
     facts = machine_facts(conn, editor, machine, capabilities)
+    key = (editor, machine)
+    fleet: dict[tuple[str, str], Any] | None = None
     offered: list[int] = []
     refused: dict[int, str] = {}
     for job in db.queued_jobs(conn):
@@ -164,6 +384,17 @@ def offers_for_machine(
         reason, _sentence = policy_refusal(facts, kind)
         if reason:
             refused[int(job["id"])] = reason
+            continue
+        if fleet is None:
+            # LAZY, and once: the ranking pass costs five queries, and the
+            # commonest report by far is one with nothing to offer at all.
+            # THIS machine's row is replaced by the facts above, which carry
+            # the capabilities that arrived with this very request rather than
+            # the ones stored a report interval ago.
+            fleet = dict(fleet_facts(conn))
+            fleet[key] = facts
+        if not first_refusal(job, key, fleet, now):
+            refused[int(job["id"])] = REFUSE_NOT_PREFERRED
             continue
         offered.append(int(job["id"]))
         if len(offered) >= max(1, int(limit)):
@@ -192,12 +423,10 @@ def explain(conn: sqlite3.Connection, job_id: int) -> dict[str, Any] | None:
             "job": job, "schedulable": False, "machines": [],
             "summary": _terminal_summary(job),
         }
-    for row in conn.execute(
-        "SELECT editor_username, machine FROM machine_state "
-        " ORDER BY editor_username, machine"
-    ).fetchall():
-        editor, machine = row["editor_username"], row["machine"]
-        facts = machine_facts(conn, editor, machine)
+    fleet = fleet_facts(conn)
+    order = {key: rank for rank, (key, _score) in
+             enumerate(ranked_machines(job, fleet), start=1)}
+    for (editor, machine), facts in fleet.items():
         ok, why = db.job_requirements_met(job.get("requires"), facts["capabilities"])
         if not ok:
             lines.append({"editor": editor, "machine": machine, "ok": False,
@@ -208,8 +437,18 @@ def explain(conn: sqlite3.Connection, job_id: int) -> dict[str, Any] | None:
             lines.append({"editor": editor, "machine": machine, "ok": False,
                           "reason": reason, "why": sentence})
             continue
+        # ok, and WHERE IN THE ORDER -- because "three machines can take this
+        # and it went to the one without the encoder" is a scheduling
+        # complaint this page has to be able to answer.
+        rank = order.get((editor, machine), 0)
         lines.append({"editor": editor, "machine": machine, "ok": True,
-                      "reason": "", "why": "this machine can take it"})
+                      "reason": "", "rank": rank,
+                      "why": ("this machine can take it, and is first choice"
+                              if rank == 1 else
+                              f"this machine can take it (choice {rank} of "
+                              f"{len(order)}; it is offered the job anyway "
+                              f"once it has waited "
+                              f"{int(RANK_GRACE_SECONDS)}s)")})
     can = [m for m in lines if m["ok"]]
     if kind not in db.JOB_KINDS:
         summary = (f"this dashboard does not know the job kind {kind!r}, so no "
@@ -256,6 +495,7 @@ def _blocked_summary(lines: list[dict[str, Any]]) -> str:
         REFUSE_NOT_IDLE: "have somebody sitting at them",
         REFUSE_NO_CAPABILITIES: "have not said what they can do",
         REFUSE_KIND_UNKNOWN: "would never be offered this kind",
+        REFUSE_NOT_PREFERRED: "are waiting for a better-placed machine",
     }.get(reason, reason)
     return (f"no machine can take this job right now: {count} of {len(lines)} "
             f"{words}")

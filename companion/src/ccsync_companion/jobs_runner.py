@@ -1,10 +1,16 @@
 """This machine doing work the fleet queued: claim, run, heartbeat, report.
 
-docs/TIMELINE-CARDS-INTO-CCSYNC.md phase 0 (2026-08-29). One kind today:
-`whisper`, which runs MulticamPipeline's corpus stage over a folder in the
-vault. The pipeline does the real work and writes into the vault, which every
-machine shares -- so nothing streams through the dashboard and the job row
-records PATHS, never bytes (§4.4 rule 6).
+docs/TIMELINE-CARDS-INTO-CCSYNC.md phase 0 (2026-08-29) and phase 1
+(2026-08-30). Four kinds:
+
+    whisper                             MulticamPipeline's corpus stage over a
+                                        folder in the vault, as a subprocess.
+    proxy-480p / audio-extract / peaks  the three Timeline Cards media
+                                        recipes, in-process (`jobs_media.py`).
+
+Either way the work writes into the vault, which every machine shares -- so
+nothing streams through the dashboard and the job row records PATHS, never
+bytes (§4.4 rule 6).
 
 The shape is proxy_gen's, deliberately, because the thing being protected is
 the same thing: an editor's machine. Every seam arrives as a constructor
@@ -33,6 +39,14 @@ Six rules, each with its reason:
     job is claimed while somebody is here, which is the part that matters.
   * **A FLEET HALT STOPS IT** -- the child is terminated and the job handed
     back as a retryable failure. "Stop everything" outranks a transcript.
+    A media recipe stops the same way, and its `.partial` is discarded rather
+    than published: a half-written proxy that reached the vault would be a
+    file the page plays.
+  * **THE MEDIA RECIPES ARE NOT KILLED WHEN THE EDITOR RETURNS EITHER**, for
+    the same reason as whisper and with less at stake: a 480p encode is
+    seconds to minutes, it runs BELOW NORMAL priority (jobs_media._popen), and
+    the half that protects the editor is that no new job is claimed while
+    somebody is here.
   * **NOTHING HERE TOUCHES RESOLVE'S SCRIPTING API** (CR-68). The only
     Resolve question asked is whether the process is running, through
     resolve_prefs, which fails closed.
@@ -49,7 +63,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import config as config_mod
-from . import job_paths
+from . import job_paths, jobs_media
 
 log = logging.getLogger("ccsync.jobs")
 
@@ -194,6 +208,25 @@ class JobRunner:
             log.debug("jobs: capabilities failed", exc_info=True)
             return {}
 
+    def runnable_kinds(self) -> list[str]:
+        """The kinds THIS machine can actually execute right now.
+
+        Sent with every claim, so a machine that has ffmpeg but no whisper
+        venv is never handed a transcription it would have to give straight
+        back -- and so a dashboard that grows a fifth kind cannot hand this
+        build work it has no runner for. Capability-derived, not configured:
+        the answer must not be able to disagree with the capabilities section
+        the scheduler filtered on.
+        """
+        caps = self._capabilities()
+        kinds: list[str] = []
+        if caps.get("whisper"):
+            kinds.append("whisper")
+        # BOTH, never one: every media recipe probes before it encodes.
+        if caps.get("ffmpeg") and caps.get("ffprobe"):
+            kinds.extend(jobs_media.MEDIA_KINDS)
+        return kinds
+
     def _gate(self) -> str:
         """Why this machine is or is not taking work, in priority order --
         proxy_gen._gate's shape, and the order an editor would ask the
@@ -209,8 +242,7 @@ class JobRunner:
             offered = list(self._offered)
         if holding:
             return STATE_RUNNING
-        caps = self._capabilities()
-        if not caps.get("whisper"):
+        if not self.runnable_kinds():
             return STATE_NO_CAPABILITY
         if not self._user_is_away():
             return STATE_USER_ACTIVE
@@ -261,18 +293,26 @@ class JobRunner:
         status, parsed = self._call("/claim", {
             "machine": self.machine,
             "capabilities": self._capabilities(),
-            "kinds": ["whisper"]})
+            "kinds": self.runnable_kinds()})
         if status != 200 or not isinstance(parsed, dict):
             log.debug("jobs: claim answered HTTP %s", status)
             return None
         return parsed.get("job") or None
 
-    def _heartbeat(self, job_id: int) -> bool:
+    def _heartbeat(self, job_id: int, progress: Optional[float] = None) -> bool:
         """-> keep going. A 410 is the dashboard saying the job is no longer
         ours (the lease expired and somebody else has it, or an admin ended
-        it); the answer to all of those is the same one, and it is to stop."""
-        status, _parsed = self._call(f"/{int(job_id)}/heartbeat",
-                                     {"machine": self.machine})
+        it); the answer to all of those is the same one, and it is to stop.
+
+        `progress` is 0..1 or None, and NONE IS NOT ZERO: a recipe with no
+        honest fraction to report (a peaks pass reads its input in one gulp)
+        sends none, and the fleet chip shows the job id rather than a machine
+        that looks stuck at 0%.
+        """
+        body: dict[str, Any] = {"machine": self.machine}
+        if progress is not None:
+            body["progress"] = max(0.0, min(1.0, float(progress)))
+        status, _parsed = self._call(f"/{int(job_id)}/heartbeat", body)
         if status == 410:
             log.warning("jobs: job #%s is no longer ours -- stopping", job_id)
             return False
@@ -343,8 +383,14 @@ class JobRunner:
         return job
 
     def _execute(self, job: dict[str, Any]) -> None:
+        """Dispatch by kind. ONE place that knows which runner does what, so
+        adding a kind is adding a branch here and a capability above, never a
+        second loop with its own gate."""
         job_id = int(job["id"])
         kind = str(job.get("kind") or "")
+        if kind in jobs_media.MEDIA_KINDS:
+            self._execute_media(job)
+            return
         if kind != "whisper":
             # Claimed something this build cannot run: hand it straight back,
             # NOT retryable on this machine's account -- the dashboard's own
@@ -354,6 +400,10 @@ class JobRunner:
                               f"this companion has no runner for {kind!r} jobs",
                               retryable=False)
             return
+        self._execute_whisper(job)
+
+    def _execute_whisper(self, job: dict[str, Any]) -> None:
+        job_id = int(job["id"])
         try:
             argv, folder, episode = self._whisper_command(job)
         except job_paths.JobPathError as exc:
@@ -387,6 +437,123 @@ class JobRunner:
                              f"({elapsed:.0f}s).")
             except Exception:
                 log.debug("jobs: notify failed", exc_info=True)
+
+    # -- the media recipes (phase 1) -------------------------------------
+    def _execute_media(self, job: dict[str, Any]) -> None:
+        """One Timeline Cards recipe, in this process.
+
+        In-process and not a subprocess, unlike whisper: the recipe is ffmpeg
+        plus about forty lines of binning, the companion already owns an
+        ffmpeg discovery and a `.partial` discipline, and shelling out to a
+        second Python would mean a second copy of both.
+        """
+        job_id = int(job["id"])
+        kind = str(job["kind"])
+        try:
+            source, out_dir, stem, out_root, out_rel = self._media_paths(job)
+        except job_paths.JobPathError as exc:
+            # A path this machine cannot place is retryable ELSEWHERE: another
+            # machine may have the root this one is missing.
+            log.warning("jobs: job #%s cannot be placed here: %s", job_id, exc)
+            self._post_result(job_id, False, str(exc), retryable=True)
+            return
+        log.info("jobs: job #%s %s of %s -> %s", job_id, kind, source, out_dir)
+
+        # The heartbeat and the progress it carries. The recipe publishes a
+        # fraction about once a second (ffmpeg's -progress stream); the beater
+        # sends one every 30, which is what the 300 s lease is sized against.
+        latest: dict[str, Any] = {"fraction": None}
+        lease_lost = threading.Event()
+        finished = threading.Event()
+
+        def on_progress(fraction: Optional[float]) -> None:
+            latest["fraction"] = fraction
+
+        def should_stop() -> str:
+            if lease_lost.is_set():
+                return "the lease was lost"
+            if self._halted():
+                return "a fleet halt stopped this job"
+            if self._stop.is_set():
+                return "this computer is shutting down"
+            return ""
+
+        def beat() -> None:
+            while not finished.wait(HEARTBEAT_SECONDS):
+                if not self._heartbeat(job_id, latest["fraction"]):
+                    # Sets the flag rather than killing anything itself: the
+                    # thread doing the work is the thread that owns the child
+                    # and the .partial, and two threads ending one encode is
+                    # how a half-written file gets published.
+                    lease_lost.set()
+                    return
+
+        beater = threading.Thread(target=beat, name="ccsync-jobs-heartbeat",
+                                  daemon=True)
+        beater.start()
+        started = self._clock()
+        try:
+            recipe = jobs_media.MediaJob(
+                ffmpeg_path=str(self.cfg.get("ffmpeg_path", "ffmpeg")),
+                # WHAT THIS MACHINE REPORTED, not what it wishes: the
+                # capabilities section is `detect_encoders` on this binary, so
+                # the argv can never name an encoder this ffmpeg lacks.
+                nvenc=bool(self._capabilities().get("nvenc")),
+                on_progress=on_progress, should_stop=should_stop,
+                clock=self._clock)
+            outcome = recipe.run(kind, source, out_dir, stem)
+        except jobs_media.MediaJobError as exc:
+            finished.set()
+            log.warning("jobs: job #%s (%s) failed: %s", job_id, kind, exc)
+            self._post_result(job_id, False, str(exc),
+                              result={"seconds": round(self._clock() - started, 1)},
+                              retryable=bool(getattr(exc, "retryable", True)))
+            return
+        except Exception as exc:                                # noqa: BLE001
+            finished.set()
+            log.exception("jobs: job #%s (%s) raised", job_id, kind)
+            self._post_result(job_id, False, str(exc), retryable=True)
+            return
+        finally:
+            finished.set()
+        result = dict(outcome)
+        # PATHS RELATIVE TO THE OUTPUT ROOT, and the root named beside them
+        # (§4.1 applied to the answer): "Script Docs/remote_audio/source/A.m4a"
+        # under `vault` means the same thing on every machine, and
+        # `X:\...\A.m4a` means it on exactly one.
+        result["out_root"] = out_root
+        result["files"] = [f"{out_rel}/{name}" if out_rel else name
+                           for name in outcome.get("files", [])]
+        self._post_result(job_id, True, result=result)
+
+    def _media_paths(
+        self, job: dict[str, Any],
+    ) -> tuple[Path, Path, str, str, str]:
+        """A media job's inputs -> (source, out dir, stem, out root, out rel).
+
+        `out_root`/`out_rel` name the directory the recipe writes into -- for
+        Timeline Cards that is `<episode>/Script Docs/remote_audio/source` for
+        the extractions and the proxies, and `.../remote_audio` for the peaks.
+        The SUBMITTER decides which, because it is the page that knows where
+        it will look.
+
+        `out_stem` is the name the page uses for this clip (its multicam
+        name), which is NOT always the media file's own stem -- and defaulting
+        to the file's stem is right for everything else.
+        """
+        inputs = job.get("inputs") or {}
+        root = str(inputs.get("root") or "media")
+        source = job_paths.resolve(self.cfg, root, str(inputs.get("rel_path") or ""))
+        out_root = str(inputs.get("out_root") or root)
+        out_rel = str(inputs.get("out_rel") or "").strip().replace("\\", "/").strip("/")
+        if not out_rel:
+            raise job_paths.JobPathError(
+                "a media job must name the directory its output goes in "
+                "(out_root + out_rel) -- nothing here guesses where a cache "
+                "belongs in somebody's vault")
+        out_dir = job_paths.resolve(self.cfg, out_root, out_rel)
+        stem = str(inputs.get("out_stem") or "").strip() or source.stem
+        return source, out_dir, stem, out_root, out_rel
 
     def _whisper_command(self, job: dict[str, Any]) -> tuple[list[str], Path, Path]:
         """The exact command the corpus stage documents:

@@ -14,6 +14,7 @@ anything new:
     gpu_*      broll_vlm_sidecar.gpu()      (cached; nvidia-smi, no console)
     nvenc      ffmpeg_tools.encoders_if_known
     ffmpeg     ffmpeg_tools.ffmpeg_available (cached 300 s on success)
+    ffprobe    the same probe on ffmpeg_tools.ffprobe_for's answer
     whisper    two configured paths, both present on disk
     mounts     job_paths.mounts()            (root NAMES, never paths)
     idle_*     idle.IdleProbe.seconds_idle()
@@ -136,6 +137,28 @@ def _ffmpeg(cfg: dict[str, Any]) -> bool:
         return False
 
 
+def _ffprobe(cfg: dict[str, Any]) -> bool:
+    """Is there a runnable ffprobe beside this machine's ffmpeg? (Phase 1.)
+
+    ITS OWN CAPABILITY, not a corollary of `ffmpeg`, because the three media
+    recipes need both and the two can genuinely be apart -- ffprobe is what
+    decides a proxy's GOP from the source's frame rate and what proves an
+    extracted audio track came out the length it went in. A machine that
+    reported ffmpeg alone would claim the work and then guess.
+
+    `ffmpeg_available` is the probe for both (it runs `<binary> -version` and
+    caches the success for 300 s); only its message says "ffmpeg", and nothing
+    here shows it.
+    """
+    try:
+        path = ffmpeg_tools.ffprobe_for(str(cfg.get("ffmpeg_path", "ffmpeg")))
+        ok, _message = ffmpeg_tools.ffmpeg_available(path, use_cache=True)
+        return bool(ok)
+    except Exception:
+        log.debug("capabilities: ffprobe probe failed", exc_info=True)
+        return False
+
+
 def _gpu() -> dict[str, Any]:
     try:
         from . import broll_vlm_sidecar
@@ -206,6 +229,7 @@ def build(
         "gpu_vram_gb": gpu.get("vram_gb"),
         "nvenc": _nvenc(cfg),
         "ffmpeg": _ffmpeg(cfg),
+        "ffprobe": _ffprobe(cfg),
         "whisper": whisper,
         # Why not, in the words an admin can act on -- the [ VRAM ] chip's
         # lesson: a capability that is OFF because of a missing setting must

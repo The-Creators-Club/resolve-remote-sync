@@ -218,3 +218,69 @@ def test_a_capabilities_getter_that_throws_never_costs_the_report():
     payload = rep._build_payload(light=True)
     assert "capabilities" not in payload
     assert payload["editor_name"] == "jsmith"
+
+
+# --------------------------------------------------- phase 1 (2026-08-30)
+
+def test_the_media_root_becomes_a_mount_when_it_is_configured_and_there(tmp_path):
+    """The three media recipes read the footage share and write the vault, and
+    a machine that reports neither is never offered either kind. `media` is
+    the root that is separate from the tree -- the footage share needs its own
+    mapping to be usable at all."""
+    (tmp_path / "tree").mkdir()
+    (tmp_path / "vault").mkdir()
+    (tmp_path / "media").mkdir()
+    c = cfg(tmp_path, jobs_vault_root=str(tmp_path / "vault"),
+            jobs_media_root=str(tmp_path / "media"))
+    assert job_paths.mounts(c) == ["tree", "vault", "media"]
+    assert caps_mod.build(c, use_cache=False)["mounts"] == \
+        ["tree", "vault", "media"]
+
+
+def test_an_unconfigured_media_root_is_absent_and_never_guessed(tmp_path):
+    """Absent is "no capability", never a guess -- the rule the whole
+    companion follows for a seam it does not have. A machine that reported a
+    media mount it cannot read would claim a job and fail every file of it."""
+    (tmp_path / "tree").mkdir()
+    assert "media" not in caps_mod.build(cfg(tmp_path), use_cache=False)["mounts"]
+
+
+def test_ffprobe_is_its_own_capability(tmp_path, monkeypatch):
+    """Not a corollary of `ffmpeg`: ffprobe is what decides the proxy's GOP
+    from the source's frame rate and what proves an extracted track came out
+    the length it went in, so a machine with ffmpeg alone would claim the work
+    and then guess."""
+    (tmp_path / "tree").mkdir()
+    monkeypatch.setattr(caps_mod, "_ffmpeg", lambda c: True)
+    monkeypatch.setattr(caps_mod, "_ffprobe", lambda c: False)
+    section = caps_mod.build(cfg(tmp_path), use_cache=False)
+    assert section["ffmpeg"] is True
+    assert section["ffprobe"] is False
+
+
+def test_the_ffprobe_probe_asks_about_the_binary_beside_this_ffmpeg(
+        tmp_path, monkeypatch):
+    """`ffprobe_for`, which is the companion's own tool discovery: the sibling
+    of whatever ffmpeg resolved, including the pinned static pair
+    sidecar_tools installs on a machine that has neither on PATH."""
+    asked: list = []
+
+    def fake_available(path, use_cache=True):
+        asked.append(path)
+        return True, path
+
+    monkeypatch.setattr(caps_mod.ffmpeg_tools, "ffprobe_for",
+                        lambda p: "/opt/ffmpeg/ffprobe")
+    monkeypatch.setattr(caps_mod.ffmpeg_tools, "ffmpeg_available", fake_available)
+    assert caps_mod._ffprobe(cfg(tmp_path, ffmpeg_path="/opt/ffmpeg/ffmpeg")) is True
+    # The binary that was PROBED is ffprobe_for's answer, not the ffmpeg path:
+    # a machine whose ffmpeg is deliberately off PATH still gets a real check.
+    assert asked == ["/opt/ffmpeg/ffprobe"]
+
+
+def test_a_broken_ffprobe_probe_reads_as_absent(tmp_path, monkeypatch):
+    """Fails CLOSED, like every other probe here: a capability that cannot be
+    established is one this machine does not advertise."""
+    monkeypatch.setattr(caps_mod.ffmpeg_tools, "ffprobe_for",
+                        lambda p: (_ for _ in ()).throw(OSError("nope")))
+    assert caps_mod._ffprobe(cfg(tmp_path)) is False

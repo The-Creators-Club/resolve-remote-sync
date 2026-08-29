@@ -1050,11 +1050,14 @@ better place to find out.
   then `multicam_pipeline/resolve/resolve_script_server.py` is deleted (the
   companion's is the one copy), `run_agent` and the `.cmd` go, and §3.1's
   table loses its last row.
-* **Nothing is deployed.** Dashboard 0.7.20 (schema v44), companion 0.9.58
-  with `REQUIRES_DASHBOARD = 0.7.20`. The order is enforced by the machinery
-  and is the rule either way.
-* **No in-process page** (phase 3), no `claude-run`, no admin view of the
-  agent beyond the chip and the diagnostics bundle.
+* **Nothing is deployed.** Dashboard 0.7.20 (schema v44) -- 0.7.21 with
+  phase 3 (§7d) -- and companion 0.9.58 with `REQUIRES_DASHBOARD = 0.7.20`,
+  bumped to **0.9.59** by the three findings above. The floor is unchanged:
+  none of them is a wire change. The order is enforced by the machinery and
+  is the rule either way.
+* **No `claude-run` job and no admin view of the agent** beyond the chip and
+  the diagnostics bundle. (The in-process page that used to be listed here is
+  built: §7d.)
 * **Whether a FROZEN companion can import the engine is untested.** The
   shipped build is one-file PyInstaller carrying its own dependencies, and
   the cards package pulls in whatever the MulticamPipeline checkout needs. A

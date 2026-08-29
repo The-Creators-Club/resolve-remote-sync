@@ -34,7 +34,19 @@ plan as written below, and why:
   it is an ATTRIBUTE of the machine row, and its job is the rename case --
   a report whose id matches a known machine under a different hostname
   ADOPTS it (`db.adopt_renamed_machine`), carrying the plan and the sticky
-  root across.
+  root across. Since SYS-18a (2026-08-29) that adoption is conditional on
+  the old hostname having gone QUIET (`api.CLONE_ADOPTION_WINDOW_SECONDS`,
+  five minutes of the server's own `received_at`): a rename is one computer
+  with two names over time, while an id arriving at a second hostname while
+  the first is still reporting is a cloned disk, and is refused so that both
+  rows survive for `duplicate_machine_id` and invariant 3 to name. **The
+  verdict is revisited on every report, not made once.** A renamed PC reboots
+  and is back inside one to three minutes, so its first report under the new
+  name is refused by design; the rename is confirmed a report or two later by
+  the old name staying quiet, and the adoption then happens on its own and
+  clears the notice. Nothing is adopted onto a hostname that has a plan of
+  its own (`adopt_renamed_machine(..., same_computer=True)`), so the
+  2026-08-19 rule that a collision is an admin decision still holds.
 * **The unassigned bucket.** `machine = ''` means "this editor's machines
   that have none of their own", resolved once in
   `db.selections_for_machine`. It is not the inheritance §3.2 argues
@@ -361,6 +373,7 @@ untouched. Do this only when the owner actually wants the fleet page to read
 | Two machines, one NAS account, two rclone remotes on one SFTP home | Lane A uploads from both | Already true for any editor with a laptop today; lane A is add-only and path-canonical. Worth one integration test, not a design change |
 | `machine_id` lost (profile reset) | Machine arrives as new, with an empty plan | Recoverable in the UI: "this looks like <old machine>, adopt its plan?" keyed on the Syncthing device ID match. Ship the prompt with WP5, not before |
 | Hostname collisions inside one person | Two `DESKTOP-ABC` under one user | NOT solved by construction (CR-42, 2026-08-19): the plan, prefs, state and lane tables are keyed on the hostname, the minted id is an attribute of the registry row. What IS guaranteed: a rename is never allowed to destroy a plan. `adopt_renamed_machine` refuses when the new name is already one of this editor's registered computers, both plans stay, the collision is logged, and an admin copies or clears one by hand. Two LIVE machines under one name thrash each other's `machine_state` row and are unsupported |
+| One disk image on two computers, both signed in as the same person | Both report one `machine_id` every 30 s | SYS-18a (2026-08-29): the adoption is refused while the other hostname is still reporting, so no plan moves and no row is deleted, both rows survive for `duplicate_machine_id` and invariant 3, and the refusal itself raises the notice that names both computers and tells the owner to mint a fresh identity on one of them. A real rename hits the same refusal on its first report and then adopts itself once the old name has been quiet for the window, so the common case costs about five minutes and no operator action |
 
 ---
 

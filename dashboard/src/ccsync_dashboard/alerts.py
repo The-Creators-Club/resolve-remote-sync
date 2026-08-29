@@ -1303,6 +1303,90 @@ def _check_weekly_send(ctx: Ctx) -> list[Finding]:
         str(row.get("detail") or ""))]
 
 
+def _check_invariants(ctx: Ctx) -> list[Finding]:
+    """A fact this system relies on has stopped being true (SYS-9, wave 5).
+
+    Reads the rows `invariants.run_cycle` wrote in the collector kind that
+    runs immediately before this one; it does not re-evaluate anything, for
+    the reason `Ctx`'s docstring gives -- the checks walk the tree and the
+    registry, and a scan that ran them again per `/api/v1/health` call would
+    be a scan somebody turns off. `_rows`' rule applies: a database migrated
+    by an older build has no such table, and that reads as nothing to report
+    HERE, because the invariant page says so for itself.
+
+    ONE finding per broken subject, and the invariant's own consequence
+    sentence is the diagnosis: the wording an owner needs was written once,
+    in the registry, and must not be re-invented here.
+    """
+    from . import invariants
+
+    out = []
+    for row in db.broken_invariants(ctx.conn):
+        inv = invariants.BY_KEY.get(str(row.get("invariant") or ""))
+        if inv is None:
+            continue
+        out.append(_f(
+            f"{inv.key}: {row.get('subject')}",
+            f"{inv.consequence} This server checks that {inv.title}, and as of "
+            f"{_age_words(row.get('checked_at'), ctx.now)} it is not true.",
+            inv.fix,
+            str(row.get("detail") or "")))
+    return out
+
+
+def _protection_findings(ctx: Ctx, wanted: tuple[str, ...]) -> list[Finding]:
+    """The protection panel's lines, as alerts (SYS-14, wave 5).
+
+    Reads the last stored pass exactly as `_check_invariants` reads the
+    invariant ledger: the pass itself asks the NAS, and a scan that re-asked
+    per `/api/v1/health` call would be a scan somebody turns off. A database
+    an older build migrated has no stored pass at all, which reads as nothing
+    to report HERE because the panel says so for itself.
+
+    The line's own `consequence` sentence is the diagnosis: the wording was
+    written once, in the registry, and must not be re-invented here.
+    """
+    from . import protection
+
+    view = protection.page_view(ctx.conn)
+    if not view["checked_at"]:
+        # No pass has ever run here (a fresh boot, or a database an older
+        # build migrated). The PANEL renders every line as CANNOT VERIFY, as
+        # it must, but alerting on that would mail every new deployment eight
+        # findings before the collector's first slow cycle.
+        return []
+    out = []
+    for row in view["lines"]:
+        if row["state"] not in wanted:
+            continue
+        line = protection.BY_KEY.get(row["key"])
+        if line is None:
+            continue
+        if row["state"] == protection.BROKEN:
+            diagnosis = (f"{line.consequence} This server checks that {line.title}, "
+                         f"and it cannot see that it is.")
+        else:
+            diagnosis = (f"This server cannot confirm that {line.title}. "
+                         f"{line.consequence} Treat it as unchecked, not as fine.")
+        out.append(_f(line.key, diagnosis, line.fix, str(row.get("detail") or "")))
+    return out
+
+
+def _check_protection_missing(ctx: Ctx) -> list[Finding]:
+    from . import protection
+
+    return _protection_findings(ctx, (protection.BROKEN,))
+
+
+def _check_protection_unverifiable(ctx: Ctx) -> list[Finding]:
+    """Amber-forever, said ONCE. A warn is stated once and not repeated until
+    it has cleared and come back, which is what makes a DSM site's permanent
+    "cannot verify, confirm in DSM" honest rather than nagging."""
+    from . import protection
+
+    return _protection_findings(ctx, (protection.NOT_CHECKED, protection.CHECK_FAILED))
+
+
 def _check_red_unexplained(ctx: Ctx) -> list[Finding]:
     """The catch-all. Runs LAST, and only for machines no other check named.
 
@@ -1416,6 +1500,13 @@ ALERT_KINDS: tuple[AlertKind, ...] = (
               "the sign-in key rotation drain", _check_key_drain),
     AlertKind("weekly_send_failed", SEV_ERROR, "the weekly report could not be sent",
               "the alert channel itself", _check_weekly_send),
+    AlertKind("invariant_broken", SEV_ERROR, "something this system relies on is not true",
+              "the invariant checks (SYS-9)", _check_invariants),
+    AlertKind("protection_missing", SEV_ERROR, "a safety net is not there",
+              "the protection panel (SYS-14)", _check_protection_missing),
+    AlertKind("protection_unverifiable", SEV_WARN,
+              "a safety net this server cannot check",
+              "safety mechanisms this server can verify", _check_protection_unverifiable),
     AlertKind("red_unexplained", SEV_ERROR, "a computer is not syncing",
               "computers red with no specific cause", _check_red_unexplained),
 )
@@ -1661,6 +1752,21 @@ def compose_weekly(
         lines.append("")
 
     lines += _lane_bytes_section(conn)
+
+    # 3b. What is protected, and what only looks protected (SYS-14, wave 5).
+    #     A STANDING block, printed whether or not anything is wrong: "no
+    #     snapshot schedule is configured on this NAS" has to be a line in
+    #     every report until it stops being true, and a block that appeared
+    #     only on bad weeks would make its absence read as good news.
+    try:
+        from . import protection
+
+        lines += protection.weekly_lines(conn)
+    except Exception:                                               # noqa: BLE001
+        log.exception("alerts: the weekly report could not read the protection panel")
+        lines.append("WHAT IS PROTECTED: this section could not be read this week. "
+                     "Treat it as unchecked, not as fine.")
+        lines.append("")
 
     # 4. Trash, when a machine reported one. .stversions is NOT here: no
     #    companion measures it, and a zero we did not measure would read as

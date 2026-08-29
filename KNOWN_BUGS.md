@@ -625,7 +625,13 @@ rename, `<name>.db.prev-<ts>` kept, `--rollback`. Runbook
 `docs/BACKUP_RESTORE.md`. Owed by the operator: `setup_snapshots.py --apply`
 on the TrueNAS (and the Synology), then `--list` within the hour — until then
 this entry is code, not protection; the `pool.snapshottask` payload is
-unverified against a live 25.10 middleware.
+unverified against a live 25.10 middleware. **Since 2026-08-29 the dashboard
+says this out loud** (SYS-14, wave 5): Settings -> PROTECTION reads
+`pool.snapshottask` and renders the apps dataset `[ MISSING ]` when nothing
+covers it, `[ CANNOT VERIFY ]` when the container has not been told its name,
+and the same line goes into the notices and every Monday report. The operator
+work below is unchanged; what has changed is that not doing it is no longer
+invisible.
 
 ### CR-11 — lane B could walk a proxy set into the trash 20 GB per pass with the grid green — FIXED in repo 2026-08-17, unshipped
 `--max-delete 100 / 20G` bounds ONE pass, not the sequence: a wrong
@@ -7409,6 +7415,590 @@ on darwin, reads the first line, and survives a broken probe.
 
 **Ships as:** rebuilt editor package (the .ps1) + onboard.exe (the wizard);
 INSTALLER_VERSION bump owed. No macOS or companion half.
+
+## Resilience sweep, wave 5: recovery and invariants (2026-08-29) - FIXED in repo, unshipped
+
+Wave 5 of `docs/RESILIENCE_SWEEP_2026-08-28.md` (items 34, 40, 42, 43): what
+makes the system tell the owner what it is NOT protected against, and the
+tests that stop the earlier waves' classes coming back. Schema numbers v39,
+v40 and v41 were reserved one per work package so the packages could merge
+without renumbering; two were taken (**39 the invariant checker, 40 the
+recovery package's Resolve-undo ledger, 41 unused** - the protection panel
+chose `meta` over a table and gave its number back, and the migration list
+has to stay gapless, so the recovery package moved down into 40 rather than
+leaving a hole). Entries below, one per finding.
+
+### SYS-9 - every invariant in this system is enforced at write time and never re-checked - FIXED in repo 2026-08-29, unshipped
+
+**Symptom.** Nothing in this product ever asks whether a fact it relies on is
+still true. A tick written while Syncthing was unreachable stays a tick with
+no share behind it, and the fleet page renders it exactly like a working one.
+A project folder renamed on the NAS by hand keeps its row and loses its
+marker, so everybody's ticks for it quietly stop meaning anything. A disk
+image copied onto a second PC gives two computers one `machine_id`, and
+`adopt_renamed_machine` then ping-pongs one sync plan and one Syncthing
+device between two live machines on every report, restarting the affected
+folders every enforce cycle. A package published with a `min_version` above
+its own version (CR-52) bricks the upgrade channel for every machine that
+takes it, and the only thing that ever asked was the publish path. A machine
+below 0.9.3 cannot be reached by [ UPDATE NOW ] at all, which is how leso's
+Mac sat on 0.9.2 for ten days while an admin pressed a button that did
+nothing. None of these is detected, and none of them is what anybody was
+looking at when they were finally found.
+
+**Cause.** `collector.folder_tuning_drift` is the only drift check in the
+tree: it re-reads a Syncthing folder's settings each cycle and repairs the
+keys that drifted, and it covers folder tuning alone. Every other
+cross-component fact is enforced by whichever code path wrote it, once, and
+is never re-verified by anything.
+
+**Fix.** A ninth collector kind, `invariants`
+(`dashboard/src/ccsync_dashboard/invariants.py`), on the slowest cadence in
+the collector (`interval_invariants`, `DASH_INTERVAL_INVARIANTS`, default
+900 s), running immediately before `alerts` so the alert kind reads the rows
+it has just written, and in `SYNCTHING_FREE_KINDS` because most of what it
+verifies is a table read and a cloned disk must still be reported on a
+deployment with no sync engine.
+
+**It repairs nothing. It names things** - that is the whole gap, and a
+checker trusted to write to Syncthing, the tree and the registry on a timer
+has B16 (the fleet unshared in one pass) as its failure mode.
+
+THE INVARIANTS ARE DATA, `invariants.INVARIANTS`, the shape
+`alerts.ALERT_KINDS` uses: one row per invariant carrying its key, SYS-9's
+own number, the fact in a line, the CONSEQUENCE a non-technical owner
+understands, the exact next action, its severity and its callable. Adding an
+invariant is adding a row; the ledger, the page, the notices, the alert kind
+and the weekly report all pick it up with no second edit. Nine of SYS-9's ten
+are evaluated: (1) `plan_has_share`, every full tick shared with that
+computer's device id; (2) `machine_has_plan`, a reporting computer has a
+plan, the unassigned bucket or a base-rig role (CR-28); (3)
+`one_identity_per_computer`, one `machine_id` and one device id per computer,
+**including the disk-clone signature** - two hostnames on one `machine_id`
+that BOTH reported inside one interval get the "a copied disk is in use on
+two computers at once" sentence, where the same pair with one stale row reads
+as a rename nobody tidied up - the half of that case this could not reach until SYS-18a was fixed below (both clones signed in as the SAME editor, `db.adopt_renamed_machine` deleting one of the two rows on every report, so there was never a second row to group) now reaches it, because the adoption is refused while the other hostname is still reporting (and only adopted later, once it has gone quiet), so both rows survive; (4) `project_markers`, an active project's
+marker exists and its slug matches the row; (5) `tree_markers`, the tree root
+still looks like the tree rather than an empty mount (the server's half of
+`sequencer._check_remote_root`, which only the companion ever ran); (6)
+`package_floor`, CR-52's brick plus the floor-drop rule, asked continuously
+rather than only at publish; (7) `companion_floor`, a build new enough for
+the plan it was given (0.9.3 for a pushed update, 0.9.43 for [ RESUME ],
+0.9.54 for an upload-only tick); (9) `snapshot_schedule`, SYS-14's standing
+red line, asked of the NAS's own periodic snapshot tasks; (10)
+`proxy_pairs`, a `Proxy/<stem>.*` with no original beside it - the cheapest
+detector of a half-finished reorganisation.
+
+**(8) `versioning_agrees` is registered and deliberately NOT evaluated**, and
+that is the point of the tri-state: `.stversions` retention is 365 d NAS-side
+and 30 d editor-side (R5), the editor-side number lives in the companion
+build, and no machine reports it - so this server can see one of the two
+values it would have to compare. It renders `[ NOT CHECKED ]` with that
+sentence. Deleting the row would have hidden the same fact behind an absence.
+
+FOUR STATES, STORED, never two: `invariant_results` (schema v39) keeps `ok`
+as 1/0/**NULL** beside a `state` of `ok` / `broken` / `not_checked` /
+`check_failed`, so no reader can flatten "could not check" into "fine" - the
+load-bearing rule of this whole sweep. A check that RAISES becomes its own
+`check_failed` verdict and an `invariant_check_failed` notice reading "treat
+it as unchecked, not as fine", exactly as `alerts.scan` does; one raising
+invariant never stops the other nine, and the collector kind still succeeds
+(a checker that took the collector down with it would cost more than it tells
+anybody). Every `not_checked` verdict carries the reason it could not run: no
+tree mounted, no NAS API key, no `config` pass completed in this process, no
+build published.
+
+Each broken subject is a `db.notice` of kind `invariant_broken` at the
+invariant's own severity, carrying the registry's consequence and fix, so it
+lands in PROBLEMS THE SERVER FOUND and (at `error`) reaches the alert sink
+through `notice_error`; a pass that finds it fixed closes it, and the subject
+rows a pass did not name are deleted, because this table is a picture of the
+last pass and not a history. One new alert kind, `invariant_broken`, sits
+above `red_unexplained` and READS those rows rather than re-evaluating (an
+older database with no such table reads as nothing to report there). The page
+is Settings -> INVARIANTS, read-only, listing every invariant with its state,
+subjects, last-checked time and, when it is broken, the consequence and the
+fix; THE REGISTRY IS THE SPINE, so an invariant with no row yet renders
+`[ NOT CHECKED ]` rather than being absent. There is deliberately no
+[ RE-CHECK NOW ] button: the pass walks the tree and asks the NAS, and a
+button an admin can hammer is one that parks the collector's single thread.
+
+**Overlap with wave 4 is deliberate.** Wave 4's "SYS-9 (partial)" entry
+below landed invariants 1 and 3 as notice checks inside `notices.run_checks`
+(`_check_plan_without_share`, `_check_identity_collisions`), which was the
+right shape for a wave that was building the notices ledger anyway. They stay
+exactly as they are: this kind is the finding's own ninth collector kind with
+its own table and its own tri-state page, and the two agree on the same
+conditions from the same data. So one broken share can produce both a
+`plan_without_share` and an `invariant_broken` notice, deduped per
+`(kind, subject)` and each closing itself - the same "some conditions are
+reported twice" that `docs/SELF_DIAGNOSIS.md` already records for the enforce
+brake. What the invariant kind adds over the notice is the standing verdict:
+the notice can only ever speak up when something is wrong, and the page has to
+be able to say "checked, all 34 ticks are shared" and "NOT CHECKED, and here
+is why" as well.
+
+**Files.** `dashboard/src/ccsync_dashboard/invariants.py` (new);
+`db.py` (SCHEMA_V39 + the `(39, SCHEMA_V39)` step, `record_invariant_result`
+/ `fetch_invariant_results` / `broken_invariants`, the `invariant_broken` and
+`invariant_check_failed` rows in `NOTICE_KINDS`); `collector.py` (the
+`invariants` kind in `KINDS` and `SYNCTHING_FREE_KINDS`, `_interval`,
+`_run_invariants`); `settings.py` (`interval_invariants`);
+`alerts.py` (`_check_invariants` + the `invariant_broken` registry row);
+`notices.py` (the `_JOB_MEANING` line for the new kind); `ui.py`
+(`/admin/invariants`); `templates/admin_invariants.html`,
+`templates/partials/invariant_checks.html`,
+`templates/partials/settings_nav.html` (the INVARIANTS entry).
+
+**Tests.** `dashboard/tests/test_invariants.py` (28): the registry is
+complete and every row evaluates on an empty database with nothing claiming
+OK; a broken fact writes a notice carrying the registry's own fix and the
+alert kind reports it with the registry's consequence; a fixed fact closes
+its notice and drops its subject rows; a raising check becomes `check_failed`
+with `ok` NULL and does not stop its neighbours or fail the collector cycle;
+the deliberately unevaluated invariant 8 and a never-run pass both render NOT
+CHECKED and never OK; the cold folder cache and an unaskable NAS are NOT
+CHECKED rather than broken; the disk-clone signature is told apart from an
+old rename; and the kind is registered before `alerts`, is Syncthing-free,
+runs on its own interval and leaves the other kinds' results alone.
+
+**Ships as:** dashboard only (schema v39), one OTA. No companion, installer
+or NAS-script change: every invariant is computed from data this dashboard
+already holds, plus one bounded `/pool/snapshottask` read on a TrueNAS site
+that has an API key. New env: `DASH_INTERVAL_INVARIANTS` (900). New collector
+kind: `invariants`. New page: Settings -> INVARIANTS. Operator docs:
+`docs/SELF_DIAGNOSIS.md` section 13. Nothing here is required by a companion,
+so the usual "dashboard before the companions" ordering has no extra rule
+attached this time.
+
+### SYS-18 - thirteen suites, strong on logic and near silent on conditions - BUILT in repo 2026-08-29
+
+**Symptom.** Not a defect in the product: a defect in how the product is
+tested, and the reason so much of this ledger exists. The systems agent read
+all 4,821 lines of `KNOWN_BUGS.md` as data and counted how each entry was
+found: about 40 % by the owner noticing something, about 58 % by a periodic
+hand audit, about **2 % by a test**, and 0 % by the system telling anyone.
+Every failure class in the sweep is a fault a test could have induced in
+seconds and never did, because the suites exercise LOGIC (given this input,
+what does the function return) and almost never CONDITIONS (the child never
+exits; the clock is wrong; the disk is full; the credential was revoked; the
+process died mid-write).
+
+**Cause.** No `chaos`/fault-injection module existed in any of the thirteen
+suites (verified by grep across the tree). The seams were not the obstacle -
+`popen_factory`, the reporter's `_http_post`, the selection client's opener,
+`subprocess.run`, `RcloneLane._monotonic` and `_wait_poll_seconds` are all
+injectable and were already used for logic tests, so the harness was about
+90 % built and unused for this purpose.
+
+**Fix.** Two modules, one per component that owns an observable:
+
+* `companion/tests/chaos/test_fault_injection.py` - seven injections.
+  A `popen_factory` whose child never exits, on both lane directions
+  (CR-91b/SYS-17): the pass ends `error` with a sentence, `transferring` and
+  `current_project` are cleared, the stall is on disk in `lane_stall.json`
+  and rides `sync_guard.stalled` from the OTHER lane; plus its converse, a
+  child past both ceilings that is still moving bytes and must never be
+  killed. A reply whose `received_at` is 20 minutes ahead (SYS-4): the skew
+  is measured, the WARNING names `--min-age` rather than just a number, and
+  `blocked_report` answers `clock_skew` with "proxy download will not
+  transfer anything" for the grid and the tray. `disk_usage` at 1 GB
+  (SYS-5/SYNC-7): lane B parks `paused` before rclone is spawned, the latch
+  survives a restart and rides the guard section; and a measurement that
+  RAISES parks nothing. A report POST that 401s three times then recovers
+  (APP-1): the health record counts the streak, exactly one toast fires, the
+  streak clears on recovery and the record survives a restart; and the same
+  401 on `/api/v1/selection` serves the cached plan and labels the source
+  `cache`, never `live`. The loop raising on its third pass (SYS-2): one
+  pass is lost, not the thread, `loop_failures` and `last_error` say so; and
+  a scaffolding failure that really does end the thread leaves `_state` at
+  STOPPED, is restarted by `LaneWatchdog`, and reaches `watchdog.json` and
+  `sync_guard.restarts` with the exception that caused it. A kill between an
+  atomic latch's tmp-write and its `os.replace` (class G), parameterised over
+  `config.toml`, `lane_stall.json` and `lane_b_breaker.json`: the previous
+  committed value is what the next reader gets, and the stray `.tmp` the kill
+  leaves behind is not adopted. An empty remote listing on a project scope
+  (CR-44/CR-47): the breaker parks lane B before a byte is trashed, and a
+  listing that FAILED is still not an empty one.
+* `dashboard/tests/chaos/test_fault_injection.py` - the three whose
+  observable only exists on the server. An undeclared top-level section and
+  an undeclared `sync_guard` sub-key (SYS-3): 200 rather than 422, named in
+  the log, folded into the meta record, and rendered as a notice with a fix;
+  and every wave-2 section still reading as declared, so the banner cannot
+  cry wolf. One `machine_id` on two hostnames (DASH-11): the notice fires,
+  is `error`, names both computers and tells the owner to delete
+  `machine.json`; a rename is not a clone. A folder listing that answers 200
+  with nothing in it (DASH-4): the brake refuses, every project stays active,
+  the alarm is persisted - **and the hourly prune is then run**, because a
+  brake that stops the deactivation but leaves `purge_nas_media_for_inactive`
+  to empty the inventory would be no brake at all.
+
+Two rules govern the modules, and they are what separates them from the unit
+tests next door. **Assert the observable, never the call**: the state the
+lane reports, the sentence the tray shows, the file the next boot reads, the
+notice a person is handed - a test that asserts "the guard ran" passes
+against a guard whose answer nobody surfaces, which is the exact shape of
+UX-10 and of "green while dead". **No sleeps, no spawns, no network**: clocks
+are injected, children are scripted, hours-long ceilings are crossed in
+milliseconds; both modules run in under 4 s.
+
+The fault list is DATA (a `FAULTS` tuple naming all nine, the ledger entry
+each closes, and which component owns it) with a registry test in each
+module, so dropping an injection fails a test instead of quietly making nine
+into eight.
+
+**Tests.** The modules are the tests. `companion`: 19 passing. `dashboard`:
+13 passing and 1 `xfail(strict=True)` as of the SYS-18a fix below (it was 9
+passing and 2 xfails: the two real gaps the injections found, one of which
+has since been fixed and its xfail deleted). Operator note in
+`docs/SELF_DIAGNOSIS.md` section 11.
+
+**Ships as:** nothing. Tests only; no product code was changed in this work
+package.
+
+### SYS-18a - a same-editor disk clone was read as a rename, so `duplicate_machine_id` could never fire for the case its own fix text describes - FIXED in repo 2026-08-29, unshipped
+
+**Symptom.** One person images their editing PC's disk onto their second
+computer. Both are signed in as them, both mint no new identity, so both
+report the same `machine_id` every 30 s. `notices._check_identity_collisions`
+never raises `duplicate_machine_id`, whose own fix text is written for
+exactly this ("On the newer computer, quit CCSync, delete the file
+.ccsync/machine.json..."). Worse than silence: the two machines' sync plans
+are merged and re-homed continuously.
+
+**Cause.** `api._register_machine` read "this `machine_id` at a new hostname"
+as a RENAME (WP1, `MULTI_MACHINE_PLAN.md`) with no test of WHEN the old
+hostname last reported, and `db.adopt_renamed_machine` then DELETEs the old
+`machines` row and moves that computer's `selections` and `editor_prefs`
+across. Two clones therefore ping-ponged a SINGLE registry row between the
+two hostnames for ever, and each swap deleted the other computer's plan rows
+and carried the survivor's plan onto whichever machine reported last. The
+collision check groups `machines` by `machine_id` `HAVING n > 1`, and there
+was never more than one row. The same starvation hit all three readers: wave
+5's invariant 3 (`one_identity_per_computer`) groups the same table and could
+not see this shape either, because the adoption had deleted the row it needed
+to group.
+
+**Fix, part 1: freshness decides, and the safe direction is to UNDER-act.** A
+rename is one computer with two names over TIME; a clone is two computers
+with one identity at the SAME time, and the evidence that tells them apart
+was already in the table. `_register_machine` adopts only when the old row
+has gone QUIET; if it reported inside `api.CLONE_ADOPTION_WINDOW_SECONDS` the
+adoption is REFUSED - nothing deleted, no `selections` or `editor_prefs`
+moved, the report still recorded under its own hostname, so both rows survive
+and the collision lands in front of `duplicate_machine_id` and invariant 3,
+which were both already written and already correct. The refusal also raises
+`duplicate_machine_id` itself, at the report, naming both hostnames, how long
+ago the other was heard from, and the exact next action. No new alert kind was
+needed: `duplicate_machine_id` is `error` severity and `alerts`' `notice_error`
+kind already delivers every open error notice.
+
+**Fix, part 2: the verdict is REVISITED, not made once.** No window separates
+"rebooting after a rename" from "the twin was briefly quiet". A renamed
+Windows box reboots and reports under its new name one to three minutes
+later, i.e. inside any window wide enough to catch a clone - so **the first
+report after a rename is refused BY DESIGN, and recovers by itself**. What
+tells the two apart is what happens NEXT: a clone's twin keeps reporting
+every 30 s, while a renamed computer's old hostname is never heard from
+again. So every report asks again, over EVERY row carrying the id rather than
+only the most recent (after a refusal the most recent holder is the reporting
+machine itself, and a rule that only looked there could never change its
+mind). Once the old row has been quiet for the window, the rename is
+confirmed and adopted - the plan and the sticky root move, the old row goes,
+and the notice the refusal raised is cleared, so a rename leaves no permanent
+finding. Typical cost to a real rename: one to two reports, about five
+minutes, and nobody has to do anything. The deferred adoption reuses
+`db.adopt_renamed_machine` (`same_computer=True`) rather than a second
+plan-moving helper: the taken-name test it has enforced since the ultrareview
+of 2026-08-19 is not weakened but REPLACED BY THE THING IT PROTECTED - a row
+at the new name that has a plan or a sticky root of its own is a different
+computer and is still refused, so the only row that can be adopted onto is an
+empty registry row and nothing can be destroyed.
+
+**The window is five minutes** (`health.STALE_REPORT_SECONDS`, reused rather
+than invented), measured on `machines.last_seen`, which `upsert_machine`
+fills from the server's `received_at` and never from the companion's own
+clock (SYS-4: a machine set to 2098 must not be able to declare itself fresh
+and make every rename look like a clone). It is ten report cycles at the
+companion's 30 s cadence, so a live clone is caught with an order of
+magnitude of margin, and it is affordable to be generous in the clone
+direction precisely because a refusal is reversible on the next report while
+a wrong adoption destroys a plan every 30 s for ever.
+
+**Takes no schema version.** No table, no column, no migration: a freshness
+test on a column that has always been there, one extra read on the same
+table, a keyword on an existing helper, and a `notices` row of a kind that
+already exists.
+
+**Tests.** `dashboard/tests/chaos/test_fault_injection.py`:
+`test_a_same_editor_clone_is_named_as_a_clone` was the `xfail(strict=True)`
+that pinned this and is now a passing regression test (the notice is raised
+by the report itself, is `error`, names both hostnames, carries the
+machine.json action, and the collector's own pass keeps it open);
+`test_a_live_same_editor_clone_is_refused_and_both_rows_survive` replaces the
+old characterisation test and asserts the inverse of what it recorded, over
+eight alternating reports (two rows, the plan still on the machine that owns
+it, the notice still open);
+`test_a_rename_refused_at_first_sight_adopts_itself_once_the_old_name_is_quiet`
+is the self-healing path end to end, including the notice being cleared;
+`test_a_new_name_given_a_plan_of_its_own_is_never_adopted_onto` is the guard
+on it; `test_the_invariant_checker_now_sees_the_same_editor_clone` proves
+invariant 3's blind spot is gone. The ordinary rename is pinned by
+`test_one_computer_that_was_renamed_is_not_a_clone` and
+`test_a_rename_still_carries_the_sync_plan_to_the_new_name`, and the helper
+itself by `test_adopt_onto_the_same_computers_own_empty_row_is_allowed` /
+`test_adopt_never_lands_on_a_row_that_has_a_plan_of_its_own` in
+`tests/test_multi_machine.py`. Rename tests elsewhere now quieten the old row
+first (`test_multi_machine.py`, `test_upload_only.py`), which is what a reboot
+does and what the two-step verdict reads.
+
+**Ships as:** a dashboard deploy. No companion change, no schema version.
+
+### SYS-18b - the DASH-4 deactivation refusal reads the wrong key, so the notice is cleared instead of raised - FIXED in repo 2026-08-29, unshipped
+
+**Symptom.** A Syncthing whose config was re-created answers 200 with zero
+folders. The wave 1 brake works: nothing is deactivated, the NAS inventory
+survives, and the refusal is persisted. The wave 4 half does not: PROBLEMS
+THE SERVER FOUND never shows it, so the condition reaches a person only if
+they open the fleet banner or the container log - which is UX-10 again, in
+the mechanism built to close UX-10.
+
+**Cause.** `db.deactivate_missing_projects` persists
+`{at, message, seen, active, would_deactivate, ceiling, projects}`, while
+`notices._check_collector_alarms` tests `deactivation.get("count")` and its
+body formats `deactivation["count"]`. The key is never present, so the `if`
+is false on every cycle and the `else` branch CLEARS the notice; had the `if`
+ever been true, the f-string would `KeyError` inside `run_checks`' own
+per-check isolation and be logged-and-swallowed. Wave 4's own rule is
+"register a notice kind WITH its writer"; here the writer is registered and
+reads a key its writer never wrote. `enforce_refusal` beside it does have a
+`count`, which is what makes the shape easy to miss.
+
+**Fix.** `notices._check_collector_alarms` reads `would_deactivate`, the key
+its writer actually persists, through a local (`n_refused`) that both the
+condition and the sentence use, so the two cannot drift apart again. Read the
+key ONCE: a second `deactivation[...]` inside the f-string is how this
+survived review the first time. No schema change and no companion half.
+
+**Tests.** `dashboard/tests/chaos/test_fault_injection.py`:
+`test_a_config_with_no_folders_at_all_takes_nothing_off_the_fleet` covers the
+brake, the surviving inventory and the persisted alarm;
+`test_the_refused_deactivation_reaches_a_person_on_the_home_page` was the
+`xfail(strict=True)` that pinned this and is now the regression for the last
+hop, from the persisted record to the panel an owner reads.
+
+### SYS-14 - nothing in the product ever said a safety mechanism was ABSENT - FIXED in repo 2026-08-29, unshipped
+
+**Symptom.** Every panel in this dashboard reports what is WRONG. Nothing
+reported what is NOT THERE, and a mechanism that does not exist produces no
+errors, so its absence rendered as green everywhere. The live TrueNAS keeps
+`dashboard.db`, `broll.db` and `music.db` under `/mnt/tank/apps`, which is a
+plain directory and not a dataset: it cannot carry a periodic snapshot task
+at all, and `setup_snapshots.py --apply` has never been run on either NAS
+(CR-10, open). The fleet's projects, editors, ticks and client links have had
+no point-in-time behind them since the day they existed, and every page in
+the product looked healthy about it. `SYNC_SAFETY.md` said so in prose -
+"there is no banner for 'this NAS has no snapshot schedule'. Until there is,
+it is a runbook item, not a system property" - and the dashboard was one API
+call away from knowing.
+
+**Cause.** Absence has no writer. Every check in the product starts from a
+thing that exists and asks whether it is healthy; nothing enumerated the
+safety mechanisms the system depends on and asked whether each is present.
+The same shape produced the two "could not ask rendered as fine" bugs the
+sweep already paid for (`folder_errors` and the container healthcheck).
+
+**Fix.** `dashboard/src/ccsync_dashboard/protection.py`: **a safety mechanism
+this server cannot POSITIVELY VERIFY is reported as missing or as
+unverifiable, never as silence.** Eight lines, each green only on evidence
+this server actually holds: an enabled `pool.snapshottask` covering the tree
+dataset; the same for the dashboard's own data (the CR-10 line); a last run
+under 25 h (WPK-6: a schedule that stopped running looks identical to one
+that works); `DASH_RELEASE_PUBKEYS` set, counted and never rendered; the
+release key backed up, as an admin-set DATE; a restore drill inside a year,
+as a date the dashboard reads rather than a boolean it computes, so the
+sibling recovery package can record its own through
+`protection.record_restore_drill`; server-side file versioning on every
+project folder; and `.ccsync-trash` on editors' machines under its 50 GB
+bound (the 14-day half of that rule is reported by no companion, and the line
+says which half it checked).
+
+THE TRI-STATE IS THE POINT, and it is `invariants.py`'s: this reuses its
+`Outcome`, its four states and its constructors rather than growing a second
+vocabulary, and it reads the snapshot schedule through ONE memoised probe
+(`protection.nas_probe`) shared with `invariants._check_snapshot_schedule`,
+so the two cannot disagree about what the NAS said at two different moments.
+The panel chips are `[ PROTECTED ]`, `[ MISSING ]`, `[ CANNOT VERIFY ]` and
+`[ COULD NOT RUN ]`. **AMBER FOREVER IS AN ACCEPTABLE ANSWER**: on a Synology
+the snapshot lines read "cannot verify, confirm in DSM" for the life of the
+deployment, because DSM's schedules live in a package with no supported API
+and a green chip there would be a guess. An unset dataset name is
+`[ CANNOT VERIFY ]` naming the environment variable, never "there is no
+snapshot" - a question nobody asked is not an answer.
+
+Wired into wave 4's machinery rather than beside it: two notice kinds
+(`protection_missing` error, `protection_unverifiable` warn - a warn is said
+once and not again until it clears, which is what makes DSM's permanent amber
+honest rather than nagging), two rows in `alerts.ALERT_KINDS`, a standing
+WHAT IS PROTECTED block in the weekly report printed every week whether or
+not anything is wrong (a block that appeared only on bad weeks would make its
+absence read as good news), and the panel at Settings -> PROTECTION rendered
+in the shape of `partials/notice_checks.html`. It rides the `invariants`
+collector kind, wrapped, so a protection pass that raised cannot cost the
+fleet its invariant verdicts. Every external read is bounded and fails to
+"cannot verify", never to an exception on a page or in the cycle. Nothing
+here formats a secret: `DASH_RELEASE_PUBKEYS` is checked for PRESENCE and
+counted.
+
+**Schema.** None. v40 was reserved for this package and is deliberately
+UNUSED: the last verdict per line and the two admin-set dates live in `meta`
+(`protection_results`, `protection_acks`), the shape `META_ALERTS_OPEN` and
+`NOTICE_CHECKS_META` already use. A migration every customer's database must
+run, to add a table a JSON blob holds, is a migration not worth the number;
+40 stays skipped rather than recycled.
+
+**What it says about THIS NAS today.** Not green. With no
+`DASH_TREE_DATASET` / `DASH_UPDATE_SNAPSHOT_DATASET` on the container the
+three snapshot lines read `[ CANNOT VERIFY ]` naming the variables; set them
+and, until `setup_snapshots.py --apply` is run, "this dashboard's own data is
+on a snapshot schedule" reads `[ MISSING ]` with `tank/apps` named and the
+sentence "the fleet's projects, editors, ticks and search indexes have no
+point-in-time behind them". "Somebody has actually restored from a backup
+this year" is `[ MISSING ]` on every deployment in existence, because nobody
+ever has. **This closes CR-10's reporting half**: the operator work it names
+(`--apply` on both NAS boxes, then `--list` within the hour) is still owed,
+but from this build on the dashboard says so out loud on its own page, in its
+notices and in every Monday report, instead of the ledger being the only
+place the gap is written down.
+
+**Tests.** `dashboard/tests/test_protection.py` (36): nothing is green on a
+deployment that can prove nothing; a NAS that cannot be asked, one whose API
+raises, and a Synology all render CANNOT VERIFY and never OK; a check that
+raises becomes COULD NOT RUN; a disabled task is not a schedule and a
+recursive parent task covers a child; the CR-10 missing-apps-dataset case is
+reported by name; a schedule that stopped running is MISSING though the task
+exists; both last-run shapes TrueNAS reports are read; a key is counted and
+never rendered; a future or unreadable date is refused where it is typed; and
+the panel, the notices, both alert kinds and the weekly report all carry it.
+
+### SYS-15 - the owner cannot recover from anything without a root shell - FIXED in repo 2026-08-29, unshipped
+
+**Symptom.** The owner deletes a project folder on the NAS by hand on a
+Sunday. Every one of the five restore paths `docs/BACKUP_RESTORE.md`
+documented is a root SSH session that asks him for judgements he has no way to
+make: is `apps` a dataset or a plain directory (this decides which of two `cp`
+lines is correct, and whether a snapshot of it exists at all - on this fleet's
+own box it is a directory, CR-10); which snapshot; is everything written since
+it expendable; has the fleet stopped writing; and - platform dependent and
+destructive if wrong - `chown` is REQUIRED on TrueNAS and DELETES the share's
+ACL on DSM. `zfs rollback -r` destroys later snapshots, guarded by a
+parenthetical in a doc. The one self-service path in the whole document is
+browsing `.stversions` over SMB, which never covers video originals: they have
+no versioning at all, NAS-side. And the Resolve undo was a TRAY CLICK on the
+editor's own machine with no admin route, unlike the lane B breaker, whose
+blast radius is smaller and which got [ RESUME ] in CR-45.
+
+**Cause.** Recovery was written as prose for a systems administrator, in a
+product whose operator is not one. Nothing in the dashboard had ever performed
+a restore, and nothing had ever verified that one would work.
+
+**Fix.** A RECOVERY page (Settings -> RECOVERY, `/admin/recovery`), four
+parts, in `dashboard/src/ccsync_dashboard/recovery.py`:
+
+**(a) Snapshot browse-and-restore, into a quarantine folder.** Pick a project,
+pick a snapshot, see exactly what is missing, and the dashboard copies it back
+into `<project>/.restored-<ts>/`. **Nothing is overwritten, nothing is deleted
+and nothing is chowned**, which is the whole point: the destructive judgement
+("is everything since this snapshot expendable?") disappears, and a wrong
+snapshot costs disk space and nothing else. The leading dot is load-bearing -
+`provision`'s walk prunes dot-directories, so a restored copy of a project,
+which carries a copy of that project's `.ccsync-project` marker, cannot be
+discovered as a second project claiming the same slug. A destination that
+already exists is refused, never merged. A pre-restore NAS snapshot is taken
+best-effort first (`dashboard_update.snapshot_before`), because "snapshot
+before anything privileged and recursive" applies to the restore path too.
+
+**Snapshots are not visible from a container by default**: `/projects` is a
+bind mount of the Projects directory and ZFS's `.zfs/snapshot` belongs to the
+dataset above it, so the browse path is a read-only mount this deployment was
+TOLD about (`DASH_SNAPSHOT_DIR`, plus `DASH_SNAPSHOT_PROJECTS_SUBPATH` for the
+path from a snapshot root to the tree). Unset is "this server was never told",
+never "there are no snapshots" - the same rule the protection panel's dataset
+lines follow - and the page says so and falls back to printing commands.
+
+**(b) An admin-side Resolve undo** on the command channel (schema v40):
+`commands.resolve_undo` names a journal id, and the companion replays the SAME
+journal through the SAME `resolve_bridge.undo_last_relink` the tray's own menu
+item calls - one place in this product writes to a media pool, and this is not
+a second one. Delivered on the report reply and kept riding every report until
+the machine answers (`resolve_undo_applied`): the `file_moves` contract,
+including `retrying`. An undo refused because Resolve is closed, or because
+the change was made in a project that is not the one open, is going to work
+later, and retiring the command there would leave the wrong paths in place
+with the admin believing they had been put back. A week of retrying becomes a
+failure. The companion reports what it holds (`resolve_journals`, names and
+counts only, on heavy ticks) because there is no inbound connection to an
+editor's PC and an admin cannot name a file they have no way to know about;
+absent is not empty, so an older build does not blank the list.
+
+**(c) A guided runbook that is a wizard, not prose.** It names what is
+protected RIGHT NOW (the protection panel's own evidence, not a second opinion
+about it), asks which of five things went wrong, and either performs the
+recovery or prints the exact commands **with this customer's real pool name,
+dataset and platform substituted in**. THE REFUSAL IS THE FEATURE: a step
+whose facts this server could not VERIFY prints no command at all, only a
+refusal naming what is missing and how to supply it. A dataset is verified
+only when the NAS's own snapshot task list names it or a recursive parent of
+it - deliberately a stronger bar than "somebody set the variable", because
+`/mnt/tank/apps` being a plain directory is exactly the fact the two `cp`
+lines in BACKUP_RESTORE.md 4c differ by. The platform is verified by a bounded
+call to the NAS, because `chown` is required on one and destroys the share's
+ACL on the other. A generated `zfs rollback` with a guessed dataset in it is
+worse than no command at all.
+
+**(d) A restore drill.** [ REHEARSE A RESTORE NOW ] copies one real file out
+of the newest snapshot into a scratch folder under `/data`, compares it byte
+for byte, deletes it and records the DATE through
+`protection.record_restore_drill` - the same store the admin's button writes,
+so the panel's line needs no edit and the two can never disagree. A drill that
+FAILS records nothing there: that line reads a date meaning "a restore worked
+here", and it must stay MISSING rather than turn green. A backup nobody has
+restored from is a hypothesis, and until this button existed nothing in this
+product had ever tried.
+
+**Schema v40.** `resolve_undo_requests` plus `machine_state.resolve_journals`.
+Wave 5's reservations ended up 39 invariants, 40 recovery, 41 unused: the
+migration list has to stay gapless (test_db's ordering test), so the number the
+protection panel reserved and then gave up was renumbered away rather than
+left as a hole. The restore and the drill add no table at all - they write
+files into a quarantine directory and a date into `meta`.
+
+**What an owner can now do without a shell**: put back a deleted or overwritten
+file or folder from any snapshot this dashboard can read; undo a clip-path
+change CC Sync made on any computer in the fleet; roll this dashboard's own
+databases back from its update backups; rehearse a restore and record that it
+worked. **What still needs one**: a whole-tree `zfs rollback`, restoring
+`dashboard.db` from a NAS snapshot when the in-app backups are gone too, and
+any deployment that has not been given a snapshot mount. For each of those the
+page prints the exact commands for THIS server, or refuses to and says which
+fact it could not confirm.
+
+**Tests.** `dashboard/tests/test_recovery.py` (24): a restore leaves every
+pre-existing file byte-for-byte identical and writes only under `.restored-`;
+the quarantine folder cannot become a second project; a snapshot, project,
+tree mount or snapshot mount that cannot be identified is a refusal with a
+sentence in it rather than a guess; the preview changes nothing; a drill
+records a date the protection panel then reads as OK, leaves no scratch files
+behind, and records nothing when it could not run; the runbook prints no `zfs
+rollback` while the dataset is unverified, treats a dataset nothing snapshots
+as unverified (CR-10), substitutes a verified one, prints nothing at all when
+the NAS did not answer, and leaves no `{placeholder}` in any of the five
+plans; and the page renders with no NAS and no snapshots at all.
+`companion/tests/test_resolve_undo_command.py` (16): a journal id off the wire
+never resolves outside `~/.ccsync/resolve_edits`; the replay is the bridge's
+own; the wrong project open and a raising bridge are both `retrying`; a swept
+journal is a failure rather than an eternal retry; and a redelivered command
+is answered from the ledger rather than replayed.
 
 ## Approving a computer under its own name mints a phantom editor (CR-91, 2026-08-28)
 

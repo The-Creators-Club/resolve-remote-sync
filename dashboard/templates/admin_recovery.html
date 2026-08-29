@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}CC SYNC: GET SOMETHING BACK{% endblock %}
+{% block layout %}
+  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s" hx-swap="innerHTML">
+    {% include "partials/sidebar.html" %}
+  </aside>
+  <main class="main">
+    {% include "partials/settings_nav.html" %}
+    <div class="detail-head"><h1>[ GET SOMETHING BACK ]</h1></div>
+    <p class="muted" style="margin: 0.4rem 0 0.9rem; max-width: 72ch;">
+      Something was deleted, overwritten or changed and you want it back. Start
+      at the bottom of this page with what went wrong: where this server can do
+      the recovery itself it says so, and where it cannot it prints the exact
+      commands for THIS server, with its real names already in them.
+    </p>
+    <p class="muted" style="margin: 0 0 0.9rem; max-width: 72ch;">
+      Nothing on this page overwrites anything. A restore copies files into a
+      new folder inside the project and leaves what is there alone, so picking
+      the wrong snapshot costs disk space and nothing else.
+    </p>
+    {# NOT polled: a swap under the reader would throw away a preview somebody
+       is halfway through reading, and this page asks the NAS on every render. #}
+    {% include "partials/recovery.html" %}
+  </main>
+{% endblock %}

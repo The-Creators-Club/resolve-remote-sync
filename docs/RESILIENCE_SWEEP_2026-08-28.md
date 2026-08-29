@@ -502,7 +502,22 @@ never reads.
 **Wave 5, recovery and invariants:** 34, 40, 42, 43. The protection panel and
 invariant checker are what make the system tell the owner what it is *not*
 protected against; the chaos tests are what stop the classes above from
-coming back.
+coming back. **BUILT 2026-08-29** by four builder agents; ledger section
+"Resilience sweep, wave 5" in `KNOWN_BUGS.md`; dashboard schema v39
+(`invariant_results`) and v40 (`resolve_undo_requests` +
+`machine_state.resolve_journals`). The protection panel took no table and
+holds its verdicts in `meta`, so v40 went to the recovery package: keep the
+migration list GAPLESS, because `test_db.py` asserts 1..SCHEMA_VERSION with
+no holes and a reserved-but-skipped number only survives while it is the
+head. The chaos suites found two live defects the other packages had not
+(SYS-18a, a same-editor disk clone read as a rename, which
+`adopt_renamed_machine` then resolved by deleting one of the two rows; and
+SYS-18b, the DASH-4 refusal notice reading a key its own writer never wrote);
+both are fixed here, and both were found by fault injection rather than by a
+person noticing, which was the point of the exercise.
+
+With this wave the sweep is fully built: 201 findings, five waves, all 13
+suites green.
 
 ## 5. Ledger notes from the sweep
 

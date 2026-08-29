@@ -44,6 +44,17 @@ def hdr(editor):
             "X-CCSync-Identity": auth.make_identity_token(SECRET, editor)}
 
 
+def _quieten(conn, editor, machine):
+    """Take a registry row off the air, which is what a rename does to the old
+    hostname: the computer reboots to take its new name and never reports
+    under the old one again. Since SYS-18a (2026-08-29) that silence is what
+    tells the adoption path a rename from a cloned disk, so a rename test has
+    to spell it out rather than fire two reports in the same millisecond."""
+    conn.execute("UPDATE machines SET last_seen='2026-08-18T09:00:00+00:00' "
+                 "WHERE editor_username=? AND machine=?", (editor, machine))
+    conn.commit()
+
+
 def report(client, editor, machine, **extra):
     body = {"editor_name": editor, "machine": machine,
             "reported_at": "2026-08-18T10:00:00+00:00", "lanes": []}
@@ -94,10 +105,16 @@ def test_learned_attributes_are_never_unlearned_by_a_lighter_report(env):
 def test_a_renamed_computer_keeps_its_plan(env):
     """A hostname is a label an editor can change in ten seconds, and the
     plan is keyed on it. Without the minted id this reads as a brand-new
-    computer with an empty plan -- a machine that silently stops syncing."""
+    computer with an empty plan -- a machine that silently stops syncing.
+
+    The old row is taken off the air first (SYS-18a, 2026-08-29): a rename is
+    one computer with two names over TIME, so the adoption now happens only
+    when the old hostname has gone quiet. Two reports a millisecond apart are
+    the disk-clone shape, and are refused."""
     client, conn, _now = env
     report(client, "ruskin", "DESKTOP-1", machine_id="mid-1")
     client.put("/api/v1/selection/ruskin/p1?machine=DESKTOP-1")
+    _quieten(conn, "ruskin", "DESKTOP-1")
 
     report(client, "ruskin", "RUSKIN-PC", machine_id="mid-1")
 
@@ -119,7 +136,10 @@ def test_a_rename_onto_another_live_computers_name_destroys_neither_plan(env):
     client.put("/api/v1/selection/ruskin/p1?machine=DESKTOP-1")
     client.put("/api/v1/selection/ruskin/p2?machine=WORK-PC")
 
-    # DESKTOP-1 comes back calling itself WORK-PC.
+    # DESKTOP-1 comes back calling itself WORK-PC. Quietened first so this
+    # still exercises the TAKEN-NAME refusal and not SYS-18a's clone refusal
+    # one branch above it, which would pass this test for another reason.
+    _quieten(conn, "ruskin", "DESKTOP-1")
     report(client, "ruskin", "WORK-PC", machine_id="mid-1", syncthing_device_id="DEV-A")
 
     # Nothing was deleted: WORK-PC's plan is still p2, DESKTOP-1's still p1.
@@ -152,6 +172,44 @@ def test_adopt_renamed_machine_refuses_a_taken_name(env):
     assert dbmod.adopt_renamed_machine(conn, "ruskin", "OLD", "FRESH") is True
     assert [s["slug"] for s in dbmod.selections_for_machine(conn, "ruskin", "FRESH")] == ["p1"]
     assert dbmod.selections_for_machine(conn, "ruskin", "OLD") == []
+
+
+def test_adopt_onto_the_same_computers_own_empty_row_is_allowed(env):
+    """The unit behind SYS-18a's deferred adoption (2026-08-29). A rename is
+    refused at first sight, which REGISTERS the new hostname, so by the time
+    the rename is confirmed the new name is "taken" - by the very row the
+    refusal created. `same_computer=True` replaces the existence test with
+    the thing it was protecting: a row with a plan or a sticky root of its own
+    is a different computer and is still refused, so nothing can be
+    destroyed."""
+    client, conn, now = env
+    dbmod.upsert_machine(conn, "ruskin", "OLD", now, machine_id="mid-1")
+    dbmod.add_selection(conn, "ruskin", "p1", "admin", now, machine="OLD")
+    # The row the refusal left behind: registered, and empty.
+    dbmod.upsert_machine(conn, "ruskin", "NEW", now, machine_id="mid-1")
+    conn.commit()
+
+    assert dbmod.adopt_renamed_machine(conn, "ruskin", "OLD", "NEW") is False
+    assert dbmod.adopt_renamed_machine(conn, "ruskin", "OLD", "NEW",
+                                       same_computer=True) is True
+    assert [s["slug"] for s in dbmod.selections_for_machine(conn, "ruskin", "NEW")] == ["p1"]
+    assert [m["machine"] for m in dbmod.fetch_machines(conn, "ruskin")] == ["NEW"]
+
+
+def test_adopt_never_lands_on_a_row_that_has_a_plan_of_its_own(env):
+    """...and the guard that makes the line above safe. Same shape, except
+    somebody ticked a project for the new name in the meantime."""
+    client, conn, now = env
+    dbmod.upsert_machine(conn, "ruskin", "OLD", now, machine_id="mid-1")
+    dbmod.add_selection(conn, "ruskin", "p1", "admin", now, machine="OLD")
+    dbmod.upsert_machine(conn, "ruskin", "NEW", now, machine_id="mid-1")
+    dbmod.add_selection(conn, "ruskin", "p2", "admin", now, machine="NEW")
+    conn.commit()
+
+    assert dbmod.adopt_renamed_machine(conn, "ruskin", "OLD", "NEW",
+                                       same_computer=True) is False
+    assert [s["slug"] for s in dbmod.selections_for_machine(conn, "ruskin", "NEW")] == ["p2"]
+    assert [s["slug"] for s in dbmod.selections_for_machine(conn, "ruskin", "OLD")] == ["p1"]
 
 
 def test_another_editors_machine_id_moves_nothing(env):

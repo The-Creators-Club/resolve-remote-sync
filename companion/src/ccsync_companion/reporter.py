@@ -395,6 +395,8 @@ class DashboardReporter:
         get_broll_ingest: Optional[GetBrollIngestFn] = None,
         get_music_ingest: Optional[GetMusicIngestFn] = None,
         get_file_moves_applied: Optional[Callable[[], list[dict[str, Any]]]] = None,
+        get_resolve_journals: Optional[Callable[[], list[dict[str, Any]]]] = None,
+        get_resolve_undo_applied: Optional[Callable[[], list[dict[str, Any]]]] = None,
         notify: Optional[Callable[[str], None]] = None,
         state_dir: Optional[Path] = None,
     ) -> None:
@@ -404,6 +406,12 @@ class DashboardReporter:
         # command is simply redelivered on the next reply and answered again
         # from the on-disk ledger, so a lost POST costs one report interval.
         self._get_file_moves_applied = get_file_moves_applied
+        # SYS-15b (2026-08-29): the undo journals this machine holds, so an
+        # admin can name one, and the answers to the undos they asked for.
+        # The journals are a SECTION (absent means "this build does not send
+        # them"), the answers are a DRAIN like the file moves' are.
+        self._get_resolve_journals = get_resolve_journals
+        self._get_resolve_undo_applied = get_resolve_undo_applied
         self.cfg = cfg
         self._http_post = http_post or default_http_post
         self.timeout = timeout
@@ -879,6 +887,32 @@ class DashboardReporter:
                 answers = None
             if answers:
                 payload["file_moves_applied"] = answers
+        if self._get_resolve_undo_applied is not None:
+            try:
+                undo_answers = self._get_resolve_undo_applied()
+            except Exception:
+                log.exception("get_resolve_undo_applied() failed")
+                undo_answers = None
+            if undo_answers:
+                payload["resolve_undo_applied"] = undo_answers
+        # HEAVY TICKS ONLY: listing them reads every journal file in
+        # ~/.ccsync/resolve_edits, and a change an admin might undo is minutes
+        # old at worst, never seconds. The ANSWERS above ride every tick,
+        # because a command that has been carried out has to stop being
+        # redelivered as soon as possible.
+        if self._get_resolve_journals is not None and not light:
+            try:
+                journals = self._get_resolve_journals()
+            except Exception:
+                log.exception("get_resolve_journals() failed")
+                journals = None
+            # An EMPTY list is sent, unlike the ingest sections above: "this
+            # machine has nothing recorded to undo" is a real answer an admin
+            # needs, and omitting it would leave a stale list on the page for
+            # ever (db.store_resolve_journals only replaces on a report that
+            # carried the section).
+            if journals is not None:
+                payload["resolve_journals"] = journals
         if self._get_broll_ingest is not None:
             try:
                 ingest = self._get_broll_ingest()

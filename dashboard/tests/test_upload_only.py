@@ -174,9 +174,16 @@ def test_the_unassigned_bucket_keeps_the_mode_when_it_is_materialised(env):
 
 
 def test_a_renamed_computer_keeps_its_upload_only_ticks(env):
+    """The old row is taken off the air between the two reports because a
+    rename reboots the computer, and since SYS-18a (2026-08-29) that silence
+    is what tells the adoption path a rename from a cloned disk still
+    reporting under the first name."""
     client, conn, now = env
     report(client, "ruskin", "OLD-NAME", machine_id="mid-1")
     client.put("/api/v1/selection/ruskin/p1?machine=OLD-NAME&mode=upload_only")
+    conn.execute("UPDATE machines SET last_seen='2026-08-26T09:00:00+00:00' "
+                 "WHERE editor_username='ruskin' AND machine='OLD-NAME'")
+    conn.commit()
     report(client, "ruskin", "NEW-NAME", machine_id="mid-1")
     assert modes_for(client, "ruskin", "NEW-NAME") == {"p1": UP}
 

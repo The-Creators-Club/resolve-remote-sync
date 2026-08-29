@@ -1,0 +1,39 @@
+{# The invariant checker's verdicts (SYS-9, resilience sweep wave 5,
+   2026-08-29).
+
+   THREE STATES, NEVER TWO. [ OK ] means a check ran this pass and found the
+   fact still true; [ BROKEN ] names the subjects; [ NOT CHECKED ] means this
+   deployment cannot evaluate it and says what would have to be true for it
+   to run; [ COULD NOT RUN ] is a check that raised. A check that could not
+   run must never render the same as a check that found nothing, which is the
+   rule the whole sweep turns on -- so the not-checked rows carry their
+   reason in the same column the broken rows carry their detail, rather than
+   being quietly dropped from the table. #}
+<table class="editors" id="invariant-table">
+  <tbody>
+  {% for inv in invariants %}
+    <tr class="editor-row">
+      <td class="mono-sm" style="white-space:nowrap">
+        {% if inv.state == 'ok' %}<span class="chip green">[ OK ]</span>
+        {% elif inv.state == 'broken' %}<span class="chip {{ 'red' if inv.severity == 'error' else 'amber' }}">[ BROKEN ]</span>
+        {% elif inv.state == 'check_failed' %}<span class="chip red">[ COULD NOT RUN ]</span>
+        {% else %}<span class="chip" title="this server cannot evaluate this one; the reason is beside it">[ NOT CHECKED ]</span>{% endif %}
+      </td>
+      <td>
+        <div class="mono-sm">{{ inv.title }}</div>
+        {% if inv.state == 'broken' or inv.state == 'check_failed' %}
+          <div class="muted" style="margin-top:0.25rem">{{ inv.consequence }}</div>
+          <div class="mono-sm" style="margin-top:0.25rem">WHAT TO DO: {{ inv.fix }}</div>
+        {% endif %}
+        {% if inv.detail %}<div class="muted mono-sm" style="margin-top:0.25rem">{{ inv.detail }}</div>{% endif %}
+        {% for s in inv.subjects %}
+          <div class="mono-sm" style="margin-top:0.2rem">- {{ s.subject }}{% if s.detail %}: {{ s.detail }}{% endif %}</div>
+        {% endfor %}
+      </td>
+      <td class="muted mono-sm" style="white-space:nowrap">
+        {% if inv.checked_at %}{{ inv.checked_at | ago }}{% else %}never{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>

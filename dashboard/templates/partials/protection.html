@@ -1,0 +1,92 @@
+{# WHAT IS PROTECTED (SYS-14, resilience sweep wave 5, 2026-08-29).
+
+   THE DEFAULT IS INVERTED HERE, which is the whole package: a safety
+   mechanism this server cannot POSITIVELY VERIFY renders [ MISSING ] or
+   [ CANNOT VERIFY ], never a green chip and never nothing at all. Until this
+   panel existed, a NAS with no snapshot schedule at all (CR-10: the apps
+   directory is not a dataset and has never had one) rendered green on every
+   page in the product.
+
+   [ CANNOT VERIFY ] IS NOT [ PROTECTED ]. On a Synology it stays amber for
+   ever, because DSM's snapshot schedules live in a package with no API and
+   this server has no honest way to get evidence. Amber for ever is the
+   correct answer there; green would be a guess.
+
+   Rendered in the shape partials/notice_checks.html and
+   partials/invariant_checks.html use, so the three read as one family. #}
+<div id="protection">
+
+  {% if protection_error %}<div class="banner">▲ {{ protection_error }}</div>{% endif %}
+  {% if protection_notice %}<div class="muted" style="margin:0.4rem 0">{{ protection_notice }}</div>{% endif %}
+
+  <div class="side-head">[ WHAT IS PROTECTED ]
+    <span class="muted">{{ protection.counts.ok }} of {{ protection.lines | length }}
+      confirmed, {{ protection.counts.broken }} missing,
+      {{ protection.counts.not_checked + protection.counts.check_failed }} this server
+      cannot check.
+      {% if protection.checked_at %}Last looked at {{ protection.checked_at | ago }}.
+      {% else %}No pass has run yet.{% endif %}</span></div>
+
+  <table class="editors" id="protection-table" style="margin-top:0.6rem">
+    <tbody>
+    {% for row in protection.lines %}
+      <tr class="editor-row">
+        <td class="mono-sm" style="white-space:nowrap">
+          {% if row.state == 'ok' %}<span class="chip green">[ PROTECTED ]</span>
+          {% elif row.state == 'broken' %}<span class="chip {{ 'red' if row.severity == 'error' else 'amber' }}">[ MISSING ]</span>
+          {% elif row.state == 'check_failed' %}<span class="chip red">[ COULD NOT RUN ]</span>
+          {% else %}<span class="chip amber" title="this server has no way to get evidence for this one; the reason is beside it">[ CANNOT VERIFY ]</span>{% endif %}
+        </td>
+        <td>
+          <div class="mono-sm">{{ row.title }}</div>
+          {% if row.state != 'ok' %}
+            <div class="muted" style="margin-top:0.25rem">{{ row.consequence }}</div>
+          {% endif %}
+          {% if row.detail %}<div class="muted mono-sm" style="margin-top:0.25rem">{{ row.detail }}</div>{% endif %}
+          {% for s in row.subjects %}
+            <div class="mono-sm" style="margin-top:0.2rem">- {{ s.subject }}{% if s.detail %}: {{ s.detail }}{% endif %}</div>
+          {% endfor %}
+          {% if row.state != 'ok' %}
+            <div class="mono-sm" style="margin-top:0.25rem">WHAT TO DO: {{ row.fix }}</div>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+
+  {# The two dates nothing on this server can observe for itself. They are
+     DATES, not ticks: "the key is backed up" is a claim that ages, and a
+     restore drill from two years ago is not a restore drill. #}
+  <div class="side-head" style="margin-top:1.2rem">[ WHAT ONLY YOU CAN CONFIRM ]
+    <span class="muted">This server cannot see a key on your workstation or a
+      restore you did by hand. Record it here and the lines above turn
+      green.</span></div>
+
+  <form class="inline-form" style="display:block; margin-top:0.6rem"
+        hx-post="/partials/admin/protection/ack" hx-target="#protection" hx-swap="outerHTML">
+    <input type="hidden" name="key" value="release_key_backup">
+    <label>THE RELEASE SIGNING KEY IS BACKED UP, ON<br>
+      <input type="date" name="date" value=""></label>
+    <button class="btn" type="submit">[ I HAVE BACKED IT UP ]</button>
+    <span class="muted mono-sm">
+      {% if protection.acks.release_key_backup %}last recorded
+        {{ protection.acks.release_key_backup.date }}
+        {% if protection.acks.release_key_backup.by %}by {{ protection.acks.release_key_backup.by }}{% endif %}
+      {% else %}never recorded{% endif %}</span>
+  </form>
+
+  <form class="inline-form" style="display:block; margin-top:0.6rem"
+        hx-post="/partials/admin/protection/ack" hx-target="#protection" hx-swap="outerHTML">
+    <input type="hidden" name="key" value="restore_drill">
+    <label>A RESTORE FROM A BACKUP WAS TRIED, ON<br>
+      <input type="date" name="date" value=""></label>
+    <button class="btn" type="submit">[ RECORD A RESTORE ]</button>
+    <span class="muted mono-sm">
+      {% if protection.acks.restore_drill %}last recorded
+        {{ protection.acks.restore_drill.date }}
+        {% if protection.acks.restore_drill.by %}by {{ protection.acks.restore_drill.by }}{% endif %}
+      {% else %}never recorded{% endif %}</span>
+  </form>
+
+</div>

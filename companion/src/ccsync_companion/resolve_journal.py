@@ -492,6 +492,77 @@ def read_session(path: Any) -> dict[str, Any]:
     return _read(Path(path))
 
 
+# -- naming one journal from off the machine (SYS-15b, 2026-08-29) ---------
+#
+# The dashboard's admin-side undo has to NAME a journal, and the only thing
+# it knows about this machine is what this machine has told it. So a journal
+# gets an id -- "<project slug>/<file name>" -- which travels in the report,
+# comes back in the command, and is resolved here rather than anywhere near a
+# path from the wire.
+
+
+def journal_id(path: Any) -> str:
+    """The id for one journal file: its project directory and its name."""
+    p = Path(path)
+    return f"{p.parent.name}/{p.name}"
+
+
+def session_by_id(text: Any) -> Optional[Path]:
+    """The journal named by `journal_id`, or None.
+
+    REFUSES ANYTHING THAT IS NOT EXACTLY TWO PLAIN SEGMENTS. This value
+    arrives in a report reply from the network, and the file it names is
+    about to be read and replayed against Resolve's media pool: `..`, an
+    absolute path or a drive letter must not resolve to anything at all.
+    """
+    raw = str(text or "").strip().replace("\\", "/")
+    parts = [p for p in raw.split("/") if p]
+    if len(parts) != 2 or any(p in (".", "..") for p in parts):
+        return None
+    slug, name = parts
+    if not name.endswith(".json") or slug != project_slug(slug):
+        return None
+    root = journal_root()
+    candidate = root / slug / name
+    try:
+        if not candidate.resolve().is_relative_to(root.resolve()):
+            return None
+        return candidate if candidate.is_file() else None
+    except (OSError, ValueError):
+        return None
+
+
+def summaries(limit: int = 20) -> list[dict[str, Any]]:
+    """The newest journals on this machine, as the dashboard is told about
+    them: names and counts, NEVER the entries.
+
+    A journal's entries are this editor's own paths, and the dashboard has no
+    use for them -- an admin picks a change to undo by project and time. Never
+    raises: this runs on the reporter thread.
+    """
+    out: list[dict[str, Any]] = []
+    try:
+        found = sessions()
+    except Exception:
+        return []
+    for path in reversed(found[-max(1, int(limit)):]):
+        try:
+            data = read_session(path)
+            entries = data.get("entries") or []
+            sources = sorted({str(e.get("source") or "") for e in entries
+                              if isinstance(e, dict) and e.get("source")})
+            out.append({
+                "id": journal_id(path),
+                "project": str(data.get("project") or ""),
+                "started": str(data.get("started") or ""),
+                "entries": len(entries),
+                "sources": ",".join(sources)[:128],
+            })
+        except Exception:
+            continue
+    return out
+
+
 def describe_latest(project_name: Any = None) -> str:
     """One line for a tray menu / popup: what the last pass did."""
     path = latest_session(project_name)

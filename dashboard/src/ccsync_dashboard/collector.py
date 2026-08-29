@@ -31,7 +31,12 @@ log = logging.getLogger("ccsync.dashboard.collector")
 # picture every kind above it has just refreshed, and an alert composed from
 # a half-updated cycle is an alert about the cycle rather than about the
 # fleet (SYS-8, resilience sweep 2026-08-28).
-KINDS = ("provision", "config", "enforce", "inventory", "connections", "completion", "remoteneed", "prune", "alerts")
+# `invariants` (SYS-9, wave 5, 2026-08-29) runs before `alerts` and after
+# everything that refreshes state: it re-verifies cross-component facts
+# that are enforced at write time and never re-checked, and the alert kind
+# that reports a broken one reads the rows this kind has just written.
+KINDS = ("provision", "config", "enforce", "inventory", "connections", "completion",
+         "remoteneed", "prune", "invariants", "alerts")
 REMOTENEED_PERPAGE = 200
 REMOTENEED_MAX_PAGES = 3
 BACKOFF_BASE = 15.0
@@ -47,7 +52,10 @@ DB_OPEN_RETRY_SECONDS = 5.0
 # "this server cannot reach its own sync engine" is one of the things it
 # alerts ON. A kind that only runs when Syncthing is reachable could never
 # report Syncthing being unreachable (SYS-8).
-SYNCTHING_FREE_KINDS = ("prune", "alerts")
+# `invariants` is here for the same reason: most of what it verifies is a
+# table read, and a deployment with no Syncthing must still be told that a
+# disk was cloned or that a published build carries a bricking floor.
+SYNCTHING_FREE_KINDS = ("prune", "invariants", "alerts")
 
 # Syncthing's own folder marker. Its presence is proof Syncthing has actually
 # been serving a directory -- and its ABSENCE is Syncthing's only mass-delete
@@ -123,6 +131,12 @@ class Collector:
         self._project_ids: dict[str, int] = {}      # folder slug -> projects.id
         self._device_ids: dict[str, int] = {}       # syncthing device ID -> devices.id
         self._folder_devices: dict[str, list[str]] = {}  # slug -> shared editor device IDs
+        # slug -> the live folder's `versioning` block, read by the config
+        # cycle for the protection panel (SYS-14, wave 5): whether files
+        # deleted on the SERVER are still recoverable is provisioned once and
+        # was never re-checked. Empty until a config pass completes, which is
+        # why the reader is handed None unless `_my_id` is set.
+        self._folder_versioning: dict[str, dict] = {}
         self._my_id = ""
         self._incomplete: dict[tuple[str, str], int] = {}  # (slug, device ID) -> needItems
         self._inventory_cursor = 0   # round-robin over projects for the NAS walk
@@ -230,6 +244,7 @@ class Collector:
             "completion": s.interval_completion,
             "remoteneed": s.interval_remoteneed,
             "prune": s.interval_prune,
+            "invariants": s.interval_invariants,
             "alerts": s.interval_alerts,
         }[kind]
 
@@ -326,6 +341,7 @@ class Collector:
             "completion": self._run_completion,
             "remoteneed": self._run_remoteneed,
             "prune": self._run_prune,
+            "invariants": self._run_invariants,
             "alerts": self._run_alerts,
         }
         results: dict[str, bool] = {}
@@ -1084,6 +1100,7 @@ class Collector:
             )
         seen: list[str] = []
         self._folder_devices = {}
+        self._folder_versioning = {}
         for folder in cfg.get("folders", []):
             slug = folder["id"]
             if slug in self._shared_folder_ids:
@@ -1101,6 +1118,8 @@ class Collector:
             self._folder_devices[slug] = [
                 d["deviceID"] for d in folder.get("devices", []) if d["deviceID"] != my_id
             ]
+            versioning = folder.get("versioning")
+            self._folder_versioning[slug] = versioning if isinstance(versioning, dict) else {}
         # DASH-4 (resilience sweep 2026-08-28): the brake lives in db.py so the
         # refusal is persisted with the counts that produced it; here it only
         # has to be said out loud and handed to _timed as this cycle's note.
@@ -1820,6 +1839,53 @@ class Collector:
 
     def _run_prune(self, conn) -> None:
         db.prune(conn, self.now_fn())
+
+    def _run_invariants(self, conn) -> str | None:
+        """The continuous invariant checker (SYS-9, resilience sweep wave 5,
+        2026-08-29).
+
+        Re-verifies the cross-component facts nothing re-verifies today, and
+        REPAIRS NOTHING: it records a verdict per invariant, files a notice
+        for each broken subject, and returns the note that keeps a pass which
+        found something from reading like a clean one on the health panel.
+
+        `_folder_devices` is handed in on the same rule the self-diagnosis
+        pass uses it (see run_cycle): an unset `_my_id` means the config job
+        has not completed a pass in THIS process, so the cache is its {}
+        construction default rather than a real snapshot, and None there is
+        what makes invariant 1 read as NOT CHECKED instead of declaring every
+        tick unshared.
+
+        The protection panel (SYS-14) rides this same kind and this same NAS
+        read: `nas_probe` is memoised, so the snapshot schedule is fetched
+        ONCE per pass and the invariant and the panel can never disagree
+        about what the NAS said at two different moments. Its pass is
+        wrapped: a protection panel that raised must not cost the fleet its
+        invariant verdicts, and its own COULD NOT RUN handling is inside
+        `protection.evaluate`.
+        """
+        from . import invariants, protection
+
+        now = self.now_fn()
+        probe = protection.nas_probe(self.settings)
+        folder_devices = self._folder_devices if self._my_id else None
+        result = invariants.run_cycle(
+            conn, self.settings, now,
+            folder_devices=folder_devices,
+            snapshot_tasks_fn=probe.tasks)
+        notes = [result.get("note")]
+        try:
+            guarded = protection.run_cycle(
+                conn, self.settings, now, tasks_fn=probe.tasks,
+                # Same rule as folder_devices above: no config pass in THIS
+                # process means the cache is a construction default, not
+                # evidence that every folder keeps its deleted files.
+                folder_versioning=self._folder_versioning if self._my_id else None)
+            notes.append(guarded.get("note"))
+        except Exception:                                            # noqa: BLE001
+            log.exception("the protection pass failed")
+            notes.append("protection pass failed")
+        return "; ".join(n for n in notes if n) or None
 
     def _run_alerts(self, conn) -> str | None:
         """The self-diagnosis pass (SYS-8, resilience sweep 2026-08-28).

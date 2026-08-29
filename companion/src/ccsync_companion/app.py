@@ -48,6 +48,7 @@ from . import reporter as reporter_mod
 from . import resolve_bridge
 from . import resolve_journal
 from . import resolve_prefs as resolve_prefs_mod
+from . import resolve_undo as resolve_undo_mod
 from . import root_guard as root_guard_mod
 from . import drive_reminder as drive_reminder_mod
 from . import shutdown_guard as shutdown_guard_mod
@@ -1738,6 +1739,12 @@ class CompanionApp:
             # Answers to the dashboard's file-move commands
             # (docs/FILE_MOVES.md): read lazily, the ledger is built below.
             get_file_moves_applied=self._file_move_results,
+            # SYS-15b (2026-08-29): which clip-path changes this machine has
+            # recorded, so an admin can name one to put back, and the answers
+            # to the ones they already asked for. Names and counts only -- the
+            # journals themselves name this editor's own paths and stay here.
+            get_resolve_journals=self._resolve_journals,
+            get_resolve_undo_applied=self._resolve_undo_results,
             # APP-1 (resilience sweep 2026-08-28): the ONE thing the reporter
             # says out loud. A revoked credential is a human's problem, and
             # nothing else on this machine can tell the editor about it -- the
@@ -1822,6 +1829,11 @@ class CompanionApp:
         # ...and files the admin moved on the server, which this machine's
         # copies have to follow (docs/FILE_MOVES.md, 2026-08-27).
         self._apply_file_moves(resp)
+        # ...and an admin undoing a clip-path change CC Sync made here
+        # (SYS-15b, 2026-08-29): the same journal the tray's own undo replays,
+        # asked for from the dashboard because until now the only way to press
+        # it was to be sitting at this computer.
+        self._apply_resolve_undo(resp)
         # An unattended update that stood down (an open window, a consolidate,
         # a failed download) gets its next go here rather than waiting for a
         # NEW version to be published (comp-app-core-4, 2026-08-21).
@@ -1853,6 +1865,12 @@ class CompanionApp:
         # or refused (docs/FILE_MOVES.md). Before the lanes: lane A reads it.
         self.file_moves = file_moves_mod.FileMoveLedger(Path(state_dir))
         self._file_move_answers: list[dict[str, Any]] = []
+        # SYS-15b (2026-08-29): what this machine has already answered about
+        # an admin's Resolve undo. Beside the file-move ledger, on disk, for
+        # the same reason: a command redelivered after a restart is answered
+        # from what happened the first time rather than replayed.
+        self.resolve_undos = resolve_undo_mod.UndoLedger(Path(state_dir))
+        self._resolve_undo_answers: list[dict[str, Any]] = []
         # RES-10: one relink offer per move per process. The watcher re-reports
         # the same MISSING clip every poll (3 s), and a dialog per poll is the
         # popup-storm shape comp-resolve-5 fixed one layer up.
@@ -6308,6 +6326,93 @@ class CompanionApp:
         """Drained by the reporter: the answers queued since the last report."""
         answers, self._file_move_answers = self._file_move_answers, []
         return answers
+
+    # -- the admin-side Resolve undo (SYS-15b, 2026-08-29) -----------------
+
+    def _resolve_journals(self) -> list[dict[str, Any]]:
+        """The clip-path changes this machine has recorded, for the report.
+
+        NAMES AND COUNTS ONLY. The journal entries are this editor's own
+        paths and the dashboard has no use for them: an admin picks a change
+        to undo by project and time. Never raises: reporter thread."""
+        try:
+            return resolve_journal.summaries()
+        except Exception:
+            log.exception("could not list this machine's undo journals")
+            return []
+
+    def _resolve_undo_results(self) -> list[dict[str, Any]]:
+        answers, self._resolve_undo_answers = self._resolve_undo_answers, []
+        return answers
+
+    def _queue_resolve_undo_answer(self, request_id: int, ok: bool, detail: str,
+                                   state: str, attempts: int = 0) -> None:
+        self._resolve_undo_answers = [
+            a for a in self._resolve_undo_answers if a["id"] != request_id]
+        answer: dict[str, Any] = {"id": int(request_id), "ok": bool(ok),
+                                  "detail": str(detail or "")[:512], "state": state}
+        if attempts:
+            answer["attempts"] = int(attempts)
+        self._resolve_undo_answers.append(answer)
+
+    def _apply_resolve_undo(self, resp: Any) -> None:
+        """Put clip paths back because an admin asked, not because the editor
+        clicked (SYS-15b, 2026-08-29).
+
+        Replays the SAME journal the tray's own undo replays, through the same
+        `resolve_bridge.undo_last_relink` -- there is one place in this
+        product where a media-pool write happens and this is not a second one.
+
+        An undo that cannot run YET (Resolve closed, the change was made in a
+        project that is not the one open) is answered `retrying`: the
+        dashboard records the attempt without retiring the command, and it
+        comes back on the next report. Retiring it would leave the wrong paths
+        in place with an admin believing they had been put back.
+
+        Once per request: the on-disk ledger answers a redelivered command
+        with the outcome it already had. Never raises: reporter thread."""
+        try:
+            commands = resp.get("commands") if isinstance(resp, dict) else None
+            raw = commands.get("resolve_undo") if isinstance(commands, dict) else None
+            if not isinstance(raw, list) or not raw:
+                return
+            for entry in raw[:8]:
+                command = resolve_undo_mod.parse_command(entry)
+                if command is None:
+                    log.warning("resolve undo: ignoring a malformed command (%r)", entry)
+                    continue
+                done = self.resolve_undos.entry(command["id"])
+                if done is not None and done.get("state") != "retrying":
+                    self._queue_resolve_undo_answer(
+                        command["id"], bool(done.get("ok")), str(done.get("detail") or ""),
+                        str(done.get("state") or "done"),
+                        int(done.get("attempts") or 0))
+                    continue
+                ok, detail, state = resolve_undo_mod.apply_undo(command)
+                if state == "retrying" and done is not None \
+                        and self.resolve_undos.gave_up(done):
+                    # A week of "ask me again" is an answer. Anything else
+                    # leaves the admin watching a request that never ends.
+                    state = "failed"
+                    detail = (f"{detail} (this computer has been unable to do it for a "
+                              "week)")
+                    ok = False
+                recorded = self.resolve_undos.record(command["id"], ok, detail, state)
+                self._queue_resolve_undo_answer(
+                    command["id"], ok, detail, state,
+                    int(recorded.get("attempts") or 0))
+                who = command["requested_by"]
+                if ok:
+                    log.warning("resolve undo #%s (asked for by %s): %s",
+                                command["id"], who, detail)
+                    self._notify_tray(
+                        f"{who} put back the clip paths CC Sync changed in Resolve.",
+                        "ccsync-companion: clip paths put back")
+                else:
+                    log.warning("resolve undo #%s (asked for by %s) %s: %s",
+                                command["id"], who, state, detail)
+        except Exception:
+            log.exception("could not apply the dashboard's Resolve undo")
 
     def _relink_moved_result(self, old_local: str, new_local: str,
                              is_dir: bool) -> tuple[bool, str]:

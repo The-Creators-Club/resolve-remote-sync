@@ -5658,6 +5658,100 @@ class TransportHealthIn(BaseModel):
     express: ExpressReportIn | None = None
 
 
+# SYS-18a (wave 5 of the resilience sweep, 2026-08-29). How recently the OLD
+# row must have reported for "this machine_id at a new hostname" to be two
+# live computers off one disk image rather than one computer that was
+# renamed. Not a new constant: it is the dashboard's own line for "a report
+# this old is no longer current" (health.STALE_REPORT_SECONDS, ten report
+# cycles at the companion's 30 s cadence).
+#
+# Deliberately generous in the CLONE direction, because the two mistakes do
+# not cost the same: a refused adoption is reversible on the next report,
+# while a wrong one DELETES the other computer's plan, every 30 s, for ever.
+# That is affordable only because the verdict is REVISITED. A renamed
+# Windows box reboots and is back inside one to three minutes, i.e. inside
+# any window wide enough to catch a clone, so this window does not have to
+# separate those two on its own: it only decides whether to act YET. The
+# rename is confirmed later, by the old hostname staying quiet for this
+# long, which a clone reporting every 30 s can never do.
+CLONE_ADOPTION_WINDOW_SECONDS = health.STALE_REPORT_SECONDS
+
+
+def _previous_row_is_live(previous: dict[str, Any], now: str) -> bool:
+    """Did the row this machine_id used to live on report inside the window.
+
+    Measured on `last_seen`, which upsert_machine fills from the SERVER's
+    `received_at` and never from the companion's own clock (SYS-4): a machine
+    whose clock is set to 2098 must not be able to declare itself fresh and
+    make every rename look like a clone, nor set itself to 1999 and have a
+    live clone read as quiet. An unreadable timestamp is NOT live -- "cannot
+    tell" is not evidence of two running computers, and the adoption path is
+    the one that keeps a renamed machine syncing."""
+    try:
+        age = db.age_seconds(str(previous.get("last_seen") or ""), now)
+    except (TypeError, ValueError):
+        return False
+    return 0 <= age <= CLONE_ADOPTION_WINDOW_SECONDS
+
+
+def _note_identity_clone(
+    conn: sqlite3.Connection, editor: str, machine: str, other: dict[str, Any],
+    machine_id: str, now: str,
+) -> None:
+    """Hand a person the clone (SYS-18a). Raised HERE, at the moment the
+    adoption is refused, rather than left to the next collector cycle: this
+    is the one place that knows both computers were live at the same instant.
+
+    A rename too recent to tell from a clone raises it too, and the body says
+    so, because the alternative is staying silent for five minutes about a
+    real clone. The deferred adoption clears it a report or two later, so a
+    renamed computer leaves no finding behind.
+
+    Kind `duplicate_machine_id` on purpose, not a kind of its own. That check
+    already exists, already has a writer that reopens and clears it every
+    cycle (notices._check_identity_collisions), and now that the refusal
+    leaves BOTH rows in `machines` it fires on this shape by itself -- which
+    is exactly what its own fix text was written for. A second kind would
+    have meant a second row on the checks panel that nothing but this branch
+    ever evaluates."""
+    other_name = str(other.get("machine") or "?")
+    try:
+        age = db.age_seconds(str(other.get("last_seen") or ""), now)
+    except (TypeError, ValueError):
+        age = 0.0
+    heard = ("less than a minute ago" if age < 60
+             else f"{int(age // 60)} minute(s) ago")
+    # Never able to fail the report. A notice is the diagnosis of a problem;
+    # taking /api/v1/report down to deliver it would be a worse one, and the
+    # collector's own pass writes this same kind on the next cycle anyway.
+    try:
+        db.notice(
+            conn, "duplicate_machine_id", "error", machine_id,
+            body=(f"Two computers are reporting the same identity: "
+                  f"{editor}/{machine} and {editor}/{other_name}. {other_name} "
+                  f"was last heard from {heard}, so both are switched on and "
+                  f"running. This happens when one computer's disk was copied "
+                  f"onto another one. Until it is sorted out, neither computer's "
+                  f"list of projects to sync is safe: the server cannot tell "
+                  f"which of the two a plan, an update or a halt belongs to. If "
+                  f"one of these two names is simply the new name of the other, "
+                  f"because that computer was renamed, this clears itself a few "
+                  f"minutes after the old name stops reporting and the projects "
+                  f"move across on their own."),
+            fix=("On the NEWER computer, quit CC Sync, delete the file "
+                 ".ccsync/machine.json in that user's home folder, and start CC "
+                 "Sync again. It mints a fresh identity on the next start and can "
+                 "then be given its own projects. Nothing to do if this was a "
+                 "rename rather than a copy: wait five minutes and it sorts "
+                 "itself out. If it is still here after that and one of the two "
+                 "computers no longer exists, remove that one with [ FORGET ] on "
+                 "the FLEET page."),
+            now=now)
+    except sqlite3.Error:
+        log.warning("could not record the duplicate_machine_id notice for %s",
+                    machine_id, exc_info=True)
+
+
 def _register_machine(
     conn: sqlite3.Connection, editor: str, machine: str, payload: "ReportIn", now: str
 ) -> None:
@@ -5667,30 +5761,93 @@ def _register_machine(
     The rename branch is the whole reason `machine_id` exists: a hostname is
     a label an editor can change, and the plan is keyed on it. It only fires
     when the minted id matches a machine of the SAME editor -- an id from
-    somebody else's report names nothing here, so it can move nothing."""
+    somebody else's report names nothing here, so it can move nothing.
+
+    FRESHNESS DECIDES (SYS-18a, 2026-08-29). A rename is one computer with
+    two names over TIME; a cloned disk is two computers with one identity at
+    the SAME time. Until this date the first reading was the only one, so an
+    imaged PC and its original ping-ponged a single registry row between
+    their hostnames every 30 s, each swap deleting the other's `selections`
+    and carrying the survivor's plan onto whichever reported last -- and
+    because there was only ever one row, neither `duplicate_machine_id` nor
+    invariant 3 could see it. Now: if the old row reported inside
+    CLONE_ADOPTION_WINDOW_SECONDS, both are live, so we UNDER-act. Nothing
+    is deleted, nothing moves, both rows survive so the collision is visible
+    to the two checks written for it, and a person is told.
+
+    THE VERDICT IS REVISITED, NOT MADE ONCE. No window separates "rebooting
+    after a rename" from "the twin was briefly quiet": a renamed Windows box
+    is back one to three minutes later, inside any window wide enough to
+    catch a clone. So the FIRST report after a rename is refused by design,
+    and the rename is confirmed by what happens NEXT -- a clone's twin keeps
+    reporting every 30 s, while a renamed computer's old hostname is never
+    heard from again. Once that row has been quiet for the window, a later
+    report from the new name adopts (db.adopt_renamed_machine,
+    same_computer=True) and clears the notice, and nobody has had to do
+    anything. That is why this looks at EVERY row carrying the id rather
+    than only the most recent: after a refusal the most recent holder is the
+    reporting machine itself, and a rule that only ever looked there could
+    never change its mind. The one case that stays refused is a new name
+    that has acquired a PLAN of its own in the meantime, which is an admin
+    decision and not ours to overwrite."""
     machine_id = (payload.machine_id or "").strip() or None
     device_id = (payload.syncthing_device_id or "").strip() or None
     if machine_id:
-        previous = db.machine_by_machine_id(conn, editor, machine_id)
-        if previous is not None and previous["machine"] != machine:
-            if db.adopt_renamed_machine(conn, editor, previous["machine"], machine):
+        # Every OTHER hostname holding this id, freshest first. A first-sight
+        # rename leaves one quiet row here; a clone one live row; a rename
+        # whose first report was refused leaves one row that has since gone
+        # quiet, which is the deferred case (SYS-18a).
+        others = [r for r in db.machines_by_machine_id(conn, editor, machine_id)
+                  if r["machine"] != machine]
+        live = [r for r in others if _previous_row_is_live(r, now)]
+        if live:
+            # A CLONE, or a rename too recent to tell apart from one. Refusing
+            # is the whole fix: this report is still recorded under its own
+            # name below, so both rows exist from here on, and the next report
+            # asks again.
+            previous = live[0]
+            log.warning(
+                "%s: machine %r reports the machine_id of %r, which reported "
+                "within the last %d minute(s) -- two live computers on one "
+                "identity (a copied disk), NOT a rename. Refusing the "
+                "adoption: no plan is moved and no row is deleted (SYS-18a).",
+                editor, machine, previous["machine"],
+                int(CLONE_ADOPTION_WINDOW_SECONDS // 60),
+            )
+            _note_identity_clone(conn, editor, machine, previous, machine_id, now)
+        elif others:
+            previous = others[0]
+            if db.adopt_renamed_machine(conn, editor, previous["machine"], machine,
+                                        same_computer=True):
                 log.info(
                     "%s: machine %r is the computer previously known as %r (same "
-                    "machine_id) -- moving its sync plan across rather than "
+                    "machine_id, and that name has now been quiet for over %d "
+                    "minute(s)) -- moving its sync plan across rather than "
                     "starting it empty",
                     editor, machine, previous["machine"],
+                    int(CLONE_ADOPTION_WINDOW_SECONDS // 60),
                 )
+                # The rename is settled, so the clone finding that a refused
+                # first report may have raised is no longer true. Cleared here
+                # rather than left to the collector, so a rename never leaves a
+                # permanent problem on the home page (SYS-18a).
+                try:
+                    db.clear_notice(conn, "duplicate_machine_id", machine_id, now=now)
+                except sqlite3.Error:
+                    log.warning("could not clear the duplicate_machine_id notice "
+                                "for %s", machine_id, exc_info=True)
             else:
-                # The name is TAKEN by another of this editor's computers.
-                # Nothing moves and nothing is deleted: both plans stay where
-                # they are, this report is recorded under the name it used,
-                # and the stale row keeps its plan until an admin copies or
-                # clears it (ultrareview 2026-08-19, db.adopt_renamed_machine).
+                # The name is TAKEN by another of this editor's computers, or
+                # has been given a plan of its own since the refusal. Nothing
+                # moves and nothing is deleted: both plans stay where they are,
+                # this report is recorded under the name it used, and the stale
+                # row keeps its plan until an admin copies or clears it
+                # (ultrareview 2026-08-19, db.adopt_renamed_machine).
                 log.warning(
-                    "%s: machine %r reports the machine_id of %r, but %r is "
-                    "already a different registered computer -- NOT moving the "
-                    "plan (a hostname collision is an admin decision, not a "
-                    "silent overwrite). Both plans are untouched.",
+                    "%s: machine %r reports the machine_id of %r, but %r already "
+                    "has a sync plan of its own -- NOT moving the plan (a hostname "
+                    "collision is an admin decision, not a silent overwrite). "
+                    "Both plans are untouched.",
                     editor, machine, previous["machine"], machine,
                 )
     db.upsert_machine(
@@ -6609,6 +6766,38 @@ def music_cancel_requested(settings: Any, editor: str, machine: str) -> list[str
                 pass
 
 
+class ResolveJournalIn(BaseModel):
+    """One undo journal a machine holds (v40, SYS-15b).
+
+    A companion cannot be ASKED what it holds -- there is no inbound
+    connection to an editor's PC -- so it says so on the report channel and
+    the dashboard remembers, which is what lets an admin name one. It is a
+    LIST OF NAMES, never the journal itself: the entries name that editor's
+    local paths, and nothing here needs them.
+    """
+    model_config = ConfigDict(extra="ignore")
+    # "<project slug>/<file name>", the companion's own addressing.
+    id: str = Field(max_length=256)
+    project: str = Field(default="", max_length=256)
+    started: str = Field(default="", max_length=64)
+    entries: int = Field(default=0, ge=0, le=1_000_000)
+    sources: str = Field(default="", max_length=128)
+
+
+class ResolveUndoResultIn(BaseModel):
+    """A machine's answer to `commands.resolve_undo` (v40, SYS-15b). The same
+    contract FileMoveResultIn uses, including `retrying`: an undo refused
+    because the wrong project is open in Resolve is going to be tried again,
+    and retiring the command on it would leave the wrong paths in place with
+    the admin believing they were put back."""
+    model_config = ConfigDict(extra="ignore")
+    id: int
+    ok: bool
+    detail: str | None = Field(default=None, max_length=512)
+    state: Literal["done", "failed", "retrying"] | None = None
+    attempts: int | None = Field(default=None, ge=0, le=1000)
+
+
 class FileMoveResultIn(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: int
@@ -6738,6 +6927,16 @@ class ReportIn(BaseModel):
     # older than 0.9.54, which is fine -- those never receive the command's
     # effects either way (see the reply builder).
     file_moves_applied: list[FileMoveResultIn] | None = Field(default=None, max_length=64)
+    # The clip-path changes this machine has recorded, so an admin can name
+    # one to undo (v40, SYS-15b), and its answers to the undos already asked
+    # for. Absent from every companion below this wave: absent is NOT an empty
+    # list (see db.store_resolve_journals), because overwriting the stored
+    # list with [] would tell an admin that a machine which has been relinking
+    # for weeks has nothing to put back.
+    resolve_journals: list[ResolveJournalIn] | None = Field(
+        default=None, max_length=db.RESOLVE_JOURNALS_MAX)
+    resolve_undo_applied: list[ResolveUndoResultIn] | None = Field(
+        default=None, max_length=16)
     # The three sections this model used to DROP UNDECLARED. proxy_coverage
     # and youtube_import have ridden every heavy tick since their features
     # shipped and reached nobody; broll_ingest is new (BROLL_INGEST_PLAN.md
@@ -7104,6 +7303,23 @@ def api_report(
                 "%s/%s file move #%s: %s%s", editor, machine, outcome.id,
                 "done" if outcome.ok else (outcome.state or "failed").upper(),
                 f" ({outcome.detail})" if outcome.detail else "")
+    # ...and to the admin-side Resolve undos (v40, SYS-15b), on exactly the
+    # same contract and in the same place, for the same reason: an undo
+    # answered in THIS report must not be re-sent in its own reply.
+    for undo in payload.resolve_undo_applied or []:
+        if db.mark_resolve_undo_applied(
+                conn, undo.id, editor, machine, undo.ok, undo.detail or "",
+                received_at, state=undo.state, attempts=undo.attempts):
+            (log.info if undo.ok else log.warning)(
+                "%s/%s resolve undo #%s: %s%s", editor, machine, undo.id,
+                "done" if undo.ok else (undo.state or "failed").upper(),
+                f" ({undo.detail})" if undo.detail else "")
+    # What this machine holds to undo. A section, so absent keeps whatever was
+    # last reported rather than emptying the list an admin is looking at.
+    db.store_resolve_journals(
+        conn, editor, machine,
+        None if payload.resolve_journals is None
+        else [j.model_dump() for j in payload.resolve_journals])
 
     # -- media presence (all optional; absent field ⇒ table untouched) --
     # (`mode` is read above, with the machine_state write that now stores it.)
@@ -7328,6 +7544,23 @@ def api_report(
         ]
         db.mark_file_moves_delivered(
             conn, [m["id"] for m in pending_moves], editor, machine, received_at)
+        conn.commit()
+    # AN ADMIN'S RESOLVE UNDO (v40, SYS-15b, 2026-08-29). Present only while
+    # one is outstanding, and it keeps riding every report until the machine
+    # answers -- the file_moves rule, not the resume_lane_b rule. The two
+    # risks are opposite: a standing RESUME re-armed the breaker every cycle,
+    # while a standing UNDO is idempotent (the companion refuses to replay a
+    # journal it has already replayed) and the failure that matters here is an
+    # admin clicking, Resolve being closed, and nothing ever happening.
+    pending_undos = db.pending_resolve_undos(conn, editor, machine)
+    if pending_undos:
+        result["commands"]["resolve_undo"] = [
+            {"id": u["id"], "journal": u["journal_id"], "project": u["project_name"],
+             "requested_by": u["requested_by"], "requested_at": u["requested_at"]}
+            for u in pending_undos
+        ]
+        db.mark_resolve_undos_delivered(
+            conn, [u["id"] for u in pending_undos], received_at)
         conn.commit()
     return result
 
@@ -7613,3 +7846,123 @@ def api_alerts_preview(request: Request, conn: sqlite3.Connection = Depends(get_
     subject, text = alerts.compose_weekly(conn, db.utcnow_iso(),
                                           request.app.state.settings)
     return f"Subject: {subject}\n\n{text}"
+
+
+# ---------------------------------------------------------------- recovery
+# SYS-15 (resilience sweep 2026-08-28, built 2026-08-29 as wave 5). Getting
+# something back without a root shell. `recovery.py` holds the reasoning; these
+# are the routes, and every one of them is admin-only: a restore, a rehearsal
+# and a runbook that names this NAS's datasets are all operator surface.
+
+
+@router.get("/admin/recovery")
+def api_recovery(request: Request, problem: str = "",
+                 conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    """What is protected right now, what can have gone wrong, and the plan.
+
+    Never 500s on a NAS that is down: page_view gathers what it can and says
+    what it could not. The page an owner opens after losing something is the
+    last page in this product that may fail to render."""
+    _require_admin(request)
+    from . import recovery
+
+    return recovery.page_view(request.app.state.settings, conn, problem)
+
+
+@router.get("/admin/recovery/preview")
+def api_recovery_preview(request: Request, slug: str, snapshot: str,
+                         conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    _require_admin(request)
+    from . import recovery
+
+    try:
+        return recovery.preview_restore(request.app.state.settings, conn, slug, snapshot)
+    except recovery.RecoveryError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+
+@router.post("/admin/recovery/restore")
+def api_recovery_restore(request: Request, slug: str, snapshot: str,
+                         include_changed: bool = False,
+                         conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    """Restore into `<project>/.restored-<ts>/`, never over the live path.
+
+    There is no "and overwrite" flag on this route and there is not going to
+    be one: quarantine-instead-of-overwrite is what makes the snapshot choice
+    safe to get wrong, which is the whole of SYS-15(a)."""
+    admin = _require_admin(request)
+    from . import recovery
+
+    try:
+        return recovery.restore_into_quarantine(
+            request.app.state.settings, conn, slug, snapshot, admin,
+            include_changed=include_changed)
+    except recovery.RecoveryError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+
+@router.post("/admin/recovery/drill")
+def api_recovery_drill(request: Request, snapshot: str = "",
+                       conn: sqlite3.Connection = Depends(get_conn)) -> dict[str, Any]:
+    """Rehearse a restore against a scratch path (SYS-15d).
+
+    A backup nobody has restored from is a hypothesis. A drill that WORKS
+    records the date on the protection panel; one that fails records nothing
+    there, so that line stays MISSING rather than green."""
+    admin = _require_admin(request)
+    from . import recovery
+
+    try:
+        return recovery.run_drill(request.app.state.settings, conn, admin,
+                                  snapshot=snapshot)
+    except recovery.RecoveryError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc))
+
+
+@router.get("/admin/machines/{editor}/{machine}/resolve-journals")
+def api_machine_resolve_journals(
+    editor: str, machine: str, request: Request,
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """The clip-path changes this computer has recorded, and what has been
+    asked of it. The list comes from the machine's own reports: there is no
+    inbound connection to an editor's PC, so it tells us and we remember."""
+    _require_admin(request)
+    editor, machine = editor.strip().lower(), machine.strip()
+    return {"journals": db.machine_resolve_journals(conn, editor, machine),
+            "requests": db.resolve_undos_for_machine(conn, editor, machine)}
+
+
+@router.post("/admin/machines/{editor}/{machine}/resolve-undo")
+def api_machine_resolve_undo(
+    editor: str, machine: str, request: Request, journal: str = "",
+    conn: sqlite3.Connection = Depends(get_conn),
+) -> dict[str, Any]:
+    """[ UNDO THIS CHANGE ] on somebody else's computer (SYS-15b).
+
+    The same shape as CR-45's [ RESUME ]: this is "press the tray's undo on
+    their behalf", not an override. The companion replays the journal the tray
+    would have replayed, refuses it for the same reasons the tray refuses it
+    (the wrong project is open), and answers on the report channel.
+
+    404 rather than a silent success for a machine or a journal we do not
+    know, on request_lane_b_resume's reasoning: a request that names nothing
+    must read as a failure to the admin."""
+    admin = _require_admin(request)
+    editor, machine, journal = editor.strip().lower(), machine.strip(), journal.strip()
+    known = db.machine_resolve_journals(conn, editor, machine)
+    match = next((j for j in known if str(j.get("id") or "") == journal), None)
+    if match is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"that computer has not reported a change called {journal!r}. Its "
+                   "list is refreshed every time it reports: reload and try again.")
+    request_id = db.request_resolve_undo(
+        conn, editor, machine, journal, str(match.get("project") or ""),
+        admin, db.utcnow_iso())
+    if not request_id:
+        raise HTTPException(status_code=404, detail=f"no machine {machine!r} for {editor!r}")
+    conn.commit()
+    log.info("%s asked %s/%s to undo the clip-path changes in %s",
+             admin, editor, machine, journal)
+    return {"ok": True, "id": request_id}

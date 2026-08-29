@@ -11,6 +11,36 @@ likely to destroy a customer's footage.
 Read `docs/SERVER.md` (TrueNAS) or `docs/SERVER-SYNOLOGY.md` (DSM) first for
 what the NAS holds and where.
 
+> **START AT THE DASHBOARD, NOT AT THIS DOCUMENT** (SYS-15, 2026-08-29).
+> **Settings -> RECOVERY** (`/admin/recovery`) is the primary route for
+> getting something back. It names what is protected right now, asks what went
+> wrong, and either performs the recovery itself or prints the commands below
+> **with this NAS's real dataset, pool and platform already substituted in** -
+> and it refuses to print a command built on a fact it could not verify.
+>
+> | What happened | Where to go |
+> |---|---|
+> | a file or folder was deleted, overwritten or changed on the server | RECOVERY -> restore into `<project>/.restored-<ts>/`. Nothing is overwritten. |
+> | CC Sync changed clip paths in somebody's Resolve project | RECOVERY -> undo it on that computer, or their own tray. `docs/RESOLVE_EDIT_SAFETY.md` |
+> | this dashboard lost projects, editors or ticks | Settings -> PACKAGES -> the dashboard's own database backups |
+> | the b-roll or music search is wrong | `publish_db.py --rollback` (section 6) |
+> | everything on the server is wrong since a moment | the only case that still needs a root shell: section 4b, via RECOVERY, which prints it |
+> | rehearsing a restore | RECOVERY -> [ REHEARSE A RESTORE NOW ] (section 7) |
+>
+> **The rest of this document is the reference and the fallback**: what those
+> commands do, what they cost, and what to do on a deployment the dashboard
+> has not been given a snapshot mount for. Sections 4a to 4e are the shell
+> procedures, and they are correct - they are simply no longer the first thing
+> to reach for.
+>
+> Two things a deployment has to be given before the page can restore anything
+> itself, because a container sees `/projects` and not the pool path behind it:
+> `DASH_SNAPSHOT_DIR` (a read-only mount whose entries are snapshots) and
+> `DASH_SNAPSHOT_PROJECTS_SUBPATH` (the path from a snapshot root to the
+> Projects tree). Without them the page still runs the runbook and prints the
+> commands; it just cannot do the copying. `docs/SELF_DIAGNOSIS.md` section 15
+> is the full description.
+
 ---
 
 ## 1. What is protected, and what protects it
@@ -181,10 +211,18 @@ Recommended for a customer site once §2 is done and verified.
 
 ---
 
-## 4. Restoring
+## 4. Restoring (the shell procedures)
 
 Snapshots are **read-only trees**, so every restore below is a copy out of one.
 Nothing here rolls a whole dataset back unless it says so.
+
+**Try Settings -> RECOVERY first** (the callout at the top). For 4a it does
+the whole thing without a shell and without the overwrite - it copies into
+`<project>/.restored-<ts>/` and leaves the live files alone, so there is no
+"is everything since this snapshot expendable" question to answer. What
+follows is what to do when the dashboard cannot see the snapshots, when the
+restore is larger than a page click should move, or when you want to know
+exactly what the page is doing.
 
 ### 4a. One file, or one project
 
@@ -235,6 +273,12 @@ Only after deciding that everything written since the snapshot is expendable.
 `dashboard.db` **is** the fleet's provisioning state: projects, editors, ticks,
 transfer history. Losing it does not lose footage, but it loses who is allowed
 to sync what.
+
+**Look at Settings -> PACKAGES first.** The dashboard backs its own databases
+up before every update and can put one back by itself, with no shell and
+without the NAS - and an update having gone wrong is what this almost always
+is. RECOVERY's "this dashboard has lost projects, editors or their ticks"
+question sends you there, and only prints what follows as the fallback.
 
 ```bash
 # with the container stopped -- the dashboard holds this open
@@ -447,11 +491,23 @@ python check_health.py                  # the fleet's own checks
 ```
 
 Yearly, or before a customer handover — **actually restore something**. A
-backup nobody has restored from is a hypothesis:
+backup nobody has restored from is a hypothesis.
+
+Since 2026-08-29 (SYS-15d) the dashboard does this itself: **Settings ->
+RECOVERY -> [ REHEARSE A RESTORE NOW ]** copies one real file out of the
+newest snapshot into a scratch folder under `/data`, compares it byte for
+byte, deletes it, and records the date. That date is the protection panel's
+"somebody has actually restored from a backup this year" line, which reads
+`[ MISSING ]` until something records one - a drill that fails records
+nothing, deliberately.
+
+By hand, on a deployment the dashboard has no snapshot mount on:
 
 1. pick a file from a project, note its size and hash;
 2. restore it out of a snapshot into a scratch directory (§4a);
-3. compare; delete the scratch copy.
+3. compare; delete the scratch copy;
+4. record it on Settings -> PROTECTION with [ RECORD A RESTORE ], or the
+   panel goes on saying nobody ever has.
 
 ---
 

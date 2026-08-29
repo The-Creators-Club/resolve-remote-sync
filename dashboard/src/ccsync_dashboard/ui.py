@@ -1277,6 +1277,202 @@ def page_admin_alerts(request: Request, conn: sqlite3.Connection = Depends(get_c
     })
 
 
+# ---------------------------------------------------------------- invariants
+# SYS-9 (resilience sweep wave 5, 2026-08-29). READ-ONLY, and there is no
+# button: this page names things, and every fix it names belongs to a page
+# that already exists. A [ RE-CHECK NOW ] button was deliberately not added --
+# the pass walks the tree and asks the NAS, and a page an admin can hammer is
+# a page that can park the collector's single thread behind it.
+
+
+@router.get("/admin/invariants")
+def page_admin_invariants(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    _require_admin_page(request)
+    from . import invariants
+
+    settings = request.app.state.settings
+    return _render(request, "admin_invariants.html", {
+        **_sidebar_context(request, conn, None),
+        "invariants": invariants.page_view(conn),
+        "invariants_interval_minutes": int(
+            max(1.0, getattr(settings, "interval_invariants", 900.0)) // 60),
+        "nav_current": "invariants",
+    })
+
+
+# ---------------------------------------------------------------- protection
+# SYS-14 (resilience sweep wave 5, 2026-08-29). What is protected, and what
+# only looks protected. READ-ONLY except for the two dates nothing on this
+# server can observe for itself (the release key's backup and a restore
+# drill), which is why this page has forms at all -- and both of them write a
+# DATE, never a boolean, so the lines above them can age.
+
+
+def _protection_context(conn, error: str = "", notice: str = "") -> dict:
+    from . import protection
+
+    return {
+        "protection": protection.page_view(conn),
+        "protection_error": error,
+        "protection_notice": notice,
+    }
+
+
+@router.get("/admin/protection")
+def page_admin_protection(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    _require_admin_page(request)
+    return _render(request, "admin_protection.html", {
+        **_sidebar_context(request, conn, None),
+        **_protection_context(conn),
+        "nav_current": "protection",
+    })
+
+
+@router.post("/partials/admin/protection/ack")
+async def partial_admin_protection_ack(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    """Record that a human did the thing this server cannot see.
+
+    Audited like any other admin action: "somebody said the key was backed
+    up" is exactly the kind of claim an incident review needs a name and a
+    date against. A refusal (an unreadable or future date) is a message on
+    the page, never a silently ignored click -- the failure mode of a
+    swallowed acknowledgement is a line that reads MISSING for ever while the
+    admin believes they cleared it.
+    """
+    admin = _require_admin_page(request)
+    from . import protection
+
+    form = await _form(request)
+    error = ""
+    notice = ""
+    try:
+        entry = protection.set_ack(conn, str(form.get("key") or ""),
+                                   str(form.get("date") or ""), admin)
+        db.audit(conn, admin, "protection.ack", str(form.get("key") or ""),
+                 {"date": entry["date"]})
+        conn.commit()
+        notice = f"recorded {entry['date']}."
+    except ValueError as exc:
+        conn.rollback()
+        error = str(exc)
+    return _render(request, "partials/protection.html",
+                   _protection_context(conn, error, notice))
+
+
+# ------------------------------------------------------------------ recovery
+# SYS-15 (resilience sweep wave 5, 2026-08-29). A WIZARD, NOT PROSE: it names
+# what is protected right now, asks what went wrong, and either does the
+# recovery or prints the exact commands with this customer's real pool name
+# and platform in them. Where it cannot verify a fact it says so and prints
+# NOTHING built on the guess -- a generated `zfs rollback` with the wrong
+# dataset in it is worse than no command at all.
+
+
+def _recovery_context(request: Request, conn, problem: str = "",
+                      error: str = "", notice: str = "",
+                      preview: dict | None = None,
+                      result: dict | None = None) -> dict:
+    from . import recovery
+
+    return {
+        "recovery": recovery.page_view(request.app.state.settings, conn, problem),
+        "recovery_problem": problem,
+        "recovery_error": error,
+        "recovery_notice": notice,
+        "recovery_preview": preview,
+        "recovery_result": result,
+    }
+
+
+@router.get("/admin/recovery")
+def page_admin_recovery(request: Request, problem: str = "",
+                        conn: sqlite3.Connection = Depends(get_conn)):
+    _require_admin_page(request)
+    return _render(request, "admin_recovery.html", {
+        **_sidebar_context(request, conn, None),
+        **_recovery_context(request, conn, problem),
+        "nav_current": "recovery",
+    })
+
+
+@router.post("/partials/admin/recovery/preview")
+async def partial_admin_recovery_preview(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    """What restoring this snapshot of this project would put back. READ
+    ONLY: an owner choosing between two snapshots is asking "does the file I
+    lost appear in this one", which is a list of names, not a date."""
+    _require_admin_page(request)
+    from . import recovery
+
+    form = await _form(request)
+    error, preview = "", None
+    try:
+        preview = recovery.preview_restore(
+            request.app.state.settings, conn, str(form.get("slug") or ""),
+            str(form.get("snapshot") or ""))
+    except recovery.RecoveryError as exc:
+        error = str(exc)
+    return _render(request, "partials/recovery.html",
+                   _recovery_context(request, conn, str(form.get("problem") or ""),
+                                     error, preview=preview))
+
+
+@router.post("/partials/admin/recovery/restore")
+async def partial_admin_recovery_restore(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    """Copy what is missing into `<project>/.restored-<ts>/`.
+
+    There is no overwrite here and there is not going to be one: quarantine
+    instead of overwrite is what makes the snapshot choice safe to get wrong,
+    and it is the whole of SYS-15(a)."""
+    admin = _require_admin_page(request)
+    from . import recovery
+
+    form = await _form(request)
+    error, notice, result = "", "", None
+    try:
+        result = recovery.restore_into_quarantine(
+            request.app.state.settings, conn, str(form.get("slug") or ""),
+            str(form.get("snapshot") or ""), admin,
+            include_changed=str(form.get("include_changed") or "") == "1")
+        notice = (f"copied {result['files']} file(s) into {result['where']}. "
+                  "Nothing that was already there was touched.")
+    except recovery.RecoveryError as exc:
+        conn.rollback()
+        error = str(exc)
+    return _render(request, "partials/recovery.html",
+                   _recovery_context(request, conn, str(form.get("problem") or ""),
+                                     error, notice, result=result))
+
+
+@router.post("/partials/admin/recovery/drill")
+async def partial_admin_recovery_drill(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+):
+    """Rehearse a restore (SYS-15d). A backup nobody has restored from is a
+    hypothesis, and until this button existed nothing here had ever tried."""
+    admin = _require_admin_page(request)
+    from . import recovery
+
+    form = await _form(request)
+    error, notice = "", ""
+    try:
+        result = recovery.run_drill(request.app.state.settings, conn, admin)
+        notice = (f"rehearsed a restore from {result['snapshot']}: {result['detail']}."
+                  if result["ok"] else
+                  f"the rehearsal FAILED: {result['detail']}.")
+    except recovery.RecoveryError as exc:
+        conn.rollback()
+        error = str(exc)
+    return _render(request, "partials/recovery.html",
+                   _recovery_context(request, conn, str(form.get("problem") or ""),
+                                     error, notice))
+
+
 @router.get("/admin/alerts/preview", response_class=PlainTextResponse)
 def page_admin_alerts_preview(request: Request,
                               conn: sqlite3.Connection = Depends(get_conn)):

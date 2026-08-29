@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}CC SYNC: INVARIANTS{% endblock %}
+{% block layout %}
+  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s" hx-swap="innerHTML">
+    {% include "partials/sidebar.html" %}
+  </aside>
+  <main class="main">
+    {% include "partials/settings_nav.html" %}
+    <div class="detail-head"><h1>[ INVARIANTS ]</h1></div>
+    <p class="muted" style="margin: 0.4rem 0 0.9rem; max-width: 62ch;">
+      Facts this system relies on, re-checked every {{ invariants_interval_minutes }}
+      minutes. Everything here is enforced when it is first written down and was
+      never asked about again: a project ticked while the sync engine was down, a
+      folder renamed on the server by hand, a disk copied onto a second computer.
+      Nothing on this page changes anything. It names what has stopped being true,
+      and where to fix it.
+    </p>
+    <p class="muted" style="margin: 0 0 0.9rem; max-width: 62ch;">
+      [ NOT CHECKED ] is not [ OK ]. It means this server cannot answer that one,
+      and the reason is beside it.
+    </p>
+    {# NOT polled: the pass runs on its own slow cadence, and a table that swaps
+       under the reader would move the row they are reading. #}
+    {% include "partials/invariant_checks.html" %}
+  </main>
+{% endblock %}

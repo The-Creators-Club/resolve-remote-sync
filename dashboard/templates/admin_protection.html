@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}CC SYNC: PROTECTION{% endblock %}
+{% block layout %}
+  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s" hx-swap="innerHTML">
+    {% include "partials/sidebar.html" %}
+  </aside>
+  <main class="main">
+    {% include "partials/settings_nav.html" %}
+    <div class="detail-head"><h1>[ PROTECTION ]</h1></div>
+    <p class="muted" style="margin: 0.4rem 0 0.9rem; max-width: 62ch;">
+      What stands between this fleet and losing something, and what does not.
+      Every line here is green only on evidence this server actually has:
+      a snapshot task it can see, a signing key it holds, a date you recorded.
+      Nothing is assumed to be there.
+    </p>
+    <p class="muted" style="margin: 0 0 0.9rem; max-width: 62ch;">
+      [ CANNOT VERIFY ] is not [ PROTECTED ]. It means this server has no way
+      to check that one from here, and the reason is beside it. On a Synology
+      the snapshot lines stay that way for good: DSM keeps its schedules
+      somewhere no other program can read.
+    </p>
+    {# NOT polled: the pass runs on its own slow cadence, and a swap under the
+       reader would throw away a date half typed into the forms below. #}
+    {% include "partials/protection.html" %}
+  </main>
+{% endblock %}

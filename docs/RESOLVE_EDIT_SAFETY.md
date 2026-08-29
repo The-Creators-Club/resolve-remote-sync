@@ -45,6 +45,18 @@ runs the pass immediately.
 
 **Tray → Advanced → "Undo the last clip-path change CCSync made…"**
 
+**Or from the dashboard, on somebody else's computer** (SYS-15b, 2026-08-29):
+Settings → RECOVERY → "CC Sync changed clip paths in somebody's Resolve
+project and they are wrong", which lists what each machine has recorded and
+asks it to replay one. It goes out on the report channel like the fleet halt
+and CR-45's [ RESUME ], and it runs **exactly the code below** on that
+machine: same journal, same `undo_last_relink`, same refusals. An undo asked
+for while Resolve is closed, or while a different project is open, is answered
+"still trying" and repeated on every report until it can run - so the admin's
+click is not lost, and the wrong paths are not left in place with somebody
+believing they were put back. What the dashboard knows about is what that
+computer has reported: names, times and counts, never the journal entries.
+
 It reads the newest journal **for the project that is open in Resolve right
 now** and replays it **in reverse**, so a clip touched twice in one burst ends
 up at the path it had before the burst started. A clip that is no longer in

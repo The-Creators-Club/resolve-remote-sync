@@ -1256,6 +1256,84 @@ ALTER TABLE machine_state ADD COLUMN moved_project_dirs_count INTEGER;
 ALTER TABLE machine_state ADD COLUMN ingest_staging_bytes INTEGER;
 """
 
+# v39: the continuous invariant checker's ledger (SYS-9, resilience sweep
+# 2026-08-28, wave 5, built 2026-08-29).
+#
+# Every cross-component fact in this system is enforced at the moment
+# something WRITES it and never re-verified: a tick is written while
+# Syncthing is unreachable, a project is renamed on the NAS by hand, a disk
+# is cloned onto a second PC. `folder_tuning_drift` proves the pattern is
+# understood -- it re-reads a folder's settings every cycle and repairs what
+# drifted -- and it covers Syncthing folder tuning ALONE.
+#
+# A TABLE rather than notices alone because the page has to be able to show
+# "checked and found nothing wrong" as well as "broken": the row for a
+# healthy invariant is the EVIDENCE that separates [ OK ] from
+# [ NOT CHECKED ], which is the load-bearing rule of this whole sweep. One
+# row per (invariant, subject); subject '' is the invariant's own summary row
+# and always exists, subject rows name what is broken and are capped by the
+# writer. `ok` is 1/0/NULL, NULL meaning "not checked" -- the tri-state is in
+# the data, so no reader can flatten it to a boolean by accident.
+SCHEMA_V39 = """
+CREATE TABLE IF NOT EXISTS invariant_results (
+  invariant  TEXT NOT NULL,
+  subject    TEXT NOT NULL DEFAULT '',
+  ok         INTEGER,
+  state      TEXT NOT NULL,
+  detail     TEXT NOT NULL DEFAULT '',
+  checked_at TEXT NOT NULL,
+  PRIMARY KEY (invariant, subject)
+);
+CREATE INDEX IF NOT EXISTS ix_invariant_results_state
+  ON invariant_results(state, checked_at);
+"""
+
+# v40: the admin-side Resolve undo (SYS-15b, resilience sweep 2026-08-28,
+# built 2026-08-29 as wave 5).
+#
+# Undoing a clip-path change CC Sync made was a TRAY CLICK on the editor's
+# own machine and nothing else (docs/RESOLVE_EDIT_SAFETY.md) -- while the
+# lane B breaker, whose blast radius is smaller, got [ RESUME ] on the
+# command channel in CR-45. So an owner who could see that a relink pass had
+# gone wrong on someone else's computer had no way to undo it without that
+# person being at their keyboard.
+#
+# A TABLE rather than a pair of columns on `machines` (the shape
+# resume_lane_b and diagnostics use) because this command NAMES A THING: a
+# journal id, on a machine that may hold several, and each request has its
+# own outcome worth keeping after it is answered. It is the `file_moves`
+# acknowledgement contract, deliberately: delivered on the reply, kept
+# riding every report until the machine answers, `state='retrying'` records
+# an attempt WITHOUT retiring the command (the undo refuses while the wrong
+# project is open in Resolve, and that is a state that clears itself when
+# the editor switches project).
+#
+# `machine_state.resolve_journals` is the other half: a companion cannot be
+# asked what journals it holds -- there is no inbound connection to an
+# editor's PC -- so it reports them, capped, on the same channel everything
+# else rides. Without it the admin would have to type a filename they have
+# no way to know.
+SCHEMA_V40 = """
+CREATE TABLE IF NOT EXISTS resolve_undo_requests (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  editor_username TEXT NOT NULL,
+  machine         TEXT NOT NULL,
+  journal_id      TEXT NOT NULL,
+  project_name    TEXT NOT NULL DEFAULT '',
+  requested_by    TEXT NOT NULL,
+  requested_at    TEXT NOT NULL,
+  delivered_at    TEXT,
+  applied_at      TEXT,
+  ok              INTEGER,
+  state           TEXT,
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  detail          TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS ix_resolve_undo_machine
+  ON resolve_undo_requests(editor_username, machine, applied_at, id);
+ALTER TABLE machine_state ADD COLUMN resolve_journals TEXT;
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -1313,6 +1391,28 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (36, SCHEMA_V36),
     (37, SCHEMA_V37),
     (38, SCHEMA_V38),
+    # 39, 40 and 41 were WAVE 5's numbers, fixed in advance and reserved per
+    # work package so the parallel packages could merge without renumbering --
+    # the same discipline 17-19 and 36-38 used. Two were taken:
+    #
+    #   39  the continuous invariant checker's ledger (SYS-9).
+    #   40  the recovery package's (SYS-15): the admin-side Resolve undo's
+    #       request ledger, and the journals a machine reports so an admin can
+    #       name one. The snapshot restore and the restore drill deliberately
+    #       add no table -- they write files into a quarantine directory and a
+    #       date into `meta`, and neither has history worth querying.
+    #   41  UNUSED. It was the protection panel's (SYS-14), which chose `meta`
+    #       instead: what that panel keeps is a small current picture (the last
+    #       verdict per line) plus two admin-set dates, the same shape
+    #       META_ALERTS_OPEN and NOTICE_CHECKS_META already use. A migration
+    #       every customer's database has to run, to add a table a JSON blob
+    #       holds, is a migration not worth the number.
+    #
+    # THE LIST MUST STAY GAPLESS (test_db's ordering test): a reserved number
+    # that goes unused is renumbered away, never left as a hole, which is why
+    # the recovery package moved down into 40 when the panel gave it up.
+    (39, SCHEMA_V39),
+    (40, SCHEMA_V40),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -2279,6 +2379,21 @@ NOTICE_KINDS: dict[str, dict[str, str]] = {
         "a computer is being sent a project nobody ticked for it"},
     "editor_without_machine": {"severity": "info", "what":
         "an editor account no computer has ever reported for"},
+    # -- the invariant checker (SYS-9, wave 5) --------------------------------
+    "invariant_broken": {"severity": "error", "what":
+        "a fact this system relies on has stopped being true (the invariant checks)"},
+    "invariant_check_failed": {"severity": "error", "what":
+        "one of the invariant checks could not run, so that fact is unchecked"},
+    # -- what is protected (SYS-14, wave 5) -----------------------------------
+    # The INVERTED default: a safety mechanism this server cannot positively
+    # verify is reported, not passed over. `protection_unverifiable` is a warn
+    # rather than an error because amber-forever is an honest answer on a NAS
+    # whose schedules have no API (DSM), and an error would train an owner to
+    # ignore the panel that carries the real ones.
+    "protection_missing": {"severity": "error", "what":
+        "a safety net this system relies on is not there (snapshots, signing, backups)"},
+    "protection_unverifiable": {"severity": "warn", "what":
+        "a safety net this server cannot check, so it is unknown rather than fine"},
     # -- space ---------------------------------------------------------------
     "dashboard_disk_low": {"severity": "error", "what":
         "the volume this dashboard writes to is nearly full"},
@@ -2479,6 +2594,114 @@ def dismiss_notice(
     audit(conn, actor, "notice.dismiss", row["kind"],
           {"subject": row["subject"], "severity": row["severity"]}, now=stamp)
     return dict(row)
+
+
+# ------------------------------------------------------ invariant results
+#
+# SYS-9 (resilience sweep 2026-08-28, wave 5). The registry, the checks and
+# the wording all live in invariants.py; what is here is the ledger and the
+# read the page and the alert kind share, on the same split db.py/notices.py
+# already use. The three states are STORED, not derived: "could not check"
+# read as "fine" is the mistake this whole sweep exists to end, and a reader
+# that only ever sees `ok` as 1/0 cannot make it.
+
+INVARIANT_OK = "ok"
+INVARIANT_BROKEN = "broken"
+INVARIANT_NOT_CHECKED = "not_checked"
+INVARIANT_CHECK_FAILED = "check_failed"
+INVARIANT_STATES = (INVARIANT_OK, INVARIANT_BROKEN, INVARIANT_NOT_CHECKED,
+                    INVARIANT_CHECK_FAILED)
+
+# Per invariant, per pass. One broken cross-component fact usually breaks it
+# for many subjects at once (a Syncthing config restored empty breaks the
+# share invariant for the whole fleet), and a page listing four hundred of
+# them says less than a page listing twenty and a count.
+INVARIANT_MAX_SUBJECTS = 20
+
+
+def _invariant_ok_flag(state: str) -> int | None:
+    if state == INVARIANT_OK:
+        return 1
+    if state == INVARIANT_BROKEN:
+        return 0
+    return None
+
+
+def record_invariant_result(
+    conn: sqlite3.Connection, invariant: str, state: str, detail: str = "",
+    subjects: Iterable[tuple[str, str]] = (), now: str | None = None,
+) -> None:
+    """Write one invariant's verdict: the summary row plus a row per broken
+    subject, and DELETE the subject rows this pass did not name.
+
+    The delete is what makes the page reflect the present rather than
+    everything that has ever been wrong: unlike `notices`, which is a ledger
+    with a life and a DISMISS, this table is a picture of the last pass.
+    """
+    stamp = now or utcnow_iso()
+    verdict = state if state in INVARIANT_STATES else INVARIANT_CHECK_FAILED
+    rows: list[tuple[str, str, int | None, str, str, str]] = [
+        (invariant, "", _invariant_ok_flag(verdict), verdict, str(detail or ""), stamp)
+    ]
+    kept: list[str] = []
+    for subject, subject_detail in list(subjects)[:INVARIANT_MAX_SUBJECTS]:
+        kept.append(str(subject))
+        rows.append((invariant, str(subject), _invariant_ok_flag(verdict), verdict,
+                     str(subject_detail or ""), stamp))
+    conn.executemany(
+        """INSERT INTO invariant_results
+             (invariant, subject, ok, state, detail, checked_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(invariant, subject) DO UPDATE SET
+             ok=excluded.ok, state=excluded.state, detail=excluded.detail,
+             checked_at=excluded.checked_at""",
+        rows,
+    )
+    placeholders = ",".join("?" * len(kept)) or "''"
+    conn.execute(
+        f"""DELETE FROM invariant_results
+             WHERE invariant=? AND subject<>'' AND subject NOT IN ({placeholders})""",
+        (invariant, *kept),
+    )
+
+
+def fetch_invariant_results(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    """{invariant: {state, detail, checked_at, subjects: [...]}}.
+
+    A MISSING TABLE IS AN EMPTY PICTURE, not an error (the rule
+    `alerts._rows` states): this is read by the admin page and by an alert
+    check that may be running against a database an older build migrated."""
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        rows = list(conn.execute(
+            "SELECT * FROM invariant_results ORDER BY invariant, subject"))
+    except sqlite3.Error:
+        return {}
+    for row in rows:
+        entry = out.setdefault(str(row["invariant"]), {
+            "state": INVARIANT_NOT_CHECKED, "detail": "", "checked_at": "",
+            "subjects": [],
+        })
+        if not row["subject"]:
+            entry["state"] = str(row["state"])
+            entry["detail"] = str(row["detail"] or "")
+            entry["checked_at"] = str(row["checked_at"] or "")
+        else:
+            entry["subjects"].append(
+                {"subject": str(row["subject"]), "detail": str(row["detail"] or "")})
+    return out
+
+
+def broken_invariants(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Every currently broken invariant's subject rows, for the alert kind."""
+    try:
+        rows = list(conn.execute(
+            "SELECT invariant, subject, detail, checked_at FROM invariant_results "
+            "WHERE state=? AND subject<>'' ORDER BY invariant, subject",
+            (INVARIANT_BROKEN,)))
+    except sqlite3.Error:
+        return []
+    return [dict(r) for r in rows]
 
 
 # --------------------------------------------------- site settings history
@@ -3214,6 +3437,26 @@ def machine_by_machine_id(
         (editor, machine_id),
     ).fetchone()
     return dict(row) if row else None
+
+
+def machines_by_machine_id(
+    conn: sqlite3.Connection, editor: str, machine_id: str
+) -> list[dict[str, Any]]:
+    """EVERY row of this editor's registry carrying this minted id, most
+    recently heard from first.
+
+    The singular above answers "who holds this id", which is all the rename
+    branch needed while an adoption could only ever leave one row. SYS-18a
+    (2026-08-29) made the refusal leave two on purpose, and the verdict is
+    now revisited on every report -- so the caller needs the OTHER rows, not
+    the one that has just reported and would always sort first."""
+    if not machine_id:
+        return []
+    return [dict(r) for r in conn.execute(
+        """SELECT * FROM machines WHERE editor_username=? AND machine_id=?
+           ORDER BY last_seen DESC, machine ASC""",
+        (editor, machine_id),
+    )]
 
 
 def request_machine_update(
@@ -4115,6 +4358,155 @@ def _days_between(then: str | None, now: str) -> float:
         return 0.0
 
 
+# -- the admin-side Resolve undo (v40, SYS-15b, 2026-08-29) -----------------
+#
+# The same acknowledgement contract as `file_moves`, and for the same reason:
+# the dashboard cannot reach an editor's PC, so a command is delivered on the
+# report reply and keeps riding every report until the machine ANSWERS. A
+# failure that is going to clear itself (Resolve is not open, or the wrong
+# project is) answers `retrying` and stays on the books; a failure that will
+# not answers once and retires.
+
+RESOLVE_UNDO_COMMAND_LIMIT = 4
+RESOLVE_UNDO_RETRYING = "retrying"
+# What one machine reports about its own journals. Capped here because it is
+# client-supplied and lands in a column: an editor who relinks daily holds 60
+# days of them (resolve_journal.RETENTION_DAYS), and an admin picking one only
+# ever wants the recent ones.
+RESOLVE_JOURNALS_MAX = 20
+
+
+def request_resolve_undo(
+    conn: sqlite3.Connection, editor: str, machine: str, journal_id: str,
+    project_name: str, requested_by: str, now: str,
+) -> int:
+    """Ask one machine to replay one undo journal in reverse. Returns the
+    request id, or 0 when there is no such machine.
+
+    0 rather than a silent success, on request_lane_b_resume's reasoning: a
+    request that names nothing must read as a failure to the admin."""
+    if machine not in machines_of(conn, editor):
+        return 0
+    cur = conn.execute(
+        """INSERT INTO resolve_undo_requests
+               (editor_username, machine, journal_id, project_name,
+                requested_by, requested_at)
+           VALUES (?,?,?,?,?,?)""",
+        (editor, machine, journal_id[:256], (project_name or "")[:256],
+         requested_by, now),
+    )
+    request_id = int(cur.lastrowid or 0)
+    audit(conn, requested_by, "resolve.undo.request", f"{editor}/{machine}",
+          {"journal": journal_id, "project": project_name}, now=now)
+    return request_id
+
+
+def pending_resolve_undos(
+    conn: sqlite3.Connection, editor: str, machine: str,
+    limit: int = RESOLVE_UNDO_COMMAND_LIMIT,
+) -> list[dict[str, Any]]:
+    """The undos this computer has not answered yet, oldest first.
+
+    Bounded by DELIVERY and by nothing else, like pending_file_moves: an old
+    command is harmless because the companion refuses a journal that is not
+    where the command says, and the machine that has not answered is exactly
+    the one still holding the wrong clip paths."""
+    return [dict(r) for r in conn.execute(
+        """SELECT id, journal_id, project_name, requested_by, requested_at
+             FROM resolve_undo_requests
+            WHERE editor_username=? AND machine=? AND applied_at IS NULL
+            ORDER BY id LIMIT ?""",
+        (editor, machine, int(limit)),
+    )]
+
+
+def mark_resolve_undos_delivered(
+    conn: sqlite3.Connection, request_ids: list[int], now: str,
+) -> None:
+    """First delivery only: the stamp says when the machine was first told,
+    and the command keeps riding until it is answered."""
+    for request_id in request_ids:
+        conn.execute(
+            "UPDATE resolve_undo_requests SET delivered_at=COALESCE(delivered_at, ?) "
+            " WHERE id=?", (now, int(request_id)))
+
+
+def mark_resolve_undo_applied(
+    conn: sqlite3.Connection, request_id: int, editor: str, machine: str,
+    ok: bool, detail: str, now: str, state: str | None = None,
+    attempts: int | None = None,
+) -> bool:
+    """The machine's answer.
+
+    `state='retrying'` records the attempt WITHOUT retiring the command, the
+    same way mark_file_move_applied does: "Resolve is not open" and "another
+    project is open" are both states that clear themselves, and retiring the
+    command on one of them would leave the wrong paths in place with the
+    admin believing they had been undone."""
+    if state == RESOLVE_UNDO_RETRYING:
+        cur = conn.execute(
+            """UPDATE resolve_undo_requests SET state=?, attempts=?, detail=?
+                WHERE id=? AND editor_username=? AND machine=? AND applied_at IS NULL""",
+            (state, int(attempts or 0), (detail or "")[:512],
+             int(request_id), editor, machine))
+        return cur.rowcount > 0
+    cur = conn.execute(
+        """UPDATE resolve_undo_requests
+              SET applied_at=?, ok=?, detail=?, state=?, attempts=?
+            WHERE id=? AND editor_username=? AND machine=? AND applied_at IS NULL""",
+        (now, int(bool(ok)), (detail or "")[:512], state or ("done" if ok else "failed"),
+         int(attempts or 0), int(request_id), editor, machine))
+    return cur.rowcount > 0
+
+
+def resolve_undos_for_machine(
+    conn: sqlite3.Connection, editor: str, machine: str, limit: int = 20,
+) -> list[dict[str, Any]]:
+    """What has been asked of this computer and what came back, newest
+    first -- what the machine's recovery panel draws."""
+    return [dict(r) for r in conn.execute(
+        """SELECT * FROM resolve_undo_requests
+            WHERE editor_username=? AND machine=? ORDER BY id DESC LIMIT ?""",
+        (editor, machine, int(limit)),
+    )]
+
+
+def store_resolve_journals(
+    conn: sqlite3.Connection, editor: str, machine: str,
+    journals: list[dict[str, Any]] | None,
+) -> None:
+    """What undo journals this machine holds (v40).
+
+    ABSENT IS NOT EMPTY: a companion too old to report journals sends None,
+    and overwriting the stored list with [] would tell an admin that a
+    machine which has been relinking for weeks has nothing to undo. Only a
+    report that CARRIED the section replaces it."""
+    if journals is None:
+        return
+    text = json.dumps(journals[:RESOLVE_JOURNALS_MAX], separators=(",", ":"))
+    conn.execute(
+        "UPDATE machine_state SET resolve_journals=? "
+        " WHERE editor_username=? AND machine=?", (text, editor, machine))
+
+
+def machine_resolve_journals(
+    conn: sqlite3.Connection, editor: str, machine: str,
+) -> list[dict[str, Any]]:
+    """The journals this machine last reported, or [] when it has reported
+    none -- never a raise: a damaged blob must not break the page that is
+    trying to recover from something."""
+    row = conn.execute(
+        "SELECT resolve_journals FROM machine_state "
+        " WHERE editor_username=? AND machine=?", (editor, machine)).fetchone()
+    if row is None or not row["resolve_journals"]:
+        return []
+    try:
+        data = json.loads(row["resolve_journals"])
+    except (ValueError, TypeError):
+        return []
+    return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
+
+
 def copy_machine_plan(
     conn: sqlite3.Connection, editor: str, source: str, target: str,
     copied_by: str, now: str,
@@ -4150,7 +4542,8 @@ def copy_machine_plan(
 
 
 def adopt_renamed_machine(
-    conn: sqlite3.Connection, editor: str, old_machine: str, new_machine: str
+    conn: sqlite3.Connection, editor: str, old_machine: str, new_machine: str,
+    *, same_computer: bool = False,
 ) -> bool:
     """Somebody renamed their PC. Carry what belongs to the COMPUTER across.
 
@@ -4173,7 +4566,17 @@ def adopt_renamed_machine(
     table but this registry is keyed on the hostname. So the one thing this
     must never do is destroy a plan to resolve one: both stay, the collision
     is logged, and an admin copies or clears a plan by hand. Under-sharing is
-    the safe direction."""
+    the safe direction.
+
+    `same_computer=True` is the DEFERRED half of SYS-18a (2026-08-29). A
+    rename now has its first report refused as a possible disk clone, which
+    registers the new hostname; when the old row is still quiet a report or
+    two later the rename is confirmed and adopted, and by then the new name
+    is "taken" by the row that refusal created. So the existence test is
+    replaced -- never weakened -- by the thing it was protecting: a row at
+    the new name that has a PLAN or a sticky root of its own is a different
+    computer, and is refused exactly as before. What is left to adopt onto is
+    a registry row and nothing else, so this can still destroy nothing."""
     if not old_machine or not new_machine or old_machine == new_machine:
         return False
     taken = conn.execute(
@@ -4181,7 +4584,15 @@ def adopt_renamed_machine(
         (editor, new_machine),
     ).fetchone()
     if taken is not None:
-        return False
+        if not same_computer:
+            return False
+        for table in ("selections", "editor_prefs"):
+            own = conn.execute(
+                f"SELECT 1 FROM {table} WHERE editor_username=? AND machine=? LIMIT 1",
+                (editor, new_machine),
+            ).fetchone()
+            if own is not None:
+                return False
     for table in ("selections", "editor_prefs"):
         conn.execute(
             f"DELETE FROM {table} WHERE editor_username=? AND machine=?",

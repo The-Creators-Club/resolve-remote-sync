@@ -147,6 +147,10 @@ _JOB_MEANING = {
                    "Check that Syncthing is running on the server."),
     "prune": ("old rows are not being cleared out of the database",
               "Check the free space on the data volume (Settings, Packages)."),
+    "invariants": ("the checks that re-verify the facts this system relies on are not "
+                   "running, so nothing is re-checking them (SYS-9)",
+                   "Open Settings, Invariants to see which check last ran, then restart "
+                   "the dashboard."),
 }
 
 # sqlite says these when the problem is the disk rather than the query.
@@ -249,10 +253,18 @@ def _check_collector_alarms(conn, settings, now: str) -> None:
         db.clear_notice(conn, "enforce_refusal", "share removals", now=now)
         db.clear_notices_of_kind(conn, "share_without_plan", now=now)
     deactivation = alarms.get("deactivation_refusal")
-    if isinstance(deactivation, dict) and deactivation.get("count"):
+    # The key is `would_deactivate`, which is what db.deactivate_missing_projects
+    # persists; this read asked for `count` and so was never once true, clearing
+    # the notice on every cycle instead of raising it (SYS-18b, 2026-08-29, found
+    # by the wave 5 chaos suite). Had it ever been true the f-string below would
+    # have raised KeyError inside run_checks' own isolation and been swallowed -
+    # UX-10 recurring inside the mechanism built to close UX-10. Read it through
+    # a local so the test and the sentence cannot drift apart again.
+    n_refused = deactivation.get("would_deactivate") if isinstance(deactivation, dict) else None
+    if n_refused:
         db.notice(
             conn, "deactivation_refusal", "error", "projects",
-            body=(f"{deactivation['count']} project(s) looked as though they had been "
+            body=(f"{n_refused} project(s) looked as though they had been "
                   f"deleted from the server in one pass, which is more than the safety "
                   f"limit, so none of them were marked gone. If the projects folder was "
                   f"unmounted, that is what this means."),

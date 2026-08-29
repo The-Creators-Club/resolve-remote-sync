@@ -434,6 +434,13 @@ class Settings:
     # running it faster would cost CPU on the box that is meant to be moving
     # lane C bytes and would change nothing an admin sees.
     interval_alerts: float = 600.0
+    # The invariant checker (SYS-9, resilience sweep wave 5, 2026-08-29).
+    # Fifteen minutes, the slowest cadence in the collector: the facts it
+    # re-verifies (a tick's share, a project's marker, a package floor, a
+    # cloned disk) change on human timescales, and the one check that leaves
+    # the container is a single bounded call to the NAS. Faster would cost
+    # CPU on the box moving lane C bytes and change nothing an admin sees.
+    interval_invariants: float = 900.0
     # Wall-clock budget for ONE completion pass (ops-efficiency-5,
     # 2026-08-21). The collector is one thread running every due kind in
     # series, so a Syncthing that hangs rather than refuses parks enforce,
@@ -670,6 +677,7 @@ class Settings:
             interval_remoteneed=num("DASH_INTERVAL_REMOTENEED", 60.0),
             interval_prune=num("DASH_INTERVAL_PRUNE", 3600.0),
             interval_alerts=num("DASH_INTERVAL_ALERTS", 600.0),
+            interval_invariants=num("DASH_INTERVAL_INVARIANTS", 900.0),
             completion_budget_seconds=num("DASH_COMPLETION_BUDGET_SECONDS", 30.0),
             backoff_max=num("DASH_BACKOFF_MAX", 300.0),
             enforce_max_share_removals=int(num("DASH_ENFORCE_MAX_REMOVALS", 3)),

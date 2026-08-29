@@ -90,24 +90,165 @@ def default_requires(kind: str, inputs: Mapping[str, Any] | None) -> dict[str, A
     return requires
 
 
-# Which machine is PREFERRED for a kind, as a table rather than a chain of
+# WHICH MACHINE IS PREFERRED FOR A KIND, as a table rather than a chain of
 # ifs (§4.4 rule 3). Every capable machine is still offered the job in the
 # end -- see RANK_GRACE_SECONDS -- so a preference can never be the reason a
 # queue stops moving; it only decides who gets first refusal.
 #
-#   nvenc   the phase-1 win. The NAS container measured 11-33x realtime on
-#           libx264 veryfast; a machine with an NVIDIA encoder does the same
-#           480p proxy without spending a core on it.
-#   gpu     whisper's model has to fit somewhere.
-#   base    the base rig for the cheap I/O-bound kinds: it is the machine
-#           next to the media, nobody sits at it, and an audio copy that runs
-#           there costs an editor nothing at all.
-PREFERRED_FOR_KIND: dict[str, tuple[str, ...]] = {
-    db.JOB_KIND_WHISPER: ("gpu",),
+# Phase 4 finished the table (2026-08-30). It is now an ORDERED tuple of
+# signals per kind, not a set: the first signal is worth more than the
+# second, so "an encoder" beats "a GPU that is only a decoder" without
+# either of them beating "is anybody sitting at it" (which is policy, not
+# rank, and already refused the machine before we get here).
+#
+#   nvenc      the phase-1 win. The NAS container measured 11-33x realtime on
+#              libx264 veryfast; a machine with an NVIDIA encoder writes the
+#              same 480p proxy without spending a core on it.
+#   gpu_fits   whisper's model has to fit somewhere: this machine's VRAM
+#              meets the job's OWN `gpu_vram_gb` requirement with room to
+#              spare. A machine that only just clears the floor still ranks,
+#              below one that clears it comfortably.
+#   gpu        ...and, failing that, any GPU at all.
+#   near_media the machine NEXT TO THE MEDIA for the cheap I/O-bound kinds:
+#              the base rig or the dashboard host. Nobody sits at it, an
+#              audio copy that runs there costs an editor nothing, and the
+#              round trip over SMB is what these two kinds are made of.
+RANK_SIGNALS: dict[str, tuple[str, ...]] = {
+    db.JOB_KIND_WHISPER: ("gpu_fits", "gpu"),
     db.JOB_KIND_PROXY_480P: ("nvenc",),
-    db.JOB_KIND_AUDIO_EXTRACT: ("base",),
-    db.JOB_KIND_PEAKS: ("base",),
+    db.JOB_KIND_AUDIO_EXTRACT: ("near_media",),
+    db.JOB_KIND_PEAKS: ("near_media",),
 }
+
+# What each signal is called on the why page. An admin reading "choice 2 of 3"
+# has to be able to find out WHAT the other machine had that this one has not.
+SIGNAL_WORDS = {
+    "nvenc": "an NVIDIA encoder",
+    "gpu_fits": "a GPU with room for this model",
+    "gpu": "a GPU",
+    "near_media": "is next to the media (the base rig or the dashboard host)",
+}
+
+# How much headroom over a job's stated VRAM floor counts as "it fits". A
+# model that needs 6 GB on a card with 6.0 GB free is a card that OOMs the
+# moment anything else is on it, and the point of the signal is to prefer the
+# machine where it will actually finish.
+VRAM_HEADROOM_GB = 1.0
+
+
+def _signal_true(name: str, facts: Mapping[str, Any],
+                 job: Mapping[str, Any] | None) -> bool:
+    """Does this machine carry this rank signal? Never raises: a capability
+    that arrived as a string must not be able to throw inside a sort key."""
+    caps = dict(facts.get("capabilities") or {})
+    if name == "nvenc":
+        return bool(caps.get("nvenc"))
+    if name == "gpu":
+        return bool(caps.get("gpu_present"))
+    if name == "gpu_fits":
+        if not caps.get("gpu_present"):
+            return False
+        want = (dict(job.get("requires") or {}) if job else {}).get("gpu_vram_gb")
+        try:
+            have = float(caps.get("gpu_vram_gb"))
+        except (TypeError, ValueError):
+            # A GPU that will not say how big it is fits nothing in
+            # particular. Not a refusal (job_requirements_met already had its
+            # say) -- just not a preference.
+            return False
+        if want is None:
+            return True
+        try:
+            return have >= float(want) + VRAM_HEADROOM_GB
+        except (TypeError, ValueError):
+            return False
+    if name == "near_media":
+        return str(facts.get("mode") or "editor") == "base"
+    return False
+
+
+def rank_signals(
+    facts: Mapping[str, Any], kind: str, job: Mapping[str, Any] | None = None,
+) -> list[tuple[str, bool, int]]:
+    """(signal, does this machine have it, what it is worth) for one kind."""
+    names = RANK_SIGNALS.get(str(kind), ())
+    return [(name, _signal_true(name, facts, job), len(names) - i)
+            for i, name in enumerate(names)]
+
+
+def rank_key(
+    facts: Mapping[str, Any], kind: str, job: Mapping[str, Any] | None = None,
+) -> tuple[float, ...]:
+    """How good a home this machine is for this kind of work. BIGGER IS
+    BETTER, and the order is §4.4 rule 3's: capability, then least loaded,
+    then longest idle.
+
+    Every component is a fact this dashboard already stores, and none of them
+    is a tie-breaker on a name -- ranking machines alphabetically is how one
+    computer ends up doing all the work of a fleet.
+
+    `job` is optional and only the `gpu_fits` signal reads it: a caller with
+    the row in hand gets the finished ranking, and one without still gets the
+    kind's ordering rather than an exception.
+    """
+    caps = dict(facts.get("capabilities") or {})
+    preference = sum(weight for _name, have, weight in rank_signals(facts, kind, job)
+                     if have)
+    try:
+        load = float(caps.get("load"))
+    except (TypeError, ValueError):
+        # None means this platform has no load average (Windows). NOT a
+        # penalty: it would rank every Windows machine below every Mac for a
+        # reason that says nothing about how busy either is.
+        load = 0.0
+    try:
+        idle = float(caps.get("idle_seconds"))
+    except (TypeError, ValueError):
+        # Unreachable in practice: policy_refusal already refused a machine
+        # that cannot say. Zero here keeps the contract anyway -- an unknown
+        # idle answer must never rank ABOVE a known one.
+        idle = 0.0
+    return (float(preference), -float(len(facts.get("live_jobs") or [])),
+            -load, idle)
+
+
+# The rank tuple's own field names, in order, for the explanation. A number
+# in a list is not an answer to "why did the other machine win".
+RANK_FIELDS = ("preference", "free_slots", "load", "idle")
+RANK_FIELD_WORDS = {
+    "preference": "is better placed for this kind of work",
+    "free_slots": "is holding less work right now",
+    "load": "is less loaded",
+    "idle": "has been idle longer",
+}
+
+
+def why_not_first(
+    mine: tuple[float, ...], best: tuple[float, ...],
+    facts: Mapping[str, Any], best_facts: Mapping[str, Any],
+    kind: str, job: Mapping[str, Any] | None = None,
+) -> str:
+    """The FIRST component this machine lost on, in words, or "".
+
+    The whole point of phase 4's ranking being explainable: "three machines
+    could take this and it went to the one without the encoder" has to be
+    answerable from the why page, and a tuple of floats does not answer it.
+    """
+    for field, value, top in zip(RANK_FIELDS, mine, best):
+        if value >= top:
+            continue
+        if field == "preference":
+            missing = [SIGNAL_WORDS.get(name, name)
+                       for (name, have, _w), (bname, bhave, _bw)
+                       in zip(rank_signals(facts, kind, job),
+                              rank_signals(best_facts, kind, job))
+                       if bhave and not have and name == bname]
+            if missing:
+                return "the first choice has %s and this machine has not" % (
+                    ", ".join(missing))
+        return "the first choice " + RANK_FIELD_WORDS[field]
+    return ""
+
 
 # How long a job waits for its preferred machine before EVERY capable machine
 # is offered it. A preference that could starve a queue would be worse than
@@ -209,42 +350,6 @@ def fleet_facts(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any
     return out
 
 
-def rank_key(facts: Mapping[str, Any], kind: str) -> tuple[float, ...]:
-    """How good a home this machine is for this kind of work. BIGGER IS
-    BETTER, and the order is §4.4 rule 3's: capability, then least loaded,
-    then longest idle.
-
-    Every component is a fact this dashboard already stores, and none of them
-    is a tie-breaker on a name -- ranking machines alphabetically is how one
-    computer ends up doing all the work of a fleet.
-    """
-    caps = dict(facts.get("capabilities") or {})
-    preference = 0
-    for name in PREFERRED_FOR_KIND.get(str(kind), ()):
-        if name == "nvenc" and caps.get("nvenc"):
-            preference += 1
-        elif name == "gpu" and caps.get("gpu_present"):
-            preference += 1
-        elif name == "base" and str(facts.get("mode") or "editor") == "base":
-            preference += 1
-    try:
-        load = float(caps.get("load"))
-    except (TypeError, ValueError):
-        # None means this platform has no load average (Windows). NOT a
-        # penalty: it would rank every Windows machine below every Mac for a
-        # reason that says nothing about how busy either is.
-        load = 0.0
-    try:
-        idle = float(caps.get("idle_seconds"))
-    except (TypeError, ValueError):
-        # Unreachable in practice: policy_refusal already refused a machine
-        # that cannot say. Zero here keeps the contract anyway -- an unknown
-        # idle answer must never rank ABOVE a known one.
-        idle = 0.0
-    return (float(preference), -float(len(facts.get("live_jobs") or [])),
-            -load, idle)
-
-
 def ranked_machines(
     job: Mapping[str, Any], fleet: Mapping[tuple[str, str], Mapping[str, Any]],
 ) -> list[tuple[tuple[str, str], tuple[float, ...]]]:
@@ -262,7 +367,7 @@ def ranked_machines(
         reason, _sentence = policy_refusal(facts, kind)
         if reason:
             continue
-        able.append((key, rank_key(facts, kind)))
+        able.append((key, rank_key(facts, kind, job)))
     able.sort(key=lambda pair: pair[1], reverse=True)
     return able
 
@@ -424,8 +529,10 @@ def explain(conn: sqlite3.Connection, job_id: int) -> dict[str, Any] | None:
             "summary": _terminal_summary(job),
         }
     fleet = fleet_facts(conn)
-    order = {key: rank for rank, (key, _score) in
-             enumerate(ranked_machines(job, fleet), start=1)}
+    able = ranked_machines(job, fleet)
+    order = {key: rank for rank, (key, _score) in enumerate(able, start=1)}
+    scores = dict(able)
+    best_key, best_score = (able[0] if able else (None, ()))
     for (editor, machine), facts in fleet.items():
         ok, why = db.job_requirements_met(job.get("requires"), facts["capabilities"])
         if not ok:
@@ -440,15 +547,31 @@ def explain(conn: sqlite3.Connection, job_id: int) -> dict[str, Any] | None:
         # ok, and WHERE IN THE ORDER -- because "three machines can take this
         # and it went to the one without the encoder" is a scheduling
         # complaint this page has to be able to answer.
-        rank = order.get((editor, machine), 0)
-        lines.append({"editor": editor, "machine": machine, "ok": True,
-                      "reason": "", "rank": rank,
-                      "why": ("this machine can take it, and is first choice"
-                              if rank == 1 else
-                              f"this machine can take it (choice {rank} of "
-                              f"{len(order)}; it is offered the job anyway "
-                              f"once it has waited "
-                              f"{int(RANK_GRACE_SECONDS)}s)")})
+        key = (editor, machine)
+        rank = order.get(key, 0)
+        score = scores.get(key, ())
+        # THE RANK TUPLE ITSELF RIDES ALONG (phase 4). A sentence is what an
+        # admin reads and the numbers are what a bug report is made of: the
+        # complaint "it went to the machine without the encoder" is only
+        # answerable if the four components that decided it are visible.
+        line = {"editor": editor, "machine": machine, "ok": True,
+                "reason": "", "rank": rank,
+                "score": [round(float(v), 3) for v in score],
+                "signals": {name: have
+                            for name, have, _w in rank_signals(facts, kind, job)}}
+        if rank == 1:
+            line["why"] = "this machine can take it, and is first choice"
+            line["why_not_first"] = ""
+        else:
+            beaten = why_not_first(score, best_score, facts,
+                                   fleet.get(best_key) or {}, kind, job)
+            line["why_not_first"] = beaten
+            line["why"] = (f"this machine can take it (choice {rank} of "
+                           f"{len(order)}"
+                           + (f"; {beaten}" if beaten else "")
+                           + f"; it is offered the job anyway once it has "
+                             f"waited {int(RANK_GRACE_SECONDS)}s)")
+        lines.append(line)
     can = [m for m in lines if m["ok"]]
     if kind not in db.JOB_KINDS:
         summary = (f"this dashboard does not know the job kind {kind!r}, so no "

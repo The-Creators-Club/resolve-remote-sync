@@ -121,7 +121,7 @@ def test_a_reported_machine_is_offered_a_job_it_can_do(env):
                               {"whisper": True, "gpu_vram_gb": 6, "mount": "vault"})
     conn.commit()
     r = report(client, capabilities=CAPS)
-    assert r.json()["commands"]["jobs"] == {"offered": [job_id]}
+    assert r.json()["commands"]["jobs"]["offered"] == [job_id]
 
 
 def test_a_machine_with_somebody_at_it_is_offered_nothing(env):
@@ -130,7 +130,10 @@ def test_a_machine_with_somebody_at_it_is_offered_nothing(env):
                      {"whisper": True})
     conn.commit()
     r = report(client, capabilities=dict(CAPS, idle_seconds=5))
-    assert "jobs" not in r.json()["commands"]
+    # Phase 4: the reply still carries the QUEUE DEPTH -- a companion that is
+    # offered nothing is exactly the one that should be able to see there is
+    # work it is not being given -- but nothing it may claim.
+    assert "offered" not in r.json()["commands"].get("jobs", {})
 
 
 def test_the_grid_carries_the_chips(env):

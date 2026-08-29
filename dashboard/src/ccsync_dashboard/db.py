@@ -1461,6 +1461,41 @@ ALTER TABLE machine_state ADD COLUMN cap_cards_version INTEGER;
 ALTER TABLE machine_state ADD COLUMN cap_cards_since REAL;
 """
 
+# v45: BACKPRESSURE AND THE ALLOW-LIST (phase 4, 2026-08-30).
+#
+# Three columns, one idea between them: a scheduler needs to be able to say
+# NO for a reason that is not "nothing can do this".
+#
+# `jobs_cooldown_until` is how long this machine is left alone after it hands
+# a job back failed. Without it a machine with a broken ffmpeg is the FIRST
+# to be offered the retry every time -- it is idle, after all, precisely
+# because it is failing everything in seconds -- and a two-attempt budget is
+# spent by one bad machine in under a minute. `jobs_cooldown_reason` is what
+# the why page shows, because "this machine is cooling down" with no cause is
+# the same unanswerable shrug the whole phase exists to remove.
+#
+# `cap_job_kinds` is the machine's OWN allow-list (`[jobs] kinds` in its
+# config), reported like every other capability and honoured by the offer
+# filter. Phase 1 left this open: today an editor's laptop can only be taken
+# out of the fleet entirely (`jobs_enabled = false`), and "this laptop may
+# transcode a proxy overnight but must never be handed a whisper pass" was
+# unsayable. NULL means the machine never said, which is ALL KINDS -- a
+# companion older than phase 4 keeps the behaviour it shipped with, and an
+# empty JSON list means all kinds too, because that is what an unset config
+# key spells over there.
+# `cancel_requested_at` / `_by` are the other half of the same sentence: an
+# admin can stop a job, and stopping one that is RUNNING is not a database
+# write -- it is a message to the machine holding it, re-sent on every report
+# until that machine answers. The columns are what makes the re-send possible
+# across a dashboard restart, and what the jobs page shows as "cancelling".
+SCHEMA_V45 = """
+ALTER TABLE jobs ADD COLUMN cancel_requested_at TEXT;
+ALTER TABLE jobs ADD COLUMN cancel_requested_by TEXT;
+ALTER TABLE machine_state ADD COLUMN jobs_cooldown_until TEXT;
+ALTER TABLE machine_state ADD COLUMN jobs_cooldown_reason TEXT;
+ALTER TABLE machine_state ADD COLUMN cap_job_kinds TEXT;
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -1559,6 +1594,11 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # that never serves a page, and these are useful on the one machine that
     # does.
     (44, SCHEMA_V44),
+    # 45: phase 4's backpressure (the per-machine cooldown) and the
+    # per-machine kind allow-list. One step: they are the same feature seen
+    # from the two ends -- the server's reason to hold off, and the machine's
+    # own.
+    (45, SCHEMA_V45),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -7371,6 +7411,11 @@ JOB_RUNNING = "running"
 JOB_DONE = "done"
 JOB_FAILED = "failed"
 JOB_ABANDONED = "abandoned"
+# Handed to the dashboard's OWN in-process executor after the fleet spent the
+# retry budget (v45, phase 4, §4.4 rule 5). It is not terminal -- the work is
+# still going to happen -- and it is not held by any machine, which is the
+# whole point: a pinned job NEVER goes back to the fleet.
+JOB_PINNED = "pinned"
 
 # Held by a machine right now: a claim that has not yet been heartbeated as
 # running is still possession, which is why both are in here.
@@ -7434,9 +7479,52 @@ JOB_RETRY_BUDGET_DEFAULT = 3
 # `inputs` is (root, rel_path) pairs and nothing legitimate is near it.
 JOB_JSON_MAX_BYTES = 16 * 1024
 
+# Per kind, and deliberately small. whisper is a whole GPU each; the media
+# recipes are ffmpeg reading a rush over the share, and four of those is
+# already the share's ceiling on this fleet's hardware. Overridable per
+# deployment (DASH_JOBS_MAX_RUNNING) because "how many at once" is a fact
+# about somebody's network, not about this code.
+JOB_MAX_RUNNING = {
+    JOB_KIND_WHISPER: 2,
+    JOB_KIND_PROXY_480P: 4,
+    JOB_KIND_AUDIO_EXTRACT: 4,
+    JOB_KIND_PEAKS: 4,
+}
+JOB_MAX_RUNNING_DEFAULT = 4
+
+# How long a machine is left alone after handing a job back failed. Two
+# minutes: long enough that the same machine does not eat a two-attempt
+# budget on its own, short enough that a fleet of one (the base rig, most
+# evenings) is not parked for the night by one bad clip.
+JOB_COOLDOWN_SECONDS = 120
+
 
 def job_retry_budget(kind: str) -> int:
     return int(JOB_RETRY_BUDGET.get(str(kind or ""), JOB_RETRY_BUDGET_DEFAULT))
+
+
+# WHICH KINDS MAY BE PINNED to the dashboard's own worker when the fleet has
+# spent the budget (§4.4 rule 5, phase 4). The three media recipes, and
+# never `whisper`: the executor is the dashboard container, which has ffmpeg
+# and the two mounts and NO GPU. A whisper job pinned there would be a job
+# that fails for ever in a new place -- so it is abandoned, visibly, which is
+# the honest answer and the one an admin can act on.
+JOB_PINNABLE_KINDS = (JOB_KIND_PROXY_480P, JOB_KIND_AUDIO_EXTRACT,
+                      JOB_KIND_PEAKS)
+
+
+def _spent_state(kind: str, pin: bool) -> str:
+    """What becomes of a job whose retry budget is gone.
+
+    `pin` is the CALLER saying there is an executor here at all (the
+    Timeline Cards engine is mounted). Phase 1 shipped `abandoned` with the
+    note that an abandoned job is visible, not handed to a NAS-side executor
+    "because there is none"; there is one now, and abandoning is what happens
+    when there is not.
+    """
+    if pin and str(kind) in JOB_PINNABLE_KINDS:
+        return JOB_PINNED
+    return JOB_ABANDONED
 
 
 def _job_json(value: Any) -> str:
@@ -7722,12 +7810,18 @@ def finish_job(
         (JOB_DONE, _job_json(dict(result or {})), now, now,
          int(job_id), str(editor), str(machine), JOB_CLAIMED, JOB_RUNNING),
     )
+    if cur.rowcount:
+        # A machine that FINISHED one is not a machine to hold off from
+        # (v45). The cooldown is about failure, and a success is the best
+        # evidence there is that whatever went wrong last time is over.
+        clear_machine_job_cooldown(conn, editor, machine)
     return bool(cur.rowcount)
 
 
 def fail_job(
     conn: sqlite3.Connection, job_id: int, editor: str, machine: str,
     error: str = "", now: str | None = None, retryable: bool = True,
+    cooldown_seconds: float = JOB_COOLDOWN_SECONDS, pin: bool = False,
 ) -> str | None:
     """One attempt failed. -> the job's new state, or None if this caller did
     not hold it.
@@ -7748,7 +7842,8 @@ def fail_job(
         return None
     attempts = int(row["attempts"] or 0) + 1
     spent = attempts >= job_retry_budget(row["kind"])
-    state = JOB_FAILED if not retryable else (JOB_ABANDONED if spent else JOB_QUEUED)
+    state = (JOB_FAILED if not retryable
+             else (_spent_state(row["kind"], pin) if spent else JOB_QUEUED))
     conn.execute(
         """UPDATE jobs SET state=?, attempts=?, last_error=?, claimed_by=NULL,
                            claimed_machine=NULL, lease_expires_at=NULL, updated_at=?
@@ -7756,11 +7851,23 @@ def fail_job(
         (state, attempts, str(error or "")[:2000], now,
          int(job_id), str(editor), str(machine)),
     )
+    # THE MACHINE IS LEFT ALONE FOR A WHILE (v45), but only when the fault
+    # could be the machine's. `retryable=False` is the runner saying the
+    # fault is in the JOB -- a clip with no audio track -- and cooling down a
+    # good machine for a bad clip is how a fleet stops for a reason nobody
+    # can see. A cancelled job comes back the same way, and must not punish
+    # the machine that obeyed.
+    if retryable and cooldown_seconds > 0:
+        set_machine_job_cooldown(
+            conn, editor, machine,
+            f"job #{int(job_id)} ({row['kind']}) failed here: "
+            f"{str(error or '')[:120]}", now, cooldown_seconds)
     return state
 
 
 def expire_leases(
-    conn: sqlite3.Connection, now: str | None = None,
+    conn: sqlite3.Connection, now: str | None = None, pin: bool = False,
+    cooldown_seconds: float = JOB_COOLDOWN_SECONDS,
 ) -> list[dict[str, Any]]:
     """Re-queue (or abandon) every job whose holder has gone quiet.
 
@@ -7776,7 +7883,7 @@ def expire_leases(
     for row in rows:
         attempts = int(row["attempts"] or 0) + 1
         spent = attempts >= job_retry_budget(row["kind"])
-        state = JOB_ABANDONED if spent else JOB_QUEUED
+        state = _spent_state(row["kind"], pin) if spent else JOB_QUEUED
         cur = conn.execute(
             """UPDATE jobs SET state=?, attempts=?, claimed_by=NULL,
                                claimed_machine=NULL, lease_expires_at=NULL,
@@ -7792,6 +7899,17 @@ def expire_leases(
             job["state"] = state
             job["attempts"] = attempts
             moved.append(job)
+            # A machine that went quiet mid-job gets the same cooldown a
+            # machine that reported a failure does: it is the SAME evidence
+            # (this computer did not finish what it took), and without it the
+            # laptop that sleeps every evening is first in the queue for
+            # every retry all night.
+            if cooldown_seconds > 0 and row["claimed_machine"]:
+                set_machine_job_cooldown(
+                    conn, str(row["claimed_by"] or ""),
+                    str(row["claimed_machine"]),
+                    f"job #{row['id']} ({row['kind']}) lost its lease here",
+                    now, cooldown_seconds)
     return moved
 
 
@@ -7807,6 +7925,115 @@ def machine_live_jobs(
             " AND state IN (?, ?) ORDER BY id",
             (str(editor), str(machine), JOB_CLAIMED, JOB_RUNNING))
     ]
+
+
+# ------------------------------------------------------ backpressure (v45)
+#
+# THE QUEUE HAS TO BE ABLE TO PUSH BACK (phase 4, §4.4). Three separate
+# brakes, because they answer three different runaways:
+#
+#   the fleet cap     how many jobs of one KIND may be in flight across the
+#                     whole fleet at once. Not a per-machine limit (that is
+#                     one, and always has been) -- this is the NAS's disk and
+#                     the media share's bandwidth, which four simultaneous
+#                     480p encodes reading rushes over SMB will find long
+#                     before any one machine does.
+#   the cooldown      how long a machine that just failed a job is left
+#                     alone. Without it the machine with the broken ffmpeg is
+#                     first in the queue for the retry, every time, because
+#                     failing in two seconds is what keeps it idle.
+#   the queue depth   what the companion is TOLD, so it can back off by
+#                     itself: {queued, running, oldest_age_s} on the report
+#                     reply.
+
+def count_running_by_kind(conn: sqlite3.Connection) -> dict[str, int]:
+    """kind -> how many are in flight on the fleet right now.
+
+    Held states only. A PINNED job is deliberately not counted: it is not on
+    anybody's machine, it is on this container's own worker, and letting it
+    hold a fleet slot would be the dashboard blocking the fleet on work the
+    fleet already refused."""
+    return {row["kind"]: int(row["n"]) for row in conn.execute(
+        "SELECT kind, COUNT(*) AS n FROM jobs WHERE state IN (?, ?) "
+        " GROUP BY kind", JOB_HELD_STATES)}
+
+
+def queue_depth(conn: sqlite3.Connection, now: str | None = None) -> dict[str, Any]:
+    """{queued, running, pinned, oldest_age_s} -- the signal that rides the
+    report reply so a companion can back off by itself.
+
+    `oldest_age_s` is the number that matters and is null, never 0, on an
+    empty queue: zero is "something arrived this second", and a companion
+    that read the two the same way would treat an idle fleet as an urgent
+    one.
+    """
+    now = now or utcnow_iso()
+    counts: dict[str, int] = {}
+    for row in conn.execute("SELECT state, COUNT(*) AS n FROM jobs "
+                            " WHERE state NOT IN (%s) GROUP BY state"
+                            % ",".join("?" * len(JOB_TERMINAL_STATES)),
+                            JOB_TERMINAL_STATES):
+        counts[str(row["state"])] = int(row["n"])
+    oldest = conn.execute(
+        "SELECT created_at FROM jobs WHERE state=? ORDER BY id ASC LIMIT 1",
+        (JOB_QUEUED,)).fetchone()
+    age: float | None = None
+    if oldest is not None:
+        try:
+            age = max(0.0, (parse_iso(now)
+                            - parse_iso(str(oldest["created_at"]))).total_seconds())
+        except Exception:                                      # noqa: BLE001
+            age = None
+    return {
+        "queued": counts.get(JOB_QUEUED, 0),
+        "running": counts.get(JOB_CLAIMED, 0) + counts.get(JOB_RUNNING, 0),
+        "pinned": counts.get(JOB_PINNED, 0),
+        "oldest_age_s": None if age is None else round(age, 1),
+    }
+
+
+def set_machine_job_cooldown(
+    conn: sqlite3.Connection, editor: str, machine: str, reason: str,
+    now: str | None = None, seconds: float = JOB_COOLDOWN_SECONDS,
+) -> str:
+    """Leave this machine alone for a while. -> when it may claim again.
+
+    Written even when the row does not exist yet (the UPDATE matches nothing
+    and that is fine): a machine that has never reported is not being offered
+    anything anyway."""
+    now = now or utcnow_iso()
+    until = _job_lease_until(now, seconds)
+    conn.execute(
+        "UPDATE machine_state SET jobs_cooldown_until=?, jobs_cooldown_reason=? "
+        " WHERE editor_username=? AND machine=?",
+        (until, str(reason or "")[:255], str(editor), str(machine)))
+    return until
+
+
+def clear_machine_job_cooldown(
+    conn: sqlite3.Connection, editor: str, machine: str,
+) -> None:
+    """A machine that FINISHED a job is not a machine to hold off from. The
+    cooldown is about failure, and letting a success clear it is what stops
+    one bad clip from parking a good machine for two minutes."""
+    conn.execute(
+        "UPDATE machine_state SET jobs_cooldown_until=NULL, "
+        "       jobs_cooldown_reason='' "
+        " WHERE editor_username=? AND machine=?", (str(editor), str(machine)))
+
+
+def machine_job_cooldown(
+    conn: sqlite3.Connection, editor: str, machine: str,
+) -> tuple[str, str]:
+    """(until, reason) or ("", "")."""
+    row = conn.execute(
+        "SELECT jobs_cooldown_until, jobs_cooldown_reason FROM machine_state "
+        " WHERE editor_username=? AND machine=?",
+        (str(editor), str(machine))).fetchone()
+    if row is None:
+        return "", ""
+    return (str(row["jobs_cooldown_until"] or ""),
+            str(row["jobs_cooldown_reason"] or ""))
 
 
 def fetch_running_jobs_map(
@@ -7836,6 +8063,75 @@ def fetch_running_jobs_map(
                          if isinstance(inputs, dict) else ""),
         }
     return out
+
+
+# ------------------------------------------------------------ cancel (v45)
+#
+# An admin can stop a job. What that MEANS depends on who has it, and the
+# three answers are deliberately different:
+#
+#   queued    it is this row and nobody else's: it becomes `failed`, with the
+#             admin's name in last_error, and it is never retried.
+#   held      the machine holding it is the only thing that can stop it. The
+#             row records the REQUEST, `commands.jobs.cancel` carries the id
+#             on that machine's next report, and the companion kills its
+#             child and posts failed(cancelled). Re-sent until the machine
+#             answers -- the file_moves rule, because an admin clicking while
+#             a laptop is asleep must not be a click that evaporates.
+#   pinned    the dashboard's own executor is doing it; its should_stop()
+#             reads the same flag on its next check.
+#
+# NOTHING HERE FORCES A ROW TERMINAL BEHIND A RUNNING PROCESS. A cancelled
+# job whose machine never answers stays visible as "cancelling" until the
+# lease expires, and the lease is what ends it. Lying about the state while
+# an ffmpeg is still writing into the vault is how a half-made proxy gets
+# published.
+
+JOB_CANCELLED_ERROR = "cancelled"
+
+
+def request_job_cancel(
+    conn: sqlite3.Connection, job_id: int, by: str, now: str | None = None,
+) -> str | None:
+    """-> what happened: "failed" (it was queued and is over), "requested"
+    (a machine or the pinned worker has to stop it), or None for a job that
+    is already finished or does not exist."""
+    now = now or utcnow_iso()
+    job = get_job(conn, int(job_id))
+    if job is None or job["state"] in JOB_TERMINAL_STATES:
+        return None
+    who = str(by or "an admin")[:64]
+    if job["state"] == JOB_QUEUED:
+        conn.execute(
+            """UPDATE jobs SET state=?, last_error=?, cancel_requested_at=?,
+                               cancel_requested_by=?, updated_at=?
+                WHERE id=? AND state=?""",
+            (JOB_FAILED, f"{JOB_CANCELLED_ERROR} by {who}", now, who, now,
+             int(job_id), JOB_QUEUED))
+        return JOB_FAILED
+    conn.execute(
+        """UPDATE jobs SET cancel_requested_at=?, cancel_requested_by=?,
+                           updated_at=?
+            WHERE id=? AND state IN (?, ?, ?)""",
+        (now, who, now, int(job_id), JOB_CLAIMED, JOB_RUNNING, JOB_PINNED))
+    return "requested"
+
+
+def job_cancel_requested(conn: sqlite3.Connection, job_id: int) -> bool:
+    """What the pinned executor's should_stop() asks."""
+    row = conn.execute("SELECT cancel_requested_at FROM jobs WHERE id=?",
+                       (int(job_id),)).fetchone()
+    return bool(row is not None and row["cancel_requested_at"])
+
+
+def pending_job_cancels(
+    conn: sqlite3.Connection, editor: str, machine: str,
+) -> list[int]:
+    """The ids THIS machine is holding that an admin has asked to stop."""
+    return [int(r["id"]) for r in conn.execute(
+        "SELECT id FROM jobs WHERE claimed_by=? AND claimed_machine=? "
+        "   AND state IN (?, ?) AND cancel_requested_at IS NOT NULL "
+        " ORDER BY id", (str(editor), str(machine), JOB_CLAIMED, JOB_RUNNING))]
 
 
 def prune_jobs(conn: sqlite3.Connection, now: str, max_age_days: int = 30) -> int:
@@ -7892,7 +8188,8 @@ def store_machine_capabilities(
              cap_whisper_detail=?,
              cap_claude=?, cap_mounts=?, cap_cpu_count=?, cap_idle_seconds=?,
              cap_load=?, cap_resolve_running=?, cap_resolve_project=?,
-             cap_jobs_enabled=?, cap_cards_connected=?, cap_cards_state=?,
+             cap_jobs_enabled=?, cap_job_kinds=?, cap_cards_connected=?,
+             cap_cards_state=?,
              cap_cards_timeline=?, cap_cards_version=?, cap_cards_since=?
             WHERE editor_username=? AND machine=?""",
         (now,
@@ -7916,6 +8213,12 @@ def store_machine_capabilities(
          int(bool((resolve or {}).get("running"))),
          str((resolve or {}).get("project") or "")[:255],
          int(bool(caps.get("jobs_enabled", True))),
+         # THE MACHINE'S OWN ALLOW-LIST (v45, phase 4). NULL when the section
+         # did not carry one, which is a companion older than phase 4 and
+         # means ALL KINDS -- never "no kinds", which would silently take
+         # every machine in the fleet out of the queue on the day the
+         # dashboard is deployed ahead of the companions (the B16 shape).
+         _job_kinds_json(caps.get("job_kinds")),
          # The cards role (v44). Written wholesale like everything else here:
          # a companion that has STOPPED serving the page must be able to say
          # so, and a merge would leave the last timeline on the grid for ever.
@@ -7956,6 +8259,9 @@ def _capabilities_of(row: sqlite3.Row | None) -> dict[str, Any]:
         "idle_seconds": row["cap_idle_seconds"],
         "load": row["cap_load"],
         "jobs_enabled": bool(row["cap_jobs_enabled"]),
+        # [] is "this machine did not say", which every reader must treat as
+        # ALL KINDS (see _job_kinds_json).
+        "job_kinds": _job_kinds_of(row["cap_job_kinds"]),
         "resolve": {"running": bool(row["cap_resolve_running"]),
                     "project": row["cap_resolve_project"] or ""},
         # v44. `state` is meaningful with `connected` false and is the whole
@@ -7972,8 +8278,52 @@ _CAPABILITY_COLUMNS = """cap_at, cap_gpu_present, cap_gpu_name, cap_gpu_vram_gb,
        cap_nvenc, cap_ffmpeg, cap_ffprobe, cap_whisper, cap_whisper_detail,
        cap_claude, cap_mounts, cap_cpu_count, cap_idle_seconds, cap_load,
        cap_resolve_running, cap_resolve_project, cap_jobs_enabled,
+       cap_job_kinds,
        cap_cards_connected, cap_cards_state, cap_cards_timeline,
        cap_cards_version, cap_cards_since"""
+
+
+# A machine's allow-list is a handful of names; sixteen is already more kinds
+# than this dashboard has ever had.
+CAPABILITY_KINDS_MAX = 16
+
+
+def _job_kinds_json(value: Any) -> str | None:
+    """The `job_kinds` capability -> its column, or None for "not said".
+
+    None and [] are the SAME ANSWER here on purpose (all kinds), because an
+    editor's config with no `jobs_kinds` key and a companion too old to have
+    one are the same machine as far as the fleet is concerned. The only way
+    to be excluded from a kind is to name the kinds you do want.
+    """
+    if not value:
+        return None
+    try:
+        names = [str(k)[:32] for k in list(value)][:CAPABILITY_KINDS_MAX]
+    except TypeError:
+        return None
+    return json.dumps(names, separators=(",", ":")) if names else None
+
+
+def _job_kinds_of(raw: Any) -> list[str]:
+    try:
+        names = json.loads(raw) if raw else []
+    except (TypeError, ValueError):
+        return []
+    return [str(k) for k in names] if isinstance(names, list) else []
+
+
+def machine_allows_kind(capabilities: Mapping[str, Any] | None, kind: str) -> bool:
+    """May this machine be offered work of this kind? (v45, phase 4.)
+
+    An EMPTY list is every kind: see _job_kinds_json. `jobs_enabled` is a
+    different switch and is not read here -- the runner refuses everything
+    when it is off, and the two answers must not be folded into one, because
+    "this machine is out of the fleet" and "this machine does not do whisper"
+    are different lines on the why page.
+    """
+    allowed = list((capabilities or {}).get("job_kinds") or [])
+    return not allowed or str(kind) in allowed
 
 
 def _as_int(value: Any) -> int | None:

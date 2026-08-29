@@ -435,7 +435,12 @@ def test_the_report_reply_offers_jobs(env, monkeypatch):
             "reported_at": dbmod.utcnow_iso(), "lanes": []}
     r = client.post("/api/v1/report", json=body, headers=fleet_headers())
     assert r.status_code == 200, r.text
-    assert r.json()["commands"]["jobs"] == {"offered": [job_id]}
+    block = r.json()["commands"]["jobs"]
+    assert block["offered"] == [job_id]
+    # ...and phase 4's depth signal beside it, so a companion can back off by
+    # itself rather than by being refused.
+    assert block["queue"] == {"queued": 1, "running": 0, "pinned": 0,
+                              "oldest_age_s": block["queue"]["oldest_age_s"]}
 
 
 def test_a_broken_scheduler_never_costs_a_report(env, monkeypatch):

@@ -21,6 +21,25 @@ log = logging.getLogger("ccsync.dashboard.settings")
 # what tells everyone whether their footage is syncing, and it keeps doing
 # that with no NAS credentials at all (only /admin/users and the login probe
 # depend on these).
+def _parse_kind_limits(raw: str) -> dict:
+    """`"whisper=2,proxy-480p=4"` -> `{"whisper": 2, "proxy-480p": 4}`.
+
+    A bad entry is dropped and the built-in default for that kind stands:
+    the failure mode of a limit is a fleet that saturates the media share,
+    and a typo must never be the thing that removes one.
+    """
+    out: dict = {}
+    for pair in str(raw or "").replace(";", ",").split(","):
+        name, sep, value = pair.partition("=")
+        if not sep:
+            continue
+        try:
+            out[name.strip()] = max(1, int(value.strip()))
+        except ValueError:
+            continue
+    return out
+
+
 def _looks_like_ed25519_pubkey(value: str) -> bool:
     """base64 of exactly 32 bytes (COMMERCIAL_READINESS.md item 4, 2026-08-17)."""
     import base64
@@ -379,6 +398,19 @@ class Settings:
     # itself reads, so the two can never disagree.
     broll_ingest_token: str = ""
 
+    # --- fleet job backpressure (TIMELINE-CARDS-INTO-CCSYNC.md phase 4) ---
+    # How many jobs of one KIND may be in flight across the whole fleet at
+    # once, over db.JOB_MAX_RUNNING's defaults. Spelled
+    # `DASH_JOBS_MAX_RUNNING="whisper=2,proxy-480p=4"`, because "how many
+    # ffmpegs the media share can feed" is a fact about somebody's network
+    # that this code cannot know. An unparseable entry is DROPPED with the
+    # default kept -- a typo must not remove a limit.
+    jobs_max_running: dict = field(default_factory=dict)
+    # How long a machine is left alone after handing a job back failed
+    # (DASH_JOBS_COOLDOWN_SECONDS, 0 disables). Without it the machine with
+    # the broken ffmpeg is first in the queue for every retry.
+    jobs_cooldown_seconds: float = 120.0
+
     # The Timeline Cards server this dashboard tunnels the agent protocol to
     # (docs/TIMELINE-CARDS-INTO-CCSYNC.md phase 2, 2026-08-30). Today that is
     # the separate custom app on :8800; phase 3 makes it in-process and these
@@ -682,6 +714,9 @@ class Settings:
             site_feature_auto_update=env.get("DASH_SITE_AUTO_UPDATE", "") == "1",
             broll_enabled=env.get("DASH_BROLL_ENABLED", "") == "1",
             broll_ingest_token=env.get("BROLL_INGEST_TOKEN", "").strip(),
+            jobs_max_running=_parse_kind_limits(
+                env.get("DASH_JOBS_MAX_RUNNING", "")),
+            jobs_cooldown_seconds=num("DASH_JOBS_COOLDOWN_SECONDS", 120.0),
             cards_server_url=env.get("DASH_CARDS_SERVER_URL", "").strip().rstrip("/"),
             cards_token=env.get("DASH_CARDS_TOKEN", "").strip(),
             # "1" and nothing else, matching DASH_BROLL_ENABLED.

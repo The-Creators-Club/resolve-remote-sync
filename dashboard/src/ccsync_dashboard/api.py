@@ -7708,9 +7708,28 @@ def api_report(
             # what makes the offer and the claim (which re-checks against the
             # capabilities in the claim body) two readings of the same rule.
             None if payload.capabilities is None else payload.capabilities.model_dump(),
-            now=received_at)
+            now=received_at, caps=jobs_mod.fleet_caps(settings))
+        # WHAT THIS MACHINE MAY DO, and WHAT IT MUST STOP (phase 4). The
+        # cancel list rides the same block as the offers, on the file_moves
+        # rule rather than the halt rule: it keeps being sent until the
+        # machine answers with a result, because an admin clicking [ CANCEL ]
+        # while a laptop is asleep must not be a click that evaporates.
+        cancels = db.pending_job_cancels(conn, editor, machine)
+        # ...and HOW DEEP THE QUEUE IS, so a companion can back off by
+        # itself. Present whenever there is anything at all to say, which is
+        # not the same as "there is something for this machine": a fleet with
+        # four queued jobs nobody can take is exactly the state an idle
+        # companion should be able to see.
+        depth = db.queue_depth(conn, received_at)
+        block: dict[str, Any] = {}
         if offers["offered"]:
-            result["commands"]["jobs"] = {"offered": offers["offered"]}
+            block["offered"] = offers["offered"]
+        if cancels:
+            block["cancel"] = cancels
+        if depth["queued"] or depth["running"] or depth["pinned"]:
+            block["queue"] = depth
+        if block:
+            result["commands"]["jobs"] = block
     except Exception:                                              # noqa: BLE001
         log.exception("could not work out which jobs %s/%s may claim", editor, machine)
     return result
@@ -8329,7 +8348,8 @@ def api_claim_job(
                     expired["id"], expired["claimed_by"], expired["claimed_machine"],
                     expired["state"])
     offers = jobs_mod.offers_for_machine(
-        conn, editor, machine, payload.capabilities, now, limit=MAX_JOB_OFFERS)
+        conn, editor, machine, payload.capabilities, now, limit=MAX_JOB_OFFERS,
+        caps=jobs_mod.fleet_caps(request.app.state.settings))
     job = db.claim_next_job(
         conn, editor, machine, payload.capabilities, now=now,
         allowed_ids=offers["offered"], kinds=payload.kinds)

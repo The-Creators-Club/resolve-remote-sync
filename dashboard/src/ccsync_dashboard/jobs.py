@@ -269,6 +269,80 @@ REFUSE_BUSY_WITH_JOB = "already_holds_a_job"
 REFUSE_NOT_IDLE = "not_idle"
 REFUSE_NO_CAPABILITIES = "no_capabilities_reported"
 REFUSE_NOT_PREFERRED = "another_machine_is_preferred"
+# Phase 4's three (2026-08-30).
+REFUSE_FLEET_CAP = "fleet_cap"
+REFUSE_COOLDOWN = "cooling_down"
+REFUSE_KIND_NOT_ALLOWED = "kind_not_allowed"
+REFUSE_JOBS_DISABLED = "jobs_disabled"
+
+# THE JOB-LEVEL ANSWER, which is a different question from the per-machine
+# one. Timeline Cards' client asks exactly one thing of `why` -- "may I stop
+# waiting and make this file myself" -- and the difference between "nothing in
+# this fleet can ever run this" and "every machine is busy for the next
+# minute" is the difference between falling back for ever and falling back
+# once. `schedulable` is the boolean it acts on; `reason_code` is why, and it
+# is a CODE and not a sentence because the client branches on it.
+REASON_SCHEDULABLE = ""
+REASON_NO_MACHINES = "no_machine_reported"
+REASON_NO_CAPABLE = "no_capable_machine"
+REASON_ALL_BUSY = "all_busy"
+REASON_FLEET_CAP = "fleet_cap"
+REASON_HALTED = "halted"
+REASON_IDLE_WAIT = "idle_wait"
+REASON_COOLDOWN = "cooling_down"
+REASON_NOT_ALLOWED = "kind_not_allowed"
+REASON_KIND_UNKNOWN = "kind_unknown"
+REASON_HELD = "held"
+REASON_PINNED = "pinned"
+REASON_FINISHED = "finished"
+
+# Which job-level code a per-machine refusal counts towards. Not the identity
+# map: `upgrading` and a tripped breaker are both "this machine is busy with
+# its own trouble", and a client cannot do anything different about either.
+REFUSAL_TO_REASON = {
+    REFUSE_CAPABILITY: REASON_NO_CAPABLE,
+    REFUSE_NO_CAPABILITIES: REASON_NO_CAPABLE,
+    REFUSE_KIND_UNKNOWN: REASON_KIND_UNKNOWN,
+    REFUSE_KIND_NOT_ALLOWED: REASON_NOT_ALLOWED,
+    REFUSE_JOBS_DISABLED: REASON_NOT_ALLOWED,
+    REFUSE_FLEET_HALT: REASON_HALTED,
+    REFUSE_MACHINE_HALT: REASON_HALTED,
+    REFUSE_UPGRADING: REASON_ALL_BUSY,
+    REFUSE_BREAKER: REASON_ALL_BUSY,
+    REFUSE_BUSY_WITH_JOB: REASON_ALL_BUSY,
+    REFUSE_NOT_IDLE: REASON_IDLE_WAIT,
+    REFUSE_COOLDOWN: REASON_COOLDOWN,
+    REFUSE_FLEET_CAP: REASON_FLEET_CAP,
+    REFUSE_NOT_PREFERRED: REASON_ALL_BUSY,
+}
+
+# Codes that mean "wait, do not do it yourself": the fleet WILL get to it.
+# Timeline Cards falls back locally on everything else, which is the safe
+# direction -- a duplicate proxy costs a minute of one machine, a lane with
+# no audio costs the person looking at it.
+TRANSIENT_REASONS = frozenset({REASON_ALL_BUSY, REASON_FLEET_CAP,
+                               REASON_IDLE_WAIT, REASON_COOLDOWN,
+                               REASON_HELD, REASON_PINNED})
+
+
+def fleet_caps(settings: Any = None) -> dict[str, int]:
+    """How many of each kind may be in flight across the fleet at once.
+
+    `db.JOB_MAX_RUNNING` unless this deployment overrode it
+    (DASH_JOBS_MAX_RUNNING): "how many ffmpegs the media share can feed" is a
+    fact about somebody's network, and this code has no way to know it.
+    """
+    caps = dict(db.JOB_MAX_RUNNING)
+    caps.update(dict(getattr(settings, "jobs_max_running", None) or {}))
+    return caps
+
+
+def max_running(kind: str, caps: Mapping[str, int] | None = None) -> int:
+    table = dict(caps) if caps is not None else dict(db.JOB_MAX_RUNNING)
+    try:
+        return max(1, int(table.get(str(kind), db.JOB_MAX_RUNNING_DEFAULT)))
+    except (TypeError, ValueError):
+        return db.JOB_MAX_RUNNING_DEFAULT
 
 
 def idle_floor(kind: str) -> int:
@@ -287,7 +361,8 @@ def machine_facts(
     caps = dict(capabilities) if capabilities is not None else \
         db.machine_capabilities(conn, editor, machine)
     row = conn.execute(
-        "SELECT mode, halt_active, breaker_tripped FROM machine_state "
+        "SELECT mode, halt_active, breaker_tripped, jobs_cooldown_until, "
+        "       jobs_cooldown_reason FROM machine_state "
         " WHERE editor_username=? AND machine=?", (editor, machine)).fetchone()
     upgrade = db.machine_update_request(conn, editor, machine)
     return {
@@ -300,6 +375,10 @@ def machine_facts(
         "upgrading": bool(upgrade),
         "live_jobs": db.machine_live_jobs(conn, editor, machine),
         "fleet_halt": bool(db.get_fleet_halt(conn)["active"]),
+        "cooldown_until": (str(row["jobs_cooldown_until"] or "")
+                           if row is not None else ""),
+        "cooldown_reason": (str(row["jobs_cooldown_reason"] or "")
+                            if row is not None else ""),
     }
 
 
@@ -333,7 +412,8 @@ def fleet_facts(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any
                         []).append({"id": row["id"], "kind": row["kind"]})
     out: dict[tuple[str, str], dict[str, Any]] = {}
     for row in conn.execute(
-        "SELECT editor_username, machine, mode, halt_active, breaker_tripped "
+        "SELECT editor_username, machine, mode, halt_active, breaker_tripped, "
+        "       jobs_cooldown_until, jobs_cooldown_reason "
         "  FROM machine_state ORDER BY editor_username, machine"
     ):
         key = (row["editor_username"], row["machine"])
@@ -346,12 +426,15 @@ def fleet_facts(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any
             "upgrading": key in upgrading,
             "live_jobs": live.get(key, []),
             "fleet_halt": halted,
+            "cooldown_until": str(row["jobs_cooldown_until"] or ""),
+            "cooldown_reason": str(row["jobs_cooldown_reason"] or ""),
         }
     return out
 
 
 def ranked_machines(
     job: Mapping[str, Any], fleet: Mapping[tuple[str, str], Mapping[str, Any]],
+    now: str | None = None,
 ) -> list[tuple[tuple[str, str], tuple[float, ...]]]:
     """Every machine that could take this job right now, best first.
 
@@ -364,7 +447,7 @@ def ranked_machines(
         ok, _why = db.job_requirements_met(job.get("requires"), facts["capabilities"])
         if not ok:
             continue
-        reason, _sentence = policy_refusal(facts, kind)
+        reason, _sentence = policy_refusal(facts, kind, now)
         if reason:
             continue
         able.append((key, rank_key(facts, kind, job)))
@@ -400,14 +483,15 @@ def first_refusal(
     """
     if job_age_seconds(job, now) >= RANK_GRACE_SECONDS:
         return True
-    able = ranked_machines(job, fleet)
+    able = ranked_machines(job, fleet, now)
     if not able:
         return True
     best = able[0][1]
     return any(k == key for k, score in able if score == best)
 
 
-def policy_refusal(facts: Mapping[str, Any], kind: str) -> tuple[str, str]:
+def policy_refusal(facts: Mapping[str, Any], kind: str,
+                   now: str | None = None) -> tuple[str, str]:
     """Why this machine may take no job of this kind right now, or ("", "").
 
     Order matters: the first true answer is the one shown, and it is the
@@ -434,6 +518,26 @@ def policy_refusal(facts: Mapping[str, Any], kind: str) -> tuple[str, str]:
         return (REFUSE_NO_CAPABILITIES,
                 "this machine has not reported what it can do (a companion "
                 "older than the job runner)")
+    if not caps.get("jobs_enabled", True):
+        return (REFUSE_JOBS_DISABLED,
+                "fleet jobs are switched off on this machine (jobs_enabled)")
+    # THE MACHINE'S OWN ALLOW-LIST (v45, phase 4). Its own refusal and not
+    # folded into the capability one: "this laptop does not do whisper" is a
+    # setting somebody chose, and "this laptop has no GPU" is a fact about
+    # the hardware. An admin looking at the why page can act on the first.
+    if not db.machine_allows_kind(caps, kind):
+        return (REFUSE_KIND_NOT_ALLOWED,
+                f"this machine's config allows only "
+                f"{', '.join(caps.get('job_kinds') or [])} jobs, not {kind}")
+    # ...AND A MACHINE THAT JUST FAILED ONE IS LEFT ALONE. Without this the
+    # machine with the broken ffmpeg is first in the queue for the retry
+    # every time -- failing in two seconds is exactly what keeps it idle --
+    # and one bad machine spends a two-attempt budget on its own.
+    until = str(facts.get("cooldown_until") or "")
+    if until and until > (now or db.utcnow_iso()):
+        reason = str(facts.get("cooldown_reason") or "a job failed here")
+        return (REFUSE_COOLDOWN,
+                f"this machine is cooling down until {until} ({reason})")
     # THE BASE RIG IS EXEMPT (MULTI_MACHINE_PLAN.md WP0): nobody sits at it,
     # and idle.py on a machine with no console session cannot answer anyway.
     if str(facts.get("mode") or "editor") != "base":
@@ -458,6 +562,7 @@ def offers_for_machine(
     conn: sqlite3.Connection, editor: str, machine: str,
     capabilities: Mapping[str, Any] | None = None,
     now: str | None = None, limit: int = 8,
+    caps: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """What this machine may claim right now.
 
@@ -477,16 +582,25 @@ def offers_for_machine(
     fleet: dict[tuple[str, str], Any] | None = None
     offered: list[int] = []
     refused: dict[int, str] = {}
+    # THE FLEET CAP IS COUNTED ONCE, not per job: it is a fact about the
+    # whole queue and this runs on every report of every machine. `running`
+    # is incremented as offers are made in this same pass, because eight
+    # offers of a capped kind on one reply is exactly the burst the cap
+    # exists to stop.
+    running = db.count_running_by_kind(conn)
     for job in db.queued_jobs(conn):
         kind = str(job["kind"])
         if kind not in db.JOB_KINDS:
             refused[int(job["id"])] = REFUSE_KIND_UNKNOWN
             continue
+        if running.get(kind, 0) >= max_running(kind, caps):
+            refused[int(job["id"])] = REFUSE_FLEET_CAP
+            continue
         ok, _why = db.job_requirements_met(job.get("requires"), facts["capabilities"])
         if not ok:
             refused[int(job["id"])] = REFUSE_CAPABILITY
             continue
-        reason, _sentence = policy_refusal(facts, kind)
+        reason, _sentence = policy_refusal(facts, kind, now)
         if reason:
             refused[int(job["id"])] = reason
             continue
@@ -502,12 +616,15 @@ def offers_for_machine(
             refused[int(job["id"])] = REFUSE_NOT_PREFERRED
             continue
         offered.append(int(job["id"]))
+        running[kind] = running.get(kind, 0) + 1
         if len(offered) >= max(1, int(limit)):
             break
     return {"offered": offered, "refused": refused}
 
 
-def explain(conn: sqlite3.Connection, job_id: int) -> dict[str, Any] | None:
+def explain(conn: sqlite3.Connection, job_id: int,
+            caps: Mapping[str, int] | None = None,
+            now: str | None = None) -> dict[str, Any] | None:
     """"Unschedulable, and why", per machine. None if there is no such job.
 
     Every machine the dashboard has ever heard from gets a line, including the
@@ -519,17 +636,21 @@ def explain(conn: sqlite3.Connection, job_id: int) -> dict[str, Any] | None:
     job = db.get_job(conn, int(job_id))
     if job is None:
         return None
+    now = now or db.utcnow_iso()
     kind = str(job["kind"])
     lines: list[dict[str, Any]] = []
-    if job["state"] in db.JOB_TERMINAL_STATES or job["state"] in db.JOB_HELD_STATES:
+    if (job["state"] in db.JOB_TERMINAL_STATES
+            or job["state"] in db.JOB_HELD_STATES
+            or job["state"] == db.JOB_PINNED):
         # Not a scheduling question any more. Say so rather than listing
         # eight machines that "could have".
         return {
             "job": job, "schedulable": False, "machines": [],
+            "reason_code": _terminal_reason(job),
             "summary": _terminal_summary(job),
         }
     fleet = fleet_facts(conn)
-    able = ranked_machines(job, fleet)
+    able = ranked_machines(job, fleet, now)
     order = {key: rank for rank, (key, _score) in enumerate(able, start=1)}
     scores = dict(able)
     best_key, best_score = (able[0] if able else (None, ()))
@@ -539,7 +660,7 @@ def explain(conn: sqlite3.Connection, job_id: int) -> dict[str, Any] | None:
             lines.append({"editor": editor, "machine": machine, "ok": False,
                           "reason": REFUSE_CAPABILITY, "why": why})
             continue
-        reason, sentence = policy_refusal(facts, kind)
+        reason, sentence = policy_refusal(facts, kind, now)
         if reason:
             lines.append({"editor": editor, "machine": machine, "ok": False,
                           "reason": reason, "why": sentence})
@@ -573,18 +694,77 @@ def explain(conn: sqlite3.Connection, job_id: int) -> dict[str, Any] | None:
                              f"waited {int(RANK_GRACE_SECONDS)}s)")
         lines.append(line)
     can = [m for m in lines if m["ok"]]
+    # The fleet cap is a property of the QUEUE, not of any machine, so it is
+    # asked here rather than in policy_refusal: every machine could take this
+    # job, and the answer is still "not yet".
+    live = db.count_running_by_kind(conn).get(kind, 0)
+    cap = max_running(kind, caps)
+    capped = kind in db.JOB_KINDS and live >= cap
     if kind not in db.JOB_KINDS:
+        code = REASON_KIND_UNKNOWN
         summary = (f"this dashboard does not know the job kind {kind!r}, so no "
                    f"machine will ever be offered it")
+    elif capped:
+        code = REASON_FLEET_CAP
+        summary = (f"{live} {kind} job(s) are already running, which is this "
+                   f"fleet's limit ({cap}); it starts as soon as one finishes")
     elif can:
+        code = REASON_SCHEDULABLE
         summary = (f"{len(can)} machine(s) can take this job; it is waiting to "
                    f"be claimed on their next report")
     elif not lines:
+        code = REASON_NO_MACHINES
         summary = "no machine has ever reported to this dashboard"
     else:
+        code = _blocked_reason(lines)
         summary = _blocked_summary(lines)
-    return {"job": job, "schedulable": bool(can) and kind in db.JOB_KINDS,
+    return {"job": job,
+            # UNCHANGED MEANING (phase 1): "is anything going to take this,
+            # soon". Timeline Cards' client makes the file itself when this
+            # is false, and that is still the right answer for a fleet whose
+            # every machine has somebody sitting at it.
+            "schedulable": bool(can) and kind in db.JOB_KINDS and not capped,
+            # ...and the code is what tells the two kinds of false apart
+            # (phase 4): `no_capable_machine` will still be true in an hour,
+            # `all_busy` will not.
+            "reason_code": code,
+            "transient": code in TRANSIENT_REASONS,
+            # How many machines could EVER run this, ignoring who is at their
+            # desk right now. The number an admin needs before buying a GPU.
+            "capable": sum(1 for m in lines
+                           if m["reason"] not in (REFUSE_CAPABILITY,
+                                                  REFUSE_NO_CAPABILITIES,
+                                                  REFUSE_KIND_NOT_ALLOWED,
+                                                  REFUSE_JOBS_DISABLED)),
+            "running": live, "cap": cap,
             "machines": lines, "summary": summary}
+
+
+def _terminal_reason(job: Mapping[str, Any]) -> str:
+    state = str(job["state"])
+    if state in db.JOB_HELD_STATES:
+        return REASON_HELD
+    if state == db.JOB_PINNED:
+        return REASON_PINNED
+    return REASON_FINISHED
+
+
+def _blocked_reason(lines: list[dict[str, Any]]) -> str:
+    """The job-level code, from the per-machine refusals.
+
+    THE WORST ANSWER WINS, not the commonest: one machine that could do this
+    if its editor stood up is a fleet that will get to it, and answering
+    "no_capable_machine" because four other machines have no GPU would send
+    the client off to do GPU work on a laptop.
+    """
+    codes = {REFUSAL_TO_REASON.get(line["reason"], REASON_NO_CAPABLE)
+             for line in lines}
+    for code in (REASON_ALL_BUSY, REASON_FLEET_CAP, REASON_COOLDOWN,
+                 REASON_IDLE_WAIT, REASON_HALTED, REASON_NOT_ALLOWED,
+                 REASON_KIND_UNKNOWN):
+        if code in codes:
+            return code
+    return REASON_NO_CAPABLE
 
 
 def _terminal_summary(job: Mapping[str, Any]) -> str:
@@ -592,6 +772,9 @@ def _terminal_summary(job: Mapping[str, Any]) -> str:
     if state in db.JOB_HELD_STATES:
         return (f"{job['claimed_by']}/{job['claimed_machine']} is holding this "
                 f"job (lease until {job['lease_expires_at']})")
+    if state == db.JOB_PINNED:
+        return ("the fleet could not finish this, so it is pinned to the "
+                "dashboard's own worker; it never goes back to the fleet")
     if state == db.JOB_DONE:
         return "this job is done"
     if state == db.JOB_ABANDONED:
@@ -619,6 +802,10 @@ def _blocked_summary(lines: list[dict[str, Any]]) -> str:
         REFUSE_NO_CAPABILITIES: "have not said what they can do",
         REFUSE_KIND_UNKNOWN: "would never be offered this kind",
         REFUSE_NOT_PREFERRED: "are waiting for a better-placed machine",
+        REFUSE_COOLDOWN: "are cooling down after failing a job",
+        REFUSE_KIND_NOT_ALLOWED: "are not allowed this kind of work",
+        REFUSE_JOBS_DISABLED: "have fleet jobs switched off",
+        REFUSE_FLEET_CAP: "are at this fleet's limit for the kind",
     }.get(reason, reason)
     return (f"no machine can take this job right now: {count} of {len(lines)} "
             f"{words}")

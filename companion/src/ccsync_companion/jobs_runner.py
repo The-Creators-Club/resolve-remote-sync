@@ -88,6 +88,12 @@ HEARTBEAT_SECONDS = 30.0
 # carry its summary line and a traceback; nowhere near enough to be a log
 # shipping channel.
 OUTPUT_TAIL_CHARS = 4000
+# How much longer this loop waits when the dashboard says the queue is empty
+# (phase 4's backpressure, and it is the companion's half of it). Capped, so
+# a machine that has backed off still notices work within two minutes -- the
+# offers ride the report anyway, and the report interval is 5-60 s.
+IDLE_BACKOFF = 4.0
+IDLE_BACKOFF_MAX_SECONDS = 120.0
 # "(12 written, 0 failed, 3 skipped) (41.2 min audio in 3.6 min, 11.4x
 # realtime overall)" -- whisper_corpus's own summary line.
 _REALTIME_RE = re.compile(r"([0-9.]+)x realtime")
@@ -132,6 +138,12 @@ class JobRunner:
 
         self._lock = threading.Lock()
         self._offered: list[int] = []
+        # THE QUEUE DEPTH THE DASHBOARD LAST REPORTED (phase 4): {queued,
+        # running, pinned, oldest_age_s}, or {} from a dashboard too old to
+        # send one. It is not an instruction -- the offers are -- it is what
+        # lets this loop stop asking a fleet that has nothing to give.
+        self._queue: dict[str, Any] = {}
+        self._cancel: list[int] = []
         self._job: Optional[dict[str, Any]] = None
         self._state = STATE_NOTHING_OFFERED
         self._stop = threading.Event()
@@ -139,19 +151,29 @@ class JobRunner:
 
     # -- what the app hands us ------------------------------------------
     def note_report_reply(self, resp: Any) -> None:
-        """Read `commands.jobs.offered` off a report reply. Never raises:
-        this runs on the reporter thread, beside the halt and the file
-        moves."""
+        """Read `commands.jobs` off a report reply: what this machine may
+        claim, what an admin has asked it to stop, and how deep the queue is.
+
+        Never raises: this runs on the reporter thread, beside the halt and
+        the file moves."""
         try:
             commands = resp.get("commands") if isinstance(resp, dict) else None
             block = commands.get("jobs") if isinstance(commands, dict) else None
-            offered = block.get("offered") if isinstance(block, dict) else None
+            if not isinstance(block, dict):
+                block = {}
+            offered = block.get("offered")
             ids = [int(i) for i in offered] if isinstance(offered, list) else []
+            cancel = block.get("cancel")
+            stops = [int(i) for i in cancel] if isinstance(cancel, list) else []
+            queue = block.get("queue")
+            depth = dict(queue) if isinstance(queue, dict) else {}
         except (TypeError, ValueError):
             log.debug("jobs: unreadable offer block", exc_info=True)
             return
         with self._lock:
             self._offered = ids[:16]
+            self._queue = depth
+            self._cancel = stops[:16]
 
     def status(self) -> dict[str, Any]:
         """Zero-I/O snapshot for the log, the diagnostics bundle and (later)
@@ -159,7 +181,30 @@ class JobRunner:
         with self._lock:
             job = dict(self._job) if self._job else None
             return {"state": self._state, "offered": list(self._offered),
+                    "queue": dict(self._queue),
                     "job": {"id": job["id"], "kind": job["kind"]} if job else None}
+
+    def wait_seconds(self) -> float:
+        """How long to sleep before the next tick -- THE BACKOFF (phase 4).
+
+        The offers ride the report reply, so a tick with nothing offered
+        makes no HTTP call at all and costs nothing. What this exists for is
+        the other half: a dashboard that says the queue is EMPTY is a
+        dashboard that will have nothing for a while, and a fleet of eight
+        machines waking up every 20 s to discover that is eight pointless
+        wakeups a minute on eight editors' laptops.
+
+        A DEEP queue never lengthens the wait. Backpressure here means "stop
+        asking", never "stop working": the machines are what empties it.
+        """
+        base = max(2.0, float(self.poll_seconds))
+        with self._lock:
+            offered, depth = list(self._offered), dict(self._queue)
+        if offered or not depth:
+            return base
+        if int(depth.get("queued") or 0) > 0 or int(depth.get("running") or 0) > 0:
+            return base
+        return min(base * IDLE_BACKOFF, IDLE_BACKOFF_MAX_SECONDS)
 
     # -- the gate --------------------------------------------------------
     def _seconds_idle(self) -> Optional[float]:
@@ -351,7 +396,7 @@ class JobRunner:
                 self.tick()
             except Exception:
                 log.exception("jobs: the runner tick failed")
-            self._stop.wait(max(2.0, float(self.poll_seconds)))
+            self._stop.wait(self.wait_seconds())
 
     def tick(self) -> Optional[dict[str, Any]]:
         """One pass: claim if allowed, run it, report it. -> the job it ran.

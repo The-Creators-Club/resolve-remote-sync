@@ -194,3 +194,56 @@ def test_a_cancel_for_a_job_this_machine_is_not_holding_is_harmless(tmp_path):
     r.note_report_reply({"commands": {"jobs": {"cancel": [1, 2, 3]}}})
     assert r._cancel_requested(2) is True
     assert r._cancel_requested(9) is False
+
+
+# ----------------------------------------------------------- the allow-list
+
+def test_no_allow_list_is_every_kind():
+    """The default, and it has to be: naming the kinds you DO want is the
+    only way to be excluded from one."""
+    assert caps_mod.job_kinds({}) == []
+    assert caps_mod.job_kinds({"jobs_kinds": []}) == []
+
+
+def test_an_allow_list_reaches_the_capabilities_section(tmp_path):
+    caps_mod.reset_cache()
+    section = caps_mod.build({"jobs_kinds": ["whisper", "peaks"]},
+                             use_cache=False)
+    assert section["job_kinds"] == ["whisper", "peaks"]
+
+
+def test_a_hand_written_comma_string_is_read_as_a_list():
+    """config.toml is edited by hand, and `jobs_kinds = "whisper, peaks"` is
+    what a person writes when the example line is out of sight."""
+    assert caps_mod.job_kinds({"jobs_kinds": "whisper, peaks"}) ==         ["whisper", "peaks"]
+
+
+def test_a_typo_in_the_allow_list_is_dropped_not_obeyed():
+    """A machine allow-listing a kind that does not exist would silently take
+    no work at all, which looks exactly like a machine that is offline."""
+    assert caps_mod.job_kinds({"jobs_kinds": ["whisper", "proxy480"]}) ==         ["whisper"]
+
+
+def test_the_runner_will_not_claim_a_kind_this_machine_is_not_allowed():
+    """Honoured on BOTH sides: the dashboard's filter stops the offer, and
+    this stops a stale offer being acted on."""
+    r = runner_mod.JobRunner(
+        {"dashboard_url": "http://d", "dashboard_token": "t"},
+        capabilities_fn=lambda: {"whisper": True, "ffmpeg": True,
+                                 "ffprobe": True,
+                                 "job_kinds": ["proxy-480p"]},
+        idle_probe=FakeIdle(), machine_name="EDIT-PC")
+    assert r.runnable_kinds() == ["proxy-480p"]
+
+
+def test_an_editors_laptop_can_be_kept_out_of_one_kind_not_the_fleet():
+    """The point of the setting: `jobs_enabled = false` was the only tool,
+    and it takes the machine out of everything."""
+    r = runner_mod.JobRunner(
+        {"dashboard_url": "http://d", "dashboard_token": "t"},
+        capabilities_fn=lambda: {"whisper": True, "ffmpeg": True,
+                                 "ffprobe": True,
+                                 "job_kinds": ["peaks", "audio-extract"]},
+        idle_probe=FakeIdle(), machine_name="EDIT-PC")
+    assert "whisper" not in r.runnable_kinds()
+    assert sorted(r.runnable_kinds()) == ["audio-extract", "peaks"]

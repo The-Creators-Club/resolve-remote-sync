@@ -261,3 +261,43 @@ def test_the_worst_answer_wins_not_the_commonest(conn):
     machine(conn, "capable", dict(MEDIA_CAPS, idle_seconds=2))
     answer = jobs_mod.explain(conn, queue(conn, "peaks", {"ffmpeg": True}))
     assert answer["reason_code"] == jobs_mod.REASON_IDLE_WAIT
+
+
+# --------------------------------------------------------- the allow-list
+
+def test_a_machine_is_not_offered_a_kind_its_config_excludes(conn):
+    """`jobs_enabled = false` was the only tool, and it takes the machine out
+    of everything. "This laptop may make a proxy overnight but must never be
+    handed a whisper pass" was unsayable until now."""
+    key = machine(conn, "laptop", dict(MEDIA_CAPS, job_kinds=["proxy-480p"]))
+    peaks = queue(conn, "peaks")
+    proxy = queue(conn, "proxy-480p")
+    offers = jobs_mod.offers_for_machine(conn, *key)
+    assert offers["offered"] == [proxy]
+    assert offers["refused"][peaks] == jobs_mod.REFUSE_KIND_NOT_ALLOWED
+
+
+def test_no_allow_list_is_every_kind(conn):
+    """A companion older than phase 4 sends none, and must not be read as
+    "no kinds" -- that would take the whole fleet out of the queue on the day
+    the dashboard is deployed ahead of the companions."""
+    key = machine(conn, "old", dict(MEDIA_CAPS))
+    job_id = queue(conn, "peaks")
+    assert jobs_mod.offers_for_machine(conn, *key)["offered"] == [job_id]
+
+
+def test_the_allow_list_is_a_sentence_on_the_why_page(conn):
+    machine(conn, "laptop", dict(MEDIA_CAPS, job_kinds=["proxy-480p"]))
+    answer = jobs_mod.explain(conn, queue(conn, "peaks"))
+    assert answer["reason_code"] == jobs_mod.REASON_NOT_ALLOWED
+    assert "allows only proxy-480p" in answer["machines"][0]["why"]
+    # ...and it is NOT counted as a machine that could do this: an admin
+    # asking "do I need another box" is asking about hardware, and this is a
+    # setting somebody chose.
+    assert answer["capable"] == 0
+
+
+def test_jobs_switched_off_is_its_own_refusal(conn):
+    machine(conn, "off", dict(MEDIA_CAPS, jobs_enabled=False))
+    answer = jobs_mod.explain(conn, queue(conn, "peaks"))
+    assert answer["machines"][0]["reason"] == jobs_mod.REFUSE_JOBS_DISABLED

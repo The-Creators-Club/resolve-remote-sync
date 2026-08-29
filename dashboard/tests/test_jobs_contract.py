@@ -379,3 +379,92 @@ def test_the_cards_report_block_the_role_builds_parses_here(env, tmp_path):
         if value is None:
             continue
         assert stored[key] == value, f"cards_agent.{key} did not survive the report"
+
+
+# ---------------------------------------------------- phase 4 (2026-08-30)
+#
+# Three more fields on the same two wires, and each of them is a bug that
+# would only show up in the field if the two halves disagreed: a cancel that
+# never reaches the machine running the job, a depth signal a companion reads
+# as zero and backs off on for ever, and an allow-list that silently takes
+# every machine out of the queue.
+
+
+def test_the_cancel_the_dashboard_sends_is_the_one_the_runner_reads(env):
+    _caps, _paths, jobs_runner = companion()
+    client, conn = env
+    job_id = dbmod.create_job(conn, "peaks", {"root": "media", "rel_path": "a.mp4"})
+    dbmod.claim_job(conn, job_id, "jsmith", "EDIT-PC")
+    conn.commit()
+    as_admin(client).post(f"/api/v1/jobs/{job_id}/cancel")
+
+    reply = client.post("/api/v1/report", json={
+        "editor_name": "jsmith", "machine": "EDIT-PC", "lanes": [],
+        "reported_at": dbmod.utcnow_iso(),
+    }, headers=hdr()).json()
+    runner = jobs_runner.JobRunner({}, machine_name="EDIT-PC")
+    runner.note_report_reply(reply)
+    assert runner._cancel_requested(job_id) is True
+
+
+def test_the_depth_signal_the_dashboard_sends_is_the_one_the_runner_backs_off_on(env):
+    _caps, _paths, jobs_runner = companion()
+    client, conn = env
+    reply = client.post("/api/v1/report", json={
+        "editor_name": "jsmith", "machine": "EDIT-PC", "lanes": [],
+        "reported_at": dbmod.utcnow_iso(),
+    }, headers=hdr()).json()
+    runner = jobs_runner.JobRunner({"jobs_poll_seconds": 20},
+                                   machine_name="EDIT-PC")
+    runner.note_report_reply(reply)
+    # An empty fleet queue sends no block at all, and the runner keeps its
+    # cadence: no key means "an older dashboard", which must not be read as
+    # "nothing to do for ever".
+    assert runner.wait_seconds() == 20.0
+
+    dbmod.create_job(conn, "peaks", {"root": "media", "rel_path": "a.mp4"})
+    conn.commit()
+    reply = client.post("/api/v1/report", json={
+        "editor_name": "jsmith", "machine": "EDIT-PC", "lanes": [],
+        "reported_at": dbmod.utcnow_iso(),
+    }, headers=hdr()).json()
+    runner.note_report_reply(reply)
+    assert runner.status()["queue"]["queued"] == 1
+    assert set(runner.status()["queue"]) == {"queued", "running", "pinned",
+                                             "oldest_age_s"}
+
+
+def test_the_allow_list_the_companion_reports_is_the_one_the_scheduler_filters_on(
+        env, tmp_path):
+    """The `ffprobe` lesson again: a field the report model does not declare
+    is dropped SILENTLY, and the symptom here would be a laptop being handed
+    exactly the work its owner excluded."""
+    caps_mod, _paths, _runner = companion()
+    client, conn = env
+    section = caps_mod.build({"local_root": str(tmp_path),
+                              "jobs_kinds": ["proxy-480p"]},
+                             use_cache=False)
+    assert section["job_kinds"] == ["proxy-480p"]
+    r = client.post("/api/v1/report", json={
+        "editor_name": "jsmith", "machine": "EDIT-PC", "lanes": [],
+        "reported_at": dbmod.utcnow_iso(), "capabilities": section,
+    }, headers=hdr())
+    assert r.status_code == 200, r.text
+    stored = dbmod.machine_capabilities(conn, "jsmith", "EDIT-PC")
+    assert stored["job_kinds"] == ["proxy-480p"]
+    assert dbmod.machine_allows_kind(stored, "proxy-480p") is True
+    assert dbmod.machine_allows_kind(stored, "whisper") is False
+
+
+def test_an_empty_allow_list_survives_as_every_kind(env, tmp_path):
+    caps_mod, _paths, _runner = companion()
+    client, conn = env
+    section = caps_mod.build({"local_root": str(tmp_path)}, use_cache=False)
+    assert section["job_kinds"] == []
+    client.post("/api/v1/report", json={
+        "editor_name": "jsmith", "machine": "EDIT-PC", "lanes": [],
+        "reported_at": dbmod.utcnow_iso(), "capabilities": section,
+    }, headers=hdr())
+    stored = dbmod.machine_capabilities(conn, "jsmith", "EDIT-PC")
+    assert stored["job_kinds"] == []
+    assert dbmod.machine_allows_kind(stored, "whisper") is True

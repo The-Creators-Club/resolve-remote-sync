@@ -6654,6 +6654,13 @@ class CapabilitiesIn(_ReportSectionIn):
     load: float | None = Field(default=None, ge=0)
     jobs_enabled: bool = True
     jobs_idle_seconds: float | None = Field(default=None, ge=0)
+    # THE MACHINE'S OWN ALLOW-LIST (phase 4, 2026-08-30): `[jobs] kinds` in
+    # its config. None (a companion older than phase 4) and [] (an editor who
+    # set no key) are the SAME ANSWER -- all kinds -- because the only way to
+    # be excluded from a kind is to name the kinds you do want. Anything else
+    # would take every machine in the fleet out of the queue on the day this
+    # dashboard is deployed ahead of the companions.
+    job_kinds: list[str] | None = Field(default=None, max_length=16)
     resolve: ResolveCapabilityIn | None = None
     cards_agent: CardsAgentIn | None = None
 

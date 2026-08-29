@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import config as config_mod
-from . import ffmpeg_tools, job_paths
+from . import ffmpeg_tools, job_paths, jobs_media
 
 log = logging.getLogger("ccsync.capabilities")
 
@@ -60,6 +60,11 @@ log = logging.getLogger("ccsync.capabilities")
 CACHE_SECONDS = 45.0
 
 NVENC_ENCODERS = ("h264_nvenc", "hevc_nvenc")
+
+# The kinds a `jobs_kinds` allow-list may name. `conform` and `resolve-edit`
+# are absent and must stay absent (§4.2): every edit is a synthetic keystroke
+# into whatever Resolve has open on ONE machine.
+KNOWN_KINDS = ("whisper",) + tuple(jobs_media.MEDIA_KINDS)
 
 _lock = threading.Lock()
 _cache: Optional[tuple[float, dict[str, Any]]] = None
@@ -102,6 +107,42 @@ def whisper_ready(cfg: dict[str, Any]) -> tuple[bool, str]:
     if not _exists(Path(pipeline).expanduser() / "pipeline.py"):
         return False, f"there is no pipeline.py under {pipeline}"
     return True, ""
+
+
+def job_kinds(cfg: dict[str, Any]) -> list[str]:
+    """`jobs_kinds` from this machine's config, cleaned. [] = every kind.
+
+    A list, a comma string, or nothing -- config.toml is edited by hand and
+    `jobs_kinds = "whisper, peaks"` is what a person writes when the example
+    line is out of sight. An entry that is not a kind this build knows is
+    DROPPED with a warning rather than obeyed: a typo'd name in an allow-list
+    is a machine that silently takes no work at all, which looks exactly like
+    a machine that is offline.
+    """
+    raw = cfg.get("jobs_kinds", None)
+    if raw is None or raw == "":
+        return []
+    if isinstance(raw, str):
+        names = [part.strip() for part in raw.replace(";", ",").split(",")]
+    else:
+        try:
+            names = [str(part).strip() for part in raw]
+        except TypeError:
+            log.warning("capabilities: jobs_kinds is not a list of kinds (%r); "
+                        "this machine will take every kind", raw)
+            return []
+    out: list[str] = []
+    for name in names:
+        if not name:
+            continue
+        if name not in KNOWN_KINDS:
+            log.warning("capabilities: jobs_kinds names %r, which is not a job "
+                        "kind this build knows (%s) -- ignoring it",
+                        name, ", ".join(KNOWN_KINDS))
+            continue
+        if name not in out:
+            out.append(name)
+    return out
 
 
 def _nvenc(cfg: dict[str, Any]) -> bool:
@@ -249,6 +290,13 @@ def build(
         # this machine's can be compared when they disagree.
         "jobs_enabled": bool(cfg.get("jobs_enabled", True)),
         "jobs_idle_seconds": config_mod.coerce_numeric(cfg, "jobs_idle_seconds", 300),
+        # WHICH KINDS THIS MACHINE WILL TAKE (phase 4, 2026-08-30). Empty is
+        # ALL KINDS, and it is the default: the only way to be excluded from
+        # a kind is to name the kinds you do want. Phase 1 left this open --
+        # an editor's laptop could only be taken out of the fleet ENTIRELY
+        # (`jobs_enabled = false`), and "this laptop may make a proxy
+        # overnight but must never be handed a whisper pass" was unsayable.
+        "job_kinds": job_kinds(cfg),
     }
     section["idle_seconds"] = _idle_seconds(idle_probe)
     section["resolve"] = _resolve_block(resolve_running_fn, resolve_project_fn)

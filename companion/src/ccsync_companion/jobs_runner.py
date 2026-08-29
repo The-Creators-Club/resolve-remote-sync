@@ -285,6 +285,15 @@ class JobRunner:
         # BOTH, never one: every media recipe probes before it encodes.
         if caps.get("ffmpeg") and caps.get("ffprobe"):
             kinds.extend(jobs_media.MEDIA_KINDS)
+        # ...AND THIS MACHINE'S OWN ALLOW-LIST (phase 4), from the same
+        # capabilities section the scheduler filtered on, so the two answers
+        # cannot disagree. Empty is every kind. Honoured on BOTH sides
+        # deliberately: the dashboard's filter is what stops the offer, and
+        # this is what stops a stale offer being acted on by a machine whose
+        # owner has since changed their mind.
+        allowed = [str(k) for k in (caps.get("job_kinds") or [])]
+        if allowed:
+            kinds = [k for k in kinds if k in allowed]
         return kinds
 
     def _gate(self) -> str:

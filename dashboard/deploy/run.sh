@@ -284,6 +284,14 @@ export PYTHONPATH=/app/src:/broll-app:/music-app:/ytdl-app
 # in the list above, so that when it is empty the exported path gains no empty
 # entry -- an empty entry is how /music once came to report "absent" behind a
 # green healthcheck.
+# /cards-app IS DELIBERATELY NOT ON THAT LIST (Timeline Cards, phase 3,
+# 2026-08-30). It is another repo's tree: it is never in this image and never
+# in an over-the-air code bundle, so `select_code_root.py` -- which re-derives
+# the four roots above on every image-mode boot -- has nothing to say about
+# it, and a fifth entry here would be dropped on exactly the boots that
+# matter. `ccsync_dashboard.cards` appends DASH_CARDS_SRC (=/cards-app) to
+# sys.path itself when it mounts, so the path entry and the mount are one
+# decision instead of two that can disagree.
 IMAGE_PYTHONPATH="$PYTHONPATH$PYTHONPATH_EXTRA"
 PYTHONPATH="$IMAGE_PYTHONPATH"
 export PYTHONPATH
@@ -315,6 +323,13 @@ export PYTHONPATH
 # resolution of ~ for pip, uvicorn and every library in the dashboard. The
 # entry is kept in the PATH below so an older host that still has the mount
 # does not change behaviour mid-upgrade; it can go once no deployment has one.
+# ...and the same /opt/ffmpeg serves TIMELINE CARDS at /cards, which needs
+# both binaries: ffmpeg for the lane's Opus copies, the .peaks and the audio
+# it pulls out of a clip's own media, ffprobe to prove an extraction came out
+# the length it went in. Its `media.ffmpeg_path()` / `ffprobe_path()` look on
+# PATH FIRST and only then in two Windows install locations, so this line is
+# all it needs -- and an empty /opt/ffmpeg mount is a state it reports rather
+# than one it crashes on.
 export PATH="/opt/ffmpeg:/opt/claude:/opt/deno:$PATH"
 
 # UVICORN'S ACCESS LOG, OFF BY DEFAULT (ops-efficiency-7, 2026-08-21).

@@ -419,3 +419,67 @@ project_acl = "shared"
 # so until the first release, use ":edge" (published on every push to main) or
 # the digest it resolves to.
 # image = "ghcr.io/the-creators-club/ccsync:1"
+
+# --------------------------------------------------------------------------
+[timeline_cards]
+# --------------------------------------------------------------------------
+# The Timeline Cards page, hosted BY THE DASHBOARD at /cards
+# (docs/TIMELINE-CARDS-INTO-CCSYNC.md phase 3, 2026-08-30). The whole section
+# is optional and OFF is the shipped state: a site that says nothing here gets
+# the dashboard exactly as it was, and /cards reports `disabled` with the
+# reason on GET /api/v1/health.
+#
+# THE ORDER TO DO IT IN, because two of these fail in ways that look like
+# something else:
+#   1. `src` -- point it at a MulticamPipeline checkout on the machine that
+#      RUNS THE DEPLOY (it is not part of this repo). Without it the deploy
+#      ships nothing and /cards is `absent`.
+#   2. `vault_host` -- and BEFORE the first deploy, make it writable by this
+#      container's uid: docs/DOCKER.md, "The Timeline Cards mounts", has the
+#      exact chown/chmod. Without that the page loads and every plan it saves
+#      is refused with EACCES, which reads on the page as "the plan did not
+#      save" and nowhere else.
+#   3. `enabled = true`.
+# enabled = false
+# The checkout to ship. Overridden by $CARDS_SRC in the deploying shell.
+# src = "E:\Projects\Editing\Resolve\MulticamPipeline"
+# THE VAULT, mounted read-write at /vault: transcripts, plans, notes, the
+# translation caches and the reference WAVs. The whole vault rather than one
+# episode -- the header's root menu walks siblings, and following the edit to
+# the next show should not need a redeploy.
+# vault_host = "/mnt/tank/web"
+# The group the vault's files belong to. The container is added to it
+# (`group_add`) so its uid may write a share that is somebody else's.
+# vault_gid = "3000"
+# The episode the page opens on, as the CONTAINER sees it. Blank = the vault
+# root; the root menu switches it live either way.
+# root = "/vault/Vault/2026/FF5/Civil Defence"
+# THE FOOTAGE SHARE, mounted read-only at /media, and the path translation
+# that makes it usable. EITHER ALONE DOES NOTHING: without the map the
+# container cannot turn `P:\Projects\...` (which is how the agent names a
+# clip) into the same bytes under /media, and the lane plays no audio for any
+# clip that has no rendered WAV.
+# media_host = "/mnt/tank/TheCreatorsPool/Creators_Club"
+# media_map = "P:/=/media"
+# Resolve's project library (PostgreSQL). With it the page comes up with cards
+# from the SAVED timeline before any agent has connected, and its picker can
+# roam every library on that host. NOT `localhost`: the project server is
+# another container.
+# db_host = "192.168.0.102"
+# db_name = "FF5"
+# Which libraries this server may WRITE -- a conform built straight into
+# Resolve's own database, with no Resolve running. Blank (the default) means
+# no library write is possible and the page says so instead of offering a
+# route that cannot work. Start with a sandbox copy.
+# db_write_allow = "FF5lab"
+# Where the writer puts the row backup it takes before every write. Blank =
+# library_backups/ under the app's own /data volume.
+# db_backups = ""
+# A .cut.md PROJECT FILE to serve instead of the agent's timeline. Blank = the
+# timeline server, which is what the page has always been.
+# project = ""
+# THE OLD, SEPARATE cards server (phase 2). Only used when the page is NOT
+# mounted here: the three /cards/agent/* tunnel routes then forward to it, so
+# both origins can run side by side during the transition. Its secret is
+# $DASH_CARDS_TOKEN in the deploying shell, never in this file.
+# server_url = "http://truenas:8800"

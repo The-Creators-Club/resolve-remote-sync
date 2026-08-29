@@ -297,6 +297,59 @@ services:
       # nothing set this (2026-08-16). Removing the line is the global
       # rollback; per job it is the "download on the server instead" link.
       YTDL_LOCAL_DOWNLOAD: "1"
+      # --- TIMELINE CARDS, hosted here at /cards -------------------------
+      # docs/TIMELINE-CARDS-INTO-CCSYNC.md phase 3 (2026-08-30). ALL OF IT IS
+      # OPTIONAL and blank is the shipped state: with DASH_CARDS_ENABLED off
+      # the dashboard boots exactly as before and /cards reports `disabled`
+      # with the reason. On a site that turns it on, these are the same
+      # values the standalone container takes as CARDS_*, one for one, so
+      # `server.main --remote-agent` and `cards.build_engine` construct the
+      # same engine.
+      #
+      # TWO OF THEM ARE MOUNTS, NOT SETTINGS: the vault at /vault (rw) and
+      # the footage share at /media (ro) are added to the volume list by
+      # server/install_dashboard_app.py when site.toml's [timeline_cards]
+      # names them -- see the note in the volumes block below, and
+      # docs/DOCKER.md for the chown the vault needs first.
+      DASH_CARDS_ENABLED: "0"
+      # The MulticamPipeline checkout `multicam_pipeline.cards` is imported
+      # from, shipped to the host and mounted read-only exactly as
+      # /broll-app is. NOT on PYTHONPATH: it is another repo's tree, it is
+      # never in this image or in an over-the-air code bundle, so
+      # ccsync_dashboard.cards appends this path itself at mount time.
+      DASH_CARDS_SRC: ""
+      DASH_CARDS_VAULT_ROOT: ""
+      # The episode root the page opens on. Blank = the vault root, and the
+      # header's root menu walks the rest either way.
+      DASH_CARDS_ROOT: ""
+      # A .cut.md PROJECT FILE to serve instead of the agent's timeline
+      # (PROJECT-FORMAT-PLAN §4.1). Blank = the timeline server.
+      DASH_CARDS_PROJECT: ""
+      # Resolve's project library (PostgreSQL): with it the page comes up
+      # with cards from the SAVED timeline before any agent has connected.
+      # NOT `localhost` -- the postgres app is another container.
+      DASH_CARDS_DB_HOST: ""
+      DASH_CARDS_DB_NAME: ""
+      # Which libraries may be WRITTEN (a conform built straight into
+      # Resolve's own database). Blank -- the default -- means no library
+      # write is possible and the page says so instead of offering a route
+      # that cannot work. Start with the sandbox copy: FF5lab.
+      DASH_CARDS_DB_WRITE_ALLOW: ""
+      DASH_CARDS_DB_BACKUPS: ""
+      # How this container reaches the media the agent names. Single-quoted:
+      # the value carries backslashes (`P:\=/media`), and a backslash in a
+      # DOUBLE-quoted YAML scalar is an escape character -- TrueNAS parses
+      # this file, so it would fail at install rather than at run time.
+      # Useless without the /media mount, and vice versa.
+      DASH_CARDS_MEDIA_MAP: ''
+      # THE TUNNEL'S TARGET (phase 2), and what happens to it here: with the
+      # page mounted above, `/cards/agent/*` calls the engine IN THIS
+      # PROCESS and these two are ignored. They stay because a dashboard
+      # that has not mounted the page still forwards to the separate
+      # container on :8800 -- which is how both origins run side by side
+      # during the transition (§7.4).
+      DASH_CARDS_SERVER_URL: ""
+      DASH_CARDS_TOKEN: "REPLACE_ME"
       # WHICH OPTIONAL FEATURES THIS SITE TURNED ON (2026-08-17,
       # docs/COMMERCIAL_READINESS.md items 2 + 3). BOTH DEFAULT "0", and "0"
       # is what the vendor build ships: the customer decides whether
@@ -546,6 +599,20 @@ services:
       # group 3000, NOT editors. The finished CLIPS do not live here: they are
       # written into /projects, which sync then distributes.
       - /mnt/tank/apps/ccsync-dashboard/ytdl-data:/ytdl-data:rw
+      # Timeline Cards' code: the MulticamPipeline checkout shipped to the
+      # host by install_dashboard_app.py (CARDS_SRC overrides the source),
+      # read-only like every other code mount. An empty dir here is a
+      # supported state -- /cards reports `absent` and nothing else changes.
+      # Mounted in IMAGE MODE TOO, unlike the four above: the vendor image
+      # cannot carry another repo's tree.
+      - /mnt/tank/apps/ccsync-dashboard/cards-web:/cards-app:ro
+      # NOTE: the VAULT (/vault:rw) and the FOOTAGE SHARE (/media:ro) are
+      # NOT here, and that is deliberate -- they are a per-site pair like
+      # the deno mount below, added by install_dashboard_app.py only when
+      # site.toml's [timeline_cards] names them, together with
+      # `group_add: ["<vault gid>"]` so this container's uid may write the
+      # vault at all. docs/DOCKER.md, "The Timeline Cards mounts", has the
+      # exact host recipe and the reason a chown is needed first.
       # NOTE (2026-08-17): two mounts used to follow and no longer do.
       # claude-home and claude-bin are gone with the CLI -- the AI calls use
       # the anthropic SDK with ANTHROPIC_API_KEY above, so there is no OAuth

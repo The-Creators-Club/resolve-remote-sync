@@ -439,6 +439,138 @@ DEFAULT_YTDL_WEB_DIR = Path(__file__).resolve().parents[1] / "ytdl" / "web"
 # onto the NAS's read-only mount (YTDL-40, 2026-08-11).
 YTDL_EXCLUDE_DIRS = BROLL_EXCLUDE_DIRS | {"data"}
 
+# --------------------------------------------------------------------------
+# Timeline Cards (multicam_pipeline/cards), mounted in-process at /cards
+# --------------------------------------------------------------------------
+# docs/TIMELINE-CARDS-INTO-CCSYNC.md phase 3 (2026-08-30). Deployed the way
+# the three above are -- the CODE tree ships to <host-root>/cards-web, which
+# the container mounts read-only at /cards-app -- with THREE differences, each
+# of which is why this block exists rather than a fourth copy of the b-roll
+# one:
+#
+#   * THE TREE IS NOT IN THIS REPO. broll/web, music/web and ytdl/web are, so
+#     a missing one means a broken checkout and says so. Timeline Cards lives
+#     in the MulticamPipeline repo (decision 7.1: keep the repo, import it as
+#     a package), so its source is NAMED -- CARDS_SRC, or site.toml's
+#     [timeline_cards] src -- and an unnamed one is the normal state of every
+#     site that does not use it.
+#   * IT IS NOT ON PYTHONPATH. run.sh's four roots are re-derived in image
+#     mode by select_code_root.py from an over-the-air code bundle, which this
+#     tree is never part of. ccsync_dashboard.cards appends DASH_CARDS_SRC to
+#     sys.path itself at mount time instead, so the path entry and the mount
+#     can never disagree.
+#   * IT NEEDS TWO MOUNTS NOBODY ELSE DOES: the vault rw and the footage share
+#     ro. Optional, per site, and the vault needs a chown on the NAS before
+#     this container's uid can write it -- docs/DOCKER.md, "The Timeline Cards
+#     mounts".
+CARDS_EXCLUDE_DIRS = BROLL_EXCLUDE_DIRS | {
+    # The repo is a pipeline, not a web app: everything below is either
+    # somebody's working data or another tool entirely, and none of it is
+    # imported by multicam_pipeline.cards.
+    "docs", "deploy", "scratch", "golden", "tools", ".claude",
+}
+SITE_CARDS_ENABLED = site_bool("timeline_cards", "enabled", False)
+SITE_CARDS_SRC = site_value("timeline_cards", "src")
+SITE_CARDS_VAULT_HOST = site_value("timeline_cards", "vault_host")
+SITE_CARDS_MEDIA_HOST = site_value("timeline_cards", "media_host")
+SITE_CARDS_MEDIA_MAP = site_value("timeline_cards", "media_map")
+SITE_CARDS_ROOT = site_value("timeline_cards", "root")
+SITE_CARDS_PROJECT = site_value("timeline_cards", "project")
+SITE_CARDS_DB_HOST = site_value("timeline_cards", "db_host")
+SITE_CARDS_DB_NAME = site_value("timeline_cards", "db_name")
+SITE_CARDS_DB_WRITE_ALLOW = site_value("timeline_cards", "db_write_allow")
+SITE_CARDS_DB_BACKUPS = site_value("timeline_cards", "db_backups")
+SITE_CARDS_SERVER_URL = site_value("timeline_cards", "server_url")
+# The GROUP the vault's files belong to, which this container must be a member
+# of to write them. On this NAS tank/web is Alex's own share -- uid 3003, gid
+# 3000 (broll) -- and the dashboard runs 3000:3001, so without a supplementary
+# group every plan the page saves would be refused. group_add is the
+# docker-level half; the chmod/setgid on the host is the other, and neither
+# works without the other (docs/DOCKER.md).
+SITE_CARDS_VAULT_GID = site_value("timeline_cards", "vault_gid") or "3000"
+# Where inside the container the two shares land. Fixed, not per-site: the
+# page's own media map is written against them and so is every path in the
+# runbook.
+CARDS_VAULT_MOUNT = "/vault"
+CARDS_MEDIA_MOUNT = "/media"
+CARDS_APP_MOUNT = "/cards-app"
+
+
+def cards_web_source():
+    """The MulticamPipeline checkout to ship, or None.
+
+    None is the ordinary answer: nothing in THIS repo is Timeline Cards, so a
+    site that has not named a checkout gets no /cards and no complaint.
+    """
+    raw = (os.environ.get("CARDS_SRC", "").strip() or SITE_CARDS_SRC).strip()
+    return Path(raw) if raw else None
+
+
+def cards_enabled_for_site(ship_cards: bool) -> str:
+    """1 only when this site asked for it AND there is a tree to import.
+
+    Both halves, because either alone is a dashboard that logs a refusal on
+    every boot: a flag with no code, or code nobody asked to mount.
+    """
+    return "1" if (SITE_CARDS_ENABLED and ship_cards) else "0"
+
+
+def cards_env(enabled: str, cards_token: str = "") -> dict:
+    """The DASH_CARDS_* block. Every key always present, blank when unset.
+
+    Always present so compose.yaml and compose_config() carry the same key set
+    (server/tests/test_safety.py diffs them); blank because blank is a
+    complete, supported state that ccsync_dashboard.cards reports with a
+    sentence naming the variable.
+    """
+    return {
+        "DASH_CARDS_ENABLED": enabled,
+        "DASH_CARDS_SRC": CARDS_APP_MOUNT if enabled == "1" else "",
+        "DASH_CARDS_VAULT_ROOT": CARDS_VAULT_MOUNT if SITE_CARDS_VAULT_HOST else "",
+        "DASH_CARDS_ROOT": SITE_CARDS_ROOT,
+        "DASH_CARDS_PROJECT": SITE_CARDS_PROJECT,
+        "DASH_CARDS_DB_HOST": SITE_CARDS_DB_HOST,
+        "DASH_CARDS_DB_NAME": SITE_CARDS_DB_NAME,
+        "DASH_CARDS_DB_WRITE_ALLOW": SITE_CARDS_DB_WRITE_ALLOW,
+        # Default: beside the mirror on the app's own volume, which is what
+        # that volume is for. Never in the vault -- a row backup is this
+        # container's state, not the episode's.
+        "DASH_CARDS_DB_BACKUPS": SITE_CARDS_DB_BACKUPS,
+        # Useless without the /media mount, so it is not emitted without one:
+        # "either alone does nothing" costs an afternoon to diagnose from the
+        # page, where it looks like a clip that has no audio.
+        "DASH_CARDS_MEDIA_MAP": (SITE_CARDS_MEDIA_MAP
+                                 if SITE_CARDS_MEDIA_HOST else ""),
+        # The phase-2 tunnel's target, ignored once the page is mounted here.
+        "DASH_CARDS_SERVER_URL": SITE_CARDS_SERVER_URL,
+        "DASH_CARDS_TOKEN": cards_token,
+    }
+
+
+def cards_volumes() -> list:
+    """The optional pair. The CODE mount is unconditional and lives with the
+    others; these two are per-site and absent by default.
+
+    rw on the vault is not a convenience: Script Docs/ is where the draft, the
+    saved plans, the notes and the translation caches are written, and a :ro
+    mount there loses every plan at the moment of saving. ro on the media is
+    the point: this container reads audio out of the rushes and must never be
+    able to write to them.
+    """
+    out = []
+    if SITE_CARDS_VAULT_HOST:
+        out.append(SITE_CARDS_VAULT_HOST.rstrip("/") + ":" + CARDS_VAULT_MOUNT + ":rw")
+    if SITE_CARDS_MEDIA_HOST:
+        out.append(SITE_CARDS_MEDIA_HOST.rstrip("/") + ":" + CARDS_MEDIA_MOUNT + ":ro")
+    return out
+
+
+def cards_group_add() -> list:
+    """The supplementary group that makes the vault writable. See
+    SITE_CARDS_VAULT_GID -- and docs/DOCKER.md for the host half, without
+    which this alone changes nothing."""
+    return [SITE_CARDS_VAULT_GID] if SITE_CARDS_VAULT_HOST else []
+
 # The binaries the ytdl app needs on the host, provisioned the same way ffmpeg
 # is and for the same reason: NOTHING BUILDS THIS IMAGE (compose runs a stock
 # pinned python:3.12.7-slim) and the container is unprivileged, so it can
@@ -1463,6 +1595,12 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                    # one site.toml key; provisions nothing.
                    auto_update: str = "0",
                    anthropic_api_key: str = "",
+                   # Timeline Cards (phase 3, 2026-08-30). "0" here is the
+                   # vendor build and the shipped state: the mount needs
+                   # another repo's checkout and two bind mounts, and a
+                   # dashboard that was not asked for it must behave exactly
+                   # as it did before. Projects site.toml's [timeline_cards].
+                   cards_enabled: str = "0", cards_token: str = "",
                    # WHERE THE CODE COMES FROM (2026-08-18, docs/DOCKER.md).
                    # "bind" is the default in the SIGNATURE too, not
                    # SITE_STACK_MODE: main() always passes the resolved value,
@@ -1515,6 +1653,16 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
             "dashboard": {
                 "image": image,
                 "user": f"{uid}:{gid}",
+                # THE VAULT'S GROUP, and only on a site that mounts one
+                # (docs/DOCKER.md, "The Timeline Cards mounts"). An
+                # unprivileged container cannot setuid or setgid itself, so a
+                # supplementary group is the only way this uid writes files
+                # into a share that belongs to somebody else -- and the page
+                # writes every plan, note and translation cache it makes into
+                # exactly that share. Absent by default: an empty group_add
+                # is not the same as none in every compose implementation,
+                # and a key nobody needs is a key that can be wrong.
+                **({"group_add": cards_group_add()} if cards_group_add() else {}),
                 "command": ["/bin/sh", "/app/deploy/run.sh"],
                 "environment": {
                     # IMAGE MODE ONLY, matching compose.image.yaml. An
@@ -1760,6 +1908,8 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # before; "1" or a CA bundle path inside the container
                     # once the NAS has a trusted cert.
                     "TRUENAS_VERIFY_SSL": truenas_verify_ssl,
+                    # --- Timeline Cards at /cards (see cards_env) ------------
+                    **cards_env(cards_enabled, cards_token),
                     # --- what GET /api/v1/site serves (see site_env) ---------
                     **site_env(port, tree_root, truenas_host, dashboard_url),
                 },
@@ -1825,6 +1975,17 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     # here; they are written into /projects above, which is
                     # what makes sync distribute them to the editors.
                     f"{host_root}/ytdl-data:/ytdl-data:rw",
+                    # Timeline Cards' code, on the /app posture. NOT dropped
+                    # in image mode, unlike the four code mounts above: the
+                    # vendor image cannot carry another repo's tree, so this
+                    # is the only way it is ever there.
+                    f"{host_root}/cards-web:{CARDS_APP_MOUNT}:ro",
+                    # ...and the two per-site mounts the page needs: the vault
+                    # it writes plans into, and the footage share it reads
+                    # audio out of. Absent by default -- with no vault /cards
+                    # reports "no vault is mounted here" and the dashboard is
+                    # otherwise untouched.
+                    *cards_volumes(),
                     # claude-home and claude-bin are GONE (2026-08-17,
                     # COMMERCIAL_READINESS.md item 1): no CLI subprocess, so no
                     # OAuth credential volume and no agent binary inside a
@@ -2010,6 +2171,16 @@ def compose_variables(port: int = 8480, host_root: str = "", tree_root: str = ""
         # compose.yaml simply never asks for it, and an unused variable costs
         # nothing while a missing one is a hard error by design.
         "CCSYNC_IMAGE": ccsync_image or SITE_CONTAINER_IMAGE,
+        # Timeline Cards' block, minus the token: that one is a
+        # `DASH_CARDS_TOKEN: "REPLACE_ME"` line in the template, which
+        # secrets_as_env_refs turns into a ${DASH_CARDS_TOKEN} reference into
+        # the 0600 .env -- a credential never goes in the world-readable file.
+        # ENABLED here is site.toml's intent rather than main()'s
+        # `cards_enabled_for_site`, because this renders the file an operator
+        # PASTES: it has no checkout in front of it to look at, and the
+        # dashboard reports an enabled-but-absent tree in one honest line.
+        **{k: v for k, v in cards_env("1" if SITE_CARDS_ENABLED else "0").items()
+           if k != "DASH_CARDS_TOKEN"},
         **site,
         "NAS_APPS_ROOT": host_root,
         "NAS_TREE_ROOT": tree_root,
@@ -2078,6 +2249,13 @@ SECRET_ENV_VARS = (
     # since the Claude CLI came out (2026-08-17, item 1). A bearer credential
     # billed to their account -- masked in --dry-run exactly like the rest.
     "ANTHROPIC_API_KEY",
+    # Timeline Cards' agent secret (phase 2/3, 2026-08-30). A credential
+    # wherever it points: at a separate cards server on :8800 it is what the
+    # tunnel presents upstream, and with the page mounted here it is what an
+    # agent connecting directly would have to show. It never leaves this
+    # container either way, which is the whole point of the tunnel -- and a
+    # reason not to print it in a dry run either.
+    "DASH_CARDS_TOKEN",
 )
 
 # The same secrets as they appear in the compose FILE (the Synology path):
@@ -3565,6 +3743,11 @@ SYNOLOGY_HOST_DIRS = (
     # only exists on a site that enabled youtube_unblock, which is the flag
     # that also provisions the binary into it (item 3).
     ("ytdl-web", "code"), ("deno", "code"),
+    # Timeline Cards' code tree, mounted read-only at /cards-app. Listed on
+    # every site: an EMPTY code dir costs nothing, and the mount is
+    # unconditional because a bind whose host path is missing stops the
+    # container from starting at all.
+    ("cards-web", "code"),
     ("venv", "private"), ("data", "private"), ("music-data", "private"),
     ("ytdl-data", "private"),
     ("syncthing-config", "private"),
@@ -4004,6 +4187,37 @@ def main():
               f"'absent' and hide the nav link. ytdl/web is part of THIS repo, "
               f"so a missing one means a partial checkout; YTDL_WEB_SRC points "
               f"at a web/ tree elsewhere.", file=sys.stderr)
+    # Timeline Cards pre-flight. A NOTE and a skip, like music's and unlike
+    # b-roll's -- but for a different reason: the tree is not in this repo at
+    # all (decision 7.1), so "not there" is the state of every site that does
+    # not use it, and only a site that NAMED a checkout gets told when the
+    # name is wrong. Image mode changes nothing here: the vendor image cannot
+    # carry another repo's code, so this tree is always a mount.
+    cards_src = cards_web_source()
+    ship_cards = bool(cards_src and (cards_src / "multicam_pipeline" / "cards"
+                                     / "handler.py").is_file())
+    if cards_src and not ship_cards:
+        print(f"NOTE: no Timeline Cards package at {cards_src} "
+              f"(looked for "
+              f"{cards_src / 'multicam_pipeline' / 'cards' / 'handler.py'}) -- "
+              f"deploying WITHOUT the /cards UI; the dashboard will report the "
+              f"mount 'absent' and hide the nav link. That tree is the "
+              f"MulticamPipeline repo, not this one: point CARDS_SRC (or "
+              f"site.toml's [timeline_cards] src) at a checkout of it.",
+              file=sys.stderr)
+    cards_enabled = cards_enabled_for_site(ship_cards)
+    if SITE_CARDS_ENABLED and not SITE_CARDS_VAULT_HOST:
+        print("NOTE: [timeline_cards] enabled is set but vault_host is not -- "
+              "/cards will report 'no vault is mounted here' and serve "
+              "nothing. The vault is where the page reads transcripts from "
+              "and writes every plan it saves (docs/DOCKER.md).",
+              file=sys.stderr)
+    if SITE_CARDS_MEDIA_HOST and not SITE_CARDS_MEDIA_MAP:
+        print("NOTE: [timeline_cards] media_host is set but media_map is not "
+              "-- either alone does nothing. Without the map the container "
+              "cannot turn the path an agent names (P:\\...) into the same "
+              "bytes under /media, and the lane plays no audio for any clip "
+              "with no rendered WAV.", file=sys.stderr)
     music_data_mode = (args.music_data or "").strip().lower() or MUSIC_DATA_PUSH_DEFAULT
     music_forced, music_data_err = parse_music_data_push(music_data_mode)
     if music_data_err:
@@ -4043,6 +4257,13 @@ def main():
     # credential in the printed body.
     anthropic_api_key = (secrets["ANTHROPIC_API_KEY"] if args.dry_run
                          else os.environ.get("ANTHROPIC_API_KEY", "").strip())
+    # Timeline Cards' agent secret, on exactly the same terms as the Anthropic
+    # key above: read, never required, and masked in --dry-run. Blank is a
+    # supported state -- with the page mounted here nothing needs it, and with
+    # a separate cards server the three tunnel routes answer 503 naming the
+    # variable.
+    cards_token = (secrets["DASH_CARDS_TOKEN"] if args.dry_run
+                   else os.environ.get("DASH_CARDS_TOKEN", "").strip())
     # Which optional features this site turned on. site.toml is the source and
     # the flag is the override, matching every other value here.
     youtube_download = "1" if (args.enable_youtube
@@ -4295,11 +4516,18 @@ def main():
             # one on a previously-deployed host is left where it is -- the
             # no-deletion rule -- and simply stops being mounted; the operator
             # step to remove it, with claude-home, is in ytdl/web/DEPLOY.md.
+            # Timeline Cards' code dir joins them: the /app posture again,
+            # and created on EVERY site whether or not one is shipped -- the
+            # container mounts it unconditionally, and a bind mount whose
+            # host path does not exist is a container that will not start.
             f"mkdir -p {shell_quote(root + '/ytdl-web')} "
+            f"{shell_quote(root + '/cards-web')} "
             f"{shell_quote(root + '/deno')} && "
             f"chown root:root {shell_quote(root + '/ytdl-web')} "
+            f"{shell_quote(root + '/cards-web')} "
             f"{shell_quote(root + '/deno')} && "
             f"chmod 755 {shell_quote(root + '/ytdl-web')} "
+            f"{shell_quote(root + '/cards-web')} "
             f"{shell_quote(root + '/deno')} && "
             # ytdl DATA root: ytdl.db and the worker's scratch, so data/'s
             # posture -- 3000:3000 mode 770, group 3000 and NOT 3001/editors,
@@ -4317,7 +4545,7 @@ def main():
     print(f"host dirs ready: {root}/app, {root}/venv, {root}/data, {root}/broll-web, "
           f"{root}/music-web, {root}/music-data, {root}/music-encoder, "
           f"{root}/music-proxies, {root}/ffmpeg, {root}/ytdl-web, {root}/ytdl-data, "
-          f"{root}/deno")
+          f"{root}/cards-web, {root}/deno")
 
     # Where the 1.4 GB music artefacts are staged (OPS-8). /tmp on the NAS may
     # be RAM-backed and holds the whole component until the swap `cp -a`s it
@@ -4646,6 +4874,18 @@ def main():
                             staging_parent=code_staging_parent):
             return fail_after_app_swap(args.dry_run)
 
+    # Step 2g: ship the Timeline Cards tree into cards-web, the same
+    # staged-verify-swap route as the three above. Two differences: the source
+    # is another repo (so it is only shipped when a site named one), and it is
+    # shipped in IMAGE MODE TOO -- the vendor image carries the other three as
+    # layers and cannot carry this one.
+    if ship_cards:
+        if not install_tree(root, "cards-web", cards_src, args.dry_run,
+                            excludes=CARDS_EXCLUDE_DIRS,
+                            staging_slug="ccsync-cardsweb-upload",
+                            staging_parent=code_staging_parent):
+            return fail_after_app_swap(args.dry_run)
+
     # Step 2h (image mode): get the image onto the NAS before the app is
     # created, so a create job that pulls has nothing left to fetch and a
     # RESTART -- which never pulls -- at least runs against an up-to-date local
@@ -4754,6 +4994,7 @@ def main():
         ai_cli_providers=ai_cli_providers,
         auto_update=auto_update,
         anthropic_api_key=anthropic_api_key,
+        cards_enabled=cards_enabled, cards_token=cards_token,
         mode=mode,
         ccsync_image=ccsync_image,
     )
@@ -4790,6 +5031,10 @@ def main():
             # says so -- but it goes in the 0600 .env like every other secret,
             # never into the world-readable compose.yaml beside it.
             "ANTHROPIC_API_KEY": anthropic_api_key,
+            # Timeline Cards' agent secret. Legitimately blank, and in the
+            # 0600 .env rather than the world-readable compose.yaml beside it
+            # like every other credential here.
+            "DASH_CARDS_TOKEN": cards_token,
         }
         if args.dry_run:
             print(f"[dry-run] the .env would carry: "

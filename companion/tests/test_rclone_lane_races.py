@@ -20,6 +20,7 @@ Everything here is deterministic -- no sleeps. The two mechanisms used are:
 from __future__ import annotations
 
 import os
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -64,8 +65,21 @@ class _FakeProc:
         self._ended = threading.Event()
 
     def wait(self, timeout=None) -> int:
-        if timeout is None and self._wait_for_terminate:
-            assert self._ended.wait(10), "stop() never terminated the child"
+        # HONOUR THE TIMEOUT LIKE A REAL CHILD. This used to block only when
+        # `timeout is None`, which was true of the runner until CR-91 (wave 1,
+        # 2026-08-28) replaced the unbounded `proc.wait()` with a poll loop
+        # that always passes one. From that commit on, this fake returned its
+        # exit code on the first poll: the run finished and cleared its
+        # published handle before stop() could look, so `wait_for_terminate`
+        # -- the whole reason the stand-down tests are deterministic -- was
+        # silently inert and those tests passed only when stop() happened to
+        # win the race. This rig kept winning it; CI's macOS runner did not
+        # (2026-08-29).
+        if self._wait_for_terminate:
+            if timeout is None:
+                assert self._ended.wait(10), "stop() never terminated the child"
+            elif not self._ended.wait(timeout):
+                raise subprocess.TimeoutExpired(cmd="rclone", timeout=timeout)
         return self._returncode
 
     def poll(self):

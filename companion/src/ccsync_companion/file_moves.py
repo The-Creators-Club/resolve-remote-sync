@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 import unicodedata
 from pathlib import Path
@@ -109,13 +110,31 @@ def parse_command(raw: Any) -> Optional[dict[str, Any]]:
     }
 
 
+def _cmp_key(path: object) -> str:
+    """A path folded for COMPARISON only -- never for opening, renaming or
+    deleting anything (CLAUDE.md's rule: there the bytes on disk are truth).
+
+    `os.path.normcase` is a no-op on POSIX, which is wrong for the editors we
+    actually have: a Mac's APFS volume is case-insensitive by default, so
+    `Clip.braw` and `clip.braw` are ONE file there, and a ledger lookup that
+    missed on case leaves a moved clip looking like a mystery MISSING rather
+    than the one-click relink RES-10 built. Windows folds case for us; darwin
+    has to be told to. Linux is the one place where case really does
+    distinguish two files, so it is left alone. (2026-08-29: found by CI's
+    macOS runner, the only machine here that runs this suite on a Mac.)"""
+    folded = os.path.normcase(os.path.normpath(str(path)))
+    if sys.platform == "darwin":
+        folded = folded.lower()
+    return folded
+
+
 def _same_file(a: Path, b: Path) -> bool:
-    return os.path.normcase(os.path.normpath(str(a))) == os.path.normcase(os.path.normpath(str(b)))
+    return _cmp_key(a) == _cmp_key(b)
 
 
 def _is_inside(path: Path, root: Path) -> bool:
-    p = os.path.normcase(os.path.normpath(str(path)))
-    r = os.path.normcase(os.path.normpath(str(root)))
+    p = _cmp_key(path)
+    r = _cmp_key(root)
     return p == r or p.startswith(r.rstrip("\\/") + os.sep)
 
 
@@ -283,7 +302,7 @@ class FileMoveLedger:
         The watcher asks this about every clip whose file is MISSING: a path
         this machine moved on the server's instruction is not a mystery, it
         is a one-click relink to a destination we know exactly."""
-        wanted = os.path.normcase(os.path.normpath(str(local_path or "")))
+        wanted = _cmp_key(local_path or "")
         if not wanted:
             return None
         cutoff = float(self._now()) - RELINK_WINDOW_SECONDS
@@ -293,7 +312,7 @@ class FileMoveLedger:
                 continue
             if float(entry.get("at") or 0) < cutoff:
                 continue
-            old_n = os.path.normcase(os.path.normpath(str(old)))
+            old_n = _cmp_key(old)
             if wanted == old_n or (entry.get("is_dir")
                                    and wanted.startswith(old_n.rstrip("\\/") + os.sep)):
                 return entry

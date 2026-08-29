@@ -19,8 +19,10 @@ What it pins:
                  including through interpreter shutdown, which is its own
                  abort (the pin in _immortalise, measured 2026-08-29).
 
-Skipped wherever a Tk root cannot be created at all (a headless runner), and
-NOT skipped on macOS: the same abort is what CR-93 would do there.
+Skipped wherever a child cannot build a Tk root ON A WORKER THREAD -- a
+headless runner (no display) and macOS both, the latter because Aqua's Tk
+belongs to the main thread and a secondary-thread root simply never returns.
+CR-93's abort is a Windows/X11 shape; a Mac cannot get far enough to have it.
 """
 
 from __future__ import annotations
@@ -39,7 +41,32 @@ SRC_DIR = str(Path(ccsync_companion.__file__).resolve().parent.parent)
 # child that somehow blocks on a dialog does not hold the suite.
 CHILD_TIMEOUT_SECONDS = 120
 
-PROBE = "import tkinter; r = tkinter.Tk(); r.withdraw(); r.destroy()"
+# The probe has to be the SHAPE the tests use, not merely "does Tk work".
+# Every child below builds its root on a WORKER thread, and on macOS's Aqua Tk
+# that is not a thing you may do: Tk initialises against NSApplication, which
+# belongs to the main thread, so the child blocks for ever rather than failing
+# -- 120 s per test, three tests, and a red CI run that says "timeout" about a
+# platform limit (2026-08-29, first macOS runner to reach this file). A probe
+# that creates a root on the main thread proves nothing about that.
+PROBE = """
+import threading, tkinter as tk
+
+
+def build():
+    root = tk.Tk()
+    root.withdraw()
+    root.update()
+    root.destroy()
+
+
+thread = threading.Thread(target=build, name="probe")
+thread.start()
+thread.join()
+print("ok")
+"""
+# Short: a probe that has not answered in this long is the hang it is looking
+# for, and waiting the full child timeout for it only delays the skip.
+PROBE_TIMEOUT_SECONDS = 30
 
 # A window built on a worker thread that leaves ONE widget behind, exactly as
 # WorkProgressWindow did before 2026-08-18 and PopupDialog's per-row
@@ -65,20 +92,23 @@ print("survived")
 """
 
 
-def _run(code: str) -> subprocess.CompletedProcess:
+def _run(code: str, timeout: float = CHILD_TIMEOUT_SECONDS) -> subprocess.CompletedProcess:
     env = dict(os.environ)
     env["PYTHONPATH"] = SRC_DIR + os.pathsep + env.get("PYTHONPATH", "")
     return subprocess.run([sys.executable, "-c", code], capture_output=True,
-                          text=True, timeout=CHILD_TIMEOUT_SECONDS, env=env)
+                          text=True, timeout=timeout, env=env)
 
 
 @pytest.fixture(scope="module")
 def tk_runs() -> None:
     try:
-        probe = _run(PROBE)
+        probe = _run(PROBE, timeout=PROBE_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        pytest.skip("Tk on a worker thread hangs here (macOS Aqua): CR-93's "
+                    "shape cannot be reproduced on this platform")
     except Exception as exc:  # noqa: BLE001 - no python, no subprocess: skip
         pytest.skip(f"cannot run a child interpreter: {exc}")
-    if probe.returncode != 0:
+    if probe.returncode != 0 or "ok" not in probe.stdout:
         pytest.skip("no display: a real Tk root cannot be created here")
 
 

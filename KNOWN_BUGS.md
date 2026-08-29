@@ -3033,6 +3033,68 @@ browser with no confirm(), is exactly the old behaviour: re-attach and the
 loud toast (which now names [ CANCEL SEARCH ]). Harness scenarios in
 `tests/test_static_app.py`. Needs a dashboard deploy.
 
+## The first CI run that ever saw waves 1-5 (CR-94, 2026-08-29)
+
+### CR-94 - three green-on-Windows suites, four failures on Linux and macOS - FIXED in repo 2026-08-29, companion 0.9.55 / dashboard 0.7.17
+**How it surfaced.** Seven commits (CR-92, the five resilience-sweep waves,
+CR-93) had been sitting on this rig unpushed since 2026-08-27. Everything
+was green here. The first push put them through `.github/workflows/ci.yml`
+for the first time and four tests failed on the two operating systems this
+rig is not - which is the entire reason that workflow exists
+(COMMERCIAL_READINESS item 13). Three of the four are test defects; one is a
+real macOS behaviour bug. None of them affects a Windows editor, which is
+why none of them had ever been seen.
+
+**1. `file_moves._cmp_key` - a Mac could not recognise its own moved file
+(the real one).** `moved_to()` is what turns a MISSING clip into RES-10's
+one-click relink, and it compared paths with `os.path.normcase`, which is a
+**no-op on POSIX**. A Mac's APFS volume is case-insensitive by default, so
+`Clip.braw` and `clip.braw` are one file there - and the ledger lookup for
+one spelling missed a move recorded under the other, leaving the clip
+looking like a mystery rather than a relink. Fixed with a `_cmp_key()`
+helper that folds case on Windows (as before) and on darwin, and leaves
+Linux alone, where case genuinely does distinguish two files. It is a
+COMPARISON key only: nothing opens, renames or deletes through it, per
+CLAUDE.md's rule that there the bytes on disk are the truth. The same helper
+now backs `_same_file` and `_is_inside`.
+
+**2. `test_tk_release_native` - three 120 s hangs on macOS.** Every child in
+that file builds its Tk root on a WORKER thread, which is the CR-93 shape.
+On macOS's Aqua Tk that is not a thing you may do at all: Tk initialises
+against NSApplication, which belongs to the main thread, so the child does
+not fail - it blocks for ever. The module's skip-probe created a root on the
+MAIN thread, proved nothing about the shape actually under test, and let all
+three run into the timeout. The probe is now the same shape as the tests
+(worker-thread root, 30 s cap) and skips the module when it hangs. Windows
+coverage of CR-93 is unchanged - all three still run and pass here.
+
+**3. `test_invariants` - the page test raced the real collector.** Entering
+the `TestClient` lifespan starts the live `Collector` thread, which runs
+`invariants` on its own connection with `folder_devices=None` (no Syncthing
+configured in a test), and so re-records invariant 1 as NOT CHECKED over the
+BROKEN verdict the test had just seeded. The GET usually won that race here;
+on the Linux runner it lost. Fixed by stopping the collector before seeding
+- the same pattern, and the same reason, already documented in
+`test_alerts.py`.
+
+**4. `test_rclone_lane_races` - a safety test that had been a coin flip
+since wave 1.** `_FakeProc.wait()` honoured `wait_for_terminate` only when
+`timeout is None`. That was true of the runner until **CR-91** (wave 1,
+2026-08-28) replaced the unbounded `proc.wait()` with a poll loop that
+always passes a timeout. From that commit on the fake returned its exit code
+on the first poll, the run finished and cleared its published child handle
+before `stop()` could look, and `proc.terminated` was False unless `stop()`
+happened to win the spawn race. It kept winning here and lost on a loaded
+macOS runner. The fake now behaves like a real child: it blocks up to
+`timeout` and raises `subprocess.TimeoutExpired`. This one is worth noting
+beyond its own fix - **a wave-1 change to production code silently disarmed
+a fake that four tests rely on**, and only a slower machine ever said so.
+
+**The lesson, and it is the CI one.** "Green on the base rig" is a claim
+about one Windows box. Three of these four had been broken for a day or more
+and two of them were latent races that this hardware simply kept winning.
+Push before the pile gets to seven commits.
+
 ## The tray "kept closing itself": a Tk root freed on the wrong thread (CR-93, 2026-08-29)
 
 ### CR-93 - Tcl_AsyncDelete aborts the whole companion, with no traceback and no log line - FIXED in repo 2026-08-29 as companion 0.9.55, NOT YET SHIPPED

@@ -462,6 +462,14 @@ def test_the_page_renders_all_three_states_and_is_admin_only(tmp_path):
         session_secret=secret, admin_users=frozenset({"owen"}),
     ))
     with TestClient(app) as client:
+        # The real Collector thread starts on lifespan entry and runs
+        # `invariants` on its own connection, with folder_devices=None because
+        # no Syncthing is configured here -- which re-records invariant 1 as
+        # NOT CHECKED over the BROKEN verdict this test seeds below. On this
+        # rig the GET usually won that race; on CI's Linux runner it did not
+        # (2026-08-29). Stop it first, then seed: the same pattern, and the
+        # same reason, as test_alerts.py.
+        client.app.state.collector.stop()
         conn = dbmod.connect(tmp_path / "dash.db")
         try:
             dbmod.upsert_machine(conn, "ruskin", "DESKTOP-1", NOW, machine_id="m-1",

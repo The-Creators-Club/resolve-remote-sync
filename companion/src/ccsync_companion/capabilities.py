@@ -50,7 +50,7 @@ from typing import Any, Callable, Optional
 from . import config as config_mod
 from . import ffmpeg_tools, job_paths
 
-log = logging.getLogger("ccsync-companion.capabilities")
+log = logging.getLogger("ccsync.capabilities")
 
 # The expensive halves (the GPU probe, the ffmpeg/encoder probes) are cached
 # by their own modules; this caches the ASSEMBLY, so a 30 s report does not

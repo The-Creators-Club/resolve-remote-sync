@@ -51,7 +51,7 @@ from typing import Any, Callable, Optional
 from . import config as config_mod
 from . import job_paths
 
-log = logging.getLogger("ccsync-companion.jobs")
+log = logging.getLogger("ccsync.jobs")
 
 # Gate states, in the order _gate() asks them. The tray does not render these
 # yet; the diagnostics bundle and the log do, and they are what "why is this

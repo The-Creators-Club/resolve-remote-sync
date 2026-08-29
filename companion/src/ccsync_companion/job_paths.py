@@ -31,7 +31,7 @@ import os
 from pathlib import Path
 from typing import Any, Optional
 
-log = logging.getLogger("ccsync-companion.job_paths")
+log = logging.getLogger("ccsync.jobpaths")
 
 TREE = "tree"
 VAULT = "vault"

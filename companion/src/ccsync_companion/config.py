@@ -145,7 +145,7 @@ log = logging.getLogger("ccsync.config")
 # sidecar once when the signature says the binary rather than the video. The
 # other half of CR-83 is the dashboard's, 0.7.11: the fleet's yt-dlp floor was
 # 2026.07.04, which is a version that cannot download at all.
-VERSION = "0.9.57"
+VERSION = "0.9.58"
 
 # The dashboard version this build needs to be talked to by (REL-4 / SYS-13,
 # resilience sweep 2026-08-28). `tools/release.ps1` / `sign_release.py` copy
@@ -158,7 +158,7 @@ VERSION = "0.9.57"
 # RAISE IT whenever this build reads something only a newer dashboard sends or
 # stores; leave it alone otherwise. It is the dashboard version that must
 # already be deployed, not the newest one that exists.
-REQUIRES_DASHBOARD = "0.7.19"
+REQUIRES_DASHBOARD = "0.7.20"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"

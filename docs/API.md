@@ -1206,6 +1206,56 @@ argv and never the environment.
 
 ---
 
+## 6d. The Timeline Cards agent tunnel -- `/cards/agent/*`
+
+`docs/TIMELINE-CARDS-INTO-CCSYNC.md` §3.3 option (a), phase 2 (2026-08-30).
+Implemented by `dashboard/src/ccsync_dashboard/cards_tunnel.py`.
+
+The machine with DaVinci Resolve open pushes the timeline it has swept and
+long-polls for the next edit. This is the **interactive** channel: a card
+click has a ~0.3 s budget, which is why it is not on the report reply the way
+fleet jobs are (§6c). It is a thin proxy: the dashboard holds no state for it
+and decides nothing about it.
+
+| Method | Path | Body / query | Answer |
+|---|---|---|---|
+| POST | `/cards/agent/state` | the agent's state document, or a playhead-only ping | `{ok, version, root, resend}` |
+| GET | `/cards/agent/pending` | `?wait=<0..25>` | `{}` or the next edit request |
+| POST | `/cards/agent/result` | `{id, ok, note, error, inserted_uid, conformed, renamed}` | `{ok}` |
+
+**The credential is the fleet's**, exactly as for `/api/v1/jobs/claim`:
+`X-CCSync-Token` (the shared report token, or a per-editor `cce1.` one) **and**
+a dashboard-signed `X-CCSync-Identity`, both checked by
+`api._require_fleet_caller`. `app.py`'s `login_gate` and `csrf_gate` carve out
+these three suffixes and nothing else -- `/cards/` is where phase 3 mounts the
+page, and it stays session-gated.
+
+**The upstream token is the dashboard's alone.** `DASH_CARDS_TOKEN` is
+attached outbound as `X-Cards-Token`; a `token` field in the caller's body is
+dropped rather than forwarded, and one echoed by the upstream is stripped on
+the way back. That is the point of the tunnel: `CARDS_TOKEN` stops living in a
+`.cmd` file on an editor's PC.
+
+**The agent's `name` is the verified identity**, plus the machine the caller
+declared (`alex/CREATOR-1`), never the `name` the body carried -- the page's
+"the agent is away" text is built from it, so it has to mean something.
+
+Status codes:
+
+| Code | Means |
+|---|---|
+| 200 | the cards server's own answer, verbatim |
+| 401 / 403 | no fleet token, or no signed identity, or a per-editor token that names somebody else. JSON, never a login page: a pull loop handed HTML to `json.loads` says "Expecting value: line 1 column 1" every 25 s and never says why |
+| 502 | the cards server could not be reached, refused this dashboard's token (the detail says `DASH_CARDS_TOKEN`), or did not answer JSON |
+| 503 | no `DASH_CARDS_SERVER_URL` / `DASH_CARDS_TOKEN` configured here. Named, because 404 reads as an old dashboard |
+
+`wait` is clamped to 25 s (the agent's own `AGENT_WAIT_S`) and the outbound
+read timeout is that plus 20 s. The route is a blocking `def`, so it runs in
+the threadpool: one worker per connected agent, and there is one agent per
+machine.
+
+---
+
 ## 7. The companion loopback API
 
 Separate service, separate trust model, separate document:

@@ -891,6 +891,343 @@ heartbeat / result suffixes.
 
 ---
 
+## 7c. PHASE 2 BUILT, ccsync side (2026-08-30)
+
+Status: §6's phase 2 is **built on the CC Sync side** on branch
+`timeline-cards-port`. **Timeline Cards itself is still untouched**: the
+companion's role imports its engine and REFUSES to start until that repo lands
+the bridge contract in §7c.1, which is written below as a spec a builder over
+there can implement from alone. Nothing is deployed and nothing is retired --
+the standalone `--agent` and its `.cmd` launcher keep working exactly as they
+do today.
+
+### What exists now
+
+| Piece | Where |
+|---|---|
+| the tunnel | `dashboard/src/ccsync_dashboard/cards_tunnel.py` -- `POST /cards/agent/state`, `GET /cards/agent/pending?wait=25`, `POST /cards/agent/result`, on `_require_fleet_caller` |
+| its carve-outs | `app.py`: `_cards_fleet_re` (login gate), `_CSRF_EXEMPT_RE` (the two POSTs), the JSON-401 prefix list, and two body ceilings (`MAX_CARDS_STATE_BODY_BYTES` 6 MB, credential checked BEFORE the body) |
+| its config | `DASH_CARDS_SERVER_URL` / `DASH_CARDS_TOKEN` -> `settings.cards_server_url` / `cards_token` |
+| the bridge | `companion/src/ccsync_companion/timeline_cards_bridge.py` -- `CardsBridge`, `CONTRACT_VERSION = 1`, lock hold-time stats |
+| one public lock entry | `resolve_bridge.api_call(name)` -- `_bridge_call` for callers outside that module; `_API_LOCK` stays private |
+| the role | `companion/src/ccsync_companion/timeline_cards_role.py` -- the gate, the engine import, the contract check, the standalone-agent probe, the two loops, `report_block()` |
+| its config | `cards_agent` (default **false**), `cards_vault_root` (defaults to `jobs_vault_root`); the checkout is `jobs_mulcam_pipeline`, which the whisper runner already names |
+| the report | `capabilities.cards_agent = {connected, state, timeline, version, since}` -> schema **v44**'s five columns -> `db.machine_capabilities` |
+| the chip | `[ CARDS: E1 v5 ]` on the fleet grid, green, on the connected machine only |
+
+Tests: `dashboard/tests/test_cards_tunnel.py` (22),
+`dashboard/tests/test_cards_capability.py` (10),
+`companion/tests/test_timeline_cards_bridge.py` (19),
+`companion/tests/test_timeline_cards_role.py` (30), and two more in
+`dashboard/tests/test_jobs_contract.py` -- **the wire between the two
+deployment units**, now covering the tunnel as well as the job routes.
+
+### The tunnel, exactly
+
+```
+POST /cards/agent/state     body verbatim, minus `token`, with `name` replaced
+GET  /cards/agent/pending?wait=<0..25>
+POST /cards/agent/result    body verbatim, minus `token`
+```
+
+Every one needs `X-CCSync-Token` (the shared report token or a per-editor
+`cce1.` one) **and** a dashboard-signed `X-CCSync-Identity`, the same pair the
+job routes take, checked by the same `_require_fleet_caller`.
+
+Four decisions in it:
+
+* **`CARDS_TOKEN` leaves the editor's machine.** The dashboard attaches it
+  outbound as `X-Cards-Token` from its own environment. The companion holds
+  only what it already held. A body's own `token` field is dropped rather than
+  forwarded, so a companion cannot present a secret of its choosing upstream,
+  and an echoed one is stripped on the way back.
+* **The agent's `name` is the VERIFIED identity**, plus the machine the caller
+  declared, sanitised: `alex/CREATOR-1`. `AgentClient` puts
+  `socket.gethostname()` there and the page's away/stale text is built from
+  it. Same rule as ytdl's H5: the verified name, never `body.editor`.
+* **Per suffix, never per prefix.** `/cards/` is where phase 3 mounts the
+  PAGE -- a whole cut of a documentary -- and it stays session-gated. The
+  three routes are registered before any future mount, so phase 3 replaces
+  `_forward` with an in-process call and changes nothing else.
+* **Upstream down is a 502 with a sentence**, and an upstream 401/403 says
+  `DASH_CARDS_TOKEN` explicitly: that failure is THIS dashboard's secret being
+  wrong, not the caller's, and an admin who cannot tell them apart rotates the
+  fleet's token by mistake. No server configured at all is a 503 naming the
+  variable, because a 404 reads as an old dashboard.
+
+### The role's start and refuse rules
+
+It starts when ALL of these hold, and refuses -- with a sentence, in
+`status()["detail"]` and in the log -- on the first that does not:
+
+1. `cards_agent = true` in `~/.ccsync/config.toml` (default false everywhere);
+2. a dashboard URL and a fleet token (i.e. signed in);
+3. no fleet halt (fails CLOSED: a halt check that cannot answer refuses);
+4. `jobs_mulcam_pipeline` set, and `jobs_vault_root`/`cards_vault_root` set;
+5. **no standalone Timeline Cards process talking to Resolve here** -- a
+   command line matching `reorder_web.py` or `--agent`. It is NAMED and NOT
+   KILLED: a human started it, and §6 says nothing is retired until Alex
+   flips the config. A process probe that cannot answer counts as one
+   running (fail closed): a false refusal costs the page, a false clearance
+   costs scripting for the whole Resolve session for every client on the
+   machine.
+6. the checkout imports, and its engine declares
+   `BRIDGE_CONTRACT_VERSION == 1` **and** takes a `bridge` argument. Both,
+   because a constant is a claim and a signature is whether it is true.
+
+`stop()` (companion shutdown) lets go. A fleet halt refuses a START and does
+not interrupt a RUNNING role: the edits are synthetic keystroke sequences, and
+one stopped half way through is a timeline nobody asked for.
+
+### The cadence budget, and what it measured
+
+Three schedulers now meet on `resolve_bridge._API_LOCK`:
+
+| who | period | what it holds the lock for |
+|---|---|---|
+| the companion's timeline watcher | 3 s | its fingerprint, then the library walk with the lock RELEASED |
+| the engine's full sweep | 1 s (`POLL_FULL`) | the timeline fingerprint: current timeline, item list, markers |
+| the engine's playhead read | 0.1 s (`POLL_FAST`) | `GetCurrentTimecode` + `GetCurrentVideoItem` |
+| an edit | on demand | the keystroke sequence and its verification |
+
+The lock is never held for a per-clip property walk: that is
+`bridge.sweep_items()`, which reads the project library with `_API_LOCK`
+released, and which REFUSES to answer at all from an API walk (returning
+None, i.e. "ask Resolve yourself") rather than putting the 11-95 s crawl on
+the sweep's hot path.
+
+Measured by `test_the_budget_a_sweep_costs_is_milliseconds` with the fake
+bridge: **100 takes cost < 0.5 s in total and < 5 ms each**, against a watcher
+tick of 3 s. `bridge.stats()` carries `takes`, `held_total`, `held_max` and
+`held_max_call` for ever (cumulative, never reset -- the number that matters
+is the worst take since the companion started), and a take past
+`SLOW_TAKE_SECONDS` (0.5) is logged with its name, at most once a minute.
+
+### THE HANDSHAKE HAS NEVER RUN LIVE
+
+`release` and `reload` -- `SaveProject`, `CloseProject`, `LoadProject`,
+`SetCurrentTimeline` -- are routed through the bridge like any other edit and
+are otherwise untouched. `TRUENAS-APP-PLAN.md` §0 says twice that those four
+calls have never been executed against a real project, and §6's own risk note
+says not to port an unexercised path and change its host in the same week.
+**So: run the release/reload handshake on `FF5lab` from the CURRENT
+standalone agent first, before `cards_agent` is ever set to true.** If it is
+wrong, it is wrong in the code that has been running for weeks, which is a far
+better place to find out.
+
+### Decisions this build made, that the plan left open
+
+* **Flat `cards_*` config keys**, not a `[timeline_cards]` table -- phase 0's
+  decision, unchanged, and for its reason: every other feature in `config.py`
+  is flat. The dashboard's half is env vars (`DASH_CARDS_*`), because that is
+  where every dashboard setting lives.
+* **The role is CONSTRUCTED on every machine and starts on almost none.**
+  `status()` is what answers "why is this computer not serving the page", and
+  a role that is not built cannot answer anything. The chip, by contrast,
+  renders only on the connected machine: `cards_agent is not set` is true of
+  every computer in the fleet and would be a chip on all of them.
+* **`AgentClient` is subclassed, not rewritten.** Its `_req` is the only
+  place it touches a socket, so the push/pull loops that have driven Resolve
+  from creator-1 for weeks are re-pointed rather than re-implemented.
+* **`sweep_items` is the per-clip facts, not the item geometry.** The project
+  library has no Resolve item UniqueId and its `MediaFilePath` is a stale
+  snapshot (GOTCHAS §16), so uid/start/duration stay API reads -- three cheap
+  calls a sweep. What comes out of the library is exactly what
+  `_learn_media_path` and `_tokens_for` buy today with a GetClipProperty per
+  clip, which is the part that made a card click take 7 s.
+* **A refusal carries its own state**, not a word in its message. "No bridge
+  contract at all" and "a contract from another version" are different
+  answers for different people.
+
+### What is NOT there yet
+
+* **Timeline Cards implements none of §7c.1**, so the role refuses on every
+  machine today, by design and with a message that says which document to
+  read.
+* **Nothing is retired.** The standalone `--agent`, `Launch Timeline Cards
+  Agent.cmd` and the launcher card all still work. They come out when Alex
+  has set `cards_agent = true` on creator-1 and watched a cut go through it:
+  then `multicam_pipeline/resolve/resolve_script_server.py` is deleted (the
+  companion's is the one copy), `run_agent` and the `.cmd` go, and §3.1's
+  table loses its last row.
+* **Nothing is deployed.** Dashboard 0.7.20 (schema v44), companion 0.9.58
+  with `REQUIRES_DASHBOARD = 0.7.20`. The order is enforced by the machinery
+  and is the rule either way.
+* **No in-process page** (phase 3), no `claude-run`, no admin view of the
+  agent beyond the chip and the diagnostics bundle.
+
+### What Alex has to do before any of it runs
+
+1. **Run the release/reload handshake on FF5lab from the current standalone
+   agent.** Before anything else, and see above for why.
+2. **Deploy the dashboard (0.7.20) before publishing the companion**, and set
+   `DASH_CARDS_SERVER_URL` (`http://<truenas>:8800`) and `DASH_CARDS_TOKEN`
+   (the same value as the cards container's `CARDS_TOKEN`) in its compose
+   environment. Until then the three routes answer 503 naming the variable.
+3. **Have the Timeline Cards side implement §7c.1.** Nothing here runs until
+   it does.
+4. **Then, on creator-1 only**: stop the standalone agent and this PC's own
+   `reorder_web.py 8800`, put `cards_agent = true` in
+   `~/.ccsync/config.toml`, and restart the companion. There is no gradual
+   rollout on that machine (§5's cost note): the moment the companion carries
+   the role, it is the one Resolve client there.
+
+---
+
+## 7c.1 The engine's bridge contract (the spec for the Timeline Cards side)
+
+This is written so it can be implemented from this document alone, in
+`E:\Projects\Editing\Resolve\MulticamPipeline`. It is the ONLY thing the CC
+Sync side is waiting on.
+
+### The one-line summary
+
+`ResolveEngine` stops owning a Resolve connection. It is handed one, and it
+never calls `scriptapp()`, never imports `DaVinciResolveScript`, and never
+reads the TCP table itself.
+
+### The signatures, verbatim
+
+```python
+# multicam_pipeline/cards/resolve_engine.py
+
+BRIDGE_CONTRACT_VERSION = 1        # module level; the companion checks it
+
+
+class ResolveEngine(threading.Thread):
+    def __init__(self, lib, bridge=None):
+        ...
+
+
+class SyncEngine(LibraryEngine):
+    def __init__(self, root, bridge=None):
+        LibraryEngine.__init__(self, root)
+        self.res = ResolveEngine(self, bridge=bridge)
+```
+
+`bridge=None` keeps `python reorder_web.py 8800` and `--agent` working
+unchanged: with no bridge the engine builds its own (an `_OwnBridge` wrapping
+today's `mt.connect_resolve()` + `resolve_script_server`) and behaves exactly
+as it does now. The companion always passes one.
+
+### What a bridge provides
+
+```python
+class Bridge(Protocol):
+
+    lock: ContextManager
+    """The API lock. `with bridge.lock:` around EVERY call into Resolve.
+
+    Re-entrant, so a helper that takes it inside a caller that already has it
+    costs nothing. It may also be called with a name --
+    `with bridge.lock("cards.conform"):` -- which is what a wedge warning
+    reports; the plain form is always valid.
+    """
+
+    def resolve(self) -> Any | None:
+        """The connected scriptapp object, or None. Never raises.
+
+        None is an ordinary state, not an error: Resolve is closed, or it is
+        inside its launch window and connecting now would kill the script
+        server (CR-68). Wait and ask again.
+        """
+
+    def ready(self) -> bool:
+        """May Resolve be talked to at all right now? Never raises, fails
+        OPEN. Cheap enough to ask every tick; `resolve()` asks it too."""
+
+    def on_edit_start(self, kind: str) -> None:
+        """About to drive Resolve with synthetic keystrokes. `kind` is the
+        request's own kind ("move", "trim", "conform", "release", ...).
+
+        INFORMATIONAL. The bridge may not refuse an edit the page has already
+        accepted; it logs it and reports it.
+        """
+
+    def on_edit_end(self, kind: str, ok: bool = True, note: str = "") -> None:
+        """...and it is over, with how it went."""
+
+    def sweep_items(self, tl_uid: str) -> list[dict] | None:
+        """The open timeline's clips, read from the PROJECT LIBRARY, or None.
+
+        None means "ask Resolve yourself" -- no library, or it stopped
+        answering -- and is the state most machines are in. Not an error, and
+        not to be cached.
+
+        Each dict:
+            {"media_pool_uid": str,     # MediaPoolItem.GetUniqueId()
+             "clip_name":      str,
+             "file_path":      str,     # the file ON THIS MACHINE, "" if none
+             "track_type":     "video" | "audio",
+             "track_index":    int,     # 1-based, Resolve's convention
+             "item_index":     int,     # 0-based within the track
+             "via_multicam":   str | None,   # the multicam it came through
+             "source":         "library"}
+
+        NOT in it, and NOT obtainable from it: the timeline ITEM's unique id,
+        its start and its duration. The project library carries no item uid
+        and its MediaFilePath is a stale snapshot. Those three stay API reads.
+        """
+```
+
+### What the engine has to change
+
+1. **Delete `multicam_pipeline/resolve/resolve_script_server.py`** and every
+   call to it. The companion's `script_server.py` is the one copy, reached
+   through `bridge.ready()` / `bridge.resolve()`.
+2. **`_connect`** becomes `self._resolve = bridge.resolve()`; None means "not
+   now", not an exception. The project handle is read from it under the lock,
+   as today.
+3. **Every call into Resolve goes inside `with bridge.lock:`** -- the sweep's
+   fingerprint, the playhead read, `_apply_*`, `_render_wav`, the conform and
+   the release/reload handshake. The lock is SHARED with the companion's
+   timeline watcher, so hold it for the calls and not for the thinking: build
+   card dicts, diff plans and write JSON outside it.
+4. **`_sweep` asks `bridge.sweep_items(tl_id)` first.** When it answers, use
+   its rows for the per-clip facts `_learn_media_path` and `_tokens_for`
+   currently buy with `GetClipProperty` -- clip name, file path, and the
+   multicam mapping -- and read only the item geometry from the API. When it
+   answers None, do exactly what the code does today.
+5. **`_apply` calls `bridge.on_edit_start(kind)` before it touches Resolve
+   and `on_edit_end(kind, ok, note)` in a `finally`.**
+6. **Nothing else changes.** `KeyHelper`, `ripple_keys.ahk`, the undo journal,
+   `_apply_conform`, the offcuts bank, `AgentClient` and the page all stay as
+   they are. `AgentClient._req` in particular must remain the single place
+   that touches a socket: the companion subclasses it and replaces only that
+   method.
+
+### How the companion drives it
+
+```python
+from multicam_pipeline.cards.resolve_engine import SyncEngine
+engine = SyncEngine(vault_root, bridge=CardsBridge(cfg))
+engine.start()
+client = _TunnelClient(dashboard_url, "", engine, machine_name)  # AgentClient
+threading.Thread(target=client.pull_loop, daemon=True).start()
+threading.Thread(target=client.push_loop, daemon=True).start()
+```
+
+The token is empty on purpose, for ever: the cards server's secret lives in
+the dashboard container and is attached there.
+
+### How to know it landed
+
+`companion/tests/test_timeline_cards_role.py` builds a fake checkout and
+checks the refusals; the real one has to satisfy the same two questions:
+
+```python
+import multicam_pipeline.cards.resolve_engine as m
+assert m.BRIDGE_CONTRACT_VERSION == 1
+import inspect
+assert "bridge" in inspect.signature(m.SyncEngine.__init__).parameters
+```
+
+If either is false the companion refuses to start the role and says so in one
+sentence naming this section. That is the intended behaviour on every machine
+until the work above is done.
+
+---
+
 ## 8. Verdict
 
 **Do it, in this order, and do not skip phase 0.**

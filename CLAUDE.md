@@ -203,6 +203,24 @@ run alongside the tray app — it would hold port 8899.
   /api/v1/jobs/<id>/why` answers "unschedulable, and why" per machine,
   because a scheduler that quietly assigns nothing looks exactly like a fleet
   with nothing to do.
+- **The page a phone stages a cut on drives THIS computer's Resolve**
+  (2026-08-30, `docs/TIMELINE-CARDS-INTO-CCSYNC.md` phase 2): the Timeline
+  Cards agent is a companion role (`timeline_cards_role.py`), not a second
+  program on creator-1. **One machine, one Resolve client** -- it refuses to
+  start beside a standalone `reorder_web.py --agent`, names it, and does not
+  kill it; a process probe that cannot answer counts as one running. The
+  engine is IMPORTED from `jobs_mulcam_pipeline` and handed a bridge
+  (`timeline_cards_bridge.CardsBridge`) instead of owning a connection, so
+  `scriptapp()` still has exactly one caller in this process
+  (`resolve_bridge.connect()`, CR-68) and the sweep reads the project library
+  with `_API_LOCK` released -- `resolve_bridge.api_call(name)` is the one
+  public way in for callers outside that module, and every take is timed. The
+  `/agent/*` protocol is tunnelled at `/cards/agent/{state,pending,result}` on
+  the fleet credential, so `CARDS_TOKEN` lives in the dashboard container and
+  never on an editor's machine. OFF everywhere (`cards_agent`), and inert
+  until the other repo implements the bridge contract (plan §7c.1). The
+  release/reload handshake has still NEVER RUN LIVE: FF5lab first, from the
+  standalone agent.
 - The 8899 loopback is origin-allow-listed (`loopback_guard.py`,
   2026-08-17): only the configured dashboard origin gets CORS headers, and a
   POST needs that origin or the `~/.ccsync/loopback-token` header. If

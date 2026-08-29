@@ -1346,3 +1346,55 @@ correctly and invisibly refused all three media kinds. The pin is in
 the companion's `capabilities.build()` produces comes back out of
 `db.machine_capabilities` unchanged -- so the next field cannot be added to
 one side only.
+
+---
+
+## 21. Two Resolve clients on one machine (Timeline Cards, phase 2, 2026-08-30)
+
+§15 (CR-68) says one unguarded poller kills scripting for every client on the
+machine for the whole Resolve session. Phase 2 puts a SECOND scheduler inside
+the companion -- the Timeline Cards engine, sweeping at 1 Hz with a 10 Hz
+playhead read -- so the rules that keep that true are worth stating on their
+own.
+
+**One process, one connection.** The engine does not call `scriptapp()`. It is
+handed `timeline_cards_bridge.CardsBridge`, whose `resolve()` is
+`resolve_bridge.connect()` -- the one chokepoint, carrying the guard. An
+engine that still owns a connection is REFUSED at start
+(`BRIDGE_CONTRACT_VERSION`, plan §7c.1), and the refusal names the document.
+
+**One machine, one client.** `timeline_cards_role` refuses to start if a
+standalone `reorder_web.py --agent` (or the PC's own `reorder_web.py 8800`) is
+running, and it does NOT kill it. The probe FAILS CLOSED: an unlistable
+process table counts as "one is running". A false refusal costs the page until
+somebody looks; a false clearance costs scripting for every client on that
+machine, and the cure is closing Resolve.
+
+**One lock, three cadences.** The watcher polls every 3 s, the engine sweeps
+every 1 s and reads the playhead every 0.1 s, and all of them take
+`resolve_bridge._API_LOCK` -- from outside that module through the one public
+entry, `resolve_bridge.api_call(name)`. Two rules keep that from starving
+anything:
+
+* **Never hold the lock for a walk.** The per-clip property crawl is 11-95 s
+  on a big project (§16). The engine's sweep asks `bridge.sweep_items()`,
+  which reads the project library with the lock RELEASED -- and which returns
+  None rather than answering out of the API walk, because handing that back
+  would put the crawl on the sweep's hot path with the lock held for all of
+  it.
+* **Measure it.** `bridge.stats()` carries `takes`, `held_total`, `held_max`
+  and `held_max_call` for the life of the process, and a take past 0.5 s is
+  logged with its name (at most once a minute). "The tray went quiet" is then
+  a number, not an argument. Measured with the fake bridge: 100 takes, under
+  5 ms each.
+
+**A halt refuses a start; it does not interrupt an edit.** Every edit is a
+synthetic keystroke SEQUENCE, and one stopped half way through is a timeline
+nobody asked for. The companion's shutdown is what lets go of Resolve.
+
+**The release/reload handshake has never run live.** `SaveProject`,
+`CloseProject`, `LoadProject`, `SetCurrentTimeline`: four calls that
+`TRUENAS-APP-PLAN.md` §0 says twice have never been executed against a real
+project. Run them on FF5lab from the standalone agent BEFORE turning
+`cards_agent` on. Do not port an unexercised path and change its host in the
+same week.

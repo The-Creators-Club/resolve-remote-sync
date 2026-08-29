@@ -472,6 +472,8 @@ for `broll_ingest_*`):
 | `DASH_INTERVAL_REMOTENEED` | `60` | |
 | `DASH_INTERVAL_PRUNE` | `3600` | |
 | `DASH_BACKOFF_MAX` | `300` | |
+| `DASH_CARDS_SERVER_URL` | `""` | The Timeline Cards server the `/cards/agent/*` tunnel forwards to (phase 2; `http://<truenas>:8800` today, in-process in phase 3). Blank is normal -- a fleet that does not use Timeline Cards has no server -- and the three routes then answer **503 naming this variable**, because a 404 reads as an old dashboard |
+| `DASH_CARDS_TOKEN` | `""` | That server's own `CARDS_TOKEN`. **It never leaves this container**: the tunnel attaches it outbound, which is what takes it off the editor's machine. An upstream 401/403 is reported as "check DASH_CARDS_TOKEN", not as the caller's problem |
 | `DASH_ENFORCE_MAX_REMOVALS` | `3` | **Blast-radius brake.** An enforce pass that would unshare more than this many devices is refused (additions still apply) and logged as an ERROR. A mass unshare is never a normal outcome |
 
 ### 2.7 Deploy-time only
@@ -662,6 +664,32 @@ file the page plays.
 The roots a machine can place are reported as `capabilities.mounts` by NAME,
 never as paths, and a configured root that is not actually there (an unplugged
 drive, a `subst` that did not run at login) is not a mount.
+
+### Timeline Cards (`docs/TIMELINE-CARDS-INTO-CCSYNC.md` phase 2)
+
+Serving the Timeline Cards page from **this** computer's Resolve, so a phone
+somewhere else can re-order the cut that is open here. Two keys, and the
+default is off on every machine:
+
+| Key | Default | Notes |
+|---|---|---|
+| `cards_agent` | `false` | The switch. **Turn it on on exactly one computer.** The companion refuses to start the role beside a standalone `reorder_web.py --agent` (or this PC's own `reorder_web.py 8800`) and says so: two Resolve clients on one machine kill scripting for both, for the whole Resolve session (CR-68, `GOTCHAS.md` §15). A process probe that cannot answer counts as one running |
+| `cards_vault_root` | `""` | The vault the page reads. Falls back to `jobs_vault_root`; its own key exists so a machine can transcode for the fleet out of one root and serve cards out of another |
+
+The **engine itself** is imported from `jobs_mulcam_pipeline` -- the same
+checkout the whisper runner names -- and never copied, so a page fix over
+there is a `git pull` and not a companion release. Until that repo implements
+the bridge contract (§7c.1 of the plan) the role refuses to start on every
+machine, with a sentence naming it.
+
+Nothing else is configured here. The role talks only to the dashboard, with
+the fleet token and signed identity it already holds; the cards server's own
+`CARDS_TOKEN` lives in the dashboard container (`DASH_CARDS_TOKEN`) and never
+reaches an editor's machine.
+
+Its state rides the report as `capabilities.cards_agent` and shows on the
+fleet grid as `[ CARDS: E1 v5 ]` -- the timeline on screen and the state
+version -- on the connected machine only.
 
 ### YouTube (**F** — all inert unless the site enables the feature)
 

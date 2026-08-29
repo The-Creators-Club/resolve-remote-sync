@@ -889,14 +889,26 @@ class ProjectLibrary:
     def timeline_items(self, timeline_uid: str) -> list[dict]:
         """Every item of one timeline, multicams and compounds expanded.
 
-        Item order is (video tracks then audio, each by DbIndex), and
-        within a track by Start. An item with no MediaRef -- a transition,
-        a generator, a title -- is skipped: it has no media and every
-        consumer of this list is looking for media.
+        Item order is (video tracks then audio, each by DbIndex on the
+        SEQUENCE CONTAINER association -- never a row id, which is insertion
+        order and says nothing about where a track sits), and within a track
+        by Start. An item with no MediaRef -- a generator, a title, an
+        adjustment clip -- is not EMITTED: it has no media and every consumer
+        of this list is looking for media.
 
-        item_index counts TIMELINE ITEMS, so the angles of a multicam all
-        carry the index of the multicam item they came from; see the module
-        docstring.
+        BUT IT IS STILL COUNTED. `item_index` is the 0-based position of the
+        item within its track, counting every item in it, because that is
+        what the caller can line the list up against:
+        `GetItemListInTrack("video", 1)` returns titles and generators too,
+        and Timeline Cards maps our rows onto that list POSITIONALLY --
+        `rows.get(index)` against `enumerate(geom)` in its `_sweep`
+        (TIMELINE-CARDS-INTO-CCSYNC.md §7c.1). Skipping a title without
+        counting it moved every clip after it by one, silently, and the
+        symptom is a card carrying the next clip's name and transcript.
+
+        The angles of a multicam all carry the index of the multicam item
+        they were expanded from, which is the same rule from the other side:
+        an index names a place in the track the API agrees about.
         """
         def work():
             sequence_id = self._sequence_for_timeline(timeline_uid)
@@ -918,18 +930,21 @@ class ProjectLibrary:
                 track_type = "audio" if kind == _TRACK_AUDIO else "video"
                 position = 0
                 for name, _start, media_uid in items_of.get(track_id, []):
-                    if not media_uid:
-                        continue
-                    for expanded in self._expand(media_uid, name, paths, graph, 0, set(), done):
-                        expanded.update({
-                            "track_type": track_type,
-                            "track_index": index + 1,
-                            "item_index": position,
-                            "source": "library",
-                        })
-                        if track_name:
-                            expanded.setdefault("track_name", track_name)
-                        items.append(expanded)
+                    # `position` advances for EVERY item, media or not -- see
+                    # the docstring. The `continue` that used to sit here
+                    # skipped the increment too.
+                    if media_uid:
+                        for expanded in self._expand(media_uid, name, paths,
+                                                     graph, 0, set(), done):
+                            expanded.update({
+                                "track_type": track_type,
+                                "track_index": index + 1,
+                                "item_index": position,
+                                "source": "library",
+                            })
+                            if track_name:
+                                expanded.setdefault("track_name", track_name)
+                            items.append(expanded)
                     position += 1
             return items
         return self._retrying(work)

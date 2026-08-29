@@ -52,6 +52,7 @@ FAKE_HANDLER = '''
 """A minimal stand-in for multicam_pipeline.cards.handler."""
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse
+import gzip
 import json
 import os
 
@@ -63,8 +64,19 @@ def make_handler(engine):
 
         def _send(self, code, body, ctype="application/json; charset=utf-8"):
             data = body if isinstance(body, bytes) else body.encode("utf-8")
+            # The real handler's own condition, verbatim: a full state is
+            # ~660 KB of JSON and ~90 KB gzipped, and the page fetches it on
+            # every version.
+            enc = None
+            if (len(data) >= 2048 and "json" in ctype
+                    and "gzip" in (self.headers.get("Accept-Encoding") or "")):
+                data = gzip.compress(data, 5)
+                enc = "gzip"
             self.send_response(code)
             self.send_header("Content-Type", ctype)
+            if enc:
+                self.send_header("Content-Encoding", enc)
+                self.send_header("Vary", "Accept-Encoding")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -80,6 +92,8 @@ def make_handler(engine):
             elif u.path == "/":
                 self._send(200, "<!doctype html><title>Timeline Cards</title>",
                            "text/html; charset=utf-8")
+            elif u.path == "/big":
+                self._send(200, json.dumps({"pad": "x" * 8000}))
             elif u.path == "/boom":
                 raise RuntimeError("a route that blew up")
             elif u.path == "/silent":
@@ -471,6 +485,24 @@ def test_the_whole_file_is_a_200_with_the_same_validators(mounted):
                                                      "If-Range": etag})
     assert again.status_code == 206
     assert again.content == AUDIO_BYTES[:4]
+
+
+def test_the_handlers_own_gzip_survives_the_shim(mounted):
+    """The handler compresses its own bodies and sets Content-Encoding; the
+    shim must pass both through untouched. uvicorn does not re-encode, so a
+    header dropped here would be 660 KB of gzip served as text/plain -- which
+    the browser renders as binary and nobody reads as a header bug."""
+    client, _ = mounted
+    resp = client.get("/cards/big", headers={"Accept-Encoding": "gzip"})
+    assert resp.status_code == 200
+    # httpx decodes it, so the proof it WAS compressed is the raw length
+    # against the decoded one.
+    assert resp.json()["pad"] == "x" * 8000
+    assert int(resp.headers["content-length"]) < 8000
+    assert resp.headers["Vary"] == "Accept-Encoding"
+    plain = client.get("/cards/big", headers={"Accept-Encoding": "identity"})
+    assert "content-encoding" not in plain.headers
+    assert int(plain.headers["content-length"]) > 8000
 
 
 def test_a_route_that_raises_is_a_500_and_not_a_dead_mount(mounted):

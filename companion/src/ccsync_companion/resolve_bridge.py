@@ -1109,8 +1109,16 @@ def _current_project_locked() -> tuple[Optional[dict[str, Any]], Any, Any, str]:
 def get_timeline_items(allow_cached: bool = False) -> dict[str, Any]:
     """Enumerate every video+audio timeline item on the current timeline.
 
-    Returns {"ok": bool, "message": str, "items": [...], "project_name": str}.
-    Never raises.
+    Returns {"ok": bool, "message": str, "items": [...], "project_name": str,
+    "timeline_uid": str}. Never raises.
+
+    "timeline_uid" is WHICH TIMELINE the items are from -- `GetUniqueId()` of
+    the one that was current when the walk ran, "" when there was none or the
+    build has no such call. It exists because `item_index` is only meaningful
+    against that timeline's own track: a caller that took a fingerprint of
+    timeline A and then reads this list has to be able to tell that Resolve
+    moved to B in between, and an `allow_cached` answer makes that window
+    wider still (TIMELINE-CARDS-INTO-CCSYNC.md §7c, finding 1).
 
     Each item dict: {
         "file_path": str,               # GetClipProperty()["File Path"]
@@ -1349,7 +1357,7 @@ def _library_timeline_items(allow_cached: bool = False) -> Optional[dict[str, An
         log.debug("resolve: library walk of %r found %d items, %d with a path, in %.1f ms",
                   timeline_name, len(walked), len(items), elapsed_ms)
         result = {"ok": True, "message": "", "items": items,
-                  "project_name": project_name}
+                  "project_name": project_name, "timeline_uid": timeline_uid}
         _remember_timeline_result(fingerprint, result)
         return result
 
@@ -1412,6 +1420,10 @@ def _get_timeline_items_locked(allow_cached: bool = False) -> dict[str, Any]:
 
     items: list[dict[str, Any]] = []
     swept = [0]
+    # Read once, here, rather than a second GetUniqueId() at the bottom: the
+    # fingerprint below already asks for it, and the answer has to name the
+    # timeline these item_index values belong to (see the docstring).
+    timeline_uid = _safe_attr_str(timeline, "GetUniqueId")
     try:
         tracks = _timeline_tracks(timeline)
         fingerprint = _timeline_fingerprint(project_name, timeline, tracks)
@@ -1466,7 +1478,8 @@ def _get_timeline_items_locked(allow_cached: bool = False) -> dict[str, Any]:
                 "project_name": project_name}
 
     _log_darwin_clip_path_flavor(items)
-    result = {"ok": True, "message": "", "items": items, "project_name": project_name}
+    result = {"ok": True, "message": "", "items": items,
+              "project_name": project_name, "timeline_uid": timeline_uid}
     _remember_timeline_result(fingerprint, result)
     return result
 

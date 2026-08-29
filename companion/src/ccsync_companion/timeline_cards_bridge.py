@@ -71,28 +71,55 @@ class _Take:
 
         with bridge.lock:                 # the plain context manager
         with bridge.lock("conform"):      # ...named, for the wedge log
+
+    **THE PLAIN FORM IS SHARED AND THE STATE IS NOT.** `bridge.lock` is ONE
+    object on the bridge, and the engine has three threads that take it (the
+    1 s sweep, the 0.1 s playhead read, an edit) -- so the inner context and
+    the start time cannot live on `self`, or two threads entering at once
+    would overwrite each other's and the second `__exit__` would release a
+    lock it never took and time it from the wrong instant. They live on a
+    thread-local STACK instead, which also makes the re-entrant case
+    (`_API_LOCK` is an RLock, and a helper may take it inside a caller that
+    already has) cost nothing. `bridge.lock("name")` still returns a fresh
+    `_Take`, so the wedge log gets the caller's own word for the work.
     """
 
-    __slots__ = ("_owner", "_name", "_started", "_inner")
+    __slots__ = ("_owner", "_name", "_local")
 
     def __init__(self, owner: "CardsBridge", name: str) -> None:
         self._owner = owner
         self._name = name
-        self._started = 0.0
+        self._local = threading.local()
+
+    def _stack(self) -> list:
+        stack = getattr(self._local, "stack", None)
+        if stack is None:
+            stack = self._local.stack = []
+        return stack
 
     def __call__(self, name: str) -> "_Take":
         return _Take(self._owner, str(name or self._name))
 
     def __enter__(self) -> "_Take":
-        self._inner = resolve_bridge.api_call(self._name)   # type: ignore[attr-defined]
-        self._inner.__enter__()
-        self._started = time.monotonic()
+        inner = resolve_bridge.api_call(self._name)   # type: ignore[attr-defined]
+        inner.__enter__()
+        self._stack().append((inner, time.monotonic()))
         return self
 
     def __exit__(self, *exc: Any) -> bool:
-        held = time.monotonic() - self._started
+        stack = self._stack()
+        if not stack:
+            # `__exit__` without `__enter__` on this thread. Nothing to
+            # release and nothing to time; swallowing it would hide a bug in
+            # a caller, so it is loud and still not an exception on the way
+            # out of a `with` that is already unwinding.
+            log.error("cards: %s left the API lock without taking it on this "
+                      "thread", self._name)
+            return False
+        inner, started = stack.pop()
+        held = time.monotonic() - started
         try:
-            return bool(self._inner.__exit__(*exc))
+            return bool(inner.__exit__(*exc))
         finally:
             self._owner._note_take(self._name, held)
 
@@ -181,18 +208,33 @@ class CardsBridge:
     # -- the sweep ---------------------------------------------------------
 
     def sweep_items(self, tl_uid: str) -> Optional[list[dict]]:
-        """The open timeline's clips, read from the PROJECT LIBRARY.
+        """The clips of THE TIMELINE `tl_uid` NAMES, from the PROJECT LIBRARY.
 
         None means "ask Resolve yourself": the walk is switched off, no
-        library could be located, or the one we had stopped answering. That
-        is not an error -- it is the state every machine is in until a
-        library is found, and the engine's API path is the fallback.
+        library could be located, the one we had stopped answering, **or the
+        answer is about a different timeline**. That is not an error -- it is
+        the state every machine is in until a library is found, and the
+        engine's API path is the fallback.
+
+        **THE UID CHECK IS NOT A FORMALITY** (§7c, finding 1, 2026-08-30).
+        The engine maps these rows onto `GetItemListInTrack("video", 1)`
+        POSITIONALLY, for the timeline it fingerprinted a moment ago; this
+        function asks the companion for "the current timeline's items", with
+        `allow_cached` on. An editor who switched timeline in that window --
+        or a cached answer from the previous one -- would put every clip's
+        name, path and transcript on somebody else's cut, and nothing about
+        the result would look wrong. So an answer that is about another
+        timeline, or that cannot say which timeline it is about, is refused:
+        the API walk that follows is slower and correct.
 
         _API_LOCK is NOT held for this. The read has a 5 s statement timeout
         and five seconds of that lock is five seconds of frozen tray menu and
         of every other scripting client on the machine queueing.
         """
         if self._items is not None:
+            # The injected seam answers for itself, `tl_uid` and all: it is
+            # what the suite (and any future non-library source) implements,
+            # and re-checking a uid it never claimed would refuse everything.
             return self._items(tl_uid)
         try:
             answer = resolve_bridge.get_timeline_items(allow_cached=True)
@@ -200,6 +242,13 @@ class CardsBridge:
             log.debug("cards: the library sweep failed", exc_info=True)
             return None
         if not isinstance(answer, dict) or not answer.get("ok"):
+            return None
+        answered_for = str(answer.get("timeline_uid") or "")
+        wanted = str(tl_uid or "")
+        if wanted and answered_for != wanted:
+            log.debug("cards: the library answered for timeline %r, not %r -- "
+                      "the engine will ask Resolve itself",
+                      answered_for or "(unnamed)", wanted)
             return None
         items = answer.get("items") or []
         # Only a LIBRARY answer counts. resolve_bridge falls back to the API

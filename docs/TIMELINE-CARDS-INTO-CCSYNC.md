@@ -1079,6 +1079,55 @@ better place to find out.
    rollout on that machine (§5's cost note): the moment the companion carries
    the role, it is the one Resolve client there.
 
+### Three findings from the other side's implementation (2026-08-30)
+
+Timeline Cards implemented §7c.1 (`47c2487` in that repo: `ResolveEngine(lib,
+bridge=None)`, and a `_sweep_rows` that keys the library's rows by
+`item_index` and reads them back with `rows.get(index)` against
+`enumerate(GetItemListInTrack("video", 1))`). Reviewing THAT against this
+side turned up three things, all fixed here:
+
+**1. `sweep_items(tl_uid)` ignored `tl_uid`.** It returned
+`resolve_bridge.get_timeline_items(allow_cached=True)` -- whatever timeline is
+current, or a CACHED answer from a moment ago -- and the engine maps those
+rows positionally onto the V1 items of the timeline it fingerprinted. An
+editor who switched timeline between the fingerprint and the read (or a cache
+hit from the previous one) would get every card's name, path and transcript
+from somebody else's cut, **and nothing about the result would look wrong**.
+Fixed on both halves: `get_timeline_items` now returns `timeline_uid` -- which
+timeline the items are from -- and `CardsBridge.sweep_items` returns None on a
+mismatch, or when the answer cannot say. An answer that cannot name its
+timeline and one that names yours must not be the same answer to a caller
+that is about to index into it.
+
+**2. `item_index` skipped items it did not emit.** The contract is: rows come
+back in `GetItemListInTrack("video", 1)` order, `item_index` 0-based within
+the track, `track_index` 1-based, V1 = (`track_type "video"`, `track_index
+1`). The track ORDER was already right and is now pinned by a test -- tracks
+sort by `Sm2SequenceContainer_Sm2TiTrack.DbIndex`, never by row id, because
+`Sm2TiTrack` carries no index of its own and its `SubType` is uninitialised
+memory. The INDEX was not: an item with no `MediaRef` (a title, a generator,
+an adjustment clip) was skipped WITHOUT advancing the counter, while Resolve's
+own list returns it -- so every clip after a title on V1 was off by one.
+`library.timeline_items` now counts every item and emits only the ones with
+media.
+
+**3. `_Take`'s plain form was not thread-safe.** `bridge.lock` is one object
+and the engine has three threads that take it (the 1 s sweep, the 0.1 s
+playhead read, an edit). The inner context and the start time lived on
+`self`, so two threads entering at once overwrote each other's: the second
+`__exit__` released a lock it never took and timed the take from the wrong
+instant. They are a thread-local STACK now, which also makes the re-entrant
+case free (`_API_LOCK` is an RLock). The engine only ever uses the named form
+today; the docstring promised both, so both work.
+
+And two smaller things the adapter is now pinned to, because the engine
+depends on them: `on_edit_end(kind, ok, note)` is called POSITIONALLY (from a
+`finally`, where a TypeError would be swallowed), and **`resolve()` returning
+None is "wait", never a counted failure** -- Resolve closed, or inside its
+launch window, is an ordinary state, and this bridge scores no connections of
+its own.
+
 ---
 
 ## 7c.1 The engine's bridge contract (the spec for the Timeline Cards side)
@@ -1155,11 +1204,18 @@ class Bridge(Protocol):
         """...and it is over, with how it went."""
 
     def sweep_items(self, tl_uid: str) -> list[dict] | None:
-        """The open timeline's clips, read from the PROJECT LIBRARY, or None.
+        """The clips of THE TIMELINE `tl_uid` NAMES, from the PROJECT LIBRARY.
 
-        None means "ask Resolve yourself" -- no library, or it stopped
-        answering -- and is the state most machines are in. Not an error, and
-        not to be cached.
+        None means "ask Resolve yourself" -- no library, it stopped
+        answering, OR the answer turned out to be about another timeline --
+        and is the state most machines are in. Not an error, and not to be
+        cached.
+
+        `tl_uid` IS A CONSTRAINT, NOT A HINT (finding 1 below). The rows are
+        matched to the API's items by POSITION, so a bridge that answered
+        about whatever timeline is current would put one cut's clip name,
+        path and transcript on another's the moment somebody switched
+        timeline mid-sweep.
 
         Each dict:
             {"media_pool_uid": str,     # MediaPoolItem.GetUniqueId()

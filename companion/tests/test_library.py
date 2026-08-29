@@ -526,6 +526,60 @@ def test_item_index_counts_timeline_items_not_emitted_dicts(db):
     lib.close()
 
 
+def test_item_index_counts_a_title_it_does_not_emit(db):
+    """§7c finding 2 (2026-08-30): a V1 item with no MediaRef -- a title, a
+    generator, an adjustment clip -- is not emitted, and MUST still advance
+    the index. Resolve's `GetItemListInTrack("video", 1)` returns it, and
+    Timeline Cards lines our rows up against that list POSITIONALLY, so
+    skipping it without counting it moved every clip after it by one. The
+    symptom is a card carrying the NEXT clip's name and transcript, on a
+    timeline that looks completely normal."""
+    conn, path = db
+    b, project, root = _simple_project(conn)
+    one = b.clip("one", "one.mov", root, r"P:\Media", "one.mov")
+    two = b.clip("two", "two.mov", root, r"P:\Media", "two.mov")
+    _tl, seq = b.timeline(project, "e1", "Show - E1")
+    v1 = b.track(seq, "v1", 0, 0)
+    b.item(v1, "i1", "one", 0, one)
+    b.item(v1, "title", "Lower third", 100)          # no MediaRef at all
+    b.item(v1, "i2", "two", 200, two)
+    conn.commit()
+
+    lib = open_library(path)
+    items = lib.timeline_items(_uid("tl/e1"))
+    assert [(i["clip_name"], i["item_index"]) for i in items] == [
+        ("one", 0), ("two", 2)]
+    lib.close()
+
+
+def test_tracks_are_ordered_by_the_containers_dbindex_not_the_row_id(db):
+    """§7c finding 2, the other half. `Sm2TiTrack` carries no index of its
+    own and its SubType is uninitialised memory; the ONLY ordering there is
+    is `Sm2SequenceContainer_Sm2TiTrack.DbIndex`. Inserted here in the wrong
+    order on purpose, so a walk that fell back to row id would report V2 as
+    V1 -- and V1 is the only track Timeline Cards reads."""
+    conn, path = db
+    b, project, root = _simple_project(conn)
+    lower = b.clip("lower", "lower.mov", root, r"P:\Media", "lower.mov")
+    upper = b.clip("upper", "upper.mov", root, r"P:\Media", "upper.mov")
+    _tl, seq = b.timeline(project, "e1", "Show - E1")
+    # V2 first by row id, V1 second -- and DbIndex says the opposite.
+    v2 = b.track(seq, "v2", 0, 1)
+    v1 = b.track(seq, "v1", 0, 0)
+    b.item(v2, "up", "upper", 0, upper)
+    b.item(v1, "low", "lower", 0, lower)
+    conn.commit()
+
+    lib = open_library(path)
+    items = lib.timeline_items(_uid("tl/e1"))
+    assert [(i["track_index"], i["clip_name"]) for i in items] == [
+        (1, "lower"), (2, "upper")]
+    # ...and V1 is `track_type "video"`, 1-based, which is the whole of the
+    # contract the cards engine filters on.
+    assert items[0]["track_type"] == "video"
+    lib.close()
+
+
 def test_an_unknown_timeline_is_unavailable_not_empty(db):
     """Empty would look like "this timeline has no media" and stop the
     fallback; the caller must be told the library could not answer."""

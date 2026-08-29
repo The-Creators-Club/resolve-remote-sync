@@ -217,6 +217,35 @@ run alongside the tray app — it would hold port 8899.
   /api/v1/jobs/<id>/why` answers "unschedulable, and why" per machine,
   because a scheduler that quietly assigns nothing looks exactly like a fleet
   with nothing to do.
+  **Phase 4 (2026-08-30) finished the scheduler.** The rank is an ordered
+  list of signals per kind (nvenc for a proxy, a GPU with HEADROOM over the
+  job's own VRAM floor for whisper, the base rig for the two cheap kinds),
+  then least-loaded, then longest-idle -- and it is EXPLAINABLE: `why`
+  carries every able machine's rank tuple, its signals and the first
+  component it lost on, in words. Backpressure is a per-kind FLEET cap
+  (`DASH_JOBS_MAX_RUNNING`), a per-machine cooldown after a failure (the box
+  with the broken ffmpeg is otherwise first in the queue for every retry,
+  because failing in two seconds is what keeps it idle) and a queue depth on
+  the report reply the companion backs off on -- STOP ASKING, never stop
+  working. `schedulable` keeps its phase-1 meaning because Timeline Cards
+  falls back on it; `reason_code` (`no_capable_machine` / `all_busy` /
+  `idle_wait` / `fleet_cap` / `cooling_down` / `halted` / ...) is what tells
+  the two kinds of false apart, and THE WORST ANSWER WINS, not the
+  commonest. Rule 5's pinning fallback exists now: a media job the fleet
+  spends its retry budget on is **`pinned`** and run by the dashboard's own
+  mounted Timeline Cards engine (`cards_exec.py`, one seam -- the engine's
+  `fleet_execute`, plan §7f.1 -- onto its single ffmpeg worker), one-way,
+  never back to the fleet; **whisper never pins** (ffmpeg here, no GPU) and
+  with no executor a spent job is `abandoned` exactly as before, because a
+  job pinned into a queue nothing drains is worse than one that says so.
+  `POST /api/v1/jobs/{id}/cancel` is three acts wearing one button (queued:
+  over now; held: `commands.jobs.cancel` until that machine kills its child
+  and reports cancelled-not-retryable; pinned: the worker's `should_stop`),
+  and nothing forces a row terminal behind a live ffmpeg. `[jobs] kinds`
+  (`jobs_kinds`) keeps an editor's laptop out of ONE kind without
+  `jobs_enabled = false`; empty is every kind, because a dashboard deployed
+  ahead of the companions must not read silence as "no kinds". The operator's
+  view is **Settings -> JOBS** and `tools/jobs.py queue|cancel|why`.
 - **The page a phone stages a cut on drives THIS computer's Resolve**
   (2026-08-30, `docs/TIMELINE-CARDS-INTO-CCSYNC.md` phase 2): the Timeline
   Cards agent is a companion role (`timeline_cards_role.py`), not a second

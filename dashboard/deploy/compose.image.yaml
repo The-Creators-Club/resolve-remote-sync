@@ -221,6 +221,16 @@ services:
       # during the transition (§7.4).
       DASH_CARDS_SERVER_URL: "{{DASH_CARDS_SERVER_URL}}"
       DASH_CARDS_TOKEN: "REPLACE_ME"
+      # WHAT THIS CONTAINER CALLS THE FLEET'S ROOT NAMES, for the jobs it
+      # runs ITSELF (TIMELINE-CARDS-INTO-CCSYNC.md phase 4's pin: a media job
+      # the fleet spent its retry budget on is handed to the engine mounted
+      # above instead of being abandoned). Written by
+      # install_dashboard_app.jobs_env from the two mounts it makes, so it
+      # cannot disagree with them; `media` is absent when the site names no
+      # footage share, because a root that is not mounted must not be
+      # advertised. A job naming a root that is not here fails with a
+      # sentence, never a guess.
+      DASH_JOBS_ROOTS: "{{DASH_JOBS_ROOTS}}"
       # Unattended updates (2026-08-18, docs/MULTI_MACHINE_PLAN.md §9). "0"
       # is the vendor build: companions offer a new build in their tray and
       # an admin can push one machine at a time from Settings, Packages. "1"

@@ -184,10 +184,40 @@ invisible in every other signal becomes visible: a tripped lane B breaker, a
 halted machine, a relayed Syncthing peer — and, since 2026-08-18,
 `[ INDEXING B-ROLL: 12/40 ]` while a machine is crunching a local b-roll batch,
 `[ VRAM ]` when one was refused because the GPU cannot fit the chosen model
-(shown even with nothing running), and `[ N NEED PROXIES ]`. All of them are
+(shown even with nothing running), `[ N NEED PROXIES ]`, and -- since
+2026-08-29 -- `[ PROXY 480p: 62% ]` for a fleet job that machine is holding,
+which is the one chip that is a LINK (to Settings -> JOBS, where it can be
+explained and stopped). All of them are
 flat `machine_state` columns fed by sections of the companion's report
 (`BROLL_INGEST_PLAN.md` §3.2), not a JSON blob: the grid sorts and alarms on
 them.
+
+The fleet can also be given a **JOB** (`jobs` table v41-v45,
+`dashboard/jobs.py`, `docs/TIMELINE-CARDS-INTO-CCSYNC.md`). It is the ytdl
+download lease generalised -- compare-and-set claim, `(editor, MACHINE)` key,
+possession EXPIRES -- with one module that has an OPINION about which machine
+should do what: capability match, then policy (halt, upgrade, breaker, one job
+at a time, an idle floor per kind that the base rig is exempt from, a cooldown
+after a failure, the machine's own kind allow-list), then rank, then **offer,
+do not push**: the ids ride the report reply and the companion claims one on a
+fleet route. Four kinds -- `whisper` and the three Timeline Cards media
+recipes -- and `conform`/`resolve-edit` must never join them, because a
+synthetic keystroke moved to another machine is a keystroke into the wrong
+timeline.
+
+Two things about it are architecture rather than detail. **A job's paths are
+(root name, relative path) pairs, never absolute**: the vault is a drive
+letter on one machine, a container mount here and a UNC path on the wire.
+And **the dashboard is itself an executor**: when `/cards` is mounted, a media
+job the fleet has spent its retry budget on is `pinned` and handed to that
+engine's own single ffmpeg worker (`cards_exec.py`) instead of being
+abandoned -- one-way, never back to the fleet. Where there is no such engine,
+nothing pins and the job is abandoned visibly, which is the honest answer.
+Because the failure mode of a scheduler is INVISIBLE -- one that quietly
+assigns nothing looks exactly like a fleet with nothing to do -- "unschedulable,
+and why" is a first-class answer here: `GET /api/v1/jobs/{id}/why` per machine,
+and Settings -> JOBS for the person who noticed a lane spinning and is not
+holding a terminal.
 
 An in-process **collector thread** polls Syncthing's REST API on staggered
 cadences (connections 15s, completion 60s, config 120s, provisioning 300s,

@@ -1106,14 +1106,55 @@ refusal** -- an unknown requirement must never read as satisfied.
 | `POST /api/v1/jobs` | `{kind, inputs, requires, cost, priority}` | `{ok, job, why}` -- the receipt carries the scheduling answer, so a job nothing can run says so at submit time |
 | `GET /api/v1/jobs?state=open\|queued\|…&kind=&limit=` | -- | `{jobs:[…], kinds:[…]}` -- `kinds` is what THIS dashboard can schedule |
 | `GET /api/v1/jobs/{id}` | -- | `{job}` |
-| `GET /api/v1/jobs/{id}/why` | -- | `{job, schedulable, summary, machines:[{editor, machine, ok, reason, why}]}` |
+| `GET /api/v1/jobs/{id}/why` | -- | `{job, schedulable, reason_code, transient, capable, running, cap, summary, machines:[{editor, machine, ok, reason, why, rank, score, signals, why_not_first}]}` |
+| `GET /api/v1/jobs/queue` | -- | `{queue:{queued, running, pinned, oldest_age_s}, kinds:[{kind, running, cap}], pinning:{available, why_not}}` |
+| `POST /api/v1/jobs/{id}/cancel` | -- | `{ok, state, job}`; **409** for a job that has already finished |
 
 `why` is **"unschedulable, and why", per machine**, and it exists from the
 first commit on purpose: a scheduler that quietly assigns nothing looks
-exactly like a fleet with nothing to do. Reasons are
+exactly like a fleet with nothing to do. Per-machine `reason`s are
 `capability | fleet_halt | machine_halt | upgrading | lane_b_breaker |
 already_holds_a_job | not_idle | no_capabilities_reported | kind_unknown |
-another_machine_is_preferred`.
+another_machine_is_preferred | cooling_down | kind_not_allowed |
+jobs_disabled | fleet_cap`.
+
+**`schedulable` and `reason_code` are two different questions** (phase 4).
+`schedulable` keeps its phase-1 meaning -- "is anything going to take this,
+soon" -- because Timeline Cards' client makes the file itself when it is
+false, and that is the right answer for a fleet whose every machine has
+somebody sitting at it. `reason_code` is what tells the two kinds of false
+apart, and it is a CODE because a client branches on it:
+
+| `reason_code` | means | `transient` |
+|---|---|---|
+| `""` | schedulable | -- |
+| `no_machine_reported` | nothing has ever reported here | no |
+| `no_capable_machine` | every machine fails the capability filter | no |
+| `all_busy` | capable machines, all holding a job / upgrading / breaker-tripped / inside the grace window | yes |
+| `fleet_cap` | this kind is at the fleet's own limit | yes |
+| `idle_wait` | somebody is at every machine that could | yes |
+| `cooling_down` | every capable machine failed a job recently | yes |
+| `halted` | a fleet halt, or every machine's sync halted | no |
+| `kind_not_allowed` | every machine's config excludes this kind | no |
+| `kind_unknown` | this dashboard does not know the kind | no |
+| `held` / `pinned` / `finished` | somebody has it, or it is over | held and pinned, yes |
+
+**The worst answer wins, not the commonest**: one machine that could do this
+if its editor stood up is a fleet that will get to it, and answering
+`no_capable_machine` because four other machines have no GPU would send a
+client off to do GPU work on a laptop. `capable` is how many machines could
+EVER run it -- the number to read before buying hardware.
+
+**Cancelling** is three different acts wearing one route. A **queued** job is
+`failed` when the call returns, with the admin's name in `last_error`, and is
+never retried. A **held** one is not touched: the request is recorded, rides
+`commands.jobs.cancel` on that machine's next report until it answers, and
+the companion kills its child and posts `failed(cancelled, retryable=false)`.
+A **pinned** one is read by the dashboard's own worker within a second.
+Nothing forces a row terminal behind a live ffmpeg -- a machine that never
+answers keeps the job until its lease expires, because saying "stopped" while
+a child is still writing into the vault is how a half-made proxy gets
+published.
 
 These are session routes, so a non-browser client sends the CSRF token
 `POST /api/v1/login` now returns as `csrf` (it is an HMAC over that session's
@@ -1150,18 +1191,45 @@ to all of them is the same one -- stop, quietly.
 
 Leases: 300 s, heartbeat every 30 s. An expiry re-queues the job **and counts
 as an attempt**; past the per-kind retry budget (3 for `whisper`) it becomes
-`abandoned` rather than ping-ponging around the fleet for ever. `ok: false,
-retryable: false` is the runner saying the fault is in the JOB, which no
-other machine will fix.
+`pinned` where this dashboard has an executor of its own and `abandoned`
+where it has not, rather than ping-ponging around the fleet for ever.
+`ok: false, retryable: false` is the runner saying the fault is in the JOB,
+which no other machine will fix.
+
+**`pinned` is the fifth state** (phase 4, section 4.4 rule 5): the three media
+kinds only -- never `whisper`, since the dashboard container has ffmpeg and no
+GPU -- and only where `/cards` is mounted with an engine that implements
+`fleet_execute`. The dashboard's own worker runs it and the job then finishes
+`done` with `result.files`, so a client polling the row on another server sees
+it complete and cannot tell who made the file. **A pinned job never goes back
+to the fleet.** With no executor nothing pins and the state is `abandoned`,
+exactly as in phase 1 -- a job pinned into a queue nothing drains would be
+worse than one that says it was given up on.
+
+A **retryable** failure, and a lost lease, also put that machine on a short
+**cooldown** (`DASH_JOBS_COOLDOWN_SECONDS`, 120 s): the box with the broken
+ffmpeg is otherwise first in the queue for every retry, because failing in two
+seconds is exactly what keeps it idle. A success clears it; `retryable=false`
+never sets it, because the fault was in the clip.
 
 ### The offer, on the report reply
 
 ```json
-{"commands": {"jobs": {"offered": [12, 13]}}}
+{"commands": {"jobs": {
+  "offered": [12, 13],
+  "cancel": [11],
+  "queue": {"queued": 4, "running": 2, "pinned": 0, "oldest_age_s": 91.2}
+}}}
 ```
 
-Present only while something is on offer (the `broll_ingest` rule: an empty
-list is not an instruction, and this rides every tick of every machine).
+Each key is present only when it has something to say (the `broll_ingest`
+rule: an empty list is not an instruction, and this rides every tick of every
+machine). `cancel` names jobs THIS machine is holding that an admin has
+stopped, and keeps riding until the machine answers with a result. `queue` is
+the **depth signal** (phase 4): a companion with nothing offered and an empty
+queue lengthens its own tick (4x, capped at 120 s), and a DEEP queue never
+lengthens it -- backpressure on that side means stop asking, never stop
+working. `oldest_age_s` is null, never 0, on an empty queue.
 **Offer, do not push** -- the ids are an invitation and the claim is the
 decision. Computed by `ccsync_dashboard/jobs.py`: capability match, then
 policy (not halted, not mid-upgrade, breaker not tripped, not already holding
@@ -1170,14 +1238,38 @@ at it), then rank.
 
 **Rank is a preference, never a gate** (phase 1). For the first
 `RANK_GRACE_SECONDS` (60 s, two report intervals) a job is offered only to the
-best-placed machines -- capability for the kind (nvenc for a proxy, a GPU for
-whisper, the base rig for the two cheap kinds), then least loaded, then
-longest idle; a TIE is offered to all of them, because the compare-and-set is
-what decides between equals. After that every capable machine is offered it.
-A scheduler that can starve a queue is worse than one with no opinion at all,
-because the symptom is identical to a fleet with nothing to do. `why` reports
-each able machine's `rank`, so "three machines could and it went to the one
-without the encoder" is an answerable question.
+best-placed machines; a TIE is offered to all of them, because the
+compare-and-set is what decides between equals. After that every capable
+machine is offered it. A scheduler that can starve a queue is worse than one
+with no opinion at all, because the symptom is identical to a fleet with
+nothing to do.
+
+The rank (phase 4) is `(preference, -live jobs, -load, idle seconds)`,
+biggest first, and only `preference` differs by kind -- an ORDERED list of
+signals, the first worth more than the second:
+
+| kind | signals, best first |
+|---|---|
+| `whisper` | `gpu_fits` (VRAM at or above the job's own `gpu_vram_gb` plus 1 GB of headroom), then `gpu` |
+| `proxy-480p` | `nvenc` |
+| `audio-extract`, `peaks` | `near_media` (the base rig: next to the media, and nobody sits at it) |
+
+A GPU that will not report its size is no preference (not a refusal), and a
+missing load average is not a penalty -- `null` is "Windows has no loadavg",
+and reading it as busy would rank every Windows box below every Mac for a
+reason that says nothing about either. `why` reports each able machine's
+`rank`, its `score` tuple, the `signals` behind it and `why_not_first` -- the
+first component it lost on, in words -- so "three machines could and it went
+to the one without the encoder" is an answerable question.
+
+**A per-kind FLEET CAP** sits over all of it (`DASH_JOBS_MAX_RUNNING`,
+default 2 for `whisper` and 4 for the media kinds): one job at a time per
+machine was never a limit on the NAS's disk or the media share's bandwidth,
+which four simultaneous 480p encodes reading rushes over SMB find long before
+any one machine does. **And a machine's own allow-list** (`jobs_kinds` in its
+config, reported as `capabilities.job_kinds`) is honoured here and on the
+companion: empty is every kind, so an editor's laptop can be kept out of
+`whisper` without being taken out of the fleet.
 
 `idle_seconds` keeps `idle.py`'s contract end to end: **null means cannot
 tell means NOT IDLE**, on the machine and on the server.
@@ -1194,6 +1286,9 @@ python tools/jobs.py submit --kind proxy-480p --root media \
     [--out-stem "Interview 3"] [--watch]
 
 python tools/jobs.py list [--state open] | why <id> | watch <id>
+python tools/jobs.py queue          # the depth, the per-kind caps, and
+                                    # whether anything pins here
+python tools/jobs.py cancel <id>
 ```
 
 `watch` prints the percentage while a recipe runs, and says "already

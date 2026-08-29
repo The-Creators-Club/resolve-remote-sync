@@ -547,6 +547,29 @@ def cards_env(enabled: str, cards_token: str = "") -> dict:
     }
 
 
+def jobs_env() -> dict:
+    """`DASH_JOBS_ROOTS` -- what THIS container calls the fleet's root names.
+
+    Derived from the two mounts this script already makes, rather than left
+    to an operator: a job the fleet gives up on is run HERE (phase 4's pin,
+    ccsync_dashboard/cards_exec.py), and it can only be placed if the
+    container knows that `vault` is /vault and `media` is /media. Getting
+    that wrong is not a crash, it is a pinned job that fails with "no media
+    root configured" hours after anybody was watching.
+
+    `media` is omitted when the site names no footage share, because a root
+    that is not mounted must not be advertised -- absent is "no capability"
+    here exactly as it is on a companion. `tree` needs no entry: the
+    dashboard's own DASH_PROJECTS_DIR is its fallback.
+    """
+    roots = []
+    if SITE_CARDS_VAULT_HOST:
+        roots.append("vault=" + CARDS_VAULT_MOUNT)
+    if SITE_CARDS_MEDIA_HOST:
+        roots.append("media=" + CARDS_MEDIA_MOUNT)
+    return {"DASH_JOBS_ROOTS": ",".join(roots)}
+
+
 def cards_volumes() -> list:
     """The optional pair. The CODE mount is unconditional and lives with the
     others; these two are per-site and absent by default.
@@ -1910,6 +1933,8 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     "TRUENAS_VERIFY_SSL": truenas_verify_ssl,
                     # --- Timeline Cards at /cards (see cards_env) ------------
                     **cards_env(cards_enabled, cards_token),
+                    # --- the roots a PINNED fleet job is placed against ------
+                    **jobs_env(),
                     # --- what GET /api/v1/site serves (see site_env) ---------
                     **site_env(port, tree_root, truenas_host, dashboard_url),
                 },
@@ -2181,6 +2206,7 @@ def compose_variables(port: int = 8480, host_root: str = "", tree_root: str = ""
         # dashboard reports an enabled-but-absent tree in one honest line.
         **{k: v for k, v in cards_env("1" if SITE_CARDS_ENABLED else "0").items()
            if k != "DASH_CARDS_TOKEN"},
+        **jobs_env(),
         **site,
         "NAS_APPS_ROOT": host_root,
         "NAS_TREE_ROOT": tree_root,

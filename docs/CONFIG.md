@@ -454,6 +454,24 @@ for `broll_ingest_*`):
 | `music_ingest_staging_dir` | `<local_root>/Assets/Music/.ingest` | The base rig overrides it: its `local_root` IS the NAS share, and staging there would push every file over SMB twice |
 | `music_clap_feed_base` | *(the site manifest's)* | A dev loop or a base rig pointing at a local copy of the feed. Overrides `release_feed_base` |
 
+### 2.5c Fleet job scheduling (`TIMELINE-CARDS-INTO-CCSYNC.md` phase 4, 2026-08-30)
+
+The scheduler's own knobs. Every one of them has a default that works, and
+each exists because the right number is a fact about somebody's network or
+hardware that this code cannot know.
+
+| Var | Default | Notes |
+|---|---|---|
+| `DASH_JOBS_MAX_RUNNING` | `whisper=2,proxy-480p=4,audio-extract=4,peaks=4` | **The per-kind FLEET cap** -- how many jobs of one kind may be in flight across the whole fleet, over the built-in defaults. One job at a time per machine was never a limit on the NAS's disk or the media share's bandwidth, which four simultaneous 480p encodes reading rushes over SMB find long before any one machine does. Spelled `"whisper=2,proxy-480p=4"`; an unparseable entry is DROPPED and that kind's default stands, because a typo must never be the thing that removes a limit |
+| `DASH_JOBS_COOLDOWN_SECONDS` | `120` | How long a machine is left alone after it hands a job back FAILED, or loses a lease. Without it the box with the broken ffmpeg is first in the queue for every retry -- failing in two seconds is exactly what keeps it idle -- and one bad machine spends a two-attempt budget on its own. A success clears it; a `retryable=false` failure never sets it, because that is the runner saying the fault was in the clip. `0` disables |
+| `DASH_JOBS_ROOTS` | *(vault and tree inferred)* | What THIS container calls the fleet's root names, for the jobs it runs ITSELF when the fleet has given up on one: `"vault=/vault,media=/media"`. `vault` falls back to `DASH_CARDS_ROOT`/`DASH_CARDS_VAULT_ROOT` and `tree` to `DASH_PROJECTS_DIR`; **`media` has no fallback**, because the footage share is its own bind mount and deriving it from `DASH_CARDS_MEDIA_MAP` would be guessing which side of a pair is which. A pinned job naming a root this container has not fails with a sentence naming this variable |
+
+**Pinning needs no variable of its own.** A media job whose retry budget runs
+out is handed to the dashboard's own worker only where `/cards` is mounted
+AND the mounted checkout implements `fleet_execute` (plan section 7f.1);
+otherwise nothing pins and the job is `abandoned`, visibly, exactly as before
+phase 4. Settings -> JOBS says which, and why.
+
 ### 2.6 Mounts and cadences
 
 | Var | Default | Notes |
@@ -624,7 +642,7 @@ The music half is the same six keys under `music_ingest_*`, plus
 depend on in §2.5b, because the one thing music ingest cannot work without
 (`DASH_RELEASE_FEED_URL`) is set on the dashboard, not here.
 
-### Fleet jobs (`docs/TIMELINE-CARDS-INTO-CCSYNC.md` phases 0 and 1)
+### Fleet jobs (`docs/TIMELINE-CARDS-INTO-CCSYNC.md` phases 0, 1 and 4)
 
 Work the **dashboard** queued that this computer may do while nobody is at
 it. Four kinds:
@@ -659,7 +677,15 @@ fails halfway rather than at the start.
 | `ffmpeg_path` | `"ffmpeg"` | Not a jobs key, but it is the one the media recipes use, and `ffprobe` is found BESIDE it (`ffmpeg_tools.ffprobe_for`) -- including the pinned static pair `sidecar_tools` installs on a machine that has neither on PATH |
 | `jobs_idle_seconds` | `300` | Seconds away from the keyboard before this machine will **claim**. `proxy_gen_idle_seconds`'s number deliberately: an editor should not have to learn two meanings of "away". THE DASHBOARD HAS ITS OWN FLOOR PER KIND (300 s for whisper and proxies, 60 s for audio and peaks) and both have to pass -- this key is the machine's own answer and it is never loosened by the server's |
 | `jobs_skip_while_resolve_running` | `true` | Do not claim while Resolve is open. True here where `proxy_gen_skip_while_resolve_running` is false: a whisper pass wants the whole GPU, which is what a Resolve render is using |
-| `jobs_poll_seconds` | `20` | How often the runner acts on what it was offered. The offers themselves ride the report reply |
+| `jobs_poll_seconds` | `20` | How often the runner acts on what it was offered. The offers themselves ride the report reply. A dashboard that says the queue is EMPTY lengthens this 4x (capped at 120 s); a DEEP queue never lengthens it, because backpressure on this side means stop asking, never stop working |
+| `jobs_kinds` | `[]` | **This machine's allow-list** (phase 4, 2026-08-30). Empty is EVERY kind, and the only way to be excluded from one is to name the kinds you do want: `jobs_kinds = ["proxy-480p", "peaks"]` keeps an editor's laptop out of `whisper` without `jobs_enabled = false`, which takes it out of everything. Reported as `capabilities.job_kinds` and honoured by the dashboard's offer filter AND here, so a stale offer cannot be acted on. A name that is not a kind this build knows is dropped with a warning rather than obeyed -- a typo'd allow-list is a machine that takes no work at all and looks exactly like one that is offline. A comma string works too, because config.toml is edited by hand |
+
+An **admin can cancel** a job this machine is holding (phase 4): the id rides
+`commands.jobs.cancel` on the next report reply, the child is killed, and the
+job is handed back `cancelled` and NOT retryable -- another machine re-running
+work a person just stopped is the one outcome nobody asked for. A whisper job
+notices within 30 s (its child is waited on in heartbeat-sized slices); a
+media recipe within a second.
 
 A **running** job is not killed when the editor comes back (unlike
 `proxy_gen`'s own ffmpeg, which costs seconds and resumes trivially): no new

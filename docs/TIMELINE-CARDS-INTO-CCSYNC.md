@@ -1,8 +1,14 @@
 # Timeline Cards into CC Sync — the agent into the companion, the page into the dashboard, and the jobs across the fleet
 
-Investigation and plan, 2026-08-29. Status: **NOT BUILT, NOT DECIDED.** Nothing
-in this document has been implemented; §7 is the list of things the owner has
-to choose before phase 0 can start.
+Investigation and plan, 2026-08-29. Status as of 2026-08-30:
+**PHASES 0-4 ARE BUILT on branch `timeline-cards-port`, and NOTHING IS
+DEPLOYED.** Sections 1 to 7 are the original plan and are left as they were
+written -- they are the reasoning, and a decision that was later taken
+differently is recorded where it was taken. What was actually built is in
+§7a (phase 0), §7b (phase 1), §7c (phase 2), §7d (phase 3), §7f (phase 4),
+and **§9 is the one to read first: what runs where now, and the runbook for
+going live**. §7b.4, §7c.1, §7d.1 and §7f.1 are specs for the Timeline Cards
+side, written so they can be implemented from this document alone.
 
 Written from a read-only pass over both trees on the base rig. Facts are cited
 `file:line` on both sides; where CC Sync has no concept for something this
@@ -1670,6 +1676,261 @@ under a prefix and it says "connecting..." for ever.
 
 ---
 
+## 7f. PHASE 4 BUILT, ccsync side (2026-08-30)
+
+Dashboard **0.7.22**, companion **0.9.60** (`REQUIRES_DASHBOARD = 0.7.22`).
+Branch `timeline-cards-port`. Nothing is deployed.
+
+Phase 4 is the scheduler proper: ranking finished and made explainable,
+backpressure, rule 5's pinning fallback (which phase 1 could not build
+"because there is none"), cancellation, and the operator's view §6 said this
+phase needed **from the first commit** -- "the failure mode is invisible: a
+scheduler that quietly assigns nothing looks exactly like a fleet with
+nothing to do."
+
+### What exists now
+
+| Piece | Where | What it does |
+|---|---|---|
+| the finished rank | `dashboard/jobs.py` `RANK_SIGNALS`, `rank_signals`, `rank_key`, `why_not_first` | an ORDERED list of signals per kind, then least-loaded, then longest-idle; the 60 s grace window is unchanged |
+| the fleet cap | `db.JOB_MAX_RUNNING`, `db.count_running_by_kind`, `jobs.max_running`, `DASH_JOBS_MAX_RUNNING` | how many jobs of one kind may be in flight across the WHOLE fleet |
+| the cooldown | `machine_state.jobs_cooldown_until/_reason` (v45), set by `fail_job` and `expire_leases`, cleared by `finish_job` | a machine that just failed a job is left alone for `DASH_JOBS_COOLDOWN_SECONDS` |
+| the depth signal | `db.queue_depth`, `commands.jobs.queue`, `GET /api/v1/jobs/queue` | `{queued, running, pinned, oldest_age_s}` on every report reply |
+| the backoff | `companion/jobs_runner.wait_seconds` | an EMPTY queue lengthens this machine's tick; a deep one never does |
+| the pin | `db.JOB_PINNED`, `JOB_PINNABLE_KINDS`, `_spent_state`, `pinned_jobs`/`take_pinned_job`/`pin_progress`/`finish_pinned_job`/`fail_pinned_job`/`release_pinned_jobs`, `dashboard/cards_exec.py` | a media job the fleet gives up on is handed to the mounted Timeline Cards engine's own ffmpeg worker |
+| the cancel | `POST /api/v1/jobs/{id}/cancel`, `jobs.cancel_requested_at/_by` (v45), `commands.jobs.cancel`, `jobs_runner.CANCELLED_ERROR` | queued: over now. Held: the machine kills its child. Pinned: `should_stop()` |
+| the allow-list | config `jobs_kinds` -> `capabilities.job_kinds` -> `machine_state.cap_job_kinds` (v45) -> `db.machine_allows_kind` | an editor's laptop out of ONE kind without `jobs_enabled = false` |
+| the operator's view | `/admin/jobs` (Settings -> JOBS), `templates/partials/admin_jobs.html`, `tools/jobs.py cancel|queue` | the open queue, the caps, the per-machine why inline, cancel buttons; the fleet grid's job chip links to it |
+
+### The rank, per kind
+
+`rank_key` answers a four-component tuple, biggest first:
+`(preference, -live jobs, -load, idle seconds)`. Only `preference` differs by
+kind, and it is a sum of ORDERED signals (the first is worth more than the
+second) rather than the single point phase 1 shipped:
+
+| kind | signals, best first | then |
+|---|---|---|
+| `whisper` | `gpu_fits` (VRAM >= the job's own `gpu_vram_gb` + 1 GB of headroom), then `gpu` (any card at all) | least live jobs, least load, longest idle |
+| `proxy-480p` | `nvenc` | ditto |
+| `audio-extract` | `near_media` (`mode = "base"`: the base rig / the machine next to the media) | ditto |
+| `peaks` | `near_media` | ditto |
+
+Three decisions inside that table:
+
+* **`gpu_fits` wants HEADROOM.** A card with exactly the stated floor is a
+  card that OOMs the moment anything else is on it. A tight card still ranks
+  -- below a roomy one -- because refusing it would be a policy decision, and
+  `job_requirements_met` has already had its say.
+* **A GPU that will not report its size is no preference**, not a refusal.
+* **No load average is not a penalty.** `None` is "Windows has no loadavg",
+  and treating it as busy would rank every Windows box below every Mac for a
+  reason that says nothing about either.
+
+And the rank is EXPLAINABLE, which is the half phase 4 was actually for.
+`GET /api/v1/jobs/<id>/why` now carries, per able machine, `rank`, the
+`score` tuple, the `signals` that produced it, and `why_not_first` -- the
+FIRST component it lost on, in words ("the first choice has an NVIDIA encoder
+and this machine has not", "the first choice is less loaded"). "Three
+machines could take this and it went to the one without the encoder" is a
+complaint, and a scheduler that cannot answer it is one nobody can debug.
+
+### `reason_code`, and what Timeline Cards does with it
+
+`why.schedulable` keeps EXACTLY the meaning phase 1 gave it -- "is anything
+going to take this, soon" -- because `library_engine._fleet_state` falls back
+to its own ffmpeg on `false` and that is still right for a fleet whose every
+machine has somebody sitting at it. What phase 4 adds beside it is the code,
+so the two kinds of `false` can be told apart:
+
+| `reason_code` | means | transient |
+|---|---|---|
+| `""` | it is schedulable; some machine will claim it | - |
+| `no_machine_reported` | nothing has ever reported to this dashboard | no |
+| `no_capable_machine` | every machine fails the capability filter | no |
+| `all_busy` | capable machines, all holding a job / upgrading / breaker-tripped / waiting out the grace window | yes |
+| `fleet_cap` | this kind is at the fleet's own limit | yes |
+| `idle_wait` | somebody is sitting at every machine that could | yes |
+| `cooling_down` | every capable machine failed a job recently | yes |
+| `halted` | fleet halt, or every machine's sync halted | no |
+| `kind_not_allowed` | every machine's config excludes this kind (or has jobs off) | no |
+| `kind_unknown` | this dashboard does not know the kind | no |
+| `held` | a machine is running it right now | yes |
+| `pinned` | the fleet gave up; this dashboard's own worker has it | yes |
+| `finished` | done, failed or abandoned | no |
+
+**The worst answer wins, not the commonest.** One machine that could do this
+if its editor stood up is a fleet that will get to it; answering
+`no_capable_machine` because four other machines have no GPU would send the
+client off to do GPU work on a laptop. `transient` is the same judgement as a
+boolean, and `capable` is how many machines could EVER run it -- the number
+an admin needs before buying hardware, which "everyone is at their desk" must
+not hide.
+
+### The pin handoff, exactly
+
+1. A media job fails its whole retry budget (2 attempts for `audio-extract`
+   and `peaks`, 3 for `proxy-480p`), by reported failure or by lost lease.
+2. `fail_job` / `expire_leases` ask the CALLER whether pinning is possible
+   (`jobs.can_pin(app)` -> `app.state.pinned_executor.available()`), and
+   `_spent_state` answers `pinned` for a media kind and `abandoned` for
+   anything else. **`whisper` never pins**: this container has ffmpeg and no
+   GPU, so a pin would be a job that fails for ever in a new place.
+3. `cards_exec.PinnedExecutor` (a thread started by the lifespan when
+   `/cards` is mounted, one connection for its life, the collector's shape)
+   polls `db.pinned_jobs`, takes one with a compare-and-set
+   (`take_pinned_job` -> `claimed_machine = "(dashboard)"`), and resolves the
+   job's `(root, rel_path)` pairs through **this container's** roots
+   (`DASH_JOBS_ROOTS`, falling back to the Timeline Cards vault root and the
+   projects mount).
+4. It calls ONE seam on the mounted engine --
+   `engine.fleet_execute(kind, source, out_dir, stem, on_progress, should_stop)`
+   (§7f.1) -- which enqueues onto the engine's own `_src_q`/`_vid_q`. The
+   ffmpeg stays where the recipe, the `.partial` and first-writer-wins
+   already live, and "the NAS must never run dozens of ffmpegs because a lane
+   opened" stays true with a queue feeding it.
+5. On success: `finish_pinned_job` -> **`done`**, with `result.files`
+   relative to the output root and the root named beside them. A Timeline
+   Cards client on another server polling that row sees a job that finished,
+   and cannot tell who made the file -- which is the contract §7b.4 already
+   states ("read the answer off the DISK").
+6. On failure: `fail_pinned_job` -> `abandoned`. **A pinned job never goes
+   back to the fleet** (`queued_jobs` only ever reads `queued`), because the
+   fleet has already spent the budget on it and putting it back is the
+   ping-pong rule 5 exists to end.
+
+**No executor is a first-class state.** With `/cards` unmounted, or mounted
+from a checkout that has no `fleet_execute` yet, `can_pin` is false, nothing
+pins, and a spent job is `abandoned` exactly as it was in phase 1 -- a job
+pinned into a queue nothing drains is worse than an abandoned one, which at
+least says so. The jobs page shows `[ NO PINNING HERE ]` with the reason.
+
+### The cancel path, exactly
+
+```
+admin clicks [ CANCEL ]  ->  POST /api/v1/jobs/<id>/cancel  (or the page's
+                             /partials/admin/jobs/<id>/cancel)
+   queued  -> db.request_job_cancel: state=failed, "cancelled by <admin>",
+              never retried. Over when the click returns.
+   held    -> cancel_requested_at/_by recorded. state UNCHANGED.
+              -> api_report: commands.jobs.cancel = [id] to THAT machine,
+                 re-sent every report until it answers (the file_moves rule)
+              -> jobs_runner._cancel_requested(id) is true
+                 - whisper:  _run_child terminates the subprocess
+                 - media:    should_stop() returns "cancelled"; jobs_media
+                             kills ffmpeg and discards the .partial
+              -> _post_result(ok=False, error="cancelled", retryable=False)
+              -> db.fail_job: state=failed, no cooldown (the machine obeyed),
+                 no retry anywhere
+   pinned  -> the same flag; cards_exec's should_stop() reads it directly
+   done/failed/abandoned -> 409
+```
+
+**Nothing forces a row terminal behind a live ffmpeg.** A cancelled job whose
+machine never answers stays visible as "cancelling" until its lease expires,
+and the lease is what ends it. Saying "stopped" on a page while a child is
+still writing into the vault is how a half-made proxy gets published.
+
+### Decisions this build made, that the plan left open
+
+* **`schedulable` did not change meaning.** It would have been tidier to
+  redefine it as "some machine could ever", but Timeline Cards is deployed
+  against the phase-1 meaning and a redefinition would silently stop it
+  falling back on a fleet full of busy editors. `reason_code`, `transient`
+  and `capable` are additive.
+* **The fleet cap is asked in `offers_for_machine`, not `policy_refusal`.**
+  It is a fact about the queue, not about a machine, and folding it into the
+  per-machine refusal would make every machine's line on the why page say
+  something untrue about that machine.
+* **The cooldown is only for retryable failures.** `retryable=False` is the
+  runner saying the fault is in the CLIP; cooling a good machine down for a
+  bad clip is a fleet that stops for a reason nobody can see. A success
+  clears it.
+* **`DASH_JOBS_MAX_RUNNING` / `DASH_JOBS_ROOTS` are environment, not
+  `site.toml`.** Every other dashboard knob is, and `[jobs]` in the manifest
+  would have made a per-deployment ceiling a per-CUSTOMER one.
+* **`media` has no fallback in `container_roots`.** The footage share is its
+  own bind mount, and deriving it from `DASH_CARDS_MEDIA_MAP` would be
+  guessing which side of a pair is which. A pinned job that names a root this
+  container does not have fails with a sentence naming the variable.
+* **The jobs page is polled every 15 s and has no filters.** It shows OPEN
+  jobs only: a finished one is history and ages out on its own, and a queued
+  one nobody can run never ages out at all, which is the whole point.
+* **The allow-list drops unknown kind names with a warning.** A machine
+  allow-listing a kind that does not exist takes no work at all, and looks
+  exactly like a machine that is offline.
+
+### What is NOT there yet
+
+* **Nothing is deployed.** Dashboard 0.7.22 and companion 0.9.60 are built
+  and green; the fleet is on 0.7.21 / 0.9.59.
+* **`fleet_execute` does not exist in the Timeline Cards checkout yet**
+  (§7f.1 is its spec). Until it does, `can_pin` is false on the real NAS too
+  and rule 5 behaves exactly as phase 1: abandoned, visibly.
+* **The cancel latency for a whisper job is up to 30 s** -- the child is
+  waited on in `HEARTBEAT_SECONDS` slices. A media recipe notices within a
+  second.
+* **The cooldown has no UI switch.** It is `DASH_JOBS_COOLDOWN_SECONDS` (0
+  disables) and the why page names it in a sentence; there is no button that
+  forgives a machine early.
+* **Nothing alerts on a queue that is not moving.** `alerts.ALERT_KINDS` is a
+  registry and "a job has been queued for an hour with `no_capable_machine`"
+  is exactly the shape it takes, but adding a kind means adding its writer,
+  and this build added neither.
+* **`claude-run` is still not a job kind**, and after phase 3 it is unlikely
+  ever to be.
+
+---
+
+## 7f.1 The executor seam (the spec for the Timeline Cards side)
+
+One method on `LibraryEngine`, in
+`multicam_pipeline/cards/library_engine.py`. **Until it lands nothing pins:
+`cards_exec.available()` is false, the jobs page says
+`[ NO PINNING HERE ]`, and a job the fleet gives up on is abandoned.** That
+is the honest failure and it is the state today.
+
+```python
+def fleet_execute(self, kind, source, out_dir, stem,
+                  on_progress=None, should_stop=None):
+    """Run one fleet media recipe HERE, for the dashboard that hosts us.
+
+    kind        'audio-extract' | 'proxy-480p' | 'peaks'
+    source      an absolute path IN THIS CONTAINER (already resolved)
+    out_dir     the directory to write into, absolute, in this container
+    stem        the name the page knows the clip by (NOT the file's stem)
+    on_progress f(fraction 0..1 or None) -- optional, best effort
+    should_stop f() -> "" or a reason; checked while ffmpeg runs
+
+    -> {"files": [<basename>, ...], "seconds": float, "skipped": bool}
+       or {"error": "<why>"} -- never a raise for an ordinary failure.
+    """
+```
+
+Four requirements, each of them load-bearing:
+
+1. **It must go through the existing single worker** (`_src_q` / `_vid_q` /
+   `_src_worker`, audio strictly before video), not spawn its own ffmpeg. The
+   reason that worker exists is unchanged: "the NAS must never run dozens of
+   ffmpegs because a lane opened", and it is now being fed by a queue as well
+   as by a page.
+2. **The argv must stay the recipe the page already writes** -- the same one
+   `companion/jobs_media.py` reproduces verbatim, so a proxy made on
+   creator-1 and one made here are the same bytes.
+3. **`.partial` / atomic rename / first writer wins** (rule 2), unchanged. A
+   pinned job may be re-run after a container restart
+   (`db.release_pinned_jobs` at boot), and that is safe only because of this.
+4. **It must BLOCK until the work is done** and answer, because the caller is
+   a job that will be marked `done` or `abandoned` on its return. A
+   `should_stop()` that answers non-empty should kill the child, discard the
+   `.partial` and return `{"error": "cancelled"}`.
+
+`files` are BASENAMES: `cards_exec` joins them onto the job's own
+`out_root`/`out_rel` so the row that reaches another server carries a path
+that means something there.
+
+---
+
 ## 8. Verdict
 
 **Do it, in this order, and do not skip phase 0.**
@@ -1699,3 +1960,139 @@ never run live — changes host in the same change. Run those on `FF5lab`
 first, from the current code, before anything moves.
 
 Phase 0 alone is worth shipping even if the rest is never built.
+
+---
+
+## 9. The port, as built (2026-08-30)
+
+Phases 0 to 4 are built on `timeline-cards-port`. **Nothing is deployed and
+nothing is retired.** This section is what a stranger needs to know six months
+from now: what runs where, what did NOT move, the order to release in, and
+what Alex has to do to go live.
+
+### 9.1 What runs where now
+
+§4.2's table, with the "after" column filled in truthfully -- built, not
+planned:
+
+| kind | needs | before | AFTER (built) |
+|---|---|---|---|
+| `whisper` | GPU >= ~6 GB VRAM, the faster-whisper venv, the WAV | creator-1 only, by hand | ANY fleet machine with the venv + a GPU that fits, idle 300 s, offered on its report reply and claimed with a CAS. Ranked by headroom over the job's own floor. **Never pinned** |
+| `proxy-480p` | ffmpeg + the media share | the NAS container's single worker | any idle machine with both roots; nvenc gets first refusal for 60 s, then everyone. Fleet cap 4. Pinned to the NAS worker after 3 attempts |
+| `audio-extract` | ffmpeg + the media share | the same single worker | any idle machine (floor 60 s, not 300); the base rig gets first refusal. Cap 4, budget 2, then pinned |
+| `peaks` | ffmpeg + the WAV | the NAS | as above |
+| `claude-run` | a Claude credential | whichever machine served the page | **NOT a job kind.** Phase 3's answer instead: `cards_ai.make_runner` -> `ai_providers` in the dashboard (§7d.1). No scheduling involved |
+| `conform` | Resolve or the library allow-list | agent keystrokes / NAS SQL | **unchanged, pinned to creator-1.** Never schedulable |
+| `resolve-edit` | Resolve open on that project | agent only | **unchanged, pinned to creator-1.** Never schedulable |
+
+And the three programs:
+
+| Thing | Before | After (built) |
+|---|---|---|
+| the PAGE | `timeline-cards` custom app, :8800 (3003:3000), `?key=` in the URL | mounted in the dashboard at `/cards` behind the login (`cards.py` + `cards_wsgi.py` + a2wsgi), tri-state, never fatal. `CARDS_KEY` retired; `/api/restart` refused |
+| the LIBRARY engine | in that container | the same engine, imported from `DASH_CARDS_SRC` and constructed from `DASH_CARDS_*` -- and it is now ALSO the dashboard's pinned-job executor (§7f) |
+| the RESOLVE engine | `reorder_web.py --agent` beside the companion on creator-1 | a companion ROLE (`timeline_cards_role.py` + `timeline_cards_bridge.py`), OFF everywhere until `cards_agent = true`. One machine, one Resolve client: it refuses to start beside a standalone agent and names it |
+| the `/agent/*` protocol | direct to :8800 with `CARDS_TOKEN` on creator-1 | tunnelled at `/cards/agent/{state,pending,result}` on the fleet credential; `CARDS_TOKEN` never leaves the container. In-process when the page is mounted here |
+| the ffmpeg QUEUE | one thread on whichever machine served the page | a fleet queue (`jobs`, v41-v45): capability -> policy -> rank -> offer -> CAS claim -> lease -> retry -> pin. The in-process worker is still the fallback AND the pin target |
+| whisper | a hand-run on creator-1 | `tools/jobs.py submit --kind whisper`, or any client of the job API |
+
+### 9.2 What was retired, and what was NOT
+
+**Retired in this branch:** nothing on a machine. In the CODE: `CARDS_KEY`
+(the mounted page has no browser gate of its own), and `/cards/api/restart`
+(refused at the gate).
+
+**NOT retired, deliberately:**
+
+* the `timeline-cards` custom app on :8800 -- retiring it is runbook step 8
+  below, and it must not happen before the mounted page has been used for
+  real;
+* `reorder_web.py --agent` and `Launch Timeline Cards Agent.cmd` on creator-1
+  -- they stay until the role has driven a live edit, and the role REFUSES to
+  start beside them rather than racing them (CR-68);
+* `multicam_pipeline/resolve/resolve_script_server.py` -- §3.1 says delete it,
+  and it is the other repo's file. It is inert once the role is the only
+  Resolve client;
+* the standalone `_src_worker` in `library_engine.py` -- it is the fallback
+  for "no fleet reachable" and the pin target, and it must not go;
+* `FleetJobs` is NOT wired into the MOUNTED engine (§7d): that engine would be
+  signing in to the dashboard it runs inside.
+
+### 9.3 The release order
+
+**Dashboard 0.7.22 FIRST, then companion 0.9.60.** This is not a preference:
+companion 0.9.60 carries `REQUIRES_DASHBOARD = "0.7.22"`, so an older
+dashboard will not advertise it or make it current -- the rule that CR-22,
+CR-27a, CR-49, CR-55, CR-83, CR-85 and CR-87 were each written in blood for,
+enforced by the machinery. Concretely: the cancel command, the queue depth and
+`capabilities.job_kinds` are all fields 0.7.21 neither sends nor stores, so on
+an older dashboard a cancel never arrives and an editor's allow-list is
+silently ignored.
+
+Schema v41-v45 all migrate additively on the dashboard's own boot.
+
+### 9.4 The runbook for Alex, in order
+
+1. **Chown the vault on the NAS**, once, BEFORE the first deploy with
+   `[timeline_cards]` set (`docs/DOCKER.md`, "The chown, and why it is needed
+   BEFORE the first deploy"). `group_add` without it is a page whose every
+   save is refused, visible only in the container log.
+2. **Fill in `[timeline_cards]` in `site.toml`**: `src`, `vault_host`,
+   `media_host` + `media_map`, `db_host` / `db_name`, `enabled = true`. The
+   media mount and the media map are useless one without the other.
+3. **Decide the Claude credential**: `ANTHROPIC_API_KEY` on Settings -> AI
+   providers (metered), or `[features] ai_cli_providers = true` plus the CLI
+   from that page (subscription, ToS is the customer's). With neither, the
+   three Claude features dim and say why.
+4. **Set the job knobs** if the defaults are wrong for this network
+   (`docs/CONFIG.md` §2.6a): `DASH_JOBS_ROOTS="vault=/vault,media=/media"` --
+   **without `media` no pinned proxy job can be placed here** --
+   `DASH_JOBS_MAX_RUNNING`, `DASH_JOBS_COOLDOWN_SECONDS`.
+5. **Deploy the dashboard (0.7.22)** and check `GET /api/v1/health`'s `cards`
+   block: `mounted`, the vault root it is serving, and the Claude line. Then
+   Settings -> JOBS: it should say `[ NO PINNING HERE ]` until the other repo
+   ships `fleet_execute` (§7f.1), which is correct and not a fault.
+6. **FF5lab, from the STANDALONE agent, before anything else moves.** The
+   release/reload handshake -- `SaveProject`, `CloseProject`, `LoadProject`,
+   `SetCurrentTimeline` -- has still NEVER RUN LIVE (§7c). Do not port an
+   unexercised path and change its host in the same week.
+7. **Flip creator-1 to the role.** Publish companion 0.9.60, upgrade
+   creator-1, stop the standalone agent and this PC's own `reorder_web.py
+   8800`, then set `cards_agent = true`. ONE MACHINE, ONE RESOLVE CLIENT:
+   there is no gradual rollout on that box, and the role refuses to start if
+   it can still see the other program. Watch for `[ CARDS: <timeline> ]` on
+   the fleet grid.
+8. **Retire the custom app, and only now.** Use `/cards` for a session (the
+   cards, the lane's audio and video, a plan save, a translate run, one edit
+   through the agent); point the phone at `https://<dashboard>/cards/` and
+   re-add it to the home screen (the old install keeps working from the other
+   origin, which is why the app stays up until this step); THEN stop and
+   delete the `timeline-cards` app in the TrueNAS UI; then clear
+   `DASH_CARDS_SERVER_URL`. Its `/data` (`cards_pick.json`,
+   `cards_mirror.json`, `cards_ui.json`) is per-server UI state with no owner
+   and no migration -- expect the picker and the mirror to be empty ONCE, not
+   wrong.
+9. **Turn the fleet on gradually.** `jobs_enabled` is already the default, so
+   the lever that matters is per machine: `jobs_kinds = ["proxy-480p"]` on an
+   editor's laptop before `jobs_kinds` is left blank anywhere. Submit one job
+   by hand (`python tools/jobs.py submit --kind peaks ...`) and read the
+   receipt -- it says which machines can take it before you wait for one to.
+10. **When a queue does not move, open Settings -> JOBS** (or
+    `python tools/jobs.py why <id>`). Every refusal is a sentence naming the
+    machine and the reason; "nothing can run this" and "everyone is at their
+    desk" are different lines on purpose.
+
+### 9.5 Open items after phase 4
+
+* `fleet_execute` (§7f.1) and the manifest `scope` (§7e) are the Timeline
+  Cards side's two remaining changes. Both are optional in the sense that
+  everything works without them, and both are visible when missing.
+* The release/reload handshake is still unexercised (runbook step 6).
+* Nothing ALERTS on a queue that is not moving: `alerts.ALERT_KINDS` is the
+  right home and a kind must be registered WITH its writer.
+* The page still polls once a second per open tab, now against the
+  dashboard's event loop.
+* `conform` and `resolve-edit` must never become schedulable. If a future
+  phase is tempted, §4.2's last two rows are the reason, and it has not
+  changed: a synthetic keystroke moved to another machine is a keystroke into
+  the wrong timeline.

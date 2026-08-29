@@ -6581,6 +6581,28 @@ class ResolveCapabilityIn(_ReportSectionIn):
     project: str = Field(default="", max_length=255)
 
 
+class CardsAgentIn(_ReportSectionIn):
+    """Is this computer serving the Timeline Cards page from its own Resolve?
+    (TIMELINE-CARDS-INTO-CCSYNC.md phase 2, 2026-08-30.)
+
+    Four small facts and a refusal. NOTHING here costs a scripting call
+    either: `timeline` and `version` are what the role's own push loop last
+    sent through the tunnel, not a fresh question to Resolve -- the rule
+    ResolveCapabilityIn above states applies to every field on a 30 s
+    cadence, not only to Resolve's own block.
+
+    `state` is meaningful while `connected` is false, and that is the point of
+    carrying it: "nobody turned it on" and "a standalone agent is still
+    running there, so the companion stood down" are different problems with
+    the same symptom.
+    """
+    connected: bool = False
+    state: str = Field(default="", max_length=32)
+    timeline: str = Field(default="", max_length=255)
+    version: int | None = Field(default=None, ge=0)
+    since: float | None = Field(default=None, ge=0)
+
+
 class CapabilitiesIn(_ReportSectionIn):
     """The companion's `capabilities` section (TIMELINE-CARDS-INTO-CCSYNC.md
     §4.3, 2026-08-29): what this computer can DO.
@@ -6615,6 +6637,7 @@ class CapabilitiesIn(_ReportSectionIn):
     jobs_enabled: bool = True
     jobs_idle_seconds: float | None = Field(default=None, ge=0)
     resolve: ResolveCapabilityIn | None = None
+    cards_agent: CardsAgentIn | None = None
 
 
 class MusicIngestIn(BrollIngestIn):

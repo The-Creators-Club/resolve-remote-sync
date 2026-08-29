@@ -18,6 +18,12 @@ implementations:
     model parses it -- including that a null idle answer survives the trip;
   * the (root, rel_path) discipline: the dashboard never sends a path, and the
     companion refuses one that is not relative.
+
+Phase 2 (2026-08-30) adds the second wire between the same two units: the
+Timeline Cards agent tunnel. The companion's role builds the URL, the method,
+the credential and the body; the real app answers them. It is the same class
+of bug and the same cost -- a renamed suffix here is a machine that quietly
+stops driving Resolve while both halves look healthy.
 """
 from __future__ import annotations
 
@@ -45,6 +51,17 @@ def companion():
     except ImportError:                                       # pragma: no cover
         pytest.skip("no companion checkout beside this one")
     return capabilities, job_paths, jobs_runner
+
+
+def cards_role():
+    """The companion's Timeline Cards role, or a skip. Same rule as above."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]
+                           / "companion" / "src"))
+    try:
+        from ccsync_companion import timeline_cards_role
+    except ImportError:                                       # pragma: no cover
+        pytest.skip("no companion checkout beside this one")
+    return timeline_cards_role
 
 
 @pytest.fixture
@@ -261,3 +278,104 @@ def test_a_media_job_goes_out_and_comes_back_whole(env, tmp_path):
     # Relative, and named with the root it is relative TO.
     assert stored["result"]["out_root"] == "vault"
     assert not stored["result"]["files"][0].startswith(str(vault))
+
+
+# ------------------------------------------------- the cards agent tunnel
+
+def test_the_role_calls_the_tunnel_routes_this_dashboard_serves(tmp_path, monkeypatch):
+    """The companion builds the three calls; the real app routes them.
+
+    The upstream cards server is a stub here -- what is being pinned is the
+    seam BETWEEN the two deployment units, not the third one. A renamed
+    suffix, a lost header or a `wait` that stopped being forwarded all show up
+    here instead of as a page that stopped updating.
+    """
+    role_mod = cards_role()
+    from ccsync_dashboard import cards_tunnel
+
+    sent = []
+
+    class Upstream:
+        def open(self, request, timeout=None):
+            sent.append((request.get_method(), request.full_url,
+                         dict(request.headers), timeout))
+
+            class R:
+                def read(self_inner):
+                    return b'{"ok": true, "version": 5}'
+
+                def __enter__(self_inner):
+                    return self_inner
+
+                def __exit__(self_inner, *exc):
+                    return False
+            return R()
+
+    monkeypatch.setattr(cards_tunnel, "_opener", Upstream)
+    projects = tmp_path / "tree" / "Projects"
+    projects.mkdir(parents=True)
+    settings = Settings(db_path=str(tmp_path / "tunnel.db"), session_secret=SECRET,
+                        report_token=TOKEN, admin_users=frozenset({"owen"}),
+                        projects_dir=str(projects),
+                        cards_server_url="http://cards.invalid:8800",
+                        cards_token="cards-token-not-a-real-one")
+    with TestClient(create_app(settings)) as client:
+        def request(method, url, body, headers, timeout):
+            # The role hands us an absolute URL against the dashboard; the
+            # test client wants the path.
+            path = url.split("/", 3)[-1]
+            resp = client.request(method, "/" + path, json=body, headers=headers)
+            return resp.status_code, (resp.json() if resp.content else None)
+
+        role = role_mod.TimelineCardsRole(
+            {"cards_agent": True, "dashboard_url": "http://dash.example",
+             "dashboard_token": TOKEN,
+             "jobs_mulcam_pipeline": str(tmp_path), "jobs_vault_root": str(tmp_path)},
+            request_fn=request,
+            identity_token_fn=lambda: auth.make_identity_token(SECRET, "jsmith"),
+            processes_fn=lambda: [])
+
+        assert role.call("/agent/state", {"token": "", "name": "EDIT-PC",
+                                          "state": {"timeline": "E1"}})             == {"ok": True, "version": 5}
+        assert role.call("/agent/pending?wait=25&token=") == {"ok": True,
+                                                              "version": 5}
+        assert role.call("/agent/result", {"id": 1, "ok": True}) == {
+            "ok": True, "version": 5}
+
+    methods = [call[0] for call in sent]
+    urls = [call[1] for call in sent]
+    assert methods == ["POST", "GET", "POST"]
+    assert urls[0].endswith("/agent/state")
+    assert urls[1].endswith("/agent/pending?wait=25")
+    assert urls[2].endswith("/agent/result")
+    # The dashboard attached its own token; the companion never held one.
+    for _method, _url, headers, _timeout in sent:
+        assert headers.get("X-cards-token") == "cards-token-not-a-real-one"
+
+
+def test_the_cards_report_block_the_role_builds_parses_here(env, tmp_path):
+    """capabilities.cards_agent, built by the role and stored by the schema.
+
+    The `ffprobe` lesson (phase 1): a field the report model does not declare
+    is dropped SILENTLY by pydantic, and the symptom is a fleet grid that is
+    simply missing a chip nobody can explain.
+    """
+    role_mod = cards_role()
+    caps_mod, _paths, _runner = companion()
+    client, conn = env
+    role = role_mod.TimelineCardsRole({"cards_agent": False},
+                                      processes_fn=lambda: [])
+    section = caps_mod.build({"local_root": str(tmp_path)}, use_cache=False,
+                             cards_agent_fn=role.report_block)
+    assert set(section["cards_agent"]) == {"connected", "state", "timeline",
+                                           "version", "since"}
+    r = client.post("/api/v1/report", json={
+        "editor_name": "jsmith", "machine": "EDIT-PC", "lanes": [],
+        "reported_at": dbmod.utcnow_iso(), "capabilities": section,
+    }, headers=hdr())
+    assert r.status_code == 200, r.text
+    stored = dbmod.machine_capabilities(conn, "jsmith", "EDIT-PC")["cards_agent"]
+    for key, value in section["cards_agent"].items():
+        if value is None:
+            continue
+        assert stored[key] == value, f"cards_agent.{key} did not survive the report"

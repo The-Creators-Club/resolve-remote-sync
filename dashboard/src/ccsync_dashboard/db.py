@@ -1441,6 +1441,26 @@ ALTER TABLE jobs ADD COLUMN progress REAL;
 ALTER TABLE machine_state ADD COLUMN cap_ffprobe INTEGER;
 """
 
+# v44: IS THIS COMPUTER SERVING THE TIMELINE CARDS PAGE (phase 2, 2026-08-30).
+#
+# Five flat columns beside the other capabilities, for the reason v42 gave and
+# not a JSON blob: the grid renders them and an admin has to be able to ask
+# "which machine has Resolve open on the cut" without decoding a document.
+#
+# `cap_cards_state` is the one that earns its keep. `connected` false is the
+# normal state on every machine in the fleet, and the interesting question is
+# always WHICH refusal: nobody turned it on, or a standalone agent is still
+# running there and the companion stood down (CR-68). That is the [ VRAM ]
+# chip's lesson again -- a capability that is off because of a machine's own
+# state must say so somewhere other than a log on the machine nobody is at.
+SCHEMA_V44 = """
+ALTER TABLE machine_state ADD COLUMN cap_cards_connected INTEGER;
+ALTER TABLE machine_state ADD COLUMN cap_cards_state TEXT;
+ALTER TABLE machine_state ADD COLUMN cap_cards_timeline TEXT;
+ALTER TABLE machine_state ADD COLUMN cap_cards_version INTEGER;
+ALTER TABLE machine_state ADD COLUMN cap_cards_since REAL;
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -1534,6 +1554,11 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # ffprobe capability is never offered, and a job that is never offered
     # has no progress to report.
     (43, SCHEMA_V43),
+    # 44: the cards role's own state (phase 2). Its own step because it is
+    # its own feature: the queue and the media columns are useful on a fleet
+    # that never serves a page, and these are useful on the one machine that
+    # does.
+    (44, SCHEMA_V44),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -7858,6 +7883,7 @@ def store_machine_capabilities(
         return
     caps = dict(caps)
     resolve = caps.get("resolve") if isinstance(caps.get("resolve"), Mapping) else {}
+    cards = caps.get("cards_agent") if isinstance(caps.get("cards_agent"), Mapping) else {}
     mounts = [str(m)[:32] for m in (caps.get("mounts") or [])][:CAPABILITY_MOUNTS_MAX]
     conn.execute(
         """UPDATE machine_state SET
@@ -7866,7 +7892,8 @@ def store_machine_capabilities(
              cap_whisper_detail=?,
              cap_claude=?, cap_mounts=?, cap_cpu_count=?, cap_idle_seconds=?,
              cap_load=?, cap_resolve_running=?, cap_resolve_project=?,
-             cap_jobs_enabled=?
+             cap_jobs_enabled=?, cap_cards_connected=?, cap_cards_state=?,
+             cap_cards_timeline=?, cap_cards_version=?, cap_cards_since=?
             WHERE editor_username=? AND machine=?""",
         (now,
          int(bool(caps.get("gpu_present"))),
@@ -7889,6 +7916,14 @@ def store_machine_capabilities(
          int(bool((resolve or {}).get("running"))),
          str((resolve or {}).get("project") or "")[:255],
          int(bool(caps.get("jobs_enabled", True))),
+         # The cards role (v44). Written wholesale like everything else here:
+         # a companion that has STOPPED serving the page must be able to say
+         # so, and a merge would leave the last timeline on the grid for ever.
+         int(bool((cards or {}).get("connected"))),
+         str((cards or {}).get("state") or "")[:32],
+         str((cards or {}).get("timeline") or "")[:255],
+         _as_int((cards or {}).get("version")),
+         _as_float((cards or {}).get("since")),
          str(editor), str(machine)),
     )
 
@@ -7923,13 +7958,38 @@ def _capabilities_of(row: sqlite3.Row | None) -> dict[str, Any]:
         "jobs_enabled": bool(row["cap_jobs_enabled"]),
         "resolve": {"running": bool(row["cap_resolve_running"]),
                     "project": row["cap_resolve_project"] or ""},
+        # v44. `state` is meaningful with `connected` false and is the whole
+        # value of the row: it names the refusal.
+        "cards_agent": {"connected": bool(row["cap_cards_connected"]),
+                        "state": row["cap_cards_state"] or "",
+                        "timeline": row["cap_cards_timeline"] or "",
+                        "version": row["cap_cards_version"] or 0,
+                        "since": row["cap_cards_since"]},
     }
 
 
 _CAPABILITY_COLUMNS = """cap_at, cap_gpu_present, cap_gpu_name, cap_gpu_vram_gb,
        cap_nvenc, cap_ffmpeg, cap_ffprobe, cap_whisper, cap_whisper_detail,
        cap_claude, cap_mounts, cap_cpu_count, cap_idle_seconds, cap_load,
-       cap_resolve_running, cap_resolve_project, cap_jobs_enabled"""
+       cap_resolve_running, cap_resolve_project, cap_jobs_enabled,
+       cap_cards_connected, cap_cards_state, cap_cards_timeline,
+       cap_cards_version, cap_cards_since"""
+
+
+def _as_int(value: Any) -> int | None:
+    """A number a companion sent, or None. Never a string in a column the
+    grid does arithmetic on."""
+    try:
+        return None if value is None else int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def machine_capabilities(

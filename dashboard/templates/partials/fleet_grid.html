@@ -252,6 +252,15 @@
            machine it ran on. #}
         {% if e.capabilities.gpu_present %}<span class="chip" title="{{ e.capabilities.gpu_name or "an NVIDIA GPU" }}{% if e.capabilities.nvenc %}, with nvenc{% endif %}{% if e.capabilities.at %} · reported {{ e.capabilities.at | ago }}{% endif %}">[ GPU{% if e.capabilities.gpu_vram_gb %} {{ e.capabilities.gpu_vram_gb | round | int }}G{% endif %} ]</span>{% endif %}
         {% if e.capabilities.whisper %}<span class="chip" title="this computer has the whisper venv and the pipeline checkout the transcription jobs need">[ WHISPER ]</span>{% endif %}
+        {# THE TIMELINE CARDS PAGE, served from this computer's Resolve
+           (TIMELINE-CARDS-INTO-CCSYNC.md phase 2, 2026-08-30). Green because
+           it is a live connection, not a capability: this is the one machine
+           in the fleet whose Resolve a phone can re-order a cut in, and the
+           timeline it names is the one on screen there. A machine that
+           REFUSED the role shows nothing here -- the refusal is in the
+           diagnostics bundle, because "cards_agent is not set" is true of
+           every computer and would be a chip on all of them. #}
+        {% if e.capabilities.cards_agent and e.capabilities.cards_agent.connected %}<span class="chip green" title="this computer is serving the Timeline Cards page from its own Resolve{% if e.capabilities.cards_agent.timeline %} - {{ e.capabilities.cards_agent.timeline }}{% endif %}{% if e.capabilities.at %} · reported {{ e.capabilities.at | ago }}{% endif %}">[ CARDS{% if e.capabilities.cards_agent.timeline %}: {{ e.capabilities.cards_agent.timeline }}{% endif %}{% if e.capabilities.cards_agent.version %} v{{ e.capabilities.cards_agent.version }}{% endif %} ]</span>{% endif %}
         {# The chip shows HOW FAR THROUGH where the runner can say (phase 1: ffmpeg's
    -progress stream against the source duration) and the job id where it
    cannot. A percentage is what tells a watching admin the difference between

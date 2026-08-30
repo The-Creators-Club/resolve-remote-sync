@@ -8,12 +8,12 @@ failure this exists to catch.
 
 No sockets, no server, no certificate. The checker takes its `fetch` as an
 argument (module docstring, "ONE FETCH FUNCTION, injected"), so the fake
-below answers from a real `TestClient` over the real app for the routes that
-exist today, and from a canned table for the three that M4 and M5 are still
-building (`/manifest.webmanifest`, `/sw.js`,
-`/.well-known/assetlinks.json` -- as planned; see MOBILE_PLAN.md sections 4
-M4 and 4 M5). When those land, the canned entries can go and these tests
-still describe the same verdicts.
+below answers from a real `TestClient` over the real app -- every route the
+checker asks for, `/manifest.webmanifest` and `/sw.js` and
+`/.well-known/assetlinks.json` included now that M4 and M5 have landed. The
+good run is a real run with nothing canned in it. The override table exists
+only to force ONE failure at a time, which is the half a working app cannot
+demonstrate.
 
 `tools/` is not a package and not on the path, so the checker is loaded by
 file path -- the same shape `tools/tests/` uses for the scripts it covers.
@@ -47,48 +47,23 @@ def _load_checker():
 checker = _load_checker()
 
 
-# The three routes M4 and M5 own, answered here the way their plans say they
-# will answer. A test that wants the failing shape overrides one of them.
-GOOD_MANIFEST = json.dumps({
-    "name": "CC Sync", "start_url": "/", "scope": "/", "display": "standalone",
-    "icons": [{"src": "/static/icons/icon-192.png", "sizes": "192x192", "type": "image/png"}],
-}).encode()
-
-
-def canned() -> dict[str, "checker.Response"]:
-    R = checker.Response
-    return {
-        "/manifest.webmanifest": R(200, {"content-type": "application/manifest+json"},
-                                   GOOD_MANIFEST),
-        "/sw.js": R(200, {"content-type": "application/javascript",
-                          "service-worker-allowed": "/"}, b"// sw\n"),
-        "/.well-known/assetlinks.json": R(200, {"content-type": "application/json"}, b"[]"),
-    }
-
-
 class Fake:
-    """`fetch(url)` over a TestClient, with a canned table in front of it.
+    """`fetch(url)` over a TestClient, with an override table in front of it.
 
     Follows redirects, exactly as `urllib.request.urlopen` does in the real
-    `http_fetch` -- which is the whole reason a login-gated manifest reads as
-    "not JSON" here rather than as a 303: a browser sees the same thing.
+    `http_fetch`. That is not a detail: it is why a route that has fallen
+    behind the login wall reads here as "not JSON" rather than as a 303, and
+    a phone browser sees exactly the same thing.
     """
 
-    def __init__(self, client: TestClient, table: dict | None = None,
+    def __init__(self, client: TestClient, overrides: dict | None = None,
                  raises: Exception | None = None):
         self.client = client
-        self.table = canned() if table is None else table
+        self.overrides = overrides or {}
         self.raises = raises
         self.asked: list[str] = []
 
-    def __call__(self, url: str) -> "checker.Response":
-        assert url.startswith(ORIGIN), f"the checker left its origin: {url}"
-        path = url[len(ORIGIN):] or "/"
-        self.asked.append(path)
-        if self.raises is not None:
-            raise self.raises
-        if path in self.table:
-            return self.table[path]
+    def get(self, path: str) -> "checker.Response":
         reply = self.client.get(path, follow_redirects=True)
         return checker.Response(
             status=reply.status_code,
@@ -96,6 +71,16 @@ class Fake:
             body=reply.content,
             set_cookies=tuple(reply.headers.get_list("set-cookie")),
         )
+
+    def __call__(self, url: str) -> "checker.Response":
+        assert url.startswith(ORIGIN), f"the checker left its origin: {url}"
+        path = url[len(ORIGIN):] or "/"
+        self.asked.append(path)
+        if self.raises is not None:
+            raise self.raises
+        if path in self.overrides:
+            return self.overrides[path]
+        return self.get(path)
 
 
 @pytest.fixture
@@ -161,37 +146,37 @@ def test_a_bad_certificate_stops_at_the_certificate(client):
 
 
 def test_a_login_gated_manifest_fails(client):
-    # THE failure this script exists for, and the state of the tree today:
-    # /manifest.webmanifest is not in _OPEN_EXACT yet (M4), so an anonymous
-    # fetch follows the 303 and lands on the login page's HTML. Chrome does
-    # exactly this and then silently never offers to install.
-    table = canned()
-    del table["/manifest.webmanifest"]
-    results = checker.run_checks(ORIGIN, Fake(client, table))
+    # THE failure this script exists for. /manifest.webmanifest is in
+    # app._OPEN_EXACT today, so the app cannot show this shape by itself --
+    # it is forced by answering that path with what a session-gated route
+    # answers: a 303 followed to the login page's HTML. Chrome does exactly
+    # this and then silently never offers to install. If somebody drops the
+    # route out of _OPEN_EXACT, the checker still says so.
+    fake = Fake(client)
+    fake.overrides["/manifest.webmanifest"] = fake.get("/login")
+    results = checker.run_checks(ORIGIN, fake)
     assert verdicts(results)["manifest"] == "FAIL"
     assert "not JSON" in detail(results, "manifest")
 
 
 def test_a_manifest_without_start_url_or_icons_fails(client):
-    table = canned()
-    table["/manifest.webmanifest"] = checker.Response(200, {}, b'{"name": "CC Sync"}')
-    results = checker.run_checks(ORIGIN, Fake(client, table))
+    overrides = {"/manifest.webmanifest": checker.Response(200, {}, b'{"name": "CC Sync"}')}
+    results = checker.run_checks(ORIGIN, Fake(client, overrides))
     assert verdicts(results)["manifest"] == "FAIL"
     assert "start_url" in detail(results, "manifest") and "icons" in detail(results, "manifest")
 
 
 def test_a_service_worker_without_the_header_fails(client):
-    table = canned()
-    table["/sw.js"] = checker.Response(200, {"content-type": "application/javascript"}, b"// sw")
-    results = checker.run_checks(ORIGIN, Fake(client, table))
+    overrides = {"/sw.js": checker.Response(
+        200, {"content-type": "application/javascript"}, b"// sw")}
+    results = checker.run_checks(ORIGIN, Fake(client, overrides))
     assert verdicts(results)["service worker"] == "FAIL"
     assert "Service-Worker-Allowed" in detail(results, "service worker")
 
 
 def test_missing_asset_links_fail_and_an_empty_list_does_not(client):
-    table = canned()
-    table["/.well-known/assetlinks.json"] = checker.Response(404, {}, b"")
-    results = checker.run_checks(ORIGIN, Fake(client, table))
+    overrides = {"/.well-known/assetlinks.json": checker.Response(404, {}, b"")}
+    results = checker.run_checks(ORIGIN, Fake(client, overrides))
     assert verdicts(results)["asset links"] == "FAIL"
     assert "URL bar" in detail(results, "asset links")
     # The default -- no Android package configured -- is not a fault.
@@ -201,17 +186,15 @@ def test_missing_asset_links_fail_and_an_empty_list_does_not(client):
 
 
 def test_something_else_on_the_port_fails_at_health(client):
-    table = canned()
-    table["/api/v1/health"] = checker.Response(200, {}, b"<html>TrueNAS</html>")
-    results = checker.run_checks(ORIGIN, Fake(client, table))
+    overrides = {"/api/v1/health": checker.Response(200, {}, b"<html>TrueNAS</html>")}
+    results = checker.run_checks(ORIGIN, Fake(client, overrides))
     assert verdicts(results)["health"] == "FAIL"
     assert "not JSON" in detail(results, "health")
 
 
 def test_health_without_a_version_fails(client):
-    table = canned()
-    table["/api/v1/health"] = checker.Response(200, {}, b'{"ok": true}')
-    results = checker.run_checks(ORIGIN, Fake(client, table))
+    overrides = {"/api/v1/health": checker.Response(200, {}, b'{"ok": true}')}
+    results = checker.run_checks(ORIGIN, Fake(client, overrides))
     assert verdicts(results)["health"] == "FAIL"
     assert "not the dashboard" in detail(results, "health")
 
@@ -222,21 +205,19 @@ def test_a_session_cookie_without_secure_fails(client):
     # The trusted-proxy trap: DASH_COOKIE_SECURE=auto behind a terminator
     # whose address is not in DASH_TRUSTED_PROXIES leaves the flag off, and
     # nothing else anywhere notices.
-    table = canned()
-    table["/login"] = checker.Response(
+    overrides = {"/login": checker.Response(
         200, {}, b"<html></html>",
-        set_cookies=("ccsync_session=abc; HttpOnly; Path=/; SameSite=lax",))
-    results = checker.run_checks(ORIGIN, Fake(client, table))
+        set_cookies=("ccsync_session=abc; HttpOnly; Path=/; SameSite=lax",))}
+    results = checker.run_checks(ORIGIN, Fake(client, overrides))
     assert verdicts(results)["cookie secure"] == "FAIL"
     assert "DASH_TRUSTED_PROXIES" in detail(results, "cookie secure")
 
 
 def test_a_secure_session_cookie_passes(client):
-    table = canned()
-    table["/login"] = checker.Response(
+    overrides = {"/login": checker.Response(
         200, {}, b"<html></html>",
-        set_cookies=("ccsync_session=abc; HttpOnly; Secure; Path=/; SameSite=lax",))
-    results = checker.run_checks(ORIGIN, Fake(client, table))
+        set_cookies=("ccsync_session=abc; HttpOnly; Secure; Path=/; SameSite=lax",))}
+    results = checker.run_checks(ORIGIN, Fake(client, overrides))
     assert verdicts(results)["cookie secure"] == "OK"
 
 
@@ -252,9 +233,10 @@ def test_no_cookie_on_the_login_page_is_a_skip_not_a_pass(client):
 # ------------------------------------------------------------- the exit code
 
 def test_main_exits_non_zero_on_a_fail_and_names_the_check(client, capsys, monkeypatch):
-    table = canned()
-    del table["/sw.js"]
-    monkeypatch.setattr(checker, "http_fetch", Fake(client, table))
+    # A service worker served WITHOUT Service-Worker-Allowed: real route,
+    # real 200, and still a fail -- the header is the whole check.
+    overrides = {"/sw.js": checker.Response(200, {}, b"// sw")}
+    monkeypatch.setattr(checker, "http_fetch", Fake(client, overrides))
     assert checker.main([ORIGIN]) == 1
     out = capsys.readouterr().out
     assert "STOPPED at service worker" in out

@@ -11,9 +11,8 @@ for studios that want a real app rather than a home-screen shortcut. There is
 no separate mobile site and no separate URL: whatever an editor browses on a
 laptop is what they browse on a phone.
 
-Items marked **(as planned; see MOBILE_PLAN.md §4 Mx)** are contracts the
-matching work package is building as this is written, trued up after it
-merges.
+Everything on this page has shipped. Where a detail is worth checking in the
+code, the file is named.
 
 ---
 
@@ -104,15 +103,21 @@ Open the dashboard's URL in Chrome (Android) or Safari (iOS) and sign in.
 Everything is the same product: the console look, the `[ CHIP ]` idiom, the
 same numbers.
 
-* Every page is usable at 390 px wide with one thumb, with no sideways
-  scrolling of the page itself (as planned; see MOBILE_PLAN.md §4 M1, M2, M3).
-* Tables that cannot be stacked scroll sideways **inside their own box** --
-  the fleet grid and the assignments matrix are the two that do this. The
-  page under them does not move.
-* Controls are at least 44 px tall on a touch screen. On a mouse the pages
-  are pixel-for-pixel what they were.
-* The navigation drawer, the projects sidebar (a bottom sheet on a phone) and
-  the settings strip are all reachable one-handed.
+* Below 600 px wide the pages lay themselves out for a thumb: one column,
+  records that were table rows become labelled cards, and the page itself
+  does not scroll sideways.
+* Tables that would lose their meaning stacked scroll sideways **inside their
+  own box** instead -- the fleet grid and the assignments matrix are the two
+  that do this. The page under them stays put.
+* Controls are at least 44 px on a touch screen. That is keyed to the pointer,
+  not to the width, so a touch laptop gets the bigger hit boxes and a narrow
+  desktop window does not: at a mouse the pages are what they were.
+* The navigation drawer opens full height with the `[ X ]` where a thumb is.
+  The projects sidebar becomes a `[ PROJECTS ]` handle pinned to the bottom of
+  the screen; tapping it slides the tree up over the page. The settings strip
+  scrolls sideways with the current page already in view.
+* Text inputs are 16 px on a phone, because anything smaller makes both
+  Android and iOS zoom the page in when the keyboard opens.
 * The three side apps -- `/broll`, `/music`, `/ytdl` -- work but are not laid
   out for a phone yet. They are their own round (`MOBILE_PLAN.md` §7).
 * The Timeline Cards page is a separate thing with its own phone layout and
@@ -124,12 +129,19 @@ same numbers.
 ### Android, Chrome
 
 1. Open the dashboard and sign in.
-2. `⋮` -> **Add to Home screen** (it may say **Install app**).
+2. `⋮` -> **Add to Home screen** (it may say **Install app**). When Chrome
+   decides the site is installable it also lights an `[ INSTALL ]` chip at
+   the foot of the navigation drawer, which does the same thing.
 3. Confirm. The icon lands on the home screen; opening it gives the
    dashboard with no browser chrome, in its own task.
 
-If Chrome offers a plain shortcut instead of an install, the origin is not
-https or the manifest is not being served -- run the checker (§6).
+The icon's label is the site's own product name -- the same one in the header
+you signed in under -- so a studio that has renamed the product gets that
+name on the phone.
+
+If Chrome offers a plain shortcut instead of an install, and no `[ INSTALL ]`
+chip appears, the origin is not https or the manifest is not being served:
+run the checker (§6).
 
 ### iOS, Safari
 
@@ -137,39 +149,49 @@ https or the manifest is not being served -- run the checker (§6).
 2. Share -> **Add to Home Screen** -> **Add**.
 3. The icon opens the dashboard full screen with the status bar kept.
 
-iOS has no install prompt and no `beforeinstallprompt`; the Share sheet is
-the whole mechanism. Everything else works the same, except that Safari
-evicts an unused site's storage after a few weeks, which for this app means
-the offline page and cached styles get re-fetched -- nothing else is stored
-on the phone.
+iOS has no install prompt, so there is no `[ INSTALL ]` chip there and the
+Share sheet is the whole mechanism. Everything else works the same, except
+that Safari evicts an unused site's storage after a few weeks, which for this
+app means the offline page and the cached styles are fetched again. Nothing
+else is stored on the phone anyway.
 
 ### The Android app
 
 A studio that wants a signed APK its editors install (own icon, no browser
 chrome, no "add to home screen" instructions) builds a Trusted Web Activity
-around this same install. The whole path -- build it, paste the fingerprint
-into Settings, verify -- is `docs/ANDROID.md` (as planned; see
-MOBILE_PLAN.md §4 M5). The one symptom to recognise: **an app that opens with
-a URL bar has failed asset-link verification**, which is a settings problem,
-not a build problem.
+around this same install. `docs/ANDROID.md` is the whole path: build it on CI
+(`gh workflow run android.yml -f origin=<the https origin>`, which signs with
+a throwaway debug key unless the release signing secrets are set, and says
+which it did), then paste the package name and the SHA-256 fingerprint it
+printed into **Settings -> ANDROID** and press `[ CHECK ]`. That is what
+publishes the statement at `/.well-known/assetlinks.json` that Chrome fetches
+from the phone.
+
+The one symptom to recognise: **an app that opens with a URL bar has failed
+asset-link verification**. It is nearly always the fingerprint or the origin
+rather than the build, and `docs/ANDROID.md` opens with the four causes.
 
 ## 4. What polls, and when
 
 The dashboard is a status board: pages refresh themselves rather than making
 anyone pull down. On a phone that is a battery and a data question, so:
 
-| what | how often |
-|---|---|
-| live transfers (on `/` and `/transfers`) | 2 s on a desktop, 10 s on a touch device |
-| project bins | 5 s |
-| the fleet grid, the jobs table | 15 s |
-| the projects sidebar | 30 s |
-| the fleet-halt banner | 60 s |
+| what | on a desktop | on a phone or a tablet |
+|---|---|---|
+| live transfers (on `/` and `/transfers`) | 2 s | 10 s |
+| project bins | 5 s | 15 s |
+| the fleet grid, the jobs table | 15 s | 15 s |
+| the projects sidebar | 30 s | 30 s |
+| the fleet-halt banner | 60 s | 60 s |
 
-**Nothing polls while the page is hidden.** Switch apps, lock the phone, or
-move to another tab and every one of those stops; coming back refreshes once,
-immediately, and resumes (as planned; see MOBILE_PLAN.md §4 M1-M4). A phone
-in a pocket costs the server nothing.
+The two fast ones are slowed for a coarse pointer rather than for a narrow
+screen, so a tablet gets it too and a small desktop window does not.
+
+**Nothing polls while the page is hidden.** Switch apps, lock the phone or
+move to another tab and every poll stops, including a request already in
+flight. Coming back refreshes each of them once, immediately, and then
+resumes at the cadence above -- so the page an editor returns to is current,
+and a phone in a pocket costs the server nothing.
 
 ## 5. Offline
 
@@ -177,18 +199,24 @@ The installed app is not an offline app, and pretending otherwise would be
 worse than saying so. It shows the fleet's live state, which by definition
 comes from the server.
 
-* With no network, opening the app gives **the dashboard's own offline page**
-  -- the product's look, one sentence, a `[ RETRY ]` -- instead of the
-  browser's dinosaur (as planned; see MOBILE_PLAN.md §4 M4).
-* Styles, scripts and icons are served from the phone's cache, so that page
-  appears instantly.
-* Nothing else is cached. No page of fleet data, no API response, no partial
-  and nothing from `/login` is ever stored on the phone: a cached fleet page
-  would be a stale answer to "is anything red", which is the one question the
-  board exists to answer, and a cached page from a signed-in session is a
-  page the next person to pick up the phone should not see.
-* Anything queued while offline is not queued: actions need the server. Do
-  them again when the bars come back.
+* Pages come from the network first, always. The cache is never asked for one
+  while there is a connection, so nothing on the phone can give a stale
+  answer to "is anything red".
+* When a page genuinely cannot be reached, the app paints **the dashboard's
+  own offline page**: the product's look, one sentence, a `[ RETRY ]`,
+  instead of the browser's dinosaur. It deliberately says nothing about the
+  fleet -- it is a cached page, so anything it claimed would be old.
+* Styles, scripts and icons do come from the cache, which is why that page
+  appears instantly and why the app opens fast on a poor connection.
+* Nothing else is stored, ever. Live data (`/api/`), the fragments that carry
+  it (`/partials/`), the three side apps, Timeline Cards and both ends of a
+  session (`/login`, `/logout`) are handed to the network untouched: a cached
+  page from a signed-in session is a page the next person to pick up the
+  phone should not see.
+* Actions need the server, so nothing queues up while offline. Do them again
+  when the bars come back.
+* An update arrives by itself: every release changes the worker, the phone
+  picks it up on the next launch, and the previous cache is deleted.
 
 ## 6. The checker
 
@@ -220,3 +248,8 @@ because everything after the first failure is a consequence of it. Exit code
 Push notifications (alerts still go to email and webhooks), an iOS app, a
 Play Store listing, and phone layouts for the three side apps. All of them
 are `MOBILE_PLAN.md` §7.
+
+One more thing worth knowing if you change a page: the sweep in
+`docs/mobile/SWEEP.md` drives headless Chrome over every page at 390 px and
+768 px and fails on a page that scrolls sideways or a control too small to
+hit. It is how the layouts above are kept true.

@@ -207,6 +207,45 @@
   .assign-filter { min-width: 0; width: 100%; }
   .assign-scroll table.assign-grid td.assign-project,
   .assign-scroll table.assign-grid th.assign-project-head { max-width: 9rem; }
+
+  /* ---- ROUND 2 OF THE SWEEP (2026-08-30): what was still 400-1500 px wide.
+     `.mono, .mono-sm { white-space: nowrap }` (style.css:418) is right on the
+     desktop, where those classes hold a version, a hash or a machine name in
+     a table column. On these pages they also hold SENTENCES -- the per-machine
+     "why" under a job, an invariant's detail, a protection line's WHAT TO DO,
+     an alert's diagnosis -- and one unbreakable line of prose was the single
+     thing making main.main scroll sideways on five admin pages (jobs +423,
+     alerts +522, invariants +957, protection +1293, recovery +396).
+     Scoped to a stacked cell and to the three panels, so the fleet grid and
+     every other .mono-sm in the product keep the nowrap they were written
+     with. overflow-wrap because the sentences carry paths and device ids
+     with no space in them to break at. */
+  table.stack td, table.stack td .mono, table.stack td .mono-sm,
+  table.stack td.mono, table.stack td.mono-sm,
+  .admin-users-box .mono, .admin-users-box .mono-sm,
+  .admin-packages-box .mono, .admin-packages-box .mono-sm,
+  .admin-sessions-box .mono, .admin-sessions-box .mono-sm,
+  #recovery .mono-sm, #protection .mono-sm, #invariant-table .mono-sm {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  /* The site settings form is a two-column grid on the desktop (style.css:234,
+     `220px minmax(260px, 520px)`, caption | field) and 493 px of it would not
+     fit a 390 px screen whatever the field did. One column: the caption keeps
+     its row above the input, and the <br> the desktop hides stays hidden.
+     Written here at the same specificity as the rule it beats, because
+     style.css belongs to M1. */
+  #settings-form > label:has(> input[type="text"]) {
+    grid-template-columns: minmax(0, 1fr);
+    column-gap: 0;
+  }
+  /* The two chip strips that are not table cells: capacity on the jobs page
+     (six chips, 633 px on one line) and the publish command on packages
+     (one 515 px token, which is why it needs `anywhere` and not `normal`). */
+  .jobs-kinds { white-space: normal; }
+  .publish-cmd { white-space: normal; overflow-wrap: anywhere; }
+  .job-why { white-space: normal; overflow-wrap: anywhere; }
 }
 
 @media (pointer: coarse) {
@@ -228,7 +267,18 @@
     width: 20px;
     height: 20px;
   }
-  .assign-upmode { font-size: 12px; }
+  /* The "up" label is a control in its own right (it writes upload-only for
+     one project on one computer) and the sweep measured it at 20 px. It is
+     the label that has to grow, not just the box inside it: the whole word
+     is what a thumb lands on. Round 2, 2026-08-30. */
+  .assign-upmode {
+    font-size: 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: var(--tap);
+    min-width: var(--tap);
+  }
 }
 
 

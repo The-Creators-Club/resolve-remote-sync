@@ -18,6 +18,11 @@
   {% if admin_users.local_users %}
     {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): a row here is one account, so a
        phone reads it as a labelled block instead of six columns. #}
+    {# .scroll-x (MOBILE_PLAN.md §3.2): the phone layer stacks this table below
+       600 px, but between 600 and 900 it is still a grid, and a grid that
+       is wider than the window has to scroll inside itself rather than take
+       the page with it (round 2 of the sweep, 2026-08-30). #}
+    <div class="scroll-x">
     <table class="editors stack">
       <thead><tr><th>USERNAME</th><th>ROLE</th><th>STATUS</th><th>SSH KEYS</th><th>SET PASSWORD</th><th></th></tr></thead>
       <tbody>
@@ -84,6 +89,7 @@
       {% endfor %}
       </tbody>
     </table>
+    </div>
   {% else %}
     <div class="muted">no local accounts yet</div>
   {% endif %}
@@ -114,6 +120,7 @@
   {% if admin_users.computers %}
     {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): a row here is one computer, so a
        phone reads it as a labelled block instead of eight columns. #}
+    <div class="scroll-x">
     <table class="editors stack">
       <thead><tr><th>EDITOR</th><th>MACHINE</th><th>PLATFORM</th><th>MODE</th><th>RUNNING</th><th>PLAN</th><th>LAST REPORT</th><th></th></tr></thead>
       <tbody>
@@ -143,6 +150,7 @@
       {% endfor %}
       </tbody>
     </table>
+    </div>
   {% else %}
     <div class="muted">no computer has reported in yet</div>
   {% endif %}
@@ -153,6 +161,7 @@
      hand. Only this button can clean their records and their device up. #}
   <div class="side-head" style="margin-top:1.2rem">[ EDITORS WITHOUT AN ACCOUNT ]
     <span class="muted">known to the fleet (a device, a plan or a report), but no account here.</span></div>
+  <div class="scroll-x">
   <table class="editors stack">
     <thead><tr><th>USERNAME</th><th></th></tr></thead>
     <tbody>
@@ -172,6 +181,7 @@
     {% endfor %}
     </tbody>
   </table>
+  </div>
   {% endif %}
 
   {% if not admin_users.truenas_configured %}
@@ -195,6 +205,7 @@
   {% elif admin_users.pending_devices %}
     {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): a row here is one device, so a
        phone reads it as a labelled block instead of five columns. #}
+    <div class="scroll-x">
     <table class="editors stack">
       <thead><tr><th>DEVICE ID</th><th>STATUS</th><th>COMPUTER NAME</th><th>OWNER (EDITOR)</th><th></th></tr></thead>
       <tbody>
@@ -229,6 +240,7 @@
       {% endfor %}
       </tbody>
     </table>
+    </div>
     {# One list for every row: a datalist is addressed by id, and repeating it
        per device would duplicate ids in the same document. #}
     <datalist id="known-editors">
@@ -256,6 +268,7 @@
   {% elif admin_users.editors %}
     {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): a row here is one account, so a
        phone reads it as a labelled block instead of seven columns. #}
+    <div class="scroll-x">
     <table class="editors stack">
       <thead><tr><th>USERNAME</th><th>UID</th><th>SSH KEY</th><th>SMB</th><th>LOCKED</th><th>SET PASSWORD</th><th></th></tr></thead>
       <tbody>
@@ -292,6 +305,7 @@
       {% endfor %}
       </tbody>
     </table>
+    </div>
   {% else %}
     <div class="muted">no editor accounts yet</div>
   {% endif %}

@@ -43,6 +43,11 @@
   {% endif %}
 
   {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): a row is one credential. #}
+  {# .scroll-x (MOBILE_PLAN.md §3.2): the phone layer stacks this table below
+     600 px, but between 600 and 900 it is still a grid, and a grid that
+     is wider than the window has to scroll inside itself rather than take
+     the page with it (round 2 of the sweep, 2026-08-30). #}
+  <div class="scroll-x">
   <table class="editors stack" style="margin-top:0.8rem">
     <thead><tr><th>EDITOR</th><th>LABEL</th><th>CREATED</th><th>LAST USED</th><th></th></tr></thead>
     <tbody>
@@ -71,6 +76,7 @@
     {% endfor %}
     </tbody>
   </table>
+  </div>
 
   <div class="side-head" style="margin-top:0.8rem">[ MINT A TOKEN ]</div>
   <form class="inline-form" hx-post="/partials/admin/report-tokens/create"

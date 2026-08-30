@@ -67,7 +67,13 @@
              the company with nothing said about what that means. #}
           hx-confirm="Stop syncing on EVERY computer in the fleet? Uploads, proxy downloads and shared project files stop everywhere until you start them again here. Nothing is deleted. Work done while the halt is on will not reach anyone until you release it.">
       <input type="hidden" name="active" value="1">
-      <input type="text" name="reason" required style="min-width:24rem"
+      {# min(), not 24rem flat: 24rem is 384px and the phone that has to read
+         "why is the fleet stopped" is 390px wide with padding, so the one
+         input on this panel was what made /admin/users scroll sideways
+         (round 2 of the mobile sweep, 2026-08-30). The desktop keeps the
+         width it had; nothing in a stylesheet can beat an inline min-width,
+         which is why the fix is here. #}
+      <input type="text" name="reason" required style="min-width:min(24rem, 100%)"
              placeholder="why (shown in every editor's tray)">
       <button class="btn" type="submit">[ HALT ALL SYNCING ]</button>
     </form>

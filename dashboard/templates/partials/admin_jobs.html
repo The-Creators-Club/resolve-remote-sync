@@ -18,7 +18,10 @@
   <div class="admin-users-box">
     <div class="side-head">[ THE QUEUE ]
       <span class="muted">{{ depth.queued }} queued, {{ depth.running }} running{% if depth.pinned %}, {{ depth.pinned }} pinned here{% endif %}{% if depth.oldest_age_s is not none %} · the oldest has waited {{ depth.oldest_age_s | round | int }}s{% endif %}</span></div>
-    <div class="mono-sm" style="margin-top:0.4rem">
+    {# The capacity chips. .mono-sm is `white-space: nowrap` (style.css), and
+       six chips on one unbreakable line was 633 px at 390: the class is what
+       mobile.css's admin section lets wrap (round 2, 2026-08-30). #}
+    <div class="mono-sm jobs-kinds" style="margin-top:0.4rem">
       {% for row in kinds %}
         <span class="chip{{ ' amber' if row.running >= row.cap }}" title="{{ row.running }} of at most {{ row.cap }} {{ row.kind }} jobs are running across the whole fleet{% if row.running >= row.cap %} - the next one waits for a free slot{% endif %}">[ {{ row.label }}: {{ row.running }}/{{ row.cap }} ]</span>
       {% endfor %}
@@ -38,6 +41,11 @@
   {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): a row here is one job, so on a
      phone each becomes a block of labelled lines rather than eight columns
      of two characters each. #}
+  {# .scroll-x (MOBILE_PLAN.md §3.2): the phone layer stacks this table below
+     600 px, but between 600 and 900 it is still a grid, and a grid that
+     is wider than the window has to scroll inside itself rather than take
+     the page with it (round 2 of the sweep, 2026-08-30). #}
+  <div class="scroll-x">
   <table class="editors stack" style="margin-top:0.8rem">
     <thead><tr>
       <th>JOB</th><th>KIND</th><th>STATE</th><th>WHERE</th>
@@ -77,8 +85,10 @@
         {# THE PER-MACHINE ANSWER, INLINE. "Nothing can run this" and "three
            machines could but all three have somebody sitting at them" are
            different problems with the same symptom (an empty grid). #}
-        <td></td>
-        <td colspan="7" class="mono-sm muted">
+        <td data-label=""></td>
+        {# 798 px at 390 before round 2: one line per machine, each a whole
+           sentence, in a class that is nowrap. #}
+        <td colspan="7" class="mono-sm muted job-why" data-label="">
           {% for m in job.machines %}
             {{ "yes" if m.ok else "no " }} {{ m.editor }}/{{ m.machine }}: {{ m.why }}<br>
           {% endfor %}
@@ -87,5 +97,6 @@
     {% endfor %}
     </tbody>
   </table>
+  </div>
   {% endif %}
 </div>

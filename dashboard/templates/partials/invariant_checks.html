@@ -9,17 +9,27 @@
    rule the whole sweep turns on -- so the not-checked rows carry their
    reason in the same column the broken rows carry their detail, rather than
    being quietly dropped from the table. #}
-<table class="editors" id="invariant-table">
+{# .scroll-x (MOBILE_PLAN.md §3.2): the phone layer stacks this table below
+   600 px, but between 600 and 900 it is still a grid, and a grid that
+   is wider than the window has to scroll inside itself rather than take
+   the page with it (round 2 of the sweep, 2026-08-30). #}
+{# .stack with EMPTY data-labels (MOBILE_PLAN.md §3.2, round 2 of the sweep,
+   2026-08-30): a row here is one check, and its first cell is already the
+   label -- a chip that says which of the three states it is in. The empty
+   attribute is style.css's opt-out, so the cell becomes a line with no 11 px
+   heading above it. Before this the page was 957 px wide at 390. #}
+<div class="scroll-x">
+<table class="editors stack" id="invariant-table">
   <tbody>
   {% for inv in invariants %}
     <tr class="editor-row">
-      <td class="mono-sm" style="white-space:nowrap">
+      <td class="mono-sm" data-label="" style="white-space:nowrap">
         {% if inv.state == 'ok' %}<span class="chip green">[ OK ]</span>
         {% elif inv.state == 'broken' %}<span class="chip {{ 'red' if inv.severity == 'error' else 'amber' }}">[ BROKEN ]</span>
         {% elif inv.state == 'check_failed' %}<span class="chip red">[ COULD NOT RUN ]</span>
         {% else %}<span class="chip" title="this server cannot evaluate this one; the reason is beside it">[ NOT CHECKED ]</span>{% endif %}
       </td>
-      <td>
+      <td data-label="">
         <div class="mono-sm">{{ inv.title }}</div>
         {% if inv.state == 'broken' or inv.state == 'check_failed' %}
           <div class="muted" style="margin-top:0.25rem">{{ inv.consequence }}</div>
@@ -30,10 +40,11 @@
           <div class="mono-sm" style="margin-top:0.2rem">- {{ s.subject }}{% if s.detail %}: {{ s.detail }}{% endif %}</div>
         {% endfor %}
       </td>
-      <td class="muted mono-sm" style="white-space:nowrap">
+      <td class="muted mono-sm" data-label="LAST CHECKED" style="white-space:nowrap">
         {% if inv.checked_at %}{{ inv.checked_at | ago }}{% else %}never{% endif %}
       </td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
+</div>

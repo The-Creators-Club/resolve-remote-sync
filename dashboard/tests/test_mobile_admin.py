@@ -77,11 +77,17 @@ CONFIRM_MAX = 90
 
 VISIBILITY_FILTER = "[document.visibilityState === 'visible']"
 
-# Templates M3 owns, for the source-level pins.
+# Templates M3 owns, for the source-level pins. The last three came over in
+# round 2 of the sweep (2026-08-30): they are the BODIES of admin pages M3
+# owns, they were nobody's in §3.3, and they were the widest thing in the
+# product at 390 px (admin-protection was 1683 px).
 OWNED_TEMPLATES = sorted(
     list((DASHBOARD_ROOT / "templates").glob("admin_*.html"))
     + list((DASHBOARD_ROOT / "templates" / "partials").glob("admin_*.html"))
-    + [DASHBOARD_ROOT / "templates" / "partials" / "recovery.html"]
+    + [DASHBOARD_ROOT / "templates" / "partials" / "recovery.html",
+       DASHBOARD_ROOT / "templates" / "partials" / "invariant_checks.html",
+       DASHBOARD_ROOT / "templates" / "partials" / "protection.html",
+       DASHBOARD_ROOT / "templates" / "partials" / "collector_health.html"]
 )
 
 
@@ -236,18 +242,93 @@ def test_the_record_tables_stack_with_a_label_on_every_cell(client, url):
         assert f'data-label="{label}"' in body, (url, label)
 
 
-def test_every_editors_table_m3_owns_is_stacked_or_deliberately_not(client):
+def test_every_editors_table_m3_owns_stacks(client):
     """The pin that catches the table added next year. `table class="editors"`
-    with no `stack` is a nine-column grid at 390 px; the two exceptions are
-    recovery's label/prose pairs, which are already what `.stack` would make
-    of them."""
+    with no `stack` is a nine-column grid at 390 px.
+
+    Round 2 removed the two exceptions this test used to carry: recovery's
+    label/prose pairs looked like what `.stack` would make of them anyway,
+    and they were 620 px wide at 390 because `.mono-sm` is nowrap. There is
+    no exception now."""
     plain = []
     for path in OWNED_TEMPLATES:
-        text = path.read_text(encoding="utf-8")
-        for tag in re.findall(r'<table class="editors[^"]*"', text):
+        body = path.read_text(encoding="utf-8")
+        for tag in re.findall(r'<table class="editors[^"]*"', body):
             if "stack" not in tag:
-                plain.append(path.name)
-    assert plain == ["recovery.html", "recovery.html"], plain
+                plain.append((path.name, tag))
+    assert plain == [], plain
+
+
+def test_every_table_m3_owns_is_wrapped_in_a_scroll_x(client):
+    """768 px is not the phone query: `.stack` does not apply there and every
+    one of these is a real table again, wider than the column it sits in. The
+    wrapper is a DIV (M1's rule: `.scroll-x` never goes on the table itself),
+    and the sweep exempts an element from "content scrolls sideways" only if
+    it carries the class or is inside something that does."""
+    unwrapped = []
+    for path in OWNED_TEMPLATES:
+        lines = path.read_text(encoding="utf-8").split("\n")
+        for i, line in enumerate(lines):
+            if not re.match(r"^\s*<table\b", line):
+                continue
+            if "assign-grid" in line:              # its own wrapper, see below
+                continue
+            before = lines[i - 1] if i else ""
+            if 'class="scroll-x"' not in before:
+                unwrapped.append((path.name, line.strip()[:60]))
+    assert unwrapped == [], unwrapped
+
+
+def test_the_assignments_grid_keeps_its_own_wrapper(client):
+    """The one table whose wrapper is not the one above: it already had a
+    scroller (`.assign-scroll`, both axes sticky) and round 1 put `.scroll-x`
+    on that element rather than nesting a second one inside it."""
+    page = (DASHBOARD_ROOT / "templates" / "admin_assignments.html").read_text(
+        encoding="utf-8")
+    assert 'class="assign-scroll scroll-x"' in page
+    assert page.count("<table") == 1
+
+
+INHERITED = {
+    "/admin/invariants": ("invariant-table", 'class="editors stack"'),
+    "/admin/protection": ("protection-table", 'class="editors stack"'),
+}
+
+
+@pytest.mark.parametrize("url", sorted(INHERITED))
+def test_the_two_bodies_m3_inherited_stack_too(client, url):
+    """`invariant_checks.html` and `protection.html` are the tables these two
+    pages ARE, and §3.3 gave them to nobody: at 390 px they were 1347 px and
+    1683 px wide. Their first cell is a chip that already says which of the
+    three states the row is in, so they stack with EMPTY data-labels."""
+    body = client.get(url).text
+    ident, stacked = INHERITED[url]
+    assert ident in body
+    assert stacked in body
+    assert 'data-label=""' in body
+
+
+def test_the_rules_in_the_inherited_partials_are_elements_now(client):
+    """`collector_health.html` and `admin_diagnostics.html` were the last two
+    `{{ "-" * 100 }}` rules in the product (spelled with a box-drawing
+    character); both are `.rule` elements now."""
+    for name in ("collector_health.html", "admin_diagnostics.html"):
+        body = (DASHBOARD_ROOT / "templates" / "partials" / name).read_text(
+            encoding="utf-8")
+        assert "─" not in body, name
+        assert '<div class="rule"></div>' in body, name
+
+
+def test_the_fleet_halt_reason_box_fits_a_phone(client):
+    """The last 8 px of overflow on /admin/users, and the one thing on it that
+    no stylesheet could fix: an INLINE `min-width: 24rem` (384 px) on the
+    input, which beats every rule in every file. `min(24rem, 100%)` keeps the
+    desktop width and caps the phone. partials/fleet_halt.html is not in
+    §3.3's list either; it renders on an admin page M3 owns."""
+    body = (DASHBOARD_ROOT / "templates" / "partials" / "fleet_halt.html"
+            ).read_text(encoding="utf-8")
+    assert "min-width:min(24rem, 100%)" in body
+    assert "min-width:24rem" not in body
 
 
 def test_the_jobs_cancel_and_the_session_revoke_are_tap_targets(client):
@@ -297,6 +378,44 @@ def test_the_forms_are_one_column_with_16px_inputs_on_a_phone():
     assert "font-size: 16px" in admin
     # .ai-key input {min-width: 22rem} is 352px inside a 390px screen.
     assert ".ai-key input { min-width: 0; width: 100%; }" in admin
+
+
+def test_the_sentences_in_a_stacked_cell_may_wrap():
+    """Round 2's single biggest finding. `.mono, .mono-sm { white-space:
+    nowrap }` is right on the desktop, where those classes hold a version or a
+    hash in a table column; on these pages they also hold whole sentences (a
+    job's per-machine why, an invariant's detail, a protection line's WHAT TO
+    DO), and one unbreakable line of prose was what made five admin pages
+    scroll sideways at 390 px."""
+    css = (DASHBOARD_ROOT / "static" / "mobile.css").read_text(encoding="utf-8")
+    admin = css.split("== admin ==")[1].split("== end ==")[0]
+    assert "white-space: normal" in admin
+    assert "overflow-wrap: anywhere" in admin
+    for scope in ("table.stack td", ".admin-users-box .mono-sm",
+                  ".admin-packages-box .mono-sm", "#recovery .mono-sm",
+                  "#protection .mono-sm", "#invariant-table .mono-sm",
+                  ".jobs-kinds", ".job-why", ".publish-cmd"):
+        assert scope in admin, scope
+
+
+def test_the_site_settings_grid_is_one_column_on_a_phone():
+    """style.css gives that form `220px minmax(260px, 520px)`, which is 493 px
+    of caption-beside-field on a 390 px screen. Overridden here at the same
+    specificity, because style.css is M1's."""
+    css = (DASHBOARD_ROOT / "static" / "mobile.css").read_text(encoding="utf-8")
+    admin = css.split("== admin ==")[1].split("== end ==")[0]
+    assert '#settings-form > label:has(> input[type="text"])' in admin
+    assert "grid-template-columns: minmax(0, 1fr)" in admin
+
+
+def test_the_upload_only_label_is_a_thumb_target():
+    """The sweep measured `label.assign-upmode` at 20 px. It is a control (it
+    writes upload-only for one project on one computer), and it is the LABEL
+    that has to grow: the whole word is what a thumb lands on."""
+    css = (DASHBOARD_ROOT / "static" / "mobile.css").read_text(encoding="utf-8")
+    coarse = css.split("== admin ==")[1].split("@media (pointer: coarse)")[1]
+    assert ".assign-upmode" in coarse
+    assert coarse.count("min-height: var(--tap)") >= 2
 
 
 def test_m3_wrote_only_in_its_own_section_of_mobile_css():

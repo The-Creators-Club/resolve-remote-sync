@@ -27,6 +27,11 @@
   {% if audit_rows %}
     {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): a row is one recorded change,
        and DETAIL is a JSON blob no phone column can hold. #}
+    {# .scroll-x (MOBILE_PLAN.md §3.2): the phone layer stacks this table below
+       600 px, but between 600 and 900 it is still a grid, and a grid that
+       is wider than the window has to scroll inside itself rather than take
+       the page with it (round 2 of the sweep, 2026-08-30). #}
+    <div class="scroll-x">
     <table class="editors stack">
       <thead><tr><th>WHEN</th><th>WHO</th><th>ACTION</th><th>SUBJECT</th><th>DETAIL</th></tr></thead>
       <tbody>
@@ -41,6 +46,7 @@
       {% endfor %}
       </tbody>
     </table>
+    </div>
   {% elif audit_query %}
     <div class="muted">nothing in the timeline matches "{{ audit_query }}"</div>
   {% else %}

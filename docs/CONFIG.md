@@ -678,7 +678,17 @@ fails halfway rather than at the start.
 | `jobs_idle_seconds` | `300` | Seconds away from the keyboard before this machine will **claim**. `proxy_gen_idle_seconds`'s number deliberately: an editor should not have to learn two meanings of "away". THE DASHBOARD HAS ITS OWN FLOOR PER KIND (300 s for whisper and proxies, 60 s for audio and peaks) and both have to pass -- this key is the machine's own answer and it is never loosened by the server's |
 | `jobs_skip_while_resolve_running` | `true` | Do not claim while Resolve is open. True here where `proxy_gen_skip_while_resolve_running` is false: a whisper pass wants the whole GPU, which is what a Resolve render is using |
 | `jobs_poll_seconds` | `20` | How often the runner acts on what it was offered. The offers themselves ride the report reply. A dashboard that says the queue is EMPTY lengthens this 4x (capped at 120 s); a DEEP queue never lengthens it, because backpressure on this side means stop asking, never stop working |
+| `jobs_volunteer_minutes` | `30` | How long the tray's **⚡ Take fleet jobs now** item lends this machine to the fleet for (section 10, 2026-08-30). While the timer runs this machine claims work with somebody AT the keyboard and with Resolve open -- and nothing else: a halt, an update, a tripped breaker, `jobs_enabled = false` and `jobs_kinds` all still refuse. It is reported as `capabilities.volunteer_until` so the dashboard skips its own idle floor for this machine too, it ends on its own, and clicking the item again ends it early |
 | `jobs_kinds` | `[]` | **This machine's allow-list** (phase 4, 2026-08-30). Empty is EVERY kind, and the only way to be excluded from one is to name the kinds you do want: `jobs_kinds = ["proxy-480p", "peaks"]` keeps an editor's laptop out of `whisper` without `jobs_enabled = false`, which takes it out of everything. Reported as `capabilities.job_kinds` and honoured by the dashboard's offer filter AND here, so a stale offer cannot be acted on. A name that is not a kind this build knows is dropped with a warning rather than obeyed -- a typo'd allow-list is a machine that takes no work at all and looks exactly like one that is offline. A comma string works too, because config.toml is edited by hand |
+
+The tray is where a person LENDS this machine: **⚡ Take fleet jobs now
+(30 min)**, between "Sync now" and "Pause", switches `jobs_idle_seconds` and
+`jobs_skip_while_resolve_running` off for the next `jobs_volunteer_minutes`
+and then puts them back. The item only exists on a machine with fleet jobs
+switched on. The other way past the idle gate is the admin's: a job submitted
+with `tools/jobs.py submit --now` is **forced**, and a companion holding a
+forced offer claims that job BY ID even with the editor present -- "do not
+wait for anybody to leave", never "run on a machine that cannot".
 
 An **admin can cancel** a job this machine is holding (phase 4): the id rides
 `commands.jobs.cancel` on the next report reply, the child is killed, and the

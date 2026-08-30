@@ -14,6 +14,10 @@ routes tomorrow (§4: it stays its own repo and is a CLIENT of this API).
         --rel "FF5/Civil Defence/Interview 3.mp4" --out-root vault \\
         --out-rel "Vault/2026/FF5/Civil Defence/Script Docs/remote_audio/source"
 
+    python tools/jobs.py submit --kind whisper --root vault --rel "..." \\
+        --now                     # do not wait for an idle machine
+        --on CREATOR-1            # ...and give it to that one machine only
+
     python tools/jobs.py list [--state open]
     python tools/jobs.py why 12
     python tools/jobs.py watch 12
@@ -219,7 +223,7 @@ def media_job(args: argparse.Namespace) -> dict:
         # not always the media file's own stem. Default: the file's stem.
         inputs["out_stem"] = args.out_stem
     return {"kind": args.kind, "inputs": inputs, "requires": {},
-            "priority": int(args.priority)}
+            "priority": int(args.priority), **levers(args)}
 
 
 def whisper_job(args: argparse.Namespace) -> dict:
@@ -240,7 +244,23 @@ def whisper_job(args: argparse.Namespace) -> dict:
     requires = {"whisper": True, "mount": args.root,
                 "gpu_vram_gb": float(args.vram)}
     return {"kind": args.kind, "inputs": inputs, "requires": requires,
-            "priority": int(args.priority)}
+            "priority": int(args.priority), **levers(args)}
+
+
+def levers(args: argparse.Namespace) -> dict:
+    """`--now` and `--on`, as the two fields the API takes (section 10).
+
+    Both are absent from the body unless asked for, so a submission from this
+    tool against a dashboard older than 0.7.23 is byte-for-byte the one it
+    used to send.
+    """
+    body: dict = {}
+    if getattr(args, "now", False):
+        body["force"] = True
+    target = str(getattr(args, "on", "") or "").strip()
+    if target:
+        body["target_machine"] = target
+    return body
 
 
 # ----------------------------------------------------------------- commands
@@ -265,6 +285,13 @@ def cmd_submit(client: Client, args: argparse.Namespace) -> int:
     why = answer.get("why") or {}
     print(f"job #{job.get('id')} queued ({job.get('kind')})")
     print(f"  {job.get('inputs', {}).get('root')}:{job.get('inputs', {}).get('rel_path')}")
+    # WHAT THE LEVERS DID, in the receipt, because `--now` is a decision to
+    # interrupt somebody else's work and a person who typed it should see it
+    # confirmed rather than infer it from a queue moving faster.
+    if job.get("forced"):
+        print("  forced: every capable machine is asked at once")
+    if job.get("target_machine"):
+        print(f"  for {job['target_machine']} only")
     # The RECEIPT says whether anything can run it. A submitter who queues
     # work no machine can take learns it here, not by watching a queue that
     # never moves.
@@ -437,6 +464,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--vram", type=float, default=6.0,
                    help="GPU VRAM (GB) this job needs; the scheduler filters on it")
     s.add_argument("--priority", type=int, default=0)
+    # SECTION 10. `--now` skips the idle floor, the per-machine cooldown and
+    # the rank grace on every machine offered this job -- and nothing else: a
+    # halt, an update, a tripped breaker, a machine's own kind allow-list and
+    # the capability filter all still refuse it.
+    s.add_argument("--now", action="store_true",
+                   help="do not wait for an idle machine: offer this job to "
+                        "every capable machine at once, even ones with "
+                        "somebody sitting at them")
+    s.add_argument("--on", default="", metavar="MACHINE",
+                   help="give this job to ONE machine (the name the fleet "
+                        "grid shows, or editor/machine) and nobody else")
     s.add_argument("--watch", action="store_true")
     s.add_argument("--timeout", type=float, default=3600)
 

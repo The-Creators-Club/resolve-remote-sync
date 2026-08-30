@@ -2088,9 +2088,59 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     # in-memory objects, the trash summary is whatever lane B's last prune
     # cycle measured -- so none of them may stall the render path.
     _get("sync_guard", lambda: (getattr(app, "sync_guard", None) or (lambda: {}))() or {}, {})
+    # Whether this machine is currently lent to the fleet, and until when
+    # (TIMELINE-CARDS-INTO-CCSYNC.md section 10, 2026-08-30). A zero-I/O read
+    # of the runner's own snapshot, like every other line here -- and "" on a
+    # companion with no runner at all, which is what hides the menu item.
+    _get("jobs_volunteer_until", lambda: _jobs_volunteer_until(app), "")
+    # ...and how long a click lasts, which is both the label's number and the
+    # test for whether the item exists at all: 0 on a companion with no job
+    # runner, or one whose owner has turned fleet jobs off.
+    _get("jobs_volunteer_minutes", lambda: _jobs_volunteer_minutes(app), 0)
     snap["color"] = compute_overall_color(statuses, app)
     _get("pulse", lambda: should_pulse(snap["color"], statuses), False)
     return snap
+
+
+def _jobs_volunteer_until(app: "CompanionApp") -> str:
+    """The ISO deadline the job runner is volunteering until, or "".
+
+    status() is a zero-I/O lock-guarded read, which is the only kind of getter
+    allowed on this path (COMP-CORE-6)."""
+    runner = getattr(app, "job_runner", None)
+    if runner is None:
+        return ""
+    return str((runner.status() or {}).get("volunteer_until") or "")
+
+
+def _jobs_volunteer_minutes(app: "CompanionApp") -> int:
+    """How many minutes one click lends this machine for -- 0 when there is
+    nothing to lend (no runner, or `jobs_enabled = false`), which is what
+    keeps the item out of the menu entirely."""
+    runner = getattr(app, "job_runner", None)
+    if runner is None or not getattr(runner, "enabled", False):
+        return 0
+    try:
+        return max(0, int(float(getattr(runner, "volunteer_minutes", 30) or 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _volunteer_label(snap: dict) -> str:
+    """The menu item's two states, in the editor's own local time.
+
+    An unparseable deadline still says something useful rather than crashing
+    the menu: an unreadable timestamp is not a reason to hide a switch
+    somebody is looking for."""
+    minutes = int(snap.get("jobs_volunteer_minutes") or 0)
+    until = str(snap.get("jobs_volunteer_until") or "")
+    if not until:
+        return f"⚡ Take fleet jobs now ({minutes} min)"
+    try:
+        when = datetime.fromisoformat(until).astimezone().strftime("%H:%M")
+    except (TypeError, ValueError):
+        return "⚡ Taking fleet jobs now (click to stop)"
+    return f"⚡ Taking fleet jobs until {when} (click to stop)"
 
 
 def _breaker_line(guard: dict) -> Optional[str]:
@@ -2544,6 +2594,13 @@ def _menu_fingerprint(snap: dict) -> tuple:
         # the click that cleared it -- and the Sync: line would still say
         # "not set up yet" (UI-3's shape again, 2026-08-18).
         bool(snap.get("eula_problem")),
+        # The volunteer item's presence AND its label (section 10,
+        # 2026-08-30). Both halves have to be here: without the minutes the
+        # item never appears on a machine whose runner starts late, and
+        # without the deadline the label still says "Take fleet jobs now"
+        # after the click that started the timer -- UI-3's shape again.
+        int(snap.get("jobs_volunteer_minutes") or 0),
+        str(snap.get("jobs_volunteer_until") or ""),
     )
 
 
@@ -3060,6 +3117,31 @@ def action_toggle_pause(app: "CompanionApp") -> None:
     _spawn(app, "Pause/resume", app.toggle_pause)
 
 
+def action_volunteer(app: "CompanionApp", snap: Optional[dict] = None) -> None:
+    """Lend this machine to the fleet for a while, or take it back.
+
+    _spawn like every other action: volunteer() itself is a lock and a clock,
+    but the notification behind it is a Shell_NotifyIcon call and the tray's
+    own message loop is the one thread nothing may block (2026-07-26)."""
+    volunteering = bool((snap or {}).get("jobs_volunteer_until"))
+    runner = getattr(app, "job_runner", None)
+    if runner is None:
+        return
+
+    def switch() -> None:
+        if volunteering:
+            runner.volunteer(0)
+            _notify(app, "Back to taking fleet jobs only while you are away.")
+            return
+        minutes = int((snap or {}).get("jobs_volunteer_minutes")
+                      or getattr(runner, "volunteer_minutes", 30) or 30)
+        runner.volunteer(None)
+        _notify(app, f"Taking fleet jobs for the next {minutes} minutes, "
+                     f"even while you work.")
+
+    _spawn(app, "Volunteer", switch)
+
+
 def action_resume_lane_b(app: "CompanionApp", snap: dict) -> None:
     # Confirm first: resuming is the operator asserting the server is
     # fine, and the breaker exists precisely because nothing else can
@@ -3154,6 +3236,9 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
 
     def on_toggle_pause(icon, item):
         action_toggle_pause(app)
+
+    def on_volunteer(icon, item):
+        action_volunteer(app, snap)
 
     def on_open_sync_drive(icon, item):
         action_open_sync_drive(app)
@@ -3294,6 +3379,20 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
         *breaker_items, *halt_release_items, *upgrade_items,
     ]
 
+    # "Use this machine NOW" (section 10, 2026-08-30). The admin's lever is a
+    # forced job; this is the one the person sitting here pulls, and it is
+    # deliberately theirs alone -- they are the one who knows whether they
+    # mind their GPU being borrowed for the next half hour. Absent on a
+    # companion with no job runner, or one with fleet jobs switched off.
+    volunteering = bool(snap.get("jobs_volunteer_until"))
+    volunteer_items = (
+        [tray_backend.MenuItem(
+            _volunteer_label(snap), on_volunteer,
+            checked=(lambda on: lambda item: on)(volunteering),
+        )]
+        if int(snap.get("jobs_volunteer_minutes") or 0) else []
+    )
+
     # One line of sync state plus Resolve's state -- the three lane lines and
     # every advisory line that used to sit here moved to Settings.
     state_items = [
@@ -3310,6 +3409,7 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
         *state_items,
         tray_backend.Menu.SEPARATOR,
         tray_backend.MenuItem("Sync now", on_sync_now),
+        *volunteer_items,
         tray_backend.MenuItem(
             "▶ Resume syncing (currently PAUSED)" if snap["paused"] else "⏸ Pause syncing",
             on_toggle_pause, checked=(lambda paused: lambda item: paused)(snap["paused"]),

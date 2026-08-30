@@ -145,7 +145,14 @@ log = logging.getLogger("ccsync.config")
 # sidecar once when the signature says the binary rather than the video. The
 # other half of CR-83 is the dashboard's, 0.7.11: the fleet's yt-dlp floor was
 # 2026.07.04, which is a version that cannot download at all.
-VERSION = "0.9.60"
+# 0.9.61: fleet work can be asked for rather than waited for
+# (docs/TIMELINE-CARDS-INTO-CCSYNC.md section 10, 2026-08-30). The person AT a
+# machine can lend it for 30 minutes from the tray (`jobs_volunteer_minutes`,
+# reported as `capabilities.volunteer_until`), an admin can mark a job forced
+# and this loop claims it BY ID through a closed idle gate, and a whisper pass
+# finally reports progress -- its stdout is read on a drain thread instead of
+# being buffered until exit, so the fleet chip moves while the GPU works.
+VERSION = "0.9.61"
 
 # The dashboard version this build needs to be talked to by (REL-4 / SYS-13,
 # resilience sweep 2026-08-28). `tools/release.ps1` / `sign_release.py` copy
@@ -158,11 +165,12 @@ VERSION = "0.9.60"
 # RAISE IT whenever this build reads something only a newer dashboard sends or
 # stores; leave it alone otherwise. It is the dashboard version that must
 # already be deployed, not the newest one that exists.
-# 0.7.22 (phase 4, 2026-08-30): this build reads `commands.jobs.cancel` and
-# `commands.jobs.queue`, and reports `capabilities.job_kinds` -- three fields
-# an older dashboard neither sends nor stores. On an older one the cancel
-# never arrives and an editor's allow-list is silently ignored.
-REQUIRES_DASHBOARD = "0.7.22"
+# 0.7.23 (force/volunteer, section 10, 2026-08-30): this build reads
+# `commands.jobs.forced`, claims with `ids`, and reports
+# `capabilities.volunteer_until` -- three fields an older dashboard neither
+# sends nor stores. On an older one the tray's volunteer item would be a
+# switch that changes nothing at all, which is worse than not offering it.
+REQUIRES_DASHBOARD = "0.7.23"
 
 CONFIG_DIR = Path.home() / ".ccsync"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
@@ -802,6 +810,11 @@ DEFAULTS: dict[str, Any] = {
     # How often the runner looks at what it was offered. The offers themselves
     # ride the report reply, so this is only the tick that acts on them.
     "jobs_poll_seconds": 20,
+    # How long one click of the tray's "Take fleet jobs now" lasts (section
+    # 10, 2026-08-30). A TIMER and not a toggle: somebody who lends their
+    # machine to the fleet and then walks away gets it back without having to
+    # remember they lent it.
+    "jobs_volunteer_minutes": 30,
 
     # -- THE TIMELINE CARDS AGENT (phase 2, 2026-08-30) -------------------
     #
@@ -1441,6 +1454,10 @@ ignored_resolve_projects = ["Untitled Project", "New Doc"]
 # jobs_idle_seconds = 300
 # jobs_skip_while_resolve_running = true
 # jobs_poll_seconds = 20
+# How long the tray's "Take fleet jobs now" item lends this machine to the
+# fleet for -- it takes work while you are AT the keyboard until the timer
+# runs out, or until you click the item again.
+# jobs_volunteer_minutes = 30
 
 # --------------------------------------------------- THE TIMELINE CARDS PAGE
 # Serve the Timeline Cards page from THIS machine's Resolve (phase 2). Off

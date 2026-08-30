@@ -2096,3 +2096,232 @@ Schema v41-v45 all migrate additively on the dashboard's own boot.
   phase is tempted, §4.2's last two rows are the reason, and it has not
   changed: a synthetic keystroke moved to another machine is a keystroke into
   the wrong timeline.
+
+## 10. Force, volunteer, and whisper progress (spec, 2026-08-30)
+
+Alex, after reading §9: *"Is there an ability to force start the proxy/whisper
+workflow in the companion, without waiting for someone's idle PC to process
+it? We also need progress updates in the dashboard."* There was not, and
+whisper had none. Three changes, built together as dashboard **0.7.23** /
+companion **0.9.61** (`REQUIRES_DASHBOARD = "0.7.23"`; the new offer fields
+are ones 0.7.22 neither sends nor stores, §9.3's rule).
+
+### 10.1 What exists after
+
+| lever | who pulls it | what it bypasses |
+|---|---|---|
+| **volunteer** -- the tray item *"⚡ Take fleet jobs now (30 min)"* | the person AT the machine | that machine's idle gate and its Resolve-open gate, on both sides, until the timer runs out or they click it off |
+| **force** -- `tools/jobs.py submit --now` (`"force": true` on the job) | the admin submitting | the idle floor, the cooldown and the rank grace on EVERY machine offered this job, and the companion's idle/Resolve gates for THIS job only |
+| **target** -- `tools/jobs.py submit --on <machine>` (`"target_machine"`) | the admin submitting | the ranking: the job is offered to that one machine and nobody else |
+| **whisper progress** | nothing to pull | the `[ WHISPER: JOB 12 ]` chip becomes `[ WHISPER: 37% ]`, the jobs page PROGRESS column fills, the Cards page's ` + fleet 37%` appears |
+
+Nothing bypasses: a fleet halt, a machine halt, an update waiting, a tripped
+breaker, `jobs_enabled = false`, the machine's own `jobs_kinds`, a job it
+already holds, the fleet cap (`DASH_JOBS_MAX_RUNNING`), or the capability
+filter. "Force" means "do not wait for anybody to leave"; it does not mean
+"run on a machine that cannot".
+
+### 10.2 The contract (both sides build to exactly this)
+
+**Capabilities section** (companion -> dashboard, every report and claim):
+
+* `volunteer_until`: ISO-8601 UTC string, or `null`. Present in every
+  section from 0.9.61; absent from older builds, which reads as `null`.
+
+**Job row / `POST /api/v1/jobs` body** (`JobIn`):
+
+* `force: bool = false`
+* `target_machine: str | null` -- a machine name as the report uses it
+  (`machine_state.machine`), compared case-insensitively; `"editor/machine"`
+  is accepted and the editor half is then also required to match. An unknown
+  name is accepted (the receipt's `why` says nobody by that name has reported)
+  -- the machine may report later.
+* Columns (schema **v46**, one step): `jobs.forced INTEGER`,
+  `jobs.target_machine TEXT`, `machine_state.cap_volunteer_until TEXT`.
+  (`forced`, not `force`, so the column never argues with SQL.)
+* `GET /jobs`, `GET /jobs/{id}`, the receipt and the why page carry both
+  fields back.
+
+**Report reply** (`commands.jobs`):
+
+* `forced: [ids]` -- the subset of `offered` whose row has `forced=1`. Sent
+  whenever non-empty. A companion older than 0.9.61 ignores it and claims on
+  its own gate as before.
+
+**Claim body** (`JobClaimIn`): `ids: list[int] | null` -- when set, the
+dashboard claims only among `allowed_ids` intersected with `ids`. A companion
+whose gate is closed but which holds forced offers claims with `ids = forced`.
+
+### 10.3 Dashboard side (`dashboard/`)
+
+1. `db.py`: v46 as above; `create_job(..., forced=False, target_machine=None)`;
+   `job_row` exposes `forced` (bool) and `target_machine`; `queued_jobs`
+   unchanged; `store_machine_capabilities` writes `cap_volunteer_until` and
+   `_capabilities_of` reads it back as `volunteer_until`; `claim_next_job`
+   takes `ids` and intersects.
+2. `jobs.py`:
+   * `is_volunteering(caps, now) -> bool`: `volunteer_until` parses and is
+     `> now`. Unparseable is `False`.
+   * `policy_refusal(facts, kind, now, job=None)`: the idle-floor branch is
+     skipped when `is_volunteering` OR `job["forced"]`; the cooldown branch
+     is skipped when `job["forced"]`. Everything before them stays in order.
+   * a new refusal BEFORE the capability/policy checks in `offers_for_machine`
+     and `explain`: `REFUSE_NOT_TARGET = "not_the_target"` -- *"this job is
+     for <target> only"*. Maps to a new `REASON_TARGET_AWAY = "target_away"`
+     (transient) when the target exists but refuses, and to
+     `REASON_TARGET_UNKNOWN = "target_unknown"` (not transient) when no
+     machine of that name has ever reported. The worst-answer rule (§7f) is
+     unchanged; these slot in as "one machine can do this, and it is the one
+     asked for".
+   * `first_refusal`: returns `True` at once for a forced or targeted job (no
+     grace window).
+   * `ranked_machines`: a new leading preference signal `volunteering`
+     ("is volunteering right now"), above `nvenc`/`near_media`; add it to
+     `RANK_FIELDS`/the words table so `why_not_first` can say it.
+   * `offers_for_machine` returns `{"offered", "forced", "refused"}`.
+3. `api.py`: `JobIn` + `JobClaimIn` fields; the report reply block adds
+   `forced`; `api_create_job` passes both through; `api_claim_job` passes
+   `ids`. The `why`/receipt JSON gains `target_machine` and `forced`.
+4. `templates/partials/admin_jobs.html`: KIND cell gets a `NOW` chip when
+   forced and a `-> <machine>` chip when targeted (both as titled spans, the
+   page's chip idiom); `fleet_grid.html`: a machine that `is_volunteering`
+   shows `[ VOLUNTEERING until HH:MM ]` (green chip, title says what that
+   means) next to the job chip.
+5. `tools/jobs.py submit`: `--now` (force) and `--on MACHINE` (target); the
+   receipt printer says *"forced: every capable machine is asked at once"* /
+   *"for <machine> only"*. `tools/tests/test_jobs_cli.py` covers both flags.
+6. Docs: `docs/API.md` §6c (the three new fields, the reply key, the claim
+   key); this file's §10.6 (as-built notes) is written by the orchestrator
+   after the merge -- builders do not edit this file.
+7. Versions: `dashboard/src/ccsync_dashboard/__init__.py` and
+   `dashboard/pyproject.toml` -> **0.7.23**. Tests: extend
+   `dashboard/tests/test_jobs_scheduling.py` / `test_jobs_contract.py` /
+   `test_jobs_ranking.py` (the schema-gapless test in `test_db` must still
+   pass at v46).
+
+### 10.4 Companion side (`companion/`)
+
+1. `jobs_runner.py`:
+   * `volunteer(minutes)` sets `self.volunteer_until` (a monotonic deadline
+     plus an ISO wall-clock copy for the report); `None` means the default
+     minutes, `0` clears it. `volunteering` property. Default minutes from
+     `cfg["jobs_volunteer_minutes"]` (**30**).
+   * `note_report_reply` also reads `commands.jobs.forced` into
+     `self._forced` (ids, at most 16).
+   * `_gate()`: after `STATE_NO_CAPABILITY`, if `self.volunteering` skip the
+     user_active and resolve_open checks; else if either would refuse AND
+     `self._forced` intersected with `self._offered` is non-empty, return
+     `STATE_READY` with `self._claim_ids = that intersection` (log at INFO:
+     *"claiming forced job #N with somebody at the keyboard"*). A new state
+     string `STATE_FORCED = "forced"` is what `status()` reports while such
+     a job runs, so the tray/diagnostics can say why a job ran with the
+     editor present.
+   * `_claim()` sends `ids` when `_claim_ids` is set, and clears it after.
+   * `status()` adds `volunteer_until` (ISO or None) and `forced` (ids).
+   * **Whisper progress**: `_run_child` reads the child's stdout on a drain
+     thread (the shape of `jobs_media._drain_progress`) instead of
+     `communicate()`. A pure line parser `whisper_progress(line, state) ->
+     Optional[float]`:
+       - `N media file(s), S already transcribed, T to do` -> `total = T`
+         (T == 0 -> progress 1.0 at exit, nothing before);
+       - `[n/N] <file>` -> `base = (n-1)/N`, `total = N`, fraction `= base`;
+       - `        <at>s / <dur>s` -> `base + (at/dur)/N` (dur 0 -> `base`);
+       - `done: ...` -> `1.0`.
+     Anything else leaves the fraction alone. `None` until the first `[n/N]`
+     (never 0 -- `db.clamp_progress`'s rule holds here). The heartbeat goes
+     out every `HEARTBEAT_SECONDS` as now **and** early when the fraction has
+     moved by 0.01 or more and 5 s have passed since the last one; each
+     carries the current fraction. The output tail, `_parse_realtime`,
+     cancel/halt/lease-loss handling and `_words_files` are unchanged.
+2. `capabilities.py`: `build(..., volunteer_until_fn=None)` writes
+   `section["volunteer_until"]` OUTSIDE the cache (a live value, like
+   `idle_seconds`). `app.job_capabilities` passes
+   `lambda: self.job_runner.volunteer_until_iso` when the runner exists.
+3. `config.py`: `jobs_volunteer_minutes` (default 30) in the defaults dict
+   and the commented `config.toml` block; `VERSION = "0.9.61"`,
+   `REQUIRES_DASHBOARD = "0.7.23"`; `companion/pyproject.toml` -> 0.9.61.
+4. `tray.py`: snapshot field `jobs_volunteer_until` (ISO or "") via
+   `app.job_runner.status()`, in `_menu_fingerprint`; a menu item between
+   "Sync now" and "Pause":
+     - off: `⚡ Take fleet jobs now (30 min)` -> `action_volunteer(app)` ->
+       `_spawn(app, "Volunteer", lambda: app.job_runner.volunteer(None))`,
+       then a tray notification *"Taking fleet jobs for the next 30 minutes,
+       even while you work."*
+     - on: `⚡ Taking fleet jobs until HH:MM (click to stop)`, `checked`,
+       -> `volunteer(0)`.
+     - absent when `app.job_runner is None` or `jobs_enabled` is false.
+   `settings_window.py` gets the same line in its jobs section if one
+   exists; otherwise nothing.
+5. Tests: `companion/tests/test_jobs_runner.py` (volunteer opens the gate,
+   forced ids claim through a closed gate with `ids`, a forced id that is
+   not in `offered` is ignored, the timer expiring closes the gate, whisper
+   progress parsing incl. the early heartbeat), `test_capabilities.py`
+   (`volunteer_until` outside the cache), `test_tray.py` (item present /
+   label / fingerprint moves).
+6. Docs: `docs/CONFIG.md` companion table (`jobs_volunteer_minutes`, and a
+   sentence on the tray item under `jobs_idle_seconds`).
+
+### 10.5 What this deliberately does not do
+
+* No dashboard button that switches a machine to volunteering: a person at
+  the machine is the one who knows whether they mind. The admin's lever is
+  `--on --now`, which that machine's companion obeys.
+* No force on `conform` / `resolve-edit` (§9.5, unchanged: not schedulable).
+* Whisper progress is per FILE with a linear guess inside it; a diarize pass
+  after the last file shows as 100 % for its duration. Good enough to tell
+  working from wedged, which is what §7f's chip comment asked for.
+
+### 10.6 As built (2026-08-30, dashboard 0.7.23 / companion 0.9.61)
+
+Built by two builders in parallel from §10.2-10.4, merged on `fleet-force`
+with main's CI fixes (d2231f0). Every suite green at the merge (counts in
+the merge commit). The contract held on both sides; what differs from the
+spec is listed here so the next reader trusts the code over §10.3/10.4.
+
+**Dashboard (4291034, 727f09f, 5d2031d).** Schema v46 (`jobs.forced INTEGER
+NOT NULL DEFAULT 0`, `jobs.target_machine TEXT`, `machine_state.cap_volunteer_until
+TEXT`). `JobIn.force` / `JobIn.target_machine` on the way in; the ROW says
+`forced` (always a bool) and `target_machine` (always a string, `""` for
+none). `CapabilitiesIn.volunteer_until` is a plain `str | None` so a bad
+timestamp cannot 422 a whole report; `jobs.is_volunteering` parses it with
+`db.parse_iso` (naive = UTC, `Z` and `+00:00` both fine, unparseable = not
+volunteering). `commands.jobs.forced` is a strict subset of `offered`,
+present only when non-empty; `JobClaimIn.ids` (max 16) is INTERSECTED with
+the offers, never substituted. Deviations: `volunteering` is the first entry
+of every kind's `RANK_SIGNALS` tuple rather than a fifth rank field, so the
+published `score` array is unchanged and `why_not_first` still names it
+("...somebody at it who said to take fleet jobs now"). `target_away` versus
+`target_unknown` is decided in `_blocked_reason` over the whole fleet, and a
+targeted machine that can NEVER run the kind passes its non-transient reason
+through (`no_capable_machine`, `halted`, `kind_not_allowed`) instead of
+saying "wait"; `no_machine_reported` still wins on an empty fleet. `explain`'s
+`capable` count excludes `not_the_target` lines. `api.build_editors_view`
+computes `entry["volunteering"] = {active, until, at}` for the grid chip.
+`tools/jobs.py submit --now` / `--on MACHINE`.
+
+**Companion (fe74611, 0512495).** `JobRunner.volunteer(minutes)` (None =
+`jobs_volunteer_minutes`, default 30; 0 clears), `volunteering`,
+`volunteer_until_iso` (`datetime.now(timezone.utc)+n min`, seconds
+precision, `+00:00`); `note_report_reply` reads `commands.jobs.forced`
+(ints, max 16, only ids also in `offered` count); the gate skips the idle and
+Resolve checks while volunteering, and otherwise opens for the forced
+intersection only, sending `ids` on THAT claim alone (`STATE_FORCED` while
+it runs). Whisper progress: `_run_child` drains stdout on a thread;
+`whisper_progress()` maps `[n/N]` to `(n-1)/N`, `<at>s / <dur>s` to
+`base + (at/dur)/N`, `done:` to 1.0, and returns None for exactly 0.0 (so
+`[1/N]` publishes nothing until the first file moves, `clamp_progress`'s
+rule); a run that said `0 to do` sends one final 1.0 on a clean exit. The
+heartbeat goes every 30 s as before plus early when the fraction moved by
+0.01 after 5 s (`PROGRESS_STEP`, `PROGRESS_MIN_SECONDS`); the wait loop is
+now sliced at 5 s, so cancel/halt/shutdown are noticed within ~5 s instead of
+~30. Tray: `⚡ Take fleet jobs now (30 min)` / `⚡ Taking fleet jobs until
+HH:MM (click to stop)` between "Sync now" and "Pause", absent without a
+runner or with `jobs_enabled = false`; `action_volunteer(app, snap)` and a
+second snapshot field `jobs_volunteer_minutes` (0 = no item). Notifications
+on both branches. `config.example.toml` documents `jobs_volunteer_minutes`
+(the shipped-config drift test demands it). `settings_window.py` untouched
+(no jobs section).
+
+**Not changed on purpose:** nothing on the Timeline Cards side. The Cards
+page already appends ` + fleet NN%` from `job.progress`, so a whisper job
+submitted by hand now shows a percentage there too.

@@ -47,6 +47,13 @@ Six rules, each with its reason:
     seconds to minutes, it runs BELOW NORMAL priority (jobs_media._popen), and
     the half that protects the editor is that no new job is claimed while
     somebody is here.
+  * **THE IDLE GATE CAN BE OPENED, BY A PERSON, TWO WAYS** (§10, 2026-08-30)
+    -- and by nobody else. The one AT the machine can `volunteer()` it for
+    half an hour from the tray, and an admin can mark a JOB forced, which this
+    loop will claim by id with the editor present. Neither opens anything
+    above them: a halt, an update, a tripped breaker, `jobs_enabled = false`
+    and this machine's own kind list all still refuse. "Force" means "do not
+    wait for anybody to leave", never "run on a machine that cannot".
   * **NOTHING HERE TOUCHES RESOLVE'S SCRIPTING API** (CR-68). The only
     Resolve question asked is whether the process is running, through
     resolve_prefs, which fails closed.
@@ -59,6 +66,7 @@ import re
 import subprocess
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -79,6 +87,11 @@ STATE_USER_ACTIVE = "user_active"
 STATE_RESOLVE_OPEN = "resolve_open"
 STATE_NOTHING_OFFERED = "nothing_offered"
 STATE_READY = "ready"
+# A job that ran THROUGH a closed gate (§10, 2026-08-30): the admin marked it
+# forced, or the person here volunteered. Reported by status() while it runs so
+# the tray and the diagnostics can say why work started with somebody at the
+# keyboard, instead of looking like the idle gate had failed.
+STATE_FORCED = "forced"
 
 HTTP_TIMEOUT_SECONDS = 20.0
 # The dashboard's lease is 300 s (db.JOB_LEASE_SECONDS). Beat every 30 so a
@@ -99,9 +112,33 @@ IDLE_BACKOFF_MAX_SECONDS = 120.0
 # nobody asked for, and the dashboard's own word for it is the same string
 # (db.JOB_CANCELLED_ERROR).
 CANCELLED_ERROR = "cancelled"
+# THE EARLY HEARTBEAT (§10, 2026-08-30). A whisper pass is minutes long and
+# the 30 s beat is sized against the lease, not against a progress bar -- so a
+# beat also goes out as soon as the fraction has really moved (1 %) and the
+# last one is at least 5 s old. Both halves matter: without the step a file
+# that finishes in 4 s would send a beat per line, and without the floor a long
+# file would leave the chip frozen for half a minute.
+PROGRESS_STEP = 0.01
+PROGRESS_MIN_SECONDS = 5.0
+# How many of the child's lines are kept while it runs. The tail that rides the
+# result is measured in CHARACTERS (OUTPUT_TAIL_CHARS); this is only the bound
+# on the list the drain thread appends to, so a pipeline that prints a line a
+# millisecond cannot grow the companion's heap.
+OUTPUT_TAIL_LINES = 2000
 # "(12 written, 0 failed, 3 skipped) (41.2 min audio in 3.6 min, 11.4x
 # realtime overall)" -- whisper_corpus's own summary line.
 _REALTIME_RE = re.compile(r"([0-9.]+)x realtime")
+# THE THREE LINES whisper_corpus.py actually prints, and nothing else (§10.4).
+# Copied from its own format strings ("%d media file(s), %d already
+# transcribed, %d to do", "[%d/%d] %s", "        %.0fs / %.0fs", "done: ...")
+# so a line that merely looks similar -- the per-file "lang=zh 41s audio in
+# 3.6s" summary sits at the same indent as the progress line -- cannot be read
+# as progress.
+_WHISPER_TOTAL_RE = re.compile(
+    r"^(\d+) media file\(s\), (\d+) already transcribed, (\d+) to do\s*$")
+_WHISPER_FILE_RE = re.compile(r"^\[(\d+)/(\d+)\] ")
+_WHISPER_AT_RE = re.compile(r"^\s+([0-9.]+)s / ([0-9.]+)s\s*$")
+_WHISPER_DONE_RE = re.compile(r"^done: \d+ transcribed")
 
 
 class JobRunner:
@@ -140,6 +177,9 @@ class JobRunner:
         self.skip_while_resolve = bool(
             self.cfg.get("jobs_skip_while_resolve_running", True))
         self.poll_seconds = config_mod.coerce_numeric(self.cfg, "jobs_poll_seconds", 20)
+        # How long one click of the tray's "take fleet jobs now" lasts (§10).
+        self.volunteer_minutes = config_mod.coerce_numeric(
+            self.cfg, "jobs_volunteer_minutes", 30)
 
         self._lock = threading.Lock()
         self._offered: list[int] = []
@@ -149,6 +189,17 @@ class JobRunner:
         # lets this loop stop asking a fleet that has nothing to give.
         self._queue: dict[str, Any] = {}
         self._cancel: list[int] = []
+        # THE IDS AN ADMIN SUBMITTED WITH `--now` (§10). An offer this machine
+        # may claim even with somebody at the keyboard -- and only those ids,
+        # which is why `_claim_ids` exists: a forced claim must not be able to
+        # pick up the ordinary job that happened to be offered beside it.
+        self._forced: list[int] = []
+        self._claim_ids: Optional[list[int]] = None
+        # The person AT this machine saying "use it now" -- a monotonic
+        # deadline for the gate, and a wall-clock copy for the report (the
+        # dashboard cannot read another machine's monotonic clock).
+        self._volunteer_until: Optional[float] = None
+        self._volunteer_until_iso: Optional[str] = None
         self._job: Optional[dict[str, Any]] = None
         self._state = STATE_NOTHING_OFFERED
         self._stop = threading.Event()
@@ -170,6 +221,8 @@ class JobRunner:
             ids = [int(i) for i in offered] if isinstance(offered, list) else []
             cancel = block.get("cancel")
             stops = [int(i) for i in cancel] if isinstance(cancel, list) else []
+            forced = block.get("forced")
+            urgent = [int(i) for i in forced] if isinstance(forced, list) else []
             queue = block.get("queue")
             depth = dict(queue) if isinstance(queue, dict) else {}
         except (TypeError, ValueError):
@@ -179,14 +232,74 @@ class JobRunner:
             self._offered = ids[:16]
             self._queue = depth
             self._cancel = stops[:16]
+            self._forced = urgent[:16]
+
+    # -- volunteering (§10, 2026-08-30) -----------------------------------
+    def volunteer(self, minutes: Optional[float] = None) -> Optional[str]:
+        """The person AT this machine lending it to the fleet for a while.
+
+        -> the ISO deadline, or None when it was switched off. `None` minutes
+        means the configured default (`jobs_volunteer_minutes`, 30); `0`
+        clears it. A TIMER and not a toggle deliberately: somebody who lends
+        their machine and then walks away should get it back without having to
+        remember they lent it.
+        """
+        try:
+            value = self.volunteer_minutes if minutes is None else float(minutes)
+        except (TypeError, ValueError):
+            value = self.volunteer_minutes
+        with self._lock:
+            if value <= 0:
+                self._volunteer_until = None
+                self._volunteer_until_iso = None
+                log.info("jobs: no longer volunteering -- back to the idle gate")
+                return None
+            self._volunteer_until = self._clock() + value * 60.0
+            self._volunteer_until_iso = (
+                datetime.now(timezone.utc) + timedelta(minutes=value)
+            ).replace(microsecond=0).isoformat()
+            log.info("jobs: volunteering for the next %.0f minutes (until %s)",
+                     value, self._volunteer_until_iso)
+            return self._volunteer_until_iso
+
+    @property
+    def volunteering(self) -> bool:
+        with self._lock:
+            return self._volunteering_locked()
+
+    @property
+    def volunteer_until_iso(self) -> Optional[str]:
+        """The wall-clock deadline the capabilities section carries, or None.
+
+        Reads through the same expiry check as the gate, so a report can never
+        tell the dashboard this machine is volunteering after the timer here
+        has run out."""
+        with self._lock:
+            return self._volunteer_until_iso if self._volunteering_locked() else None
+
+    def _volunteering_locked(self) -> bool:
+        """Caller holds `_lock`. Expiring CLEARS both copies, so the answer and
+        what the report says cannot drift apart."""
+        deadline = self._volunteer_until
+        if deadline is None:
+            return False
+        if self._clock() >= deadline:
+            self._volunteer_until = None
+            self._volunteer_until_iso = None
+            log.info("jobs: the volunteer window has run out -- back to the idle gate")
+            return False
+        return True
 
     def status(self) -> dict[str, Any]:
-        """Zero-I/O snapshot for the log, the diagnostics bundle and (later)
-        the tray."""
+        """Zero-I/O snapshot for the log, the diagnostics bundle and the
+        tray."""
         with self._lock:
             job = dict(self._job) if self._job else None
+            volunteer = (self._volunteer_until_iso
+                         if self._volunteering_locked() else None)
             return {"state": self._state, "offered": list(self._offered),
                     "queue": dict(self._queue),
+                    "volunteer_until": volunteer, "forced": list(self._forced),
                     "job": {"id": job["id"], "kind": job["kind"]} if job else None}
 
     def wait_seconds(self) -> float:
@@ -313,10 +426,28 @@ class JobRunner:
             return STATE_RUNNING
         if not self.runnable_kinds():
             return STATE_NO_CAPABILITY
-        if not self._user_is_away():
-            return STATE_USER_ACTIVE
-        if self.skip_while_resolve and self._resolve_running():
-            return STATE_RESOLVE_OPEN
+        # THE TWO GATES A PERSON CAN OPEN (§10, 2026-08-30), and only these
+        # two: what comes above is capability and safety, and neither a
+        # volunteer nor an admin's `--now` is allowed past those.
+        blocked = ""
+        if not self.volunteering:
+            if not self._user_is_away():
+                blocked = STATE_USER_ACTIVE
+            elif self.skip_while_resolve and self._resolve_running():
+                blocked = STATE_RESOLVE_OPEN
+        if blocked:
+            with self._lock:
+                forced = [i for i in self._forced if i in self._offered]
+            if not forced:
+                return blocked
+            # ONLY THESE IDS. The claim carries them, so a machine whose gate
+            # is shut cannot pick up the ordinary job that happened to be
+            # offered in the same reply.
+            log.info("jobs: claiming forced job #%s with somebody at the keyboard",
+                     forced[0])
+            with self._lock:
+                self._claim_ids = forced
+            return STATE_READY
         if not offered:
             return STATE_NOTHING_OFFERED
         return STATE_READY
@@ -359,10 +490,18 @@ class JobRunner:
                        body, self._headers(), HTTP_TIMEOUT_SECONDS)
 
     def _claim(self) -> Optional[dict[str, Any]]:
-        status, parsed = self._call("/claim", {
+        body: dict[str, Any] = {
             "machine": self.machine,
             "capabilities": self._capabilities(),
-            "kinds": self.runnable_kinds()})
+            "kinds": self.runnable_kinds()}
+        with self._lock:
+            ids, self._claim_ids = self._claim_ids, None
+        if ids:
+            # A CLOSED GATE CLAIMING ANYWAY (§10): the dashboard intersects
+            # this list with what it would have offered, so naming ids can
+            # only ever narrow what comes back, never widen it.
+            body["ids"] = list(ids)
+        status, parsed = self._call("/claim", body)
         if status != 200 or not isinstance(parsed, dict):
             log.debug("jobs: claim answered HTTP %s", status)
             return None
@@ -434,6 +573,11 @@ class JobRunner:
             self._state = state
         if state != STATE_READY:
             return None
+        with self._lock:
+            # Read before the claim clears it: what the state says while this
+            # job runs is how the tray explains a job that started with the
+            # editor present.
+            forced_claim = bool(self._claim_ids)
         job = self._claim()
         if job is None:
             with self._lock:
@@ -442,7 +586,7 @@ class JobRunner:
             return None
         with self._lock:
             self._job = job
-            self._state = STATE_RUNNING
+            self._state = STATE_FORCED if forced_claim else STATE_RUNNING
         try:
             self._execute(job)
         finally:
@@ -669,6 +813,13 @@ class JobRunner:
         -> (ok, output tail, error). The child is terminated when the lease is
         lost, when a fleet halt arrives, or when the companion is shutting
         down -- and NOT when the editor comes back (see the module docstring).
+
+        The stdout is read on a DRAIN THREAD (§10, 2026-08-30), the shape
+        jobs_media._drain_progress already uses. It used to ride
+        `communicate(timeout=...)`, which buffers the whole run and hands it
+        over at exit -- so the pipeline's own "[3/12] ..." lines existed and
+        nobody could see them until the transcription was over, and the fleet
+        chip had nothing to show for twenty minutes.
         """
         try:
             proc = self._runner(
@@ -680,19 +831,42 @@ class JobRunner:
             return False, "", f"could not start the transcription: {exc}"
         last_beat = self._clock()
         chunks: list[str] = []
+        progress: dict[str, Any] = {}
+        latest: dict[str, Optional[float]] = {"fraction": None}
+        sent: Optional[float] = None
+
+        def feed(line: str) -> None:
+            chunks.append(line + "\n")
+            del chunks[:-OUTPUT_TAIL_LINES]
+            fraction = whisper_progress(line, progress)
+            if fraction is not None:
+                latest["fraction"] = fraction
+
+        reader: Optional[threading.Thread] = None
+        if getattr(proc, "stdout", None) is not None:
+            reader = threading.Thread(target=_drain_lines, args=(proc.stdout, feed),
+                                      name="ccsync-jobs-stdout", daemon=True)
+            reader.start()
         try:
             while True:
                 try:
-                    out, _err = proc.communicate(timeout=HEARTBEAT_SECONDS)
-                    if out:
-                        chunks.append(out)
+                    # In slices, so a cancel, a halt and a shutdown are all
+                    # noticed while the child runs -- and short enough that the
+                    # early progress beat below can actually be early.
+                    proc.wait(timeout=max(0.1, min(HEARTBEAT_SECONDS,
+                                                   PROGRESS_MIN_SECONDS)))
                     break
                 except subprocess.TimeoutExpired:
                     pass
                 now = self._clock()
-                if now - last_beat >= HEARTBEAT_SECONDS:
+                fraction = latest["fraction"]
+                moved = (fraction is not None
+                         and (sent is None or abs(fraction - sent) >= PROGRESS_STEP)
+                         and (now - last_beat) >= PROGRESS_MIN_SECONDS)
+                if now - last_beat >= HEARTBEAT_SECONDS or moved:
                     last_beat = now
-                    if not self._heartbeat(job_id):
+                    sent = fraction
+                    if not self._heartbeat(job_id, fraction):
                         _terminate(proc)
                         return False, _tail(chunks), "the lease was lost"
                 if self._cancel_requested(job_id):
@@ -712,11 +886,94 @@ class JobRunner:
             log.exception("jobs: the transcription child failed")
             _terminate(proc)
             return False, _tail(chunks), str(exc)
+        if reader is not None:
+            # The last lines the child wrote as it exited, including its own
+            # summary -- _parse_realtime reads them off the tail below.
+            reader.join(timeout=5.0)
         code = proc.returncode
         output = _tail(chunks)
         if code == 0:
+            # A RUN WITH NOTHING TO DO ends at 1.0 (§10.4): the pipeline prints
+            # its "0 to do" line and exits without ever naming a file, and a
+            # chip left at "unknown" for a job that succeeded reads as wedged.
+            if progress.get("total") == 0 and latest["fraction"] is None:
+                self._heartbeat(job_id, 1.0)
             return True, output, ""
         return False, output, f"pipeline.py transcribe exited {code}"
+
+
+def whisper_progress(line: str, state: dict[str, Any]) -> Optional[float]:
+    """One line of `pipeline.py transcribe` output -> how far through it is.
+
+    A PURE FUNCTION over a caller-owned `state` dict, so the whole thing is
+    testable with a list of strings and no subprocess. -> the new fraction, or
+    None when this line says nothing about progress -- and None is NOT zero
+    (db.clamp_progress's rule, the same one jobs_media._Progress obeys): a
+    machine reported at 0 % looks stuck, a machine reported as unknown shows
+    its job id and looks busy, which is the truth until the first file starts.
+
+    Per FILE with a linear guess inside it, which is all the pipeline offers:
+    the diarize pass after the last file shows as 100 % for its duration
+    (§10.5). Good enough to tell working from wedged.
+    """
+    if not line:
+        return None
+    match = _WHISPER_TOTAL_RE.match(line)
+    if match:
+        # "12 media file(s), 3 already transcribed, 9 to do" -- the denominator
+        # is what is TO DO, because the ones already transcribed are skipped in
+        # milliseconds and counting them would make the bar jump.
+        state["total"] = int(match.group(3))
+        return None
+    match = _WHISPER_FILE_RE.match(line)
+    if match:
+        index, total = int(match.group(1)), int(match.group(2))
+        state["total"] = total
+        state["base"] = (index - 1) / total if total > 0 else 0.0
+        return _clamped(state["base"])
+    match = _WHISPER_AT_RE.match(line)
+    if match and state.get("base") is not None:
+        total = int(state.get("total") or 0)
+        at, duration = float(match.group(1)), float(match.group(2))
+        base = float(state["base"])
+        if duration <= 0 or total <= 0:
+            # A file whose duration ffprobe would not give: hold at the file
+            # boundary rather than divide by nothing.
+            return _clamped(base)
+        return _clamped(base + (at / duration) / total)
+    if _WHISPER_DONE_RE.match(line):
+        return 1.0
+    return None
+
+
+def _clamped(fraction: float) -> Optional[float]:
+    """0..1, and None for 0 -- see whisper_progress's rule about zero."""
+    value = max(0.0, min(1.0, float(fraction)))
+    return value if value > 0 else None
+
+
+def _drain_lines(stream: Any, feed: Callable[[str], None]) -> None:
+    """Read the child's stdout line by line until it closes.
+
+    jobs_media._drain_progress's shape, and its posture too: a reader that
+    raises must not be able to take down the run it is only watching."""
+    try:
+        for line in iter(stream.readline, ""):
+            if not line:
+                break
+            if isinstance(line, bytes):
+                line = line.decode("utf-8", "replace")
+            try:
+                feed(line.rstrip("\r\n"))
+            except Exception:
+                log.debug("jobs: the progress parser stumbled", exc_info=True)
+    except Exception:
+        log.debug("jobs: the child's output reader stopped early", exc_info=True)
+    finally:
+        try:
+            stream.close()
+        except Exception:
+            pass
 
 
 def _terminate(proc: Any) -> None:

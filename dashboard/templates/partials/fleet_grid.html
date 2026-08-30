@@ -274,6 +274,16 @@
    cannot. A percentage is what tells a watching admin the difference between
    a machine working and a machine wedged; `percent` is null, never 0, when
    nothing measured it. #}
+        {# SOMEBODY AT THIS MACHINE SAID "GO AHEAD" (section 10, 2026-08-30).
+           Green because it is a live state and a generous one: for the next
+           few minutes this computer takes fleet work with its editor sitting
+           right there. It is the ONE lever this dashboard has no button for -
+           the person at the keyboard is the only one who knows whether they
+           mind - so the grid shows what they chose and nothing here changes
+           it. Next to the job chip, because the two answer one question
+           together: what is this machine doing for the fleet, and why is it
+           allowed to. #}
+        {% if e.volunteering.active %}<span class="chip green" title="somebody at {{ e.machine }} clicked 'take fleet jobs now', so this computer is offered work while they use it - until {{ e.volunteering.until }} UTC, or until they click it off. Nothing else is bypassed: a halt, an update or a tripped breaker still refuse.">[ VOLUNTEERING until {{ e.volunteering.until }} ]</span>{% endif %}
         {% if e.job.id %}<a class="chip green" href="/admin/jobs" title="job #{{ e.job.id }} ({{ e.job.kind }}, {{ e.job.state }}){% if e.job.rel_path %} - {{ e.job.rel_path }}{% endif %}{% if e.job.at %} · last heartbeat {{ e.job.at | ago }}{% endif %}{% if e.job.lease_expires_at %} · lease until {{ e.job.lease_expires_at }}{% endif %}">[ {{ e.job.label or e.job.kind | upper }}: {% if e.job.percent is not none %}{{ e.job.percent }}%{% else %}JOB {{ e.job.id }}{% endif %} ]</a>{% endif %}
         {# Music ingest (MUSIC_INGEST_PLAN.md step 3, 2026-08-18). Its OWN
            chip beside b-roll's rather than one shared one: music needs no GPU,

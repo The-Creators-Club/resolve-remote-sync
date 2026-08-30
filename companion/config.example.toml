@@ -797,6 +797,12 @@ ignored_resolve_projects = ["Untitled Project", "New Doc"]
 # jobs_skip_while_resolve_running = true
 # jobs_poll_seconds = 20
 
+# How long the tray's "Take fleet jobs now" item lends this machine to the
+# fleet for (section 10). While it is running this machine takes work with you
+# AT the keyboard and with Resolve open -- it is the person here saying so,
+# and it ends on its own so nobody has to remember to switch it back.
+# jobs_volunteer_minutes = 30
+
 # --------------------------------------------------------------------------
 # THE TIMELINE CARDS PAGE, SERVED FROM THIS COMPUTER'S RESOLVE
 # --------------------------------------------------------------------------

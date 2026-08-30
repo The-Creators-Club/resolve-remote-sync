@@ -47,7 +47,11 @@
     {% for job in jobs %}
       <tr class="editor-row">
         <td class="mono-sm" data-label="JOB">#{{ job.id }}</td>
-        <td class="mono-sm" data-label="KIND">{{ job.label }}</td>
+        {# SECTION 10's two levers, as chips beside the kind. An admin
+           looking at a queue has to be able to see WHY one job is being
+           offered to a machine with somebody sitting at it, and why another
+           is waiting for one computer while four idle ones look on. #}
+        <td class="mono-sm" data-label="KIND">{{ job.label }}{% if job.forced %} <span class="chip amber" title="forced: every capable machine is asked at once, without waiting for anybody to leave their desk. A halt, an update, a tripped breaker and the capability filter still refuse it.">[ NOW ]</span>{% endif %}{% if job.target_machine %} <span class="chip" title="this job is for {{ job.target_machine }} only - no other machine is offered it, however idle it is">[ -&gt; {{ job.target_machine }} ]</span>{% endif %}</td>
         <td class="mono-sm" data-label="STATE">{{ job.state | upper }}{% if job.cancel_requested_at %} <span class="muted">(cancelling)</span>{% endif %}</td>
         <td class="who" data-label="WHERE">{% if job.claimed_machine %}{{ job.claimed_by }}/{{ job.claimed_machine }}{% else %}<span class="muted">nobody</span>{% endif %}</td>
         {# A percentage where the runner measured one, the job id where it

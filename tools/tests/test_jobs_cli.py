@@ -336,3 +336,60 @@ def test_a_job_that_found_its_file_already_made_says_so(capsys):
                                               "files": ["V/Ep/a.peaks"]})})})
     jobs_cli.watch(jobs_cli.Client(http, URL), 12, timeout=60, sleep=lambda _s: None)
     assert "already made" in capsys.readouterr().out
+
+
+# ------------------------------------------ section 10: --now and --on
+#
+# The two levers an admin has over a scheduler that could otherwise only ever
+# say "wait" (docs/TIMELINE-CARDS-INTO-CCSYNC.md section 10). Both are checked
+# at the BODY, because the field names differ from the flag names on purpose
+# (`--now` sends `force`, and the column is `forced`) and a mismatch here is a
+# job that quietly queues as an ordinary one.
+
+
+def test_now_sends_force_and_the_receipt_says_what_it_did(capsys):
+    _code, http = run(
+        ["submit", "--rel", "V/2026/A", "--now"],
+        {("POST", "/api/v1/login"): (200, LOGIN_OK),
+         ("POST", "/api/v1/jobs"): (200, {"job": a_job(forced=True), "why": {}})})
+    assert http.calls[-1][3]["force"] is True
+    assert "target_machine" not in http.calls[-1][3]
+    assert "forced: every capable machine is asked at once" in capsys.readouterr().out
+
+
+def test_on_sends_the_target_and_the_receipt_names_it(capsys):
+    _code, http = run(
+        ["submit", "--rel", "V/2026/A", "--on", "CREATOR-1"],
+        {("POST", "/api/v1/login"): (200, LOGIN_OK),
+         ("POST", "/api/v1/jobs"): (200, {"job": a_job(target_machine="CREATOR-1"),
+                                          "why": {}})})
+    assert http.calls[-1][3]["target_machine"] == "CREATOR-1"
+    assert "force" not in http.calls[-1][3]
+    assert "for CREATOR-1 only" in capsys.readouterr().out
+
+
+def test_the_two_levers_ride_a_media_job_as_well(capsys):
+    """`--now --on` is section 10.5's answer to "give me that machine's time",
+    and it has to work on the kind an editor is actually waiting for."""
+    _code, http = run(
+        ["submit", "--kind", "proxy-480p", "--root", "media", "--rel", "a.mp4",
+         "--out-rel", "V/cache", "--now", "--on", "jsmith/EDIT-PC"],
+        {("POST", "/api/v1/login"): (200, LOGIN_OK),
+         ("POST", "/api/v1/jobs"): (200, {
+             "job": a_job(kind="proxy-480p", forced=True,
+                          target_machine="jsmith/EDIT-PC"), "why": {}})})
+    body = http.calls[-1][3]
+    assert (body["force"], body["target_machine"]) == (True, "jsmith/EDIT-PC")
+    out = capsys.readouterr().out
+    assert "forced" in out and "for jsmith/EDIT-PC only" in out
+
+
+def test_a_submission_without_them_is_byte_for_byte_the_old_one():
+    """Neither field appears unless asked for, so this tool still submits to
+    a dashboard older than 0.7.23 exactly as it used to."""
+    _code, http = run(
+        ["submit", "--rel", "V/2026/A"],
+        {("POST", "/api/v1/login"): (200, LOGIN_OK),
+         ("POST", "/api/v1/jobs"): (200, {"job": a_job(), "why": {}})})
+    body = http.calls[-1][3]
+    assert "force" not in body and "target_machine" not in body

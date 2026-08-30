@@ -91,7 +91,8 @@ def test_a_gpu_that_will_not_say_its_size_is_no_preference(conn):
     quiet = machine(conn, "quiet", dict(GPU, gpu_vram_gb=None))
     key = jobs_mod.rank_signals(facts(conn, quiet), "whisper",
                                 {"requires": {"gpu_vram_gb": 6}})
-    assert dict((n, have) for n, have, _w in key) == {"gpu_fits": False,
+    assert dict((n, have) for n, have, _w in key) == {"volunteering": False,
+                                                      "gpu_fits": False,
                                                       "gpu": True}
 
 
@@ -155,7 +156,9 @@ def test_why_carries_the_rank_tuple_and_the_signals(conn):
     job_id = dbmod.create_job(conn, "proxy-480p", {"root": "media"}, {})
     conn.commit()
     line = jobs_mod.explain(conn, job_id)["machines"][0]
-    assert line["signals"] == {"nvenc": True}
+    # `volunteering` leads every kind's list since section 10 and is false on
+    # a machine whose editor never said otherwise -- it costs nothing here.
+    assert line["signals"] == {"volunteering": False, "nvenc": True}
     # preference, free slots, load, idle -- in that order, bigger is better
     assert line["score"] == [1.0, 0.0, -0.5, 900.0]
 

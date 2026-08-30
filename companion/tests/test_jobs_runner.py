@@ -632,3 +632,247 @@ def test_a_skipped_job_is_still_a_success(tmp_path, monkeypatch):
     r.tick()
     assert dash.results[-1]["ok"] is True
     assert dash.results[-1]["result"]["skipped"] is True
+
+
+# ================================ section 10: force, volunteer and progress
+#
+# docs/TIMELINE-CARDS-INTO-CCSYNC.md section 10 (2026-08-30). Two levers a
+# PERSON pulls -- the one at the machine volunteering it, the admin forcing a
+# job -- and the progress a whisper pass never reported. What is defended here
+# is that each lever opens exactly the gate it is meant to and no other, and
+# that the fraction is never invented.
+
+def test_volunteering_opens_the_gate_with_somebody_at_the_keyboard(tmp_path):
+    a_vault(tmp_path)
+    a_pipeline(tmp_path)
+    dash = FakeDashboard(a_job(tmp_path))
+    r = make(tmp_path, dash, idle=12)
+    r.note_report_reply({"commands": {"jobs": {"offered": [7]}}})
+    assert r.tick() is None, "the ordinary gate still shuts"
+    assert r.volunteer(30)
+    assert r.volunteering is True
+    assert r.tick() is not None
+    assert dash.claims == 1
+
+
+def test_volunteering_opens_the_resolve_gate_too(tmp_path):
+    """Both gates, because the person clicking it can see their own Resolve
+    and has decided they do not mind."""
+    dash = FakeDashboard(a_job(tmp_path))
+    r = make(tmp_path, dash, resolve=True)
+    r.note_report_reply({"commands": {"jobs": {"offered": [7]}}})
+    assert r._gate() == runner_mod.STATE_RESOLVE_OPEN
+    r.volunteer(None)
+    assert r._gate() == runner_mod.STATE_READY
+
+
+def test_volunteering_never_opens_a_halt_or_a_missing_capability(tmp_path):
+    """"Do not wait for anybody to leave" is not "run on a machine that
+    cannot" -- section 10.1's rule, on this side of it."""
+    dash = FakeDashboard(a_job(tmp_path))
+    r = make(tmp_path, dash, idle=12, halted=True)
+    r.volunteer(None)
+    assert r._gate() == runner_mod.STATE_HALTED
+    r2 = make(tmp_path, dash, idle=12, caps={"whisper": False})
+    r2.volunteer(None)
+    assert r2._gate() == runner_mod.STATE_NO_CAPABILITY
+
+
+def test_the_volunteer_timer_running_out_closes_the_gate_again(tmp_path):
+    """A TIMER, not a toggle: somebody who lends their machine and walks away
+    gets it back without having to remember they lent it."""
+    dash = FakeDashboard(a_job(tmp_path))
+    now = {"t": 1000.0}
+    r = make(tmp_path, dash, idle=12)
+    r._clock = lambda: now["t"]
+    r.note_report_reply({"commands": {"jobs": {"offered": [7]}}})
+    r.volunteer(30)
+    assert r._gate() == runner_mod.STATE_READY
+    now["t"] += 29 * 60
+    assert r._gate() == runner_mod.STATE_READY
+    now["t"] += 2 * 60
+    assert r._gate() == runner_mod.STATE_USER_ACTIVE
+    assert r.status()["volunteer_until"] is None
+    assert dash.claims == 0
+
+
+def test_volunteer_zero_hands_the_machine_straight_back(tmp_path):
+    dash = FakeDashboard(a_job(tmp_path))
+    r = make(tmp_path, dash, idle=12)
+    r.note_report_reply({"commands": {"jobs": {"offered": [7]}}})
+    assert r.volunteer(None) is not None
+    assert r.volunteer(0) is None
+    assert r.volunteering is False
+    assert r.status()["volunteer_until"] is None
+    assert r._gate() == runner_mod.STATE_USER_ACTIVE
+
+
+def test_the_volunteer_deadline_is_iso_utc_and_the_configured_default(tmp_path):
+    """The dashboard cannot read this machine's monotonic clock, so the report
+    carries a wall-clock deadline it can compare with its own now."""
+    from datetime import datetime, timezone
+
+    dash = FakeDashboard(None)
+    r = make(tmp_path, dash, jobs_volunteer_minutes=45)
+    until = r.volunteer(None)
+    assert until == r.volunteer_until_iso
+    parsed = datetime.fromisoformat(until)
+    assert parsed.tzinfo is not None
+    ahead = (parsed - datetime.now(timezone.utc)).total_seconds()
+    assert 44 * 60 < ahead <= 45 * 60
+
+
+def test_a_forced_job_claims_by_id_through_a_closed_gate(tmp_path):
+    """The admin's lever. The claim names the ids so the dashboard can only
+    ever narrow what comes back: a machine whose gate is shut must not pick up
+    the ordinary job offered beside the forced one."""
+    a_vault(tmp_path)
+    a_pipeline(tmp_path)
+    dash = FakeDashboard(a_job(tmp_path))
+    r = make(tmp_path, dash, idle=12)
+    r.note_report_reply({"commands": {"jobs": {"offered": [5, 7], "forced": [7]}}})
+    assert r.tick() is not None
+    suffix, body = dash.calls[0]
+    assert suffix == "/claim"
+    assert body["ids"] == [7]
+    assert r.status()["forced"] == [7]
+
+
+def test_a_forced_job_says_so_while_it_runs(tmp_path, monkeypatch):
+    """STATE_FORCED, so the tray and the diagnostics can say why a job started
+    with the editor present instead of looking like a broken idle gate."""
+    a_vault(tmp_path)
+    a_pipeline(tmp_path)
+    dash = FakeDashboard(a_job(tmp_path))
+    r = make(tmp_path, dash, idle=12)
+    r.note_report_reply({"commands": {"jobs": {"offered": [7], "forced": [7]}}})
+    seen: list[str] = []
+    real_execute = r._execute
+
+    def execute(job):
+        seen.append(r.status()["state"])
+        return real_execute(job)
+
+    monkeypatch.setattr(r, "_execute", execute)
+    r.tick()
+    assert seen == [runner_mod.STATE_FORCED]
+    assert r.status()["state"] == runner_mod.STATE_NOTHING_OFFERED
+
+
+def test_a_forced_id_this_machine_was_not_offered_is_ignored(tmp_path):
+    """The offer is still the invitation. A forced id nobody offered this
+    machine is a stale reply, not permission."""
+    dash = FakeDashboard(a_job(tmp_path))
+    r = make(tmp_path, dash, idle=12)
+    r.note_report_reply({"commands": {"jobs": {"offered": [5], "forced": [7]}}})
+    assert r._gate() == runner_mod.STATE_USER_ACTIVE
+    assert r.tick() is None
+    assert dash.claims == 0
+
+
+def test_an_ordinary_claim_names_no_ids(tmp_path):
+    """`ids` rides ONLY a forced claim: an open gate claiming by id would
+    narrow what the scheduler is allowed to hand out for no reason."""
+    a_vault(tmp_path)
+    a_pipeline(tmp_path)
+    dash = FakeDashboard(a_job(tmp_path))
+    r = make(tmp_path, dash)
+    r.note_report_reply({"commands": {"jobs": {"offered": [7], "forced": [7]}}})
+    r.tick()
+    assert "ids" not in dash.calls[0][1]
+
+
+def test_a_dashboard_too_old_to_send_forced_changes_nothing(tmp_path):
+    r = make(tmp_path, FakeDashboard(None), idle=12)
+    r.note_report_reply({"commands": {"jobs": {"offered": [7]}}})
+    assert r.status()["forced"] == []
+    r.note_report_reply({"commands": {"jobs": {"offered": [7], "forced": "all"}}})
+    assert r.status()["forced"] == []
+
+
+# --------------------------------------------------------- whisper progress
+
+def test_the_whisper_progress_parser():
+    """The corpus stage's own four lines, and nothing else. The per-file
+    summary sits at the SAME indent as the progress line, which is why the
+    pattern is anchored rather than searched for."""
+    state: dict = {}
+    p = runner_mod.whisper_progress
+    assert p("12 media file(s), 3 already transcribed, 9 to do", state) is None
+    assert state["total"] == 9
+    # None, never 0: a machine reported at 0% looks stuck, one reported as
+    # unknown shows its job id (db.clamp_progress's rule).
+    assert p("[1/9] Interview 3.mp4", state) is None
+    assert p("        45s / 90s", state) == pytest.approx(0.5 / 9)
+    assert p("[2/9] Interview 4.mp4", state) == pytest.approx(1 / 9)
+    assert p("        30s / 60s", state) == pytest.approx(1 / 9 + 0.5 / 9)
+    # A duration nothing could measure holds at the file boundary rather than
+    # dividing by nothing.
+    assert p("        12s / 0s", state) == pytest.approx(1 / 9)
+    assert p("done: 9 transcribed, 0 failed, 3 skipped", state) == 1.0
+
+
+def test_the_whisper_parser_ignores_every_other_line():
+    state: dict = {"total": 9, "base": 1 / 9}
+    p = runner_mod.whisper_progress
+    for line in ("[load] large-v3 on cuda/float16 in 8.1s",
+                 "        lang=zh 41s audio in 3.6s (11.4x realtime), 900 words",
+                 "        speakers: 3 in 42 turn(s)",
+                 "        FAILED: no audio stream",
+                 "[skip] Interview 3 -- a clip of that stem is already in this run",
+                 "", "Traceback (most recent call last):"):
+        assert p(line, state) is None, line
+
+
+def test_a_run_with_nothing_to_do_reports_none_before_it_finishes():
+    state: dict = {}
+    assert runner_mod.whisper_progress(
+        "4 media file(s), 4 already transcribed, 0 to do", state) is None
+    assert state["total"] == 0
+
+
+def test_the_progress_rides_the_heartbeat_early_when_it_moves(
+        tmp_path, monkeypatch):
+    """The 30 s beat is sized against the LEASE, not against a progress bar.
+    Without the early one the chip sat still for half a minute at a time --
+    and section 7f's whole point was telling working from wedged."""
+    monkeypatch.setattr(runner_mod, "PROGRESS_MIN_SECONDS", 0.05)
+    a_vault(tmp_path)
+    a_pipeline(tmp_path, body=(
+        "import time\n"
+        "print('2 media file(s), 0 already transcribed, 2 to do', flush=True)\n"
+        "print('[1/2] A.mp4', flush=True)\n"
+        "print('        50s / 100s', flush=True)\n"
+        "time.sleep(0.4)\n"
+        "print('        100s / 100s', flush=True)\n"
+        "time.sleep(0.4)\n"
+        "print('done: 2 transcribed, 0 failed, 0 skipped', flush=True)\n"
+        "time.sleep(0.4)\n"))
+    dash = FakeDashboard(a_job(tmp_path))
+    r = make(tmp_path, dash)
+    r.note_report_reply({"commands": {"jobs": {"offered": [7]}}})
+    r.tick()
+    beats = [body.get("progress") for suffix, body in dash.calls
+             if suffix.endswith("/heartbeat")]
+    assert beats, "a job that runs for a second must still beat once it moves"
+    assert beats[0] == pytest.approx(0.25)
+    assert beats[-1] == pytest.approx(1.0)
+    assert dash.results[-1]["ok"] is True
+
+
+def test_the_childs_output_still_rides_the_result(tmp_path):
+    """The drain thread replaced communicate(), and the tail is what
+    _parse_realtime reads -- so losing it would lose the one number that says
+    whether handing this work to another machine was worth it."""
+    a_vault(tmp_path)
+    a_pipeline(tmp_path, body=(
+        "print('[1/1] A.mp4')\n"
+        "print('done: 1 transcribed, 0 failed, 0 skipped (11.4x realtime overall)')\n"))
+    dash = FakeDashboard(a_job(tmp_path))
+    r = make(tmp_path, dash)
+    r.note_report_reply({"commands": {"jobs": {"offered": [7]}}})
+    r.tick()
+    result = dash.results[-1]
+    assert result["ok"] is True
+    assert "[1/1] A.mp4" in result["result"]["output"]
+    assert result["result"]["realtime"] == 11.4

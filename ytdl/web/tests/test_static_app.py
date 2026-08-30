@@ -4106,3 +4106,108 @@ def test_the_retry_is_wired_up_and_rendered_for_every_phase():
     prog = js[js.index('function renderProgress('):js.index('// [ RETRY N FAILED ]')]
     assert 'renderRetry(job);' in prog, \
         'the offer left by the last job outlives it unless every render clears it'
+
+
+# ------------------------------------------- the term review + the queue
+# 2026-08-30. Source assertions rather than harness scenarios, so they run on a
+# machine with no node: what they pin is the markup and the wiring, which is
+# where the two features can silently stop existing.
+
+def test_the_term_review_is_in_the_markup_and_starts_hidden():
+    html = _html()
+    assert re.search(r'id="terms"[^>]*class="[^"]*\bhidden\b', html), html
+    assert '[ TICK ALL ]' in html and '[ UNTICK ALL ]' in html
+    assert 'SEARCH WITH THESE' in html
+    assert 'id="termlist"' in html and 'id="termcount"' in html
+    # ...above the review grid, because it comes before it in the job's life
+    assert html.index('id="terms"') < html.index('id="review"')
+
+
+def test_the_term_review_rows_are_a_tick_a_term_and_a_bracket():
+    js = _js()
+    body = js[js.index('function renderTermReview('):js.index('function renderTermCount(')]
+    assert "job.phase === 'terms_review'" in body, body
+    assert "box2.type = 'checkbox'" in body, body
+    # the bracket is only drawn when there is something to put in it
+    assert "t.translation || t.english_gloss" in body, body
+    assert "'(' + tr + ')'" in body, body
+
+
+def test_ticking_updates_the_count_without_a_round_trip():
+    """The owner asked for ticking, not for a request per click. The count
+    comes off the Set in the browser; the server hears about it once."""
+    js = _js()
+    body = js[js.index('function renderTermReview('):js.index('async function searchWithTheseTerms(')]
+    assert 'renderTermCount(terms)' in body, body
+    assert 'post(' not in body, 'ticking must not talk to the server'
+    count = js[js.index('function renderTermCount('):js.index('function setAllTerms(')]
+    assert '${n} of ${terms.length} terms' in count, count
+
+
+def test_tick_all_and_untick_all_rewrite_the_whole_set():
+    js = _js()
+    body = js[js.index('function setAllTerms('):js.index('async function searchWithTheseTerms(')]
+    assert 'new Set(on ? terms.map(t => t.id) : [])' in body, body
+    assert "$('#termsall').onclick = () => setAllTerms(true);" in js
+    assert "$('#termsnone').onclick = () => setAllTerms(false);" in js
+
+
+def test_search_with_these_posts_the_set_then_continues():
+    js = _js()
+    body = js[js.index('async function searchWithTheseTerms('):
+              js.index('// ----------------------------------------------------------------- queue')]
+    assert 'post(`api/jobs/${jobId}/terms`, {enabled: [...state.termsOn]})' in body, body
+    assert 'post(`api/jobs/${jobId}/terms/continue`)' in body, body
+    # document-relative, like every other URL in this bundle (YTDL-42)
+    assert '/api/jobs' not in body, body
+    assert "$('#termsgo').onclick = searchWithTheseTerms;" in js
+
+
+def test_the_queue_is_in_the_markup_and_starts_hidden():
+    html = _html()
+    assert re.search(r'id="queue"[^>]*class="[^"]*\bhidden\b', html), html
+    assert 'id="queuelist"' in html
+    # under the running job and above Recent searches: it is what the running
+    # job is ahead of
+    assert html.index('id="downloads"') < html.index('id="queue"') < \
+        html.index('id="recent"')
+
+
+def test_a_queue_row_names_the_job_and_offers_the_three_controls():
+    js = _js()
+    body = js[js.index('function renderQueue('):js.index('async function moveInQueue(')]
+    for label in ('[ UP ]', '[ DOWN ]', '[ CANCEL ]'):
+        assert label in body, body
+    assert 'j.project_label' in body and 'j.term' in body, body
+    assert "'pasted links'" in body, 'a url job has no term to print'
+    # an empty queue is hidden rather than drawn as an empty box
+    assert "classList.toggle('hidden', !q.length)" in body, body
+
+
+def test_the_queue_moves_and_cancels_through_the_documented_routes():
+    js = _js()
+    move = js[js.index('async function moveInQueue('):js.index('async function cancelQueued(')]
+    assert 'post(`api/jobs/${jobId}/queue/move`, {position})' in move, move
+    cancel = js[js.index('async function cancelQueued('):
+                js.index('// How much of ONE video')]
+    assert 'post(`api/jobs/${jobId}/cancel`)' in cancel, cancel
+    assert '/api/jobs' not in move + cancel
+
+
+def test_the_search_form_says_queued_behind_instead_of_refusing():
+    """The owner's queue, from the search box's point of view: a second search
+    is no longer a red 409 toast naming a job the editor has lost sight of."""
+    js = _js()
+    body = js[js.index('function announceQueued('):js.index('const confirmDiscard')]
+    assert 'queued_behind' in body, body
+    assert 'queued behind ${plural(n' in body, body
+    assert 'if (!n) return;' in body, 'the first search of the day says nothing'
+    assert 'announceQueued(r);' in js
+
+
+def test_the_queue_is_read_from_the_active_route_and_not_every_tick():
+    js = _js()
+    body = js[js.index('async function loadQueue('):js.index('function renderQueue(')]
+    assert "api('api/jobs/active')" in body, body
+    poll = js[js.index('async function poll()'):js.index('function detach()')]
+    assert 'if (seen !== job.phase) loadQueue();' in poll, poll

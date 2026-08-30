@@ -434,35 +434,49 @@ def test_creating_a_job_queues_it(client, con):
     assert job['period'] == 'month'
 
 
-def test_a_second_job_is_refused_while_one_is_running(client):
+def test_a_second_job_queues_behind_the_first(client, con):
+    """The owner, 2026-08-30: "there should also be a queue so you can queue up
+    multiple searches". This used to be the 409 (YTDL-25)."""
     first = client.post('/api/jobs', json={'term': 'a', 'project_slug': PROJECTS[0][0]})
     assert first.status_code == 200
+    assert first.json()['queued_behind'] == 0
+    db.set_phase(con, first.json()['job_id'], 'searching')
+
     second = client.post('/api/jobs', json={'term': 'b', 'project_slug': PROJECTS[0][0]})
-    assert second.status_code == 409
-    assert second.json()['detail']['job_id'] == first.json()['job_id']
+    assert second.status_code == 200
+    body = second.json()
+    assert body['phase'] == 'queued'
+    assert body['queue_position'] == 1      # first in the QUEUE; the other is running
+    assert body['queued_behind'] == 1       # ...and one job runs before it
+    assert db.get_job(con, body['job_id'])['created_by'] == USER
 
 
-def test_a_double_click_cannot_create_two_active_jobs(client, con, monkeypatch):
-    """YTDL-25: the one-job check is read-then-insert, and a double-clicked
-    SEARCH lands between the two -- the second job then orphans the first,
-    which is the one active_job hands to every later 409."""
-    from ytdlweb import db as dbmod
+def test_a_third_job_queues_behind_the_second(client, con):
+    """The count is jobs AHEAD, not the length of the list: a busy job plus
+    everything already waiting."""
+    running = client.post('/api/jobs', json={'term': 'a', 'project_slug': PROJECTS[0][0]})
+    db.set_phase(con, running.json()['job_id'], 'searching')
+    client.post('/api/jobs', json={'term': 'b', 'project_slug': PROJECTS[0][0]})
+    third = client.post('/api/jobs', json={'term': 'c', 'project_slug': PROJECTS[0][0]})
+    assert third.json()['queue_position'] == 2
+    assert third.json()['queued_behind'] == 2
 
-    real, seen = dbmod.active_job, []
 
-    def blind(c, user):
-        # the first two calls are the read checks, which see nothing (the race);
-        # anything after that is the recovery path and gets the truth
-        seen.append(user)
-        return None if len(seen) <= 2 else real(c, user)
+def test_a_double_click_makes_a_queue_entry_not_an_orphan(client, con):
+    """YTDL-25's race, and what it costs now.
 
-    monkeypatch.setattr(dbmod, 'active_job', blind)
+    The one-job check was read-then-insert and a double-clicked SEARCH landed
+    between the two, so the second job orphaned the first and the editor was
+    409'd forever by a job_id nothing was tracking. There is no check to race
+    any more: both jobs exist, in order, and the second is a queue entry the
+    editor can see and cancel.
+    """
     first = client.post('/api/jobs', json={'term': 'a', 'project_slug': PROJECTS[0][0]})
-    second = client.post('/api/jobs', json={'term': 'b', 'project_slug': PROJECTS[0][0]})
-    assert first.status_code == 200
-    assert second.status_code == 409
-    assert second.json()['detail']['job_id'] == first.json()['job_id']
-    assert len(db.recent_jobs(con, USER)) == 1
+    second = client.post('/api/jobs', json={'term': 'a', 'project_slug': PROJECTS[0][0]})
+    assert first.status_code == 200 and second.status_code == 200
+    assert len(db.recent_jobs(con, USER)) == 2
+    assert [j['id'] for j in db.queued_jobs(con, USER)] == \
+        [first.json()['job_id'], second.json()['job_id']]
 
 
 def test_an_enormous_topic_is_refused_rather_than_handed_to_claude(client):
@@ -1043,44 +1057,33 @@ def test_a_url_job_validates_the_project_and_quality_server_side(client):
     assert _urls_job(client, quality='8k').status_code == 400
 
 
-def test_pasted_links_obey_one_active_job_per_editor_in_both_directions(client):
-    """The partial unique index (YTDL-25) does not care which kind of job it
-    is, so neither may the handler -- an unhandled IntegrityError here would be
-    a 500 in place of the 409 the SPA re-attaches on."""
+def test_a_paste_and_a_search_share_one_queue(client, con):
+    """The queue does not care which kind of job it is, so neither may the
+    handler -- this used to be the 409 the unique index produced (YTDL-25)."""
     search = client.post('/api/jobs', json={'term': 'a', 'project_slug': PROJECTS[0][0]})
-    refused = _urls_job(client)
-    assert refused.status_code == 409
-    assert refused.json()['detail']['job_id'] == search.json()['job_id']
-
-    client.post(f'/api/jobs/{search.json()["job_id"]}/cancel')
+    db.set_phase(con, search.json()['job_id'], 'searching')
     links = _urls_job(client)
     assert links.status_code == 200
+    assert links.json()['queued_behind'] == 1
+    # ...and the clip count in the same answer is not the queue's number
+    assert links.json()['queued'] == 1
+
     second = client.post('/api/jobs', json={'term': 'b', 'project_slug': PROJECTS[0][0]})
-    assert second.status_code == 409
-    assert second.json()['detail']['job_id'] == links.json()['job_id']
-    assert _urls_job(client).status_code == 409
+    assert second.status_code == 200
+    assert [j['id'] for j in db.queued_jobs(con, USER)] == \
+        [links.json()['job_id'], second.json()['job_id']]
 
 
-def test_a_double_clicked_paste_cannot_create_two_active_jobs(client, con, monkeypatch):
-    """The same read-then-insert window create_job has, closed the same way:
-    the index refuses the loser and the handler turns that into the 409."""
-    from ytdlweb import db as dbmod
-
-    real, seen = dbmod.active_job, []
-
-    def blind(c, user):
-        seen.append(user)
-        return None if len(seen) <= 2 else real(c, user)
-
-    monkeypatch.setattr(dbmod, 'active_job', blind)
+def test_a_double_clicked_paste_queues_and_keeps_both_sets_of_rows(client, con):
+    """The same read-then-insert window create_job had, and the same answer:
+    there is nothing to race. The videos of BOTH jobs are written, because a
+    url job's rows and its jobs row are one transaction."""
     first = _urls_job(client)
     second = _urls_job(client)
-    assert first.status_code == 200
-    assert second.status_code == 409
-    assert second.json()['detail']['job_id'] == first.json()['job_id']
-    assert len(db.recent_jobs(con, USER)) == 1
-    # ...and the loser left no orphaned video rows behind
+    assert first.status_code == 200 and second.status_code == 200
+    assert len(db.recent_jobs(con, USER)) == 2
     assert len(db.videos(con, first.json()['job_id'])) == 1
+    assert len(db.videos(con, second.json()['job_id'])) == 1
 
 
 def test_a_link_the_fleet_already_has_is_recorded_skipped_not_queued(client, con):
@@ -1140,7 +1143,7 @@ def test_the_active_job_route_answers_the_callers_one_live_job(client, con, job)
 
 def test_the_active_job_route_is_null_when_nothing_is_running(client, con, job):
     db.set_phase(con, job['id'], 'done')
-    assert client.get('/api/jobs/active').json() == {'job': None}
+    assert client.get('/api/jobs/active').json() == {'job': None, 'queue': []}
 
 
 def test_the_active_job_route_is_per_editor(client, con, job):

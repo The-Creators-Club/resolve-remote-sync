@@ -224,7 +224,34 @@ def client(attested):
 
 @pytest.fixture()
 def job(con):
-    """A queued job for USER against their first ticked project."""
+    """A queued job for USER against their first ticked project.
+
+    `auto_terms=True` since 2026-08-30, and it is the fixture's one opinion: an
+    ordinary job now STOPS at `terms_review` for a person to tick the queries,
+    which is a phase most of this suite is not about. Everything that walks a
+    job from `queued` to `ready_for_review` in one run_job() -- the pipeline,
+    the search pacing, the filter rubrics, the date range, the whole download
+    half -- is testing the machine on either side of that stop, and would
+    otherwise every one of them have to press the button first.
+
+    The stop itself, and what the review writes, are the `review_job` fixture
+    below and the tests that use it.
+    """
+    slug, label, _ = PROJECTS[0]
+    job_id = db.create_job(con, USER, 'algal reef controversy',
+                           config.safe_term_dirname('algal reef controversy'),
+                           slug, label, quality='1080p', max_per_term=5,
+                           auto_terms=True)
+    return db.get_job(con, job_id)
+
+
+@pytest.fixture()
+def review_job(con):
+    """The same job WITHOUT the bypass: it parks at `terms_review`.
+
+    What the SPA creates, in other words -- the browser never sends
+    auto_terms.
+    """
     slug, label, _ = PROJECTS[0]
     job_id = db.create_job(con, USER, 'algal reef controversy',
                            config.safe_term_dirname('algal reef controversy'),
@@ -264,10 +291,17 @@ class FakeClaude:
 
     def __init__(self, terms=None, verdicts=None, term_error=None,
                  relevance_error=None):
+        # `translation` rides on every item since 2026-08-30, exactly as
+        # claude_cli._usable_terms builds it: the gloss under the name the term
+        # review speaks, and '' for a query already in English.
         self.terms = terms if terms is not None else [
-            {'q': 'algal reef taiwan', 'lang': 'en', 'english_gloss': None},
-            {'q': 'lng terminal protest', 'lang': 'en', 'english_gloss': None},
-            {'q': '藻礁 三接 爭議', 'lang': 'zh', 'english_gloss': 'algal reef third LNG terminal dispute'},
+            {'q': 'algal reef taiwan', 'lang': 'en', 'english_gloss': None,
+             'translation': ''},
+            {'q': 'lng terminal protest', 'lang': 'en', 'english_gloss': None,
+             'translation': ''},
+            {'q': '藻礁 三接 爭議', 'lang': 'zh',
+             'english_gloss': 'algal reef third LNG terminal dispute',
+             'translation': 'algal reef third LNG terminal dispute'},
         ]
         self.verdicts = verdicts or {}
         self.term_error = term_error

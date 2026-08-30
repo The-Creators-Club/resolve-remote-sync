@@ -210,7 +210,8 @@ def test_the_jobs_shot_types_reach_both_claude_calls(
     slug, label, _ = PROJECTS[1]
     db.set_phase(con, job['id'], 'cancelled')
     mine = db.create_job(con, USER, 'algal reef controversy', 'algal reef',
-                         slug, label, shot_types=['aerial', 'interview'])
+                         slug, label, shot_types=['aerial', 'interview'],
+                         auto_terms=True)
     _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa']})
     worker.run_job(con, mine)
 
@@ -225,7 +226,7 @@ def test_a_job_that_ticked_nothing_asks_for_no_bias_not_the_defaults(
     slug, label, _ = PROJECTS[1]
     db.set_phase(con, job['id'], 'cancelled')
     none = db.create_job(con, USER, 'algal reef controversy', 'algal reef',
-                         slug, label, shot_types=[])
+                         slug, label, shot_types=[], auto_terms=True)
     _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa']})
     worker.run_job(con, none)
 
@@ -255,7 +256,7 @@ def test_the_jobs_mode_reaches_both_ai_calls(con, job, fake_claude, fake_youtube
     slug, label, _ = PROJECTS[1]
     db.set_phase(con, job['id'], 'cancelled')
     mine = db.create_job(con, USER, 'algal reef controversy', 'algal reef',
-                         slug, label, mode='news')
+                         slug, label, mode='news', auto_terms=True)
     _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa']})
     worker.run_job(con, mine)
 
@@ -290,7 +291,7 @@ def _capped_job(con, con_job, cap, user=USER, term='algal reef controversy'):
     if con_job is not None:
         db.set_phase(con, con_job['id'], 'cancelled')   # one active job each
     job_id = db.create_job(con, user, term, 'algal reef', slug, label,
-                           max_candidates=cap)
+                           max_candidates=cap, auto_terms=True)
     return db.get_job(con, job_id)
 
 
@@ -1610,7 +1611,7 @@ def test_the_jobs_scope_reaches_both_ai_calls(con, job, fake_claude, fake_youtub
     slug, label, _ = PROJECTS[1]
     db.set_phase(con, job['id'], 'cancelled')
     mine = db.create_job(con, USER, 'algal reef controversy', 'algal reef',
-                         slug, label, term_scope='zh')
+                         slug, label, term_scope='zh', auto_terms=True)
     _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa']})
     worker.run_job(con, mine)
     assert fake_claude.scopes == [('terms', 'zh'), ('relevance', 'zh')]
@@ -1635,7 +1636,7 @@ def test_an_exact_search_never_asks_claude_for_terms_and_gets_the_whole_ceiling(
     db.set_phase(con, job['id'], 'cancelled')
     mine = db.create_job(con, USER, 'algal reef controversy', 'algal reef',
                          slug, label, max_per_term=5, max_candidates=50,
-                         term_scope='exact')
+                         term_scope='exact', auto_terms=True)
     fake_claude.term_error = claude_cli.ClaudeError(
         claude_cli.ERR_AUTH, 'must never be reached')
     _wire(fake_youtube, {'algal reef controversy': ['aaaaaaaaaaa', 'bbbbbbbbbbb']})
@@ -1659,7 +1660,8 @@ def test_an_exact_search_runs_with_the_ai_provider_down_for_terms(
     degrades the way it always has (banner, unfiltered manifest)."""
     slug, label, _ = PROJECTS[1]
     db.set_phase(con, job['id'], 'cancelled')
-    mine = db.create_job(con, USER, 'reef', 'reef', slug, label, term_scope='exact')
+    mine = db.create_job(con, USER, 'reef', 'reef', slug, label,
+                         term_scope='exact', auto_terms=True)
     fake_claude.term_error = claude_cli.ClaudeError(claude_cli.ERR_AUTH, 'logged out')
     fake_claude.relevance_error = claude_cli.ClaudeError(claude_cli.ERR_AUTH, 'logged out')
     _wire(fake_youtube, {'reef': ['aaaaaaaaaaa']})
@@ -1676,7 +1678,8 @@ def test_a_single_language_scope_still_searches_the_editors_own_term_first(
     ENGLISH ONLY is still the first search (source='user')."""
     slug, label, _ = PROJECTS[1]
     db.set_phase(con, job['id'], 'cancelled')
-    mine = db.create_job(con, USER, '藻礁', '藻礁', slug, label, term_scope='en')
+    mine = db.create_job(con, USER, '藻礁', '藻礁', slug, label,
+                         term_scope='en', auto_terms=True)
     _wire(fake_youtube, {'藻礁': ['aaaaaaaaaaa']})
     worker.run_job(con, mine)
     terms = db.terms(con, mine)
@@ -1693,6 +1696,7 @@ def test_a_single_language_scope_still_searches_the_editors_own_term_first(
 def _dated_job(con, job, **over):
     slug, label, _ = PROJECTS[1]
     db.set_phase(con, job['id'], 'cancelled')
+    over.setdefault('auto_terms', True)
     return db.create_job(con, USER, 'reef', 'reef', slug, label, **over)
 
 

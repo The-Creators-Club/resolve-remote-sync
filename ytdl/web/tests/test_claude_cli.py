@@ -257,8 +257,14 @@ def test_generate_terms_returns_en_and_zh_with_glosses(run):
         {'q': '藻礁 三接', 'lang': 'zh', 'english_gloss': 'algal reef third terminal'},
     ]})))
     out = claude_cli.generate_terms('algal reef')
-    assert out[0] == {'q': 'algal reef taiwan', 'lang': 'en', 'english_gloss': None}
+    assert out[0] == {'q': 'algal reef taiwan', 'lang': 'en',
+                      'english_gloss': None, 'translation': ''}
     assert out[1]['english_gloss'] == 'algal reef third terminal'
+    # `translation` is what the term review prints in brackets (2026-08-30). It
+    # is the gloss the SAME reply already carried -- no second field in the
+    # prompt, no second call -- and it is blank for a query already in English,
+    # which is the review's "there is nothing to print after this one".
+    assert out[1]['translation'] == 'algal reef third terminal'
     assert 'Traditional Chinese' in _system(run)
     assert 'english_gloss' in _system(run)
 
@@ -487,7 +493,8 @@ def test_the_shot_type_bias_did_not_disturb_the_term_output_contract(run):
     assert '{"terms": [' in p and '{{' not in p, 'the doubled braces must render'
     assert '{bias}' not in p and '{topic}' not in p
     assert out[1] == {'q': '總統府 空拍', 'lang': 'zh',
-                      'english_gloss': 'presidential office drone'}
+                      'english_gloss': 'presidential office drone',
+                      'translation': 'presidential office drone'}
 
 
 def test_the_relevance_prompt_drops_studio_and_keeps_real_footage(run):

@@ -1,6 +1,5 @@
 """Storage layer: schema/migration runner, the phase machine's writes, and the
 two guards that live in SQL rather than in a handler."""
-import sqlite3
 import threading
 
 import pytest
@@ -38,6 +37,15 @@ def test_a_newer_database_is_refused(tmp_path):
 # too -- and because a fixture that omits a table schema.sql has always created
 # would make an ALTER fail here that cannot fail on the fleet's database.
 _V1_DDL = """
+-- job_terms is here from 2026-08-30, when migration 012 became the first one
+-- to ALTER it. Same reason job_videos is: a fixture that omits a table
+-- schema.sql has always created would make an ALTER fail here that cannot fail
+-- on the fleet's database.
+CREATE TABLE job_terms (
+    id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    term TEXT NOT NULL, lang TEXT NOT NULL, english_gloss TEXT,
+    source TEXT NOT NULL, searched INTEGER DEFAULT 0, hits INTEGER DEFAULT 0,
+    UNIQUE(job_id, term));
 CREATE TABLE jobs (
     id INTEGER PRIMARY KEY, created_by TEXT NOT NULL, term TEXT NOT NULL,
     term_dir TEXT NOT NULL, project_slug TEXT NOT NULL,
@@ -96,7 +104,13 @@ def test_a_v1_database_is_migrated_and_its_duplicate_active_jobs_retired(tmp_pat
 
     assert con.execute('PRAGMA user_version').fetchone()[0] == db.CURRENT_SCHEMA_VERSION
     assert 'term_dir' in db._columns(con, 'downloads')
-    assert db._index_exists(con, 'idx_jobs_one_active')
+    # v3 created idx_jobs_one_active and v12 drops it again (the queue,
+    # 2026-08-30). Both halves have to run here, in that order: this is the
+    # database that carries the duplicate active jobs 003's UPDATE retires, and
+    # the retirement is the reason 003 still runs at all on a v1 file.
+    assert not db._index_exists(con, 'idx_jobs_one_active')
+    assert 'queue_position' in db._columns(con, 'jobs')
+    assert {'translation', 'enabled'} <= db._columns(con, 'job_terms')
     # v4: every row that predates the paste-links box is a search, which is the
     # column's default -- so the ADD COLUMN needs no backfill.
     assert 'kind' in db._columns(con, 'jobs')
@@ -111,12 +125,14 @@ def test_a_v1_database_is_migrated_and_its_duplicate_active_jobs_retired(tmp_pat
                        'ORDER BY id', (USER,)).fetchall()
     assert [r['phase'] for r in rows] == ['cancelled', 'queued']
     assert 'YTDL-25' in rows[0]['error']
-    # ...and the index now refuses what the migration just cleaned up
-    with pytest.raises(sqlite3.IntegrityError):
-        con.execute("INSERT INTO jobs(created_by,term,term_dir,project_slug,"
-                    "project_label,phase,created_at,updated_at) "
-                    "VALUES(?,'more','more','s','2026/FF5/Energy','queued','x','x')",
-                    (USER,))
+    # ...and a second active job is no longer refused: what the index used to
+    # forbid is now a queue entry (2026-08-30). The retirement above still
+    # happened, and has to -- it is the record of what an unguarded create_job
+    # wrote before either rule existed.
+    con.execute("INSERT INTO jobs(created_by,term,term_dir,project_slug,"
+                "project_label,phase,created_at,updated_at) "
+                "VALUES(?,'more','more','s','2026/FF5/Energy','queued','x','x')",
+                (USER,))
     con.rollback()
     con.close()
 
@@ -125,6 +141,15 @@ def test_a_v1_database_is_migrated_and_its_duplicate_active_jobs_retired(tmp_pat
 # Written out for the same reason _V1_DDL is -- a copy that followed schema.sql
 # around would stop being the shape the fleet's database is actually in.
 _V4_DDL = """
+-- job_terms is here from 2026-08-30, when migration 012 became the first one
+-- to ALTER it. Same reason job_videos is: a fixture that omits a table
+-- schema.sql has always created would make an ALTER fail here that cannot fail
+-- on the fleet's database.
+CREATE TABLE job_terms (
+    id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    term TEXT NOT NULL, lang TEXT NOT NULL, english_gloss TEXT,
+    source TEXT NOT NULL, searched INTEGER DEFAULT 0, hits INTEGER DEFAULT 0,
+    UNIQUE(job_id, term));
 CREATE TABLE jobs (
     id INTEGER PRIMARY KEY, created_by TEXT NOT NULL,
     kind TEXT NOT NULL DEFAULT 'search', term TEXT NOT NULL,
@@ -203,6 +228,15 @@ def test_the_migrations_default_is_the_pythons_default(tmp_path):
 # -- the shape the fleet's ytdl.db is actually in as of this change. Written
 # out for the same reason _V1_DDL and _V4_DDL are.
 _V5_DDL = """
+-- job_terms is here from 2026-08-30, when migration 012 became the first one
+-- to ALTER it. Same reason job_videos is: a fixture that omits a table
+-- schema.sql has always created would make an ALTER fail here that cannot fail
+-- on the fleet's database.
+CREATE TABLE job_terms (
+    id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    term TEXT NOT NULL, lang TEXT NOT NULL, english_gloss TEXT,
+    source TEXT NOT NULL, searched INTEGER DEFAULT 0, hits INTEGER DEFAULT 0,
+    UNIQUE(job_id, term));
 CREATE TABLE jobs (
     id INTEGER PRIMARY KEY, created_by TEXT NOT NULL,
     kind TEXT NOT NULL DEFAULT 'search', term TEXT NOT NULL,
@@ -780,16 +814,24 @@ def test_ready_for_review_is_left_alone_by_boot_recovery(con, job):
     assert db.get_job(con, job['id'])['phase'] == 'ready_for_review'
 
 
-def test_one_active_job_per_editor_is_enforced_by_the_database(con, job):
-    """YTDL-25: the handler's check is read-then-insert, so the guarantee has
-    to live where the race cannot get at it. Terminal jobs are exempt -- an
-    editor's history is any number of rows."""
+def test_a_second_job_takes_a_place_in_the_queue_instead_of_raising(con, job):
+    """What replaced YTDL-25's unique index (2026-08-30).
+
+    The index made a second non-terminal job an IntegrityError, which the
+    handler turned into a 409 and the editor read as "SEARCH does nothing". A
+    second job is now simply the second thing in the line: created, numbered,
+    and visible on the page as something they can cancel or move.
+    """
     slug, label, _ = PROJECTS[1]
-    with pytest.raises(sqlite3.IntegrityError):
-        db.create_job(con, USER, 'second', 'second', slug, label)
-    db.set_phase(con, job['id'], 'cancelled')
-    again = db.create_job(con, USER, 'second', 'second', slug, label)
-    assert db.active_job(con, USER)['id'] == again
+    second = db.create_job(con, USER, 'second', 'second', slug, label)
+    third = db.create_job(con, USER, 'third', 'third', slug, label)
+    assert [j['id'] for j in db.queued_jobs(con, USER)] == \
+        [job['id'], second, third]
+    assert [j['queue_position'] for j in db.queued_jobs(con, USER)] == [1, 2, 3]
+    # ...and the index that used to refuse it is gone from the schema, not
+    # merely unenforced: migrations/012 drops it, and schema.sql (which is
+    # re-run against every database this app opens) no longer creates it.
+    assert not db._index_exists(con, 'idx_jobs_one_active')
 
 
 # ------------------------------------------------------- pasted-link jobs
@@ -837,23 +879,24 @@ def test_a_known_download_is_written_skipped_rather_than_queued(con):
     assert [v['video_id'] for v in db.pending_videos(con, job_id)] == ['vid00000002']
 
 
-def test_create_url_job_obeys_the_one_active_job_index_and_leaves_nothing_behind(
-        con, job):
-    """YTDL-25's index does not care what kind of job it is. The rollback
-    matters as much as the raise: the videos are inserted in the same
-    transaction, so a loser must leave no rows at all."""
-    slug, label, _ = PROJECTS[1]
-    with pytest.raises(sqlite3.IntegrityError):
-        db.create_url_job(con, USER, '', '', slug, label,
-                          _url_videos('vid00000001'))
-    assert len(db.recent_jobs(con, USER)) == 1
-    assert con.execute("SELECT COUNT(*) FROM job_videos WHERE video_id='vid00000001'"
-                       ).fetchone()[0] == 0
+def test_a_paste_queues_behind_the_editors_running_job(con, job):
+    """The queue does not care what kind of job it is either (2026-08-30).
 
-    db.set_phase(con, job['id'], 'done')
-    again = db.create_url_job(con, USER, '', '', slug, label,
+    This test used to be YTDL-25's other half -- the index raised, the whole
+    transaction rolled back, and the paste was refused. A paste now takes a
+    place in the line: the search keeps position 1, the paste gets 2, and its
+    video rows are written with it rather than discarded.
+    """
+    slug, label, _ = PROJECTS[1]
+    paste = db.create_url_job(con, USER, '', '', slug, label,
                               _url_videos('vid00000001'))
-    assert db.active_job(con, USER)['id'] == again
+    assert len(db.recent_jobs(con, USER)) == 2
+    assert con.execute("SELECT COUNT(*) FROM job_videos WHERE video_id='vid00000001'"
+                       ).fetchone()[0] == 1
+    assert [j['id'] for j in db.queued_jobs(con, USER)] == [job['id'], paste]
+    assert db.get_job(con, paste)['queue_position'] == 2
+    # ...and the page still attaches to the job that is running, not the paste
+    assert db.active_job(con, USER)['id'] == job['id']
 
 
 def test_boot_recovery_leaves_a_queued_url_jobs_videos_alone(con):
@@ -1173,7 +1216,7 @@ def test_the_migrations_scope_default_is_the_pythons_default():
     assert f"term_scope       TEXT NOT NULL DEFAULT '{db.DEFAULT_TERM_SCOPE}'" in schema
     assert db.DEFAULT_TERM_SCOPE in db.TERM_SCOPES
     assert db._MIGRATIONS[11][0] == '011_jobs_term_scope_dates.sql'
-    assert db.CURRENT_SCHEMA_VERSION == 11
+    assert db.CURRENT_SCHEMA_VERSION == 12
 
 
 def test_the_scope_and_dates_are_written_once_at_create(con):
@@ -1188,3 +1231,116 @@ def test_the_scope_and_dates_are_written_once_at_create(con):
     assert db.term_scope_of(b'zh') == 'zh'
     assert db.term_scope_of(None) == 'both'
     assert db.date_range_of({'date_from': 'soon', 'date_to': b'20191231'}) == (None, '20191231')
+
+
+# The shape a fleet database has TODAY, the day before the term review and the
+# queue: everything migrations 002-011 produced, and the one-active-job index
+# 012 removes. Written out rather than derived from schema.sql for the reason
+# _V1_DDL is: the point is a database that predates the migration.
+_V11_DDL = """
+CREATE TABLE jobs (
+    id INTEGER PRIMARY KEY, created_by TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'search', term TEXT NOT NULL,
+    term_dir TEXT NOT NULL, project_slug TEXT NOT NULL,
+    project_label TEXT NOT NULL, quality TEXT NOT NULL DEFAULT '1080p',
+    period TEXT, max_per_term INTEGER NOT NULL DEFAULT 15,
+    max_candidates INTEGER NOT NULL DEFAULT 100,
+    shot_types TEXT NOT NULL DEFAULT 'aerial,establishing,walkthrough,timelapse,event,raw',
+    mode TEXT NOT NULL DEFAULT 'visuals',
+    term_scope TEXT NOT NULL DEFAULT 'both', date_from TEXT, date_to TEXT,
+    phase TEXT NOT NULL DEFAULT 'queued', error TEXT,
+    terms_total INTEGER DEFAULT 0, terms_done INTEGER DEFAULT 0,
+    candidates INTEGER DEFAULT 0, enrich_total INTEGER DEFAULT 0,
+    enrich_done INTEGER DEFAULT 0, dl_total INTEGER DEFAULT 0,
+    dl_done INTEGER DEFAULT 0, dl_failed INTEGER DEFAULT 0,
+    cancel_requested INTEGER DEFAULT 0,
+    download_mode TEXT NOT NULL DEFAULT 'server', claimed_by TEXT,
+    claimed_machine TEXT, lease_expires_at TEXT, mode_lock TEXT,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE job_terms (
+    id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    term TEXT NOT NULL, lang TEXT NOT NULL, english_gloss TEXT,
+    source TEXT NOT NULL, searched INTEGER DEFAULT 0, hits INTEGER DEFAULT 0,
+    UNIQUE(job_id, term));
+CREATE TABLE downloads (
+    video_id TEXT PRIMARY KEY, title TEXT, channel TEXT,
+    project_slug TEXT NOT NULL, project_label TEXT NOT NULL, term TEXT NOT NULL,
+    term_dir TEXT, rel_path TEXT NOT NULL, job_id INTEGER, downloaded_by TEXT,
+    downloaded_at TEXT NOT NULL);
+CREATE TABLE job_videos (
+    id INTEGER PRIMARY KEY, job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    video_id TEXT NOT NULL, url TEXT NOT NULL, title TEXT, channel TEXT,
+    duration REAL, upload_date TEXT, view_count INTEGER, thumbnail TEXT,
+    meta_error TEXT, relevant INTEGER DEFAULT 1, relevance_note TEXT,
+    duplicate INTEGER DEFAULT 0, duplicate_of TEXT, selected INTEGER DEFAULT 1,
+    dl_state TEXT DEFAULT 'none', dl_error TEXT, filepath TEXT,
+    download_host TEXT, UNIQUE(job_id, video_id));
+CREATE UNIQUE INDEX idx_jobs_one_active ON jobs(created_by)
+    WHERE phase NOT IN ('done', 'failed', 'cancelled');
+"""
+
+
+def test_a_v11_database_gains_the_review_and_the_queue(tmp_path):
+    """012. Four columns, and the first migration in this app that REMOVES
+    something: the one-active-job index (YTDL-25) is what made a second search
+    a 409 instead of a queue entry, and a queued job is a non-terminal job, so
+    with the index still there the queue could never hold more than one thing.
+
+    No backfill, and none possible: every term this database holds WAS
+    searched, which is what `enabled` defaults to, and every job in it is
+    either terminal or already running, so queue_position 0 is honest for all
+    of them. `auto_terms` 0 is only reachable now that a stop exists.
+    """
+    con = db.connect(tmp_path / 'v11.db')
+    con.executescript(_V11_DDL)
+    con.execute("INSERT INTO jobs(created_by,term,term_dir,project_slug,"
+                "project_label,phase,created_at,updated_at) "
+                "VALUES(?,'reef','reef','s','2026/FF5/Energy','done','x','x')",
+                (USER,))
+    con.execute("INSERT INTO job_terms(job_id,term,lang,english_gloss,source) "
+                "VALUES(1,'藻礁','zh','algal reef','claude')")
+    con.execute('PRAGMA user_version = 11')
+    con.commit()
+
+    db.ensure_schema(con)
+
+    assert con.execute('PRAGMA user_version').fetchone()[0] == db.CURRENT_SCHEMA_VERSION
+    assert {'translation', 'enabled'} <= db._columns(con, 'job_terms')
+    assert {'queue_position', 'auto_terms'} <= db._columns(con, 'jobs')
+    assert not db._index_exists(con, 'idx_jobs_one_active')
+    assert db._index_exists(con, 'idx_jobs_queue')
+
+    term = con.execute('SELECT * FROM job_terms').fetchone()
+    assert term['enabled'] == 1, 'every term this database holds WAS searched'
+    assert term['translation'] is None, 'nothing to print in brackets'
+    old = con.execute('SELECT * FROM jobs').fetchone()
+    assert old['queue_position'] == 0 and old['auto_terms'] == 0
+
+    # ...and the editor can now have two non-terminal jobs, which is the whole
+    # feature the dropped index was in the way of
+    for phase in ('searching', 'queued'):
+        con.execute("INSERT INTO jobs(created_by,term,term_dir,project_slug,"
+                    "project_label,phase,created_at,updated_at) "
+                    "VALUES(?,'more','more','s','2026/FF5/Energy',?,'x','x')",
+                    (USER, phase))
+    con.commit()
+    con.close()
+
+
+def test_the_012_migration_is_registered_in_order_and_runs_once(tmp_path):
+    """The runner's contract for the newest file: registered under the version
+    it produces, and its predicate answers TRUE afterwards -- ensure_schema
+    refuses to record a migration whose effect is still absent."""
+    assert db._MIGRATIONS[12][0] == '012_terms_review_and_queue.sql'
+    assert max(db._MIGRATIONS) == db.CURRENT_SCHEMA_VERSION == 12
+
+    con = db.connect(tmp_path / 'twice.db')
+    con.executescript(_V11_DDL)
+    con.execute('PRAGMA user_version = 11')
+    con.commit()
+    db.ensure_schema(con)
+    # Re-running is what every connection does (db.con() calls init on each
+    # one), so a second pass has to be a no-op rather than a duplicate column.
+    db.ensure_schema(con)
+    assert db._MIGRATIONS[12][1](con) is True
+    con.close()

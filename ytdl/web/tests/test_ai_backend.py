@@ -532,7 +532,8 @@ def test_the_two_calls_go_through_the_chain(http, monkeypatch):
     ai_backend.set_provider_lookup(lambda: {'provider': 'openai_api', 'api_key': 'k'})
     http(_ok_payload(json.dumps({'terms': [{'q': 'a drone shot', 'lang': 'en'}]})))
     out = claude_cli.generate_terms('algal reef')
-    assert out == [{'q': 'a drone shot', 'lang': 'en', 'english_gloss': None}]
+    assert out == [{'q': 'a drone shot', 'lang': 'en', 'english_gloss': None,
+                    'translation': ''}]
 
 
 def test_the_health_cache_records_which_provider_answered(http):

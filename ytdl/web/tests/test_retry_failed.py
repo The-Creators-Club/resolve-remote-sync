@@ -73,18 +73,28 @@ def test_a_job_with_no_rows_at_all_keeps_its_409(client, con, job):
     assert 'nothing to retry' in r.json()['detail']['detail']
 
 
-def test_the_retry_is_still_one_job_per_editor(client, con, job):
-    """Reviving a terminal job makes it active again, and YTDL-25's rule is
-    unchanged by which terminal phase it was in."""
+def test_the_retry_waits_for_a_job_that_is_actually_running(client, con, job):
+    """Reviving a terminal job puts it straight into `downloading` with no
+    queue entry to wait in, so this is the one place the old one-job rule still
+    holds -- against a BUSY job (2026-08-30). A job of theirs parked for review
+    is not busy, and refusing a retry over it would be YTDL-25's block back in
+    the one place it was never about."""
     _rows(con, job['id'], {'vid00000001': 'failed'})
     db.set_phase(con, job['id'], 'failed', 'stopped')
     other = db.create_job(con, USER, 'second topic', 'second-topic',
                           job['project_slug'], job['project_label'])
+    db.set_phase(con, other, 'searching')
 
     r = client.post(f'/api/jobs/{job["id"]}/download')
     assert r.status_code == 409
     assert r.json()['detail']['job_id'] == other
     assert db.get_job(con, job['id'])['phase'] == 'failed'
+
+    # ...and the same retry goes through once that job is only WAITING for its
+    # editor rather than being worked on
+    db.set_phase(con, other, 'ready_for_review')
+    assert client.post(f'/api/jobs/{job["id"]}/download').status_code == 200
+    assert db.get_job(con, job['id'])['phase'] == 'downloading'
 
 
 def test_the_retry_forgives_the_last_runs_executor_pin(client, con, job):

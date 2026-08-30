@@ -1,0 +1,95 @@
+{# [ ANDROID ] -- the Digital Asset Links this site serves (MOBILE_PLAN.md §4
+   M5, 2026-08-30).
+
+   A PLAIN htmx form, not part of static/site_settings.js: that file is the
+   rest of this page's, and a panel whose only job is to paste two values must
+   not need a second owner. Both buttons post to android.py's routes and swap
+   this whole div back, so a save, a refusal and a check all render through
+   the same markup.
+
+   Rendered by /admin/settings (through the include) AND by those two routes,
+   so every value it reads comes from `manifest`, which both provide. The
+   three android_* names are set by the routes only; on the page render they
+   are Undefined, which is falsy, and the panel simply shows no banner. #}
+<div id="android-settings">
+  <div class="side-head" style="margin-top:1.4rem">[ ANDROID ]
+    <span class="muted">The app wrapper's proof that this site owns it. Without
+      it the installed app opens with a browser URL bar across the top and
+      nothing says why. Build the APK (see docs/ANDROID.md), paste what the
+      build printed, then reopen the app.</span></div>
+
+  {% if android_error %}
+    <div class="banner">{{ android_error }}</div>
+  {% elif android_notice %}
+    <div class="muted" style="margin-top:0.4rem">{{ android_notice }}</div>
+  {% endif %}
+
+  <form id="android-form" class="inline-form" style="margin-top:0.6rem"
+        hx-post="/api/v1/setup/android" hx-target="#android-settings" hx-swap="outerHTML">
+    {# base.html puts the CSRF token on <body> as hx-headers, so htmx already
+       sends it; the hidden field is the belt for a browser that submits this
+       form without htmx (app.py's csrf_gate reads either). #}
+    <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
+    <div>
+      <label>PACKAGE NAME
+        <input type="text" name="package_name" style="width:100%"
+               placeholder="net.ts.tail26290e.truenas.ccsync"
+               value="{{ manifest.android.package_name }}">
+      </label>
+      <span class="muted">The application id the APK was built with. Blank
+        turns the app off: this site then serves an empty statement.</span>
+    </div>
+    <div style="margin-top:0.6rem">
+      <label>SHA-256 CERT FINGERPRINTS
+        <span class="muted">one per line</span>
+        <textarea name="sha256_cert_fingerprints" rows="4" style="width:100%"
+                  placeholder="AA:BB:CC:...:FF">{% for f in manifest.android.sha256_cert_fingerprints %}{{ f }}
+{% endfor %}</textarea>
+      </label>
+      <span class="muted">32 colon-separated hex pairs, as `keytool -list` and
+        Play Console print them. Keep the OLD key here while you hand over to
+        a new one: dropping it mid-rollout breaks every installed copy.</span>
+    </div>
+    <div style="margin-top:0.4rem">
+      <button class="btn" type="submit">[ SAVE ]</button>
+    </div>
+  </form>
+
+  <form class="inline-form" style="margin-top:0.4rem"
+        hx-post="/api/v1/setup/android/check" hx-target="#android-settings" hx-swap="outerHTML">
+    <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
+    <button class="btn" type="submit">[ CHECK ]</button>
+    <span class="muted">Reads back what this site is serving at
+      /.well-known/assetlinks.json.</span>
+  </form>
+
+  {% if android_check %}
+    <div class="mono-sm" style="margin-top:0.6rem">
+      {% if android_check.count %}
+        <span class="chip green">[ SERVING ]</span>
+        <span>{{ android_check.path }} carries {{ android_check.count }} statement
+          for <span class="who">{{ android_check.package_name }}</span> with
+          {{ android_check.fingerprints | length }} fingerprint(s):</span>
+        <ul>
+          {% for f in android_check.fingerprints %}<li>{{ f }}</li>{% endfor %}
+        </ul>
+      {% else %}
+        <span class="chip amber">[ EMPTY ]</span>
+        <span>{{ android_check.path }} answers <code>[]</code>. An app installed
+          against this origin will open with a URL bar until both a package
+          name and a fingerprint are saved above.</span>
+      {% endif %}
+      <div style="margin-top:0.4rem" class="muted">
+        {% if android_check.google_url %}
+          Google decides, not this page. Open this from a machine that can
+          reach this site's public URL and read what it says:
+          <div style="overflow-wrap:anywhere"><code>{{ android_check.google_url }}</code></div>
+        {% else %}
+          Set DASHBOARD URL above to this site's https address before you build
+          the app: the statement is checked against the origin the app was
+          built for, and Google's own checker needs that URL.
+        {% endif %}
+      </div>
+    </div>
+  {% endif %}
+</div>

@@ -147,7 +147,18 @@ Sync it there anyway?");
         return;
       }
       setUpmode(upBox, false);
-      writeCell(box, wanted, "full").catch(function (err) {
+      writeCell(box, wanted, "full").then(function () {
+        // CR-28 follow-up (2026-08-30): a wired box that was ticked stays
+        // enabled only so it can be unticked (template rule). Once that
+        // untick lands, re-lock it -- the server refuses a re-tick anyway
+        // (409), and a wired cell that stayed clickable would just invite
+        // that refusal instead of explaining it up front.
+        if (box.dataset.wired === "1" && !wanted) {
+          box.disabled = true;
+          box.title = (box.dataset.machineLabel || box.dataset.editor)
+            + " is wired to the NAS: it works directly off the tree, so a new sync cannot be ticked here";
+        }
+      }).catch(function (err) {
         box.checked = !wanted;   // rollback: the browser already flipped it
         setUpmode(upBox, upWas);
         toast('could not update "' + box.dataset.editor + '": ' + err.message, "err");

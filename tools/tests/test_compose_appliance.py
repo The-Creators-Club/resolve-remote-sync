@@ -182,3 +182,40 @@ def test_no_docker_socket_is_mounted(text: str):
     # compromised -- a docker.sock bind mount anywhere in this file would
     # quietly take that property away.
     assert "docker.sock" not in text
+
+
+# ---------------------------------------------------------- the Serve switch
+# MOBILE_PLAN.md M6 (2026-08-30): the phone port needs an https origin, and
+# `deploy/tailscale/serve.json` is where TLS-on-443 -> dashboard:8480 is
+# written down. It is wired in OFF: these three tests are what "off by
+# default" means mechanically, because a `TS_SERVE_CONFIG` that ever grew a
+# non-empty default would hand every customer's node a Serve config nobody
+# asked for on the next `docker compose pull`.
+
+SERVE_JSON = REPO / "dashboard" / "deploy" / "tailscale" / "serve.json"
+
+
+def test_the_serve_config_exists_and_proxies_to_the_dashboard_service():
+    import json
+    assert SERVE_JSON.exists(), f"{SERVE_JSON} is missing"
+    doc = json.loads(SERVE_JSON.read_text(encoding="utf-8"))
+    assert doc["TCP"]["443"]["HTTPS"] is True
+    # ${TS_CERT_DOMAIN} is containerboot's substitution, and the dashboard's
+    # own serve-config POST (WP B) fills the same slot from LocalAPI's
+    # Self.DNSName -- one document, two appliers.
+    web = doc["Web"]["${TS_CERT_DOMAIN}:443"]["Handlers"]["/"]
+    # `dashboard:8480` -- the compose SERVICE name, not 127.0.0.1: the
+    # tailscale container does not share the dashboard's netns (only
+    # syncthing and sftp do), so loopback there is its own loopback.
+    assert web["Proxy"] == "http://dashboard:8480"
+
+
+def test_the_serve_switch_is_off_by_default(code: str):
+    assert 'TS_SERVE_CONFIG: "${DASH_TAILSCALE_SERVE:-}"' in code, (
+        "TS_SERVE_CONFIG must come from DASH_TAILSCALE_SERVE with an EMPTY "
+        "default -- a default that names the file turns Serve on for every "
+        "customer who never asked for it")
+
+
+def test_the_serve_config_directory_is_mounted_read_only(code: str):
+    assert "- ./tailscale:/config:ro" in code

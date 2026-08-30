@@ -1,0 +1,1585 @@
+{
+  "generated_at": "2026-08-30T03:05:52.559Z",
+  "url": "http://127.0.0.1:8497",
+  "user": "owen",
+  "widths": [
+    390,
+    768
+  ],
+  "thresholds": {
+    "tap_px": 44,
+    "font_px": 12
+  },
+  "totals": {
+    "renders": 32,
+    "fail": 23,
+    "warn": 9
+  },
+  "findings": [
+    {
+      "page": "login",
+      "url": "/login",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/login",
+      "title": "CC SYNC: LOGIN",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 38.8,
+        "w": 292,
+        "h": 38.8,
+        "selector": "label > input[type=password]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "form > label",
+        "sample": "USERNAME"
+      },
+      "counted": {
+        "taps": 4,
+        "texts": 7
+      },
+      "fails": [],
+      "warns": [
+        "tap target 292x38.8 px  label > input[type=password]",
+        "font 11 px  form > label"
+      ],
+      "png": "docs/mobile/round1/390/login.png"
+    },
+    {
+      "page": "home",
+      "url": "/",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/",
+      "title": "CC SYNC: FLEET",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 1151,
+        "scrollWidth": 1541,
+        "clientWidth": 390,
+        "selector": "div.layout > main.main",
+        "culprit": {
+          "selector": "div.banner > div.mono-sm",
+          "right": 1541,
+          "past": 1151,
+          "width": 1517,
+          "white_space": "nowrap",
+          "nowrap": true,
+          "text": "WHAT TO DO: On the NAS: make the folder holding the CC Sync ",
+          "ancestors": [
+            "div.banner",
+            "section#server-notices",
+            "div"
+          ]
+        }
+      },
+      "tap": {
+        "min": 27.8,
+        "w": 190.6,
+        "h": 27.8,
+        "selector": "form.inline-form > select.root-select"
+      },
+      "font": {
+        "min": 11,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 29,
+        "texts": 538
+      },
+      "fails": [
+        "content scrolls sideways by 1151 px  div.layout > main.main  <- div.banner > div.mono-sm (1517 px wide, 1151 px past the edge, white-space: nowrap)"
+      ],
+      "warns": [
+        "tap target 190.6x27.8 px  form.inline-form > select.root-select",
+        "font 11 px  span.topbar-right > span.stamp"
+      ],
+      "png": "docs/mobile/round1/390/home.png"
+    },
+    {
+      "page": "transfers",
+      "url": "/transfers",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/transfers",
+      "title": "CC SYNC: TRANSFERS",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 271,
+        "scrollWidth": 661,
+        "clientWidth": 390,
+        "selector": "div.layout > main.main",
+        "culprit": {
+          "selector": "summary.mono-sm > span.muted",
+          "right": 661,
+          "past": 271,
+          "width": 640,
+          "white_space": "nowrap",
+          "nowrap": true,
+          "text": "just ticked; sharing and first file lists are being set up, ",
+          "ancestors": [
+            "summary.mono-.m",
+            "details.queue-group",
+            "div"
+          ]
+        }
+      },
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 14,
+        "texts": 281
+      },
+      "fails": [
+        "content scrolls sideways by 271 px  div.layout > main.main  <- summary.mono-sm > span.muted (640 px wide, 271 px past the edge, white-space: nowrap)"
+      ],
+      "warns": [
+        "font 11 px  span.topbar-right > span.stamp"
+      ],
+      "png": "docs/mobile/round1/390/transfers.png"
+    },
+    {
+      "page": "project",
+      "url": "/project/{project}",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/project/2026-ff5-animals",
+      "title": "CC SYNC: 2026/FF5/Animals",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 261,
+        "scrollWidth": 651,
+        "clientWidth": 390,
+        "selector": "div.layout > main.main",
+        "culprit": {
+          "selector": "li > span.clip-name",
+          "right": 723,
+          "past": 333,
+          "width": 639,
+          "white_space": "nowrap",
+          "nowrap": true,
+          "text": "A017_C019_0830QP_001 - Mei-Hsiu Hwang interview, second unit",
+          "ancestors": [
+            "li",
+            "ul.clip-li.t",
+            "details.bin"
+          ]
+        }
+      },
+      "tap": {
+        "min": 32.6,
+        "w": 361.2,
+        "h": 32.6,
+        "selector": "form.move-form > select"
+      },
+      "font": {
+        "min": 11,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 10,
+        "texts": 153
+      },
+      "fails": [
+        "content scrolls sideways by 261 px  div.layout > main.main  <- li > span.clip-name (639 px wide, 333 px past the edge, white-space: nowrap)"
+      ],
+      "warns": [
+        "tap target 361.2x32.6 px  form.move-form > select",
+        "font 11 px  span.topbar-right > span.stamp"
+      ],
+      "png": "docs/mobile/round1/390/project.png"
+    },
+    {
+      "page": "project-setup",
+      "url": "/project-setup?resolve_project={resolve}",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/project-setup?resolve_project=FF5%20Elections%20E2",
+      "title": "CC SYNC: PROJECT SETUP",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 2,
+        "texts": 9
+      },
+      "fails": [],
+      "warns": [
+        "font 11 px  span.topbar-right > span.stamp"
+      ],
+      "png": "docs/mobile/round1/390/project-setup.png"
+    },
+    {
+      "page": "installer",
+      "url": "/installer",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/installer",
+      "title": "CC SYNC: INSTALLER",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 2,
+        "texts": 12
+      },
+      "fails": [],
+      "warns": [
+        "font 11 px  span.topbar-right > span.stamp"
+      ],
+      "png": "docs/mobile/round1/390/installer.png"
+    },
+    {
+      "page": "admin-users",
+      "url": "/admin/users",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/users",
+      "title": "CC SYNC: USERS",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 259,
+        "scrollWidth": 619,
+        "clientWidth": 360,
+        "selector": "main.main > nav.settings-nav",
+        "culprit": {
+          "selector": "nav.settings-nav > a.btn.settings-nav-item",
+          "right": 633,
+          "past": 258,
+          "width": 64,
+          "white_space": "nowrap",
+          "nowrap": true,
+          "text": "[ RECOVERY ]",
+          "ancestors": [
+            "nav.etting.-nav",
+            "main.main",
+            "div.layout"
+          ]
+        }
+      },
+      "tap": {
+        "min": 32.6,
+        "w": 260,
+        "h": 32.6,
+        "selector": "form > select"
+      },
+      "font": {
+        "min": 11,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 53,
+        "texts": 110
+      },
+      "fails": [
+        "content scrolls sideways by 259 px  main.main > nav.settings-nav  <- nav.settings-nav > a.btn.settings-nav-item (64 px wide, 258 px past the edge, white-space: nowrap)"
+      ],
+      "warns": [
+        "tap target 260x32.6 px  form > select",
+        "font 11 px  span.topbar-right > span.stamp"
+      ],
+      "png": "docs/mobile/round1/390/admin-users.png"
+    },
+    {
+      "page": "admin-assignments",
+      "url": "/admin/assignments",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/assignments",
+      "title": "CC SYNC: ASSIGNMENTS",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 259,
+        "scrollWidth": 619,
+        "clientWidth": 360,
+        "selector": "main.main > nav.settings-nav",
+        "culprit": {
+          "selector": "nav.settings-nav > a.btn.settings-nav-item",
+          "right": 633,
+          "past": 258,
+          "width": 64,
+          "white_space": "nowrap",
+          "nowrap": true,
+          "text": "[ RECOVERY ]",
+          "ancestors": [
+            "nav.etting.-nav",
+            "main.main",
+            "div.layout"
+          ]
+        }
+      },
+      "tap": {
+        "min": 20,
+        "w": 44,
+        "h": 20,
+        "selector": "td.assign-cell > input.proj-check.matrix-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 49,
+        "texts": 58
+      },
+      "fails": [
+        "content scrolls sideways by 259 px  main.main > nav.settings-nav  <- nav.settings-nav > a.btn.settings-nav-item (64 px wide, 258 px past the edge, white-space: nowrap)"
+      ],
+      "warns": [
+        "tap target 44x20 px  td.assign-cell > input.proj-check.matrix-check[type=checkbox]",
+        "font 11 px  span.topbar-right > span.stamp"
+      ],
+      "png": "docs/mobile/round1/390/admin-assignments.png"
+    },
+    {
+      "page": "admin-jobs",
+      "url": "/admin/jobs",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/jobs",
+      "title": "CC SYNC: JOBS",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 423,
+        "scrollWidth": 813,
+        "clientWidth": 390,
+        "selector": "div.layout > main.main",
+        "culprit": {
+          "selector": "tr.editor-row > td.mono-sm.muted",
+          "right": 812,
+          "past": 422,
+          "width": 798,
+          "white_space": "nowrap",
+          "nowrap": true,
+          "text": "no  jsmith/JSMITH-MBP: this machine's proxy-download breaker",
+          "ancestors": [
+            "tr.editor-row",
+            "tbody",
+            "table.editor. "
+          ]
+        }
+      },
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 19,
+        "texts": 69
+      },
+      "fails": [
+        "content scrolls sideways by 423 px  div.layout > main.main  <- tr.editor-row > td.mono-sm.muted (798 px wide, 422 px past the edge, white-space: nowrap)"
+      ],
+      "warns": [
+        "font 11 px  span.topbar-right > span.stamp"
+      ],
+      "png": "docs/mobile/round1/390/admin-jobs.png"
+    },
+    {
+      "page": "admin-packages",
+      "url": "/admin/packages",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/packages",
+      "title": "CC SYNC: PACKAGES",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 259,
+        "scrollWidth": 619,
+        "clientWidth": 360,
+        "selector": "main.main > nav.settings-nav",
+        "culprit": {
+          "selector": "nav.settings-nav > a.btn.settings-nav-item",
+          "right": 539,
+          "past": 164,
+          "width": 64,
+          "white_space": "nowrap",
+          "nowrap": true,
+          "text": "[ RECOVERY ]",
+          "ancestors": [
+            "nav.etting.-nav",
+            "main.main",
+            "div.layout"
+          ]
+        }
+      },
+      "tap": {
+        "min": 32.6,
+        "w": 302,
+        "h": 32.6,
+        "selector": "form.inline-form > select"
+      },
+      "font": {
+        "min": 11,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 28,
+        "texts": 98
+      },
+      "fails": [
+        "content scrolls sideways by 259 px  main.main > nav.settings-nav  <- nav.settings-nav > a.btn.settings-nav-item (64 px wide, 164 px past the edge, white-space: nowrap)"
+      ],
+      "warns": [
+        "tap target 302x32.6 px  form.inline-form > select",
+        "font 11 px  span.topbar-right > span.stamp"
+      ],
+      "png": "docs/mobile/round1/390/admin-packages.png"
+    },
+    {
+      "page": "admin-settings",
+      "url": "/admin/settings",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/settings",
+      "title": "CC SYNC: SETTINGS",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 259,
+        "scrollWidth": 619,
+        "clientWidth": 360,
+        "selector": "main.main > nav.settings-nav",
+        "culprit": {
+          "selector": "nav.settings-nav > a.btn.settings-nav-item",
+          "right": 633,
+          "past": 258,
+          "width": 64,
+          "white_space": "nowrap",
+          "nowrap": true,
+          "text": "[ RECOVERY ]",
+          "ancestors": [
+            "nav.etting.-nav",
+            "main.main",
+            "div.layout"
+          ]
+        }
+      },
+      "tap": {
+        "min": 16,
+        "w": 16,
+        "h": 16,
+        "selector": "label > input[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 54,
+        "texts": 101
+      },
+      "fails": [
+        "content scrolls sideways by 259 px  main.main > nav.settings-nav  <- nav.settings-nav > a.btn.settings-nav-item (64 px wide, 258 px past the edge, white-space: nowrap)"
+      ],
+      "warns": [
+        "tap target 16x16 px  label > input[type=checkbox]",
+        "font 11 px  span.topbar-right > span.stamp"
+      ],
+      "png": "docs/mobile/round1/390/admin-settings.png"
+    },
+    {
+      "page": "admin-audit",
+      "url": "/admin/audit",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/audit",
+      "title": "CC SYNC: TIMELINE",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 259,
+        "scrollWidth": 619,
+        "clientWidth": 360,
+        "selector": "main.main > nav.settings-nav",
+        "culprit": {
+          "selector": "nav.settings-nav > a.btn.settings-nav-item",
+          "right": 489,
+          "past": 114,
+          "width": 64,
+          "white_space": "nowrap",
+          "nowrap": true,
+          "text": "[ RECOVERY ]",
+          "ancestors": [
+            "nav.etting.-nav",
+            "main.main",
+            "div.layout"
+          ]
+        }
+      },
+      "tap": {
+        "min": 35.6,
+        "w": 361.2,
+        "h": 35.6,
+        "selector": "form.inline-form > input.audit-filter[type=search]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 16,
+        "texts": 22
+      },
+      "fails": [
+        "content scrolls sideways by 259 px  main.main > nav.settings-nav  <- nav.settings-nav > a.btn.settings-nav-item (64 px wide, 114 px past the edge, white-space: nowrap)"
+      ],
+      "warns": [
+        "tap target 361.2x35.6 px  form.inline-form > input.audit-filter[type=search]",
+        "font 11 px  span.topbar-right > span.stamp"
+      ],
+      "png": "docs/mobile/round1/390/admin-audit.png"
+    },
+    {
+      "page": "admin-alerts",
+      "url": "/admin/alerts",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/alerts",
+      "title": "CC SYNC: ALERTS",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 522,
+        "scrollWidth": 912,
+        "clientWidth": 390,
+        "selector": "div.layout > main.main",
+        "culprit": {
+          "selector": "td.mono-sm > div.muted.mono-sm",
+          "right": 911,
+          "past": 521,
+          "width": 897,
+          "white_space": "nowrap",
+          "nowrap": true,
+          "text": "this server has not read its sync engine's folder list yet i",
+          "ancestors": [
+            "td.mono-.m",
+            "tr.editor-row",
+            "tbody"
+          ]
+        }
+      },
+      "tap": {
+        "min": 32.6,
+        "w": 65,
+        "h": 32.6,
+        "selector": "label > select"
+      },
+      "font": {
+        "min": 11,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 30,
+        "texts": 310
+      },
+      "fails": [
+        "content scrolls sideways by 522 px  div.layout > main.main  <- td.mono-sm > div.muted.mono-sm (897 px wide, 521 px past the edge, white-space: nowrap)"
+      ],
+      "warns": [
+        "tap target 65x32.6 px  label > select",
+        "font 11 px  span.topbar-right > span.stamp"
+      ],
+      "png": "docs/mobile/round1/390/admin-alerts.png"
+    },
+    {
+      "page": "admin-invariants",
+      "url": "/admin/invariants",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/invariants",
+      "title": "CC SYNC: INVARIANTS",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 964,
+        "scrollWidth": 1354,
+        "clientWidth": 390,
+        "selector": "div.layout > main.main",
+        "culprit": {
+          "selector": "tr.editor-row > td.muted.mono-sm",
+          "right": 1339,
+          "past": 949,
+          "width": 59,
+          "white_space": "nowrap",
+          "nowrap": true,
+          "text": "58s ago",
+          "ancestors": [
+            "tr.editor-row",
+            "tbody",
+            "table#invariant-table"
+          ]
+        }
+      },
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 14,
+        "texts": 59
+      },
+      "fails": [
+        "content scrolls sideways by 964 px  div.layout > main.main  <- tr.editor-row > td.muted.mono-sm (59 px wide, 949 px past the edge, white-space: nowrap)"
+      ],
+      "warns": [
+        "font 11 px  span.topbar-right > span.stamp"
+      ],
+      "png": "docs/mobile/round1/390/admin-invariants.png"
+    },
+    {
+      "page": "admin-protection",
+      "url": "/admin/protection",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/protection",
+      "title": "CC SYNC: PROTECTION",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 1293,
+        "scrollWidth": 1683,
+        "clientWidth": 390,
+        "selector": "div.layout > main.main",
+        "culprit": {
+          "selector": "tr.editor-row > td",
+          "right": 1683,
+          "past": 1293,
+          "width": 1530,
+          "white_space": "normal",
+          "nowrap": false,
+          "text": "the project tree is on a snapshot schedule\n          \n      ",
+          "ancestors": [
+            "tr.editor-row",
+            "tbody",
+            "table#protection-table"
+          ]
+        }
+      },
+      "tap": {
+        "min": 33.1,
+        "w": 139,
+        "h": 33.1,
+        "selector": "label > input[type=date]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 18,
+        "texts": 69
+      },
+      "fails": [
+        "content scrolls sideways by 1293 px  div.layout > main.main  <- tr.editor-row > td (1530 px wide, 1293 px past the edge)"
+      ],
+      "warns": [
+        "tap target 139x33.1 px  label > input[type=date]",
+        "font 11 px  span.topbar-right > span.stamp"
+      ],
+      "png": "docs/mobile/round1/390/admin-protection.png"
+    },
+    {
+      "page": "admin-recovery",
+      "url": "/admin/recovery",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/recovery",
+      "title": "CC SYNC: GET SOMETHING BACK",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 396,
+        "scrollWidth": 786,
+        "clientWidth": 390,
+        "selector": "div.layout > main.main",
+        "culprit": {
+          "selector": "tr.editor-row > td",
+          "right": 786,
+          "past": 396,
+          "width": 633,
+          "white_space": "normal",
+          "nowrap": false,
+          "text": "which kind of NAS this is\n          \n            no NAS cred",
+          "ancestors": [
+            "tr.editor-row",
+            "tbody",
+            "table.editor. recovery-line"
+          ]
+        }
+      },
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 20,
+        "texts": 88
+      },
+      "fails": [
+        "content scrolls sideways by 396 px  div.layout > main.main  <- tr.editor-row > td (633 px wide, 396 px past the edge)"
+      ],
+      "warns": [
+        "font 11 px  span.topbar-right > span.stamp"
+      ],
+      "png": "docs/mobile/round1/390/admin-recovery.png"
+    },
+    {
+      "page": "login",
+      "url": "/login",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/login",
+      "title": "CC SYNC: LOGIN",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 35.8,
+        "w": 320.4,
+        "h": 35.8,
+        "selector": "label > input[type=password]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "form > label",
+        "sample": "USERNAME"
+      },
+      "counted": {
+        "taps": 5,
+        "texts": 8
+      },
+      "fails": [],
+      "warns": [
+        "tap target 320.4x35.8 px  label > input[type=password]",
+        "font 11 px  form > label"
+      ],
+      "png": "docs/mobile/round1/768/login.png"
+    },
+    {
+      "page": "home",
+      "url": "/",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/",
+      "title": "CC SYNC: FLEET",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 781,
+        "scrollWidth": 1549,
+        "clientWidth": 768,
+        "selector": "div.layout > main.main",
+        "culprit": {
+          "selector": "div.banner > div.mono-sm",
+          "right": 1549,
+          "past": 781,
+          "width": 1517,
+          "white_space": "nowrap",
+          "nowrap": true,
+          "text": "WHAT TO DO: On the NAS: make the folder holding the CC Sync ",
+          "ancestors": [
+            "div.banner",
+            "section#server-notices",
+            "div"
+          ]
+        }
+      },
+      "tap": {
+        "min": 22.8,
+        "w": 150.6,
+        "h": 22.8,
+        "selector": "form.inline-form > select.root-select"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 34,
+        "texts": 564
+      },
+      "fails": [
+        "content scrolls sideways by 781 px  div.layout > main.main  <- div.banner > div.mono-sm (1517 px wide, 781 px past the edge, white-space: nowrap)"
+      ],
+      "warns": [
+        "tap target 150.6x22.8 px  form.inline-form > select.root-select",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/round1/768/home.png"
+    },
+    {
+      "page": "transfers",
+      "url": "/transfers",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/transfers",
+      "title": "CC SYNC: TRANSFERS",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 164,
+        "scrollWidth": 932,
+        "clientWidth": 768,
+        "selector": "div.layout > main.main",
+        "culprit": {
+          "selector": "tr > th",
+          "right": 933,
+          "past": 165,
+          "width": 36,
+          "white_space": "normal",
+          "nowrap": false,
+          "text": "ETA",
+          "ancestors": [
+            "tr",
+            "thead",
+            "table.editor. "
+          ]
+        }
+      },
+      "tap": {
+        "min": 27,
+        "w": 748.8,
+        "h": 27,
+        "selector": "form > select"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 19,
+        "texts": 302
+      },
+      "fails": [
+        "content scrolls sideways by 164 px  div.layout > main.main  <- tr > th (36 px wide, 165 px past the edge)"
+      ],
+      "warns": [
+        "tap target 748.8x27 px  form > select",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/round1/768/transfers.png"
+    },
+    {
+      "page": "project",
+      "url": "/project/{project}",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/project/2026-ff5-animals",
+      "title": "CC SYNC: 2026/FF5/Animals",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 341,
+        "scrollWidth": 1109,
+        "clientWidth": 768,
+        "selector": "div.layout > main.main",
+        "culprit": {
+          "selector": "form.move-form > button.btn.tap",
+          "right": 1109,
+          "past": 341,
+          "width": 319,
+          "white_space": "nowrap",
+          "nowrap": true,
+          "text": "[ MOVE ON THE SERVER AND ON EVERY MACHINE ]",
+          "ancestors": [
+            "form.move-form",
+            "div.mono-.m",
+            "div#project-detail"
+          ]
+        }
+      },
+      "tap": {
+        "min": 27,
+        "w": 748.8,
+        "h": 27,
+        "selector": "form > select"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 16,
+        "texts": 176
+      },
+      "fails": [
+        "content scrolls sideways by 341 px  div.layout > main.main  <- form.move-form > button.btn.tap (319 px wide, 341 px past the edge, white-space: nowrap)"
+      ],
+      "warns": [
+        "tap target 748.8x27 px  form > select",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/round1/768/project.png"
+    },
+    {
+      "page": "project-setup",
+      "url": "/project-setup?resolve_project={resolve}",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/project-setup?resolve_project=FF5%20Elections%20E2",
+      "title": "CC SYNC: PROJECT SETUP",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 27,
+        "w": 748.8,
+        "h": 27,
+        "selector": "form > select"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 7,
+        "texts": 25
+      },
+      "fails": [],
+      "warns": [
+        "tap target 748.8x27 px  form > select",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/round1/768/project-setup.png"
+    },
+    {
+      "page": "installer",
+      "url": "/installer",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/installer",
+      "title": "CC SYNC: INSTALLER",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 27,
+        "w": 748.8,
+        "h": 27,
+        "selector": "form > select"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 7,
+        "texts": 27
+      },
+      "fails": [],
+      "warns": [
+        "tap target 748.8x27 px  form > select",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/round1/768/installer.png"
+    },
+    {
+      "page": "admin-users",
+      "url": "/admin/users",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/users",
+      "title": "CC SYNC: USERS",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 62,
+        "scrollWidth": 830,
+        "clientWidth": 768,
+        "selector": "div.layout > main.main",
+        "culprit": {
+          "selector": "tr > th",
+          "right": 830,
+          "past": 62,
+          "width": 77,
+          "white_space": "normal",
+          "nowrap": false,
+          "text": "",
+          "ancestors": [
+            "tr",
+            "thead",
+            "table.editor. "
+          ]
+        }
+      },
+      "tap": {
+        "min": 27,
+        "w": 748.8,
+        "h": 27,
+        "selector": "form > select"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 58,
+        "texts": 146
+      },
+      "fails": [
+        "content scrolls sideways by 62 px  div.layout > main.main  <- tr > th (77 px wide, 62 px past the edge)"
+      ],
+      "warns": [
+        "tap target 748.8x27 px  form > select",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/round1/768/admin-users.png"
+    },
+    {
+      "page": "admin-assignments",
+      "url": "/admin/assignments",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/assignments",
+      "title": "CC SYNC: ASSIGNMENTS",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 20,
+        "w": 44,
+        "h": 20,
+        "selector": "td.assign-cell > input.proj-check.matrix-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 54,
+        "texts": 74
+      },
+      "fails": [],
+      "warns": [
+        "tap target 44x20 px  td.assign-cell > input.proj-check.matrix-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/round1/768/admin-assignments.png"
+    },
+    {
+      "page": "admin-jobs",
+      "url": "/admin/jobs",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/jobs",
+      "title": "CC SYNC: JOBS",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 294,
+        "scrollWidth": 1062,
+        "clientWidth": 768,
+        "selector": "div.layout > main.main",
+        "culprit": {
+          "selector": "tr > th",
+          "right": 1062,
+          "past": 294,
+          "width": 70,
+          "white_space": "normal",
+          "nowrap": false,
+          "text": "",
+          "ancestors": [
+            "tr",
+            "thead",
+            "table.editor. "
+          ]
+        }
+      },
+      "tap": {
+        "min": 27,
+        "w": 748.8,
+        "h": 27,
+        "selector": "form > select"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 24,
+        "texts": 92
+      },
+      "fails": [
+        "content scrolls sideways by 294 px  div.layout > main.main  <- tr > th (70 px wide, 294 px past the edge)"
+      ],
+      "warns": [
+        "tap target 748.8x27 px  form > select",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/round1/768/admin-jobs.png"
+    },
+    {
+      "page": "admin-packages",
+      "url": "/admin/packages",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/packages",
+      "title": "CC SYNC: PACKAGES",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 596,
+        "scrollWidth": 1364,
+        "clientWidth": 768,
+        "selector": "div.layout > main.main",
+        "culprit": {
+          "selector": "tr > th",
+          "right": 1365,
+          "past": 597,
+          "width": 70,
+          "white_space": "normal",
+          "nowrap": false,
+          "text": "",
+          "ancestors": [
+            "tr",
+            "thead",
+            "table.editor. "
+          ]
+        }
+      },
+      "tap": {
+        "min": 27,
+        "w": 748.8,
+        "h": 27,
+        "selector": "form > select"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 33,
+        "texts": 125
+      },
+      "fails": [
+        "content scrolls sideways by 596 px  div.layout > main.main  <- tr > th (70 px wide, 597 px past the edge)"
+      ],
+      "warns": [
+        "tap target 748.8x27 px  form > select",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/round1/768/admin-packages.png"
+    },
+    {
+      "page": "admin-settings",
+      "url": "/admin/settings",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/settings",
+      "title": "CC SYNC: SETTINGS",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "label > input[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 59,
+        "texts": 117
+      },
+      "fails": [],
+      "warns": [
+        "tap target 13.3x13.3 px  label > input[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/round1/768/admin-settings.png"
+    },
+    {
+      "page": "admin-audit",
+      "url": "/admin/audit",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/audit",
+      "title": "CC SYNC: TIMELINE",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 27,
+        "w": 748.8,
+        "h": 27,
+        "selector": "form > select"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 21,
+        "texts": 38
+      },
+      "fails": [],
+      "warns": [
+        "tap target 748.8x27 px  form > select",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/round1/768/admin-audit.png"
+    },
+    {
+      "page": "admin-alerts",
+      "url": "/admin/alerts",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/alerts",
+      "title": "CC SYNC: ALERTS",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 609,
+        "scrollWidth": 1377,
+        "clientWidth": 768,
+        "selector": "div.layout > main.main",
+        "culprit": {
+          "selector": "tr > th",
+          "right": 1377,
+          "past": 609,
+          "width": 236,
+          "white_space": "normal",
+          "nowrap": false,
+          "text": "WHAT TO DO",
+          "ancestors": [
+            "tr",
+            "thead",
+            "table.editor. "
+          ]
+        }
+      },
+      "tap": {
+        "min": 27,
+        "w": 748.8,
+        "h": 27,
+        "selector": "form > select"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 35,
+        "texts": 335
+      },
+      "fails": [
+        "content scrolls sideways by 609 px  div.layout > main.main  <- tr > th (236 px wide, 609 px past the edge)"
+      ],
+      "warns": [
+        "tap target 748.8x27 px  form > select",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/round1/768/admin-alerts.png"
+    },
+    {
+      "page": "admin-invariants",
+      "url": "/admin/invariants",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/invariants",
+      "title": "CC SYNC: INVARIANTS",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 587,
+        "scrollWidth": 1355,
+        "clientWidth": 768,
+        "selector": "div.layout > main.main",
+        "culprit": {
+          "selector": "tr.editor-row > td.muted.mono-sm",
+          "right": 1332,
+          "past": 564,
+          "width": 52,
+          "white_space": "nowrap",
+          "nowrap": true,
+          "text": "1m ago",
+          "ancestors": [
+            "tr.editor-row",
+            "tbody",
+            "table#invariant-table"
+          ]
+        }
+      },
+      "tap": {
+        "min": 27,
+        "w": 748.8,
+        "h": 27,
+        "selector": "form > select"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 19,
+        "texts": 75
+      },
+      "fails": [
+        "content scrolls sideways by 587 px  div.layout > main.main  <- tr.editor-row > td.muted.mono-sm (52 px wide, 564 px past the edge, white-space: nowrap)"
+      ],
+      "warns": [
+        "tap target 748.8x27 px  form > select",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/round1/768/admin-invariants.png"
+    },
+    {
+      "page": "admin-protection",
+      "url": "/admin/protection",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/protection",
+      "title": "CC SYNC: PROTECTION",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 913,
+        "scrollWidth": 1681,
+        "clientWidth": 768,
+        "selector": "div.layout > main.main",
+        "culprit": {
+          "selector": "tr.editor-row > td",
+          "right": 1681,
+          "past": 913,
+          "width": 1530,
+          "white_space": "normal",
+          "nowrap": false,
+          "text": "the project tree is on a snapshot schedule\n          \n      ",
+          "ancestors": [
+            "tr.editor-row",
+            "tbody",
+            "table#protection-table"
+          ]
+        }
+      },
+      "tap": {
+        "min": 27,
+        "w": 748.8,
+        "h": 27,
+        "selector": "form > select"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 23,
+        "texts": 85
+      },
+      "fails": [
+        "content scrolls sideways by 913 px  div.layout > main.main  <- tr.editor-row > td (1530 px wide, 913 px past the edge)"
+      ],
+      "warns": [
+        "tap target 748.8x27 px  form > select",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/round1/768/admin-protection.png"
+    },
+    {
+      "page": "admin-recovery",
+      "url": "/admin/recovery",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/recovery",
+      "title": "CC SYNC: GET SOMETHING BACK",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 16,
+        "scrollWidth": 784,
+        "clientWidth": 768,
+        "selector": "div.layout > main.main",
+        "culprit": {
+          "selector": "tr.editor-row > td",
+          "right": 784,
+          "past": 16,
+          "width": 633,
+          "white_space": "normal",
+          "nowrap": false,
+          "text": "which kind of NAS this is\n          \n            no NAS cred",
+          "ancestors": [
+            "tr.editor-row",
+            "tbody",
+            "table.editor. recovery-line"
+          ]
+        }
+      },
+      "tap": {
+        "min": 27,
+        "w": 748.8,
+        "h": 27,
+        "selector": "form > select"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 25,
+        "texts": 104
+      },
+      "fails": [
+        "content scrolls sideways by 16 px  div.layout > main.main  <- tr.editor-row > td (633 px wide, 16 px past the edge)"
+      ],
+      "warns": [
+        "tap target 748.8x27 px  form > select",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/round1/768/admin-recovery.png"
+    }
+  ]
+}

@@ -72,7 +72,11 @@ _OPEN_EXACT = {
     # here only ever matters for the single-admin bootstrap window; every
     # later call is a 409. See setup_api.py.
     "/api/v1/setup/status", "/api/v1/setup/admin",
-    # Android asset links (MOBILE_PLAN.md §4 M5, 2026-08-30): Chrome fetches it with no cookie jar before it decides whether the installed TWA gets a URL bar. Carries no secret -- see android.py.
+    # Android asset links (MOBILE_PLAN.md §4 M5, 2026-08-30). Chrome fetches
+    # it with no cookie jar, from a phone that has never signed in, before it
+    # decides whether the installed TWA gets a URL bar. Carries no secret: a
+    # package name and a certificate digest are public by construction, and
+    # publishing them IS the mechanism. See android.py.
     "/.well-known/assetlinks.json",
     # The wizard page (ZERO_TOUCH_PLAN.md WP D, 2026-08-17). Open at the
     # MIDDLEWARE level only -- ui.page_setup does its own admin-or-first-run

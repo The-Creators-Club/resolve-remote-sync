@@ -50,7 +50,7 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 80
     # JOB-level, not step-level (installer-onboard-tools-2, 2026-08-21). A
     # step's own `env:` block is applied AFTER its `if:` is evaluated, so the
     # materialise step below guarded itself on a value that was always empty

@@ -1,0 +1,22 @@
+/* mobile.css -- the phone layer for the PAGES (MOBILE_PLAN.md, 2026-08-30).
+   style.css owns the tokens, the vocabulary (.stack, .scroll-x, .tap, .sheet,
+   .rule, .phone-hide, .phone-only) and the chrome; this file carries the
+   per-page rules, in two sections owned by two packages. Add rules INSIDE
+   your own section only. No em dashes anywhere in this repo. */
+
+
+/* ================================ == fleet == ============================ */
+/* M2: the fleet grid, project, transfers, installer (MOBILE_PLAN.md M2). */
+
+
+
+
+
+/* ================================ == admin == ============================ */
+/* M3: every /admin page and its partials (MOBILE_PLAN.md M3). */
+
+
+
+
+
+/* ============================== == end == ================================= */

@@ -92,6 +92,10 @@ if [ ! -f "$BW_CONFIG" ]; then
     exit 2
   fi
   mkdir -p "$(dirname "$BW_CONFIG")"
+  # Forward slashes: a Windows JAVA_HOME (E:\Projects\_tools\jdk17) written
+  # verbatim is invalid JSON ("Bad escaped character in JSON at position 15"),
+  # and Java accepts either separator (seen on the base rig, 2026-08-30).
+  JDK="${JDK//\\//}"; SDK="${SDK//\\//}"
   printf '{"jdkPath":"%s","androidSdkPath":"%s"}\n' "$JDK" "$SDK" > "$BW_CONFIG"
   echo "wrote $BW_CONFIG (jdk=$JDK sdk=$SDK)"
 fi
@@ -102,7 +106,10 @@ fi
 # dies with "The provided androidSdk isn't correct" and no hint at all
 # (measured on ubuntu-latest, 2026-08-30). One stub file satisfies the check;
 # every real tool it then invokes lives in build-tools/ and platform-tools/.
-SDK_PATH="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["androidSdkPath"])' "$BW_CONFIG" 2>/dev/null || true)"
+# $PYTHON, not a bare python3: Git Bash on Windows has no python3 on PATH, and
+# a silent empty SDK_PATH here is exactly the unhinted failure the stub exists
+# to prevent (the base rig, 2026-08-30).
+SDK_PATH="$("$PYTHON" -c 'import json,sys;print(json.load(open(sys.argv[1]))["androidSdkPath"])' "$BW_CONFIG" 2>/dev/null || true)"
 if [ -n "$SDK_PATH" ] && [ ! -f "$SDK_PATH/tools/source.properties" ]; then
   if mkdir -p "$SDK_PATH/tools" 2>/dev/null; then
     printf 'Pkg.Revision=26.1.1\n' > "$SDK_PATH/tools/source.properties"

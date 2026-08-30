@@ -103,6 +103,36 @@ It needs a JDK and the Android SDK. Either export `JAVA_HOME` and
 `npx @bubblewrap/cli doctor` once interactively and let Bubblewrap install
 its own.
 
+## 2a. Building on the Windows base rig (what it took, 2026-08-30)
+
+The first real APK (`ccsync-0.7.24.apk`, origin
+`https://truenas.tail26290e.ts.net:9443`) was built on creator-1 with a
+portable toolchain, no admin rights and no PATH changes:
+
+* `E:\Projects\_tools\jdk17` (Temurin 17 zip) and
+  `E:\Projects\_toolsndroid-sdk` (command-line tools + `platforms;android-34`
+  + `build-tools;34.0.0`); `JAVA_HOME` and `ANDROID_HOME` point at them for
+  the build's process only.
+* Bubblewrap pins `build-tools;29.0.2` and installs it ITSELF through
+  `<sdk>in\sdkmanager.bat` -- the layout its own installer makes, not the
+  command-line tools' `cmdline-tools\latestin`. Copy `bin` and `lib` from
+  `cmdline-tools\latest` to the SDK root once, or install 29.0.2 yourself.
+* `build_apk.sh` writes `~/.bubblewrap/config.json` with forward slashes
+  (a backslashed Windows path is invalid JSON there) and uses `$PYTHON`, not
+  a bare `python3`, for the SDK-check stub. Both were bugs found here.
+* `bubblewrap build` runs `gradlew.bat` from the project directory through
+  cmd.exe. A rig with `NoDefaultCurrentDirectoryInExePath=1` (this one)
+  gets "'gradlew.bat' is not recognized"; clear that variable for the build
+  PROCESS only (`[Environment]::SetEnvironmentVariable('NoDefaultCurrentDirectoryInExePath', $null, 'Process')`)
+  and run the build step from PowerShell rather than Git Bash.
+* The release keystore is `~\.ccsync-releasendroid.keystore` (alias
+  `ccsync`); its password is DPAPI-protected beside it in
+  `android.keystore.pw.dpapi` and is read into the four `CCSYNC_ANDROID_*`
+  variables by the operator's PowerShell session, never written anywhere
+  else. Losing that file means a new key, a new fingerprint, and every phone
+  re-installing -- back it up the way `release.key` is.
+* Signer SHA-256 of that keystore: `9A:F8:25:CD:1C:33:CD:E7:2A:DA:12:25:24:1B:CA:60:77:CD:51:AC:AA:F3:3D:90:D9:B5:12:55:C9:50:5E:A8`.
+
 ## 3. Paste the fingerprint
 
 Dashboard -> Settings -> ANDROID:

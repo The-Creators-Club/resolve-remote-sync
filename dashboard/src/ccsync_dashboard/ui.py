@@ -3,6 +3,7 @@ so the JSON API and the pages can never disagree."""
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 import secrets
 import sqlite3
@@ -12,11 +13,12 @@ from urllib.parse import parse_qs, quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import (FileResponse, HTMLResponse, PlainTextResponse,
+                               RedirectResponse, Response)
 from fastapi.templating import Jinja2Templates
 
-from . import (auth, dashboard_update, db, local_users, oidc, package_store, provision,
-               release_feed, site_store)
+from . import (VERSION, auth, dashboard_update, db, local_users, oidc, package_store,
+               provision, release_feed, site_store)
 from .api import (
     approve_username_error, build_admin_users_view, build_editors_view,
     build_packages_view, build_presence_view, build_project_view, build_projects_view,
@@ -41,6 +43,9 @@ from .nas import factory as nas_factory
 from .syncthing_client import SyncthingClient, SyncthingError
 
 TEMPLATES_DIR = Path(__file__).resolve().parents[2] / "templates"
+# The PWA's three routes read their own bodies out of static/ (see the
+# "installable app" block at the end of this file).
+STATIC_DIR = Path(__file__).resolve().parents[2] / "static"
 
 router = APIRouter(default_response_class=HTMLResponse)
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -3054,3 +3059,70 @@ async def partial_admin_feed_policy(
         error = str(exc)
 
     return _render(request, "partials/admin_packages.html", _packages_and_feed(conn, request, error))
+
+
+# -- the installable app: manifest, service worker, offline page ------------
+# MOBILE_PLAN.md 4 M4, 2026-08-30. All three are in app._OPEN_EXACT, and they
+# have to be: a browser fetches the manifest and registers the worker on the
+# LOGIN page, before anyone has a session, and the offline page is precached
+# by that worker at install time. Which is also the rule for what may live in
+# them -- a product name, a colour and five icons. Never a count, never a name
+# from this fleet, never anything a second tenant should not read.
+
+
+@router.get("/manifest.webmanifest", include_in_schema=False)
+def web_manifest(request: Request) -> Response:
+    """The web app manifest, with this site's product name in it.
+
+    static/manifest.webmanifest is the source AND the fallback, which is why
+    the brand is substituted here rather than the file being a Jinja template:
+    a `{{ }}` in it would stop it being valid JSON, and then a site whose
+    manifest could not be read would hand the phone a broken install instead
+    of the vendor's default one.
+    """
+    path = STATIC_DIR / "manifest.webmanifest"
+    settings = request.app.state.settings
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        # The same value _render puts in the topbar (brand_product), from the
+        # RESOLVED site manifest -- so an install's icon label matches the
+        # header the editor signed in under.
+        site = site_store.manifest_for_app(request.app, settings)
+        brand = (site.get("product_name") or settings.site_product_name or "").strip()
+        if brand:
+            data["name"] = brand
+            data["short_name"] = brand
+        body = json.dumps(data, indent=2)
+    except Exception:  # noqa: BLE001
+        log.exception("could not render the web app manifest; serving the file")
+        if not path.is_file():
+            return PlainTextResponse("no manifest on this server", status_code=404)
+        return FileResponse(str(path), media_type="application/manifest+json")
+    return Response(content=body, media_type="application/manifest+json")
+
+
+@router.get("/sw.js", include_in_schema=False)
+def service_worker() -> Response:
+    """The service worker, at the ROOT so it may claim scope "/".
+
+    A worker's scope can never be above its own path, so /static/sw.js could
+    only ever control /static/ -- hence this route plus Service-Worker-Allowed.
+    Cache-Control: no-cache so the browser revalidates the worker itself on
+    every update check; the VERSION substitution is what makes an update
+    visible (a byte-identical worker is never installed).
+    """
+    path = STATIC_DIR / "sw.js"
+    if not path.is_file():
+        return PlainTextResponse("no service worker on this server", status_code=404)
+    body = path.read_text(encoding="utf-8").replace("__VERSION__", VERSION)
+    return Response(
+        content=body,
+        media_type="application/javascript",
+        headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-cache"},
+    )
+
+
+@router.get("/offline")
+def page_offline(request: Request):
+    """What the worker paints when a navigation cannot reach the server."""
+    return _render(request, "offline.html", {})

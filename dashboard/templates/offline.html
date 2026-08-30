@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}CC SYNC: OFFLINE{% endblock %}
+{# The page the service worker paints when a navigation cannot reach the
+   server (MOBILE_PLAN.md 4 M4, 2026-08-30). It is PRECACHED, so it must say
+   nothing that could be stale: no counts, no fleet state, no name. The retry
+   is a plain link rather than a script so it works from the cache with
+   nothing else loaded. #}
+{% block layout %}
+  <main class="main login-main">
+    <div class="login-box">
+      <div class="side-head">[ OFFLINE ]</div>
+      <div class="muted">This phone cannot reach the dashboard right now. Nothing
+        here is live: check the network, then try again.</div>
+      <a class="btn login-btn tap" href="/">[ RETRY ]</a>
+    </div>
+  </main>
+{% endblock %}

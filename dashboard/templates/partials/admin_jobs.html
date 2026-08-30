@@ -35,7 +35,10 @@
   {% if not jobs %}
     <p class="muted" style="margin-top:0.8rem">Nothing is queued or running.</p>
   {% else %}
-  <table class="editors" style="margin-top:0.8rem">
+  {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): a row here is one job, so on a
+     phone each becomes a block of labelled lines rather than eight columns
+     of two characters each. #}
+  <table class="editors stack" style="margin-top:0.8rem">
     <thead><tr>
       <th>JOB</th><th>KIND</th><th>STATE</th><th>WHERE</th>
       <th>PROGRESS</th><th>AGE</th><th>WHY</th><th></th>
@@ -43,21 +46,26 @@
     <tbody>
     {% for job in jobs %}
       <tr class="editor-row">
-        <td class="mono-sm">#{{ job.id }}</td>
-        <td class="mono-sm">{{ job.label }}</td>
-        <td class="mono-sm">{{ job.state | upper }}{% if job.cancel_requested_at %} <span class="muted">(cancelling)</span>{% endif %}</td>
-        <td class="who">{% if job.claimed_machine %}{{ job.claimed_by }}/{{ job.claimed_machine }}{% else %}<span class="muted">nobody</span>{% endif %}</td>
+        <td class="mono-sm" data-label="JOB">#{{ job.id }}</td>
+        <td class="mono-sm" data-label="KIND">{{ job.label }}</td>
+        <td class="mono-sm" data-label="STATE">{{ job.state | upper }}{% if job.cancel_requested_at %} <span class="muted">(cancelling)</span>{% endif %}</td>
+        <td class="who" data-label="WHERE">{% if job.claimed_machine %}{{ job.claimed_by }}/{{ job.claimed_machine }}{% else %}<span class="muted">nobody</span>{% endif %}</td>
         {# A percentage where the runner measured one, the job id where it
            could not: null is not zero, and a peaks pass that reads its input
            in one gulp must not look wedged at 0%. #}
-        <td class="mono-sm">{% if job.percent is not none %}{{ job.percent }}%{% else %}<span class="muted">-</span>{% endif %}</td>
-        <td class="muted mono-sm">{{ job.created_at | ago }}</td>
-        <td class="mono-sm">{{ job.why }}{% if job.attempts %} <span class="muted">({{ job.attempts }} attempt{{ "s" if job.attempts != 1 }}{% if job.last_error %}: {{ job.last_error[:120] }}{% endif %})</span>{% endif %}</td>
+        <td class="mono-sm" data-label="PROGRESS">{% if job.percent is not none %}{{ job.percent }}%{% else %}<span class="muted">-</span>{% endif %}</td>
+        <td class="muted mono-sm" data-label="AGE">{{ job.created_at | ago }}</td>
+        <td class="mono-sm" data-label="WHY">{{ job.why }}{% if job.attempts %} <span class="muted">({{ job.attempts }} attempt{{ "s" if job.attempts != 1 }}{% if job.last_error %}: {{ job.last_error[:120] }}{% endif %})</span>{% endif %}</td>
         <td>
           <form class="inline-form" hx-post="/partials/admin/jobs/{{ job.id }}/cancel"
                 hx-target="#admin-jobs" hx-swap="outerHTML"
-                hx-confirm="Stop job #{{ job.id }}? A job a machine is running is killed there and not retried anywhere.">
-            <button class="btn" type="submit">[ CANCEL ]</button>
+                hx-confirm="Stop job #{{ job.id }}? It is killed where it runs and not retried.">
+            {# .tap and a short confirm (MOBILE_PLAN.md §4 M3, 2026-08-30):
+               this is the control an admin most wants on a phone, and a
+               confirm longer than the dialog is a confirm nobody reads.
+               The full sentence stays on the button as its title. #}
+            <button class="btn tap" type="submit"
+                    title="a job a machine is running is killed there and not retried anywhere">[ CANCEL ]</button>
           </form>
         </td>
       </tr>

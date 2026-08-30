@@ -41,17 +41,18 @@
     </div>
 
     {% if dash_update.code_updates %}
-      <table class="editors" style="margin-top:0.6rem">
+      {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): a row is one bundle. #}
+      <table class="editors stack" style="margin-top:0.6rem">
         <thead><tr><th>VERSION</th><th>SIZE</th><th>PUBLISHED</th><th>NOTES</th><th></th></tr></thead>
         <tbody>
         {% for u in dash_update.code_updates %}
           <tr class="editor-row">
-            <td class="mono-sm">{{ u.version }}</td>
-            <td class="mono-sm">{{ u.size_bytes | human_bytes }}</td>
-            <td class="muted">{{ u.published_at | ago if u.published_at else "" }}</td>
-            <td class="muted">{{ u.notes }}</td>
-            <td>
-              <button class="btn" type="button" data-dashupd-apply="{{ u.version }}">[ UPDATE NOW ]</button>
+            <td class="mono-sm" data-label="VERSION">{{ u.version }}</td>
+            <td class="mono-sm" data-label="SIZE">{{ u.size_bytes | human_bytes }}</td>
+            <td class="muted" data-label="PUBLISHED">{{ u.published_at | ago if u.published_at else "" }}</td>
+            <td class="muted" data-label="NOTES">{{ u.notes }}</td>
+            <td data-label="ACTIONS">
+              <button class="btn tap" type="button" data-dashupd-apply="{{ u.version }}">[ UPDATE NOW ]</button>
             </td>
           </tr>
         {% endfor %}
@@ -65,7 +66,7 @@
       <div class="muted" style="margin-top:0.6rem">
         older bundles on the feed (a rollback, not an update):
         {% for u in dash_update.rollback_candidates %}
-          <button class="btn" type="button" data-dashupd-apply="{{ u.version }}"
+          <button class="btn tap" type="button" data-dashupd-apply="{{ u.version }}"
                   title="go back to {{ u.version }}">[ ROLL BACK TO {{ u.version }} ]</button>
         {% endfor %}
       </div>
@@ -88,7 +89,7 @@
       <div class="muted" style="margin-top:0.8rem">
         installed tree <span class="mono-sm">{{ dash_update.current.version }}</span>
         {% if dash_update.current.applied_at %}applied {{ dash_update.current.applied_at | ago }}{% endif %}
-        <button class="btn" type="button"
+        <button class="btn tap" type="button"
                 data-dashupd-rollback="{{ dash_update.current.previous }}">[ ROLLBACK
           {% if dash_update.current.previous %}TO {{ dash_update.current.previous }}{% else %}TO THE IMAGE{% endif %} ]</button>
       </div>
@@ -123,16 +124,17 @@
     {% if dash_update.backups %}
       <div class="side-head" style="margin-top:1.2rem">[ DATABASE BACKUPS ]
         <span class="muted">taken before each update, under /data/backups</span></div>
-      <table class="editors">
+      {# .stack: a row is one backup (MOBILE_PLAN.md §3.2, 2026-08-30). #}
+      <table class="editors stack">
         <thead><tr><th>WHEN</th><th>NAME</th><th>FROM</th><th>DATABASES</th><th>SIZE</th></tr></thead>
         <tbody>
         {% for b in dash_update.backups[:10] %}
           <tr class="editor-row">
-            <td class="muted">{{ b.created_at | ago if b.created_at else "" }}</td>
-            <td class="mono-sm">{{ b.name }}</td>
-            <td class="mono-sm muted">{{ b.from_version }}</td>
-            <td class="muted">{{ b.databases | join(", ") }}</td>
-            <td class="mono-sm">{{ b.size_bytes | human_bytes }}</td>
+            <td class="muted" data-label="WHEN">{{ b.created_at | ago if b.created_at else "" }}</td>
+            <td class="mono-sm" data-label="NAME">{{ b.name }}</td>
+            <td class="mono-sm muted" data-label="FROM">{{ b.from_version }}</td>
+            <td class="muted" data-label="DATABASES">{{ b.databases | join(", ") }}</td>
+            <td class="mono-sm" data-label="SIZE">{{ b.size_bytes | human_bytes }}</td>
           </tr>
         {% endfor %}
         </tbody>

@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}CC SYNC: ASSIGNMENTS{% endblock %}
 {% block layout %}
-  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s" hx-swap="innerHTML">
+  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
   </aside>
   <main class="main">
@@ -31,7 +31,12 @@
     {% elif not assignments.projects %}
       <div class="muted">no active projects yet.</div>
     {% else %}
-    <div class="assign-scroll">
+    {# .scroll-x (MOBILE_PLAN.md §3.2, 2026-08-30) on the wrapper that already
+       scrolls: one column per computer is the whole point of this grid, so it
+       is the one admin surface that scrolls sideways instead of stacking. The
+       project name is sticky-left already (style.css); mobile.css's admin
+       section is where its phone width and the 44 px column tools live. #}
+    <div class="assign-scroll scroll-x">
       <table class="assign-grid" id="assign-grid">
         <thead>
           <tr>

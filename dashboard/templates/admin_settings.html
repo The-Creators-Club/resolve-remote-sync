@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}CC SYNC: SETTINGS{% endblock %}
 {% block layout %}
-  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s" hx-swap="innerHTML">
+  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
   </aside>
   <main class="main">
@@ -21,7 +21,10 @@
       "brand_logo": "Your studio's mark in every editor's tray and window title. Blank wears the product's own. A bare name (cc_mark_white.png) selects a mark the companion build already ships; anything with a slash is a path on the EDITOR's machine. It must be WHITE on transparent -- the tray tints it to carry sync status, so a pre-coloured logo comes out a solid blob.",
     } %}
 
-    <form id="settings-form" style="margin-top:0.8rem">
+    {# One column with 16 px inputs below --bp-phone (MOBILE_PLAN.md §4 M3,
+       2026-08-30): the class is what mobile.css's admin section addresses, so
+       the desktop form keeps the widths it has always had. #}
+    <form id="settings-form" class="admin-form" style="margin-top:0.8rem">
       {% for key, label in [
         ("org_name", "ORG NAME"),
         ("org_short", "SHORT NAME"),
@@ -106,7 +109,7 @@
         </label>
       </fieldset>
 
-      <div style="margin-top:0.6rem"><button class="btn" type="submit">[ SAVE ]</button></div>
+      <div style="margin-top:0.6rem"><button class="btn tap" type="submit">[ SAVE ]</button></div>
     </form>
 
     {# AI providers (2026-08-18). Rendered by static/site_settings.js from
@@ -156,11 +159,11 @@
     <div class="side-head" style="margin-top:1.4rem">[ EXPORT / IMPORT ]
       <span class="muted">site.toml-shaped text -- for a NAS migration or a backup.</span></div>
     <div style="margin-top:0.4rem">
-      <a class="btn" href="/api/v1/admin/site/export" download="site.toml">[ EXPORT site.toml ]</a>
+      <a class="btn tap" href="/api/v1/admin/site/export" download="site.toml">[ EXPORT site.toml ]</a>
     </div>
-    <form id="settings-import-form" style="margin-top:0.6rem">
+    <form id="settings-import-form" class="admin-form" style="margin-top:0.6rem">
       <textarea name="text" rows="8" style="width:100%" placeholder="paste a site.toml here"></textarea>
-      <div style="margin-top:0.4rem"><button class="btn" type="submit">[ IMPORT ]</button></div>
+      <div style="margin-top:0.4rem"><button class="btn tap" type="submit">[ IMPORT ]</button></div>
     </form>
 
     {# UX-21 (resilience sweep 2026-08-28): what a save or an import changed
@@ -174,7 +177,7 @@
         recent one.</span></div>
     <div id="site-history-list" class="muted" style="margin-top:0.4rem">loading…</div>
     <div style="margin-top:0.4rem">
-      <button id="site-undo-btn" class="btn" type="button" style="display:none">[ UNDO LAST IMPORT ]</button>
+      <button id="site-undo-btn" class="btn tap" type="button" style="display:none">[ UNDO LAST IMPORT ]</button>
     </div>
   </main>
   <script src="/static/site_settings.js" defer></script>

@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 {% block title %}CC SYNC: USERS{% endblock %}
 {% block layout %}
-  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s" hx-swap="innerHTML">
+  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
   </aside>
   <main class="main">
     {% include "partials/settings_nav.html" %}
-    <div hx-get="/partials/admin/users" hx-trigger="every 30s" hx-swap="innerHTML">
+    <div hx-get="/partials/admin/users" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
       {% include "partials/admin_users.html" %}
     </div>
     {# Loaded on its own (hx-trigger="load"), not server-rendered into this
@@ -15,17 +15,17 @@
        poll is not thrown away by the first response; the revoke form targets
        #admin-sessions INSIDE it. #}
     <div style="margin-top:1.6rem" hx-get="/partials/admin/sessions"
-         hx-trigger="load, every 30s" hx-swap="innerHTML"></div>
+         hx-trigger="load, every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML"></div>
     {# Per-editor report tokens, loaded on its own for the same reason the
        sessions panel above is: minting a fleet credential must not depend on
        (or be able to fail with) the Users panel's NAS calls. #}
     <div style="margin-top:1.6rem" hx-get="/partials/admin/report-tokens"
-         hx-trigger="load, every 60s" hx-swap="innerHTML"></div>
+         hx-trigger="load, every 60s [document.visibilityState === 'visible']" hx-swap="innerHTML"></div>
     {# The fleet halt (item 9, 2026-08-17), on its own load trigger for the
        same reason the two panels above are: a fleet-wide stop must never be
        unreachable because the NAS is the thing that is broken. #}
     <div style="margin-top:1.6rem" hx-get="/partials/admin/fleet-halt"
-         hx-trigger="load, every 60s" hx-swap="innerHTML"></div>
+         hx-trigger="load, every 60s [document.visibilityState === 'visible']" hx-swap="innerHTML"></div>
     {# The packages table, the vendor feed and the dashboard's own update USED
        to be the bottom third of this page (2026-08-18): the owner went looking
        for "where do I update the dashboard" and could not find it under four

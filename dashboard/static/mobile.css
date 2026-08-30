@@ -15,8 +15,81 @@
 /* ================================ == admin == ============================ */
 /* M3: every /admin page and its partials (MOBILE_PLAN.md M3). */
 
+@media (max-width: 600px) {
+  /* FORMS ARE ONE COLUMN WITH 16 PX INPUTS. Below 16 px Android and iOS zoom
+     the page when a field takes focus, and the reader is left scrolled
+     sideways with no obvious way back (MOBILE_PLAN.md 2026-08-30). The width
+     is a max-width rather than a width because the create-account and site
+     settings fields carry theirs INLINE (260 px, 420 px, 520 px): an inline
+     width beats any stylesheet rule, and a max-width does not have to fight
+     it -- the used width becomes min(inline, 100%). */
+  .main input[type="text"], .main input[type="search"],
+  .main input[type="password"], .main select, .main textarea {
+    max-width: 100%;
+    box-sizing: border-box;
+    font-size: 16px;
+  }
+  .admin-form label { display: block; margin-top: 0.7rem; }
+  .admin-form input[type="text"], .admin-form select, .admin-form textarea {
+    width: 100%;
+  }
 
+  /* The AI provider rows (site_settings.js draws them): style.css asks for
+     min-width 22rem, which is 352 px inside a 390 px screen that has already
+     spent 2 rem on padding, so the page scrolls sideways for one input. */
+  .ai-key { flex-wrap: wrap; }
+  .ai-key input { min-width: 0; width: 100%; }
 
+  /* A row's controls wrap under it instead of widening the stacked record. */
+  .admin-users-box .inline-form,
+  .admin-packages-box .inline-form,
+  .admin-sessions-box .inline-form { flex-wrap: wrap; }
+
+  /* Two columns of 11 px text is five characters a line at 390 px. */
+  .alerts-checks { columns: 1; }
+
+  /* The timeline filter, and the detail JSON beside it: a JSON blob has no
+     spaces to break at, so it is the one thing on the page that can push the
+     document wider than the screen. */
+  .audit-filter { min-width: 0; width: 100%; }
+  .audit-detail { overflow-wrap: anywhere; }
+  .recovery-lines td { overflow-wrap: anywhere; }
+
+  /* THE ASSIGNMENTS MATRIX keeps its columns: one per computer is what the
+     page IS, so it is the one admin surface that scrolls sideways (.scroll-x)
+     instead of stacking. What changes on a phone is the room the sticky
+     project column takes (style.css gives it 320 px, most of the screen) and
+     the desktop scroller's height, which is calculated against a viewport
+     this page no longer has. Written here, not in style.css, because that
+     file is M1's: a more specific selector, same effect. */
+  .assign-scroll { max-height: 70vh; }
+  .assign-toolbar { flex-wrap: wrap; }
+  .assign-filter { min-width: 0; width: 100%; }
+  .assign-scroll table.assign-grid td.assign-project,
+  .assign-scroll table.assign-grid th.assign-project-head { max-width: 9rem; }
+}
+
+@media (pointer: coarse) {
+  /* The column tools ([ ALL ], [ NONE ], copy-from) were 10 px with no
+     padding: the smallest hit boxes in the product, on the densest grid in
+     it, and both of them write a whole column. 12 px text, 44 px box. */
+  .assign-colbtns { font-size: 12px; gap: 0.6rem; }
+  .assign-colbtns .btn, .assign-colbtns select {
+    min-height: var(--tap);
+    min-width: var(--tap);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  /* A cell is a checkbox and a 10 px "up" label; a thumb needs both to be
+     bigger than the default 13 px box, without the grid growing a column. */
+  .assign-scroll table.assign-grid td.assign-cell { padding: 0.5rem 0.6rem; }
+  .assign-scroll table.assign-grid td.assign-cell input[type="checkbox"] {
+    width: 20px;
+    height: 20px;
+  }
+  .assign-upmode { font-size: 12px; }
+}
 
 
 /* ============================== == end == ================================= */

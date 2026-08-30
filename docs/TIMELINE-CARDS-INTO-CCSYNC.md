@@ -1611,6 +1611,59 @@ acceptable rather than required.
 `status()` NEVER PROBES (a CLI probe is a real one-token call), so it is safe
 on the state publish that happens every second.
 
+### The montage session, and the marker the fork must use (§12, 2026-08-30)
+
+`run()` takes one more optional argument, `session`, and nothing else about
+the seam moved. `session is None` is byte for byte the call this module made
+before -- translate, semantic search and summaries never asked for a
+conversation and must not start paying for one.
+
+`session` is duck-typed, so this repo never imports the fork: `id` (a uuid the
+fork mints), `turns` (completed turns) and `corpus_hash`. The runner owns the
+transcript, at
+
+```
+<the dashboard's data dir, ie the db_path's parent>/cards_sessions/<id>.json
+{"id": "...", "created": "2026-08-30T09:12:04+00:00", "turns": 3,
+ "corpus_hash": "sha256 of the digest", "messages": [ ... ]}
+```
+
+written `.partial` then `os.replace`, and bounded at `MAX_TURNS` 40 turns:
+the FIRST turn is kept whatever happens, because it is the corpus and the
+cached block, and the cut is made in whole user/assistant pairs after it.
+
+* `turns == 0` opens (and replaces) the conversation under that id.
+* `turns > 0` appends this prompt, sends the whole history, then appends the
+  reply. Only a call that ANSWERED is stored.
+* `turns > 0` with an id this store has never seen returns
+  `{"ok": False, "error": "session_lost"}` -- that exact string, no retry and
+  no API call. The caller decides whether to re-open with the corpus, because
+  only the caller knows what that costs.
+* The caller owns `turns`; the runner never writes back to the session object.
+
+**THE MARKER.** The door hands the runner ONE prompt string, and a cache
+breakpoint needs two blocks. So turn 0's prompt is split at the LAST line that
+is exactly `---INSTRUCTIONS---` (trailing spaces or tabs allowed, nothing
+else on the line):
+
+```
+### pangolins [c1] ... the whole corpus digest ...
+---INSTRUCTIONS---
+describe a five minute montage about ...
+```
+
+Everything before the line becomes one text block carrying
+`cache_control: {"type": "ephemeral"}`; everything after it is a second,
+uncached block. A prompt with no marker -- or with nothing on one side of it
+-- is sent as ONE uncached block, so every caller written before §12 keeps
+working. Later turns are a plain string and carry no breakpoint: a cache
+write is billed, and the corpus is the only thing worth one.
+
+On the CLI path the conversation is the CLI's own (`--session-id <id>` on
+turn 0, `--resume <id>` after), because that store is keyed by the id we hand
+it; ours is still what answers "has this id ever existed", and a stderr that
+says the session is unknown maps to the same `session_lost`.
+
 ---
 
 ## 7e. The URL spec for the page (the audit, and it is nearly empty)

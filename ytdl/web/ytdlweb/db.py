@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 
 # Highest schema version this codebase knows how to run against. Bump it, add
 # the file to _MIGRATIONS, and give it a predicate.
-CURRENT_SCHEMA_VERSION = 11
+CURRENT_SCHEMA_VERSION = 12
 
 # "the version this migration produces" -> (filename, already-applied predicate).
 # The predicate must answer "is this migration's effect already in the database?"
@@ -42,8 +42,16 @@ CURRENT_SCHEMA_VERSION = 11
 _MIGRATIONS = {
     2: ('002_downloads_term_dir.sql',
         lambda con: 'term_dir' in _columns(con, 'downloads')),
+    # The index this one creates is DROPPED again by 012 (the queue), so "is
+    # the index there" stopped being an honest already-applied test on
+    # 2026-08-30: on every database past v12 it answers no, 003 re-creates the
+    # index, and 012 -- whose own predicate then reads "not applied" -- re-runs
+    # its ALTERs and dies on `duplicate column name`. The second clause is what
+    # says "this database is past the point where that index existed at all".
+    # The first is still the whole answer for anything between v3 and v11.
     3: ('003_one_active_job_per_editor.sql',
-        lambda con: _index_exists(con, 'idx_jobs_one_active')),
+        lambda con: (_index_exists(con, 'idx_jobs_one_active')
+                     or 'queue_position' in _columns(con, 'jobs'))),
     4: ('004_jobs_kind.sql',
         lambda con: 'kind' in _columns(con, 'jobs')),
     5: ('005_jobs_shot_types.sql',
@@ -81,6 +89,16 @@ _MIGRATIONS = {
     11: ('011_jobs_term_scope_dates.sql',
          lambda con: {'term_scope', 'date_from', 'date_to'}
          <= set(_columns(con, 'jobs'))),
+    # The term review and the queue (2026-08-30). FOUR columns across two
+    # tables AND a dropped index, so the predicate asks about all five: this is
+    # the first migration that REMOVES something, and an "already applied" that
+    # only looked at the columns would leave idx_jobs_one_active in place on a
+    # database whose ALTERs had landed -- which is the one state where a second
+    # queued job raises IntegrityError and the queue silently holds one thing.
+    12: ('012_terms_review_and_queue.sql',
+         lambda con: ({'translation', 'enabled'} <= set(_columns(con, 'job_terms'))
+                      and {'queue_position', 'auto_terms'} <= set(_columns(con, 'jobs'))
+                      and not _index_exists(con, 'idx_jobs_one_active'))),
 }
 
 # What made a job. 'search' is a topic Claude expands and the editor reviews;
@@ -183,6 +201,18 @@ def _column(row, key):
         return None
 
 
+def auto_terms_of(row):
+    """A jobs row -> does this job SKIP the term review.
+
+    Tolerant like every other reader here: a row from a database the migration
+    has not reached, or from a SELECT that did not ask for the column, has no
+    such key -- and that reads as False, the reviewed path, which is the safe
+    direction. A job that stops for a person can always be sent on by that
+    person; one that skipped the stop has already spent the search.
+    """
+    return bool(_column(row, 'auto_terms'))
+
+
 def date_range_of(row):
     """A jobs row -> (date_from, date_to) as YYYYMMDD strings or None each.
 
@@ -276,12 +306,22 @@ def max_candidates_of(row_or_value):
 # The phase machine, in order. Anything not terminal is "the worker owns this
 # job"; ready_for_review is the one non-terminal phase the worker is NOT
 # working on -- it is waiting for the editor.
-PHASES = ('queued', 'generating_terms', 'searching', 'enriching', 'filtering',
-          'ready_for_review', 'downloading', 'done', 'failed', 'cancelled')
+PHASES = ('queued', 'generating_terms', 'terms_review', 'searching',
+          'enriching', 'filtering', 'ready_for_review', 'downloading',
+          'done', 'failed', 'cancelled')
 TERMINAL = ('done', 'failed', 'cancelled')
 # Phases whose work is mid-flight and must be restarted after a container
 # restart. `downloading` is deliberately absent: it is resumed, not restarted.
 RESUMABLE = ('generating_terms', 'searching', 'enriching', 'filtering')
+
+# THE PHASES A WORKER IS ACTUALLY INSIDE (2026-08-30), and so the ones that
+# make an editor's queue wait. `queued` is not here (it is the waiting), and
+# neither are the two phases that are waiting for a PERSON -- `terms_review`
+# and `ready_for_review`. That is the whole point of the queue: a manifest an
+# editor has not looked at for a week used to block every later search
+# (YTDL-25's 409), and a job parked for a human is not work in flight, so the
+# next search may as well be running while they get to it.
+BUSY = ('generating_terms', 'searching', 'enriching', 'filtering', 'downloading')
 
 # Columns the worker and the API are allowed to write through _update(). A
 # whitelist because the column name is interpolated into the SQL string --
@@ -308,6 +348,14 @@ _VIDEO_COLS = frozenset({
 # (docs/YTDL_LOCAL_DOWNLOAD.md §3).
 MODE_SERVER = 'server'
 MODE_LOCAL = 'local'
+
+# `queue_position` and `auto_terms` are not in _JOB_COLS either, for two
+# different reasons. auto_terms is an INPUT to the job, like kind and mode: a
+# later UPDATE of it would make the row describe a job nobody asked for.
+# queue_position is written by move_in_queue below, which renumbers a whole
+# queue in one transaction -- a set_job() path would be a second way to write
+# one job's number without touching the others, which is how two jobs end up
+# sharing a position and the [ UP ] button starts doing nothing.
 
 
 def now():
@@ -441,10 +489,76 @@ def _update(c, table, where_sql, where_args, allowed, cols):
 
 # ------------------------------------------------------------------- jobs
 
+def next_queue_position(c, created_by):
+    """The number the editor's NEXT job goes to the back of the queue with.
+
+    1-based, and derived from the queued rows rather than counted: a queue that
+    has had jobs cancelled out of the middle of it still has to hand the next
+    arrival a number behind everything in it. move_in_queue renumbers 1..n, so
+    the max is the length in practice -- this is what keeps it true when it is
+    not.
+    """
+    row = c.execute("SELECT MAX(queue_position) AS m FROM jobs "
+                    "WHERE created_by=? AND phase='queued'",
+                    (created_by,)).fetchone()
+    return int((row and row['m']) or 0) + 1
+
+
+def busy_job(c, user):
+    """The editor's job that is actually being WORKED ON, or None (BUSY).
+
+    This is what the queue waits behind, and what the API asks before it tells
+    a new job it is queued behind something. Deliberately not active_job: a job
+    parked at terms_review or ready_for_review is waiting for the person, and a
+    person is not a worker.
+    """
+    ph = ','.join('?' * len(BUSY))
+    return c.execute(f'SELECT * FROM jobs WHERE created_by=? AND phase IN ({ph}) '
+                     'ORDER BY id LIMIT 1', (user, *BUSY)).fetchone()
+
+
+def queued_jobs(c, user):
+    """The editor's waiting jobs, in the order they will run.
+
+    queue_position first and the id only as a tie-break, so a queue written by
+    a build that had no positions (or one renumbered mid-write) still comes
+    back oldest-first rather than in whatever order SQLite felt like.
+    """
+    return c.execute("SELECT * FROM jobs WHERE created_by=? AND phase='queued' "
+                     'ORDER BY queue_position, id', (user,)).fetchall()
+
+
+def move_in_queue(c, user, job_id, position):
+    """Move one of the editor's queued jobs to `position` (1-based). -> the
+    new order, or None when that job is not in the queue.
+
+    The WHOLE queue is renumbered 1..n in one transaction rather than the one
+    row being written: positions arrive from a database that has had jobs
+    cancelled out of it and from clients that may both be pressing [ UP ], and
+    a scheme that only rewrites the moved row leaves duplicates behind, which
+    read as an arbitrary order the next time anything sorts by them.
+
+    Out-of-range positions are CLAMPED, not refused: [ UP ] on the first row is
+    a no-op an editor will press, not an error worth a toast.
+    """
+    order = [r['id'] for r in queued_jobs(c, user)]
+    if job_id not in order:
+        return None
+    order.remove(job_id)
+    where = max(0, min(len(order), int(position) - 1))
+    order.insert(where, job_id)
+    ts = now()
+    for i, jid in enumerate(order, start=1):
+        c.execute('UPDATE jobs SET queue_position=?, updated_at=? WHERE id=?',
+                  (i, ts, jid))
+    c.commit()
+    return order
+
+
 def create_job(c, created_by, term, term_dir, project_slug, project_label,
                quality='1080p', period=None, max_per_term=15, shot_types=None,
                max_candidates=None, mode=None, term_scope=None, date_from=None,
-               date_to=None):
+               date_to=None, auto_terms=False):
     """A kind='search' job. `shot_types=None` is the mode's preset selection,
     `max_candidates=None` the default candidate ceiling, `mode=None` the
     default search mode ('visuals'), `term_scope=None` the default language
@@ -455,26 +569,40 @@ def create_job(c, created_by, term, term_dir, project_slug, project_label,
     off it, so a job that survives a container restart is re-run with the rubric
     the editor chose, the boxes they actually ticked and the number they
     submitted -- not with whatever the defaults have become since.
+
+    `auto_terms` (2026-08-30) is the same kind of input and is stored for the
+    same reason: True skips the term review and searches everything, which is
+    the headless path a script takes and never what the SPA sends.
+
+    ALWAYS `queued`, whether the editor is busy or not: `queued` is where the
+    queue waits, and claim_next_job is the one place that decides whose turn it
+    is. A handler that started a job itself when the editor looked idle would
+    be a second scheduler, racing the worker with a read-then-write.
     """
     ts = now()
     try:
         cur = c.execute(
             'INSERT INTO jobs(created_by,term,term_dir,project_slug,project_label,'
             'quality,period,max_per_term,max_candidates,mode,shot_types,'
-            'term_scope,date_from,date_to,phase,created_at,updated_at) '
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)",
+            'term_scope,date_from,date_to,auto_terms,queue_position,phase,'
+            'created_at,updated_at) '
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)",
             (created_by, term, term_dir, project_slug, project_label, quality,
              period, max_per_term, max_candidates_of(max_candidates),
              claude_cli.normalise_mode(mode),
              encode_shot_types(shot_types, mode),
              claude_cli.normalise_term_scope(term_scope),
-             date_from or None, date_to or None, ts, ts))
+             date_from or None, date_to or None, 1 if auto_terms else 0,
+             next_queue_position(c, created_by), ts, ts))
     except sqlite3.IntegrityError:
-        # The one-active-job index refused it (YTDL-25) -- and a failed INSERT
-        # leaves this connection's implicit transaction OPEN, holding a write
-        # lock. Connections here are per-thread and live forever, so an
-        # un-rolled-back loser of that race would block every later write on
-        # the request threadpool ("database is locked", 30 s at a time).
+        # Nothing in the schema refuses a second job any more (migrations/012
+        # dropped idx_jobs_one_active), so reaching this is a genuine
+        # constraint failure rather than the YTDL-25 race. The rollback stays,
+        # and it is not decoration: a failed INSERT leaves this connection's
+        # implicit transaction OPEN, holding a write lock. Connections here are
+        # per-thread and live forever, so an un-rolled-back one would block
+        # every later write on the request threadpool ("database is locked",
+        # 30 s at a time).
         c.rollback()
         raise
     c.commit()
@@ -498,19 +626,26 @@ def create_url_job(c, created_by, term, term_dir, project_slug, project_label,
     (REQ 6) is applied before any bandwidth is planned, not only after.
 
     One transaction because a url job has no search half to write the rows
-    later: a jobs row with no videos would be an ACTIVE job that can never
-    finish, and one active job per editor (YTDL-25) then locks that editor out
-    of the whole app with nothing to cancel from the UI.
+    later: a jobs row with no videos would be a job that can never finish, and
+    before the queue (YTDL-25's one-active-job rule) that locked the editor out
+    of the whole app with nothing to cancel from the UI. It queues rather than
+    blocks now, but a queue entry that downloads nothing is still a queue entry
+    somebody has to notice and cancel.
+
+    It takes a queue_position exactly as a search job does: a paste is a job
+    like any other and waits its turn behind whatever the editor has running.
     """
     ts = now()
     pending = [v for v in videos if not v.get('duplicate_of')]
     try:
         cur = c.execute(
             'INSERT INTO jobs(created_by,kind,term,term_dir,project_slug,'
-            'project_label,quality,dl_total,phase,created_at,updated_at) '
-            "VALUES(?,?,?,?,?,?,?,?,'queued',?,?)",
+            'project_label,quality,dl_total,queue_position,phase,created_at,'
+            'updated_at) '
+            "VALUES(?,?,?,?,?,?,?,?,?,'queued',?,?)",
             (created_by, KIND_URLS, term, term_dir, project_slug,
-             project_label, quality, len(pending), ts, ts))
+             project_label, quality, len(pending),
+             next_queue_position(c, created_by), ts, ts))
         job_id = cur.lastrowid
         for v in videos:
             dup = v.get('duplicate_of')
@@ -550,14 +685,32 @@ def recent_jobs(c, user, limit=20):
 
 
 def active_job(c, user):
-    """The caller's non-terminal job, or None. One at a time, per editor.
+    """The job this editor's page should be attached to, or None.
 
-    ready_for_review counts as active: it holds a manifest the editor has not
-    dealt with yet, and starting a second search would silently orphan it.
+    Their oldest non-terminal job that is NOT waiting in the queue -- the one
+    being worked on, or parked at terms_review / ready_for_review for them to
+    look at. Both of those count as active: each holds something the editor has
+    not dealt with yet, and a page that showed them nothing is a page that lost
+    their search.
+
+    The head of the queue is the fallback, so a page that loads in the second
+    between "the job was created" and "the worker claimed it" still attaches to
+    something. It is deliberately the LAST resort: a queued job has nothing to
+    show yet, and the running one does.
+
+    Before 2026-08-30 this was "the caller's one non-terminal job" and its
+    answer was what every second search was refused with (YTDL-25's 409). The
+    refusal is gone; the question -- what is this editor's page about -- is
+    still the same one.
     """
     ph = ','.join('?' * len(TERMINAL))
-    return c.execute(f'SELECT * FROM jobs WHERE created_by=? AND phase NOT IN ({ph}) '
-                     'ORDER BY id LIMIT 1', (user, *TERMINAL)).fetchone()
+    row = c.execute(
+        f"SELECT * FROM jobs WHERE created_by=? AND phase NOT IN ({ph}) "
+        "AND phase != 'queued' ORDER BY id LIMIT 1", (user, *TERMINAL)).fetchone()
+    if row is not None:
+        return row
+    return c.execute("SELECT * FROM jobs WHERE created_by=? AND phase='queued' "
+                     'ORDER BY queue_position, id LIMIT 1', (user,)).fetchone()
 
 
 def set_job(c, job_id, **cols):
@@ -602,10 +755,15 @@ def request_cancel(c, job_id):
     c.commit()
 
 
-# The phases no worker is inside: `queued` has not been claimed and
-# `ready_for_review` is waiting for a human. Anything else is mid-phase and the
-# flag is the only safe way to stop it.
-IDLE = ('queued', 'ready_for_review')
+# The phases no worker is inside: `queued` has not been claimed, and
+# `terms_review` / `ready_for_review` are waiting for a human. Anything else is
+# mid-phase and the flag is the only safe way to stop it.
+#
+# terms_review joined them 2026-08-30 and it had to: it is a job parked in
+# front of a person, exactly like ready_for_review, and YTDL-1 is what happens
+# when cancel is a no-op on one of those -- {ok:true}, nothing changes, and the
+# editor is left with a job they cannot get rid of.
+IDLE = ('queued', 'terms_review', 'ready_for_review')
 
 
 def cancel_now(c, job_id):
@@ -666,13 +824,28 @@ def claim_next_job(c):
     SQL also lets the NEXT job through, which is what "one at a time" should
     have meant all along: an editor downloading locally does not queue the
     fleet behind them.
+
+    THE QUEUE (2026-08-30) is the NOT EXISTS below, and it is the only place
+    that decides whose turn it is. A `queued` job is startable when its own
+    editor has no BUSY job -- nothing else about it matters, and in particular
+    another editor's running job never holds it back. `terms_review` and
+    `ready_for_review` are not busy (BUSY says why), so a search parked in
+    front of a person lets that person's next search start.
     """
+    busy = ','.join('?' * len(BUSY))
     return c.execute(
-        "SELECT * FROM jobs WHERE phase IN ('queued','generating_terms',"
-        "'searching','enriching','filtering','downloading') "
-        "AND NOT (download_mode='local' AND lease_expires_at IS NOT NULL "
-        '          AND lease_expires_at > ?) '
-        'ORDER BY id LIMIT 1', (now(),)).fetchone()
+        f'SELECT * FROM jobs AS j WHERE (j.phase IN ({busy}) OR '
+        "  (j.phase='queued' AND NOT EXISTS ("
+        '     SELECT 1 FROM jobs AS b WHERE b.created_by=j.created_by '
+        f'       AND b.phase IN ({busy})))) '
+        "AND NOT (j.download_mode='local' AND j.lease_expires_at IS NOT NULL "
+        '          AND j.lease_expires_at > ?) '
+        # Work already in flight before work not yet started, then the editor's
+        # own queue order, then oldest first. The last two used to be one
+        # `ORDER BY id`, and for a single job they still are.
+        "ORDER BY (CASE WHEN j.phase='queued' THEN 1 ELSE 0 END), "
+        "         (CASE WHEN j.phase='queued' THEN j.queue_position ELSE 0 END), "
+        '         j.id LIMIT 1', (*BUSY, *BUSY, now())).fetchone()
 
 
 # ----------------------------------------- the claim/lease (requester-first)
@@ -1045,14 +1218,28 @@ def reset_stale_jobs(c):
 
 # ------------------------------------------------------------------ terms
 
-def add_term(c, job_id, term, lang, source, english_gloss=None):
+def add_term(c, job_id, term, lang, source, english_gloss=None,
+             translation=None):
     """-> term id. Returns the existing id if the term is already on the job.
 
     Duplicates are expected, not exceptional: Claude regularly hands back the
     editor's own phrase as one of its English variants.
+
+    `translation` (2026-08-30) is what the term review prints in brackets. It
+    defaults to the gloss because for a Chinese query they are the same
+    sentence and asking the model twice for it would be a second AI turn; the
+    editor's own term is the case where they differ, because nothing ever
+    glossed that one.
+
+    Every term arrives ENABLED (the column's default): the review is an
+    unticking exercise, and a job whose terms all arrived unticked would search
+    nothing at all if the editor simply pressed on.
     """
-    c.execute('INSERT OR IGNORE INTO job_terms(job_id,term,lang,english_gloss,source) '
-              'VALUES(?,?,?,?,?)', (job_id, term, lang, english_gloss, source))
+    if translation is None:
+        translation = english_gloss
+    c.execute('INSERT OR IGNORE INTO job_terms(job_id,term,lang,english_gloss,'
+              'translation,source) VALUES(?,?,?,?,?,?)',
+              (job_id, term, lang, english_gloss, translation or None, source))
     c.commit()
     # Re-read rather than trust lastrowid: after an IGNOREd insert it still
     # holds whatever this connection wrote last, which would silently attribute
@@ -1061,14 +1248,85 @@ def add_term(c, job_id, term, lang, source, english_gloss=None):
                      (job_id, term)).fetchone()['id']
 
 
+def set_translation(c, term_id, translation):
+    """Fill in a term's bracketed gloss after the fact. -> did it change one.
+
+    For the EDITOR'S OWN term (worker._phase_generate_terms): it is written
+    first and unconditionally, before the model has been asked anything, so its
+    translation can only arrive once the reply is in. Only ever fills a BLANK
+    one -- a gloss that is already there was written by the call that made the
+    term, and this is a best-effort match on the same text.
+    """
+    translation = str(translation or '').strip()
+    if not translation:
+        return False
+    cur = c.execute('UPDATE job_terms SET translation=? WHERE id=? AND '
+                    "(translation IS NULL OR translation='')",
+                    (translation, term_id))
+    c.commit()
+    return bool(cur.rowcount)
+
+
 def terms(c, job_id):
     return c.execute('SELECT * FROM job_terms WHERE job_id=? ORDER BY id',
                      (job_id,)).fetchall()
 
 
-def unsearched_terms(c, job_id):
-    return c.execute('SELECT * FROM job_terms WHERE job_id=? AND searched=0 '
+def enabled_terms(c, job_id):
+    """The terms the editor left ticked at the review. What gets searched."""
+    return c.execute('SELECT * FROM job_terms WHERE job_id=? AND enabled=1 '
                      'ORDER BY id', (job_id,)).fetchall()
+
+
+def set_terms_enabled(c, job_id, wanted):
+    """Tick exactly `wanted` and untick the rest. -> how many are ticked.
+
+    `wanted` is term ids or term TEXT, mixed, because both are things a caller
+    legitimately has: the SPA holds the ids the poll gave it, and a script
+    driving this by hand has the queries it read. Anything unrecognised is
+    ignored rather than refused -- the answer says how many ended up ticked,
+    which is the number that matters and the one the caller checks.
+
+    ONE statement per column value, not one per term: this is the whole of what
+    the review writes and it must not half-apply.
+    """
+    ids, texts = set(), set()
+    for w in wanted or ():
+        if isinstance(w, bool):
+            continue
+        if isinstance(w, int):
+            ids.add(w)
+            continue
+        s = str(w).strip()
+        if not s:
+            continue
+        if s.isdigit():
+            ids.add(int(s))
+        texts.add(s)
+    on = [t['id'] for t in terms(c, job_id)
+          if t['id'] in ids or t['term'] in texts]
+    if on:
+        ph = ','.join('?' * len(on))
+        c.execute(f'UPDATE job_terms SET enabled=1 WHERE job_id=? AND id IN ({ph})',
+                  (job_id, *on))
+        c.execute(f'UPDATE job_terms SET enabled=0 WHERE job_id=? AND id NOT IN ({ph})',
+                  (job_id, *on))
+    else:
+        c.execute('UPDATE job_terms SET enabled=0 WHERE job_id=?', (job_id,))
+    c.commit()
+    return len(on)
+
+
+def unsearched_terms(c, job_id):
+    """The ticked terms this job has not searched yet.
+
+    `enabled=1` since 2026-08-30: the search phase reads this and nothing else,
+    so an unticked term is not "skipped later", it is never looked at. A job
+    that never stopped at the review has every term ticked, which is the
+    column's default and what every job before the review ran as.
+    """
+    return c.execute('SELECT * FROM job_terms WHERE job_id=? AND searched=0 '
+                     'AND enabled=1 ORDER BY id', (job_id,)).fetchall()
 
 
 def mark_term_searched(c, term_id, hits):
@@ -1456,6 +1714,41 @@ def job_dict(row):
     return d
 
 
+def term_dict(row, videos=0):
+    """A job_terms row as every JSON answer carries it.
+
+    ONE shape, built here rather than spelled out in each handler: the poll
+    response, the manifest and the term review all print the same row, and
+    before this the two that existed had already drifted apart by a field.
+
+    `translation` and `enabled` ride on every one of them (2026-08-30). A row
+    from a database the migration has not reached has neither key, and reads as
+    "nothing to print in brackets" and "ticked" -- which is what every term
+    written before the review actually was.
+    """
+    return {'id': row['id'], 'term': row['term'], 'lang': row['lang'],
+            'english_gloss': row['english_gloss'],
+            'translation': _column(row, 'translation'),
+            'enabled': bool(_column(row, 'enabled') is None
+                            or _column(row, 'enabled')),
+            'source': row['source'], 'searched': row['searched'],
+            'hits': row['hits'], 'videos': videos}
+
+
+def queue_dict(row, position):
+    """A waiting job as the SPA's QUEUE list reads it.
+
+    Deliberately NOT job_dict: a queued job has no counters worth printing and
+    the list is a name, a destination and two buttons. `position` is passed in
+    rather than read off the row so the list is numbered by its ORDER -- a
+    queue that has had a job cancelled out of the middle of it must read 1, 2,
+    3 to the person looking at it, whatever the stored numbers say.
+    """
+    return {'id': row['id'], 'term': row['term'], 'kind': row['kind'],
+            'project_label': row['project_label'], 'phase': row['phase'],
+            'position': position, 'created_at': row['created_at']}
+
+
 def video_dict(row, term_ids=None):
     d = dict(row)
     d['term_ids'] = term_ids or []
@@ -1534,8 +1827,16 @@ def manifest_json(c, job):
         'created_by': job['created_by'],
         'project': job['project_label'],
         'quality': job['quality'],
+        # `enabled` is in the folder beside the clips for the reason `mode` is:
+        # this file outlives the database, and "why did this search not cover
+        # X" is answered by the term the editor unticked at the review, which
+        # nothing else would ever record (2026-08-30).
         'terms': [{'q': t['term'], 'lang': t['lang'],
-                   'english_gloss': t['english_gloss'], 'source': t['source'],
+                   'english_gloss': t['english_gloss'],
+                   'translation': _column(t, 'translation'),
+                   'enabled': bool(_column(t, 'enabled') is None
+                                   or _column(t, 'enabled')),
+                   'source': t['source'],
                    'hits': t['hits']} for t in term_rows.values()],
         'videos': [{
             'id': v['video_id'], 'url': v['url'], 'title': v['title'],

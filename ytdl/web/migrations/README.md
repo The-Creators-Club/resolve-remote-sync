@@ -86,3 +86,17 @@ This database was created at v1. Since then (2026-08-11 bug hunt):
   filter). Like 009, the scope's default IS what every old row ran — `both`
   composes the previous prompts byte for byte — and a NULL date is no bound,
   so there is no backfill.
+- `012_terms_review_and_queue.sql` — v12 (2026-08-30), the term review and the
+  queue (`docs/YTDL_TERMS_AND_QUEUE.md`): `job_terms.translation` (the bracket
+  the review prints, the gloss the same Claude call already produced) and
+  `job_terms.enabled` (ticked, default 1), plus `jobs.queue_position` and
+  `jobs.auto_terms`. It is the first migration here to **remove** something:
+  `idx_jobs_one_active` (003) is dropped, because a queued job is a
+  non-terminal job and with that unique index in place the queue could never
+  hold more than one thing. So its predicate asks about the four columns AND
+  the absent index — and 003's own predicate had to grow a second clause for
+  the same reason, or it re-creates the index on every open of a v12 database
+  and 012 then re-runs its `ALTER`s into `duplicate column name`. There is no
+  backfill and none is possible: every term an existing database holds WAS
+  searched (which is what `enabled` defaults to) and every job in it is
+  terminal or already running (so `queue_position` 0 is honest).

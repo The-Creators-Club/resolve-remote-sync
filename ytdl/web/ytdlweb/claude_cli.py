@@ -828,7 +828,12 @@ Reply with ONLY this JSON object and nothing else -- no prose, no code fence:
 
 def generate_terms(topic, shot_types=None, mode=None, timeout=None,
                    term_scope=None):
-    """-> [{'q','lang','english_gloss'}]. Raises ClaudeError.
+    """-> [{'q','lang','english_gloss','translation'}]. Raises ClaudeError.
+
+    `translation` (2026-08-30) is the term review's bracketed gloss: the same
+    English sentence `english_gloss` carries, under the name the review speaks,
+    and '' for a query that is already English. Deliberately NOT a new field in
+    the prompt -- it costs no extra turn because the call already produces it.
 
     `shot_types` is the editor's ticked boxes (None = the mode's preset) and
     `mode` is which of MODES this search is for; both only ever change the
@@ -870,7 +875,7 @@ def generate_terms(topic, shot_types=None, mode=None, timeout=None,
 
 
 def _usable_terms(data, languages=frozenset({'en', 'zh'})):
-    """-> ([{'q','lang','english_gloss'}], [glossless zh queries]).
+    """-> ([{'q','lang','english_gloss','translation'}], [glossless zh queries]).
 
     The glossless ones are reported rather than returned: a Chinese query with
     no translation is unreadable in the manifest, so it is only ever kept after
@@ -901,7 +906,16 @@ def _usable_terms(data, languages=frozenset({'en', 'zh'})):
         if lang == 'zh' and not gloss:
             missing.append(q)
             continue
-        out.append({'q': q, 'lang': lang, 'english_gloss': gloss or None})
+        # `translation` is what the term review prints in brackets
+        # (2026-08-30, the owner: "for chinese ones, it should show a
+        # translation in brackets"). It is the gloss the SAME call already
+        # produces, under a second name rather than a second prompt field:
+        # asking for it again would change _TERM_SYSTEM, and the whole point of
+        # tests/golden/ is that an editor who never touched a toggle never has
+        # their search changed under them. Empty for an English query, which is
+        # exactly "there is nothing to print after this one".
+        out.append({'q': q, 'lang': lang, 'english_gloss': gloss or None,
+                    'translation': gloss if lang != 'en' else ''})
     return out, missing
 
 

@@ -20,7 +20,6 @@ import logging
 import os
 import re
 import shutil
-import sqlite3
 import threading
 import time
 import urllib.request
@@ -407,6 +406,13 @@ class NewJob(BaseModel):
     # metadata in the filter phase; see migrations/011.
     date_from: str | None = None
     date_to: str | None = None
+    # SKIP THE TERM REVIEW (2026-08-30). The SPA never sends it: an editor who
+    # asked for a search is exactly who should see the queries it is about to
+    # run. It is here for the headless caller -- a script that posts a topic
+    # and comes back for the manifest -- because a job parked at `terms_review`
+    # waits for a person forever, and a script is not one. OMITTED is False,
+    # so nothing that already calls this API is changed by it.
+    auto_terms: bool = False
 
 
 # A topic, not a document. The cap is a fleet-availability guard as much as a
@@ -570,36 +576,53 @@ def create_job(req: NewJob, request: Request):
     date_from, date_to = _validated_date_range(req)
 
     c = con()
-    # One job per editor at a time. Not a resource limit -- the worker is
-    # serial anyway -- but a UI one: two jobs would share the progress bar and
-    # the second manifest would silently replace the first.
-    running = db.active_job(c, user)
-    if running is not None:
-        raise _one_job_409(running)
-
-    try:
-        job_id = db.create_job(
-            c, user, term, config.safe_term_dirname(term), project['slug'],
-            project['label'], quality=req.quality, period=req.period or None,
-            max_per_term=max(1, min(50, int(req.max_per_term))),
-            shot_types=shot_types, max_candidates=max_candidates,
-            mode=mode, term_scope=term_scope, date_from=date_from,
-            date_to=date_to)
-    except sqlite3.IntegrityError:
-        # The read above and this INSERT are not one transaction, and a
-        # double-clicked SEARCH lands squarely between them; the partial unique
-        # index on jobs(created_by) is what makes the loser an error rather
-        # than a second active job that orphans the first (YTDL-25,
-        # 2026-08-11). Same answer either way -- one editor, one job.
-        running = db.active_job(c, user)
-        if running is None:
-            raise
-        raise _one_job_409(running) from None
+    # THE QUEUE (2026-08-30, the owner: "there should also be a queue so you
+    # can queue up multiple searches"). This used to be a 409 -- one job per
+    # editor, and every later search refused until the first was reviewed or
+    # cancelled (YTDL-25). It is now a position in a list: the job is created
+    # `queued` like every other job, and db.claim_next_job starts it when this
+    # editor has nothing busy. Nothing here starts anything; a handler that
+    # did would be a second scheduler racing the worker.
+    job_id = db.create_job(
+        c, user, term, config.safe_term_dirname(term), project['slug'],
+        project['label'], quality=req.quality, period=req.period or None,
+        max_per_term=max(1, min(50, int(req.max_per_term))),
+        shot_types=shot_types, max_candidates=max_candidates,
+        mode=mode, term_scope=term_scope, date_from=date_from,
+        date_to=date_to, auto_terms=bool(req.auto_terms))
     worker.nudge()
-    return {'job_id': job_id, 'phase': 'queued'}
+    return _queued_answer(c, user, job_id)
+
+
+def _queued_answer(c, user, job_id):
+    """What a create returns now that a create can queue.
+
+    `queued_behind` is what the search box prints, and it is counted rather
+    than stored: the jobs ahead of this one are its editor's busy job (at most
+    one) plus every queued job in front of it. 0 means it starts on the
+    worker's next tick, which is the answer for the first search of the day and
+    the one nothing needs to say anything about.
+    """
+    fresh = db.get_job(c, job_id)
+    ahead = [j['id'] for j in db.queued_jobs(c, user)]
+    behind = ahead.index(job_id) if job_id in ahead else 0
+    if db.busy_job(c, user) is not None:
+        behind += 1
+    return {'job_id': job_id, 'phase': fresh['phase'],
+            'queue_position': fresh['queue_position'],
+            'queued_behind': behind}
 
 
 def _one_job_409(running):
+    """"you already have a job in progress" -- what is left of the one-job rule.
+
+    NOT the create path any more: a second search queues (see create_job). What
+    still raises this is reviving a FINISHED job while a busy one is running --
+    pressing RETRY on last week's failures while today's search is downloading
+    -- because that job goes straight to `downloading` with no queue entry to
+    wait in, and two download phases for one editor is the one thing the queue
+    is not.
+    """
     return HTTPException(409, {
         'detail': 'you already have a job in progress',
         'job_id': running['id'], 'phase': running['phase']})
@@ -800,9 +823,8 @@ def create_url_job(req: NewUrlJob, request: Request):
     # can create is `Youtube`, which already exists in every project the
     # downloader has ever written to.
     c = con()
-    running = db.active_job(c, user)
-    if running is not None:
-        raise _one_job_409(running)
+    # No one-job refusal here either (2026-08-30): a paste queues behind
+    # whatever this editor has running, exactly as a search does.
 
     # The ledger half of the dedupe, before any bandwidth is planned. The DISK
     # half stays where it is (the worker's pre-download re-check): scanning a
@@ -826,23 +848,19 @@ def create_url_job(req: NewUrlJob, request: Request):
                                                   else 'all of those videos'),
             'duplicates': skipped})
 
-    try:
-        job_id = db.create_url_job(
-            c, user, URL_JOB_TERM, URL_JOB_TERM_DIR, project['slug'],
-            project['label'], videos, quality=req.quality)
-    except sqlite3.IntegrityError:
-        # The partial unique index on jobs(created_by) (YTDL-25). Same window
-        # as create_job's, same answer: one editor, one job.
-        running = db.active_job(c, user)
-        if running is None:
-            raise
-        raise _one_job_409(running) from None
+    job_id = db.create_url_job(
+        c, user, URL_JOB_TERM, URL_JOB_TERM_DIR, project['slug'],
+        project['label'], videos, quality=req.quality)
     worker.nudge()
     # `folder` is the DESTINATION as a human reads it, not a directory name --
     # 'Youtube' for a paste, and the only thing in this response that says where
     # the clips are going. `term_dir` stays for anything that already reads it,
     # empty because that is what the row holds.
-    return {'job_id': job_id, 'phase': 'queued',
+    #
+    # `queued` here is the CLIP count and has nothing to do with the job queue;
+    # it predates it by three weeks and the SPA prints it as "N links queued".
+    # The queue's own two numbers ride alongside it (_queued_answer).
+    return {**_queued_answer(c, user, job_id),
             'term_dir': URL_JOB_TERM_DIR, 'folder': db.YOUTUBE_DIR,
             'queued': len(videos) - len(skipped), 'skipped': skipped}
 
@@ -861,14 +879,29 @@ def active_job(request: Request):
     first would be a 422 rather than a fall-through.
 
     It exists because the SPA cannot infer this from the recent list: a job at
-    `ready_for_review` is deliberately ACTIVE (db.active_job), it is the one
-    that blocks every new search with a 409 (YTDL-25), and a page attached to a
-    stale `#job=` hash shows the editor something else entirely while that
-    happens. One row, one query, the same one the 409 path already reads.
+    `ready_for_review` is deliberately ACTIVE (db.active_job) and a page
+    attached to a stale `#job=` hash shows the editor something else entirely
+    while it sits there unlooked-at.
+
+    ...AND THE QUEUE behind it (2026-08-30). One round trip, because the two
+    are one question: "what is this editor's downloader doing". The queue is
+    every job of theirs at `queued`, in the order it will run, numbered by that
+    order rather than by the stored positions -- a queue with a cancellation in
+    the middle of it must read 1, 2, 3 to the person looking at it.
     """
     user = current_user(request)
-    row = db.active_job(con(), user)
-    return {'job': db.job_dict(row) if row is not None else None}
+    c = con()
+    row = db.active_job(c, user)
+    queue = [db.queue_dict(j, i) for i, j in
+             enumerate(db.queued_jobs(c, user), start=1)]
+    # The running job is not also a queue entry. It only can be in the second
+    # between "created" and "claimed", when active_job falls back to the head
+    # of the queue -- and a page that showed the same job twice would offer
+    # [ UP ] on the thing that is already running.
+    if row is not None:
+        queue = [q for q in queue if q['id'] != row['id']]
+    return {'job': db.job_dict(row) if row is not None else None,
+            'queue': queue}
 
 
 # --------------------------------------------------------- download history
@@ -921,12 +954,12 @@ def get_job(job_id: int, request: Request):
     job = _job_or_404(c, job_id, user)
     hits = db.term_hit_counts(c, job_id)
     return {
-        'job': db.job_dict(job),
-        'terms': [{'id': t['id'], 'term': t['term'], 'lang': t['lang'],
-                   'english_gloss': t['english_gloss'], 'source': t['source'],
-                   'searched': t['searched'], 'hits': t['hits'],
-                   'videos': hits.get(t['id'], 0)}
+        # Every term, ticked or not, with its bracketed translation: this is
+        # what the term review renders, and it is the same list the ticker's
+        # "N terms (x en / y zh)" has always been built from (db.term_dict).
+        'terms': [db.term_dict(t, hits.get(t['id'], 0))
                   for t in db.terms(c, job_id)],
+        'job': db.job_dict(job),
         'counts': db.counts(c, job_id),
         'progress': worker.job_progress(job_id),
         'worker_alive': worker.is_alive(),
@@ -944,12 +977,115 @@ def manifest(job_id: int, request: Request):
     return {
         'job': db.job_dict(job),
         'videos': [db.video_dict(v, tids.get(v['video_id'])) for v in db.videos(c, job_id)],
-        'terms': [{'id': t['id'], 'term': t['term'], 'lang': t['lang'],
-                   'english_gloss': t['english_gloss'], 'source': t['source'],
-                   'hits': t['hits'], 'videos': hits.get(t['id'], 0)}
+        'terms': [db.term_dict(t, hits.get(t['id'], 0))
                   for t in db.terms(c, job_id)],
         'counts': db.counts(c, job_id),
     }
+
+
+# ------------------------------------------------------------ the term review
+# The owner, 2026-08-30: "youtube downloader should show a list of the search
+# terms it is going to use (for chinese ones, it should show a translation in
+# brackets). They begin all ticked and then you can untick individual ones or
+# untick all, or tick all."
+#
+# TWO routes and not one, deliberately. Ticking is a decision about the job;
+# continuing is a decision to spend twenty minutes of YouTube requests. Folding
+# them together would mean either a page that posts every tick (a round trip
+# per checkbox, on a handler that shares its process with the fleet status
+# page) or a single call whose failure leaves nobody able to say whether the
+# ticks landed. The SPA ticks in the browser, posts the set ONCE, and only then
+# asks for the search.
+
+class TermSelection(BaseModel):
+    # Term ids, or the query text itself. Both, because both are things a
+    # caller genuinely has: the SPA holds the ids its last poll gave it, and a
+    # script driving this by hand has the strings it just read.
+    enabled: list[str | int] = []
+
+
+def _reviewing_or_409(c, job_id, user):
+    """The job, if it is parked at the term review. Else 409.
+
+    The phase is the permission: before it the terms do not exist yet, and
+    after it the search has already run on them, so a tick arriving late would
+    describe a job that is not the one that ran.
+    """
+    job = _job_or_404(c, job_id, user)
+    if job['phase'] != 'terms_review':
+        raise HTTPException(409, {
+            'detail': f'this job is {job["phase"]}, not waiting for you to '
+                      f'pick its search terms',
+            'phase': job['phase']})
+    return job
+
+
+@router.post('/api/jobs/{job_id}/terms')
+def set_terms(job_id: int, req: TermSelection, request: Request):
+    """Tick exactly these terms and untick the rest.
+
+    The WHOLE set every time, never a delta: the page knows what it is showing
+    and one post that says so cannot half-apply. UNTICK ALL is the empty list,
+    which is accepted here (it is a legal thing to be looking at) and refused by
+    the continue below, where it would mean a search of nothing.
+    """
+    user = current_user(request)
+    c = con()
+    _reviewing_or_409(c, job_id, user)
+    n = db.set_terms_enabled(c, job_id, req.enabled)
+    return {'ok': True, 'enabled': n,
+            'total': len(db.terms(c, job_id))}
+
+
+@router.post('/api/jobs/{job_id}/terms/continue')
+def continue_terms(job_id: int, request: Request):
+    """SEARCH WITH THESE: leave the review and start searching.
+
+    terms_total is rewritten here as well as in the search phase, so the
+    progress bar is right on the very first poll after the button rather than
+    counting up to a total that includes terms nobody is going to search.
+    """
+    user = current_user(request)
+    c = con()
+    _reviewing_or_409(c, job_id, user)
+    enabled = db.enabled_terms(c, job_id)
+    if not enabled:
+        raise HTTPException(400, 'tick at least one search term: a search with '
+                                 'none of them would find nothing')
+    db.set_job(c, job_id, terms_total=len(enabled))
+    db.set_phase(c, job_id, 'searching')
+    worker.nudge()
+    return {'ok': True, 'phase': 'searching', 'terms': len(enabled)}
+
+
+# ------------------------------------------------------------------ the queue
+
+class QueueMove(BaseModel):
+    position: int = 1
+
+
+@router.post('/api/jobs/{job_id}/queue/move')
+def move_queued_job(job_id: int, req: QueueMove, request: Request):
+    """[ UP ] / [ DOWN ] on the QUEUE list: put this job at `position`.
+
+    1-based, clamped rather than validated -- [ UP ] on the first row is a
+    no-op an editor will press, not an error worth a toast. A job that is not
+    in the queue any more (the worker started it while the page was deciding)
+    is a 409 with its phase in it, so the SPA can re-render instead of guessing.
+
+    Cancelling a queued job is not here: POST /api/jobs/{id}/cancel already
+    does it, and `queued` is one of db.IDLE, so it ends outright.
+    """
+    user = current_user(request)
+    c = con()
+    job = _job_or_404(c, job_id, user)
+    order = db.move_in_queue(c, user, job_id, req.position)
+    if order is None:
+        raise HTTPException(409, {
+            'detail': f'this job is {job["phase"]}, not waiting in the queue',
+            'phase': job['phase']})
+    return {'ok': True, 'queue': [db.queue_dict(j, i) for i, j in
+                                  enumerate(db.queued_jobs(c, user), start=1)]}
 
 
 class Toggle(BaseModel):
@@ -1029,10 +1165,14 @@ def start_download(job_id: int, request: Request):
                       'is nothing to retry. Start a new search.',
             'phase': job['phase']})
     if job['phase'] in ('done', 'failed'):
-        # Reviving a finished job makes it active again, and one editor gets
-        # one active job -- in the database as well as here (YTDL-25). A failed
-        # job is terminal too, so db.active_job never returns THIS one.
-        running = db.active_job(c, user)
+        # Reviving a finished job puts it straight into `downloading` with no
+        # queue entry to wait in, so it is the one path where the old one-job
+        # rule still has to hold -- but against a BUSY job only (2026-08-30). A
+        # search of this editor's parked at terms_review or ready_for_review is
+        # waiting for them, not running, and refusing a retry because of it
+        # would be the YTDL-25 block back again in the one place it was never
+        # about.
+        running = db.busy_job(c, user)
         if running is not None:
             raise _one_job_409(running)
 

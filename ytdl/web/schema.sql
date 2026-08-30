@@ -83,10 +83,27 @@ CREATE TABLE IF NOT EXISTS jobs (
     -- filter; `period` above is its fixed windows).
     date_from        TEXT,
     date_to          TEXT,
-    -- queued > generating_terms > searching > enriching > filtering >
-    -- ready_for_review > downloading > done | failed | cancelled
+    -- queued > generating_terms > terms_review > searching > enriching >
+    -- filtering > ready_for_review > downloading > done | failed | cancelled
     -- (kind='urls' skips the middle: queued > downloading > done)
     phase            TEXT NOT NULL DEFAULT 'queued',
+    -- WHERE THIS JOB SITS IN ITS EDITOR'S QUEUE (2026-08-30). One job RUNS per
+    -- editor; the rest wait at `queued` in this order, which is the order the
+    -- SPA's QUEUE list shows and [ UP ]/[ DOWN ] rewrite. Per editor, 1-based,
+    -- and only meaningful while the phase is `queued` -- a job that has started
+    -- keeps whatever number it was given, and nothing reads it again. On an
+    -- existing database this arrives via migrations/012; every row there is
+    -- terminal or already running, so 0 (the default) is honest for all of them.
+    queue_position   INTEGER NOT NULL DEFAULT 0,
+    -- SKIP THE TERM REVIEW (2026-08-30). 0 is the SPA's job: the editor sees
+    -- the generated queries at `terms_review`, unticks what they do not want,
+    -- and presses SEARCH WITH THESE. 1 is the headless path a script takes --
+    -- POST /api/jobs {auto_terms: true} -- which goes straight from
+    -- generating_terms to searching with every term enabled. Stored per job for
+    -- the reason shot_types and max_candidates are: a job that sat queued over
+    -- a restart must resume as the caller submitted it, and there is nobody
+    -- watching a script's job to press the button for it.
+    auto_terms       INTEGER NOT NULL DEFAULT 0,
     -- Carries a machine-readable prefix the SPA maps to ops hint text:
     -- claude_auth: / claude_missing: / claude_timeout: / claude_output: .
     error            TEXT,
@@ -137,6 +154,22 @@ CREATE TABLE IF NOT EXISTS job_terms (
     term          TEXT NOT NULL,
     lang          TEXT NOT NULL,             -- 'en' | 'zh'
     english_gloss TEXT,                      -- literal translation; zh terms only
+    -- What the term review shows in brackets (2026-08-30, the owner: "for
+    -- chinese ones, it should show a translation in brackets"). It is
+    -- english_gloss for a query Claude wrote, and NULL for a query that is
+    -- already English -- a separate column because the two are asked different
+    -- questions: english_gloss is the manifest's readability guarantee for a zh
+    -- query (REQ 5), this is "what to print after this row's term, if
+    -- anything", and the editor's OWN term can have one where no gloss was ever
+    -- generated.
+    translation   TEXT,
+    -- Will this term actually be searched? Every term arrives ticked; the
+    -- editor unticks the ones they do not want at `terms_review` and
+    -- worker._phase_search only ever looks at the ones left (2026-08-30).
+    -- DEFAULT 1 so every path that writes a term -- including migrations/012 on
+    -- a database full of finished searches -- means "searched", which is what
+    -- every term before this actually was.
+    enabled       INTEGER NOT NULL DEFAULT 1,
     source        TEXT NOT NULL,             -- 'user' | 'claude'
     searched      INTEGER DEFAULT 0,
     hits          INTEGER DEFAULT 0,
@@ -212,15 +245,19 @@ CREATE INDEX IF NOT EXISTS idx_videos_job    ON job_videos(job_id, id);
 CREATE INDEX IF NOT EXISTS idx_videos_state  ON job_videos(job_id, dl_state);
 CREATE INDEX IF NOT EXISTS idx_jvt_term      ON job_video_terms(job_id, term_id);
 
--- One non-terminal job per editor, in the database rather than only in the
--- handler: create_job's check is read-then-insert and a double-clicked SEARCH
--- fits between the two (YTDL-25, 2026-08-11). routes_api turns the
--- IntegrityError into the same 409 the read check gives. On an existing
--- database this arrives via migrations/003, which retires the duplicate active
--- jobs an unguarded create_job may already have written -- without that, this
--- statement raises and ensure_schema takes /ytdl down.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_one_active ON jobs(created_by)
-    WHERE phase NOT IN ('done', 'failed', 'cancelled');
+-- THE QUEUE (2026-08-30). There used to be a UNIQUE index here --
+-- idx_jobs_one_active, one non-terminal job per editor (YTDL-25) -- and a
+-- double-clicked SEARCH was the reason: create_job's check is read-then-insert
+-- and the second click fits between the two. An editor may now have as many
+-- jobs as they like, waiting at `queued` in queue_position order, so the
+-- uniqueness is gone (migrations/012 drops it) and the double click it guarded
+-- is no longer an error at all: the second job simply queues behind the first,
+-- which is what the editor was trying to say.
+--
+-- What replaces it is an ORDINARY index, because db.claim_next_job now asks
+-- "does this job's editor already have a busy one" on every tick.
+CREATE INDEX IF NOT EXISTS idx_jobs_queue
+    ON jobs(created_by, phase, queue_position, id);
 
 -- The rights/ToS attestation record (attestation.py, 2026-08-17). One row per
 -- (editor, wording version) -- a re-worded notice adds a row rather than

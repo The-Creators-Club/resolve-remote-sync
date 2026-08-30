@@ -311,9 +311,16 @@ def _tick(c):
 
 
 # The phase machine. A phase with no handler is one the worker does not own:
-# `ready_for_review` is waiting for the editor, the three terminal phases are
-# over. Ordering is the dict's, but nothing reads it in order -- each handler
-# names its own successor, which is what makes a half-finished job resumable.
+# `terms_review` and `ready_for_review` are waiting for the editor, the three
+# terminal phases are over. Ordering is the dict's, but nothing reads it in
+# order -- each handler names its own successor, which is what makes a
+# half-finished job resumable.
+#
+# `terms_review` (2026-08-30) is a no-op wait in the plainest possible sense:
+# it is ABSENT here, so run_job's `handler is None` returns and the loop moves
+# on to somebody else's job. There is no timer on it and no default -- the job
+# sits there until a person presses SEARCH WITH THESE or CANCEL, exactly as
+# ready_for_review has always sat.
 def _handlers():
     return {
         'queued': _phase_start,
@@ -413,10 +420,22 @@ def _phase_generate_terms(c, job):
     a job whose expansion is thin still searches what was actually asked for --
     and under the `exact` scope it is the ONLY term: no model call at all,
     which also means an exact search runs with the AI provider down.
+
+    Ends at `terms_review` (2026-08-30), not at `searching`: the editor sees
+    the queries, unticks the ones they do not want and presses SEARCH WITH
+    THESE. Two jobs skip the stop, and both for the same reason -- there is
+    nothing to review:
+
+      - `exact`, which has exactly ONE term, the editor's own text, generated
+        by nobody. Parking that in front of them to confirm what they just
+        typed would be a click for no information;
+      - `auto_terms`, the headless path (POST /api/jobs {auto_terms: true}).
+        Nobody is watching a script's job to press the button for it, so it
+        would sit at the review until it was cancelled.
     """
     job_id = job['id']
-    db.add_term(c, job_id, job['term'],
-                'zh' if _looks_chinese(job['term']) else 'en', 'user')
+    term_id = db.add_term(c, job_id, job['term'],
+                          'zh' if _looks_chinese(job['term']) else 'en', 'user')
 
     # The mode, the shot types and the scope come off the JOB ROW, not from a
     # default here: a job that sat queued over a restart must be expanded
@@ -439,16 +458,35 @@ def _phase_generate_terms(c, job):
                      job_id, config.MAX_TERMS)
             break
         db.add_term(c, job_id, item['q'], item['lang'], 'claude',
-                    item.get('english_gloss'))
+                    item.get('english_gloss'), item.get('translation'))
 
+    # The EDITOR'S OWN term, glossed from the reply that is already in hand.
+    # It is written before the model is asked anything, so it is the one row
+    # that can have no translation of its own -- and for a topic typed in
+    # Chinese it is the row most in need of one. Matched on the text: the model
+    # routinely echoes the editor's phrase back as one of its queries, and when
+    # it does not, the bracket is simply absent (no second call is made for it).
+    for item in generated:
+        if str(item.get('q') or '').strip() == str(job['term']).strip():
+            db.set_translation(c, term_id, item.get('translation'))
+            break
+
+    # Every term arrives ticked, so this is the whole list either way -- but it
+    # is recounted in _phase_search from the ENABLED ones, which is the number
+    # that ends up on the bar.
     db.set_job(c, job_id, terms_total=len(db.terms(c, job_id)))
-    db.set_phase(c, job_id, 'searching')
+    db.set_phase(c, job_id,
+                 'searching' if db.auto_terms_of(job) else 'terms_review')
 
 
 # ----------------------------------------------------------- 2. the search
 
 def _phase_search(c, job):
-    """One flat search per term; merge by video id, attribute every hit.
+    """One flat search per TICKED term; merge by video id, attribute every hit.
+
+    Ticked is db.unsearched_terms' own filter since 2026-08-30: a term the
+    editor unticked at the review is not searched late or searched quietly, it
+    is never looked at, and it is not in terms_total either.
 
     A term that fails is logged and marked searched with 0 hits rather than
     failing the job: YouTube rate-limiting one query out of twenty is normal,
@@ -490,6 +528,14 @@ def _phase_search(c, job):
     # than per-run.
     have = {v['video_id'] for v in db.videos(c, job_id)}
     capped = False
+
+    # terms_total counts the TICKED terms and nothing else (2026-08-30). Set
+    # here rather than only where the review continues, because this is the
+    # phase the number describes: a job resumed from `searching` after a
+    # container restart, and one that never stopped at the review at all, both
+    # arrive with a count that has to match the loop below or the bar reads
+    # "searched 9/24" and stops.
+    db.set_job(c, job_id, terms_total=len(db.enabled_terms(c, job_id)))
 
     first = True
     for term in db.unsearched_terms(c, job_id):

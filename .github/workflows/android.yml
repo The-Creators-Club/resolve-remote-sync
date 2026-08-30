@@ -33,15 +33,14 @@
 
 name: android
 
+# PROVEN GREEN 2026-08-30 on branch mobile-m5, run 33288180532: a real signed
+# APK (880 KB) and AAB (1.0 MB) against the fixture, package
+# n1.n0.n0.n127.ccsync, fingerprint printed in the summary. GitHub only offers
+# workflow_dispatch for a workflow already on the DEFAULT branch, so that run
+# needed a temporary `push` trigger on the builder's branch; it was deleted in
+# the commit after. Do not re-add one: a push must never build an APK.
+
 on:
-  # TEMPORARY, 2026-08-30: GitHub only offers workflow_dispatch for a workflow
-  # that already exists on the DEFAULT branch, so this one cannot be dispatched
-  # until it merges -- and the plan requires it to have run green once from the
-  # builder's branch first. This trigger is that proof, and the commit that
-  # follows the green run deletes it. Never widen it: a push must not build an
-  # APK.
-  push:
-    branches: ["mobile-m5"]
   workflow_dispatch:
     inputs:
       origin:
@@ -75,8 +74,9 @@ jobs:
       # The three inputs, resolved ONCE into the environment and never
       # interpolated into a `run:` body. `${{ inputs.origin }}` written inline
       # in a shell line is a script-injection sink -- whoever can dispatch the
-      # workflow writes the command. Through env it is a value, and the
-      # defaults are what a `push` proving-run (see the trigger above) gets.
+      # workflow writes the command. The `||` defaults are the belt: a
+      # dispatch that omits an optional input gets the documented value rather
+      # than an empty string in a shell argument.
       ORIGIN: ${{ github.event.inputs.origin || 'http://127.0.0.1:8765' }}
       PACKAGE_NAME: ${{ github.event.inputs.package_name || '' }}
       SERVE_FIXTURE: ${{ github.event.inputs.serve_fixture || 'true' }}

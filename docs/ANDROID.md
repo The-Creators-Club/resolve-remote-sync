@@ -54,7 +54,8 @@ re-check on every launch.
     gh workflow run android.yml -f origin=https://nas.example.ts.net:9443 -f serve_fixture=false
 
 `workflow_dispatch` only -- an APK is a decision, not a consequence of a push.
-Inputs:
+(GitHub only offers a dispatch for a workflow that is already on the default
+branch, so this works once the branch has merged.) Inputs:
 
 | input | meaning |
 |---|---|

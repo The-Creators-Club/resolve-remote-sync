@@ -9,28 +9,30 @@
   <div class="side-head">[ SYNC QUEUE: {{ queue.editor | upper }} ]
     <span class="muted">one project at a time, top to bottom</span></div>
   {% if queue.queue %}
-    <table class="editors">
+    {# Stacks on a phone (MOBILE_PLAN.md M2, 2026-08-30): one queued project
+       becomes a card of labelled rows, with [ UNTICK ] as its own thumb row. #}
+    <table class="editors stack">
       <tbody>
       {% for item in queue.queue %}
         <tr class="editor-row {{ 'current-row' if item.is_current }}">
-          <td class="mono-sm muted">{{ loop.index }}.</td>
-          <td><span class="dot {{ item.status }}">●</span></td>
-          <td><span class="who">{{ item.label }}</span>
+          <td class="mono-sm muted" data-label="#">{{ loop.index }}.</td>
+          <td data-label="STATUS"><span class="dot {{ item.status }}">●</span></td>
+          <td data-label="PROJECT"><span class="who">{{ item.label }}</span>
               {% if item.is_current %}<span class="chip amber">[ SYNCING NOW ]</span>{% endif %}
               {% if item.upload_only %}<span class="chip amber" title="upload only: video originals go to the server, nothing comes down">[ UPLOAD ONLY ]</span>{% endif %}
               {% if item.missing_project %}<span class="chip red" title="project no longer exists on the server">[ GONE ]</span>{% endif %}
               {% for inc in item.includes %}
               <div class="muted mono-sm">shares {{ inc.sub_rel }} from {{ inc.lender_label }}</div>
               {% endfor %}</td>
-          <td class="mono">{% if item.upload_only %}<span class="muted" title="no shared folder on this computer: only lane A runs, see TRANSFERS for what is left to upload">originals up only</span>{% elif item.completion is not none %}<span class="cssbar"><span class="fill" style="width:{{ [[item.completion, 100] | min, 0] | max }}%"></span></span> {{ "%.0f" | format(item.completion) }}%{% else %}<span class="muted">no data yet</span>{% endif %}</td>
-          <td class="mono-sm">
+          <td class="mono" data-label="SYNCED">{% if item.upload_only %}<span class="muted" title="no shared folder on this computer: only lane A runs, see TRANSFERS for what is left to upload">originals up only</span>{% elif item.completion is not none %}<span class="cssbar"><span class="fill" style="width:{{ [[item.completion, 100] | min, 0] | max }}%"></span></span> {{ "%.0f" | format(item.completion) }}%{% else %}<span class="muted">no data yet</span>{% endif %}</td>
+          <td class="mono-sm" data-label="LEFT">
             {% if item.need_items %}{{ item.need_items }} files · {{ item.need_bytes | human_bytes }}
               {% if item.rate_bytes_per_sec and item.rate_bytes_per_sec > 1 %} · {{ item.rate_bytes_per_sec | human_bytes }}/s{% endif %}
               {% if item.eta_seconds %} · ETA {{ item.eta_seconds | eta }}{% endif %}
             {% elif item.completion == 100 %}<span class="dot green">●</span> synced
             {% else %}-{% endif %}
           </td>
-          <td><button class="btn" hx-post="/partials/selection/{{ queue.editor }}/{{ item.slug }}/toggle"
+          <td data-label=""><button class="btn tap" hx-post="/partials/selection/{{ queue.editor }}/{{ item.slug }}/toggle"
                       {% if queue.machines %}
                       {# DASH-8 (2026-08-28): every computer this person owns. #}
                       hx-confirm="This removes {{ item.label }} from {{ queue.editor }}'s {{ queue.machines | length }} computer{{ 's' if queue.machines | length != 1 }} ({{ queue.machines | join(', ') }}). Their copies stay on disk; nothing new comes down and proxy sync stops for it."

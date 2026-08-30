@@ -3,9 +3,12 @@
   <h1>LIVE TRANSFERS</h1>
   <span class="muted mono-sm">{{ transfers.fleet_speed_bps | human_bytes }}/s total</span>
 </div>
-<div class="rule">{{ "─" * 100 }}</div>
+<div class="rule"></div>
 {% if transfers.transfers %}
-<table class="editors">
+{# Both tables stack on a phone (MOBILE_PLAN.md M2, 2026-08-30): a file name
+   is the widest thing on this page and the one nobody can afford to have
+   cropped, so it gets a row of its own rather than a column to scroll to. #}
+<table class="editors stack">
   <thead><tr>
     {% if scope_admin %}<th>EDITOR</th>{% endif %}
     <th></th><th>FILE</th><th>PROGRESS</th><th>SPEED</th><th>ETA</th>
@@ -13,12 +16,12 @@
   <tbody>
   {% for t in transfers.transfers %}
     <tr>
-      {% if scope_admin %}<td class="who">{{ t.editor }}</td>{% endif %}
-      <td class="mono">{{ "⇡" if t.direction == "up" else "⇣" }}</td>
-      <td class="mono-sm">{{ t.name }}{% if t.granularity == "project" %} <span class="chip">lane C</span>{% endif %}</td>
-      <td class="mono">{% if t.percentage is not none %}<span class="cssbar"><span class="fill" style="width:{{ [[t.percentage, 100] | min, 0] | max }}%"></span></span> {{ "%.0f" | format(t.percentage) }}%{% else %}-{% endif %}</td>
-      <td class="mono-sm">{% if t.speed_bps %}{{ t.speed_bps | human_bytes }}/s{% else %}-{% endif %}</td>
-      <td class="muted">{{ t.eta_seconds | eta if t.eta_seconds else "-" }}</td>
+      {% if scope_admin %}<td class="who" data-label="EDITOR">{{ t.editor }}</td>{% endif %}
+      <td class="mono" data-label="DIRECTION">{{ "⇡" if t.direction == "up" else "⇣" }}</td>
+      <td class="mono-sm path" data-label="FILE" title="{{ t.name }}">{{ t.name }}{% if t.granularity == "project" %} <span class="chip">lane C</span>{% endif %}</td>
+      <td class="mono" data-label="PROGRESS">{% if t.percentage is not none %}<span class="cssbar"><span class="fill" style="width:{{ [[t.percentage, 100] | min, 0] | max }}%"></span></span> {{ "%.0f" | format(t.percentage) }}%{% else %}-{% endif %}</td>
+      <td class="mono-sm" data-label="SPEED">{% if t.speed_bps %}{{ t.speed_bps | human_bytes }}/s{% else %}-{% endif %}</td>
+      <td class="muted" data-label="ETA">{{ t.eta_seconds | eta if t.eta_seconds else "-" }}</td>
     </tr>
   {% endfor %}
   </tbody>
@@ -53,7 +56,7 @@
     </summary>
     <ul class="clip-list">
       {% for f in q.files %}
-        <li><span class="clip-name">{{ f.name }}</span><span class="muted mono-sm">{{ f.size | human_bytes if f.size is not none else "" }}</span></li>
+        <li><span class="clip-name" title="{{ f.name }}">{{ f.name }}</span><span class="muted mono-sm">{{ f.size | human_bytes if f.size is not none else "" }}</span></li>
       {% endfor %}
       {% if q.truncated %}<li class="muted">… and {{ q.n_files - (q.files | length) }} more</li>{% endif %}
       {% if q.manifest_truncated %}<li class="muted">(this machine's manifest was capped; totals may undercount)</li>{% endif %}
@@ -65,14 +68,14 @@
   <span class="muted">recently completed files (companion reports + files arriving at the server; kept 7 days)</span>
 </div>
 {% if transfers.history %}
-<table class="editors">
+<table class="editors stack">
   <tbody>
   {% for h in transfers.history %}
     <tr>
-      {% if scope_admin %}<td class="who">{{ h.editor }}</td>{% endif %}
-      <td class="mono">{{ "⇡" if h.direction == "up" else "⇣" }}</td>
-      <td class="mono-sm">{{ h.name }}</td>
-      <td class="muted">{{ h.completed_at | ago }}</td>
+      {% if scope_admin %}<td class="who" data-label="EDITOR">{{ h.editor }}</td>{% endif %}
+      <td class="mono" data-label="DIRECTION">{{ "⇡" if h.direction == "up" else "⇣" }}</td>
+      <td class="mono-sm path" data-label="FILE" title="{{ h.name }}">{{ h.name }}</td>
+      <td class="muted" data-label="DONE">{{ h.completed_at | ago }}</td>
     </tr>
   {% endfor %}
   </tbody>

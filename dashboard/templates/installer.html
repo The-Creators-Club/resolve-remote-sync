@@ -9,7 +9,7 @@
    entry. #}
 {% block title %}CC SYNC: INSTALLER{% endblock %}
 {% block layout %}
-  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s" hx-swap="innerHTML">
+  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
   </aside>
   <main class="main">
@@ -17,6 +17,15 @@
       <span class="muted">The full clean-install and repair package for a new editor
         machine. Save it to the machine's own disk: running it off the shared drive
         locks the file for everyone and the wizard refuses it.</span></div>
+
+    {# On a phone this page cannot do what it is for: the companion runs on
+       the editor's own computer, and an Android browser is not it. So the
+       phone gets one sentence saying what the download is FOR before it
+       offers two of them (MOBILE_PLAN.md M2, 2026-08-30). The picks stack
+       below --bp-phone; the desktop keeps its two columns. #}
+    <div class="muted phone-only installer-phone-note">On a phone: this package
+      cannot be run here. Download it and send it to the editor's own computer,
+      Windows or macOS, and run it there.</div>
 
     <div class="installer-picks">
       {% for plat, label in [("windows", "WINDOWS"), ("macos", "MACOS")] %}
@@ -30,7 +39,7 @@
               published {{ pkg.published_at | ago }}
             </div>
             <div class="muted mono-sm" title="{{ pkg.sha256 }}">sha256 {{ pkg.sha256[:16] }}…</div>
-            <a class="btn" href="/download/{{ plat }}">[ DOWNLOAD {{ label }} ]</a>
+            <a class="btn tap" href="/download/{{ plat }}">[ DOWNLOAD {{ label }} ]</a>
           {% else %}
             {# Not an error banner: a fleet that has never published a Mac
                package is a normal state, not a fault. #}

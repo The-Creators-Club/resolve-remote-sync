@@ -3,7 +3,7 @@
   <h1>{{ project.label }}</h1>
   {% if not project.active %}<span class="chip red">[ FOLDER REMOVED ]</span>{% endif %}
 </div>
-<div class="muted mono-sm">{{ project.path }} · folder id {{ project.slug }}</div>
+<div class="muted mono-sm path" title="{{ project.path }}">{{ project.path }} · folder id {{ project.slug }}</div>
 {% if project.folder_error or project.folder_state in ("error", "stopped") %}
 <div class="mono-sm"><span class="chip red">[ SYNCTHING FOLDER {{ (project.folder_state or "error") | upper }} ]</span>
   {# trim('.') so a Syncthing error that already ends in a full stop does not
@@ -35,7 +35,7 @@
        polling div AND the entire MEDIA PRESENCE panel (page frozen and bins
        gone until a manual reload). #}
     {% set whom = "ME" if tick_for == session_user else tick_for | upper %}
-    <button class="btn {{ 'acting' if tick_for != session_user }}"
+    <button class="btn tap {{ 'acting' if tick_for != session_user }}"
             hx-post="/partials/selection/{{ tick_for }}/{{ project.slug }}/toggle?view=project&slug_page={{ project.slug }}{{ as_qs if as_qs is defined }}"
             {% if tick_for in pickers and toggle_editor_machines is defined and toggle_editor_machines %}
             {# DASH-8 (2026-08-28): person-level, so it comes off every
@@ -63,7 +63,7 @@
     {% if tick_for not in pickers and toggle_editor_machines is defined and toggle_editor_machines | length > 1 %}
     <div class="mono-sm muted" style="margin-top:0.3rem">or one computer at a time:
       {% for m in toggle_editor_machines %}
-      <button class="btn {{ 'acting' if tick_for != session_user }}"
+      <button class="btn tap {{ 'acting' if tick_for != session_user }}"
               title="sync this project to {{ m }} only"
               hx-post="/partials/selection/{{ tick_for }}/{{ project.slug }}/toggle?view=project&machine={{ m | urlencode }}&slug_page={{ project.slug }}{{ as_qs if as_qs is defined }}"
               hx-target="#project-detail" hx-swap="innerHTML">[ {{ m | upper }} ]</button>
@@ -74,13 +74,13 @@
        nothing comes down. A SET, not a toggle: pressing it on a full tick
        switches the mode, and the button flips to offer the way back. #}
     {% if modes.get(tick_for) == "upload_only" %}
-    <button class="btn {{ 'acting' if tick_for != session_user }}"
+    <button class="btn tap {{ 'acting' if tick_for != session_user }}"
             title="download this project's proxies and shared files as well: the normal sync"
             hx-post="/partials/selection/{{ tick_for }}/{{ project.slug }}/toggle?view=project&mode=full&slug_page={{ project.slug }}{{ as_qs if as_qs is defined }}"
             hx-target="#project-detail" hx-swap="innerHTML">
       [ SWITCH TO FULL SYNC ]</button>
     {% else %}
-    <button class="btn {{ 'acting' if tick_for != session_user }}"
+    <button class="btn tap {{ 'acting' if tick_for != session_user }}"
             title="for footage you already have on this computer: send the video originals to the server and download nothing (no proxies, no shared project files)"
             hx-post="/partials/selection/{{ tick_for }}/{{ project.slug }}/toggle?view=project&mode=upload_only&slug_page={{ project.slug }}{{ as_qs if as_qs is defined }}"
             hx-target="#project-detail" hx-swap="innerHTML">
@@ -105,7 +105,7 @@
       <form style="display:inline" hx-post="/partials/project/{{ project.slug }}/links/remove"
             hx-target="#project-detail" hx-swap="innerHTML">
         <input type="hidden" name="path" value="{{ l.declared_path }}">
-        <button class="btn" title="stop sharing this folder into {{ project.label }} (nothing on disk is deleted)">[ UNSHARE ]</button>
+        <button class="btn tap" title="stop sharing this folder into {{ project.label }} (nothing on disk is deleted)">[ UNSHARE ]</button>
       </form>
       {% endif %}
     </div>
@@ -119,7 +119,7 @@
     <input type="text" name="path" size="60"
            placeholder="share a folder from another project, e.g. 2026/FF5/Elections/Interviewees/..."
            title="paste a folder that lives inside ANOTHER project; anyone syncing this project will receive it at its original path">
-    <button class="btn">[ SHARE A FOLDER INTO THIS PROJECT ]</button>
+    <button class="btn tap">[ SHARE A FOLDER INTO THIS PROJECT ]</button>
   </form>
   {% if link_error %}<span class="chip red">[ ! ]</span> <span class="muted">{{ link_error }}</span>{% endif %}
 </div>
@@ -137,7 +137,7 @@
      path and a destination select that keeps the last project you looked at.
      htmx:confirm rather than hx-confirm because hx-confirm is a static
      string; issueRequest(true) is what lets the request through afterwards. #}
-  <form style="display:inline" hx-post="/partials/project/{{ project.slug }}/move"
+  <form class="move-form" style="display:inline" hx-post="/partials/project/{{ project.slug }}/move"
         hx-target="#project-detail" hx-swap="innerHTML"
         hx-on::confirm="event.preventDefault();
           var f = this;
@@ -166,7 +166,7 @@
     / <input type="text" name="to_path" size="30"
            placeholder="folder in that project, e.g. Interviewees/Pangolin"
            title="the folder to put it in (its own name is kept); leave blank for the project root">
-    <button class="btn" title="moves the file and its proxies on the server, then every computer that has it moves its own copy and relinks Resolve">[ MOVE ON THE SERVER AND ON EVERY MACHINE ]</button>
+    <button class="btn tap" title="moves the file and its proxies on the server, then every computer that has it moves its own copy and relinks Resolve">[ MOVE ON THE SERVER AND ON EVERY MACHINE ]</button>
   </form>
   {% if move_error is defined and move_error %}<span class="chip red">[ ! ]</span> <span class="muted">{{ move_error }}</span>{% endif %}
   {% if move_done is defined and move_done and move_done.proxies_failed %}
@@ -198,7 +198,7 @@
             hx-target="#project-detail" hx-swap="innerHTML">
         <input type="hidden" name="editor" value="{{ t.editor_username }}">
         <input type="hidden" name="machine" value="{{ t.machine }}">
-        <button class="btn" title="offer this move to that computer again on its next report">[ ASK THAT COMPUTER AGAIN ]</button>
+        <button class="btn tap" title="offer this move to that computer again on its next report">[ ASK THAT COMPUTER AGAIN ]</button>
       </form>
       {% endif %}
     </div>
@@ -228,7 +228,7 @@
       <form style="display:inline" hx-post="/partials/project/{{ project.slug }}/moves/{{ m.id }}/undo"
             hx-target="#project-detail" hx-swap="innerHTML"
             hx-confirm="Move {{ m.to_project_rel }}/{{ m.to_rel }} back to {{ m.from_project_rel }}/{{ m.from_rel }} on the server, and tell every computer that holds it to move its copy back and relink Resolve? Proxies go back with it.">
-        <button class="btn" title="put this move back: the same move in reverse, on the server and on every computer">[ UNDO THIS MOVE ]</button>
+        <button class="btn tap" title="put this move back: the same move in reverse, on the server and on every computer">[ UNDO THIS MOVE ]</button>
       </form>
       {% endif %}
       {% for t in m.targets %}
@@ -250,10 +250,12 @@
   {% endfor %}
 </div>
 {% endif %}
-<div class="rule">{{ "─" * 100 }}</div>
+<div class="rule"></div>
 
 {% if project.editors %}
-<table class="editors">
+{# Stacks on a phone (MOBILE_PLAN.md M2, 2026-08-30): nine columns of one
+   editor's numbers become nine labelled rows. #}
+<table class="editors stack">
   <thead>
     <tr><th></th><th>EDITOR</th><th title="proxies + shared project files, by size. Camera originals live on the server and are not counted">SYNCED</th><th>HAS</th><th>MISSING</th>
         <th>MEDIA</th><th>LANES</th><th>LAST SEEN</th><th></th></tr>
@@ -261,44 +263,44 @@
   <tbody>
   {% for e in project.editors %}
     <tr class="editor-row">
-      <td><span class="dot {{ e.status }}">●</span></td>
-      <td>
+      <td data-label="STATUS"><span class="dot {{ e.status }}">●</span></td>
+      <td data-label="EDITOR">
         <span class="who">{{ e.display_name }}</span>
         {% if e.report_only and e.mode == "base" %}<span class="chip green" title="the base rig works directly off the NAS tree; nothing syncs to it">[ BASE ]</span>{% endif %}
         {% if e.unmapped %}<span class="chip amber" title="device not named after a TrueNAS username. Run accept_device.py --device-name">[ UNMAPPED ]</span>{% endif %}
         {% if not e.report_only %}<span class="conn {{ 'on' if e.connected else 'off' }}">{{ "online" if e.connected else "offline" }}</span>{% endif %}
       </td>
       {% if e.report_only %}
-      <td class="mono muted" title="no Syncthing device on this machine; lane C does not apply">-</td>
-      <td class="mono muted">-</td>
-      <td class="mono muted">-</td>
+      <td class="mono muted" data-label="SYNCED" title="no Syncthing device on this machine; lane C does not apply">-</td>
+      <td class="mono muted" data-label="HAS">-</td>
+      <td class="mono muted" data-label="MISSING">-</td>
       {% else %}
-      <td class="mono" title="everything this machine should hold: proxies + shared project files (originals stay on the server)"><span class="cssbar"><span class="fill" style="width:{{ [[e.synced_pct or 0, 100] | min, 0] | max }}%"></span></span> {{ "%.0f" | format(e.synced_pct or 0) }}%</td>
-      <td class="mono">{% if e.global_items is not none %}{{ e.have_items }} / {{ e.global_items }} files{% else %}-{% endif %}</td>
-      <td class="mono">{% if e.need_items %}{{ e.need_items }} files · {{ e.need_bytes | human_bytes }}{% else %}-{% endif %}</td>
+      <td class="mono" data-label="SYNCED" title="everything this machine should hold: proxies + shared project files (originals stay on the server)"><span class="cssbar"><span class="fill" style="width:{{ [[e.synced_pct or 0, 100] | min, 0] | max }}%"></span></span> {{ "%.0f" | format(e.synced_pct or 0) }}%</td>
+      <td class="mono" data-label="HAS">{% if e.global_items is not none %}{{ e.have_items }} / {{ e.global_items }} files{% else %}-{% endif %}</td>
+      <td class="mono" data-label="MISSING">{% if e.need_items %}{{ e.need_items }} files · {{ e.need_bytes | human_bytes }}{% else %}-{% endif %}</td>
       {% endif %}
-      <td class="mono">
+      <td class="mono" data-label="MEDIA">
         {% if e.media %}
           <span title="camera originals on this machine's disk / on the NAS">{{ e.media.n_originals }}/{{ project.nas_media.n_originals }} orig</span>
           · <span title="proxies on this machine's disk / on the NAS">{{ e.media.n_proxies }}/{{ project.nas_media.n_proxies }} proxy</span>
         {% else %}<span class="muted" title="no media manifest reported yet">-</span>{% endif %}
       </td>
-      <td>
+      <td class="lane-cell" data-label="LANES">
         {% for lane in e.lanes %}
           <span class="chip lane {{ lane.chip }}" title="{{ lane.lane }} on {{ lane.machine }}: {{ lane.state }}{% if lane.last_error %} ({{ lane.last_error }}){% endif %}">{{ lane.label }}:{{ lane.state }}</span>
         {% else %}
           <span class="muted" title="no companion report received">no reports</span>
         {% endfor %}
       </td>
-      <td class="muted">{{ (e.updated_at if e.report_only or e.connected else e.last_connected_at) | ago }}</td>
-      <td>
+      <td class="muted" data-label="LAST SEEN">{{ (e.updated_at if e.report_only or e.connected else e.last_connected_at) | ago }}</td>
+      <td data-label="">
         {% if e.need_items and e.device_id %}
-        <button class="btn" hx-get="/partials/project/{{ project.slug }}/missing/{{ e.device_id }}"
+        <button class="btn tap" hx-get="/partials/project/{{ project.slug }}/missing/{{ e.device_id }}"
                 hx-target="#missing-{{ loop.index }}" hx-swap="innerHTML">[ MISSING FILES ]</button>
         {% endif %}
       </td>
     </tr>
-    <tr><td colspan="9"><div id="missing-{{ loop.index }}" hx-preserve="true"></div></td></tr>
+    <tr><td colspan="9" data-label=""><div id="missing-{{ loop.index }}" hx-preserve="true"></div></td></tr>
   {% endfor %}
   </tbody>
 </table>

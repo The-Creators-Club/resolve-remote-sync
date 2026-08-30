@@ -2,16 +2,20 @@
 {% block title %}CC SYNC: TRANSFERS{% endblock %}
 {% block layout %}
   <aside class="sidebar" hx-get="/partials/sidebar?current={{ as_qs }}"
-         hx-trigger="every 30s" hx-swap="innerHTML">
+         hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
   </aside>
   {# The 2s poll moved off <main> onto an inner wrapper (2026-08-18): the swap
      is innerHTML, so anything rendered beside the partial inside the polled
      element -- the Settings strip -- would be thrown away two seconds after
-     the page painted. #}
+     the page painted.
+
+     The visibility filter is MOBILE_PLAN.md §3.4 (2026-08-30): nothing polls
+     while the page is hidden. 2 s is still the desktop's rate; pwa.js slows
+     it on a touch device. #}
   <main class="main">
     {% include "partials/settings_nav.html" %}
-    <div hx-get="/partials/transfers" hx-trigger="load, every 2s" hx-swap="innerHTML">
+    <div hx-get="/partials/transfers" hx-trigger="load, every 2s [document.visibilityState === 'visible']" hx-swap="innerHTML">
       {% include "partials/transfers.html" %}
     </div>
   </main>

@@ -575,7 +575,10 @@ def test_project_detail_tick_targets_only_its_own_fragment():
     assert 'hx-target="#project-detail"' in detail
     assert 'id="project-detail"' in page
     # the polling wrapper and the bins panel are still separate elements
-    assert 'hx-trigger="every 10s"' in page
+    # The trigger gained the visibility filter (MOBILE_PLAN.md §3.4,
+    # 2026-08-30); the 10s rate, which is what this test is about, did not
+    # change. Matched without the closing quote so the filter can ride along.
+    assert 'hx-trigger="every 10s' in page
     assert "/bins" in page
 
 

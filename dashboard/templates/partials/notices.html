@@ -25,10 +25,10 @@
       {% if n.fix %}<div class="mono-sm" style="margin-top:0.35rem">WHAT TO DO: {{ n.fix }}</div>{% endif %}
       <div class="muted mono-sm" style="margin-top:0.35rem">
         first seen {{ n.first_seen | ago }} · last seen {{ n.last_seen | ago }}
-        <form class="inline-form" hx-post="/partials/notices/{{ n.id }}/dismiss"
+        <form class="inline-form notice-dismiss" hx-post="/partials/notices/{{ n.id }}/dismiss"
               hx-target="#server-notices" hx-swap="outerHTML"
               hx-confirm="Dismiss this? It is only hidden. If the server finds the same problem again it comes straight back, so dismissing it is not a fix.">
-          <button class="btn" type="submit">[ DISMISS ]</button>
+          <button class="btn tap" type="submit">[ DISMISS ]</button>
         </form>
       </div>
     </div>

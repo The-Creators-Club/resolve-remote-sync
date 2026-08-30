@@ -120,7 +120,11 @@ def test_the_poll_swaps_the_wrapper_inside_the_panel_never_the_panel(client):
     assert "hx-get" not in panel_open_tag
     inner = panel[panel.index(">"):panel.index("LIVE TRANSFERS")]
     assert 'hx-get="/partials/transfers"' in inner
-    assert 'hx-trigger="every 2s"' in inner
+    # The rate is still 2s (MOBILE_PLAN.md M2, 2026-08-30). The trigger now
+    # also carries the visibility filter, so a phone in a pocket stops asking;
+    # the assertion pins the RATE and no longer the whole attribute, because
+    # the filter is appended to it.
+    assert "hx-trigger=\"every 2s [document.visibilityState === 'visible']\"" in inner
     assert 'hx-swap="innerHTML"' in inner
 
 

@@ -14,6 +14,11 @@
 //         `overflow-x: auto`, so the content column absorbs the overflow and
 //         the check above never fires even while the grid is dragging left
 //         and right under a thumb. See MEASURE and docs/mobile/SWEEP.md.
+//         Round 2 (2026-08-30) names the CULPRIT with it: the widest visible
+//         descendant reaching furthest past the container's content edge,
+//         its width, three ancestors, and whether it refuses to wrap. The
+//         container alone was `main.main` on every page, which told nobody
+//         which template to open.
 //   WARN  the smallest visible control among `button, a.chip, .btn, input,
 //         select` is under 44 px on either axis, with the selector
 //   WARN  the smallest computed font-size actually rendering text is under 12 px
@@ -161,6 +166,65 @@ const MEASURE = `(function () {
       + (p.className ? '.' + String(p.className).trim().split(/\\s+/)[0] : '') + ' > ' + s;
     return s;
   }
+  function sel1(el) {
+    // The element's OWN token, with no parent prefix: what the ancestor
+    // chain is made of, where sel()'s built-in parent would repeat itself.
+    if (!el) return '?';
+    if (el.id) return el.tagName.toLowerCase() + '#' + el.id;
+    var cls = (el.className && el.className.baseVal !== undefined
+      ? el.className.baseVal : String(el.className || '')).trim().split(/\s+/)
+      .filter(Boolean).slice(0, 2);
+    return el.tagName.toLowerCase() + (cls.length ? '.' + cls.join('.') : '');
+  }
+  function depth(el) {
+    var d = 0;
+    while (el.parentElement) { d++; el = el.parentElement; }
+    return d;
+  }
+  function culpritOf(box) {
+    // WHICH element makes the container scroll (round 2, 2026-08-30). Naming
+    // the container names the symptom: \`main.main\` is on every page and
+    // tells nobody which template to open. The edge to beat is the
+    // container's own content-box right edge in viewport coordinates, with
+    // the container scrolled to 0, which it is -- nothing has scrolled it.
+    var br = box.getBoundingClientRect();
+    var edge = br.left + box.clientLeft + box.clientWidth;
+    var best = null, bestOver = 1;
+    var kids = box.querySelectorAll('*');
+    for (var q = 0; q < kids.length; q++) {
+      var k = kids[q], kcs = getComputedStyle(k);
+      if (!shown(k, kcs)) continue;
+      var kr = k.getBoundingClientRect();
+      // Two ways an element reaches past the edge: its own box does, or its
+      // box fits and its CONTENT does not (a nowrap run inside a narrow cell).
+      var over = Math.max(kr.right, kr.left + k.scrollWidth) - edge;
+      if (over <= 1) continue;
+      // Deepest wins a tie: every ancestor of the real culprit reaches
+      // exactly as far, and the leaf is the one somebody can fix.
+      if (!best || over > bestOver + 1
+          || (Math.abs(over - bestOver) <= 1 && depth(k) > depth(best))) {
+        if (over > bestOver) bestOver = over;
+        best = k;
+      }
+    }
+    if (!best) return null;
+    var brr = best.getBoundingClientRect();
+    var reach = Math.max(brr.right, brr.left + best.scrollWidth);
+    var ws = getComputedStyle(best).whiteSpace;
+    var anc = [], up = best.parentElement, n = 0;
+    while (up && n < 3) { anc.push(sel1(up)); up = up.parentElement; n++; }
+    return {
+      selector: sel(best),
+      right: Math.round(reach),
+      past: Math.round(reach - edge),
+      width: Math.round(Math.max(brr.width, best.scrollWidth)),
+      white_space: ws,
+      // Only the two that REFUSE to wrap: pre-wrap and pre-line both do.
+      nowrap: ws === 'nowrap' || ws === 'pre',
+      text: (best.textContent || '').trim().slice(0, 60),
+      ancestors: anc,
+    };
+  }
   function shown(el, cs) {
     if (cs.display === 'none' || cs.visibility === 'hidden') return false;
     if (parseFloat(cs.opacity || '1') === 0) return false;
@@ -195,8 +259,12 @@ const MEASURE = `(function () {
     if (by <= 1) continue;
     if (!out.inner || by > out.inner.by) out.inner = {
       by: Math.round(by), scrollWidth: sc.scrollWidth, clientWidth: sc.clientWidth,
-      selector: sel(sc),
+      selector: sel(sc), culprit: null, _at: s,
     };
+  }
+  if (out.inner) {
+    out.inner.culprit = culpritOf(scrollers[out.inner._at]);
+    delete out.inner._at;
   }
   var els = document.querySelectorAll('button, a.chip, .btn, input, select');
   for (var i = 0; i < els.length; i++) {
@@ -256,8 +324,15 @@ function verdicts(m, pageName) {
   const over = m.scrollWidth - m.innerWidth;
   if (over > 0) fails.push('the PAGE scrolls sideways by ' + over + ' px'
     + ' (scrollWidth ' + m.scrollWidth + ' > innerWidth ' + m.innerWidth + ')');
-  if (m.inner) fails.push('content scrolls sideways by ' + m.inner.by + ' px  '
-    + m.inner.selector);
+  if (m.inner) {
+    const c = m.inner.culprit;
+    fails.push('content scrolls sideways by ' + m.inner.by + ' px  '
+      + m.inner.selector
+      + (c ? '  <- ' + c.selector + ' (' + c.width + ' px wide, ' + c.past
+             + ' px past the edge'
+             + (c.nowrap ? ', white-space: ' + c.white_space : '') + ')'
+           : '  <- nothing visible reaches past the edge'));
+  }
   if (m.tap && m.tap.min < TAP_MIN) warns.push('tap target ' + m.tap.w + 'x'
     + m.tap.h + ' px  ' + m.tap.selector);
   else if (!m.tap) warns.push('no visible tap target on the page at all');
@@ -371,20 +446,24 @@ function pad(s, n) { s = String(s); return s + ' '.repeat(Math.max(0, n - s.leng
   }
 
   // ------------------------------------------------------------ the table
-  console.log('\n' + pad('page', 20) + pad('width', 7) + pad('page-ovf', 10)
-    + pad('content-ovf', 13) + pad('tap', 8) + pad('font', 7) + 'verdict');
-  console.log('-'.repeat(78));
+  console.log('\n' + pad('page', 20) + pad('width', 6) + pad('page-ovf', 9)
+    + pad('content-ovf', 12) + pad('tap', 6) + pad('font', 6) + pad('verdict', 8)
+    + 'culprit');
+  console.log('-'.repeat(120));
   for (const f of findings) {
-    console.log(pad(f.page, 20) + pad(f.width, 7)
-      + pad(f.overflow ? '+' + f.overflow + ' px' : '-', 10)
-      + pad(f.inner_overflow ? '+' + f.inner_overflow.by + ' px' : '-', 13)
-      + pad(f.tap ? f.tap.min : '-', 8)
-      + pad(f.font ? f.font.min : '-', 7)
-      + (f.fails.length ? 'FAIL' : f.warns.length ? 'WARN' : 'ok'));
+    const c = f.inner_overflow && f.inner_overflow.culprit;
+    console.log(pad(f.page, 20) + pad(f.width, 6)
+      + pad(f.overflow ? '+' + f.overflow + ' px' : '-', 9)
+      + pad(f.inner_overflow ? '+' + f.inner_overflow.by + ' px' : '-', 12)
+      + pad(f.tap ? f.tap.min : '-', 6)
+      + pad(f.font ? f.font.min : '-', 6)
+      + pad(f.fails.length ? 'FAIL' : f.warns.length ? 'WARN' : 'ok', 8)
+      + (c ? c.selector + '  ' + c.width + ' px'
+             + (c.nowrap ? '  ' + c.white_space : '') : '-'));
   }
   const failed = findings.filter(f => f.fails.length).length;
   const warned = findings.filter(f => !f.fails.length && f.warns.length).length;
-  console.log('-'.repeat(78));
+  console.log('-'.repeat(120));
   console.log(findings.length + ' page renders: ' + failed + ' FAIL, '
     + warned + ' WARN only, ' + (findings.length - failed - warned) + ' clean');
 

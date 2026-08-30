@@ -75,6 +75,26 @@ so a scrollable element that is not one is precisely the failure that
 vocabulary exists to fix. Form controls are exempt: a text input longer than
 its box scrolls by definition.
 
+Round 2 (2026-08-30) made this finding name the CULPRIT as well as the
+container, because the container was `div.layout > main.main` on every single
+page and told nobody which template to open. The culprit is the widest
+VISIBLE descendant of the scrolling container whose right edge reaches
+furthest past the container's content-box right edge, where "right edge"
+means `max(getBoundingClientRect().right, left + scrollWidth)` -- the second
+term catches an element whose own box fits while its content does not. Ties
+go to the DEEPEST element, because every ancestor of the real culprit reaches
+exactly as far and only the leaf is fixable. It is reported in the table line
+and in the JSON as:
+
+```
+culprit: { selector, right, past, width, white_space, nowrap, text, ancestors }
+```
+
+`ancestors` is up to three selectors walking outward from the parent, which
+is usually enough to identify the partial. `white_space` is printed in the
+table only when it is `nowrap` or `pre`, i.e. when the element is refusing to
+wrap and the fix is a wrapping rule rather than a width.
+
 **FAIL, redirected to /login** -- not a layout finding at all. Without it, a
 session that did not stick would sweep sixteen copies of the login box and
 report every one of them clean.
@@ -113,9 +133,13 @@ dashboard does today. `report.json` there has both widths; only the 390-wide
 PNGs are committed (the 768 ones are regenerated on demand and would double
 the repo's image weight for a width nobody is designing to first).
 
-Round 2 (§5) re-runs the sweep against merged `mobile` and hands every
-remaining FAIL and WARN back to the package that owns the file. The round
-ends when the sweep is clean at both widths.
+`docs/mobile/round1/` is the same sweep run against merged `mobile` after
+round 1 (M1 to M6), with the culprit column filled in. Same rule about the
+PNGs: 390 committed, 768 in the JSON only.
+
+Round 2 (§5) hands every remaining FAIL and WARN in `round1/report.json`
+back to the package that owns the file. The round ends when the sweep is
+clean at both widths.
 
 ## What the seed cannot fake
 

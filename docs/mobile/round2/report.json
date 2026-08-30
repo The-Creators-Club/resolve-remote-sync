@@ -1,0 +1,1044 @@
+{
+  "generated_at": "2026-08-30T03:41:37.022Z",
+  "url": "http://127.0.0.1:8498",
+  "user": "owen",
+  "widths": [
+    390,
+    768
+  ],
+  "thresholds": {
+    "tap_px": 44,
+    "font_px": 12
+  },
+  "totals": {
+    "renders": 32,
+    "fail": 0,
+    "warn": 16
+  },
+  "findings": [
+    {
+      "page": "login",
+      "url": "/login",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/login",
+      "title": "CC SYNC: LOGIN",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 12,
+        "selector": "form > label",
+        "sample": "USERNAME"
+      },
+      "counted": {
+        "taps": 4,
+        "texts": 7
+      },
+      "fails": [],
+      "warns": [],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/390/login.png"
+    },
+    {
+      "page": "home",
+      "url": "/",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/",
+      "title": "CC SYNC: FLEET",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 12,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 29,
+        "texts": 528
+      },
+      "fails": [],
+      "warns": [],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/390/home.png"
+    },
+    {
+      "page": "transfers",
+      "url": "/transfers",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/transfers",
+      "title": "CC SYNC: TRANSFERS",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 12,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 14,
+        "texts": 277
+      },
+      "fails": [],
+      "warns": [],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/390/transfers.png"
+    },
+    {
+      "page": "project",
+      "url": "/project/{project}",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/project/2026-ff5-animals",
+      "title": "CC SYNC: 2026/FF5/Animals",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 12,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 10,
+        "texts": 149
+      },
+      "fails": [],
+      "warns": [],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/390/project.png"
+    },
+    {
+      "page": "project-setup",
+      "url": "/project-setup?resolve_project={resolve}",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/project-setup?resolve_project=FF5%20Elections%20E2",
+      "title": "CC SYNC: PROJECT SETUP",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 12,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 2,
+        "texts": 9
+      },
+      "fails": [],
+      "warns": [],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/390/project-setup.png"
+    },
+    {
+      "page": "installer",
+      "url": "/installer",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/installer",
+      "title": "CC SYNC: INSTALLER",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 12,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 1s ago"
+      },
+      "counted": {
+        "taps": 2,
+        "texts": 12
+      },
+      "fails": [],
+      "warns": [],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/390/installer.png"
+    },
+    {
+      "page": "admin-users",
+      "url": "/admin/users",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/users",
+      "title": "CC SYNC: USERS",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 12,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 53,
+        "texts": 110
+      },
+      "fails": [],
+      "warns": [],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/390/admin-users.png"
+    },
+    {
+      "page": "admin-assignments",
+      "url": "/admin/assignments",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/assignments",
+      "title": "CC SYNC: ASSIGNMENTS",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 12,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 49,
+        "texts": 58
+      },
+      "fails": [],
+      "warns": [],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/390/admin-assignments.png"
+    },
+    {
+      "page": "admin-jobs",
+      "url": "/admin/jobs",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/jobs",
+      "title": "CC SYNC: JOBS",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 12,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 19,
+        "texts": 69
+      },
+      "fails": [],
+      "warns": [],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/390/admin-jobs.png"
+    },
+    {
+      "page": "admin-packages",
+      "url": "/admin/packages",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/packages",
+      "title": "CC SYNC: PACKAGES",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 12,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 28,
+        "texts": 98
+      },
+      "fails": [],
+      "warns": [],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/390/admin-packages.png"
+    },
+    {
+      "page": "admin-settings",
+      "url": "/admin/settings",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/settings",
+      "title": "CC SYNC: SETTINGS",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 12,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 54,
+        "texts": 101
+      },
+      "fails": [],
+      "warns": [],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/390/admin-settings.png"
+    },
+    {
+      "page": "admin-audit",
+      "url": "/admin/audit",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/audit",
+      "title": "CC SYNC: TIMELINE",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 12,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 16,
+        "texts": 22
+      },
+      "fails": [],
+      "warns": [],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/390/admin-audit.png"
+    },
+    {
+      "page": "admin-alerts",
+      "url": "/admin/alerts",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/alerts",
+      "title": "CC SYNC: ALERTS",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 12,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 30,
+        "texts": 310
+      },
+      "fails": [],
+      "warns": [],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/390/admin-alerts.png"
+    },
+    {
+      "page": "admin-invariants",
+      "url": "/admin/invariants",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/invariants",
+      "title": "CC SYNC: INVARIANTS",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 12,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 14,
+        "texts": 59
+      },
+      "fails": [],
+      "warns": [],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/390/admin-invariants.png"
+    },
+    {
+      "page": "admin-protection",
+      "url": "/admin/protection",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/protection",
+      "title": "CC SYNC: PROTECTION",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 12,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 18,
+        "texts": 69
+      },
+      "fails": [],
+      "warns": [],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/390/admin-protection.png"
+    },
+    {
+      "page": "admin-recovery",
+      "url": "/admin/recovery",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/recovery",
+      "title": "CC SYNC: GET SOMETHING BACK",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 12,
+        "selector": "span.topbar-right > span.stamp",
+        "sample": "updated 0s ago"
+      },
+      "counted": {
+        "taps": 20,
+        "texts": 88
+      },
+      "fails": [],
+      "warns": [],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/390/admin-recovery.png"
+    },
+    {
+      "page": "login",
+      "url": "/login",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/login",
+      "title": "CC SYNC: LOGIN",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "form > label",
+        "sample": "USERNAME"
+      },
+      "counted": {
+        "taps": 5,
+        "texts": 8
+      },
+      "fails": [],
+      "warns": [
+        "font 11 px  form > label"
+      ],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/768/login.png"
+    },
+    {
+      "page": "home",
+      "url": "/",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/",
+      "title": "CC SYNC: FLEET",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 34,
+        "texts": 557
+      },
+      "fails": [],
+      "warns": [
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/768/home.png"
+    },
+    {
+      "page": "transfers",
+      "url": "/transfers",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/transfers",
+      "title": "CC SYNC: TRANSFERS",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 19,
+        "texts": 298
+      },
+      "fails": [],
+      "warns": [
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/768/transfers.png"
+    },
+    {
+      "page": "project",
+      "url": "/project/{project}",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/project/2026-ff5-animals",
+      "title": "CC SYNC: 2026/FF5/Animals",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 16,
+        "texts": 172
+      },
+      "fails": [],
+      "warns": [
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/768/project.png"
+    },
+    {
+      "page": "project-setup",
+      "url": "/project-setup?resolve_project={resolve}",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/project-setup?resolve_project=FF5%20Elections%20E2",
+      "title": "CC SYNC: PROJECT SETUP",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 7,
+        "texts": 25
+      },
+      "fails": [],
+      "warns": [
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/768/project-setup.png"
+    },
+    {
+      "page": "installer",
+      "url": "/installer",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/installer",
+      "title": "CC SYNC: INSTALLER",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 7,
+        "texts": 27
+      },
+      "fails": [],
+      "warns": [
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/768/installer.png"
+    },
+    {
+      "page": "admin-users",
+      "url": "/admin/users",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/users",
+      "title": "CC SYNC: USERS",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 58,
+        "texts": 146
+      },
+      "fails": [],
+      "warns": [
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/768/admin-users.png"
+    },
+    {
+      "page": "admin-assignments",
+      "url": "/admin/assignments",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/assignments",
+      "title": "CC SYNC: ASSIGNMENTS",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 54,
+        "texts": 74
+      },
+      "fails": [],
+      "warns": [
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/768/admin-assignments.png"
+    },
+    {
+      "page": "admin-jobs",
+      "url": "/admin/jobs",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/jobs",
+      "title": "CC SYNC: JOBS",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 24,
+        "texts": 92
+      },
+      "fails": [],
+      "warns": [
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/768/admin-jobs.png"
+    },
+    {
+      "page": "admin-packages",
+      "url": "/admin/packages",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/packages",
+      "title": "CC SYNC: PACKAGES",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 33,
+        "texts": 125
+      },
+      "fails": [],
+      "warns": [
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/768/admin-packages.png"
+    },
+    {
+      "page": "admin-settings",
+      "url": "/admin/settings",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/settings",
+      "title": "CC SYNC: SETTINGS",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 59,
+        "texts": 117
+      },
+      "fails": [],
+      "warns": [
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/768/admin-settings.png"
+    },
+    {
+      "page": "admin-audit",
+      "url": "/admin/audit",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/audit",
+      "title": "CC SYNC: TIMELINE",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 21,
+        "texts": 38
+      },
+      "fails": [],
+      "warns": [
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/768/admin-audit.png"
+    },
+    {
+      "page": "admin-alerts",
+      "url": "/admin/alerts",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/alerts",
+      "title": "CC SYNC: ALERTS",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 35,
+        "texts": 335
+      },
+      "fails": [],
+      "warns": [
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/768/admin-alerts.png"
+    },
+    {
+      "page": "admin-invariants",
+      "url": "/admin/invariants",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/invariants",
+      "title": "CC SYNC: INVARIANTS",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 19,
+        "texts": 75
+      },
+      "fails": [],
+      "warns": [
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/768/admin-invariants.png"
+    },
+    {
+      "page": "admin-protection",
+      "url": "/admin/protection",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/protection",
+      "title": "CC SYNC: PROTECTION",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 23,
+        "texts": 85
+      },
+      "fails": [],
+      "warns": [
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/768/admin-protection.png"
+    },
+    {
+      "page": "admin-recovery",
+      "url": "/admin/recovery",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/recovery",
+      "title": "CC SYNC: GET SOMETHING BACK",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 44,
+        "w": 52.1,
+        "h": 44,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 2 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 25,
+        "texts": 104
+      },
+      "fails": [],
+      "warns": [
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "C:/Users/alex/AppData/Local/Temp/claude/E--Projects-Editing-Resolve-MontagePipeline/03f35d7d-79f9-42ff-ad60-c51d2410a2c9/scratchpad/sweep3/768/admin-recovery.png"
+    }
+  ]
+}

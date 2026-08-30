@@ -1355,6 +1355,11 @@ table.assign-grid td.assign-cell { text-align: center; white-space: nowrap; }
     display: inline-flex;
     align-items: center;
     min-height: var(--tap);
+    /* A scrolling strip's items must not shrink: with the default
+       flex-shrink they were squeezed below their own text and the labels
+       overprinted each other at 390 px (seen in the round-2 screenshots,
+       2026-08-30). The overflow is the strip's to scroll, not the item's. */
+    flex: 0 0 auto;
   }
   .settings-nav-item.settings-nav-current { scroll-snap-align: center; }
 

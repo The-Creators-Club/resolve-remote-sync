@@ -25,8 +25,7 @@
    is wider than the window has to scroll inside itself rather than take
    the page with it (round 2 of the sweep, 2026-08-30). #}
 {# .stack: a row is one collector cycle (MOBILE_PLAN.md §3.2, 2026-08-30). #}
-<div class="scroll-x">
-<table class="editors stack">
+<div class="scroll-x"><table class="editors stack">
   <thead><tr><th></th><th>CYCLE</th><th>LAST RUN</th><th>WHAT IT DID NOT DO</th></tr></thead>
   <tbody>
   {% for k in fleet.collector.kinds %}
@@ -60,8 +59,7 @@
   {{ plan.n_add }} share(s) to add, {{ plan.n_remove }} to remove. Read only, nothing on
   this page changes a share.</div>
 {# .stack: a row is one folder whose shares would change. #}
-<div class="scroll-x">
-<table class="editors stack">
+<div class="scroll-x"><table class="editors stack">
   <thead><tr><th>FOLDER</th><th>ADD</th><th>REMOVE</th></tr></thead>
   <tbody>
   {% for f in plan.folders %}

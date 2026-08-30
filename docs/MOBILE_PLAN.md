@@ -1,6 +1,6 @@
 # MOBILE_PLAN.md -- the dashboard on a phone, in the browser and as an Android app
 
-Plan, 2026-08-30. Status: **PLANNED, building** (orchestrated; the work
+Plan, 2026-08-30. Status: **BUILT, rounds 1-2 merged (see §9)** (orchestrated; the work
 packages below run as parallel builders in worktrees, each on its own
 branch off `mobile`). As-built notes are appended per package in §9 as
 they merge.
@@ -514,3 +514,127 @@ asserts the same properties as M2's; `test_settings_hub.py` keeps passing.
 ## 9. As built
 
 (appended per package as they merge)
+
+### 9.1 Rounds 1 and 2, merged (2026-08-30, dashboard 0.7.24)
+
+Seven builders in parallel, one round of fix-ups from the sweep, merged in
+the order §5 gives. The sweep on the merged tree: **0 FAIL, 16 clean, 16
+WARN-only across 32 renders** (`docs/mobile/round2/report.json`; the
+"before" is `docs/mobile/baseline/`, 22 FAIL). The warnings left are the
+11 px chips at 768 px, which is desktop typography by design (the phone
+layer stops at 600 px), and nothing else.
+
+**M0 -- the sweep** (`b7b8dfc`, `f0017e9`, `3682fbd`). As specified, plus
+the check that made the tool worth having: `.main { overflow-x: auto }`
+absorbs every sideways overflow, so page-level overflow NEVER fires on this
+codebase and a to-the-letter sweep reported a clean baseline. The sweep
+also FAILs any element with computed `overflow-x: auto|scroll` whose
+`scrollWidth > clientWidth` that does not carry `.scroll-x` (form controls
+exempt) -- §3.2's rule as a test -- and names the CULPRIT: the widest
+visible descendant of the scrolling container, with its selector, width,
+`white-space` and three ancestors. That one column is what turned round 2
+from guesswork into a list. Chrome on Windows clamps `--window-size=390`
+to a 500 px viewport; real 390 px needs CDP `Emulation.setDeviceMetricsOverride`,
+which the tool uses. Seed passwords must be 12+ characters.
+
+**M1 -- the chrome** (`b76e9f6`, `034c103`). Tokens and vocabulary exactly
+as §3.1/3.2, with two additions from M2: `table.stack td[data-label=""]`
+renders no heading, and `table.stack td > .btn, td > .tap` are full width.
+`.tap` and the automatic 44 px on `.btn`/`a.chip` exist ONLY under
+`(pointer: coarse)`; a read-out `.chip` that is not a link stays 11 px
+inline so a fleet row does not become four rows. Checkboxes and radios are
+44 x 44 boxes with the painted square kept at 1 em via `::before` (every
+painted state re-declared: `:checked` out-specifies the bare selector).
+`select`, `textarea` and text inputs get `min-height: var(--tap)`. The
+settings strip carries `scroll-x` in its class list and its items are
+`flex: 0 0 auto` (without it they shrank below their text and overprinted,
+seen only in a screenshot). `#install-slot` lives in the topbar's drawer
+foot, not base.html. No `body { overflow-x: hidden }` on purpose: it would
+have made the sweep pass for everyone. `.rule` keeps `overflow: hidden`.
+
+**M2 -- the editor's pages** (`1260018`, `08e37c1`). Every table stacks
+below 600 px with `data-label`s and sits in a `.scroll-x` wrapper for
+600-900 px. The single biggest 390 px culprit on home/transfers/project was
+`.mono, .mono-sm { white-space: nowrap }` inherited by SENTENCES (the
+notice's WHAT TO DO line at 1517 px, a queue summary, `.clip-name`); a
+`(max-width: 900px)` block releases it on user-generated text in M2's
+containers only. Real file names differ from the plan: `partials/bins.html`,
+`partials/my_queue.html`, `templates/fleet.html`. M2 also took
+`project_setup.html`, `collector_health.html`, `notice_checks.html`,
+`plan_changes.html`, `project_roots.html` (unowned, render on `/`). One line
+in `tests/test_hardening.py` (the `every 10s` literal) had to change to
+admit the visibility filter.
+
+**M3 -- the admin pages** (`fe2263e`, `df58d35`). 22 tables wrapped, all
+stacked, 44 px controls, forms one column, every poll filtered. The same
+`.mono-sm` nowrap was five of the admin culprits; two were not nowrap at
+all: `#settings-form > label:has(> input)`'s `220px minmax(260px, 520px)`
+caption grid (one column below 600 px) and an INLINE `min-width:24rem` in
+`partials/fleet_halt.html` (now `min(24rem, 100%)`). Took the unowned
+`invariant_checks.html`, `protection.html`, `admin_diagnostics.html`,
+`fleet_halt.html`. Five consequence confirms stay over 90 characters by
+ruling (their copy is pinned by other suites; a `title` is invisible on a
+phone), listed in `ALLOWED_LONG_CONFIRMS`. `test_settings_hub.py` now
+matches `settings-nav` as a whole class token.
+
+**M4 -- the PWA** (`126fbcc`). `/manifest.webmanifest` is rendered with the
+site's `product_name` as `name`/`short_name` (json round-trip, not Jinja,
+so the static file stays valid JSON as the fallback); `/sw.js` carries the
+`VERSION`, `Service-Worker-Allowed: /`, `Cache-Control: no-cache`;
+network-first navigations with `/offline`, cache-first `/static/`, and no
+`respondWith` at all for `/api/ /partials/ /cards/ /broll/ /music/ /ytdl/
+/login /logout /.well-known/`; per-file `cache.add` so one missing file
+cannot wipe the precache. `pwa.js` rewrites `every 2s -> 10s` and `every
+5s -> 15s` under `(pointer: coarse)` at top level AND on
+`htmx:beforeProcessNode` (verified against htmx 1.9.12's source and live),
+aborts polls on hidden and refreshes them once on visible, registers the SW
+only in a secure context, and renders `[ INSTALL ]` into `#install-slot`
+from `beforeinstallprompt`. Icons are drawn by headless Chrome from
+`static/icons/icon.svg` (`tools/make_icons.js`, `--check` re-renders and
+compares IHDRs); 23 tests.
+
+**M5 -- Android** (`053d059` .. `795eaf9`). `GET /.well-known/assetlinks.json`
+serves `[]` until BOTH a package name and a fingerprint are saved, then the
+standard `delegate_permission/common.handle_all_urls` statement
+(`application/json`, `max-age=3600`). The `[android]` fields are ordinary
+`site_store.KEYS`, so export/import/history/undo carry them with no
+`setup_routes` edit; `partials/android_settings.html` posts to
+`/api/v1/setup/android`; `[ CHECK ]` calls the same `statements()` the
+route does rather than an HTTP self-request (`--workers 1` would deadlock)
+and prints Google's checker URL. `tools/android/twa_manifest.py` writes
+Bubblewrap's `twa-manifest.json`; `build_apk.sh` runs `bubblewrap update`
++ `build --skipPwaValidation` (no interactive `init`), stubs the retired
+`tools/source.properties` marker bubblewrap still checks, and the package
+id is prefixed `n` because aapt2 refuses a leading underscore.
+`.github/workflows/android.yml` ran GREEN from the branch
+(run 33288180532): a signed APK (880 KB) and AAB against the fixture served
+by `python -m http.server`, debug key when the four secrets are absent, the
+fingerprint in the step summary. 31 tests; `docs/ANDROID.md` leads with
+the URL-bar symptom.
+
+**M6 -- the secure origin** (`1530659`, `4fbbae8`). `deploy/tailscale/serve.json`
++ a read-only `./tailscale:/config:ro` mount on the `tailscale` service,
+behind `DASH_TAILSCALE_SERVE` which carries the PATH
+(`=/config/serve.json`), not `1`: compose-go interpolates only `:-`/`-`/
+`:?`/`?`, and the compose test forbids anything else. `tools/check_mobile_origin.py`
+runs seven checks in browser order (https, certificate, manifest, service
+worker, asset links, health, cookie secure -- the last is SKIP today,
+`/login` sets no cookie); its tests run over the real merged app. Studio
+recipe and the `DASH_TRUSTED_PROXIES` note are in `docs/MOBILE.md` §1 and
+`docs/DOCKER.md`. `docs/MOBILE.md` describes what shipped, not the plan.
+
+**Orchestrator's two edits at close-out**: the 20 px matrix-checkbox
+override in M3's section removed (the sweep's last sub-44 target; the box
+falls to M1's 44 px rule, the grid scrolls inside `.scroll-x`), and
+`.settings-nav-item { flex: 0 0 auto }` (above). Version 0.7.24 in both
+files; no lock change, so this is an OTA code-bundle release for bind-mount
+sites.
+
+### 9.2 Left open
+
+* The three SPAs are pass-through (§2 non-goals).
+* Web Push (§7).
+* The 768 px band keeps desktop typography; a tablet-specific pass is a
+  decision, not a defect.
+* `docs/mobile/round2/` is the last sweep; re-run it before any release
+  that touches a template (`docs/mobile/SWEEP.md`).

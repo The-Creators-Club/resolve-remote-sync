@@ -319,12 +319,12 @@
     justify-content: center;
   }
   /* A cell is a checkbox and a 10 px "up" label; a thumb needs both to be
-     bigger than the default 13 px box, without the grid growing a column. */
+     bigger than the default 13 px box. The box itself is left to style.css's
+     coarse-pointer rule (44 px, the painted square kept at 1 em): a 20 px
+     override here was measured by the sweep as the last sub-44 target on the
+     site, and the grid scrolls inside .scroll-x, so a taller row costs
+     nothing (orchestrator, round 2 close-out, 2026-08-30). */
   .assign-scroll table.assign-grid td.assign-cell { padding: 0.5rem 0.6rem; }
-  .assign-scroll table.assign-grid td.assign-cell input[type="checkbox"] {
-    width: 20px;
-    height: 20px;
-  }
   /* The "up" label is a control in its own right (it writes upload-only for
      one project on one computer) and the sweep measured it at 20 px. It is
      the label that has to grow, not just the box inside it: the whole word

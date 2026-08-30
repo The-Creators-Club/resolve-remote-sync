@@ -20,6 +20,10 @@ const el = (tag, cls, txt) => {
 const PHASE_SPAN = {
   queued: [0, 3],
   generating_terms: [3, 12],
+  // Where generating_terms ends and searching begins: nothing is moving, the
+  // bar is parked exactly where the work stopped, and the panel below it is
+  // what the editor is being asked for.
+  terms_review: [12, 12],
   searching: [12, 48],
   enriching: [48, 82],
   filtering: [82, 96],
@@ -28,6 +32,7 @@ const PHASE_SPAN = {
 const PHASE_LABEL = {
   queued: 'queued',
   generating_terms: 'asking claude for search terms',
+  terms_review: 'pick the search terms',
   searching: 'searching youtube',
   enriching: 'fetching metadata',
   filtering: 'filtering + checking for duplicates',
@@ -202,6 +207,14 @@ const state = {
                        // badge (docs/YTDL_LOCAL_DOWNLOAD.md §10, phase 1)
   manifest: null,      // {videos, terms, counts}
   termFilter: null,    // job_terms.id, or null for "everything"
+  terms: [],           // the attached job's terms, as the last poll gave them
+  termsOn: null,       // the ticked ids at the term review, held in the BROWSER
+                       // (2026-08-30). Ticking is not a server round trip: the
+                       // set is posted once, when SEARCH WITH THESE is pressed.
+                       // null means "this page has not been shown a term review
+                       // yet", which is different from "everything unticked"
+  queue: [],           // the editor's waiting jobs, newest answer from
+                       // api/jobs/active
   showFiltered: false,
   shots: new Set(),    // ticked shot-type keys; init() fills it
   searchMode: DEFAULT_MODE,  // 'visuals' | 'news' -- which rubric the two AI
@@ -1032,6 +1045,9 @@ async function attach(jobId) {
   state.manifest = null;              // job A's videos must not render as B's
   state.termFilter = null;
   state.phase = null;                 // job B's phases are not job A's
+  state.terms = [];
+  state.termsOn = null;               // ...and job A's ticks are not job B's
+  $('#terms').classList.add('hidden');
   // The hand-back link is one-shot per attachment, not per page: job B may be
   // local when job A was already handed back (docs/YTDL_LOCAL_DOWNLOAD.md §9).
   $('#dlserver').disabled = false;
@@ -1079,7 +1095,14 @@ async function poll() {
   // The explanation for a bar stuck at "queued" is in every poll response and
   // nothing read it (YTDL-39, 2026-08-11).
   setBanner('worker', r.worker_alive === false && !job.terminal ? WORKER_DEAD : null, true);
+  state.terms = r.terms || [];
   renderProgress(job, r);
+  // The term review, and the queue behind it. The review is rendered from the
+  // poll it is already making; the queue is re-read only when the phase MOVED,
+  // because that is when a job can have left it (a queued job starting is
+  // exactly the transition nothing else on this page would notice).
+  renderTermReview(job, r);
+  if (seen !== job.phase) loadQueue();
 
   if (job.phase === 'ready_for_review' || job.phase === 'done'
       || job.phase === 'failed' || job.phase === 'cancelled') {
@@ -1119,8 +1142,11 @@ function detach() {
   state.jobId = null;
   state.manifest = null;
   state.phase = null;
+  state.terms = [];
+  state.termsOn = null;
   setBanner('job', null);
   location.hash = '';
+  $('#terms').classList.add('hidden');
   $('#progress').classList.add('hidden');
   $('#downloads').classList.add('hidden');
   $('#review').classList.add('hidden');
@@ -1245,6 +1271,165 @@ async function retryFailed() {
   } finally {
     if (btn) btn.disabled = false;
   }
+}
+
+// ------------------------------------------------------------ term review
+// The owner, 2026-08-30: "youtube downloader should show a list of the search
+// terms it is going to use (for chinese ones, it should show a translation in
+// brackets). They begin all ticked and then you can untick individual ones or
+// untick all, or tick all."
+//
+// The ticks live in state.termsOn until SEARCH WITH THESE is pressed. Two
+// reasons and the second is the one that decided it: a post per checkbox is a
+// request per click on handlers that share one uvicorn worker with the fleet
+// status page, and a half-posted set after a blip would start a search nobody
+// asked for. The count updates from the Set, so the page never waits on the
+// network to tell the editor what they just did.
+
+function termsSeen(job, terms) {
+  // First sight of THIS job's review: everything the server says is enabled,
+  // which is everything. Re-entered on later polls without wiping the ticks
+  // the editor has made since -- the poll runs every 1500 ms and it must not
+  // undo them.
+  if (state.termsOn === null) {
+    state.termsOn = new Set(terms.filter(t => t.enabled !== false).map(t => t.id));
+  }
+}
+
+function renderTermReview(job, r) {
+  const on = job.phase === 'terms_review';
+  $('#terms').classList.toggle('hidden', !on);
+  if (!on) return;
+  const terms = r.terms || [];
+  termsSeen(job, terms);
+  const box = $('#termlist');
+  box.innerHTML = '';
+  terms.forEach(t => {
+    const row = el('label', 'termrow' + (t.source === 'user' ? ' user' : ''));
+    const box2 = document.createElement('input');
+    box2.type = 'checkbox';
+    box2.checked = state.termsOn.has(t.id);
+    box2.onclick = () => {
+      if (box2.checked) state.termsOn.add(t.id); else state.termsOn.delete(t.id);
+      renderTermCount(terms);
+    };
+    row.appendChild(box2);
+    row.appendChild(el('span', 'q', t.term));
+    // The bracketed translation, and ONLY when there is one: an English query
+    // has nothing to say here and "(none)" would be noise on two thirds of the
+    // list. `english_gloss` is the fallback for a server that predates the
+    // column.
+    const tr = t.translation || t.english_gloss;
+    if (tr) row.appendChild(el('span', 'gloss', '(' + tr + ')'));
+    if (t.source === 'user') row.appendChild(el('span', 'tag', 'what you typed'));
+    box.appendChild(row);
+  });
+  renderTermCount(terms);
+}
+
+function renderTermCount(terms) {
+  const n = terms.filter(t => state.termsOn && state.termsOn.has(t.id)).length;
+  $('#termcount').textContent = `${n} of ${terms.length} terms`;
+  // Nothing ticked is a search of nothing, and the server refuses it with a
+  // 400. Saying so here is the same refusal without the round trip.
+  $('#termsgo').disabled = n === 0;
+}
+
+// [ TICK ALL ] / [ UNTICK ALL ]. The whole set is rewritten and the list is
+// re-rendered from it, so the boxes, the count and the button all come off the
+// one Set -- nothing here talks to the server.
+function setAllTerms(on) {
+  const terms = state.terms || [];
+  state.termsOn = new Set(on ? terms.map(t => t.id) : []);
+  renderTermReview({phase: 'terms_review'}, {terms});
+}
+
+async function searchWithTheseTerms() {
+  const jobId = state.jobId;
+  if (!jobId || !state.termsOn) return;
+  const btn = $('#termsgo');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  try {
+    // The set FIRST, then the go-ahead. Two calls on purpose (routes_api says
+    // why): if the first fails the job is still at the review with its old
+    // ticks, which is a state the editor can see and retry from.
+    await post(`api/jobs/${jobId}/terms`, {enabled: [...state.termsOn]});
+    await post(`api/jobs/${jobId}/terms/continue`);
+    state.pollStart = Date.now();
+    await poll();
+  } catch (e) {
+    toast(e.message, true, 12000);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ----------------------------------------------------------------- queue
+// The owner, 2026-08-30: "there should also be a queue so you can queue up
+// multiple searches." One job per editor RUNS; the rest wait, in an order they
+// can change. Re-read from api/jobs/active, which answers both halves of "what
+// is my downloader doing" in one round trip -- and NOT on every poll tick: the
+// queue only changes when somebody presses something, which is exactly when
+// this is called.
+
+async function loadQueue() {
+  let r;
+  try { r = await api('api/jobs/active'); }
+  catch { return; }                    // a blip, or a server without the route
+  state.queue = r.queue || [];
+  renderQueue();
+}
+
+function renderQueue() {
+  const box = $('#queuelist');
+  const q = state.queue || [];
+  $('#queue').classList.toggle('hidden', !q.length);
+  box.innerHTML = '';
+  q.forEach((j, i) => {
+    const row = el('div', 'queuerow');
+    row.appendChild(el('span', 'qpos', String(j.position)));
+    row.appendChild(el('span', 'qterm', j.kind === 'urls'
+      ? 'pasted links' : j.term));
+    row.appendChild(el('span', 'qproject muted', j.project_label));
+    row.appendChild(el('span', 'grow'));
+    const up = el('button', 'text-btn', '[ UP ]');
+    up.disabled = i === 0;
+    up.onclick = () => moveInQueue(j.id, j.position - 1);
+    const down = el('button', 'text-btn', '[ DOWN ]');
+    down.disabled = i === q.length - 1;
+    down.onclick = () => moveInQueue(j.id, j.position + 1);
+    const cancel = el('button', 'text-btn', '[ CANCEL ]');
+    cancel.onclick = () => cancelQueued(j.id);
+    row.appendChild(up);
+    row.appendChild(down);
+    row.appendChild(cancel);
+    box.appendChild(row);
+  });
+}
+
+async function moveInQueue(jobId, position) {
+  try {
+    const r = await post(`api/jobs/${jobId}/queue/move`, {position});
+    state.queue = r.queue || [];
+    renderQueue();
+  } catch (e) {
+    // A 409 here is the server saying the worker started that job while the
+    // page was deciding. Re-reading is the answer, not an apology.
+    toast(e.message, true);
+    loadQueue();
+  }
+}
+
+async function cancelQueued(jobId) {
+  try {
+    await post(`api/jobs/${jobId}/cancel`);
+    toast('cancelled');
+  } catch (e) {
+    toast(e.message, true);
+  }
+  loadQueue();
+  loadRecent();
 }
 
 // How much of ONE video the live map says is on disk. Anything missing (before
@@ -1568,6 +1753,17 @@ async function bulk(selected) {
 // effort -- a manifest can sit for a week mid-curation -- so it is asked out
 // loud, never assumed. The typeof guard keeps the test harness, which has no
 // window.confirm, on the decline path, and declining is also the safe default.
+// What a create answers now that a second search QUEUES instead of being
+// refused (2026-08-30). Silent at the front of the line, which is every first
+// search of the day: a toast saying "queued behind 0" would be noise on the
+// one case that needs no explanation.
+function announceQueued(r) {
+  const n = (r && r.queued_behind) || 0;
+  if (!n) return;
+  toast(`queued behind ${plural(n, 'job', 'jobs')}: it starts when they finish`);
+  loadQueue();
+}
+
 const confirmDiscard = msg => typeof confirm === 'function' && confirm(msg);
 
 const askDiscardParked = () => confirmDiscard(
@@ -1634,12 +1830,13 @@ async function runSearch() {
   };
   const launch = async () => {
     const r = await post('api/jobs', payload);
-    // Only now: the server decides whether a second job is allowed, and
-    // tearing the live view down first left the page showing nothing while
-    // the refused-against job kept running (YTDL-8, 2026-08-11).
+    // Only now: the server decides what happens to a second job, and tearing
+    // the live view down first left the page showing nothing while the
+    // refused-against job kept running (YTDL-8, 2026-08-11).
     detach();
     $('#progress').classList.remove('hidden');
     await attach(r.job_id);
+    announceQueued(r);
   };
   try {
     await launch();
@@ -1708,6 +1905,9 @@ async function runUrls() {
       toast(`${r.queued} queued · ${r.skipped.length} already in the tree`,
             false, 12000);
     }
+    // ...and, separately, where this JOB is in the line. `r.queued` above is a
+    // count of clips and has nothing to do with it.
+    announceQueued(r);
   };
   try {
     await launch();
@@ -2421,6 +2621,9 @@ async function init() {
   $('#discard').onclick = discardReview;
   $('#dlserver').onclick = lockToServer;
   $('#dlretry').onclick = retryFailed;
+  $('#termsall').onclick = () => setAllTerms(true);
+  $('#termsnone').onclick = () => setAllTerms(false);
+  $('#termsgo').onclick = searchWithTheseTerms;
   $('#selall').onclick = () => bulk(true);
   $('#selnone').onclick = () => bulk(false);
   $('#download').onclick = startDownload;
@@ -2445,6 +2648,10 @@ async function init() {
   setInterval(loadHealth, HEALTH_INTERVAL);
   loadRecent();
   loadHistory();
+  // The queue is part of "what is my downloader doing" and is on screen from
+  // the first paint, whether or not a job is attached: an editor who queued
+  // three searches and closed the tab must find them again.
+  loadQueue();
 
   await openingJob();
 }

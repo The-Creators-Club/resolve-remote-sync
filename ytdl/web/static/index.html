@@ -186,6 +186,31 @@
     <div class="bar"><div id="barfill" class="barfill"></div></div>
   </section>
 
+  <!-- THE TERM REVIEW (2026-08-30, the owner: "youtube downloader should show
+       a list of the search terms it is going to use (for chinese ones, it
+       should show a translation in brackets). They begin all ticked and then
+       you can untick individual ones or untick all, or tick all"). Shown only
+       while the attached job is at `terms_review`, which is a phase the worker
+       does not own: the job sits there until this panel's button, or CANCEL,
+       moves it. Above the review grid because it comes before it in the job's
+       life. The ticking is done in the browser and posted ONCE, when SEARCH
+       WITH THESE is pressed: a round trip per checkbox would be a request per
+       click on a handler that shares its process with the fleet status page. -->
+  <section id="terms" class="panel hidden">
+    <h2>Search terms</h2>
+    <div class="muted termhint">These are the queries this search will run.
+      Untick any you do not want. A translation in brackets is what a
+      non-English query says.</div>
+    <div id="termlist" class="termlist"></div>
+    <div class="resulthead">
+      <span id="termcount" class="muted"></span>
+      <span class="grow"></span>
+      <button id="termsall" class="text-btn">[ TICK ALL ]</button>
+      <button id="termsnone" class="text-btn">[ UNTICK ALL ]</button>
+      <button id="termsgo" class="primary-btn">SEARCH WITH THESE</button>
+    </div>
+  </section>
+
   <!-- the manifest: terms searched (REQ 5) + the review grid (REQ 4) -->
   <!-- Every stacked panel below collapses to its header (owner, 2026-08-11:
        "there should be a way to collapse the search results that are open").
@@ -269,6 +294,16 @@
     <button id="dlretry" class="text-btn hidden"
             title="Queue the clips that failed again. Nothing that already downloaded is fetched twice.">[ RETRY FAILED ]</button>
     <div id="dllist" class="dllist"></div>
+  </section>
+
+  <!-- THE QUEUE (2026-08-30, the owner: "there should also be a queue so you
+       can queue up multiple searches"). Under the running job, because that is
+       what it is behind. Hidden when it is empty: an empty list is a row of
+       furniture saying nothing. One job per editor RUNS; the rest wait here in
+       order, and each row can be cancelled or moved. -->
+  <section id="queue" class="panel hidden">
+    <h2>Queue</h2>
+    <div id="queuelist" class="queuelist muted"></div>
   </section>
 
   <section id="recent" class="panel">

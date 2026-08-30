@@ -262,7 +262,22 @@ def _provider_from_env():
     a site feature flag that only the dashboard can read, and a fallback that
     quietly shelled out to whatever `claude` happened to be on PATH would be
     the 2026-08-17 finding walking back in through a side door.
+
+    The one exception is spelled out, not inferred (2026-08-30): an operator
+    running this app STANDALONE on their own machine may name the Claude Code
+    binary by ABSOLUTE PATH in YTDL_STANDALONE_CLAUDE_CODE. That is the
+    dashboard's own posture in one variable -- a path somebody typed, never a
+    PATH lookup -- and it is honoured only with no dashboard in reach
+    (YTDL_DASH_DB unset), so a container that mounts the Projects tree can
+    never pick it up from a stray environment. It exists because the base rig
+    queued five news searches through a local copy of this app while the
+    owner was away, with no API key on the machine and the CLI signed in.
     """
+    standalone_cli = (os.environ.get('YTDL_STANDALONE_CLAUDE_CODE') or '').strip()
+    if standalone_cli and not config.DASH_DB and os.path.isabs(standalone_cli) \
+            and os.path.isfile(standalone_cli):
+        return Provider(CLAUDE_CODE, cli_path=standalone_cli, cli_enabled=True,
+                        model=config.CLAUDE_MODEL, detail='env (standalone CLI)')
     if config.ANTHROPIC_API_KEY:
         return Provider(ANTHROPIC_API, api_key=config.ANTHROPIC_API_KEY,
                         base_url=config.ANTHROPIC_BASE_URL,

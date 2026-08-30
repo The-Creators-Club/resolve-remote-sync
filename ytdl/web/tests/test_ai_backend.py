@@ -98,6 +98,31 @@ def test_the_environment_fallback_never_selects_a_cli(monkeypatch):
     assert ai_backend.current_provider().name not in ai_backend.CLI_PROVIDERS
 
 
+def test_a_standalone_operator_may_name_the_claude_binary_by_absolute_path(
+        monkeypatch, tmp_path):
+    """The one spelled-out exception to the rule above (2026-08-30): an
+    ABSOLUTE path in YTDL_STANDALONE_CLAUDE_CODE, honoured only with no
+    dashboard DB configured. A bare name, a relative path, a missing file, or
+    a dashboard in reach all fall through to the API-key chain."""
+    monkeypatch.setattr(config, 'ANTHROPIC_API_KEY', '')
+    monkeypatch.setattr(config, 'OPENAI_API_KEY', '')
+    monkeypatch.setattr(config, 'DEEPSEEK_API_KEY', '')
+    monkeypatch.setattr(config, 'DASH_DB', '')
+    fake = tmp_path / 'claude.exe'
+    fake.write_text('')
+    monkeypatch.setenv('YTDL_STANDALONE_CLAUDE_CODE', str(fake))
+    p = ai_backend.current_provider()
+    assert p.name == ai_backend.CLAUDE_CODE and p.cli_enabled
+    assert p.cli_path == str(fake)
+    # a PATH lookup is exactly what this must never become
+    monkeypatch.setenv('YTDL_STANDALONE_CLAUDE_CODE', 'claude')
+    assert ai_backend.current_provider().name not in ai_backend.CLI_PROVIDERS
+    # ...and a dashboard in reach means the dashboard decides, never the env
+    monkeypatch.setenv('YTDL_STANDALONE_CLAUDE_CODE', str(fake))
+    monkeypatch.setattr(config, 'DASH_DB', str(tmp_path / 'dashboard.db'))
+    assert ai_backend._provider_from_env().name not in ai_backend.CLI_PROVIDERS
+
+
 def test_a_provider_never_prints_its_key():
     p = provider('openai_api', api_key='sk-super-secret-value')
     assert 'secret' not in repr(p)

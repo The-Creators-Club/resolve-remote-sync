@@ -79,6 +79,14 @@ _OPEN_EXACT = {
     # This is what lets an appliance with no admin account yet land on
     # Setup instead of a 401.
     "/setup",
+    # The three PWA surfaces (MOBILE_PLAN.md 4 M4, 2026-08-30), open for the
+    # same reason /favicon.ico is: the browser fetches all three off the LOGIN
+    # page, before there is a session, and a manifest or a service worker that
+    # 303s to /login installs nothing and says nothing about why. None of them
+    # carries a secret or a session-specific value -- the manifest is a name, a
+    # colour and five icons; sw.js is code with the version in it; /offline is
+    # one sentence with no fleet state (ui.py's "installable app" block).
+    "/manifest.webmanifest", "/sw.js", "/offline",
 }
 
 # The setup API prefix (ZERO_TOUCH_PLAN.md WP D). A prefix, not exact paths,

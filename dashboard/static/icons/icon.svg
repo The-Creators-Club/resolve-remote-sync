@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The installed app's mark (MOBILE_PLAN.md 4 M4, 2026-08-30): the product's
+     "//" idiom from static/favicon.svg, in the theme red on the theme black,
+     squared off so a launcher has something to round. The paths are lifted
+     byte for byte from favicon.svg (native box 654.89 x 305.2) and only
+     translated/scaled -- one mark, two files, no redraw.
+     tools/make_icons.js rasterises this into static/icons/*.png; the maskable
+     pair uses the same <g id="mark"> at a smaller scale so it clears the 80%
+     safe circle. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="96" fill="#0a0a0d"/>
+  <rect x="10" y="10" width="492" height="492" rx="88" fill="none" stroke="#7c1322" stroke-width="10"/>
+  <g id="mark" transform="translate(66 167.4) scale(0.58026)">
+    <path fill="#ff2140" d="M363.02,134.4h109.96l-23.42,41.25c-7.12,12.22-16.72,21.9-28.77,29.02c-12.04,7.12-25.2,10.69-39.46,10.69H0
+      L100.81,39.71c6.79-12.22,16.29-21.9,28.5-29.02C141.53,3.56,154.6,0,168.52,0h231.67L214.85,61.08
+      c-13.57,4.42-23.93,12.91-31.06,25.46l-59.56,103.88h174.63c9.84,0,19.09-2.46,27.75-7.38c8.65-4.93,15.53-11.81,20.62-20.65
+      L363.02,134.4z"/>
+    <path fill="#ff2140" d="M291.86,170.81H181.91l23.42-41.25c7.12-12.22,16.72-21.9,28.77-29.02c12.04-7.12,25.2-10.69,39.46-10.69
+      h381.33L554.07,265.5c-6.79,12.22-16.29,21.9-28.5,29.02c-12.22,7.12-25.29,10.69-39.21,10.69H254.7l185.33-61.08
+      c13.57-4.42,23.93-12.91,31.06-25.46l59.56-103.88H356.03c-9.84,0-19.09,2.46-27.75,7.38c-8.65,4.93-15.53,11.81-20.62,20.65
+      L291.86,170.81z"/>
+  </g>
+</svg>

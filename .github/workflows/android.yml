@@ -34,6 +34,14 @@
 name: android
 
 on:
+  # TEMPORARY, 2026-08-30: GitHub only offers workflow_dispatch for a workflow
+  # that already exists on the DEFAULT branch, so this one cannot be dispatched
+  # until it merges -- and the plan requires it to have run green once from the
+  # builder's branch first. This trigger is that proof, and the commit that
+  # follows the green run deletes it. Never widen it: a push must not build an
+  # APK.
+  push:
+    branches: ["mobile-m5"]
   workflow_dispatch:
     inputs:
       origin:
@@ -64,6 +72,14 @@ jobs:
     # is visible to both. Same workaround, same reason, as release-windows.yml.
     env:
       KEYSTORE_B64: ${{ secrets.CCSYNC_ANDROID_KEYSTORE_BASE64 }}
+      # The three inputs, resolved ONCE into the environment and never
+      # interpolated into a `run:` body. `${{ inputs.origin }}` written inline
+      # in a shell line is a script-injection sink -- whoever can dispatch the
+      # workflow writes the command. Through env it is a value, and the
+      # defaults are what a `push` proving-run (see the trigger above) gets.
+      ORIGIN: ${{ github.event.inputs.origin || 'http://127.0.0.1:8765' }}
+      PACKAGE_NAME: ${{ github.event.inputs.package_name || '' }}
+      SERVE_FIXTURE: ${{ github.event.inputs.serve_fixture || 'true' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -105,7 +121,7 @@ jobs:
       # Backgrounded with its PID recorded so the teardown below kills exactly
       # this process and nothing else on the runner.
       - name: serve the fixture web app manifest
-        if: ${{ github.event.inputs.serve_fixture != 'false' }}
+        if: ${{ env.SERVE_FIXTURE != 'false' }}
         run: |
           cd tools/android/fixture
           nohup python -m http.server "$FIXTURE_PORT" --bind 127.0.0.1 > "$RUNNER_TEMP/fixture.log" 2>&1 &
@@ -124,10 +140,8 @@ jobs:
           CCSYNC_ANDROID_KEY_PASSWORD: ${{ secrets.CCSYNC_ANDROID_KEY_PASSWORD }}
           PYTHON: python
         run: |
-          bash tools/android/build_apk.sh \
-            "${{ github.event.inputs.origin }}" \
-            "${{ github.event.inputs.package_name }}" \
-            build/twa 2>&1 | tee "$RUNNER_TEMP/build.log"
+          bash tools/android/build_apk.sh "$ORIGIN" "$PACKAGE_NAME" build/twa \
+            2>&1 | tee "$RUNNER_TEMP/build.log"
           exit "${PIPESTATUS[0]}"
 
       # The one number an admin has to carry off this page.
@@ -137,7 +151,7 @@ jobs:
           {
             echo "### Android build"
             echo ""
-            echo "origin: \`${{ github.event.inputs.origin }}\`"
+            echo "origin: \`$ORIGIN\`"
             grep -E '^(package|fingerprint):' "$RUNNER_TEMP/build.log" | sed 's/^/    /' || \
               echo "    (no fingerprint printed -- the build did not get that far)"
             echo ""

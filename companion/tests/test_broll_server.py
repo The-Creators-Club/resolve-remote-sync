@@ -2336,10 +2336,25 @@ def test_the_tier_block_carries_what_the_page_renders(ingest_server):
     before Run, so both have to be in the capability answer."""
     srv, client, ingestor, staging = ingest_server
 
-    tiers = json.loads(client.get("/broll/ingest/capabilities")[2])["tiers"]
+    caps = json.loads(client.get("/broll/ingest/capabilities")[2])
+    tiers = caps["tiers"]
 
-    assert tiers["best"]["vram_gb"] == 12
-    assert tiers["good"]["vram_gb"] == 8
+    # The floor the server sends is the Apple unified-memory one on Apple
+    # silicon and the discrete-VRAM one elsewhere (broll_server's own rule),
+    # and GitHub's hosted macOS runners are M-series on some days and not on
+    # others (2026-08-30: 24 == 12 failed a release build). So the test pins
+    # the RULE against the catalogue, and the two plain numbers only where
+    # the machine is not Apple silicon.
+    from ccsync_companion import broll_vlm_sidecar
+
+    def floor(key):
+        meta = broll_vlm_sidecar._models().tier(key)
+        return meta.apple_unified_gb if caps["gpu"]["apple_silicon"] else meta.vram_gb
+
+    assert tiers["best"]["vram_gb"] == floor("best")
+    assert tiers["good"]["vram_gb"] == floor("good")
+    if not caps["gpu"]["apple_silicon"]:
+        assert (tiers["best"]["vram_gb"], tiers["good"]["vram_gb"]) == (12, 8)
     assert tiers["good"]["download_bytes"] > 3_000_000_000
     assert tiers["good"]["label"]
     assert isinstance(tiers["good"]["fits"], bool)

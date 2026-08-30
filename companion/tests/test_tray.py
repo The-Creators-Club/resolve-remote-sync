@@ -2998,3 +2998,120 @@ def test_ignored_line_is_silent_on_a_healthy_machine():
     assert _ignored_line({"resolve_health": {"ignored_this_session": 0,
                                              "ignored_folders": 0}}) is None
     assert _ignored_line({"resolve_health": {"ignored_this_session": "x"}}) is None
+
+
+# -- section 10: "take fleet jobs now" (2026-08-30) -------------------------
+
+
+class _FakeJobRunner:
+    """The two things the tray reads off the runner, and the one it calls."""
+
+    def __init__(self, until=None, enabled=True, minutes=30):
+        self.until = until
+        self.enabled = enabled
+        self.volunteer_minutes = minutes
+        self.calls: list = []
+
+    def status(self):
+        return {"state": "nothing_offered", "volunteer_until": self.until,
+                "forced": [], "offered": [], "queue": {}, "job": None}
+
+    def volunteer(self, minutes=None):
+        self.calls.append(minutes)
+        self.until = None if minutes == 0 else "2026-08-30T12:30:00+00:00"
+        return self.until
+
+
+def _app_with_runner(runner):
+    app = _FakeApp({"dashboard_url": ""})
+    app.job_runner = runner
+    return app
+
+
+def test_menu_offers_the_machine_to_the_fleet():
+    from ccsync_companion.tray import _build_menu
+
+    menu = _build_menu(_app_with_runner(_FakeJobRunner()))
+    assert "⚡ Take fleet jobs now (30 min)" in _menu_labels(menu)
+
+
+def test_menu_says_when_the_machine_is_already_lent():
+    from ccsync_companion.tray import _build_menu
+
+    runner = _FakeJobRunner(until="2026-08-30T12:30:00+00:00")
+    labels = _menu_labels(_build_menu(_app_with_runner(runner)))
+    assert any(label.startswith("⚡ Taking fleet jobs until ")
+               and label.endswith(" (click to stop)") for label in labels), labels
+
+
+def test_menu_omits_the_volunteer_item_without_a_job_runner():
+    """A switch that cannot do anything is worse than no switch: on a
+    companion with no runner, or one whose owner set jobs_enabled = false,
+    the item is simply not there."""
+    from ccsync_companion.tray import _build_menu
+
+    assert not any(label.startswith("⚡") for label
+                   in _menu_labels(_build_menu(_FakeApp({"dashboard_url": ""}))))
+    off = _app_with_runner(_FakeJobRunner(enabled=False))
+    assert not any(label.startswith("⚡") for label
+                   in _menu_labels(_build_menu(off)))
+
+
+def test_the_volunteer_item_sits_between_sync_now_and_pause():
+    """Where the approved 2026-08-27 menu puts the everyday actions, and next
+    to the other switch about what this machine does with itself."""
+    from ccsync_companion.tray import _build_menu
+
+    labels = _menu_labels(_build_menu(_app_with_runner(_FakeJobRunner())))
+    assert labels.index("Sync now") + 1 == labels.index(
+        "⚡ Take fleet jobs now (30 min)")
+    assert labels[labels.index("⚡ Take fleet jobs now (30 min)") + 1] \
+        == "⏸ Pause syncing"
+
+
+def test_the_volunteer_label_survives_an_unreadable_deadline():
+    from ccsync_companion.tray import _volunteer_label
+
+    assert _volunteer_label({"jobs_volunteer_minutes": 30,
+                             "jobs_volunteer_until": "soon"}) \
+        == "⚡ Taking fleet jobs now (click to stop)"
+
+
+def test_fingerprint_moves_when_the_machine_is_lent_and_back():
+    """UI-3's shape: without this the item would still say "Take fleet jobs
+    now" after the click that started the timer."""
+    from ccsync_companion.tray import _menu_fingerprint, _tray_snapshot
+
+    runner = _FakeJobRunner()
+    app = _app_with_runner(runner)
+    before = _menu_fingerprint(_tray_snapshot(app))
+    runner.volunteer(None)
+    lent = _menu_fingerprint(_tray_snapshot(app))
+    assert lent != before
+    runner.volunteer(0)
+    assert _menu_fingerprint(_tray_snapshot(app)) == before
+
+
+def test_the_volunteer_action_switches_the_timer_both_ways():
+    from ccsync_companion.tray import action_volunteer
+
+    runner = _FakeJobRunner()
+    app = _app_with_runner(runner)
+    action_volunteer(app, {"jobs_volunteer_minutes": 30,
+                           "jobs_volunteer_until": ""})
+    _join_tray_threads()
+    assert runner.calls == [None]
+    action_volunteer(app, {"jobs_volunteer_minutes": 30,
+                           "jobs_volunteer_until": "2026-08-30T12:30:00+00:00"})
+    _join_tray_threads()
+    assert runner.calls == [None, 0]
+
+
+def _join_tray_threads():
+    """_spawn runs every action on its own daemon thread (2026-07-26: the
+    tray's message loop is the one thread nothing may block)."""
+    import threading
+
+    for thread in threading.enumerate():
+        if thread.name.startswith("ccsync-tray-"):
+            thread.join(timeout=5.0)

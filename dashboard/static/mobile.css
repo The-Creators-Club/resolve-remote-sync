@@ -8,10 +8,75 @@
 /* ================================ == fleet == ============================ */
 /* M2: the fleet grid, project, transfers, installer (MOBILE_PLAN.md M2). */
 
-/* Everything here is inside the phone query or the touch query: at 1280 px
-   these pages render exactly as they did (MOBILE_PLAN.md goal 5, 2026-08-30).
-   The vocabulary (.stack, .scroll-x, .tap, .rule, .phone-only) is style.css's;
-   these are the per-page rules that vocabulary cannot know about. */
+/* Everything here is inside the tablet query, the phone query or the touch
+   query: at 1280 px these pages render exactly as they did (MOBILE_PLAN.md
+   goal 5, 2026-08-30). The vocabulary (.stack, .scroll-x, .tap, .rule,
+   .phone-only) is style.css's; these are the per-page rules that vocabulary
+   cannot know about. */
+
+/* ---- the nowrap sweep, at 900 px and not 600 (sweep round 2, 2026-08-30)
+
+   style.css:418 makes `.mono` and `.mono-sm` nowrap, and every one of these
+   pages writes a SENTENCE in .mono-sm: the notice's WHAT TO DO line, the
+   queue group's "just ticked, sharing is being set up", the project's path
+   and its move ledger. Inherited nowrap is what the sweep measured as home
+   scrolling sideways by 1151 px, transfers by 271 and project by 261. The
+   rule of thumb from the sweep: nothing user-generated -- a path, a clip
+   name, a machine name, an error out of Syncthing -- may be nowrap on a
+   phone.
+
+   At 900 rather than 600 because that is where the layout is already one
+   column and a 1500 px line is already too wide, and because the sweep FAILs
+   at 768 as well. The nowrap is kept above 900: on a desktop it is what
+   keeps a column of figures from breaking mid-number. */
+@media (max-width: 900px) {
+  .fleet-grid-wrap .mono,
+  .fleet-grid-wrap .mono-sm,
+  #server-notices .mono-sm,
+  #server-notices .banner > div,
+  .queue-group summary,
+  .queue-group summary .muted,
+  .queue-box .mono,
+  .queue-box .mono-sm,
+  #project-detail .mono,
+  #project-detail .mono-sm,
+  .presence-box .mono-sm,
+  .presence-box summary,
+  .project-setup-box .mono-sm,
+  .roots-box .mono-sm {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  /* A clip name is nowrap AND ellipsised (style.css:946), which reads as a
+     file whose name has been cut off rather than one that wrapped. */
+  .clip-list .clip-name {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+  /* [ SHARE A FOLDER INTO THIS PROJECT ] and [ MOVE ON THE SERVER AND ON
+     EVERY MACHINE ] are sentences with brackets round them: at 768 they
+     overflowed by 319 px on their own. They may wrap now, and the move
+     form's controls stack here rather than only on a phone. */
+  .move-form input[type="text"],
+  .move-form select,
+  #project-detail .btn {
+    white-space: normal;
+  }
+  .move-form input[type="text"],
+  .move-form select {
+    display: block;
+    width: 100%;
+    margin: 0.25rem 0;
+  }
+  .move-form .btn {
+    display: block;
+    width: 100%;
+    text-align: left;
+    min-height: var(--tap);
+  }
+}
 
 @media (max-width: 600px) {
 
@@ -61,14 +126,14 @@
     margin-bottom: 0.3rem;
     overflow-wrap: anywhere;
   }
-  /* An action cell inside a stacked row: the button gets the full width and a
-     thumb's height rather than sitting as a 12 px word at the end of a line. */
-  .editors.stack td > form > .btn,
-  .editors.stack td > .btn {
+  /* A button inside a stacked cell is style.css's rule now (table.stack td >
+     .btn, added by M1 with the labels' own alignment). The one case it cannot
+     see is a button wrapped in a form, which is how every action on the fleet
+     grid is posted. */
+  .editors.stack td > form > .btn {
     display: flex;
-    align-items: center;
-    justify-content: center;
     width: 100%;
+    justify-content: flex-start;
     min-height: var(--tap);
   }
 
@@ -93,25 +158,14 @@
     overflow-wrap: anywhere;
   }
 
-  /* -- the project page's move form (project_detail.html) ----------------
-     Three text inputs and a select written as a sentence ("MOVE x to y / z").
-     The sentence survives; each control takes its own line, because a
-     size="34" input is 34 characters wider than the screen. */
+  /* -- the forms on these pages -----------------------------------------
+     The move form stacks at 900 (above); what a phone adds is the field
+     width, which no `size` attribute may win. style.css sets every field to
+     16 px here, the size below which Android zooms the page in on focus. */
   .move-form input[type="text"],
-  .move-form select {
-    display: block;
+  .project-setup-box input[type="text"],
+  #project-detail input[type="text"] {
     width: 100%;
-    margin: 0.25rem 0;
-    /* 16 px is the size below which Android and iOS zoom the page in on
-       focus, which then leaves the page scrolled sideways. */
-    font-size: 16px;
-  }
-  .move-form .btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 100%;
-    min-height: var(--tap);
   }
 
   /* -- the installer chooser --------------------------------------------- */
@@ -135,14 +189,18 @@
   }
 }
 
-/* A touch screen of any width: the controls these pages are opened FOR.
-   Width cannot see a touch laptop and a narrow desktop window is not a
-   thumb (MOBILE_PLAN.md §3.1). */
+/* A touch screen of any width (MOBILE_PLAN.md §3.1). style.css grows every
+   .btn and every a.chip here; what it cannot grow without touching every
+   form in the product is a <select> or a text field, and these pages have
+   four that matter: the move form's destination and its path, the "share a
+   folder into this project" box, the project-setup folder name, and
+   [ PROJECT ROOTS ]'s root picker, which the sweep measured at 27.8 px on
+   `/` and 35.6 px on a project page. */
 @media (pointer: coarse) {
-  /* The queue's [ UNTICK ] and the grid's [ RESUME ] / [ ASK THIS MACHINE
-     WHY ] sit next to text they must not be mistaken for. */
-  .queue-box .btn,
-  .fleet-grid-wrap .btn {
+  #project-detail input[type="text"],
+  #project-detail select,
+  .project-setup-box input[type="text"],
+  .roots-box select.root-select {
     min-height: var(--tap);
   }
 }

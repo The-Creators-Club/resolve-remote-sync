@@ -138,7 +138,11 @@
    heading in data-label, because the alternative -- a horizontal scroll --
    puts the chips that say what is wrong off the right-hand edge, and "is
    anything red" is the whole reason to open this page on a phone. #}
-<table class="editors stack">
+{# The .scroll-x wrapper (MOBILE_PLAN.md §3.2, sweep round 2 2026-08-30):
+   the phone layer stops at 600 px, so at 768 this is still a table and it
+   took the whole page sideways with it. In a wrapper the scroll is the
+   element's own, which is what the vocabulary allows. #}
+<div class="scroll-x"><table class="editors stack">
   <thead><tr><th></th><th>EDITOR</th><th>MACHINE</th><th>LANES</th><th>VERSION</th><th>LAST REPORT</th></tr></thead>
   <tbody>
   {% for e in fleet.editors %}
@@ -329,7 +333,7 @@
     </tr>
   {% endfor %}
   </tbody>
-</table>
+</table></div>
 {% else %}
 <div class="muted">no companion reports yet. Set dashboard_url in each editor's ~/.ccsync/config.toml</div>
 {% endif %}
@@ -345,7 +349,7 @@
 <div class="side-head" style="margin-top:2rem">[ LOST COMPUTERS ]
   <span class="muted">no report for over a week. Each one still holds the sync plan below, and is still shared the projects in it.</span></div>
 <div class="rule"></div>
-<table class="editors stack">
+<div class="scroll-x"><table class="editors stack">
   <thead><tr><th></th><th>EDITOR</th><th>MACHINE</th><th>PLATFORM</th><th>STILL PLANNED</th><th>LAST REPORT</th><th></th></tr></thead>
   <tbody>
   {% for m in fleet.lost_machines %}
@@ -370,7 +374,7 @@
     </tr>
   {% endfor %}
   </tbody>
-</table>
+</table></div>
 {% endif %}
 
 {% if fleet.collector %}

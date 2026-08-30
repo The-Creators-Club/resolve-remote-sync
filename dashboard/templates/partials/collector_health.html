@@ -17,7 +17,11 @@
 <div class="banner">▲ the last collector cycle finished too long ago: everything below is
   the last thing it managed to do, not the state now.</div>
 {% endif %}
-<table class="editors">
+{# The .scroll-x wrapper (MOBILE_PLAN.md §3.2, sweep round 2 2026-08-30):
+   the phone layer stops at 600 px, so at 768 this is still a table and it
+   took the whole page sideways with it. In a wrapper the scroll is the
+   element's own, which is what the vocabulary allows. #}
+<div class="scroll-x"><table class="editors">
   <thead><tr><th></th><th>CYCLE</th><th>LAST RUN</th><th>WHAT IT DID NOT DO</th></tr></thead>
   <tbody>
   {% for k in fleet.collector.kinds %}
@@ -35,7 +39,7 @@
     <tr><td colspan="4" class="muted">no collector cycle has finished yet</td></tr>
   {% endfor %}
   </tbody>
-</table>
+</table></div>
 
 {% set plan = fleet.collector.enforce_plan %}
 <div class="side-head" style="margin-top:1.4rem">[ PENDING SHARE CHANGES ]</div>
@@ -49,7 +53,7 @@
 <div class="mono-sm muted">what the enforce cycle would apply, as of {{ plan.at | ago }}:
   {{ plan.n_add }} share(s) to add, {{ plan.n_remove }} to remove. Read only, nothing on
   this page changes a share.</div>
-<table class="editors">
+<div class="scroll-x"><table class="editors">
   <thead><tr><th>FOLDER</th><th>ADD</th><th>REMOVE</th></tr></thead>
   <tbody>
   {% for f in plan.folders %}
@@ -60,7 +64,7 @@
     </tr>
   {% endfor %}
   </tbody>
-</table>
+</table></div>
 {% if plan.truncated %}
 <div class="muted mono-sm">showing the first 100 folders</div>
 {% endif %}

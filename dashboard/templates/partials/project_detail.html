@@ -255,7 +255,7 @@
 {% if project.editors %}
 {# Stacks on a phone (MOBILE_PLAN.md M2, 2026-08-30): nine columns of one
    editor's numbers become nine labelled rows. #}
-<table class="editors stack">
+<div class="scroll-x"><table class="editors stack">
   <thead>
     <tr><th></th><th>EDITOR</th><th title="proxies + shared project files, by size. Camera originals live on the server and are not counted">SYNCED</th><th>HAS</th><th>MISSING</th>
         <th>MEDIA</th><th>LANES</th><th>LAST SEEN</th><th></th></tr>
@@ -303,7 +303,7 @@
     <tr><td colspan="9" data-label=""><div id="missing-{{ loop.index }}" hx-preserve="true"></div></td></tr>
   {% endfor %}
   </tbody>
-</table>
+</table></div>
 {% else %}
 <div class="muted">No editor devices share this folder yet. Share it with accept_device.py.</div>
 {% endif %}

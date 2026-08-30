@@ -11,7 +11,7 @@
   {% if queue.queue %}
     {# Stacks on a phone (MOBILE_PLAN.md M2, 2026-08-30): one queued project
        becomes a card of labelled rows, with [ UNTICK ] as its own thumb row. #}
-    <table class="editors stack">
+    <div class="scroll-x"><table class="editors stack">
       <tbody>
       {% for item in queue.queue %}
         <tr class="editor-row {{ 'current-row' if item.is_current }}">
@@ -41,7 +41,7 @@
         </tr>
       {% endfor %}
       </tbody>
-    </table>
+    </table></div>
   {% else %}
     <div class="muted">Nothing ticked, so nothing syncs to this machine. Tick a project in
       the [ PROJECTS ] tree on the left.</div>

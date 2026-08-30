@@ -81,7 +81,7 @@
     </div>
   {% endif %}
 
-  <table class="editors" style="margin-top:0.4rem">
+  <div class="scroll-x"><table class="editors" style="margin-top:0.4rem">
     <tbody>
     {% for e in browse.entries %}
       <tr class="editor-row">
@@ -112,7 +112,7 @@
       <tr><td class="muted">empty folder</td><td></td></tr>
     {% endfor %}
     </tbody>
-  </table>
+  </table></div>
 
   {% if browse.inside_project %}
     <div class="muted" style="margin-top:0.6rem">

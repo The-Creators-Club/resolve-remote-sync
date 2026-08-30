@@ -223,8 +223,9 @@ UI_SHUTDOWN_GRACE_SECONDS = 10.0
 # window still holding its widgets when another thread drops the last
 # reference is Tcl_AsyncDelete -- an abort, not an exception. Bounded because
 # a window that will not close must not stall the click that replaced it, and
-# must not stall shutdown; the graveyard in ui_dispatch.release_root is what
-# covers the case where the wait was not enough.
+# must not stall shutdown; the pin every interpreter carries from birth
+# (ui_dispatch, CR-93's second fix) is what covers the case where the wait was
+# not enough -- it stays pinned, it does not abort.
 WORK_WINDOW_CLOSE_WAIT_SECONDS = 3.0
 
 
@@ -249,8 +250,8 @@ def _close_work_window(window: Any, what: str) -> None:
         if waiter is not None and not waiter(WORK_WINDOW_CLOSE_WAIT_SECONDS):
             log.warning(
                 "%s did not finish closing within %.0fs -- letting go of it "
-                "anyway. If its Tk objects are still up, ui_dispatch's "
-                "graveyard is what stops that becoming a CR-93 abort.",
+                "anyway. If its Tk objects are still up, ui_dispatch's pin on "
+                "their interpreter is what stops that becoming a CR-93 abort.",
                 what, WORK_WINDOW_CLOSE_WAIT_SECONDS)
     except Exception:
         log.debug("could not close %s", what, exc_info=True)
@@ -8762,6 +8763,12 @@ class CompanionApp:
             _fallback_logging(self.config)
         log.info("ccsync-companion v%s starting", config_mod.VERSION)
         log.info("config: %s", config_mod.CONFIG_PATH)
+        # Importing ui_dispatch already did this; saying so in the log is the
+        # point. Every Tk interpreter is pinned at birth and freed only on
+        # the thread that built it (CR-93, the 2026-08-30 recurrence).
+        if not ui_dispatch.install_tk_guard():
+            log.warning("Tk guard NOT installed (no tkinter?) -- a dialog freed on "
+                        "the wrong thread can still abort this process (CR-93)")
 
         # "Is this the first start on a new build?" now comes from a version
         # marker file, NOT from whether an `.old` happened to be unlinkable.

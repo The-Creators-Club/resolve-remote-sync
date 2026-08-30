@@ -8,16 +8,24 @@ no traceback, no `finally`, no pytest report. So the only honest way to test
 it is to run it somewhere we are allowed to lose: a child process, whose EXIT
 CODE is the assertion.
 
-What it pins:
+What it pins, in two shapes:
 
-  the disease -- a widget kept past its window, dropped by another thread,
-                 kills the process ("Tcl_AsyncDelete: async handler deleted by
-                 the wrong thread"). If this test ever starts passing as
-                 "survived", the platform changed and the guard below can be
-                 revisited;
-  the cure    -- the same shape with ui_dispatch.release_root() in it exits 0,
-                 including through interpreter shutdown, which is its own
-                 abort (the pin in _immortalise, measured 2026-08-29).
+  the refcount shape (2026-08-29) -- a widget kept past its window, dropped
+                 by another thread, kills the process ("Tcl_AsyncDelete: async
+                 handler deleted by the wrong thread"); release_root() on the
+                 building thread keeps it alive.
+  the GC shape (2026-08-30, the recurrence) -- a dialog whose nested
+                 functions form a reference cycle that reaches the root. The
+                 frame ending frees nothing; the cyclic collector frees it,
+                 on whatever thread next trips it. No refcount taken inside
+                 the dialog can see this. The cure is the pin every
+                 interpreter now carries from birth (ui_dispatch's guard on
+                 tkinter.Tk.__init__) plus reclamation on the building thread
+                 at the end of dispatch(): the interpreter is freed there, or
+                 stays pinned -- never freed elsewhere.
+
+If a "disease" test ever starts passing as "survived", the platform changed
+and the guard can be revisited.
 
 Skipped wherever a child cannot build a Tk root ON A WORKER THREAD -- a
 headless runner (no display) and macOS both, the latter because Aqua's Tk
@@ -91,6 +99,53 @@ KEPT.clear()          # the main thread drops the last Tk object
 print("survived")
 """
 
+# The Settings window's shape (settings_window._build_settings_window): a
+# nested function that schedules ITSELF with root.after() -- function ->
+# closure -> cell -> the same function, a cycle -- and reaches `root` through
+# its closure. Every Tk object is a local; nothing is kept in an attribute;
+# release_root() is never called, because until 2026-08-30 "all locals"
+# was believed to be safe by construction. The frame returns, the cycle is
+# garbage, and the FIRST full collection on ANY thread frees the root and
+# with it the interpreter. `gc.disable()` keeps the worker thread's own
+# allocations from collecting it early, which is exactly what happens live:
+# the objects are old by the time the window closes, and only a full pass
+# reaches them.
+CYCLE_ON_A_WORKER_THREAD = """
+import gc, threading, tkinter as tk
+{prelude}
+gc.disable()
+
+
+def dialog():
+    root = tk.Tk()
+    root.withdraw()
+    state = {{"closed": False}}
+
+    def _close():
+        state["closed"] = True
+        root.destroy()
+
+    def _refresh():
+        if state["closed"]:
+            return
+        root.after(10, _refresh)
+
+    _refresh()
+    root.after(50, _close)
+    root.mainloop()
+
+
+def build():
+    {show}
+
+
+thread = threading.Thread(target=build, name="dialog")
+thread.start()
+thread.join()
+gc.collect()          # the watcher thread's library read, in one line
+print("survived")
+"""
+
 
 def _run(code: str, timeout: float = CHILD_TIMEOUT_SECONDS) -> subprocess.CompletedProcess:
     env = dict(os.environ)
@@ -112,6 +167,9 @@ def tk_runs() -> None:
         pytest.skip("no display: a real Tk root cannot be created here")
 
 
+# -- the refcount shape (2026-08-29) ------------------------------------------
+
+
 def test_dropping_a_widget_on_another_thread_kills_the_process(tk_runs):
     """The disease. This is what "the tray keeps closing itself" WAS."""
     result = _run(LEAK_ON_A_WORKER_THREAD.format(teardown="root.destroy()"))
@@ -124,7 +182,9 @@ def test_dropping_a_widget_on_another_thread_kills_the_process(tk_runs):
 
 def test_release_root_keeps_the_process_alive_through_the_same_leak(tk_runs):
     """The cure, end to end: the leak is still there (this test does not
-    pretend to have found every holder), and the process lives anyway."""
+    pretend to have found every holder), and the process lives anyway --
+    including through interpreter shutdown, which is its own abort without
+    the pin (measured 2026-08-29)."""
     teardown = ("from ccsync_companion import ui_dispatch\n    "
                 "ui_dispatch.release_root(root, 'the test window')")
     result = _run(LEAK_ON_A_WORKER_THREAD.format(teardown=teardown))
@@ -133,9 +193,9 @@ def test_release_root_keeps_the_process_alive_through_the_same_leak(tk_runs):
     assert "survived" in result.stdout
 
 
-def test_a_clean_window_needs_no_parking_and_still_exits_cleanly(tk_runs):
-    """The ordinary path: nothing held, nothing parked, and the interpreter
-    is freed on the thread that made it rather than pinned for the session."""
+def test_a_clean_window_needs_no_pin_and_still_exits_cleanly(tk_runs):
+    """The ordinary path: nothing held, nothing pinned, and the interpreter
+    is freed on the thread that made it rather than kept for the session."""
     code = """
 import threading, tkinter as tk
 from ccsync_companion import ui_dispatch
@@ -148,7 +208,7 @@ def build():
     root.update()
     del label
     assert ui_dispatch.release_root(root, "the test window") is True
-    assert ui_dispatch.parked_roots() == []
+    assert ui_dispatch.pinned_records() == []
 
 
 thread = threading.Thread(target=build, name="dialog")
@@ -159,3 +219,53 @@ print("survived")
     result = _run(code)
     assert result.returncode == 0, result.stderr[-2000:]
     assert "survived" in result.stdout
+
+
+# -- the GC shape (2026-08-30) ------------------------------------------------
+
+
+def test_a_closure_cycle_collected_on_another_thread_kills_the_process(tk_runs):
+    """The disease as it recurred on the fixed build: no widget is kept
+    anywhere, the dialog is all locals, and the process still dies -- on the
+    thread that ran the garbage collector, minutes later."""
+    result = _run(CYCLE_ON_A_WORKER_THREAD.format(prelude="", show="dialog()"))
+    assert result.returncode != 0, (
+        "a root freed by the cyclic GC on another thread no longer aborts -- "
+        "re-read CR-93's 2026-08-30 recurrence before relaxing anything")
+    assert "survived" not in result.stdout
+    assert "Tcl_AsyncDelete" in (result.stderr or "")
+
+
+def test_dispatch_frees_the_cycles_root_on_the_thread_that_built_it(tk_runs):
+    """The cure: through dispatch(), the dialog thread collects its own
+    garbage when the dialog returns and frees the interpreter itself. The
+    main thread's collection then finds nothing of Tk's to free."""
+    show = ("ui_dispatch.dispatch(dialog)\n    "
+            "assert ui_dispatch.pinned_records() == [], 'not freed on the dialog thread'\n    "
+            "print('freed on', threading.current_thread().name)")
+    result = _run(CYCLE_ON_A_WORKER_THREAD.format(
+        prelude="from ccsync_companion import ui_dispatch", show=show))
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "freed on dialog" in result.stdout
+    assert "survived" in result.stdout
+
+
+def test_a_root_nobody_reclaims_stays_pinned_and_the_process_lives(tk_runs):
+    """The backstop for a root built outside dispatch() and never released:
+    the guard on tkinter.Tk.__init__ pinned it at birth, so the collection on
+    the main thread lowers its count to the pin and no further. It leaks
+    (~1.8 MB), it is named in the registry, and the process exits 0 --
+    interpreter shutdown included."""
+    show = ("dialog()\n    "
+            "assert len(ui_dispatch.pinned_records()) == 1, 'the root was not adopted'")
+    code = CYCLE_ON_A_WORKER_THREAD.format(
+        prelude="from ccsync_companion import ui_dispatch", show=show)
+    code += """
+records = ui_dispatch.pinned_records()
+assert len(records) == 1 and records[0].tkapp is not None, "the pin did not hold"
+print("pinned:", records[0].describe())
+"""
+    result = _run(code)
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "survived" in result.stdout
+    assert "pinned: a Tk root (built by thread 'dialog'" in result.stdout

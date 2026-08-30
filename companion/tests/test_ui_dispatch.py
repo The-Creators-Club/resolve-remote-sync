@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
+import weakref
 import time
 
 import pytest
@@ -784,12 +785,12 @@ def test_serving_reports_whether_the_mainloop_is_up(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# release_root: the interpreter dies on the thread that built it (CR-93)
+# a Tcl interpreter dies only on the thread that built it (CR-93)
 # ---------------------------------------------------------------------------
 #
 # Still no real tkinter here (conftest forbids it): a Tk root is, for this
-# purpose, an object with a `.tk` nobody else may outlive and a destroy().
-# The REAL abort -- Tcl_AsyncDelete, exception 0x80000003 in tcl86t.dll -- is
+# purpose, an object with a `.tk` nobody else may free and a destroy(). The
+# REAL abort -- Tcl_AsyncDelete, exception 0x80000003 in tcl86t.dll -- is
 # proven in test_tk_release_native.py, which needs a display and a subprocess
 # because the failure it demonstrates kills the interpreter.
 
@@ -814,17 +815,34 @@ class FakeTkRoot:
 
 
 @pytest.fixture(autouse=True)
-def _empty_graveyard():
-    ui_dispatch._reset_graveyard_for_tests()
+def _empty_registry():
+    ui_dispatch._reset_registry_for_tests()
     yield
-    ui_dispatch._reset_graveyard_for_tests()
+    ui_dispatch._reset_registry_for_tests()
 
 
-def test_release_root_destroys_and_reports_a_clean_release():
+def test_the_guard_is_installed_by_importing_the_module():
+    """Every tk.Tk() in the process is pinned at birth -- no call site has
+    to remember anything. The wrapping itself is exercised with a real Tk in
+    test_tk_release_native.py; here only the fact that it happened."""
+    assert ui_dispatch._guard_installed is True
+    assert ui_dispatch.install_tk_guard() is True  # idempotent
+
+
+def test_release_root_destroys_and_frees_a_clean_root():
     root = FakeTkRoot()
+    interp = weakref.ref(root.tk)
     assert ui_dispatch.release_root(root) is True
     assert root.destroyed == 1
     assert ui_dispatch.parked_roots() == []
+    # The interpreter is GONE (freed here), and the root no longer reaches it:
+    # a late tkinter call on this root gets the TclError a destroyed window
+    # would give, never a dangling tkapp.
+    assert interp() is None
+    import tkinter
+
+    with pytest.raises(tkinter.TclError):
+        root.tk.call("winfo", "exists", ".")
 
 
 def test_release_root_drops_the_window_icon_image():
@@ -842,7 +860,7 @@ def test_release_root_survives_a_root_that_cannot_be_destroyed():
     assert ui_dispatch.release_root(root) is True  # nothing else holds it
 
 
-def test_release_root_parks_a_root_whose_interpreter_is_still_held(caplog):
+def test_release_root_keeps_a_held_interpreter_pinned_and_names_the_holder(caplog):
     """The whole point: another thread must never be the one to free it."""
     import logging
 
@@ -854,33 +872,36 @@ def test_release_root_parks_a_root_whose_interpreter_is_still_held(caplog):
     assert root in ui_dispatch.parked_roots()
     message = " ".join(r.getMessage() for r in caplog.records)
     assert "the fixer popup" in message and "CR-93" in message
+    assert "held by" in message
     assert leaked_widget_reference is not None  # keep the holder alive
 
 
-def test_a_parked_root_is_reclaimed_by_the_next_release_on_that_thread():
+def test_a_pinned_interpreter_is_freed_by_the_next_reclaim_on_that_thread():
     holder = []
 
     def _open_and_close_a_window():
         # In its own frame, like every real call site: once this returns, the
-        # graveyard is the ONLY thing holding the root.
+        # registry is the ONLY thing holding the root.
         root = FakeTkRoot()
         holder.append(root.tk)
         assert ui_dispatch.release_root(root) is False
 
     _open_and_close_a_window()
-    assert len(ui_dispatch.parked_roots()) == 1
+    # The ROOT may die whenever it likes (it is only weakly held); the
+    # INTERPRETER is what stays pinned.
+    assert len(ui_dispatch.pinned_records()) == 1
 
     holder.clear()  # whatever kept the widget has let go
-    # The sweep runs at the START of the next release, on this same thread --
-    # which is the only thread allowed to free it.
-    ui_dispatch.release_root(FakeTkRoot())
-    assert ui_dispatch.parked_roots() == []
+    # Reclamation runs on this same thread -- the only one allowed to free it
+    # -- at the end of every dispatch() and every release_root().
+    assert ui_dispatch.reclaim_mine() == 1
+    assert ui_dispatch.pinned_records() == []
 
 
-def test_a_parked_root_the_caller_still_holds_stays_parked():
-    """The sweep frees only what nothing else wants. A root still referenced
-    somewhere would otherwise be freed here and then AGAIN by its holder --
-    and that second free is on whatever thread the holder happens to be."""
+def test_a_pinned_interpreter_the_caller_still_holds_stays_pinned():
+    """Reclamation frees only what nothing else wants. An interpreter still
+    referenced somewhere would otherwise be freed here and then AGAIN by its
+    holder -- on whatever thread the holder happens to be."""
     root = FakeTkRoot()
     keep_the_widget = root.tk
     assert ui_dispatch.release_root(root) is False
@@ -889,8 +910,70 @@ def test_a_parked_root_the_caller_still_holds_stays_parked():
     assert keep_the_widget is not None
 
 
-def test_the_graveyard_is_per_thread():
-    """A root parked by the watcher thread must not be freed by the tray's."""
+def test_dispatch_frees_what_the_dialog_left_in_a_reference_cycle():
+    """THE shape that recurred (2026-08-30): the dialog's nested functions
+    reference each other and the root, so the frame returning frees nothing
+    -- only a garbage collection does, and before this fix that was whichever
+    thread's allocations tripped the collector next. dispatch() now collects
+    on the thread that built the root and frees the interpreter itself."""
+    interp: list = []
+
+    def _build_and_show():
+        root = FakeTkRoot()
+        # What the tkinter.Tk.__init__ guard does for a real root.
+        ui_dispatch.adopt(root, "the settings window")
+        interp.append(weakref.ref(root.tk))
+        state = {"closed": False}
+
+        def _refresh():                 # schedules ITSELF: a self-cycle
+            if not state["closed"]:
+                return _refresh
+            return root
+
+        def _close():
+            state["closed"] = True
+            root.destroy()
+
+        _close()
+        # No release_root(): this is the Settings-window shape, which
+        # keeps every Tk object in locals and closures and relied on the
+        # frame's end to free them. It does not.
+
+    ui_dispatch.dispatch(_build_and_show)
+    assert interp[0]() is None, "the interpreter should have died on this thread"
+    assert ui_dispatch.pinned_records() == []
+
+
+def test_release_root_from_another_thread_refuses(caplog):
+    """A Tcl interpreter freed on any thread but its creator is the abort;
+    a release requested from elsewhere must leave it pinned and say so."""
+    import logging
+
+    built: list = []
+    ready = threading.Event()
+    go = threading.Event()
+
+    def _build():
+        root = FakeTkRoot()
+        ui_dispatch.adopt(root, "the other thread's window")
+        built.append(root)
+        ready.set()
+        go.wait(5)
+
+    thread = threading.Thread(target=_build)
+    thread.start()
+    ready.wait(5)
+    with caplog.at_level(logging.ERROR, logger="ccsync.ui"):
+        assert ui_dispatch.release_root(built[0]) is False
+    go.set()
+    thread.join(5)
+    assert built[0].destroyed == 0
+    assert built[0] in ui_dispatch.parked_roots()
+    assert any("built on thread" in r.getMessage() for r in caplog.records)
+
+
+def test_the_registry_is_per_thread():
+    """A root pinned by the watcher thread must not be freed by the tray's."""
     parked_idents = {}
 
     def _park():
@@ -910,18 +993,72 @@ def test_the_graveyard_is_per_thread():
     assert len(parked_idents) == 2
     assert all(len(roots) == 1 for roots in parked_idents.values())
     assert len(ui_dispatch.parked_roots()) == 2
+    # ...and this thread, which built neither, frees neither.
+    assert ui_dispatch.reclaim_mine() == 0
+    assert len(ui_dispatch.parked_roots()) == 2
 
 
-def test_a_deep_graveyard_says_so_out_loud(caplog):
-    """Parking is a deliberate leak; it stops being a rounding error somewhere,
-    and an admin reading the log should be told where."""
+def test_an_interpreter_whose_thread_exited_is_reported_once(caplog):
+    """Tcl ties an interpreter to its creating thread's storage; once that
+    thread is gone NOBODY may free it. That is a permanent 1.8 MB, and the
+    log names it -- once, not on every pass."""
+    import logging
+
+    holders: list = []
+
+    def _build():
+        root = FakeTkRoot()
+        holders.append(root.tk)
+        ui_dispatch.release_root(root, "the sign-in window")
+
+    thread = threading.Thread(target=_build, name="ccsync-tray-sign-in")
+    thread.start()
+    thread.join(5)
+    with caplog.at_level(logging.WARNING, logger="ccsync.ui"):
+        ui_dispatch.reclaim_mine()
+        ui_dispatch.reclaim_mine()
+    orphan_lines = [r for r in caplog.records
+                    if "pinned for the life of the process" in r.getMessage()]
+    assert len(orphan_lines) == 1
+    assert "the sign-in window" in orphan_lines[0].getMessage()
+    assert "ccsync-tray-sign-in" in orphan_lines[0].getMessage()
+
+
+def test_many_pinned_interpreters_say_so_out_loud(caplog):
+    """Pinning is a deliberate leak; it stops being a rounding error
+    somewhere, and an admin reading the log should be told where."""
     import logging
 
     holders = []
     with caplog.at_level(logging.ERROR, logger="ccsync.ui"):
-        for _ in range(ui_dispatch.GRAVEYARD_WARN_AT):
+        for _ in range(ui_dispatch.PINNED_WARN_AT):
             root = FakeTkRoot()
             holders.append(root.tk)
             ui_dispatch.release_root(root)
-    assert len(ui_dispatch.parked_roots()) == ui_dispatch.GRAVEYARD_WARN_AT
-    assert any("never reclaimed" in r.getMessage() for r in caplog.records)
+    assert len(ui_dispatch.pinned_records()) == ui_dispatch.PINNED_WARN_AT
+    assert any("still a leak" in r.getMessage() for r in caplog.records)
+
+
+def test_the_audit_names_every_interpreter_and_its_holder(caplog):
+    """CCSYNC_TK_AUDIT=1 is the probe for the next holder: it must name the
+    window, the thread and what references the interpreter."""
+    import logging
+
+    root = FakeTkRoot()
+    kept = root.tk
+    ui_dispatch.release_root(root, "the credentials window")
+    report = ui_dispatch.audit()
+    assert "the credentials window" in report
+    assert "window gone" in report
+    assert "held by:" in report
+    assert kept is not None
+
+
+def test_the_audit_is_logged_after_a_pass_when_asked(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setenv(ui_dispatch._TK_AUDIT_ENV, "1")
+    root = FakeTkRoot()
+    with caplog.at_level(logging.INFO, logger="ccsync.ui"):
+        ui_dispatch.release_root(root, "the clipboard root")
+    assert any("Tk audit" in r.getMessage() for r in caplog.records)

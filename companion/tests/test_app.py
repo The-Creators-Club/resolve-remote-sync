@@ -7099,7 +7099,7 @@ def test_replacing_one_work_window_with_another_waits_too(tmp_path, monkeypatch)
 def test_a_work_window_that_will_not_close_is_named_not_waited_on_forever(
         tmp_path, monkeypatch, caplog):
     """The wait is bounded: a window stuck open must not stall shutdown. The
-    graveyard in ui_dispatch is what keeps that from becoming the abort."""
+    pinned interpreter in ui_dispatch is what keeps that from becoming the abort."""
     import logging
 
     from ccsync_companion import popup

@@ -62,8 +62,10 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
 import sys
 import threading
+import time
 from collections import deque
 from typing import Any, Callable, Optional
 
@@ -149,6 +151,10 @@ class _Job:
         except BaseException as exc:  # noqa: BLE001 -- re-raised in wait()
             self._error = exc
         finally:
+            # The dialog's frame is gone: whatever it left in a closure cycle
+            # is garbage this thread (the one that built the root) can
+            # collect and free right now (CR-93).
+            reclaim_mine("dialog finished")
             self._done.set()
 
     def cancel(self, error: BaseException) -> bool:
@@ -310,6 +316,8 @@ class MainThreadDispatcher:
         self._cancel(pending)
         self._break_open_dialogs()
         self._destroy_root()
+        # serve()'s thread built the hidden root; it is the one that may free it.
+        reclaim_mine("dispatcher finished")
 
     def _cancel(self, pending: list[_Job]) -> None:
         if not pending:
@@ -468,7 +476,10 @@ class MainThreadDispatcher:
             # Already on the thread that owns the UI -- either reentrant (fn
             # called dispatch again) or a dialog wanted before serve() got
             # going. Queueing here would wait for a pump that is us.
-            return fn()
+            try:
+                return fn()
+            finally:
+                reclaim_mine("dialog finished")
         job = _Job(fn)
         with self._lock:
             if self._stopped:
@@ -531,7 +542,15 @@ def dispatch(fn: Callable[[], Any]) -> Any:
     macOS. Blocks either way, returns fn()'s value, re-raises its exception."""
     dispatcher = _active
     if dispatcher is None:
-        return fn()
+        try:
+            return fn()
+        finally:
+            # fn's frame has returned. Its root, its widgets and the closures
+            # that reference them are garbage now -- garbage that only the
+            # cyclic collector frees, on whatever thread next trips it, unless
+            # THIS thread (the one that built the interpreter) collects it
+            # here and frees the interpreter itself (CR-93).
+            reclaim_mine("dialog finished")
     return dispatcher.dispatch(fn)
 
 
@@ -578,89 +597,150 @@ def run_dialog(root: Any) -> None:
         dispatcher.forget_dialog(root)
 
 
-# -- letting a root DIE on the thread that built it (CR-93) -----------------
+# -- a Tcl interpreter dies ONLY on the thread that built it (CR-93) --------
 #
-# THE FAILURE THIS PREVENTS. A `tk.Tk()` root owns a Tcl interpreter, and
-# _tkinter frees that interpreter in Tkapp_Dealloc -- inline, on whatever
-# thread happens to drop the last Python reference, with none of the
-# marshaling an ordinary Tk call gets. Tcl checks: an interpreter deleted
-# from a thread other than the one that created it is
+# THE FAILURE THIS PREVENTS. A `tk.Tk()` root owns a Tcl interpreter (the
+# `_tkinter.tkapp` in `root.tk`, shared by every widget, StringVar and
+# PhotoImage made from it), and _tkinter frees that interpreter in
+# Tkapp_Dealloc -- inline, on whatever thread drops the LAST Python reference,
+# with none of the marshaling an ordinary Tk call gets. Tcl checks: an
+# interpreter deleted from a thread other than the one that created it is
 #
 #     Tcl_AsyncDelete: async handler deleted by the wrong thread
 #
 # a Tcl_Panic, i.e. abort(). The process is GONE -- no Python traceback, no
-# `finally`, no log line, no crash file. On Windows it surfaces only in the
-# Event Log as exception 0x80000003 in tcl86t.dll, and to the editor as "the
-# tray keeps closing itself" (CR-93: seven of these between 2026-08-18 and
-# 2026-08-29 on the base rig, every one with a byte-identical stack).
+# `finally`, no log line. On Windows it surfaces only in the Event Log as
+# exception 0x80000003 in tcl86t.dll, and to the editor as "the tray keeps
+# closing itself" (CR-93: seven of these between 2026-08-18 and 2026-08-29 on
+# the base rig, then two more on the build that carried the first fix).
 #
-# On win32 every dialog in this package builds its own root on whatever
-# thread wanted it (see the module docstring), so ANY Tk object that outlives
-# its thread is a loaded gun: a widget kept in an attribute, a StringVar, a
-# ttk.Style, a PhotoImage. The root itself surviving is the same gun.
+# WHO DROPS THE LAST REFERENCE IS NOT UP TO US. The first fix (0.9.55) counted
+# references at the end of a dialog and parked the root when something still
+# held it. That closes the holder-in-an-attribute shape and misses the one
+# that actually recurred (2026-08-30, twice, dump + faulthandler in hand): a
+# dialog whose nested functions reference each other -- the Settings window's
+# `_refresh` schedules ITSELF with root.after(), and reaches `root` through
+# `_render` -> `_run` -> `_release_and_close` -- is a REFERENCE CYCLE. Its
+# frame ending frees nothing; the cyclic garbage collector frees it, later,
+# on whichever thread's allocations happen to trip the collector. Both
+# recurrences died on the watcher thread inside `Garbage-collecting` during a
+# project-library read (a hundred thousand fresh objects is what makes the
+# collector run a full pass), minutes to hours after the window had closed.
+# No refcount taken inside the dialog can see that, because inside the dialog
+# the frame is still alive and every count is legitimately high.
 #
-# THE RULE, and it is the only one that works: the Tcl interpreter must be
-# freed on the thread that made it. release_root() is how a dialog ends. It
-# destroys the window, checks whether anything still holds the interpreter,
-# and -- when something does -- PARKS the root here rather than letting the
-# unknown holder free it somewhere else later. A parked root costs a few
-# hundred KB and is reclaimed by the next release on that same thread; an
-# unparked one costs the whole tray.
+# THE RULE, then, and it is the only one that holds: an interpreter is PINNED
+# the moment it is born (an extra reference, `Py_IncRef` through ctypes, that
+# no Python object owns and finalisation cannot clear), and it is freed in
+# exactly one place -- `_try_free()`, on the thread that created it, once a
+# full collection ON THAT THREAD has left nothing else holding it. Any other
+# path to Tkapp_Dealloc no longer exists: whoever drops the last visible
+# reference, on whatever thread, only ever lowers the count to the pin.
 #
-# WHERE IT IS CALLED, AND WHERE IT IS NOT. A dialog that keeps every widget
-# in LOCALS (confirm_dialog, the licence dialog, the tray's sign-in/update/
-# credentials forms) is already safe: those locals die with the frame, on
-# this thread, whatever happens. The guard is for the windows that keep
-# widgets in ATTRIBUTES and hand themselves to a worker thread -- the fixer
-# popup (FIX ALL holds `self._publish`), ProgressWindow (`run()` joins its
-# worker with a TIMEOUT) and WorkProgressWindow (the app holds it in
-# `_work_window` and any thread may close it). Calling it from a frame that
-# still holds widget locals is not wrong, only noisy: they read as holders
-# and the root is parked for nothing.
+# The pin is installed by wrapping `tkinter.Tk.__init__` (install_tk_guard,
+# done at import), so EVERY root in this process is covered -- the fifteen
+# dialogs in this package, a hidden clipboard root, a file picker's root, a
+# root some future site forgets to think about. Reclamation happens at the
+# end of every `dispatch(fn)` (the frame that built the dialog has returned,
+# so its closures are garbage this thread can collect right now) and in
+# `release_root()` for the windows that own their roots explicitly. A root
+# that is still held after that is left pinned -- a measured 1.8 MB, not an
+# aborted process -- and the log NAMES what holds it, which is what every
+# previous occurrence cost a dump-parsing session to learn. A root whose
+# thread has exited can never be freed at all (the tray's per-click worker
+# threads are the usual case) and is reported once as a leak.
+#
+# `CCSYNC_TK_AUDIT=1` logs the whole registry -- every interpreter, its
+# origin, its thread, what holds it, with referrer chains -- after each
+# reclamation pass, so the next holder is named on the machine it happens on.
 
-# What `sys.getrefcount(root.tk)` reads for an interpreter nothing else holds:
-# the root's own __dict__, plus getrefcount's argument. Measured, not guessed
-# (2026-08-29) -- and it is stable because destroy() clears root.children.
-TK_INTERP_BASELINE_REFS = 2
-# The ROOT's own refcount is deliberately NOT part of the verdict. Every
-# dialog in this package closes over `root` in its _ok/_cancel callbacks, so
-# a live frame legitimately holds it four or five times over -- and those
-# cells die with the frame, on this thread, harmlessly. What actually kills
-# the process is another Tk OBJECT (a widget, a StringVar, a ttk.Style, a
-# PhotoImage) holding the interpreter past the frame, and that is exactly
-# what the count above sees.
-#
-# refs a PARKED root reads when nothing else wants it: the graveyard list,
-# the sweep's loop variable, and getrefcount's argument -- plus the immortal
-# reference below, when it could be taken.
-PARKED_ROOT_BASELINE_REFS = 3
-# Parking is a leak by design, so say so once it stops being a rounding error.
-GRAVEYARD_WARN_AT = 8
+import weakref
 
-_graveyard_lock = threading.Lock()
-# thread ident -> [(root, immortal?)] for destroyed roots whose interpreter
-# someone else still holds.
-_graveyard: dict[int, list] = {}
+_TK_AUDIT_ENV = "CCSYNC_TK_AUDIT"
+# A pinned interpreter whose window is gone is a leak by design; say so once
+# it stops being a rounding error (1.8 MB each, measured 2026-08-30).
+PINNED_WARN_AT = 8
+# How many referrer hops the holder description follows. Three is enough to
+# get from a tkapp to the dialog function that closed over its root.
+HOLDER_CHAIN_HOPS = 3
+HOLDER_CHAIN_WIDTH = 4
+
+
+class _TkRecord:
+    """One Tcl interpreter this process has created, and who may free it."""
+
+    __slots__ = ("tkapp", "root_ref", "thread", "ident", "label", "origin",
+                 "created", "pinned", "warned_held", "warned_orphan")
+
+    def __init__(self, tkapp: Any, root: Any, label: Optional[str], origin: str) -> None:
+        self.tkapp = tkapp
+        try:
+            self.root_ref = weakref.ref(root)
+        except TypeError:
+            # A test double without __weakref__: hold it strongly. Only the
+            # suite gets here, and only with fakes that own no interpreter.
+            self.root_ref = lambda r=root: r  # type: ignore[assignment]
+        self.thread = threading.current_thread()
+        self.ident = threading.get_ident()
+        self.label = label
+        self.origin = origin
+        self.created = time.monotonic()
+        self.pinned = False
+        self.warned_held = False
+        self.warned_orphan = False
+
+    def describe(self) -> str:
+        name = self.label or "a Tk root"
+        return f"{name} (built by thread {self.thread.name!r} at {self.origin})"
+
+
+class _ReleasedInterp:
+    """What `root.tk` becomes once the interpreter has been freed.
+
+    A root can outlive its interpreter -- that is the whole point (it may sit
+    in a closure cycle for hours) -- and tkinter reaches `root.tk` for every
+    call. Answering with TclError, the exception every call site already
+    catches for a destroyed window, beats a dangling tkapp.
+    """
+
+    __slots__ = ("_label",)
+
+    def __init__(self, label: str) -> None:
+        self._label = label
+
+    def __getattr__(self, name: str) -> Any:
+        import tkinter  # noqa: PLC0415 - only on the error path
+
+        raise tkinter.TclError(
+            f"{self._label}: its Tcl interpreter was freed on the thread that "
+            "built it (CR-93); the window is gone")
+
+
+_registry_lock = threading.Lock()
+# id(tkapp) -> record. The record's strong reference plus the Py_IncRef pin
+# is what keeps Tkapp_Dealloc from running anywhere we did not choose.
+_registry: dict[int, _TkRecord] = {}
+_guard_installed = False
 
 
 def _immortalise(obj: Any) -> bool:
     """Add a reference nothing can take back but us. Returns whether it stuck.
 
-    A parked root needs to survive INTERPRETER SHUTDOWN as well as its
-    holder: finalisation clears module globals from the main thread, so a
-    graveyard that is only a list hands the last reference to the main
-    thread and aborts on the way out (measured 2026-08-29 -- exit code 3,
-    same Tcl_AsyncDelete, just at a moment nobody was watching). An extra
-    refcount is invisible to finalisation, and _mortalise() gives it back
-    when the owning thread is ready to do the free itself.
+    A pinned interpreter must survive INTERPRETER SHUTDOWN as well as its
+    holders: finalisation clears module globals from the main thread, so a
+    registry that is only a dict hands the last reference to the main thread
+    and aborts on the way out (measured 2026-08-29 -- exit code 3, same
+    Tcl_AsyncDelete, just at a moment nobody was watching). An extra refcount
+    is invisible to finalisation, and _mortalise() gives it back at the one
+    moment the owning thread is ready to do the free itself.
     """
     try:
-        import ctypes  # noqa: PLC0415 - only needed on the parking path
+        import ctypes  # noqa: PLC0415 - only needed on this path
 
         ctypes.pythonapi.Py_IncRef(ctypes.py_object(obj))
         return True
-    except Exception:  # noqa: BLE001 - no ctypes: park anyway, list-only
-        log.debug("UI dispatch: could not pin a parked root", exc_info=True)
+    except Exception:  # noqa: BLE001 - no ctypes: the record's own reference holds
+        log.debug("UI dispatch: could not pin a Tk interpreter", exc_info=True)
         return False
 
 
@@ -670,75 +750,311 @@ def _mortalise(obj: Any) -> None:
 
         ctypes.pythonapi.Py_DecRef(ctypes.py_object(obj))
     except Exception:  # noqa: BLE001
-        log.debug("UI dispatch: could not unpin a parked root", exc_info=True)
+        log.debug("UI dispatch: could not unpin a Tk interpreter", exc_info=True)
+
+
+def _origin() -> str:
+    """The first frame outside tkinter and this module: the dialog that built
+    the root, as a label for the log."""
+    try:
+        frame = sys._getframe(1)
+        while frame is not None:
+            filename = frame.f_code.co_filename.replace("\\", "/")
+            basename = filename.rsplit("/", 1)[-1]
+            if "/tkinter/" not in filename and basename != "ui_dispatch.py":
+                return f"{frame.f_code.co_name} ({basename}:{frame.f_lineno})"
+            frame = frame.f_back
+    except Exception:  # noqa: BLE001 - a label, never a failure
+        pass
+    return "<unknown>"
+
+
+def adopt(root: Any, label: Optional[str] = None) -> Optional[_TkRecord]:
+    """Register (and pin) the interpreter behind `root`. Idempotent; a root
+    with no `.tk` owns nothing and gets no record. Normally done for every
+    root by the guard below the moment tkinter builds it -- the explicit call
+    is for a root built before the guard, and for the suite's fakes."""
+    try:
+        tkapp = root.__dict__.get("tk")
+    except Exception:  # noqa: BLE001 - no __dict__: nothing to own
+        return None
+    if tkapp is None:
+        return None
+    key = id(tkapp)
+    with _registry_lock:
+        record = _registry.get(key)
+        if record is not None:
+            if label and not record.label:
+                record.label = label
+            return record
+        record = _TkRecord(tkapp, root, label, _origin())
+        record.pinned = _immortalise(tkapp)
+        _registry[key] = record
+    return record
+
+
+def install_tk_guard() -> bool:
+    """Wrap tkinter.Tk.__init__ so every interpreter is pinned at birth.
+
+    Idempotent. The wrapper adopts in a `finally`: a root whose __init__
+    raised half-way (Tcl wedged by a sibling thread's root, seen live
+    2026-07-25) already owns an interpreter, and that one must not be the
+    exception traceback's to free.
+    """
+    global _guard_installed
+    if _guard_installed:
+        return True
+    try:
+        import tkinter
+    except Exception:  # noqa: BLE001 - no tkinter: nothing to guard
+        return False
+    original = tkinter.Tk.__init__
+
+    def __init__(self, *args, **kwargs):  # noqa: N807 - it IS __init__
+        try:
+            original(self, *args, **kwargs)
+        finally:
+            adopt(self)
+
+    __init__.__wrapped__ = original  # type: ignore[attr-defined]
+    __init__.__doc__ = original.__doc__
+    tkinter.Tk.__init__ = __init__  # type: ignore[method-assign]
+    _guard_installed = True
+    return True
+
+
+def _baseline(record: _TkRecord) -> int:
+    """What sys.getrefcount(record.tkapp) reads when nothing but us holds it:
+    the record's attribute, getrefcount's argument, the pin, and the root's
+    own `tk` while the root is alive and still has one."""
+    count = 2 + (1 if record.pinned else 0)
+    root = record.root_ref()
+    if root is not None:
+        try:
+            if root.__dict__.get("tk") is record.tkapp:
+                count += 1
+        except Exception:  # noqa: BLE001
+            pass
+    return count
+
+
+def _root_in_use(record: _TkRecord) -> bool:
+    """True while the window still exists -- a hidden clipboard root between
+    `withdraw()` and its release reads at the baseline (no widgets), and a
+    reclamation pass on a nested dialog must not free it under its frame."""
+    root = record.root_ref()
+    if root is None:
+        return False
+    exists = getattr(root, "winfo_exists", None)
+    if exists is None:
+        return False
+    try:
+        return bool(exists())
+    except Exception:  # noqa: BLE001 - "application has been destroyed"
+        return False
+
+
+def _try_free(record: _TkRecord) -> bool:
+    """Free the interpreter HERE if this thread built it and nothing else
+    holds it. The only path in this process to Tkapp_Dealloc."""
+    if record.thread is not threading.current_thread():
+        return False
+    if _root_in_use(record):
+        return False
+    tkapp = record.tkapp
+    if tkapp is None:
+        return True
+    if sys.getrefcount(tkapp) > _baseline(record) + 1:  # +1: our local above
+        return False
+    root = record.root_ref()
+    if root is not None:
+        try:
+            if root.__dict__.get("tk") is tkapp:
+                root.__dict__["tk"] = _ReleasedInterp(record.label or "a Tk root")
+        except Exception:  # noqa: BLE001
+            pass
+    with _registry_lock:
+        _registry.pop(id(tkapp), None)
+    record.tkapp = None
+    if record.pinned:
+        record.pinned = False
+        _mortalise(tkapp)
+    # `tkapp` is now the last reference. It dies on this line, on the thread
+    # that made it. Do not move this into a helper that returns it.
+    del tkapp
+    return True
 
 
 def _holder_names(obj: Any, limit: int = 6) -> str:
     """Types still referencing `obj`, for the log line that names the leak.
-
-    This is the whole point of the check: the abort it replaces named
-    nothing at all, so every previous occurrence cost a dump-parsing session
-    to attribute. `Tk` and `dict` are expected (the root, and this module's
-    graveyard); anything else is the bug.
-    """
+    `_TkRecord` is us; anything else is the holder."""
     try:
-        names = sorted({type(ref).__name__ for ref in gc.get_referrers(obj)})
+        names = sorted({type(ref).__name__ for ref in gc.get_referrers(obj)
+                        if not isinstance(ref, _TkRecord)})
     except Exception:  # noqa: BLE001 - a diagnostic may not become the failure
         return "<unknown>"
     return ", ".join(names[:limit]) or "<none>"
 
 
-def _sweep_graveyard(ident: int) -> int:
-    """Free whatever this thread parked earlier and can now safely drop.
+def _describe_ref(obj: Any) -> str:
+    kind = type(obj).__name__
+    try:
+        if kind == "function":
+            return f"function {obj.__qualname__}"
+        if kind == "cell":
+            return "cell"
+        if kind == "frame":
+            return f"frame {obj.f_code.co_name}"
+        if kind == "dict":
+            keys = list(obj.keys())[:4]
+            return f"dict{{{', '.join(repr(k)[:24] for k in keys)}{', ...' if len(obj) > 4 else ''}}}"
+    except Exception:  # noqa: BLE001
+        pass
+    return kind
 
-    Called at the START of release_root, so reclamation happens on the one
-    thread that is allowed to do it, at the one moment we know is safe. A
-    root whose holder has since let go reads the baseline again and dies
-    here; one still held stays parked. Returns how many were freed.
+
+def holder_chains(obj: Any, hops: int = HOLDER_CHAIN_HOPS,
+                  width: int = HOLDER_CHAIN_WIDTH) -> list[str]:
+    """Referrer chains from `obj` outwards, a few hops, for naming a holder:
+    `Label <- dict{'master', 'tk'} <- cell <- function _refresh`. Best effort,
+    bounded, never raises."""
+    chains: list[str] = []
+    skip_ids = {id(_registry), id(chains)}
+
+    def walk(target: Any, path: list[str], depth: int) -> None:
+        if depth > hops:
+            chains.append(" <- ".join(path))
+            return
+        try:
+            refs = [r for r in gc.get_referrers(target)
+                    if id(r) not in skip_ids and not isinstance(r, _TkRecord)
+                    and type(r).__name__ != "frame"]
+        except Exception:  # noqa: BLE001
+            refs = []
+        if not refs:
+            chains.append(" <- ".join(path))
+            return
+        for ref in refs[:width]:
+            walk(ref, path + [_describe_ref(ref)], depth + 1)
+
+    try:
+        walk(obj, [type(obj).__name__], 1)
+    except Exception:  # noqa: BLE001
+        pass
+    return chains[: width * width]
+
+
+def _warn_still_held(record: _TkRecord) -> None:
+    if record.warned_held:
+        return
+    record.warned_held = True
+    log.warning(
+        "UI dispatch: %s closed with its Tcl interpreter still referenced "
+        "(%d refs, baseline %d, held by: %s). It stays pinned on this thread "
+        "rather than being freed by whichever thread's garbage collection "
+        "gets to it -- that is the abort CR-93 was (Tcl_AsyncDelete, exception "
+        "0x80000003 in tcl86t.dll, the whole tray gone with no traceback). "
+        "Chains: %s",
+        record.describe(), sys.getrefcount(record.tkapp), _baseline(record),
+        _holder_names(record.tkapp), " | ".join(holder_chains(record.tkapp)) or "-",
+    )
+
+
+def _report_orphans() -> None:
+    """A pinned interpreter whose thread has exited can never be freed -- Tcl
+    ties it to that thread's storage, which is gone. Say so, once each."""
+    with _registry_lock:
+        records = list(_registry.values())
+    for record in records:
+        if record.warned_orphan or record.thread.is_alive():
+            continue
+        record.warned_orphan = True
+        log.warning(
+            "UI dispatch: %s is pinned for the life of the process: the thread "
+            "that built it has exited and no other thread may free a Tcl "
+            "interpreter (CR-93). Held by: %s. Whatever kept it past its own "
+            "release is the bug; every dialog must end on the thread that "
+            "opened it with nothing of its own left alive.",
+            record.describe(), _holder_names(record.tkapp),
+        )
+
+
+def reclaim_mine(reason: str = "") -> int:
+    """Free every interpreter THIS thread built that nothing else holds.
+
+    Runs a full collection first, on this thread: the dialog that just
+    returned left its closures -- and through them its root and widgets -- as
+    cyclic garbage, and collecting it here is what turns "pinned" back into
+    "freed" without another thread ever touching it. Returns how many were
+    freed. Never raises.
     """
-    with _graveyard_lock:
-        parked = _graveyard.get(ident)
-        if not parked:
-            return 0
-        keep: list = []
-        freed = 0
-        for item, immortal in parked:
-            baseline = PARKED_ROOT_BASELINE_REFS + (1 if immortal else 0)
-            try:
-                still_held = (sys.getrefcount(item) > baseline
-                              or sys.getrefcount(item.tk) > TK_INTERP_BASELINE_REFS)
-            except Exception:  # noqa: BLE001 - an unreadable root stays parked
-                still_held = True
-            if still_held:
-                keep.append((item, immortal))
-                continue
-            if immortal:
-                _mortalise(item)
-            freed += 1
-        _graveyard[ident] = keep
+    me = threading.current_thread()
+    with _registry_lock:
+        mine = [record for record in _registry.values() if record.thread is me]
+    try:
+        # Even a thread that built nothing can notice that another thread's
+        # interpreter has become unfreeable (its builder exited).
+        _report_orphans()
+    except Exception:  # noqa: BLE001
+        pass
+    if not mine:
+        return 0
+    try:
+        gc.collect()
+    except Exception:  # noqa: BLE001
+        pass
+    freed = 0
+    for record in mine:
+        try:
+            if _try_free(record):
+                freed += 1
+            elif not _root_in_use(record):
+                _warn_still_held(record)
+        except Exception:  # noqa: BLE001 - reclamation must never be the failure
+            log.debug("UI dispatch: could not reclaim %s", record.describe(), exc_info=True)
     if freed:
-        log.info("UI dispatch: released %d parked Tk root(s) on the thread that "
-                 "built them", freed)
-    # `parked` and `item` go out of scope HERE, on the owning thread. That is
-    # the entire mechanism; do not move this into a helper that returns them.
+        log.debug("UI dispatch: freed %d Tk interpreter(s) on the thread that built "
+                  "them%s", freed, f" ({reason})" if reason else "")
+    try:
+        with _registry_lock:
+            idle = [r for r in _registry.values() if not _root_in_use(r)]
+        if len(idle) >= PINNED_WARN_AT:
+            log.error(
+                "UI dispatch: %d Tk interpreter(s) pinned with their windows gone "
+                "-- something keeps a widget or a closure for the life of the "
+                "process. Each holds ~1.8 MB; the leak is deliberate (it beats "
+                "the abort) but it is still a leak. %s", len(idle),
+                "; ".join(r.describe() for r in idle[:PINNED_WARN_AT]))
+        if os.environ.get(_TK_AUDIT_ENV):
+            log.info("UI dispatch: Tk audit%s\n%s", f" ({reason})" if reason else "", audit())
+    except Exception:  # noqa: BLE001
+        pass
     return freed
 
 
 def release_root(root: Any, label: Optional[str] = None) -> bool:
-    """End a dialog: destroy `root` and make sure its Tcl interpreter dies on
-    THIS thread. Returns True if it did, False if the root had to be parked.
+    """End a window that owns its root: destroy it and free its Tcl
+    interpreter here, on the thread that built it. Returns True if the
+    interpreter died, False if it had to stay pinned.
 
-    Call it with the root in exactly one local, having already cleared every
-    attribute that held it or one of its widgets (`self.root = None`, the
-    window classes' `_drop_widgets()`); otherwise the reference you kept is
-    read as a leak and the root is parked, which is safe but wasteful.
+    Call it from the thread that created the root, with every attribute that
+    held a widget already cleared (`self.root = None`, the window classes'
+    `_drop_widgets()`); a widget still referenced reads as a holder and the
+    interpreter stays pinned, which is safe but wasteful. Called from any
+    other thread it destroys nothing and frees nothing, and says so.
 
-    Never raises: a dialog that is already gone, a Tk that is half torn down
-    and a display that vanished all mean the same thing here.
+    Never raises: a root already gone, a Tk half torn down and a display
+    that vanished all mean the same thing here.
     """
-    ident = threading.get_ident()
-    _sweep_graveyard(ident)
-    name = label or window_label(root)
+    record = adopt(root, label)
+    name = label or (record.label if record is not None else None) or window_label(root)
+    if record is not None and record.thread is not threading.current_thread():
+        log.error(
+            "UI dispatch: release_root(%s) called on thread %r, but the root was "
+            "built on thread %r -- leaving it pinned rather than freeing it here "
+            "(CR-93). Close a window from the thread that opened it.",
+            name, threading.current_thread().name, record.thread.name)
+        return False
     try:
         # apply_window_icon parks a PhotoImage on the root so Tk does not drop
         # the icon; it is bound to this interpreter and must go with it.
@@ -746,59 +1062,74 @@ def release_root(root: Any, label: Optional[str] = None) -> bool:
     except Exception:  # noqa: BLE001
         pass
     _destroy_quietly(root, name)
-    try:
-        # Deterministic before the count: Tk widgets are cyclic
-        # (master <-> children), and a cycle waiting for the collector reads
-        # exactly like a foreign holder.
-        gc.collect()
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        interp_refs = sys.getrefcount(root.tk)
-    except Exception:  # noqa: BLE001 - no .tk means nothing to free
+    if record is None:
         return True
-    if interp_refs <= TK_INTERP_BASELINE_REFS:
-        return True
-    log.warning(
-        "UI dispatch: %s closed with its Tcl interpreter still referenced "
-        "(%d refs, baseline %d, held by: %s). Parking it here rather than "
-        "letting another thread free it -- that is the abort CR-93 was: "
-        "Tcl_AsyncDelete, exception 0x80000003 in tcl86t.dll, the whole tray "
-        "gone with no traceback. Whatever is named above should have been "
-        "dropped by the window's own _drop_widgets().",
-        name, interp_refs, TK_INTERP_BASELINE_REFS, _holder_names(root.tk),
-    )
-    immortal = _immortalise(root)
-    with _graveyard_lock:
-        parked = _graveyard.setdefault(ident, [])
-        parked.append((root, immortal))
-        depth = len(parked)
-    if depth >= GRAVEYARD_WARN_AT:
-        log.error(
-            "UI dispatch: %d Tk root(s) parked on this thread and never "
-            "reclaimed -- something keeps a widget for the life of the "
-            "process. Each one holds a Tcl interpreter's memory; the leak is "
-            "deliberate (it beats the abort) but it is still a leak.", depth)
-    return False
+    reclaim_mine(f"release of {name}")
+    return record.tkapp is None
+
+
+def pinned_records() -> list[_TkRecord]:
+    with _registry_lock:
+        return list(_registry.values())
 
 
 def parked_roots(ident: Optional[int] = None) -> list:
-    """What release_root has parked, for tests and diagnostics."""
-    with _graveyard_lock:
-        if ident is None:
-            return [root for roots in _graveyard.values() for root, _ in roots]
-        return [root for root, _ in _graveyard.get(ident, ())]
+    """Roots whose interpreter is still pinned (window gone or not), for
+    tests and diagnostics. `ident` narrows to one creating thread."""
+    with _registry_lock:
+        records = [r for r in _registry.values() if ident is None or r.ident == ident]
+    roots = []
+    for record in records:
+        root = record.root_ref()
+        if root is not None:
+            roots.append(root)
+    return roots
 
 
-def _reset_graveyard_for_tests() -> None:
-    """Give back every pin and forget the roots. Only the suite calls this --
-    a released pin in production is a root the wrong thread can free."""
-    with _graveyard_lock:
-        entries = [entry for roots in _graveyard.values() for entry in roots]
-        _graveyard.clear()
-    for root, immortal in entries:
-        if immortal:
-            _mortalise(root)
+def audit() -> str:
+    """Every interpreter this process holds, one paragraph each: what built
+    it, on which thread, whether that thread and its window are still alive,
+    and what references it (with chains). This is the probe that names the
+    next holder on the machine it happens on -- CCSYNC_TK_AUDIT=1 logs it
+    after every reclamation pass."""
+    with _registry_lock:
+        records = list(_registry.values())
+    if not records:
+        return "  no Tk interpreters registered"
+    lines = []
+    me = threading.current_thread()
+    for record in records:
+        alive = record.thread.is_alive()
+        lines.append(
+            f"  - {record.describe()}: thread {'alive' if alive else 'EXITED'}"
+            f"{' (this thread)' if record.thread is me else ''}, window "
+            f"{'open' if _root_in_use(record) else 'gone'}, "
+            f"{sys.getrefcount(record.tkapp) - 1} refs (baseline {_baseline(record)}), "
+            f"pinned={record.pinned}, age {time.monotonic() - record.created:.0f}s, "
+            f"held by: {_holder_names(record.tkapp)}")
+        for chain in holder_chains(record.tkapp):
+            lines.append(f"      {chain}")
+    return "\n".join(lines)
+
+
+def _reset_registry_for_tests() -> None:
+    """Give back every pin and forget the records. Only the suite calls this
+    -- a released pin in production is an interpreter the wrong thread can
+    free."""
+    with _registry_lock:
+        records = list(_registry.values())
+        _registry.clear()
+    for record in records:
+        tkapp, record.tkapp = record.tkapp, None
+        if record.pinned and tkapp is not None:
+            record.pinned = False
+            _mortalise(tkapp)
+
+
+# Every root in this process is pinned from here on. Explicit as well
+# (app.run calls it too, for the log line), but importing this module is
+# enough: every dialog site imports it before it builds anything.
+install_tk_guard()
 
 
 def stop() -> None:

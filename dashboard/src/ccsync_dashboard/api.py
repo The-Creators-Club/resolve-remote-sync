@@ -708,6 +708,26 @@ def build_presence_view(
             "nas": nas, "editors": editors}
 
 
+def _volunteering_chip(capabilities: dict[str, Any], now: str) -> dict[str, Any]:
+    """The fleet grid's [ VOLUNTEERING ] chip, or a dict that renders nothing.
+
+    Section 10 (2026-08-30). Volunteering is the ONE lever this dashboard
+    deliberately has no button for: the person sitting at a computer is the
+    only one who knows whether they mind their GPU being used while they
+    work. So the grid shows what they chose, and an admin who wants a
+    machine's time asks for it with `--on --now` instead.
+    """
+    until = str((capabilities or {}).get("volunteer_until") or "")
+    if not until or not jobs_mod.is_volunteering(capabilities, now):
+        return {"active": False, "until": ""}
+    try:
+        # UTC HH:MM, which is what every other time on this page already is.
+        clock = db.parse_iso(until).strftime("%H:%M")
+    except (TypeError, ValueError):                            # pragma: no cover
+        clock = ""
+    return {"active": True, "until": clock, "at": until}
+
+
 def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict[str, Any]:
     now = now or db.utcnow_iso()
     # Per-platform current version (see X-5): a machine's "out of date" flag
@@ -899,6 +919,13 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
         entry["music_ingest"] = music_ingest.get(key) or {}
         entry["job"] = running_jobs.get(key) or {}
         entry["capabilities"] = capabilities.get(key) or {}
+        # IS SOMEBODY AT THIS MACHINE LETTING THE FLEET IN RIGHT NOW
+        # (section 10, 2026-08-30). Decided here rather than in the template
+        # because it is a comparison against the clock, and a template that
+        # can be wrong about "until" is a chip that says a machine is
+        # volunteering an hour after the timer ran out. `until` is the UTC
+        # HH:MM, which is what every other time on this page already is.
+        entry["volunteering"] = _volunteering_chip(entry["capabilities"], now)
         entry["proxy"] = proxies.get(key) or {}
         entry["companion_version"] = (
             (machine_versions.get(key) or {}).get("companion_version")
@@ -6661,6 +6688,14 @@ class CapabilitiesIn(_ReportSectionIn):
     # would take every machine in the fleet out of the queue on the day this
     # dashboard is deployed ahead of the companions.
     job_kinds: list[str] | None = Field(default=None, max_length=16)
+    # WHEN THE PERSON AT THIS MACHINE STOPS LETTING THE FLEET IN (section 10,
+    # 2026-08-30). An ISO-8601 UTC deadline their tray set, or null. A STRING
+    # and not a datetime: the only thing this dashboard does with it is
+    # compare it against now (jobs.is_volunteering, which reads an
+    # unparseable value as "not volunteering"), and a 422 on a badly spelled
+    # timestamp would throw away the whole report of a machine that is
+    # otherwise fine.
+    volunteer_until: str | None = Field(default=None, max_length=64)
     resolve: ResolveCapabilityIn | None = None
     cards_agent: CardsAgentIn | None = None
 
@@ -7731,6 +7766,15 @@ def api_report(
         block: dict[str, Any] = {}
         if offers["offered"]:
             block["offered"] = offers["offered"]
+        # WHICH OF THOSE THE ADMIN SAID "NOW" TO (section 10). Its own key on
+        # the same rule as the rest of this block -- present only when it has
+        # something to say -- and a subset of `offered`, never a second list
+        # to claim from: the companion's gate reads it to decide whether to
+        # claim with somebody at the keyboard, and a dashboard that named a
+        # job here it had not also offered would be pushing rather than
+        # offering.
+        if offers.get("forced"):
+            block["forced"] = offers["forced"]
         if cancels:
             block["cancel"] = cancels
         if depth["queued"] or depth["running"] or depth["pinned"]:
@@ -8225,6 +8269,18 @@ class JobIn(BaseModel):
     # Higher runs first. An int, not a name, because the only two things a
     # queue this small needs are "the usual" and "before the usual".
     priority: int = Field(default=0, ge=-100, le=100)
+    # SECTION 10's TWO LEVERS. `force` is "do not wait for anybody to leave
+    # their desk": it skips the idle floor, the per-machine cooldown and the
+    # rank grace on every machine offered this job, and NOTHING else -- a
+    # halt, an update, a tripped breaker, a machine's own allow-list and the
+    # capability filter all still refuse it.
+    force: bool = False
+    # ...and `target_machine` is "this one computer and no other". An unknown
+    # name is ACCEPTED on purpose: the receipt's `why` says nobody by that
+    # name has reported, and the machine may be switched on tomorrow. A
+    # refusal here would make an admin guess at a spelling with nothing to
+    # check it against.
+    target_machine: str | None = Field(default=None, max_length=128)
 
 
 class JobClaimIn(BaseModel):
@@ -8240,6 +8296,12 @@ class JobClaimIn(BaseModel):
     machine_id: str | None = Field(default=None, max_length=64)
     capabilities: dict[str, Any] = Field(default_factory=dict)
     kinds: list[str] | None = Field(default=None, max_length=16)
+    # WHICH jobs, when the claimant has a reason to narrow it (section 10). A
+    # companion whose own gate is shut -- somebody is at the keyboard -- but
+    # which holds forced offers claims with `ids` set to those, and the
+    # dashboard INTERSECTS: asking for a job never widens what the scheduler
+    # was willing to offer.
+    ids: list[int] | None = Field(default=None, max_length=16)
 
 
 class JobHeartbeatIn(BaseModel):
@@ -8280,7 +8342,8 @@ def api_create_job(
         payload.kind, payload.inputs)
     job_id = db.create_job(
         conn, payload.kind, payload.inputs, requires, payload.cost,
-        created_by=admin, priority=payload.priority)
+        created_by=admin, priority=payload.priority,
+        forced=payload.force, target_machine=payload.target_machine)
     conn.commit()
     log.info("job #%s (%s) queued by %s: %s", job_id, payload.kind, admin, payload.inputs)
     job = db.get_job(conn, job_id)
@@ -8428,7 +8491,7 @@ def api_claim_job(
         caps=jobs_mod.fleet_caps(request.app.state.settings))
     job = db.claim_next_job(
         conn, editor, machine, payload.capabilities, now=now,
-        allowed_ids=offers["offered"], kinds=payload.kinds)
+        allowed_ids=offers["offered"], kinds=payload.kinds, ids=payload.ids)
     conn.commit()
     if job is None:
         return {"job": None, "offered": offers["offered"]}

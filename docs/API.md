@@ -993,8 +993,8 @@ Status codes are §6a's, with two music-specific 409 reasons: `model_mismatch`
 ## 6c. Fleet jobs -- `/api/v1/jobs`
 
 Added 2026-08-29 (`docs/TIMELINE-CARDS-INTO-CCSYNC.md` phase 0), extended
-2026-08-30 (phase 1). A general queue of work the fleet can do: one row, a set
-of hard requirements, and a lease.
+2026-08-30 (phase 1, phase 4 and section 10). A general queue of work the
+fleet can do: one row, a set of hard requirements, and a lease.
 
 ### The kinds
 
@@ -1049,6 +1049,7 @@ fleet token can neither read the queue nor put work on it.
               "episode_rel": "Vault/2026/FF5/Ep", "speakers": false},
  "requires": {"whisper": true, "mount": "vault", "gpu_vram_gb": 6},
  "state": "queued|claimed|running|done|failed|abandoned",
+ "forced": false, "target_machine": "",
  "claimed_by": null, "claimed_machine": null, "lease_expires_at": null,
  "heartbeat_at": null, "attempts": 0, "last_error": "",
  "result": {"files": ["Clips/A/A_words.json"], "seconds": 214.0, "realtime": 11.4}}
@@ -1103,7 +1104,7 @@ refusal** -- an unknown requirement must never read as satisfied.
 
 | Route | Body | Answer |
 |---|---|---|
-| `POST /api/v1/jobs` | `{kind, inputs, requires, cost, priority}` | `{ok, job, why}` -- the receipt carries the scheduling answer, so a job nothing can run says so at submit time |
+| `POST /api/v1/jobs` | `{kind, inputs, requires, cost, priority, force?, target_machine?}` | `{ok, job, why}` -- the receipt carries the scheduling answer, so a job nothing can run says so at submit time |
 | `GET /api/v1/jobs?state=open\|queued\|…&kind=&limit=` | -- | `{jobs:[…], kinds:[…]}` -- `kinds` is what THIS dashboard can schedule |
 | `GET /api/v1/jobs/{id}` | -- | `{job}` |
 | `GET /api/v1/jobs/{id}/why` | -- | `{job, schedulable, reason_code, transient, capable, running, cap, summary, machines:[{editor, machine, ok, reason, why, rank, score, signals, why_not_first}]}` |
@@ -1116,7 +1117,7 @@ exactly like a fleet with nothing to do. Per-machine `reason`s are
 `capability | fleet_halt | machine_halt | upgrading | lane_b_breaker |
 already_holds_a_job | not_idle | no_capabilities_reported | kind_unknown |
 another_machine_is_preferred | cooling_down | kind_not_allowed |
-jobs_disabled | fleet_cap`.
+jobs_disabled | fleet_cap | not_the_target`.
 
 **`schedulable` and `reason_code` are two different questions** (phase 4).
 `schedulable` keeps its phase-1 meaning -- "is anything going to take this,
@@ -1137,6 +1138,8 @@ apart, and it is a CODE because a client branches on it:
 | `halted` | a fleet halt, or every machine's sync halted | no |
 | `kind_not_allowed` | every machine's config excludes this kind | no |
 | `kind_unknown` | this dashboard does not know the kind | no |
+| `target_away` | this job named one machine, and that machine is here and not free | yes |
+| `target_unknown` | this job named a machine no report has ever come from | no |
 | `held` / `pinned` / `finished` | somebody has it, or it is over | held and pinned, yes |
 
 **The worst answer wins, not the commonest**: one machine that could do this
@@ -1165,7 +1168,7 @@ write routes, which is the wrong direction).
 
 | Route | Body | Answer |
 |---|---|---|
-| `POST /api/v1/jobs/claim` | `{machine, machine_id?, capabilities, kinds?}` | `{job, lease_seconds}` or `{job: null, offered: […]}` |
+| `POST /api/v1/jobs/claim` | `{machine, machine_id?, capabilities, kinds?, ids?}` | `{job, lease_seconds}` or `{job: null, offered: […]}` |
 | `POST /api/v1/jobs/{id}/heartbeat` | `{machine, note?, progress?}` | `{ok, lease_seconds}`, or **410** |
 | `POST /api/v1/jobs/{id}/result` | `{machine, ok, retryable, error, result}` | `{ok, state}`, or **410** |
 
@@ -1217,6 +1220,7 @@ never sets it, because the fault was in the clip.
 ```json
 {"commands": {"jobs": {
   "offered": [12, 13],
+  "forced": [13],
   "cancel": [11],
   "queue": {"queued": 4, "running": 2, "pinned": 0, "oldest_age_s": 91.2}
 }}}
@@ -1229,7 +1233,10 @@ stopped, and keeps riding until the machine answers with a result. `queue` is
 the **depth signal** (phase 4): a companion with nothing offered and an empty
 queue lengthens its own tick (4x, capped at 120 s), and a DEEP queue never
 lengthens it -- backpressure on that side means stop asking, never stop
-working. `oldest_age_s` is null, never 0, on an empty queue.
+working. `oldest_age_s` is null, never 0, on an empty queue. `forced` is the subset of
+`offered` whose row carries the admin's "now" (section 10 below): always a
+subset, and never a second list to claim from, because naming a job there that
+had not also been offered would be pushing rather than offering.
 **Offer, do not push** -- the ids are an invitation and the claim is the
 decision. Computed by `ccsync_dashboard/jobs.py`: capability match, then
 policy (not halted, not mid-upgrade, breaker not tripped, not already holding
@@ -1274,6 +1281,56 @@ companion: empty is every kind, so an editor's laptop can be kept out of
 `idle_seconds` keeps `idle.py`'s contract end to end: **null means cannot
 tell means NOT IDLE**, on the machine and on the server.
 
+### Force, target and volunteer
+
+Added 2026-08-30 (`docs/TIMELINE-CARDS-INTO-CCSYNC.md` section 10, dashboard
+**0.7.23** / companion **0.9.61**). Everything above is a reason to WAIT, and
+until now the only lever over a fleet of machines with people sitting at them
+was to go and ask somebody to stand up. Three levers answer that, and each is
+pulled by a different person:
+
+| lever | who pulls it | what it bypasses |
+|---|---|---|
+| **volunteer** -- the tray item *"Take fleet jobs now (30 min)"* | the person AT the machine | that machine's idle gate and its Resolve-open gate, on both sides, until the timer runs out or they click it off |
+| **force** -- `"force": true` on the job (`tools/jobs.py submit --now`) | the admin submitting | the idle floor, the per-machine cooldown and the rank grace on EVERY machine offered this job, and the companion's own idle/Resolve gates for THIS job only |
+| **target** -- `"target_machine"` (`tools/jobs.py submit --on <machine>`) | the admin submitting | the ranking: the job is offered to that one machine and nobody else |
+
+**Nothing bypasses** a fleet halt, a machine halt, an update waiting, a
+tripped breaker, `jobs_enabled = false`, the machine's own `jobs_kinds`, a job
+it already holds, the fleet cap, or the capability filter. "Force" means "do
+not wait for anybody to leave their desk"; it does not mean "run on a machine
+that cannot".
+
+* **`force`** (body) / **`forced`** (row, and the column -- the two names
+  differ so the column never argues with SQL) is a bool, default false.
+* **`target_machine`** is a machine name as the report spells it
+  (`machine_state.machine`), compared **case-insensitively**;
+  `editor/machine` is accepted and the editor half is then also required to
+  match, because two editors' laptops can carry the same machine name. An
+  **unknown name is accepted**: the receipt's `why` says nobody by that name
+  has reported, and that machine may be switched on tomorrow. Refusing it at
+  submit time would make an admin guess at a spelling with nothing to check it
+  against. The row and the `why`/receipt JSON carry both fields back
+  (`""` when there is no target).
+* **`capabilities.volunteer_until`** is an ISO-8601 UTC string, or null, in
+  every capabilities section from companion 0.9.61. Absent from an older
+  build, which reads as null. Unparseable also reads as **not volunteering**:
+  `idle_seconds`' direction, because a value this server cannot read must
+  never be the reason work starts under somebody's hands. There is
+  deliberately **no dashboard button** that sets it -- the person at a machine
+  is the one who knows whether they mind, and the admin's lever is
+  `--on --now`, which that machine's companion obeys.
+* **`commands.jobs.forced`** on the report reply is the subset of `offered`
+  whose row is forced; **`ids`** on the claim body is the claimant's own
+  narrowing, INTERSECTED with what was offered. A companion whose gate is
+  closed but which holds forced offers claims with `ids = forced`, and asking
+  for a job can never widen what the scheduler was willing to give.
+
+`volunteering` is also a rank signal, and it LEADS every kind's list: a
+machine whose editor said "go ahead" costs nobody anything, which beats an
+encoder on a machine somebody merely walked away from. Like every other
+signal it is a preference and not a gate.
+
 ### Submitting from the command line
 
 ```
@@ -1284,6 +1341,9 @@ python tools/jobs.py submit --kind proxy-480p --root media \
     --rel "FF5/Civil Defence/Interview 3.mp4" --out-root vault \
     --out-rel "Vault/2026/FF5/CD/Script Docs/remote_audio/source" \
     [--out-stem "Interview 3"] [--watch]
+
+python tools/jobs.py submit --kind whisper --rel "..."     --now                       # do not wait for an idle machine
+    --on CREATOR-1              # ...and give it to that one machine
 
 python tools/jobs.py list [--state open] | why <id> | watch <id>
 python tools/jobs.py queue          # the depth, the per-kind caps, and

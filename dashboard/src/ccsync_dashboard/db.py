@@ -1496,6 +1496,45 @@ ALTER TABLE machine_state ADD COLUMN jobs_cooldown_reason TEXT;
 ALTER TABLE machine_state ADD COLUMN cap_job_kinds TEXT;
 """
 
+# v46: FORCE, TARGET AND VOLUNTEER (§10, 2026-08-30).
+#
+# Alex, after reading phase 4: "Is there an ability to force start the
+# proxy/whisper workflow in the companion, without waiting for someone's idle
+# PC to process it?" There was not. Everything the scheduler knows how to say
+# was a reason to WAIT, and the only lever an admin had over a fleet of
+# machines with people sitting at them was to go and ask one of them to stand
+# up.
+#
+# Three columns, one idea between them: somebody may say "now".
+#
+# `jobs.forced` is the admin's. It skips the idle floor, the per-machine
+# cooldown and the rank grace on every machine offered THIS job -- and
+# nothing else: a fleet halt, a machine halt, an update waiting, a tripped
+# breaker, `jobs_enabled`, the machine's own `jobs_kinds` and the capability
+# filter all still refuse it. "Force" means "do not wait for anybody to leave
+# their desk", never "run on a machine that cannot".
+#
+# It is `forced` and not `force` so the column name never argues with SQL,
+# and it is a column rather than a flag inside `inputs_json` because the
+# scheduler reads it on every offer of every job and the jobs page renders it.
+#
+# `jobs.target_machine` is the other half of the same lever: the job goes to
+# ONE named machine and nobody else. An unknown name is accepted on purpose
+# (the receipt says nobody by that name has reported) -- a machine that is
+# switched off today may report tomorrow, and refusing the submission would
+# make the admin guess at the exact spelling with nothing to check it against.
+#
+# `machine_state.cap_volunteer_until` is the PERSON's, and it is deliberately
+# not a dashboard button: a machine's editor is the one who knows whether
+# they mind their GPU being used while they work, so the lever is the tray's
+# and this column only records what they chose. NULL is "not volunteering",
+# which is what every companion older than 0.9.61 says by saying nothing.
+SCHEMA_V46 = """
+ALTER TABLE jobs ADD COLUMN forced INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN target_machine TEXT;
+ALTER TABLE machine_state ADD COLUMN cap_volunteer_until TEXT;
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -1599,6 +1638,11 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # from the two ends -- the server's reason to hold off, and the machine's
     # own.
     (45, SCHEMA_V45),
+    # 46: the three levers of §10 (force, target, volunteer). One step: they
+    # are one feature seen from the two ends -- the admin saying "now" and
+    # the person at the machine saying "go ahead" -- and a database that had
+    # one without the others would answer half of every scheduling question.
+    (46, SCHEMA_V46),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -7559,6 +7603,13 @@ def job_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
     job["requires"] = _job_loads(job.get("requires_json")) or {}
     job["cost"] = _job_loads(job.get("cost_json")) or {}
     job["result"] = _job_loads(job.get("result_json"))
+    # v46. `forced` is a BOOL out here and an INTEGER in the column: every
+    # reader of this row is a scheduler branch, a JSON body or a template,
+    # and 0/1 in a JSON payload is the kind of thing the other half of a
+    # contract gets subtly wrong. `target_machine` is "" and never None for
+    # the same reason -- a name to compare against, or nothing to compare.
+    job["forced"] = bool(job.get("forced"))
+    job["target_machine"] = str(job.get("target_machine") or "")
     return job
 
 
@@ -7567,6 +7618,7 @@ def create_job(
     requires: Mapping[str, Any] | None = None,
     cost: Mapping[str, Any] | None = None,
     created_by: str = "", priority: int = 0, now: str | None = None,
+    forced: bool = False, target_machine: str | None = None,
 ) -> int:
     """Queue one job. -> its id.
 
@@ -7574,15 +7626,25 @@ def create_job(
     here enforces that, because "is this an absolute path" is a question with
     a different answer on every platform in the fleet. The submitters
     (tools/jobs.py, and Timeline Cards later) build them, api.py's model
-    bounds them, and docs/API.md is the contract."""
+    bounds them, and docs/API.md is the contract.
+
+    `forced` and `target_machine` are §10's two admin levers, and neither is
+    validated here: an unknown machine name is a job that waits visibly with
+    a receipt saying nobody by that name has reported, which is a better
+    answer than a refusal at submit time to a person who cannot see the
+    fleet's spelling of it.
+    """
     now = now or utcnow_iso()
     cur = conn.execute(
         """INSERT INTO jobs (kind, created_at, created_by, priority, inputs_json,
-                             requires_json, cost_json, state, attempts, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
+                             requires_json, cost_json, state, attempts, updated_at,
+                             forced, target_machine)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)""",
         (str(kind), now, str(created_by or ""), int(priority),
          _job_json(dict(inputs or {})), _job_json(dict(requires or {})),
-         _job_json(dict(cost or {})), JOB_QUEUED, now),
+         _job_json(dict(cost or {})), JOB_QUEUED, now,
+         int(bool(forced)), (str(target_machine).strip()[:128] or None
+                             if target_machine else None)),
     )
     return int(cur.lastrowid)
 
@@ -7722,6 +7784,7 @@ def claim_next_job(
     now: str | None = None, lease_seconds: float = JOB_LEASE_SECONDS,
     allowed_ids: Iterable[int] | None = None,
     kinds: Iterable[str] | None = None,
+    ids: Iterable[int] | None = None,
 ) -> dict[str, Any] | None:
     """Claim the best queued job this machine can actually do, or None.
 
@@ -7733,11 +7796,20 @@ def claim_next_job(
     policy filter -- halt, idleness, upgrades -- lives there); None means
     "capability match alone", which is what a caller with no fleet state in
     hand can honestly ask for.
+
+    `ids` is the CLAIMANT's own narrowing (§10.2) and is INTERSECTED with
+    `allowed_ids`, never substituted for it: a companion whose idle gate is
+    closed claims the forced jobs and only those, and the fact that it asked
+    for a job must never be able to widen what the scheduler was willing to
+    give it.
     """
     now = now or utcnow_iso()
     allowed = None if allowed_ids is None else {int(i) for i in allowed_ids}
+    wanted = None if ids is None else {int(i) for i in ids}
     for job in queued_jobs(conn, kinds=kinds):
         if allowed is not None and int(job["id"]) not in allowed:
+            continue
+        if wanted is not None and int(job["id"]) not in wanted:
             continue
         ok, _why = job_requirements_met(job.get("requires"), capabilities)
         if not ok:
@@ -8301,8 +8373,8 @@ def store_machine_capabilities(
              cap_whisper_detail=?,
              cap_claude=?, cap_mounts=?, cap_cpu_count=?, cap_idle_seconds=?,
              cap_load=?, cap_resolve_running=?, cap_resolve_project=?,
-             cap_jobs_enabled=?, cap_job_kinds=?, cap_cards_connected=?,
-             cap_cards_state=?,
+             cap_jobs_enabled=?, cap_job_kinds=?, cap_volunteer_until=?,
+             cap_cards_connected=?, cap_cards_state=?,
              cap_cards_timeline=?, cap_cards_version=?, cap_cards_since=?
             WHERE editor_username=? AND machine=?""",
         (now,
@@ -8332,6 +8404,14 @@ def store_machine_capabilities(
          # every machine in the fleet out of the queue on the day the
          # dashboard is deployed ahead of the companions (the B16 shape).
          _job_kinds_json(caps.get("job_kinds")),
+         # WHO SAID "GO AHEAD" (v46, section 10). A live value like
+         # idle_seconds and NOT part of the companion's capability cache: a
+         # deadline that went stale in a cache is a machine that keeps taking
+         # work with somebody back at the keyboard. NULL is "not
+         # volunteering", which is also what a companion older than 0.9.61
+         # says by saying nothing at all.
+         (str(caps.get("volunteer_until"))[:64]
+          if caps.get("volunteer_until") else None),
          # The cards role (v44). Written wholesale like everything else here:
          # a companion that has STOPPED serving the page must be able to say
          # so, and a merge would leave the last timeline on the grid for ever.
@@ -8375,6 +8455,9 @@ def _capabilities_of(row: sqlite3.Row | None) -> dict[str, Any]:
         # [] is "this machine did not say", which every reader must treat as
         # ALL KINDS (see _job_kinds_json).
         "job_kinds": _job_kinds_of(row["cap_job_kinds"]),
+        # None is "not volunteering" (v46). The comparison against now lives
+        # in jobs.is_volunteering and not here: this is a decoder.
+        "volunteer_until": row["cap_volunteer_until"] or None,
         "resolve": {"running": bool(row["cap_resolve_running"]),
                     "project": row["cap_resolve_project"] or ""},
         # v44. `state` is meaningful with `connected` false and is the whole
@@ -8391,7 +8474,7 @@ _CAPABILITY_COLUMNS = """cap_at, cap_gpu_present, cap_gpu_name, cap_gpu_vram_gb,
        cap_nvenc, cap_ffmpeg, cap_ffprobe, cap_whisper, cap_whisper_detail,
        cap_claude, cap_mounts, cap_cpu_count, cap_idle_seconds, cap_load,
        cap_resolve_running, cap_resolve_project, cap_jobs_enabled,
-       cap_job_kinds,
+       cap_job_kinds, cap_volunteer_until,
        cap_cards_connected, cap_cards_state, cap_cards_timeline,
        cap_cards_version, cap_cards_since"""
 

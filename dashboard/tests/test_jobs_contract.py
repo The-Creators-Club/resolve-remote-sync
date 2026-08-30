@@ -27,13 +27,14 @@ stops driving Resolve while both halves look healthy.
 """
 from __future__ import annotations
 
+import datetime as dt
 import sys
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from ccsync_dashboard import auth, db as dbmod
+from ccsync_dashboard import auth, db as dbmod, jobs as jobs_mod
 from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
 
@@ -468,3 +469,155 @@ def test_an_empty_allow_list_survives_as_every_kind(env, tmp_path):
     stored = dbmod.machine_capabilities(conn, "jsmith", "EDIT-PC")
     assert stored["job_kinds"] == []
     assert dbmod.machine_allows_kind(stored, "whisper") is True
+
+
+# ------------------- section 10: force, target and volunteer, on the wire
+#
+# The companion half of this (0.9.61) is built in its own worktree at the same
+# time, so these pin the DASHBOARD's side of section 10.2's contract exactly
+# as it is written down: the key names, the types, and which of them are
+# present when they have nothing to say. Every one of them is a field 0.7.22
+# neither sends nor stores, which is what makes the two halves deployable in
+# either order (section 9.3's rule).
+
+
+def test_the_reply_names_the_forced_jobs_as_a_subset_of_the_offered_ones(env):
+    """`commands.jobs.forced` is how a companion with somebody at the keyboard
+    learns that this particular job was meant to interrupt them. A build older
+    than 0.9.61 ignores the key and claims on its own gate as before."""
+    client, conn = env
+    ordinary = dbmod.create_job(conn, "whisper", {"root": "vault", "rel_path": "V/a"})
+    forced = dbmod.create_job(conn, "whisper", {"root": "vault", "rel_path": "V/b"},
+                              forced=True)
+    conn.commit()
+    reply = client.post("/api/v1/report", json={
+        "editor_name": "jsmith", "machine": "EDIT-PC", "lanes": [],
+        "reported_at": dbmod.utcnow_iso(),
+        "capabilities": {"whisper": True, "idle_seconds": 900, "mounts": ["vault"]},
+    }, headers=hdr()).json()
+    block = reply["commands"]["jobs"]
+    assert block["forced"] == [forced]
+    assert set(block["offered"]) == {ordinary, forced}
+
+
+def test_the_forced_key_is_absent_when_there_is_nothing_to_force(env):
+    """The broll_ingest rule: an empty list is not an instruction, and this
+    block rides every tick of every machine in the fleet."""
+    client, conn = env
+    dbmod.create_job(conn, "whisper", {"root": "vault", "rel_path": "V/a"})
+    conn.commit()
+    reply = client.post("/api/v1/report", json={
+        "editor_name": "jsmith", "machine": "EDIT-PC", "lanes": [],
+        "reported_at": dbmod.utcnow_iso(),
+        "capabilities": {"whisper": True, "idle_seconds": 900, "mounts": ["vault"]},
+    }, headers=hdr()).json()
+    assert "forced" not in reply["commands"]["jobs"]
+    assert reply["commands"]["jobs"]["offered"]
+
+
+def test_a_volunteer_deadline_survives_the_report(env):
+    """`volunteer_until` is an ISO-8601 UTC string or null, in EVERY
+    capabilities section from 0.9.61. Absent from an older build, which reads
+    as null -- never as "volunteering"."""
+    client, conn = env
+    until = (dbmod.parse_iso(dbmod.utcnow_iso())
+             + dt.timedelta(minutes=30)).isoformat()
+    client.post("/api/v1/report", json={
+        "editor_name": "jsmith", "machine": "EDIT-PC", "lanes": [],
+        "reported_at": dbmod.utcnow_iso(),
+        "capabilities": {"ffmpeg": True, "idle_seconds": 0,
+                         "volunteer_until": until},
+    }, headers=hdr())
+    stored = dbmod.machine_capabilities(conn, "jsmith", "EDIT-PC")
+    assert stored["volunteer_until"] == until
+    assert jobs_mod.is_volunteering(stored) is True
+
+
+def test_an_unparseable_volunteer_deadline_does_not_422_the_whole_report(env):
+    """It is a STRING on the model on purpose: the one thing done with it is
+    a comparison against now, and throwing away the whole report of a machine
+    that is otherwise fine, over a timestamp, is the wrong trade."""
+    client, conn = env
+    r = client.post("/api/v1/report", json={
+        "editor_name": "jsmith", "machine": "EDIT-PC", "lanes": [],
+        "reported_at": dbmod.utcnow_iso(),
+        "capabilities": {"ffmpeg": True, "idle_seconds": 0,
+                         "volunteer_until": "half past four"},
+    }, headers=hdr())
+    assert r.status_code == 200, r.text
+    stored = dbmod.machine_capabilities(conn, "jsmith", "EDIT-PC")
+    assert jobs_mod.is_volunteering(stored) is False
+
+
+def test_a_claim_may_name_the_ids_it_wants(env):
+    """A companion whose own gate is shut but which holds forced offers
+    claims with `ids = forced`, and gets that job and no other."""
+    client, conn = env
+    ordinary = dbmod.create_job(conn, "peaks", {"root": "vault", "rel_path": "V/a"})
+    forced = dbmod.create_job(conn, "peaks", {"root": "vault", "rel_path": "V/b"},
+                              forced=True)
+    dbmod.upsert_machine_state(conn, "jsmith", "EDIT-PC", None, dbmod.utcnow_iso())
+    conn.commit()
+    caps = {"ffmpeg": True, "ffprobe": True, "mounts": ["vault"],
+            "idle_seconds": 900}
+    answer = client.post("/api/v1/jobs/claim",
+                         json={"machine": "EDIT-PC", "capabilities": caps,
+                               "ids": [forced]},
+                         headers=hdr()).json()
+    assert answer["job"]["id"] == forced
+    assert dbmod.get_job(conn, ordinary)["state"] == dbmod.JOB_QUEUED
+
+
+def test_a_claim_without_ids_is_the_call_an_older_companion_makes(env):
+    """`ids` is optional and null means "anything you offered me" -- 0.9.60's
+    body, unchanged, still claims."""
+    client, conn = env
+    job_id = dbmod.create_job(conn, "peaks", {"root": "vault", "rel_path": "V/a"})
+    dbmod.upsert_machine_state(conn, "jsmith", "EDIT-PC", None, dbmod.utcnow_iso())
+    conn.commit()
+    answer = client.post("/api/v1/jobs/claim", json={
+        "machine": "EDIT-PC",
+        "capabilities": {"ffmpeg": True, "ffprobe": True, "mounts": ["vault"],
+                         "idle_seconds": 900}}, headers=hdr()).json()
+    assert answer["job"]["id"] == job_id
+
+
+def test_submitting_with_the_two_levers_and_reading_them_back(env):
+    """`force` and `target_machine` on the body, `forced` and
+    `target_machine` on the row -- the names differ on purpose (`forced` is
+    the column, so it never argues with SQL) and both halves are pinned
+    here."""
+    client, _conn = env
+    # One machine reporting, under a different name: otherwise the receipt
+    # answers "no machine has ever reported here", which is a truer sentence
+    # and not the one this test is about.
+    client.post("/api/v1/report", json={
+        "editor_name": "jsmith", "machine": "OTHER-PC", "lanes": [],
+        "reported_at": dbmod.utcnow_iso(),
+        "capabilities": {"ffmpeg": True, "ffprobe": True, "mounts": ["vault"],
+                         "idle_seconds": 900}}, headers=hdr())
+    r = as_admin(client).post("/api/v1/jobs", json={
+        "kind": "peaks", "inputs": {"root": "vault", "rel_path": "V/a",
+                                    "out_root": "vault", "out_rel": "V/cache"},
+        "force": True, "target_machine": "EDIT-PC"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["job"]["forced"] is True
+    assert body["job"]["target_machine"] == "EDIT-PC"
+    # ...and the receipt's why carries them too, so a submitter who typed a
+    # machine name that nobody answers to learns it at submit time.
+    assert body["why"]["reason_code"] == jobs_mod.REASON_TARGET_UNKNOWN
+    again = client.get(f"/api/v1/jobs/{body['job']['id']}").json()["job"]
+    assert (again["forced"], again["target_machine"]) == (True, "EDIT-PC")
+
+
+def test_a_job_submitted_without_the_levers_is_the_body_0_7_22_sent(env):
+    """Both fields default, so every existing submitter keeps working and no
+    job silently becomes forced."""
+    client, _conn = env
+    body = as_admin(client).post("/api/v1/jobs", json={
+        "kind": "peaks", "inputs": {"root": "vault", "rel_path": "V/a",
+                                    "out_root": "vault", "out_rel": "V/cache"},
+    }).json()
+    assert body["job"]["forced"] is False
+    assert body["job"]["target_machine"] == ""

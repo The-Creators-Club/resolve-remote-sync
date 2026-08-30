@@ -11,6 +11,26 @@
   --amber: #ffb02e;
   --text: #e8e8ea;
   --muted: #6f6f7a;
+
+  /* The mobile tokens (2026-08-30, MOBILE_PLAN.md 3.1). A media query cannot
+     read a custom property, so the two breakpoints are written out as
+     literals in every @media below and live here as tokens for the RULES --
+     a padding that has to clear the sheet handle asks for var(--tap), not for
+     44. --bp-phone is the phone query, --bp-tablet is the existing narrow
+     layout, and --tap is the minimum hit box on a coarse pointer.
+
+     The four --safe-* are the display cutouts, and they are the whole reason
+     base.html asks for viewport-fit=cover: with the page painting edge to
+     edge, the gesture bar and the notch are ours to keep content out of.
+     env() falls back to 0px on every browser that has no cutout, so these are
+     safe to use unconditionally. */
+  --bp-phone: 600px;
+  --bp-tablet: 900px;
+  --tap: 44px;
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -278,11 +298,23 @@ a { color: inherit; text-decoration: none; }
 }
 .banner.alarm .muted { color: var(--bg); opacity: 0.75; }
 
+/* THE horizontal rule, a border since 2026-08-30 (MOBILE_PLAN.md 3.2). It
+   used to be a run of 100-120 box-drawing characters in the markup, clipped
+   by this overflow: about a thousand pixels of text laid out on every page to
+   paint one line, and at 390px it was still a thousand pixels of text. The
+   10px margins are the old line box (14px x 1.5 = 21px) rebuilt out of margin
+   plus the 1px border, so nothing below it moves on the desktop.
+
+   overflow/white-space/color stay for the partials that still carry the
+   character run: until M2 and M3 empty them, this clips it to nothing rather
+   than leaving half a line of dashes under the new border. */
 .rule {
+  height: 0;
+  border-top: 1px solid var(--red-dim);
+  margin: 10px 1.2rem;
   color: var(--red-dim);
   overflow: hidden;
   white-space: nowrap;
-  padding: 0 1.2rem;
   user-select: none;
 }
 
@@ -1020,6 +1052,402 @@ table.assign-grid td.assign-cell { text-align: center; white-space: nowrap; }
   .layout { flex-direction: column; }
   .sidebar { width: 100%; border-right: none; border-bottom: 1px solid var(--red-dim); }
 }
+
+/* ==== the phone layer (2026-08-30, MOBILE_PLAN.md M1) =====================
+   The dashboard is ONE app: the same pages at 390px with a thumb. This block
+   is the chrome half -- the tokens' rules, the class vocabulary every other
+   package builds against, and the topbar, drawer, projects rail, Settings
+   strip and login at phone width. The per-PAGE rules live in mobile.css, in
+   two sections owned by two packages; nothing here knows about the fleet grid
+   or an admin form.
+
+   It sits at the END of the file so nothing above it needs extra specificity
+   to be overridden, and ABOVE the theme-common block, whose bytes are
+   compared against the three SPA stylesheets by tests/test_theme_css.py: a
+   phone rule inside that block would have to be copied into b-roll, music and
+   ytdl, and would fail four suites until it was.
+
+   Three queries and only three (MOBILE_PLAN.md 3.1):
+
+     (max-width: 600px)          THE phone query. The number is --bp-phone; it
+                                 is written out because a media query cannot
+                                 read a custom property. The old 900px query
+                                 above stays what it always was: a narrow
+                                 window, not a phone.
+     (pointer: coarse)           THE touch query. Hit boxes grow HERE and not
+                                 by width, so a touch laptop gets them, a
+                                 narrow desktop window does not, and a 1280px
+                                 mouse page does not move by a pixel.
+     (display-mode: standalone)  the installed app, which has no browser
+                                 chrome between the status bar and the page.
+
+   Never (hover: none) for behaviour: a touch laptop reports both.
+   ========================================================================= */
+
+/* ---------------- the class vocabulary (MOBILE_PLAN.md 3.2) ----------------
+   The classes the other five packages spell out in their markup. They are
+   defined here, once, so that .stack means the same thing on the fleet grid
+   as it does on the users table. Rules that only make sense at phone width
+   are inside the query below; these are the ones that hold everywhere. .rule
+   is the last of them and it stays up with the banners, where it always was. */
+
+/* Horizontal scroll INSIDE the element, never the page: a table or a matrix
+   that cannot stack goes in one of these. The right border is the "there is
+   more to the right" hint, because the scrollbar itself is a thin near-black
+   line on a phone and on Android it is not painted at all until you drag. */
+.scroll-x {
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border-right: 1px solid var(--red-dim);
+}
+
+/* On below --bp-phone, off above, and the reverse. */
+.phone-only { display: none; }
+
+/* The desktop's escape hatch for the sheet, and it has to come BEFORE the
+   phone query, not after: an author `display` beats the UA's
+   `[popover]:not(:popover-open) { display: none }`, which is what keeps the
+   projects rail a plain block in the flow of its <aside> above --bp-phone --
+   but the phone query hands that state back to the UA with `display: revert`
+   at the SAME specificity, and between two equal declarations the later one
+   wins whatever query it is in. Written after the query it beat it, and the
+   sheet stood open over every phone page (caught in a 390px screenshot,
+   2026-08-30).
+
+   `display` alone is not enough either: the UA's `[popover]` rule also makes
+   the element `position: fixed; inset: 0; margin: auto; border: solid;
+   background: canvas`, which painted the rail as a white-bordered card
+   floating over the top-left corner of the desktop (the same screenshot pass).
+   Every one of those is undone here, and the open sheet below re-states the
+   ones it wants at a higher specificity. */
+.projects.sheet {
+  display: block;
+  position: static;
+  inset: auto;
+  width: auto;
+  height: auto;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  border: none;
+  padding: 0;
+  overflow: visible;
+  background: none;
+  color: inherit;
+}
+
+/* ---------------- below --bp-phone: the phone layout ---------------- */
+@media (max-width: 600px) {
+  /* !important because .phone-hide is put on things that carry a display of
+     their own, and the point of the class is that it always wins. */
+  .phone-hide { display: none !important; }
+  /* revert, not block or inline: a .phone-only element goes back to the
+     display the UA gives its tag, so a span stays inline and a div stays a
+     block. An element that needs something else states it in a rule of its
+     own with more specificity, as .drawer-chips does below. */
+  .phone-only { display: revert; }
+
+  /* No `body { overflow-x: hidden }` here, though the page must not scroll
+     sideways: overflow on body PROPAGATES to the viewport, so it would clip
+     every other package's overflow instead of fixing it, and the phone sweep
+     (documentElement.scrollWidth > innerWidth) would go quiet and pass. The
+     page stops scrolling sideways when the tables inside it are .scroll-x or
+     .stack, and not before. */
+
+  /* Room at the foot of every page for the projects sheet's handle, which is
+     fixed above the gesture bar and would otherwise sit on the last row of
+     whatever the page is showing. */
+  .layout {
+    padding-bottom: calc(var(--tap) + var(--safe-b));
+    padding-left: var(--safe-l);
+    padding-right: var(--safe-r);
+  }
+  .main { padding: 0.8rem 0.9rem 1rem; }
+
+  /* A record per row: the header goes, every cell becomes a labelled line. A
+     td with no data-label renders bare, which is how a row of actions or a
+     spanning note stays readable. */
+  table.stack,
+  table.stack tbody,
+  table.stack tr,
+  table.stack td { display: block; width: 100%; }
+  table.stack thead { display: none; }
+  table.stack tr {
+    border-bottom: 1px dotted #2a2a31;
+    padding: 0.5rem 0;
+  }
+  table.stack td { padding: 0.15rem 0; }
+  /* :not([data-label=""]) is the escape hatch for an ACTION cell (M2, while
+     stacking the fleet grid, 2026-08-30): a td that carries the attribute
+     with an empty value opts out of the heading entirely, rather than getting
+     an empty 11px line pushing a button down the row. A cell with no
+     attribute at all renders bare too; the empty value is for a table whose
+     cells are generated and cannot simply omit it. */
+  table.stack td[data-label]:not([data-label=""])::before {
+    content: attr(data-label);
+    display: block;
+    color: var(--muted);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+  }
+  /* A control in a stacked cell is a ROW, not a word in a line: full width,
+     text where the labels are. min-height comes from the coarse-pointer block
+     below, and this is the other half of a real target. */
+  table.stack td > .btn,
+  table.stack td > .tap {
+    display: flex;
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  /* 16px is not a size choice, it is the threshold: Android and iOS zoom the
+     whole page into any field smaller than this the moment it is focused, and
+     the zoom does not come back out by itself. Stated on the elements, so a
+     form added later is safe by existing. */
+  input, select, textarea { font-size: 16px; }
+
+  /* ---------------- the topbar ---------------- */
+  /* One 44px row: the menu button, the brand, and how stale the page is. The
+     chips and the account name moved into the drawer head (their .phone-only
+     copy lives in partials/topbar.html); flex-wrap stays, because the bar is
+     still allowed to take a second row rather than break a label in half. */
+  .topbar {
+    align-items: center;
+    min-height: var(--tap);
+    gap: 0.3rem 0.7rem;
+    padding: 0.4rem 0.8rem 0.35rem;
+  }
+  .topbar .session { display: none; }
+  .topbar .stamp { font-size: 11px; }
+
+  /* ---------------- the nav drawer ---------------- */
+  /* Full height already; 86vw so the page behind stays visible as the thing
+     you are coming back to. The [ X ] a thumb uses is the foot's copy at the
+     bottom of the panel (partials/topbar.html); the head's is .phone-hide. */
+  .nav-drawer { width: 86vw; }
+  .drawer-head {
+    flex-wrap: wrap;
+    padding-top: calc(0.9rem + var(--safe-t));
+  }
+  .drawer-chips {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    width: 100%;
+  }
+  .drawer-item { min-height: var(--tap); display: flex; align-items: center; }
+  .drawer-foot { padding-bottom: calc(0.8rem + var(--safe-b)); }
+  /* The foot's copy of the close button, parked at the right end of the last
+     row: margin-left:auto rather than an absolute box, because an absolutely
+     positioned child of a top-layer popover resolves against the viewport in
+     Chrome, and the [ X ] landed outside the panel (390px screenshot,
+     2026-08-30). */
+  .drawer-close-foot {
+    margin-left: auto;
+    font-size: 13px;
+  }
+
+  /* ---------------- the projects rail becomes a sheet ---------------- */
+  /* The <aside class="sidebar"> is not this package's markup (fourteen page
+     templates carry it), so on a phone it is emptied out rather than removed:
+     everything inside it is the popover below, and an aside with no painted
+     box of its own collapses to nothing. */
+  .sidebar {
+    padding: 0;
+    border-bottom: none;
+    background: none;
+  }
+  /* Hidden unless the browser can actually open it (below): a fixed bar that
+     does nothing is worse than no bar. */
+  .btn.sheet-handle { display: none; }
+
+  @supports selector(:popover-open) {
+    /* revert hands the closed state back to the UA's
+       `[popover]:not(:popover-open) { display: none }`, which the desktop
+       rule further down deliberately overrides. Stating `display: none` here
+       instead would ALSO beat the open state and the sheet would never come
+       up: the same trap the nav drawer's comment records. */
+    .projects.sheet { display: revert; }
+    .btn.sheet-handle {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 40;
+      height: calc(var(--tap) + var(--safe-b));
+      padding-bottom: var(--safe-b);
+      background: var(--panel);
+      border-top: 1px solid var(--red);
+      color: var(--red);
+      letter-spacing: 0.06em;
+    }
+    .projects.sheet:popover-open {
+      position: fixed;
+      inset: auto 0 0 0;
+      width: auto;
+      max-width: none;
+      max-height: 60vh;
+      overflow: auto;
+      margin: 0;
+      border: none;
+      border-top: 1px solid var(--red);
+      background: var(--panel);
+      color: var(--text);
+      font: inherit;
+      padding: 0.9rem 0.9rem calc(var(--tap) + var(--safe-b));
+      box-shadow: 0 -10px 30px rgba(255, 33, 64, 0.22);
+    }
+    .projects.sheet::backdrop { background: rgba(5, 5, 8, 0.72); }
+    /* The rail's own scroller and its sticky top are what keep a hundred
+       projects in view beside a page; inside a 60vh sheet they would be a
+       scroller inside a scroller. */
+    .projects.sheet .project-tree { max-height: none; position: static; }
+  }
+
+  /* 12px is the floor for text on a phone (MOBILE_PLAN.md goal 1), and the
+     topbar and fleet chips were the only thing in the product below it. The
+     desktop keeps 11px: the chips are read at arm's length there, and at
+     390px they are read at arm's length in bad light. */
+  .chip { font-size: 12px; }
+
+  /* ---------------- the Settings strip ---------------- */
+  /* Twelve entries wrapped onto four rows is half a phone screen of
+     navigation above the page it navigates, so below --bp-phone the strip is
+     one row that scrolls sideways. The entry for the page you are standing on
+     is the ONLY scroll-snap target in the container, which is what brings it
+     into view with no script at all: a mandatory snap type must come to rest
+     on a snap position, and there is exactly one to choose. */
+  /* The .scroll-x behaviour by SELECTOR, not by a class in the markup:
+     test_settings_hub.py pins `class="settings-nav"` exactly and belongs to
+     another package. Here rather than beside .scroll-x because this is the
+     only width at which the strip scrolls -- above the breakpoint it wraps,
+     and the hint edge would be a 1px line with nothing behind it. */
+  .settings-nav {
+    flex-wrap: nowrap;
+    gap: 0.4rem;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    border-right: 1px solid var(--red-dim);
+    scroll-snap-type: x mandatory;
+  }
+  .settings-nav-item {
+    display: inline-flex;
+    align-items: center;
+    min-height: var(--tap);
+  }
+  .settings-nav-item.settings-nav-current { scroll-snap-align: center; }
+
+  /* ---------------- login ---------------- */
+  .login-main { padding-top: 1.5rem; }
+  .login-box {
+    width: min(380px, 100% - 2rem);
+    padding: 1.1rem 1.1rem 1.4rem;
+  }
+  /* The two fields the element rule above cannot reach: .login-box input is
+     more specific and already gives them 14px. */
+  .login-box input { font-size: 16px; }
+  .login-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: var(--tap);
+  }
+}
+
+/* ---------------- a coarse pointer: the 44px hit boxes ----------------
+   By POINTER, never by width (MOBILE_PLAN.md 3.1), which is the whole reason
+   a 1280px mouse window is untouched: none of this applies there. Real
+   geometry rather than an invisible ::after overlay, because two 44px
+   overlays around two 20px chips 6px apart overlap each other, and a tap in
+   the overlap goes to whichever is painted last. A control that is hard to
+   hit is better than one that quietly does the other thing. */
+@media (pointer: coarse) {
+  /* .tap is for the exceptions: a form control, a summary, anything that is a
+     target without being one of these two. A .chip that is NOT a link stays
+     11px and inline on purpose -- the fleet grid is rows of them as read-outs,
+     and growing those would make one machine four rows tall for no gain. */
+  .btn,
+  a.chip,
+  .tap {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: var(--tap);
+    min-width: var(--tap);
+    padding-left: 0.45rem;
+    padding-right: 0.45rem;
+  }
+  .drawer-item {
+    min-height: var(--tap);
+    display: flex;
+    align-items: center;
+  }
+
+  /* The project tick, which the 2026-08-30 sweep found to be the worst target
+     in the product at 13.3 x 13.3px, and it is not a decorative one: it is
+     what starts and stops a real sync on someone's computer.
+
+     The INPUT is 44px, not a 16px box inside a 44px label, because that is
+     what a finger hits and what an audit measures. The painted box stays 1em:
+     the element's own border and fill are handed to a ::before that is
+     centred in the hit box, so a rail of ten projects still reads as ten
+     small ticks rather than ten slabs. The row grows with it, which is the
+     other half of the fix -- two 44px boxes 30px apart would overlap and a
+     tap between them would land on the wrong project. */
+  input[type="checkbox"].proj-check {
+    width: var(--tap);
+    height: var(--tap);
+    min-width: var(--tap);
+    border-color: transparent;
+    background: none;
+    box-shadow: none;
+  }
+  .proj-check::before {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 1em;
+    height: 1em;
+    transform: translate(-50%, -50%);
+    border: 1px solid var(--red-dim);
+    background: var(--field);
+    border-radius: 2px;
+  }
+  .proj-check:hover:not(:disabled)::before { border-color: var(--red-hot); }
+  .proj-check:checked::before {
+    border-color: var(--red);
+    background: var(--red-dim);
+    box-shadow: 0 0 6px rgba(255, 33, 64, 0.55);
+  }
+  /* The check mark itself is drawn by a ::after inset 2px into the ELEMENT,
+     which is now 44px: it has to be re-centred on the painted box instead. */
+  .proj-check:checked::after {
+    inset: 50% auto auto 50%;
+    width: calc(1em - 4px);
+    height: calc(1em - 4px);
+    transform: translate(-50%, -50%);
+  }
+  .project-link { min-height: var(--tap); align-items: center; }
+}
+
+/* ---------------- the installed app ---------------- */
+/* Standalone has no browser chrome, so the page starts under the status bar
+   and the safe inset is ours to pay. */
+@media (display-mode: standalone) {
+  .topbar { padding-top: calc(0.9rem + var(--safe-t)); }
+  /* pwa.js hides the install chip here too; this is the belt, so the slot
+     never flashes an [ INSTALL ] into an app that is already installed. */
+  #install-slot { display: none; }
+}
+/* ==== end of the phone layer ============================================= */
 
 /* ==== theme-common BEGIN (byte-identical in all four stylesheets) ==========
    The dashboard, b-roll, music and ytdl are four separate static trees behind

@@ -56,7 +56,19 @@
     </details>
   {% endfor %}
 {% endmacro %}
-<nav class="projects">
+{# The bottom sheet (2026-08-30, MOBILE_PLAN.md M1 and 3.2). At 390px a 300px
+   rail of projects above every page is the page; below --bp-phone the same
+   markup becomes a sheet that comes up from the bottom, and this button is its
+   44px handle sitting above the gesture bar. The HTML popover API and nothing
+   else -- the same constraint the nav drawer is built to in topbar.html: this
+   partial is the innerHTML of an <aside> that htmx replaces every 30s, so a
+   listener bound to anything inside it would be dropped on the first refresh.
+   Above --bp-phone style.css gives .projects.sheet an author `display`, which
+   beats the UA's `[popover]:not(:popover-open) { display: none }` and leaves
+   the rail exactly where it has always been. #}
+<button class="btn sheet-handle phone-only" type="button"
+        popovertarget="projects-sheet" aria-label="projects">[ PROJECTS &#9652; ]</button>
+<nav class="projects sheet" id="projects-sheet" popover>
   {% include "partials/editor_switcher.html" %}
   <div class="side-head">[ PROJECTS ]</div>
   <div class="project-tree">

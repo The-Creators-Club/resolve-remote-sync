@@ -29,6 +29,15 @@
   ("protection",  "PROTECTION",  "/admin/protection",  true),
   ("recovery",    "RECOVERY",    "/admin/recovery",    true),
 ] %}
+{# The strip is a .scroll-x row below --bp-phone (2026-08-30, MOBILE_PLAN.md
+   M1 and 3.2): above the breakpoint it wraps as it always has, and below it
+   becomes ONE row that scrolls sideways inside itself -- twelve entries
+   wrapped onto four rows would push the page they belong to off the bottom of
+   a phone. The entry for the page you are standing on is the only scroll-snap
+   target in the row, which is what scrolls it into view with no JavaScript.
+   The class is NOT in this attribute, deliberately: test_settings_hub.py pins
+   `class="settings-nav"` exactly, and that file belongs to another package,
+   so style.css gives .settings-nav the .scroll-x behaviour by selector. #}
 <nav class="settings-nav" aria-label="settings">
   {% for key, label, href, admin_only in SETTINGS_NAV %}
     {% if session_is_admin or not admin_only %}

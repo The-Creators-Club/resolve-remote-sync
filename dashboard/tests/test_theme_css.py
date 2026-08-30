@@ -123,6 +123,25 @@ def test_the_stamp_and_the_session_chip_are_one_item():
     assert "margin-left: auto" not in rule(CSS, ".stamp")
 
 
+def test_the_phone_layer_does_not_undo_the_wrap_safe_topbar():
+    """Extended 2026-08-30 with the phone layer (MOBILE_PLAN.md M1). The two
+    tests above read every rule for a selector wherever it is, so a
+    `flex-wrap: nowrap` added inside the phone query would leave them passing
+    and put "[ TRANSFERS" back on one line and "]" on the next at 390px -- the
+    exact bug they exist for, on the screen it is most likely to happen on.
+    The phone layout narrows the bar by MOVING items into the drawer, never by
+    letting a label break."""
+    phone = _strip_comments(CSS)
+    phone = phone[phone.index("@media (max-width: 600px)"):]
+    phone = phone[:phone.index("@media (pointer: coarse)")]
+    bar = phone[phone.index(".topbar {"):]
+    bar = bar[:bar.index("}")]
+    assert "flex-wrap" not in bar
+    assert "white-space" not in bar
+    # ...and nothing anywhere in the phone layer lets a topbar child shrink.
+    assert ".topbar > *" not in phone
+
+
 def test_the_brand_stays_on_one_line():
     """.brand is a direct child of .topbar, so the nowrap above binds it."""
     assert 'class="brand"' in TOPBAR

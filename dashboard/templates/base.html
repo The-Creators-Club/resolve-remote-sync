@@ -2,7 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {# viewport-fit=cover (2026-08-30, MOBILE_PLAN.md M1): the page paints under
+     a notch and under the gesture bar, and the --safe-* tokens in style.css
+     are what keep real content out from under them. Without it the browser
+     letterboxes the page and the console black stops at the notch. #}
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>{% block title %}CC SYNC{% endblock %}</title>
   {# The real product mark (2026-08-10), not the old generated PNG. SVG
      with a PNG fallback for anything that won't take an SVG favicon. #}
@@ -15,6 +19,24 @@
      individual form has to remember. Empty for an anonymous render. #}
   <meta name="csrf" content="{{ csrf_token or '' }}">
   <link rel="stylesheet" href="/static/style.css">
+  {# mobile.css is the per-PAGE phone layer (MOBILE_PLAN.md 3.3): style.css
+     owns the tokens, the class vocabulary and the chrome, this one carries the
+     rules for the fleet grid and the admin pages. Second, so it wins ties. #}
+  <link rel="stylesheet" href="/static/mobile.css">
+  {# The installable-app half (MOBILE_PLAN.md 3.3, exact lines by contract).
+     The targets are served by the PWA package; a browser that finds any of
+     them missing simply does not offer the install, so these are safe to ship
+     ahead of the routes. theme-color is --bg, so Android paints the status
+     bar the same black as the page. #}
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#0a0a0d">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="apple-touch-icon" href="/static/icons/icon-180.png">
+  {# pwa.js BEFORE htmx.min.js and deferred like it: deferred scripts run in
+     document order, and pwa.js has to rewrite the poll intervals on a coarse
+     pointer while htmx has not yet processed the nodes. #}
+  <script src="/static/pwa.js" defer></script>
   <script src="/static/htmx.min.js" defer></script>
   <script>
     // Keep <details data-key> open/closed choices across htmx innerHTML
@@ -59,14 +81,25 @@
        fallback headers -- every page shows the one real header. #}
     {% include "partials/topbar.html" %}
   </header>
-  <div class="rule">{{ "─" * 120 }}</div>
+  {# A BORDER, not 120 box-drawing characters (2026-08-30): the character run
+     was a fixed 1000px of text clipped by overflow, so at 390px it was still
+     1000px of text the browser had to lay out, and a phone that inherited a
+     wider font simply overflowed the page. .rule is now an empty element with
+     a border-top and the same 21px of vertical rhythm. #}
+  <div class="rule"></div>
   {# UX-8 (2026-08-28): the fleet halt on EVERY page. It stops every computer
      in the company, and it used to be visible only on the Users panel that
      set it -- so a Friday halt was a fleet that could not work all weekend
      with nothing on screen saying why. Its own load trigger so a slow read
      never holds up a page; renders as nothing when the fleet is syncing. #}
   {% if session_user %}
-  <div hx-get="/partials/fleet-halt-banner" hx-trigger="load, every 60s" hx-swap="innerHTML"></div>
+  {# The visibility filter (2026-08-30, MOBILE_PLAN.md 3.4): a phone in a
+     pocket must not hold a connection open against --workers 1. htmx 1.9's
+     trigger filter is evaluated at fire time, so a hidden tab simply skips
+     the beat and the next visible beat is the normal one. #}
+  <div hx-get="/partials/fleet-halt-banner"
+       hx-trigger="load, every 60s [document.visibilityState === 'visible']"
+       hx-swap="innerHTML"></div>
   {% endif %}
   <div class="layout">
     {% block layout %}{% endblock %}

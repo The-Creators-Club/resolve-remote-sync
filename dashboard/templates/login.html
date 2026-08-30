@@ -3,6 +3,11 @@
 {% block layout %}
   <main class="main login-main">
     <div class="login-box">
+      {# autocapitalize/spellcheck on the username field below, and .login-box
+         sized with min() in style.css (2026-08-30): an Android keyboard
+         capitalises the first letter of a text field by default, so "jsmith"
+         arrives as "Jsmith" and the NAS refuses it. The password field is
+         exempt -- a password type never autocapitalises. #}
       <div class="side-head">[ SIGN IN ]</div>
       {% if error %}<div class="login-error">▲ {{ error }}</div>{% endif %}
       {% if sso_enabled %}
@@ -16,7 +21,8 @@
         <form method="post" action="/login">
           <input type="hidden" name="next" value="{{ next_path or '/' }}">
           {% if sso_enabled %}<input type="hidden" name="local" value="1">{% endif %}
-          <label>USERNAME<br><input type="text" name="username" autofocus autocomplete="username"></label>
+          <label>USERNAME<br><input type="text" name="username" autofocus autocomplete="username"
+                 autocapitalize="none" spellcheck="false"></label>
           <label>PASSWORD<br><input type="password" name="password" autocomplete="current-password"></label>
           <button class="btn login-btn" type="submit">[ LOGIN ]</button>
         </form>

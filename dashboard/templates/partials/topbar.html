@@ -43,7 +43,7 @@
    (see ui._render), and absent rather than zero when there is nothing wrong:
    a bar that permanently reads [ 0 PROBLEMS ] stops being read. #}
 {% if notice_counts is defined and notice_counts and notice_counts.get("error") %}
-<a class="chip red" href="/#server-notices"
+<a class="chip red phone-hide" href="/#server-notices"
    title="the server has found problems it cannot fix by itself">[ {{ notice_counts.error }} PROBLEM{{ "S" if notice_counts.error != 1 }} ]</a>
 {% endif %}
 {# SYS-8 (finding 3, resilience sweep 2026-08-28 fix pass): the fleet's
@@ -54,7 +54,7 @@
    absent-at-zero rule: a permanently-present [ 0 ALERTS ] stops being read. #}
 {% set alert_total = (alert_counts.get("error", 0) + alert_counts.get("warn", 0)) if alert_counts is defined and alert_counts else 0 %}
 {% if alert_total %}
-<a class="chip {{ 'red' if alert_counts.get('error') else 'amber' }}" href="/admin/alerts"
+<a class="chip phone-hide {{ 'red' if alert_counts.get('error') else 'amber' }}" href="/admin/alerts"
    title="what the fleet's self-diagnosis currently has open">[ {{ alert_total }} ALERT{{ "S" if alert_total != 1 }} ]</a>
 {% endif %}
 
@@ -71,8 +71,26 @@
     {# Light dismiss (click the backdrop) and Esc both close it; this button is
        for touch, where neither is obvious. popovertargetaction is
        declarative -- still no script. #}
-    <button class="btn drawer-close" type="button" popovertarget="nav-drawer"
+    <button class="btn drawer-close phone-hide" type="button" popovertarget="nav-drawer"
             popovertargetaction="hide" aria-label="close menu">[ X ]</button>
+    {# The phone's copy of the bar chips (2026-08-30, MOBILE_PLAN.md M1). At
+       390px the bar is one 44px row -- the brand and the menu button -- so the
+       [ N PROBLEMS ] / [ N ALERTS ] chips and the account name would have
+       wrapped it to three. They are DUPLICATED here rather than moved because
+       this partial is injected into the three SPAs with innerHTML and must
+       stay script-free: only CSS can decide which copy a screen sees, and it
+       decides with .phone-hide on the bar pair and .phone-only on this one. #}
+    <div class="drawer-chips phone-only">
+      {% if notice_counts is defined and notice_counts and notice_counts.get("error") %}
+        <a class="chip red" href="/#server-notices"
+           title="the server has found problems it cannot fix by itself">[ {{ notice_counts.error }} PROBLEM{{ "S" if notice_counts.error != 1 }} ]</a>
+      {% endif %}
+      {% if alert_total %}
+        <a class="chip {{ 'red' if alert_counts.get('error') else 'amber' }}" href="/admin/alerts"
+           title="what the fleet's self-diagnosis currently has open">[ {{ alert_total }} ALERT{{ "S" if alert_total != 1 }} ]</a>
+      {% endif %}
+      {% if session_user %}<span class="muted">{{ session_user }}{{ " (admin)" if session_is_admin }}</span>{% endif %}
+    </div>
   </div>
   <nav class="drawer-nav">
     <a class="drawer-item{{ ' drawer-current' if nav_current == 'fleet' }}" href="/">[ SYNC STATUS ]</a>
@@ -142,6 +160,22 @@
     {% else %}
       <a class="btn" href="/login">[ LOGIN ]</a>
     {% endif %}
+    {# The phone's copy of the [ X ] (2026-08-30): the head is at the top of a
+       844px panel and the thumb holding the phone is at the bottom. A second
+       button rather than one that moves, for the same reason the chips above
+       are copied: this partial has to stay script-free, so only CSS can
+       choose, and CSS cannot reorder a child of another element. The head's
+       copy is .phone-hide, this one is .phone-only, and Esc and a tap on the
+       backdrop close the drawer on both. #}
+    <button class="btn drawer-close drawer-close-foot phone-only" type="button"
+            popovertarget="nav-drawer" popovertargetaction="hide"
+            aria-label="close menu">[ X ]</button>
+    {# Left empty ON PURPOSE (2026-08-30, MOBILE_PLAN.md 3.3): pwa.js fills it
+       with an [ INSTALL ] chip when Chrome fires beforeinstallprompt, and
+       leaves it empty everywhere else -- an install button on a desktop, or
+       inside the installed app itself, is a control that can only disappoint.
+       The slot lives in the markup so the PWA package adds no template. #}
+    <span id="install-slot" class="phone-only"></span>
   </div>
 </div>
 

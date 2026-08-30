@@ -3108,7 +3108,7 @@ Push before the pile gets to seven commits.
 
 ## The tray "kept closing itself": a Tk root freed on the wrong thread (CR-93, 2026-08-29)
 
-### CR-93 - Tcl_AsyncDelete aborts the whole companion, with no traceback and no log line - FIXED in repo 2026-08-29 as companion 0.9.55, NOT YET SHIPPED
+### CR-93 - Tcl_AsyncDelete aborts the whole companion, with no traceback and no log line - first fix shipped as companion 0.9.55, RECURRED 2026-08-30 twice; the real fix is the continuation below (0.9.62)
 **Reported** by the owner 2026-08-29, on the base rig: "ccsync companion seems
 to keep closing itself in this version". The tray icon disappears, sync stops,
 and `companion.log` shows nothing at all - its last line is whatever the
@@ -3202,7 +3202,74 @@ sweep are on). Nothing dashboard-side. **Until it ships, every editor's tray
 can still abort this way** - the symptom to ask about is "the tray icon is
 gone and the log just stops".
 
-**Recurrence on the fixed build (2026-08-30, base rig).** Companion 0.9.55 - the build that carries this fix - aborted at 12:17:06 in the SAME bucket (`tcl86t.dll`, 0x80000003, fault offset 0xfee74, faulting pid 0x68BC), 47 s after the tray's `tray: opening dashboard http://192.168.0.102:8480` line and while `ytdl: job 52` was downloading locally. No minidump landed in `%LOCALAPPDATA%\CrashDumps` for it (the Event Log 1000/1001 pair is the only record). The companion stayed dead until 15:28, when the AFK session relaunched it by hand (`Start-Process` of the Run-key path) - three hours with the tray gone and sync stopped. So `release_root()` closes the three window classes but not whatever the tray's open-dashboard path (or the local ytdl progress mirror running beside it) lets go of on the wrong thread; the next hunt should start from the tray menu handlers and the ytdl executor's tray updates, with the six-line reproducer above as the oracle. Until then the symptom is unchanged: tray icon gone, log just stops.
+**Recurrence on the fixed build (2026-08-30, base rig).** Companion 0.9.55 - the build that carries this fix - aborted at 12:17:06 in the SAME bucket (`tcl86t.dll`, 0x80000003, fault offset 0xfee74, faulting pid 0x68BC), 47 s after the tray's `tray: opening dashboard http://192.168.0.102:8480` line and while `ytdl: job 52` was downloading locally. The companion stayed dead until 15:28, when the AFK session relaunched it by hand (`Start-Process` of the Run-key path) - three hours with the tray gone and sync stopped. Then AGAIN at 22:40:39 on 0.9.61 (pid 0x6994 = 27028), 47 minutes dead until relaunched by hand at 23:27. The paragraph that used to end this section guessed at the open-dashboard path and the ytdl progress mirror; both guesses were wrong, and the second section below is what the evidence actually says.
+
+### CR-93 (continued) - the abort is the cyclic GC freeing a dialog's closure cycle on the watcher thread; every interpreter is now pinned at birth and freed only by its own thread; a supervisor relaunches the companion after a death - FIXED in repo 2026-08-31 as companion 0.9.62, NOT YET SHIPPED
+
+**What the 22:40 crash left behind that no earlier one had.** Two records, both from `crash_report.install_native` (0.9.55's own addition):
+
+1. `~/.ccsync/crashes/native.log`, faulthandler's thread dump at the moment of the `0x80000003`. For BOTH 2026-08-30 crashes (12:17 on 0.9.55 and 22:40 on 0.9.61 - the log holds both) the current thread is the timeline WATCHER thread, and its top frame is `Garbage-collecting`:
+
+   ```
+   Current thread 0x00008568 (most recent call first):
+     Garbage-collecting
+     File "uuid.py", line 171 in __init__
+     File "pg8000\converters.py", line 304 in uuid_in
+     File "pg8000\core.py", line 830 in handle_DATA_ROW
+     ...
+     File "ccsync_companion\library.py", line 950 in timeline_items
+     File "ccsync_companion\resolve_bridge.py", line 1337 in _library_timeline_items
+     File "ccsync_companion\watcher.py", line 193 in poll_once
+     File "ccsync_companion\app.py", line 7584 in _watcher_thread_target
+   ```
+
+   So the 12:17 death was NOT on the ytdl thread (that thread was sitting in `communicate()`), and the "47 s after the tray click" was a coincidence: the tray's open-dashboard handler builds nothing Tk at all (`tray._open_dashboard` is `webbrowser.open`).
+
+2. The minidump `%LOCALAPPDATA%\CrashDumps\ccsync-companion.exe.27028.dmp` (8.7 MB; the 12:17 one, `.26812.dmp`, exists too - the previous paragraph was wrong about that). No cdb/WinDbg on this rig, and msdl.microsoft.com does not carry python.org's symbols (404), so the dump was read with the `minidump` + `pefile` packages in a scratch venv, the faulting thread's stack scanned for return addresses, and those named through `dbghelp.dll` against `python312.pdb`/`_tkinter.pdb` extracted from python.org's `3.12.10/amd64/core_pdb.msi` and `tcltk_pdb.msi` (`msiexec /a ... TARGETDIR=`, no install; the dump's `python312.dll` timestamp 1744115002 matches the installed one). The faulting thread is 0x8568 - the watcher thread above - and its stack, deepest caller last:
+
+   ```
+   tcl86t!Tcl_PanicVA+0x124            <- the int3 (fault offset 0xfee74)
+   tcl86t!Tcl_Panic+0x22
+   tcl86t!Tcl_AsyncDelete+0x106        "async handler deleted by the wrong thread"
+   tcl86t!Tcl_DeleteInterp+0xf3
+   _tkinter!Tkapp_Dealloc+0x63         (_tkinter.pyd+0x3ea7, the same offset as all seven 08-18..08-29 dumps)
+   python312!subtype_dealloc           the Tk root
+   python312!dict_dealloc
+   python312!subtype_dealloc
+   python312!dict_dealloc
+   python312!cell_dealloc              \
+   python312!tupledealloc               | a closure's cell holding a dict holding the root
+   python312!func_clear                 |
+   python312!func_dealloc               | FOUR times over: nested functions freeing
+   python312!cell_dealloc               | each other through their closure cells
+   python312!tupledealloc               |
+   python312!func_clear                 |
+   python312!func_dealloc              /
+   python312!cell_clear
+   python312!delete_garbage
+   python312!gc_collect_main
+   python312!gc_collect_with_callback
+   python312!gc_collect_generations
+   python312!_Py_RunGC
+   python312!_Py_HandlePending
+   python312!_PyEval_EvalFrameDefault   (uuid.__init__, per faulthandler)
+   ```
+
+**The mechanism, and why 0.9.55's fix could not see it.** `release_root()` counted references to the interpreter at the end of a dialog and parked the root when a widget still held it. That closes "a widget kept in an attribute". The stack above is a different animal: **nested functions in a reference cycle**. The Settings window (`settings_window._build_settings_window`, opened by a left-click on the tray, and it logs nothing - which is why the 22:40 process's log shows no dialog at all in its 50 minutes) has `_refresh` schedule ITSELF with `root.after(_REFRESH_MS, _refresh)`: function -> closure tuple -> cell -> the same function is a cycle, and `_refresh` reaches `root` through `_render` -> `_run` -> `_release_and_close`. When the window closes and the frame returns, nothing is freed - a cycle is freed by the **cyclic garbage collector**, later, on whichever thread's allocations trip it. While the window sat open refreshing every two seconds those objects were promoted to generation 2, and a gen-2 pass only runs when the long-lived heap has grown by a quarter - which is exactly what a project-library read does (`library.timeline_items` -> `pool_paths`/`_load_graph`, a hundred thousand fresh uuid/tuple objects on the watcher thread). Both crashes are inside that read: 21:50 "reading clips from the project library" on start, 22:39 Resolve restarted, 22:40:10 reconnected, 22:40:37 the read began, 22:40:39 dead. No refcount taken INSIDE the dialog can see any of this, because inside the dialog the frame is alive and every count is legitimately high. The 0.9.55 note that "a dialog whose widgets are all frame LOCALS is safe by construction" was the wrong belief: locals die with the frame; a cycle among them does not. The tray's sign-in/update/credentials forms and `confirm_dialog` have the same `_ok`/`_cancel` closures over `root`; whether each is a cycle today is a matter of which callback references which, and the fix below does not depend on the answer.
+
+Reproduced in twenty lines (`tests/test_tk_release_native.py::CYCLE_ON_A_WORKER_THREAD`): a root built on a worker thread, reachable only through a self-scheduling closure, `gc.disable()` so nothing collects it early, the thread ends, `gc.collect()` on the main thread -> `Tcl_AsyncDelete: async handler deleted by the wrong thread`, exit 3. Every time.
+
+**Fixed (B): every Tcl interpreter is pinned at birth and freed only by the thread that built it.** Three options were weighed. A persistent hidden root per UI thread reused as a Toplevel does nothing for the cycle: the hidden root is just as collectable, and the tray's per-click threads have no "per UI thread". One dedicated Tk thread for all UI (ui_dispatch's darwin marshalling mode, on win32 too) is the biggest change to a year-old working design and STILL does not cover the GC: a cycle from the UI thread is freed on whatever thread collects it. Only pinning makes the abort impossible regardless of who holds what, so `ui_dispatch` now:
+
+- wraps `tkinter.Tk.__init__` (`install_tk_guard()`, at import - every dialog site imports the module first; `app.run` calls it again for the log line) so every root is `adopt()`ed the moment it exists: a registry record per interpreter (which thread built it, at which call site, a weakref to its root) plus a `Py_IncRef` on the `tkapp` through ctypes. The pin is invisible to Python and to finalisation; whoever drops the last visible reference, on whatever thread, only ever lowers the count to it. `Tkapp_Dealloc` has exactly one path left in this process: `_try_free()`;
+- reclaims at the end of every `dispatch(fn)` (`reclaim_mine()`): fn's frame has returned and its closures are garbage, so THIS thread runs `gc.collect()` itself, then frees each interpreter it built whose count is at the baseline (record + pin + the root's own `tk`), swapping the root's `tk` for a sentinel that answers `TclError` first. `release_root()` is the same pass for the three window classes that own their root, and now refuses - loudly - when called from a thread other than the builder (the old graveyard was keyed on `threading.get_ident()`, which Windows recycles; a sweep on a recycled ident would have been this abort again);
+- leaves a still-held interpreter pinned (1.8 MB each, measured: 20 roots, `tasklist` working set) and NAMES the holder: types, and referrer chains a few hops out (`Label <- dict{'master', 'tk'} <- cell <- function _refresh`). An interpreter whose thread has exited can never be freed (Tcl ties it to that thread's storage) and is reported once as a leak. `CCSYNC_TK_AUDIT=1` logs the whole registry after every pass - that is the probe: if a dialog leaks on the base rig, the next line in the log says which one, built where, held by what.
+
+Proven the only honest way, in subprocesses (`tests/test_tk_release_native.py`, six children now): the widget-in-an-attribute disease still aborts and `release_root` still cures it; the closure-cycle disease aborts (exit 3, `Tcl_AsyncDelete` on stderr) with no guard; through `dispatch()` the same dialog's interpreter is freed on the dialog thread (`pinned_records() == []` there) and the main thread's collection survives; a root built OUTSIDE dispatch and never released stays pinned, is named, and the process exits 0 including through interpreter shutdown. `test_ui_dispatch.py` covers the registry with fakes (the cycle through dispatch, wrong-thread refusal, per-thread ownership, the orphan report, the audit).
+
+**Fixed (C): a companion that dies is brought back.** An abort has no `finally`, so nothing in-process can help; the Run key fires at logon and never again; the lane watchdog restarts threads, not processes. `supervisor.py` (stdlib only, branched on in `launcher.py`/`__main__.py` BEFORE the app import) is the same exe re-entered as `ccsync-companion.exe --supervise <pid> --exe ... --crash-dir ... --state-dir ...`, spawned by `crash_report.start_supervisor()` right after `install_native()` has written the run marker and the single-instance slot is held (`[companion] supervise = true`, default; `CCSYNC_NO_SUPERVISOR` for a frozen build under test; Windows frozen builds only). It waits on the process handle and decides with `supervisor.decide()`, a pure function: relaunch iff the run marker is still there AND names that pid (shutdown() deletes it first thing, so a Quit, a fleet halt, a crash-loop revert and a self-upgrade hand-off - the newcomer writes its own marker - all read as deliberate) AND the exit code is not one a person or tool hands out (0; 1 = End task or a Python-level startup failure; 0xFFFFFFFF = `Stop-Process`, which is how `windows_upgrade.ps1` and the uninstaller stop it - and since the supervisor shares the image name, `Get-Process ccsync-companion | Stop-Process -Force` kills it too, so it can never fight an install; 0xC000013A = console closed) AND fewer than three relaunches in the last hour (`state/supervisor.json`). It then waits 10 s (WER is writing the dump), re-reads the marker in case a person got there first, writes `crashes/relaunched.json`, and starts the exe the way `upgrade._default_spawn` does (detached, no window, `_MEI*`/`PYTHONHOME` stripped, `PYINSTALLER_RESET_ENVIRONMENT=1`). A relaunch always goes through the single-instance guard, so there is never a second tray. The relaunched companion finds the old marker and the note: the `UncleanExit` report carries a `relaunch` block and its message says so, and the log says `this companion was RELAUNCHED by its supervisor: pid N died with exit code X ... down for about 10 s` - which rides to the dashboard with the crash summary as before. The supervisor's own log is `crashes/supervisor.log`. Two marker fixes rode along: `mark_clean_exit()` only removes a marker naming OUR pid (the old build's shutdown used to delete the newcomer's during a self-upgrade), and `install_native()` treats a marker whose pid is still alive as a hand-off, not a crash. `tests/test_supervisor.py` pins the verdict matrix, one supervised life end to end with injected waiter/spawn/clock, the loop cap, the person-got-there-first case, the clean environment, and - in a real child - that `--supervise` exits 0 without `ccsync_companion.app` ever being imported.
+
+Ships as: companion 0.9.62. Nothing dashboard-side. **Until it ships, 0.9.61 aborts exactly as before** and stays down until someone relaunches it. After it ships, watch `companion.log` for `UI dispatch: ... closed with its Tcl interpreter still referenced` (a holder to name; not an abort) and for `RELAUNCHED by its supervisor` (the net caught something: read the crash report it points at), and the Event Log for 0x80000003 in tcl86t.dll, which should never appear again.
 
 ## Pulling the sync drive mid-upload looked exactly like pulling it after a finished day (CR-92, 2026-08-28)
 

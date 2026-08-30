@@ -501,21 +501,32 @@ Full runbook, including what each version number means and how to roll back:
   the companion answers `retrying` and is re-sent the command until done or
   blocked, so deploy the dashboard BEFORE companion 0.9.55 or the retry
   never happens (`docs/FILE_MOVES.md`).
-- **A Tk root must be freed on the thread that built it** (CR-93,
-  2026-08-29, `docs/GOTCHAS.md` section 18). `_tkinter` deletes the Tcl
-  interpreter in `Tkapp_Dealloc`, inline, on whatever thread drops the last
-  reference; from any other thread Tcl answers `Tcl_Panic` - `abort()`, no
-  traceback, no `finally`, nothing in the log, the whole tray gone (seven
-  silent deaths on the base rig before the Event Log was read). Every
-  dialog here still builds its root on the thread that wanted it, so a
-  window that keeps widgets in ATTRIBUTES must clear them and end its root
-  with `ui_dispatch.release_root()`, which parks a still-held interpreter
-  instead of letting another thread free it and NAMES the holder in the
-  log. Widgets that are frame locals need none of this. A `StringVar`, a
-  `ttk.Style` and a `PhotoImage` count as widgets. Since the same commit a
-  death nobody asked for is no longer silent: `crash_report.install_native`
-  (faulthandler + a run marker cleared at the top of `shutdown()`) turns it
-  into an `UncleanExit` crash file on the next start.
+- **A Tcl interpreter is freed on the thread that built it, or never**
+  (CR-93, 2026-08-29 and its 2026-08-30 recurrence, `docs/GOTCHAS.md`
+  section 18). `_tkinter` deletes the interpreter in `Tkapp_Dealloc`, inline,
+  on whatever thread drops the last reference; from any other thread Tcl
+  answers `Tcl_Panic` - `abort()`, no traceback, no `finally`, nothing in
+  the log, the whole tray gone. Counting references at the end of a dialog
+  (the first fix) cannot see the shape that recurred: a dialog's nested
+  functions in a REFERENCE CYCLE reaching `root`, freed by the cyclic GC on
+  whichever thread trips it (the watcher thread's library read, twice).
+  So `ui_dispatch` now PINS every interpreter at birth (a wrapper on
+  `tkinter.Tk.__init__`, installed at import) and frees it only in
+  `_try_free()` on the building thread - at the end of every
+  `dispatch(fn)` and in `release_root()` - after a `gc.collect()` there. A
+  still-held interpreter stays pinned (1.8 MB) and the log NAMES the holder
+  with referrer chains (`CCSYNC_TK_AUDIT=1` logs the registry). Windows
+  that keep widgets in ATTRIBUTES still clear them and call `release_root()`
+  from their own thread; a `release_root()` from another thread frees
+  nothing and says so. A `StringVar`, a `ttk.Style`, a `PhotoImage` and any
+  closure over `root` count as holders. A death nobody asked for is not
+  silent (`crash_report.install_native`: faulthandler + a run marker
+  cleared at the top of `shutdown()` -> `UncleanExit` on the next start)
+  and, since 0.9.62, not final: `supervisor.py` (the exe re-entered with
+  `--supervise`, spawned right after the marker) relaunches a companion
+  that died WITHOUT starting a shutdown - never after a Quit, a
+  `Stop-Process` (it shares the image name and dies with it), or a
+  self-upgrade; three times an hour at most.
 - **Never call `scriptapp("Resolve")` outside `resolve_bridge.connect()`**
   (CR-68, 2026-08-21). Resolve's script server (`fuscript.exe`, TCP 1144)
   exits when its last client leaves, and a client that connects before

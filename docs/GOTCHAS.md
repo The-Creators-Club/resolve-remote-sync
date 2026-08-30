@@ -1236,32 +1236,84 @@ any Tk object that outlives its thread. It cost the base rig seven silent
 deaths in eleven days before anyone read the Event Log, because "the tray
 keeps closing itself" does not sound like a crash.
 
-Rules for any window in this package - and for any other Python tray app on
-these machines:
+**And then it recurred on the fixed build (2026-08-30, twice), which is the
+half of this section worth remembering.** The first fix counted references
+at the end of each dialog and parked the root when a widget still held the
+interpreter. That closes "a widget kept in an attribute". It cannot close
+this:
 
-* **A window that keeps widgets in ATTRIBUTES must drop them on its own
-  thread**, then end the root through `ui_dispatch.release_root(root)`. That
-  is `_drop_widgets()` + `self.root = None` + `release_root`, in that order.
-  A window whose widgets are all frame LOCALS is already safe: they die with
-  the frame, on that thread, whatever happens.
-* **It is not only widgets.** A `tk.StringVar`, a `ttk.Style` and a
-  `PhotoImage` each hold the interpreter as firmly as a Button does. The
-  fixer popup's leak was one StringVar per row.
-* **A bound method is a reference to the whole window.** Handing
-  `self.publish` to a worker thread hands it the widgets too, and a worker
-  joined with a timeout can easily be the last holder.
+```python
+def _build_settings_window(app, lock):
+    root = tk.Tk()
+    ...
+    def _refresh():
+        ...
+        refresh_job[0] = root.after(_REFRESH_MS, _refresh)   # references ITSELF
+```
+
+`_refresh` reaches itself through its own closure cell - function -> closure
+tuple -> cell -> the same function - and reaches `root` the same way. That is
+a **reference cycle**, and a cycle is freed by the **cyclic garbage
+collector, not by refcounts**: the frame returning frees nothing, and the
+collector runs on whichever thread's allocations trip it next. Both
+recurrences died on the watcher thread, inside `Garbage-collecting`, during a
+project-library read (a hundred thousand fresh objects is what makes the
+collector run a full pass), minutes to hours after the window had closed.
+The minidump's stack, symbolised with python.org's PDBs, reads
+`gc_collect_main -> delete_garbage -> cell_clear -> func_dealloc ->
+func_clear -> tupledealloc -> cell_dealloc -> ... -> subtype_dealloc ->
+Tkapp_Dealloc -> Tcl_DeleteInterp -> Tcl_AsyncDelete -> Tcl_Panic`. No
+refcount taken INSIDE the dialog can see this, because inside the dialog the
+frame is alive and every count is legitimately high. "Every Tk object is a
+frame local, so they die with the frame" was the wrong belief: locals die
+with the frame; a cycle among them does not.
+
+The rule that holds, now in `ui_dispatch`:
+
+* **Every Tcl interpreter is pinned the moment it is born** (a
+  `Py_IncRef` through ctypes, invisible to Python and to finalisation),
+  through a wrapper on `tkinter.Tk.__init__` installed when `ui_dispatch` is
+  imported. Whoever drops the last visible reference, on whatever thread,
+  only ever lowers the count to the pin. Tkapp_Dealloc has exactly one path
+  left: `_try_free()`.
+* **It is freed on the thread that built it, or not at all.** At the end of
+  every `ui_dispatch.dispatch(fn)` - fn's frame has returned, its closures
+  are garbage - the building thread runs `gc.collect()` itself and frees the
+  interpreter if nothing else holds it. `release_root()` does the same for
+  the windows that own their root. A root still held after that stays pinned
+  (1.8 MB, measured), and the log names what holds it, with referrer chains
+  (`CCSYNC_TK_AUDIT=1` logs the whole registry after every pass).
+* **A thread that has exited can never free what it built.** Tcl ties the
+  interpreter to that thread's storage. The tray's per-click worker threads
+  are the usual case; the registry reports such an interpreter once as a
+  leak. `release_root()` called from any other thread frees nothing and says
+  so - the previous graveyard keyed on `threading.get_ident()`, which Windows
+  reuses, and a sweep on a recycled ident would have been the abort again.
 * **Do not "fix" it by keeping the root alive in a module global.**
   Interpreter shutdown clears module globals from the main thread, so that
-  just moves the abort to exit (measured: exit code 3). `release_root` parks
-  a leaked root with a real extra refcount (`Py_IncRef` through ctypes),
-  which finalisation cannot undo, and reclaims it on the owning thread later.
-* **`release_root` names the holder in the log** rather than letting the
-  process vanish. If you see "closed with its Tcl interpreter still
-  referenced", the types it lists are the bug.
+  just moves the abort to exit (measured: exit code 3). The pin is a real
+  extra refcount, which finalisation cannot undo.
+* **It is not only widgets.** A `tk.StringVar`, a `ttk.Style`, a
+  `PhotoImage`, a bound method handed to a worker, and now any nested
+  function that reaches `root` - each holds the interpreter as firmly as a
+  Button does.
+
+Generalise it: **any object whose C-level destructor has a thread affinity
+(a Tcl interpreter, a COM object, a GUI handle) must never be reachable only
+through a reference cycle**, because the cyclic GC frees cycles on an
+arbitrary thread. Pin it, and free it explicitly from the right thread.
 
 Proving any of this needs a subprocess - the failure kills the interpreter
 running the test. `companion/tests/test_tk_release_native.py` is the pattern:
-run the shape in a child, assert on its exit code.
+run the shape in a child, assert on its exit code. It carries both shapes
+(the widget-in-an-attribute one and the closure-cycle one), each as a
+"disease" child that must still abort and a "cure" child that must not.
+
+And because an abort has no `finally`, the companion no longer relies on
+staying alive: `supervisor.py` (the same exe re-entered with `--supervise`)
+waits on the companion's process handle and relaunches it after a death
+that left the run marker behind - never after a Quit, a Stop-Process or a
+self-upgrade, and never more than three times an hour.
 
 ---
 

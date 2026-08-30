@@ -2270,3 +2270,58 @@ whose gate is closed but which holds forced offers claims with `ids = forced`.
 * Whisper progress is per FILE with a linear guess inside it; a diarize pass
   after the last file shows as 100 % for its duration. Good enough to tell
   working from wedged, which is what §7f's chip comment asked for.
+
+### 10.6 As built (2026-08-30, dashboard 0.7.23 / companion 0.9.61)
+
+Built by two builders in parallel from §10.2-10.4, merged on `fleet-force`
+with main's CI fixes (d2231f0). Every suite green at the merge (counts in
+the merge commit). The contract held on both sides; what differs from the
+spec is listed here so the next reader trusts the code over §10.3/10.4.
+
+**Dashboard (4291034, 727f09f, 5d2031d).** Schema v46 (`jobs.forced INTEGER
+NOT NULL DEFAULT 0`, `jobs.target_machine TEXT`, `machine_state.cap_volunteer_until
+TEXT`). `JobIn.force` / `JobIn.target_machine` on the way in; the ROW says
+`forced` (always a bool) and `target_machine` (always a string, `""` for
+none). `CapabilitiesIn.volunteer_until` is a plain `str | None` so a bad
+timestamp cannot 422 a whole report; `jobs.is_volunteering` parses it with
+`db.parse_iso` (naive = UTC, `Z` and `+00:00` both fine, unparseable = not
+volunteering). `commands.jobs.forced` is a strict subset of `offered`,
+present only when non-empty; `JobClaimIn.ids` (max 16) is INTERSECTED with
+the offers, never substituted. Deviations: `volunteering` is the first entry
+of every kind's `RANK_SIGNALS` tuple rather than a fifth rank field, so the
+published `score` array is unchanged and `why_not_first` still names it
+("...somebody at it who said to take fleet jobs now"). `target_away` versus
+`target_unknown` is decided in `_blocked_reason` over the whole fleet, and a
+targeted machine that can NEVER run the kind passes its non-transient reason
+through (`no_capable_machine`, `halted`, `kind_not_allowed`) instead of
+saying "wait"; `no_machine_reported` still wins on an empty fleet. `explain`'s
+`capable` count excludes `not_the_target` lines. `api.build_editors_view`
+computes `entry["volunteering"] = {active, until, at}` for the grid chip.
+`tools/jobs.py submit --now` / `--on MACHINE`.
+
+**Companion (fe74611, 0512495).** `JobRunner.volunteer(minutes)` (None =
+`jobs_volunteer_minutes`, default 30; 0 clears), `volunteering`,
+`volunteer_until_iso` (`datetime.now(timezone.utc)+n min`, seconds
+precision, `+00:00`); `note_report_reply` reads `commands.jobs.forced`
+(ints, max 16, only ids also in `offered` count); the gate skips the idle and
+Resolve checks while volunteering, and otherwise opens for the forced
+intersection only, sending `ids` on THAT claim alone (`STATE_FORCED` while
+it runs). Whisper progress: `_run_child` drains stdout on a thread;
+`whisper_progress()` maps `[n/N]` to `(n-1)/N`, `<at>s / <dur>s` to
+`base + (at/dur)/N`, `done:` to 1.0, and returns None for exactly 0.0 (so
+`[1/N]` publishes nothing until the first file moves, `clamp_progress`'s
+rule); a run that said `0 to do` sends one final 1.0 on a clean exit. The
+heartbeat goes every 30 s as before plus early when the fraction moved by
+0.01 after 5 s (`PROGRESS_STEP`, `PROGRESS_MIN_SECONDS`); the wait loop is
+now sliced at 5 s, so cancel/halt/shutdown are noticed within ~5 s instead of
+~30. Tray: `⚡ Take fleet jobs now (30 min)` / `⚡ Taking fleet jobs until
+HH:MM (click to stop)` between "Sync now" and "Pause", absent without a
+runner or with `jobs_enabled = false`; `action_volunteer(app, snap)` and a
+second snapshot field `jobs_volunteer_minutes` (0 = no item). Notifications
+on both branches. `config.example.toml` documents `jobs_volunteer_minutes`
+(the shipped-config drift test demands it). `settings_window.py` untouched
+(no jobs section).
+
+**Not changed on purpose:** nothing on the Timeline Cards side. The Cards
+page already appends ` + fleet NN%` from `job.progress`, so a whisper job
+submitted by hand now shows a percentage there too.

@@ -1,0 +1,1262 @@
+{
+  "generated_at": "2026-08-30T02:04:56.559Z",
+  "url": "http://127.0.0.1:8571",
+  "user": "owen",
+  "widths": [
+    390,
+    768
+  ],
+  "thresholds": {
+    "tap_px": 44,
+    "font_px": 12
+  },
+  "totals": {
+    "renders": 32,
+    "fail": 22,
+    "warn": 10
+  },
+  "findings": [
+    {
+      "page": "login",
+      "url": "/login",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/login",
+      "title": "CC SYNC: LOGIN",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 18,
+        "w": 37.8,
+        "h": 18,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "form > label",
+        "sample": "USERNAME"
+      },
+      "counted": {
+        "taps": 5,
+        "texts": 9
+      },
+      "fails": [],
+      "warns": [
+        "tap target 37.8x18 px  header.topbar > button.btn.menu-btn[type=button]",
+        "font 11 px  form > label"
+      ],
+      "png": "docs/mobile/baseline/390/login.png"
+    },
+    {
+      "page": "home",
+      "url": "/",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/",
+      "title": "CC SYNC: FLEET",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 1159,
+        "scrollWidth": 1549,
+        "clientWidth": 390,
+        "selector": "div.layout > main.main"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 34,
+        "texts": 494
+      },
+      "fails": [
+        "content scrolls sideways by 1159 px  div.layout > main.main"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/390/home.png"
+    },
+    {
+      "page": "transfers",
+      "url": "/transfers",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/transfers",
+      "title": "CC SYNC: TRANSFERS",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 317,
+        "scrollWidth": 707,
+        "clientWidth": 390,
+        "selector": "div.layout > main.main"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 18,
+        "texts": 224
+      },
+      "fails": [
+        "content scrolls sideways by 317 px  div.layout > main.main"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/390/transfers.png"
+    },
+    {
+      "page": "project",
+      "url": "/project/{project}",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/project/2026-ff5-animals",
+      "title": "CC SYNC: 2026/FF5/Animals",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 704,
+        "scrollWidth": 1094,
+        "clientWidth": 390,
+        "selector": "div.layout > main.main"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 15,
+        "texts": 174
+      },
+      "fails": [
+        "content scrolls sideways by 704 px  div.layout > main.main"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/390/project.png"
+    },
+    {
+      "page": "project-setup",
+      "url": "/project-setup?resolve_project={resolve}",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/project-setup?resolve_project=FF5%20Elections%20E2",
+      "title": "CC SYNC: PROJECT SETUP",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 6,
+        "texts": 26
+      },
+      "fails": [],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/390/project-setup.png"
+    },
+    {
+      "page": "installer",
+      "url": "/installer",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/installer",
+      "title": "CC SYNC: INSTALLER",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 6,
+        "texts": 28
+      },
+      "fails": [],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/390/installer.png"
+    },
+    {
+      "page": "admin-users",
+      "url": "/admin/users",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/users",
+      "title": "CC SYNC: USERS",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 411,
+        "scrollWidth": 801,
+        "clientWidth": 390,
+        "selector": "div.layout > main.main"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 60,
+        "texts": 162
+      },
+      "fails": [
+        "content scrolls sideways by 411 px  div.layout > main.main"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/390/admin-users.png"
+    },
+    {
+      "page": "admin-assignments",
+      "url": "/admin/assignments",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/assignments",
+      "title": "CC SYNC: ASSIGNMENTS",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 981,
+        "scrollWidth": 1324,
+        "clientWidth": 343,
+        "selector": "main.main > div.assign-scroll"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 10,
+        "selector": "td.assign-cell > label.assign-upmode.on",
+        "sample": "up"
+      },
+      "counted": {
+        "taps": 53,
+        "texts": 75
+      },
+      "fails": [
+        "content scrolls sideways by 981 px  main.main > div.assign-scroll"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 10 px  td.assign-cell > label.assign-upmode.on"
+      ],
+      "png": "docs/mobile/baseline/390/admin-assignments.png"
+    },
+    {
+      "page": "admin-jobs",
+      "url": "/admin/jobs",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/jobs",
+      "title": "CC SYNC: JOBS",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 658,
+        "scrollWidth": 1048,
+        "clientWidth": 390,
+        "selector": "div.layout > main.main"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 23,
+        "texts": 93
+      },
+      "fails": [
+        "content scrolls sideways by 658 px  div.layout > main.main"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/390/admin-jobs.png"
+    },
+    {
+      "page": "admin-packages",
+      "url": "/admin/packages",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/packages",
+      "title": "CC SYNC: PACKAGES",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 960,
+        "scrollWidth": 1350,
+        "clientWidth": 390,
+        "selector": "div.layout > main.main"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 32,
+        "texts": 126
+      },
+      "fails": [
+        "content scrolls sideways by 960 px  div.layout > main.main"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/390/admin-packages.png"
+    },
+    {
+      "page": "admin-settings",
+      "url": "/admin/settings",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/settings",
+      "title": "CC SYNC: SETTINGS",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 125,
+        "scrollWidth": 515,
+        "clientWidth": 390,
+        "selector": "div.layout > main.main"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 55,
+        "texts": 108
+      },
+      "fails": [
+        "content scrolls sideways by 125 px  div.layout > main.main"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/390/admin-settings.png"
+    },
+    {
+      "page": "admin-audit",
+      "url": "/admin/audit",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/audit",
+      "title": "CC SYNC: TIMELINE",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 20,
+        "texts": 39
+      },
+      "fails": [],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/390/admin-audit.png"
+    },
+    {
+      "page": "admin-alerts",
+      "url": "/admin/alerts",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/alerts",
+      "title": "CC SYNC: ALERTS",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 987,
+        "scrollWidth": 1377,
+        "clientWidth": 390,
+        "selector": "div.layout > main.main"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 34,
+        "texts": 354
+      },
+      "fails": [
+        "content scrolls sideways by 987 px  div.layout > main.main"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/390/admin-alerts.png"
+    },
+    {
+      "page": "admin-invariants",
+      "url": "/admin/invariants",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/invariants",
+      "title": "CC SYNC: INVARIANTS",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 965,
+        "scrollWidth": 1355,
+        "clientWidth": 390,
+        "selector": "div.layout > main.main"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 18,
+        "texts": 76
+      },
+      "fails": [
+        "content scrolls sideways by 965 px  div.layout > main.main"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/390/admin-invariants.png"
+    },
+    {
+      "page": "admin-protection",
+      "url": "/admin/protection",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/protection",
+      "title": "CC SYNC: PROTECTION",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 1291,
+        "scrollWidth": 1681,
+        "clientWidth": 390,
+        "selector": "div.layout > main.main"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 22,
+        "texts": 86
+      },
+      "fails": [
+        "content scrolls sideways by 1291 px  div.layout > main.main"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/390/admin-protection.png"
+    },
+    {
+      "page": "admin-recovery",
+      "url": "/admin/recovery",
+      "width": 390,
+      "dpr": 3,
+      "landed": "/admin/recovery",
+      "title": "CC SYNC: GET SOMETHING BACK",
+      "settle": "timeout",
+      "scrollWidth": 390,
+      "innerWidth": 390,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 394,
+        "scrollWidth": 784,
+        "clientWidth": 390,
+        "selector": "div.layout > main.main"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 24,
+        "texts": 105
+      },
+      "fails": [
+        "content scrolls sideways by 394 px  div.layout > main.main"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/390/admin-recovery.png"
+    },
+    {
+      "page": "login",
+      "url": "/login",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/login",
+      "title": "CC SYNC: LOGIN",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 18,
+        "w": 37.8,
+        "h": 18,
+        "selector": "header.topbar > button.btn.menu-btn[type=button]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "form > label",
+        "sample": "USERNAME"
+      },
+      "counted": {
+        "taps": 5,
+        "texts": 9
+      },
+      "fails": [],
+      "warns": [
+        "tap target 37.8x18 px  header.topbar > button.btn.menu-btn[type=button]",
+        "font 11 px  form > label"
+      ],
+      "png": "docs/mobile/baseline/768/login.png"
+    },
+    {
+      "page": "home",
+      "url": "/",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/",
+      "title": "CC SYNC: FLEET",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 781,
+        "scrollWidth": 1549,
+        "clientWidth": 768,
+        "selector": "div.layout > main.main"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 34,
+        "texts": 494
+      },
+      "fails": [
+        "content scrolls sideways by 781 px  div.layout > main.main"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/768/home.png"
+    },
+    {
+      "page": "transfers",
+      "url": "/transfers",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/transfers",
+      "title": "CC SYNC: TRANSFERS",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 18,
+        "texts": 224
+      },
+      "fails": [],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/768/transfers.png"
+    },
+    {
+      "page": "project",
+      "url": "/project/{project}",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/project/2026-ff5-animals",
+      "title": "CC SYNC: 2026/FF5/Animals",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 326,
+        "scrollWidth": 1094,
+        "clientWidth": 768,
+        "selector": "div.layout > main.main"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 15,
+        "texts": 174
+      },
+      "fails": [
+        "content scrolls sideways by 326 px  div.layout > main.main"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/768/project.png"
+    },
+    {
+      "page": "project-setup",
+      "url": "/project-setup?resolve_project={resolve}",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/project-setup?resolve_project=FF5%20Elections%20E2",
+      "title": "CC SYNC: PROJECT SETUP",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 6,
+        "texts": 26
+      },
+      "fails": [],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/768/project-setup.png"
+    },
+    {
+      "page": "installer",
+      "url": "/installer",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/installer",
+      "title": "CC SYNC: INSTALLER",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 6,
+        "texts": 28
+      },
+      "fails": [],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/768/installer.png"
+    },
+    {
+      "page": "admin-users",
+      "url": "/admin/users",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/users",
+      "title": "CC SYNC: USERS",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 33,
+        "scrollWidth": 801,
+        "clientWidth": 768,
+        "selector": "div.layout > main.main"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 60,
+        "texts": 162
+      },
+      "fails": [
+        "content scrolls sideways by 33 px  div.layout > main.main"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/768/admin-users.png"
+    },
+    {
+      "page": "admin-assignments",
+      "url": "/admin/assignments",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/assignments",
+      "title": "CC SYNC: ASSIGNMENTS",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 603,
+        "scrollWidth": 1324,
+        "clientWidth": 721,
+        "selector": "main.main > div.assign-scroll"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 10,
+        "selector": "td.assign-cell > label.assign-upmode.on",
+        "sample": "up"
+      },
+      "counted": {
+        "taps": 53,
+        "texts": 75
+      },
+      "fails": [
+        "content scrolls sideways by 603 px  main.main > div.assign-scroll"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 10 px  td.assign-cell > label.assign-upmode.on"
+      ],
+      "png": "docs/mobile/baseline/768/admin-assignments.png"
+    },
+    {
+      "page": "admin-jobs",
+      "url": "/admin/jobs",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/jobs",
+      "title": "CC SYNC: JOBS",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 280,
+        "scrollWidth": 1048,
+        "clientWidth": 768,
+        "selector": "div.layout > main.main"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 23,
+        "texts": 93
+      },
+      "fails": [
+        "content scrolls sideways by 280 px  div.layout > main.main"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/768/admin-jobs.png"
+    },
+    {
+      "page": "admin-packages",
+      "url": "/admin/packages",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/packages",
+      "title": "CC SYNC: PACKAGES",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 582,
+        "scrollWidth": 1350,
+        "clientWidth": 768,
+        "selector": "div.layout > main.main"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 32,
+        "texts": 126
+      },
+      "fails": [
+        "content scrolls sideways by 582 px  div.layout > main.main"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/768/admin-packages.png"
+    },
+    {
+      "page": "admin-settings",
+      "url": "/admin/settings",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/settings",
+      "title": "CC SYNC: SETTINGS",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 55,
+        "texts": 108
+      },
+      "fails": [],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/768/admin-settings.png"
+    },
+    {
+      "page": "admin-audit",
+      "url": "/admin/audit",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/audit",
+      "title": "CC SYNC: TIMELINE",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": null,
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 20,
+        "texts": 39
+      },
+      "fails": [],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/768/admin-audit.png"
+    },
+    {
+      "page": "admin-alerts",
+      "url": "/admin/alerts",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/alerts",
+      "title": "CC SYNC: ALERTS",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 609,
+        "scrollWidth": 1377,
+        "clientWidth": 768,
+        "selector": "div.layout > main.main"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 34,
+        "texts": 354
+      },
+      "fails": [
+        "content scrolls sideways by 609 px  div.layout > main.main"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/768/admin-alerts.png"
+    },
+    {
+      "page": "admin-invariants",
+      "url": "/admin/invariants",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/invariants",
+      "title": "CC SYNC: INVARIANTS",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 587,
+        "scrollWidth": 1355,
+        "clientWidth": 768,
+        "selector": "div.layout > main.main"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 18,
+        "texts": 76
+      },
+      "fails": [
+        "content scrolls sideways by 587 px  div.layout > main.main"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/768/admin-invariants.png"
+    },
+    {
+      "page": "admin-protection",
+      "url": "/admin/protection",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/protection",
+      "title": "CC SYNC: PROTECTION",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 913,
+        "scrollWidth": 1681,
+        "clientWidth": 768,
+        "selector": "div.layout > main.main"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 22,
+        "texts": 86
+      },
+      "fails": [
+        "content scrolls sideways by 913 px  div.layout > main.main"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/768/admin-protection.png"
+    },
+    {
+      "page": "admin-recovery",
+      "url": "/admin/recovery",
+      "width": 768,
+      "dpr": 2,
+      "landed": "/admin/recovery",
+      "title": "CC SYNC: GET SOMETHING BACK",
+      "settle": "timeout",
+      "scrollWidth": 768,
+      "innerWidth": 768,
+      "overflow": 0,
+      "inner_overflow": {
+        "by": 16,
+        "scrollWidth": 784,
+        "clientWidth": 768,
+        "selector": "div.layout > main.main"
+      },
+      "tap": {
+        "min": 13.3,
+        "w": 13.3,
+        "h": 13.3,
+        "selector": "div.project-link > input.proj-check[type=checkbox]"
+      },
+      "font": {
+        "min": 11,
+        "selector": "header.topbar > a.chip.red",
+        "sample": "[ 3 PROBLEMS ]"
+      },
+      "counted": {
+        "taps": 24,
+        "texts": 105
+      },
+      "fails": [
+        "content scrolls sideways by 16 px  div.layout > main.main"
+      ],
+      "warns": [
+        "tap target 13.3x13.3 px  div.project-link > input.proj-check[type=checkbox]",
+        "font 11 px  header.topbar > a.chip.red"
+      ],
+      "png": "docs/mobile/baseline/768/admin-recovery.png"
+    }
+  ]
+}

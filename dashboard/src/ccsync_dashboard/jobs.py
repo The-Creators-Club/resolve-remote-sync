@@ -29,6 +29,7 @@ and transcoding under the editor's hands.
 """
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import sqlite3
 from typing import Any, Mapping
@@ -113,16 +114,26 @@ def default_requires(kind: str, inputs: Mapping[str, Any] | None) -> dict[str, A
 #              the base rig or the dashboard host. Nobody sits at it, an
 #              audio copy that runs there costs an editor nothing, and the
 #              round trip over SMB is what these two kinds are made of.
+#   volunteering  somebody at that machine clicked "take fleet jobs now"
+#              (section 10, 2026-08-30). It LEADS every kind's list because
+#              it is the only signal about a PERSON: a machine whose editor
+#              has said "go ahead" is a machine where the work costs nobody
+#              anything, which beats any amount of hardware on a machine
+#              somebody merely walked away from. It is a preference and not a
+#              gate, like every other signal here -- volunteering opens the
+#              idle floor in policy_refusal, and this only decides who is
+#              asked first.
 RANK_SIGNALS: dict[str, tuple[str, ...]] = {
-    db.JOB_KIND_WHISPER: ("gpu_fits", "gpu"),
-    db.JOB_KIND_PROXY_480P: ("nvenc",),
-    db.JOB_KIND_AUDIO_EXTRACT: ("near_media",),
-    db.JOB_KIND_PEAKS: ("near_media",),
+    db.JOB_KIND_WHISPER: ("volunteering", "gpu_fits", "gpu"),
+    db.JOB_KIND_PROXY_480P: ("volunteering", "nvenc"),
+    db.JOB_KIND_AUDIO_EXTRACT: ("volunteering", "near_media"),
+    db.JOB_KIND_PEAKS: ("volunteering", "near_media"),
 }
 
 # What each signal is called on the why page. An admin reading "choice 2 of 3"
 # has to be able to find out WHAT the other machine had that this one has not.
 SIGNAL_WORDS = {
+    "volunteering": "somebody at it who said to take fleet jobs now",
     "nvenc": "an NVIDIA encoder",
     "gpu_fits": "a GPU with room for this model",
     "gpu": "a GPU",
@@ -136,11 +147,46 @@ SIGNAL_WORDS = {
 VRAM_HEADROOM_GB = 1.0
 
 
+def is_volunteering(capabilities: Mapping[str, Any] | None,
+                    now: str | None = None) -> bool:
+    """Has somebody AT this machine said to take fleet jobs now? (Section 10.)
+
+    The one lever a dashboard button deliberately does not pull: the person
+    sitting at a computer is the only one who knows whether they mind their
+    GPU being used while they work, so this reads a deadline their tray set
+    and nothing here can set it.
+
+    Unparseable is FALSE, the same direction `idle_seconds` takes: a value
+    this server cannot read must never be the reason work starts under
+    somebody's hands. An expired deadline is false too, which is what makes
+    the timer running out close the gate again with no message from anyone.
+    """
+    raw = str((capabilities or {}).get("volunteer_until") or "")
+    if not raw:
+        return False
+    try:
+        until = db.parse_iso(raw)
+        moment = db.parse_iso(now or db.utcnow_iso())
+    except (TypeError, ValueError):
+        log.debug("jobs: unreadable volunteer_until %r", raw)
+        return False
+    # A companion may spell UTC with a Z, a naive string or an offset. Naive
+    # means UTC here (utcnow_iso is what the rest of this file compares
+    # against), and mixing the two shapes raises inside a sort key.
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=dt.timezone.utc)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=dt.timezone.utc)
+    return until > moment
+
+
 def _signal_true(name: str, facts: Mapping[str, Any],
                  job: Mapping[str, Any] | None) -> bool:
     """Does this machine carry this rank signal? Never raises: a capability
     that arrived as a string must not be able to throw inside a sort key."""
     caps = dict(facts.get("capabilities") or {})
+    if name == "volunteering":
+        return is_volunteering(caps)
     if name == "nvenc":
         return bool(caps.get("nvenc"))
     if name == "gpu":
@@ -274,6 +320,11 @@ REFUSE_FLEET_CAP = "fleet_cap"
 REFUSE_COOLDOWN = "cooling_down"
 REFUSE_KIND_NOT_ALLOWED = "kind_not_allowed"
 REFUSE_JOBS_DISABLED = "jobs_disabled"
+# Section 10's one (2026-08-30): the admin named a machine, and this is not
+# it. Asked BEFORE capability and policy, because "this job is for creator-1
+# only" is the whole answer for every other machine in the fleet and listing
+# what else they lack would bury it.
+REFUSE_NOT_TARGET = "not_the_target"
 
 # THE JOB-LEVEL ANSWER, which is a different question from the per-machine
 # one. Timeline Cards' client asks exactly one thing of `why` -- "may I stop
@@ -295,6 +346,14 @@ REASON_KIND_UNKNOWN = "kind_unknown"
 REASON_HELD = "held"
 REASON_PINNED = "pinned"
 REASON_FINISHED = "finished"
+# Section 10. A targeted job has one machine's answer and one only, so the
+# job-level code has to be able to say WHICH kind of nothing happened: the
+# named machine is here and not free (transient -- it will run when that
+# machine is), or nobody by that name has ever reported to this dashboard
+# (not transient -- it will wait for ever until somebody fixes the name, or
+# that machine is switched on).
+REASON_TARGET_AWAY = "target_away"
+REASON_TARGET_UNKNOWN = "target_unknown"
 
 # Which job-level code a per-machine refusal counts towards. Not the identity
 # map: `upgrading` and a tripped breaker are both "this machine is busy with
@@ -314,15 +373,54 @@ REFUSAL_TO_REASON = {
     REFUSE_COOLDOWN: REASON_COOLDOWN,
     REFUSE_FLEET_CAP: REASON_FLEET_CAP,
     REFUSE_NOT_PREFERRED: REASON_ALL_BUSY,
+    # Only ever seen on a targeted job, and _blocked_reason decides between
+    # `target_away` and `target_unknown` with the whole fleet in hand: this
+    # map answers one machine at a time and cannot tell "the target is busy"
+    # from "there is no such machine".
+    REFUSE_NOT_TARGET: REASON_TARGET_AWAY,
 }
 
 # Codes that mean "wait, do not do it yourself": the fleet WILL get to it.
 # Timeline Cards falls back locally on everything else, which is the safe
 # direction -- a duplicate proxy costs a minute of one machine, a lane with
 # no audio costs the person looking at it.
+# `target_unknown` is deliberately NOT here: a job addressed to a machine
+# that has never reported is a job nothing will ever take, and telling a
+# client to keep waiting for it is how a lane spins for ever over a typo.
 TRANSIENT_REASONS = frozenset({REASON_ALL_BUSY, REASON_FLEET_CAP,
                                REASON_IDLE_WAIT, REASON_COOLDOWN,
-                               REASON_HELD, REASON_PINNED})
+                               REASON_HELD, REASON_PINNED,
+                               REASON_TARGET_AWAY})
+
+
+def matches_target(target: str, editor: str, machine: str) -> bool:
+    """Is (editor, machine) the machine this job was addressed to?
+
+    CASE-INSENSITIVE, because the name an admin types at a terminal is the
+    one they read off the fleet grid and neither is canonical. `editor/machine`
+    is accepted and then BOTH halves must match: two editors' laptops can
+    carry the same machine name, and a job that ran on the wrong one of them
+    would be work done on a computer nobody asked about.
+    """
+    want = str(target or "").strip().lower()
+    if not want:
+        return True
+    if "/" in want:
+        return want == f"{str(editor).strip().lower()}/{str(machine).strip().lower()}"
+    return want == str(machine).strip().lower()
+
+
+def target_of(job: Mapping[str, Any] | None) -> str:
+    return str((job or {}).get("target_machine") or "").strip()
+
+
+def target_refusal(job: Mapping[str, Any] | None, editor: str,
+                   machine: str) -> tuple[str, str]:
+    """("", "") unless this job is addressed to somebody else."""
+    target = target_of(job)
+    if not target or matches_target(target, editor, machine):
+        return "", ""
+    return REFUSE_NOT_TARGET, f"this job is for {target} only"
 
 
 def fleet_caps(settings: Any = None) -> dict[str, int]:
@@ -455,7 +553,9 @@ def ranked_machines(
     """Every machine that could take this job right now, best first.
 
     Capability AND policy, because a preference for a machine that is halted
-    is not a preference, it is a stall.
+    is not a preference, it is a stall. A TARGETED job (section 10) ranks the
+    one machine it names and nobody else, which is what makes `--on` mean
+    what it says even inside the grace window.
     """
     kind = str(job["kind"])
     able: list[tuple[tuple[str, str], tuple[float, ...]]] = []
@@ -463,7 +563,9 @@ def ranked_machines(
         ok, _why = db.job_requirements_met(job.get("requires"), facts["capabilities"])
         if not ok:
             continue
-        reason, _sentence = policy_refusal(facts, kind, now)
+        if target_refusal(job, key[0], key[1])[0]:
+            continue
+        reason, _sentence = policy_refusal(facts, kind, now, job)
         if reason:
             continue
         able.append((key, rank_key(facts, kind, job)))
@@ -496,7 +598,14 @@ def first_refusal(
     cost is a minute. Ties are offered TOGETHER -- two machines with the same
     encoder are equally right, and the compare-and-set is what decides between
     them, which is the whole reason the claim is a CAS.
+
+    A FORCED OR TARGETED JOB HAS NO GRACE WINDOW (section 10). Forced means
+    "do not wait", and waiting sixty seconds for a better-placed machine is
+    the one thing the admin said not to do; targeted means there is only one
+    candidate, so a preference among candidates has nothing left to decide.
     """
+    if job.get("forced") or target_of(job):
+        return True
     if job_age_seconds(job, now) >= RANK_GRACE_SECONDS:
         return True
     able = ranked_machines(job, fleet, now)
@@ -507,13 +616,24 @@ def first_refusal(
 
 
 def policy_refusal(facts: Mapping[str, Any], kind: str,
-                   now: str | None = None) -> tuple[str, str]:
+                   now: str | None = None,
+                   job: Mapping[str, Any] | None = None) -> tuple[str, str]:
     """Why this machine may take no job of this kind right now, or ("", "").
 
     Order matters: the first true answer is the one shown, and it is the
     order an admin would ask the questions in -- is everything stopped, is
     this machine stopped, is it in the middle of something, is anyone sitting
     at it.
+
+    `job` is optional and only the last two questions read it (section 10).
+    WHAT A FORCED JOB SKIPS IS A SHORT LIST AND THIS IS ALL OF IT: the
+    cooldown and the idle floor. A fleet halt, a machine halt, an update
+    waiting, a tripped breaker, a job already held, `jobs_enabled` and the
+    machine's own kind allow-list are all still refusals, because "do not
+    wait for anybody to leave their desk" is not "run on a machine that
+    cannot". A volunteer opens the idle floor only: somebody said this work
+    may run while they are here, not that their broken ffmpeg should be
+    tried again.
     """
     if facts.get("fleet_halt"):
         return REFUSE_FLEET_HALT, "the whole fleet is halted"
@@ -549,14 +669,21 @@ def policy_refusal(facts: Mapping[str, Any], kind: str,
     # machine with the broken ffmpeg is first in the queue for the retry
     # every time -- failing in two seconds is exactly what keeps it idle --
     # and one bad machine spends a two-attempt budget on its own.
+    forced = bool((job or {}).get("forced"))
     until = str(facts.get("cooldown_until") or "")
-    if until and until > (now or db.utcnow_iso()):
+    if until and until > (now or db.utcnow_iso()) and not forced:
         reason = str(facts.get("cooldown_reason") or "a job failed here")
         return (REFUSE_COOLDOWN,
                 f"this machine is cooling down until {until} ({reason})")
     # THE BASE RIG IS EXEMPT (MULTI_MACHINE_PLAN.md WP0): nobody sits at it,
     # and idle.py on a machine with no console session cannot answer anyway.
-    if str(facts.get("mode") or "editor") != "base":
+    # ...AND THE TWO WAYS PAST THE IDLE FLOOR (section 10): the person at
+    # the machine said to take work now, or the admin who submitted this job
+    # said not to wait for anybody. Both are somebody choosing, on purpose,
+    # to have work run with an editor present -- which is the one thing the
+    # floor exists to prevent, so nothing else may skip it.
+    if (str(facts.get("mode") or "editor") != "base"
+            and not forced and not is_volunteering(caps, now)):
         floor = idle_floor(kind)
         idle = caps.get("idle_seconds")
         # None means cannot tell means NOT IDLE (idle.py's contract).
@@ -582,9 +709,17 @@ def offers_for_machine(
 ) -> dict[str, Any]:
     """What this machine may claim right now.
 
-    -> {"offered": [job ids]}, plus "refused" (id -> reason) for the log and
-    the why page. The list is SMALL on purpose: it rides every report of every
-    machine in the fleet, and a companion claims one job at a time anyway.
+    -> {"offered": [job ids], "forced": [job ids]}, plus "refused"
+    (id -> reason) for the log and the why page. The list is SMALL on
+    purpose: it rides every report of every machine in the fleet, and a
+    companion claims one job at a time anyway.
+
+    `forced` is the subset of `offered` whose row carries the admin's "now"
+    (section 10). It rides the reply as its own key because the COMPANION has
+    a gate of its own -- its user_active and resolve_open checks -- and an id
+    on the `offered` list alone tells it nothing about whether the person who
+    submitted the job meant to interrupt somebody. A companion older than
+    0.9.61 ignores the key and claims on its own gate exactly as before.
 
     The same job is offered to every machine that could do it, EXCEPT for the
     first RANK_GRACE_SECONDS, when it is offered to the best-placed machines
@@ -597,6 +732,7 @@ def offers_for_machine(
     key = (editor, machine)
     fleet: dict[tuple[str, str], Any] | None = None
     offered: list[int] = []
+    forced: list[int] = []
     refused: dict[int, str] = {}
     # THE FLEET CAP IS COUNTED ONCE, not per job: it is a fact about the
     # whole queue and this runs on every report of every machine. `running`
@@ -612,11 +748,18 @@ def offers_for_machine(
         if running.get(kind, 0) >= max_running(kind, caps):
             refused[int(job["id"])] = REFUSE_FLEET_CAP
             continue
+        # THE ADMIN NAMED A MACHINE, and this is not it (section 10). Asked
+        # before capability and policy because it is the whole answer: what
+        # else this machine lacks is not interesting about a job it may never
+        # be offered.
+        if target_refusal(job, editor, machine)[0]:
+            refused[int(job["id"])] = REFUSE_NOT_TARGET
+            continue
         ok, _why = db.job_requirements_met(job.get("requires"), facts["capabilities"])
         if not ok:
             refused[int(job["id"])] = REFUSE_CAPABILITY
             continue
-        reason, _sentence = policy_refusal(facts, kind, now)
+        reason, _sentence = policy_refusal(facts, kind, now, job)
         if reason:
             refused[int(job["id"])] = reason
             continue
@@ -632,10 +775,12 @@ def offers_for_machine(
             refused[int(job["id"])] = REFUSE_NOT_PREFERRED
             continue
         offered.append(int(job["id"]))
+        if job.get("forced"):
+            forced.append(int(job["id"]))
         running[kind] = running.get(kind, 0) + 1
         if len(offered) >= max(1, int(limit)):
             break
-    return {"offered": offered, "refused": refused}
+    return {"offered": offered, "forced": forced, "refused": refused}
 
 
 def explain(conn: sqlite3.Connection, job_id: int,
@@ -671,12 +816,17 @@ def explain(conn: sqlite3.Connection, job_id: int,
     scores = dict(able)
     best_key, best_score = (able[0] if able else (None, ()))
     for (editor, machine), facts in fleet.items():
+        reason, sentence = target_refusal(job, editor, machine)
+        if reason:
+            lines.append({"editor": editor, "machine": machine, "ok": False,
+                          "reason": reason, "why": sentence})
+            continue
         ok, why = db.job_requirements_met(job.get("requires"), facts["capabilities"])
         if not ok:
             lines.append({"editor": editor, "machine": machine, "ok": False,
                           "reason": REFUSE_CAPABILITY, "why": why})
             continue
-        reason, sentence = policy_refusal(facts, kind, now)
+        reason, sentence = policy_refusal(facts, kind, now, job)
         if reason:
             lines.append({"editor": editor, "machine": machine, "ok": False,
                           "reason": reason, "why": sentence})
@@ -732,8 +882,8 @@ def explain(conn: sqlite3.Connection, job_id: int,
         code = REASON_NO_MACHINES
         summary = "no machine has ever reported to this dashboard"
     else:
-        code = _blocked_reason(lines)
-        summary = _blocked_summary(lines)
+        code = _blocked_reason(lines, job)
+        summary = _blocked_summary(lines, job)
     return {"job": job,
             # UNCHANGED MEANING (phase 1): "is anything going to take this,
             # soon". Timeline Cards' client makes the file itself when this
@@ -747,11 +897,17 @@ def explain(conn: sqlite3.Connection, job_id: int,
             "transient": code in TRANSIENT_REASONS,
             # How many machines could EVER run this, ignoring who is at their
             # desk right now. The number an admin needs before buying a GPU.
+            # A TARGETED job can only ever run on one machine, so the
+            # machines that refused for being somebody else are not "could
+            # EVER run this" -- counting them would answer an admin's "do I
+            # need to buy a GPU" with a number about a job addressed
+            # elsewhere.
             "capable": sum(1 for m in lines
                            if m["reason"] not in (REFUSE_CAPABILITY,
                                                   REFUSE_NO_CAPABILITIES,
                                                   REFUSE_KIND_NOT_ALLOWED,
-                                                  REFUSE_JOBS_DISABLED)),
+                                                  REFUSE_JOBS_DISABLED,
+                                                  REFUSE_NOT_TARGET)),
             "running": live, "cap": cap,
             "machines": lines, "summary": summary}
 
@@ -765,14 +921,32 @@ def _terminal_reason(job: Mapping[str, Any]) -> str:
     return REASON_FINISHED
 
 
-def _blocked_reason(lines: list[dict[str, Any]]) -> str:
+def _blocked_reason(lines: list[dict[str, Any]],
+                    job: Mapping[str, Any] | None = None) -> str:
     """The job-level code, from the per-machine refusals.
 
     THE WORST ANSWER WINS, not the commonest: one machine that could do this
     if its editor stood up is a fleet that will get to it, and answering
     "no_capable_machine" because four other machines have no GPU would send
     the client off to do GPU work on a laptop.
+
+    A TARGETED job (section 10) is answered by the machine it names and by
+    nobody else: "four machines are busy" is not an answer about work only
+    one of them may do. The worst-answer rule is unchanged -- it simply runs
+    over that machine's lines. When its own refusal is one a client can wait
+    out, the code is `target_away`, because what a waiting client needs to
+    know is that it is waiting for ONE computer; when it is not (no such
+    capability, halted, kind not allowed) that answer passes straight
+    through, because a client must never be told to wait for something that
+    is never going to happen.
     """
+    target = target_of(job)
+    if target:
+        mine = [line for line in lines if line["reason"] != REFUSE_NOT_TARGET]
+        if not mine:
+            return REASON_TARGET_UNKNOWN
+        code = _blocked_reason(mine)
+        return REASON_TARGET_AWAY if code in TRANSIENT_REASONS else code
     codes = {REFUSAL_TO_REASON.get(line["reason"], REASON_NO_CAPABLE)
              for line in lines}
     for code in (REASON_ALL_BUSY, REASON_FLEET_CAP, REASON_COOLDOWN,
@@ -799,10 +973,24 @@ def _terminal_summary(job: Mapping[str, Any]) -> str:
     return f"this job failed and will not be retried: {job['last_error']}"
 
 
-def _blocked_summary(lines: list[dict[str, Any]]) -> str:
+def _blocked_summary(lines: list[dict[str, Any]],
+                     job: Mapping[str, Any] | None = None) -> str:
     """One sentence naming the COMMONEST reason, because that is the one
     thing an admin can act on ("everyone is at their desk" is a different
     action from "nobody has a GPU")."""
+    target = target_of(job)
+    if target:
+        # The named machine's own answer, or the fact that there is no such
+        # machine -- which is the one thing an admin who mistyped a name
+        # needs to read, and it would otherwise appear as "5 of 5 machines
+        # are not the target".
+        mine = [line for line in lines if line["reason"] != REFUSE_NOT_TARGET]
+        if not mine:
+            return (f"this job is for {target} only, and no machine of that "
+                    f"name has ever reported to this dashboard")
+        line = mine[0]
+        return (f"this job is for {target} only, and it cannot take it: "
+                f"{line.get('why') or line['reason']}")
     counts: dict[str, int] = {}
     for line in lines:
         counts[line["reason"]] = counts.get(line["reason"], 0) + 1
@@ -822,6 +1010,7 @@ def _blocked_summary(lines: list[dict[str, Any]]) -> str:
         REFUSE_KIND_NOT_ALLOWED: "are not allowed this kind of work",
         REFUSE_JOBS_DISABLED: "have fleet jobs switched off",
         REFUSE_FLEET_CAP: "are at this fleet's limit for the kind",
+        REFUSE_NOT_TARGET: "are not the machine this job was sent to",
     }.get(reason, reason)
     return (f"no machine can take this job right now: {count} of {len(lines)} "
             f"{words}")

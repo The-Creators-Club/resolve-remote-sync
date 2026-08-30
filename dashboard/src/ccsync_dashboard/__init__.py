@@ -20,4 +20,12 @@
 # and the `code` object on /api/v1/health. Deploy notes: KNOWN_BUGS.md WPK-1
 # (the image must ship templates/ and static/) and WPK-2 (the first OTA needs
 # DASH_RELEASE_FEED_URL set and one manual redeploy).
-VERSION = "0.7.22"
+# 0.7.23 (2026-08-30): force, target and volunteer (§10 of
+# docs/TIMELINE-CARDS-INTO-CCSYNC.md). Three levers over a scheduler that
+# could only ever say "wait": `force` on a job skips the idle floor, the
+# per-machine cooldown and the rank grace everywhere it is offered,
+# `target_machine` sends it to one named computer, and `volunteer_until` --
+# set by the person AT a machine, from their tray -- opens that machine's
+# idle gate while they work. Schema v46, `commands.jobs.forced` on the report
+# reply, `ids` on the claim. Pairs with companion 0.9.61.
+VERSION = "0.7.23"

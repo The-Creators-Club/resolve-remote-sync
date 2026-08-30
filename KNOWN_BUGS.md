@@ -3202,6 +3202,8 @@ sweep are on). Nothing dashboard-side. **Until it ships, every editor's tray
 can still abort this way** - the symptom to ask about is "the tray icon is
 gone and the log just stops".
 
+**Recurrence on the fixed build (2026-08-30, base rig).** Companion 0.9.55 - the build that carries this fix - aborted at 12:17:06 in the SAME bucket (`tcl86t.dll`, 0x80000003, fault offset 0xfee74, faulting pid 0x68BC), 47 s after the tray's `tray: opening dashboard http://192.168.0.102:8480` line and while `ytdl: job 52` was downloading locally. No minidump landed in `%LOCALAPPDATA%\CrashDumps` for it (the Event Log 1000/1001 pair is the only record). The companion stayed dead until 15:28, when the AFK session relaunched it by hand (`Start-Process` of the Run-key path) - three hours with the tray gone and sync stopped. So `release_root()` closes the three window classes but not whatever the tray's open-dashboard path (or the local ytdl progress mirror running beside it) lets go of on the wrong thread; the next hunt should start from the tray menu handlers and the ytdl executor's tray updates, with the six-line reproducer above as the oracle. Until then the symptom is unchanged: tray icon gone, log just stops.
+
 ## Pulling the sync drive mid-upload looked exactly like pulling it after a finished day (CR-92, 2026-08-28)
 
 ### CR-92 - the unplug balloon never said whether anything was still owed, and nothing ever reminded the editor - FIXED in repo 2026-08-28 as companion 0.9.55, NOT YET SHIPPED

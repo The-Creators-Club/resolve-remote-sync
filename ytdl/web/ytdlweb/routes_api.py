@@ -366,10 +366,18 @@ def _js_runtime_state():
 
 
 @router.get('/api/projects')
-def list_projects(request: Request):
-    """The caller's ticked projects, straight from the dashboard database."""
+def list_projects(request: Request, machine: str | None = None, local: bool = True):
+    """The caller's ticked projects, straight from the dashboard database.
+
+    `machine` (a hostname) and `local` are the CR-72 follow-up (2026-08-30):
+    the SPA's own signals for WHICH computer is asking and WHERE the download
+    will run, so a wired machine or a server-side download sees every active
+    project instead of just what this account has ticked. Both default to the
+    pre-follow-up shape (no machine known, `local` true) for a client that
+    predates them -- see projects.ticked_projects.
+    """
     user = current_user(request)
-    result = projects.ticked_projects(user)
+    result = projects.ticked_projects(user, machine=machine, local=local)
     return {'projects': result['projects'],
             'projects_available': result['available'],
             'error': result['error']}
@@ -413,6 +421,12 @@ class NewJob(BaseModel):
     # waits for a person forever, and a script is not one. OMITTED is False,
     # so nothing that already calls this API is changed by it.
     auto_terms: bool = False
+    # CR-72 follow-up (2026-08-30): the SAME two signals GET /api/projects
+    # widens on, carried on the job so `projects.resolve_project` never
+    # disagrees with what the picker that filled `project_slug` was shown.
+    # OMITTED machine + local=True (the defaults) is the pre-follow-up shape.
+    machine: str | None = None
+    local: bool = True
 
 
 # A topic, not a document. The cap is a fleet-availability guard as much as a
@@ -560,7 +574,8 @@ def create_job(req: NewJob, request: Request):
             400, f'a search topic must be {MAX_TERM_CHARS} characters or fewer '
                  f'(that one is {len(term)})')
 
-    project = projects.resolve_project(user, req.project_slug)
+    project = projects.resolve_project(user, req.project_slug,
+                                       machine=req.machine, local=req.local)
     if project is None:
         raise HTTPException(
             400, 'that project is not one you are syncing. Tick it on the '
@@ -731,16 +746,22 @@ class NewUrlJob(BaseModel):
     urls: str | list[str] = ''
     project_slug: str
     quality: str = '1080p'
-    # ACCEPTED AND IGNORED, like shot_types and max_candidates below. The box it
-    # came from is gone and so is the destination it named (owner, 2026-08-11:
-    # "the direct download link does not need a separate folder, it just uses
-    # the same folder as the search" -> "individual downloads should just go
-    # into the /youtube root for the project folder actually, I realised the
-    # problem with there being no term to sort the clips into subfolders").
-    # Kept in the model rather than dropped so a browser holding the previous
-    # app.js in cache -- or an admin's curl -- does not get a 400 for a field
-    # that no longer changes anything; pydantic would drop it silently anyway,
-    # and this is the note saying that is deliberate.
+    # A manual folder/bin name for pasted links (2026-08-30, the owner: "there
+    # should be a way to manually input the name of the folder/bin you want
+    # links you are downloading to go into").
+    #
+    # Was ACCEPTED AND IGNORED from 2026-08-11 to 2026-08-30: the owner had
+    # reversed himself twice in one conversation that day ("the direct
+    # download link does not need a separate folder, it just uses the same
+    # folder as the search" -> "individual downloads should just go into the
+    # /youtube root for the project folder actually, I realised the problem
+    # with there being no term to sort the clips into subfolders") and this
+    # field was kept in the model, doing nothing, so a browser holding that
+    # app.js in cache -- or an admin's curl -- would not get a 400 for a field
+    # that changed nothing. He asked for it back on 2026-08-30: blank still
+    # means today's behaviour (loose in <project>/Youtube), and a name given
+    # becomes the job's term_dir through the SAME safe_term_dirname a search
+    # job's folder goes through -- see create_url_job.
     folder: str = ''
     # Deliberately NO mode, NO shot_types and NO max_candidates: a url job
     # does no searching at all, so there is nothing to frame, nothing for a
@@ -750,6 +771,9 @@ class NewUrlJob(BaseModel):
     # so one arriving here is ignored (pydantic drops unknown fields) rather
     # than refused -- a 400 over a field that changes nothing would be a paste
     # that mysteriously fails while the search beside it works.
+    # machine/local: same CR-72 follow-up as NewJob, see there.
+    machine: str | None = None
+    local: bool = True
 
 
 # A batch of links, not a bulk importer. The character cap is the same kind of
@@ -760,20 +784,26 @@ class NewUrlJob(BaseModel):
 MAX_URL_CHARS = 4000
 MAX_URLS = 50
 
-# Where pasted links land: <project>/Youtube/ ITSELF, with no subfolder at all
-# (owner, 2026-08-11 -- "individual downloads should just go into the /youtube
-# root for the project folder actually, I realised the problem with there being
-# no term to sort the clips into subfolders"). A search has a topic to name a
-# folder after; a paste has nothing but the links, so a folder invented for it
-# was a bin in Resolve with no meaning and a level of clicking for the editor.
+# Where pasted links land with no folder given: <project>/Youtube/ ITSELF, no
+# subfolder at all (owner, 2026-08-11 -- "individual downloads should just go
+# into the /youtube root for the project folder actually, I realised the
+# problem with there being no term to sort the clips into subfolders"). That
+# default still holds: `term` stays EMPTY for a url job, always -- a paste has
+# no topic, whatever folder it lands in -- and `URL_JOB_TERM_DIR` is what an
+# omitted or blank folder box resolves to.
 #
-# Both columns are EMPTY, and both deliberately: `term` because nothing was
-# searched for, `term_dir` because there is no subfolder. Everything downstream
-# reads an empty term_dir as "the Youtube root" -- the download phase's
-# safe_join, the rel_path it writes, db.ledger_where's badge and the history
-# panel's destination line. Loose clips in that root reach Resolve from
-# companion 0.7.1, which collects them alongside the one level of term folders
-# its youtube_import watcher already walks.
+# `req.folder`, when given, is reduced through the SAME safe_term_dirname a
+# search job's topic goes through and becomes the job's term_dir instead
+# (2026-08-30, the owner: "there should be a way to manually input the name of
+# the folder/bin you want links you are downloading to go into" -- reversing
+# the 2026-08-11 call above). Everything downstream already reads term_dir
+# generically for EITHER kind of job -- the download phase's safe_join, the
+# rel_path it writes, db.ledger_where's badge and the history panel's
+# destination line all keyed off the column, never off `kind` -- so nothing
+# else here changes. Clips in a folder reach Resolve from companion 0.7.1,
+# which collects them alongside the one level of term folders its
+# youtube_import watcher already walks (and the loose Youtube/ root the same
+# way, unchanged).
 URL_JOB_TERM = ''
 URL_JOB_TERM_DIR = ''
 
@@ -809,7 +839,8 @@ def create_url_job(req: NewUrlJob, request: Request):
             400, f'that is {len(videos)} links; {MAX_URLS} is the most one job '
                  'may take. Split them into two.')
 
-    project = projects.resolve_project(user, req.project_slug)
+    project = projects.resolve_project(user, req.project_slug,
+                                       machine=req.machine, local=req.local)
     if project is None:
         raise HTTPException(
             400, 'that project is not one you are syncing. Tick it on the '
@@ -817,11 +848,12 @@ def create_url_job(req: NewUrlJob, request: Request):
     if req.quality not in ('best', '2160p', '1440p', '1080p', '720p', '480p'):
         raise HTTPException(400, f'unknown quality {req.quality!r}')
 
-    # No folder is read, validated or invented: `req.folder` is accepted and
-    # ignored (see NewUrlJob). There is therefore nothing here for
-    # safe_term_dirname to make SMB-safe either -- the only directory this job
-    # can create is `Youtube`, which already exists in every project the
-    # downloader has ever written to.
+    # Blank (the default) is URL_JOB_TERM_DIR, the Youtube root, exactly as
+    # before 2026-08-30; a name given is made SMB-safe the same way a search's
+    # topic is (config.safe_term_dirname, YTDL-28's traversal/Windows/length
+    # rules) and becomes this job's folder under Youtube/.
+    folder = (req.folder or '').strip()
+    term_dir = config.safe_term_dirname(folder) if folder else URL_JOB_TERM_DIR
     c = con()
     # No one-job refusal here either (2026-08-30): a paste queues behind
     # whatever this editor has running, exactly as a search does.
@@ -849,19 +881,20 @@ def create_url_job(req: NewUrlJob, request: Request):
             'duplicates': skipped})
 
     job_id = db.create_url_job(
-        c, user, URL_JOB_TERM, URL_JOB_TERM_DIR, project['slug'],
+        c, user, URL_JOB_TERM, term_dir, project['slug'],
         project['label'], videos, quality=req.quality)
     worker.nudge()
     # `folder` is the DESTINATION as a human reads it, not a directory name --
-    # 'Youtube' for a paste, and the only thing in this response that says where
-    # the clips are going. `term_dir` stays for anything that already reads it,
-    # empty because that is what the row holds.
+    # db.folder_label so it agrees with the badge and the history panel byte
+    # for byte, 'Youtube' for a job with no folder and 'Youtube/<name>' for
+    # one with it.
     #
     # `queued` here is the CLIP count and has nothing to do with the job queue;
     # it predates it by three weeks and the SPA prints it as "N links queued".
     # The queue's own two numbers ride alongside it (_queued_answer).
     return {**_queued_answer(c, user, job_id),
-            'term_dir': URL_JOB_TERM_DIR, 'folder': db.YOUTUBE_DIR,
+            'term_dir': term_dir,
+            'folder': f'{db.YOUTUBE_DIR}/{term_dir}' if term_dir else db.YOUTUBE_DIR,
             'queued': len(videos) - len(skipped), 'skipped': skipped}
 
 

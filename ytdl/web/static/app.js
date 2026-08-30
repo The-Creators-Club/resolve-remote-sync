@@ -172,6 +172,11 @@ const CAP_KEY = 'ytdl.max_candidates';
 // keeps switching back to Creator Profiles".
 const PROJECT_KEY = 'ytdl.project';
 
+// The pasted-links folder box (2026-08-30). Remembered exactly like the
+// project is: an editor filing a run of pastes into "b-roll" all afternoon
+// should not have to retype it before every paste.
+const URL_FOLDER_KEY = 'ytdl.url_folder';
+
 const POLL_FAST = 1500;
 const POLL_SLOW = 5000;
 const BACKOFF_AFTER = 120000;   // 2 min of polling, then ease off
@@ -585,12 +590,42 @@ function saveProject() {
   catch { /* it still applies to this search, just not the next visit */ }
 }
 
+// ---------------------------------------------------------- pasted-links folder
+
+function loadUrlFolder() {
+  try { return localStorage.getItem(URL_FOLDER_KEY) || ''; }
+  catch { return ''; }
+}
+
+function saveUrlFolder() {
+  try { localStorage.setItem(URL_FOLDER_KEY, $('#urlfolder').value); }
+  catch { /* it still applies to this paste, just not the next visit */ }
+}
+
+function initUrlFolder() {
+  const box = $('#urlfolder');
+  if (!box) return;              // a cached index.html from before 2026-08-30
+  box.value = loadUrlFolder();
+  box.onchange = saveUrlFolder;
+}
+
 async function loadProjects() {
   const sel = $('#project');
   sel.innerHTML = '';
   let r;
   try {
-    r = await api('api/projects');
+    // CR-72 follow-up (2026-08-30, owner: "I can still only select /animals
+    // as a destination on the base rig"): `local` is the SAME signal
+    // localWanted() gives dispatchLocal -- whether THIS submission would even
+    // try to run on this machine's companion. false (the toggle off, or the
+    // fleet flag off) means a server-side download, which no machine's sync
+    // plan constrains, so the server answers every active project. There is
+    // no `machine` (hostname) to send yet -- the loopback companion has
+    // nothing that names this computer to the browser -- so a mixed
+    // account's wired machine still only widens by unticking "on this
+    // machine"; see KNOWN_BUGS.md CR-72 for the follow-up that would close
+    // that gap.
+    r = await api('api/projects?local=' + (localWanted() ? 'true' : 'false'));
   } catch (e) {
     sel.appendChild(el('option', null, 'could not load projects'));
     return;
@@ -1827,6 +1862,10 @@ async function runSearch() {
     // Always one of CANDIDATE_CAPS; the server refuses anything else rather
     // than clamping it, so this must never send the raw DOM value.
     max_candidates: capValue(),
+    // CR-72 follow-up (2026-08-30): the same signal loadProjects() sent to
+    // fill `project_slug`'s options, so resolve_project's server-side check
+    // never disagrees with what the picker was shown.
+    local: localWanted(),
   };
   const launch = async () => {
     const r = await post('api/jobs', payload);
@@ -1875,13 +1914,17 @@ async function runUrls() {
   btn.disabled = true;
   // Hoisted for the same reason runSearch's payload is: the discard-and-retry
   // path re-sends what was refused, not the form's current state.
+  const box = $('#urlfolder');
   const payload = {
-    // The links and the shared destination pickers, and nothing else: a paste
-    // has the same destination choice a search has, which is the project
-    // (owner's call, 2026-08-11), and its clips land in that project's Youtube
-    // root because there is no term to sort individual downloads by.
+    // The links and the shared destination pickers: the project (owner's
+    // call, 2026-08-11) and, since 2026-08-30, an optional folder under that
+    // project's Youtube root -- blank still means loose in the root, exactly
+    // as every paste has landed since 2026-08-11.
     urls, project_slug: slug,
     quality: $('#quality').value,
+    folder: box ? box.value.trim() : '',
+    // CR-72 follow-up: see runSearch's payload.
+    local: localWanted(),
   };
   const launch = async () => {
     const r = await post('api/jobs/urls', payload);
@@ -2081,6 +2124,10 @@ function initLocalSwitch() {
       ? 'downloads will be offered to this machine first'
       : 'downloads will run on the server. YouTube originals only sync '
         + 'upwards, so you can fetch one later from the download history.');
+    // CR-72 follow-up: the picker's own `local` param tracks this switch, so
+    // flipping it must re-ask for the project list rather than leave the
+    // dropdown answering a question that was true a moment ago.
+    loadProjects();
   };
 }
 
@@ -2605,6 +2652,7 @@ async function init() {
   renderTermScopes();
   initDates();
   renderCaps();
+  initUrlFolder();
   // Also before anything is awaited: a panel this editor folded away must not
   // flash open for the length of a fetch on every visit.
   initPanels();
@@ -2641,8 +2689,13 @@ async function init() {
   // before an editor types into a box that is about to 403.
   await loadAttestation();
 
+  // AWAITED, and before loadProjects (2026-08-30, CR-72 follow-up): the
+  // picker asks for `local`, and until loadHealth has set state.localDownload
+  // that value is its initial false -- which widens the list on a flash and
+  // then never narrows it back, since nothing else re-fetches. Health first
+  // means the first paint of the dropdown is already the right one.
+  await loadHealth();
   await loadProjects();
-  loadHealth();
   // Re-asked on a slow interval so an admin who fixes claude (or restarts the
   // worker) does not have to walk the fleet asking for reloads (YTDL-39).
   setInterval(loadHealth, HEALTH_INTERVAL);

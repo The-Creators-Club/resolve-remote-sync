@@ -137,18 +137,23 @@
     <!-- The second box: exact clips, no search and no review. It shares the
          project and quality pickers above deliberately -- one destination
          control on the page, so there is no way to set one and read the
-         other. There is NO folder box (owner's call, 2026-08-11): a paste has
-         the same destination choice a search has, which is the project, and
-         its clips land in <project>\Youtube itself -- there is no term to sort
-         individual downloads by, so a folder invented for them was a Resolve
-         bin with no meaning in it. -->
+         other. There WAS no folder box between 2026-08-11 and 2026-08-30
+         (owner's call, then: "individual downloads should just go into the
+         /youtube root... there is no term to sort the clips into
+         subfolders"); he reversed that 2026-08-30 ("there should be a way to
+         manually input the name of the folder/bin you want links you are
+         downloading to go into"), so #urlfolder is back -- blank still means
+         <project>\Youtube itself, exactly as it has since 2026-08-11. -->
     <div class="ctrl-row">
       <div class="search-bar">
         <textarea id="urls" rows="1" spellcheck="false" autocomplete="off"
                   placeholder="&hellip;or paste YouTube links (one per line) to download exactly those (ctrl+enter)"></textarea>
       </div>
+      <input id="urlfolder" type="text" spellcheck="false" autocomplete="off"
+             placeholder="folder/bin (optional)"
+             title="A name for the bin these clips land in, under &lt;project&gt;\Youtube\. Blank leaves them loose in the Youtube root, as before.">
       <button id="golinks" class="primary-btn"
-              title="Downloads exactly these videos into &lt;project&gt;\Youtube, through the same pipeline as a search">GET LINKS</button>
+              title="Downloads exactly these videos into &lt;project&gt;\Youtube[\folder], through the same pipeline as a search">GET LINKS</button>
     </div>
   </div>
   <!-- A CONTAINER, not a banner: app.js puts one .warnline in here per

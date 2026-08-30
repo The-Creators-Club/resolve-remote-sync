@@ -4,7 +4,7 @@
   {# as_qs keeps an admin's ?as=<editor> focus across the 30s refresh; without
      it the checkboxes silently revert to the admin's own ticks. #}
   <aside class="sidebar" hx-get="/partials/sidebar?current={{ as_qs }}"
-         hx-trigger="every 30s" hx-swap="innerHTML">
+         hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
   </aside>
   {# Order is the owner's, 2026-08-18: the fleet grid answers "is everyone's
@@ -19,11 +19,11 @@
        load trigger and admin-only, like the plan-changes panel; empty when
        the server has found nothing, so it costs a healthy fleet no space. #}
     {% if scope_admin %}
-    <div hx-get="/partials/notices" hx-trigger="load, every 60s" hx-swap="innerHTML"></div>
+    <div hx-get="/partials/notices" hx-trigger="load, every 60s [document.visibilityState === 'visible']" hx-swap="innerHTML"></div>
     {% endif %}
     {# Named so the [ RESUME ] button inside the grid can swap this same
        container (CR-45): the partial itself has no single root element. #}
-    <div class="fleet-grid-wrap" hx-get="/partials/fleet" hx-trigger="every 15s" hx-swap="innerHTML">
+    <div class="fleet-grid-wrap" hx-get="/partials/fleet" hx-trigger="every 15s [document.visibilityState === 'visible']" hx-swap="innerHTML">
       {% include "partials/fleet_grid.html" %}
     </div>
 
@@ -33,7 +33,7 @@
        ledger read can never hold up the grid, and it renders as nothing at
        all when the last hour holds no plan change. #}
     {% if scope_admin %}
-    <div hx-get="/partials/plan-changes" hx-trigger="load, every 60s" hx-swap="innerHTML"></div>
+    <div hx-get="/partials/plan-changes" hx-trigger="load, every 60s [document.visibilityState === 'visible']" hx-swap="innerHTML"></div>
     {# SYS-7 (2026-08-28): where a diagnostics bundle lands when an admin
        clicks [ READ THE ANSWER ] on a row above. OUTSIDE the fleet-grid
        wrapper on purpose -- the grid re-renders every 15 s, and swapping an
@@ -48,21 +48,27 @@
        the reader's scroll position -- alone, twice a second. Swapping the
        panel itself would yank them back to the top of the list every 2s.
        Its height is pinned in style.css, not here, so the number lives in
-       one place. #}
+       one place.
+
+       The trigger filter (MOBILE_PLAN.md §3.4, 2026-08-30) is on this and on
+       every other poll in this file: a phone in a pocket holding a 2 s poll
+       is a connection the fleet's editors share, against --workers 1. It
+       stays 2 s in the markup because that is the desktop's rate; pwa.js
+       rewrites it to 10 s on a coarse pointer. #}
     <section class="live-transfers-window" aria-label="live transfers">
-      <div hx-get="/partials/transfers" hx-trigger="every 2s" hx-swap="innerHTML">
+      <div hx-get="/partials/transfers" hx-trigger="every 2s [document.visibilityState === 'visible']" hx-swap="innerHTML">
         {% include "partials/transfers.html" %}
       </div>
     </section>
 
     {% if queue %}
       <div hx-get="/partials/queue{{ ('?as=' ~ queue.editor) if session_user and queue.editor != session_user else '' }}"
-           hx-trigger="every 10s" hx-swap="innerHTML">
+           hx-trigger="every 10s [document.visibilityState === 'visible']" hx-swap="innerHTML">
         {% include "partials/queue_section.html" %}
       </div>
     {% endif %}
     {% if session_user %}
-    <div style="margin-top:1.4rem" hx-get="/partials/project-roots" hx-trigger="every 30s" hx-swap="innerHTML">
+    <div style="margin-top:1.4rem" hx-get="/partials/project-roots" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
       {% include "partials/project_roots.html" %}
     </div>
     {% endif %}

@@ -4,17 +4,17 @@
   {# as_qs keeps an admin's ?as=<editor> focus across the 30s refresh; without
      it the checkboxes silently revert to the admin's own ticks. #}
   <aside class="sidebar" hx-get="/partials/sidebar?current={{ current_slug }}{{ as_qs }}"
-         hx-trigger="every 30s" hx-swap="innerHTML">
+         hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
   </aside>
   <main class="main">
     <div id="project-detail"
          hx-get="/partials/project/{{ project.slug }}{{ '?' ~ as_qs[1:] if as_qs }}"
-         hx-trigger="every 10s" hx-swap="innerHTML">
+         hx-trigger="every 10s [document.visibilityState === 'visible']" hx-swap="innerHTML">
       {% include "partials/project_detail.html" %}
     </div>
     <div id="media-presence" style="margin-top:1.4rem"
-         hx-get="/partials/project/{{ project.slug }}/bins" hx-trigger="load, every 5s" hx-swap="innerHTML">
+         hx-get="/partials/project/{{ project.slug }}/bins" hx-trigger="load, every 5s [document.visibilityState === 'visible']" hx-swap="innerHTML">
       {% if presence %}{% include "partials/bins.html" %}{% endif %}
     </div>
   </main>

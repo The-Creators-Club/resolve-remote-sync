@@ -8,6 +8,146 @@
 /* ================================ == fleet == ============================ */
 /* M2: the fleet grid, project, transfers, installer (MOBILE_PLAN.md M2). */
 
+/* Everything here is inside the phone query or the touch query: at 1280 px
+   these pages render exactly as they did (MOBILE_PLAN.md goal 5, 2026-08-30).
+   The vocabulary (.stack, .scroll-x, .tap, .rule, .phone-only) is style.css's;
+   these are the per-page rules that vocabulary cannot know about. */
+
+@media (max-width: 600px) {
+
+  /* -- the banners on the fleet grid and in the notices panel ------------
+     They are the loudest thing on the page and they are sentences, not
+     labels: a fixed-height amber strip cropped them. Full-width block, text
+     that wraps at any character (a Syncthing error carries paths), and the
+     action -- [ DISMISS ], [ RESUME ] -- on a row of its own so a thumb
+     cannot miss it or hit it by accident while reading. */
+  .banner,
+  .banner.alarm {
+    display: block;
+    width: 100%;
+    padding: 0.4rem 0.6rem;
+    overflow-wrap: anywhere;
+  }
+  .banner form,
+  .banner .inline-form,
+  .banner .notice-dismiss {
+    display: block;
+    margin-top: 0.4rem;
+  }
+  .banner .btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: var(--tap);
+  }
+
+  /* -- the machine rows (fleet_grid.html, project_detail.html, my_queue.html)
+     The tables carry .stack, so style.css has already made each row a card.
+     What is left is the lane cell: a machine with a stalled lane, a tripped
+     breaker and a failed update is fifteen chips, and .chip is nowrap by
+     design. Inside a stacked row they may break, because a chip whose text
+     runs off the right edge says nothing at all. */
+  .editors.stack .lane-cell {
+    line-height: 1.9;
+  }
+  .editors.stack .lane-cell .chip {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  /* The why-line is a whole sentence (SYS-7) and reads as the row's headline. */
+  .editors.stack .why-line {
+    display: block;
+    margin-bottom: 0.3rem;
+    overflow-wrap: anywhere;
+  }
+  /* An action cell inside a stacked row: the button gets the full width and a
+     thumb's height rather than sitting as a 12 px word at the end of a line. */
+  .editors.stack td > form > .btn,
+  .editors.stack td > .btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: var(--tap);
+  }
+
+  /* -- the project cards at the top of the fleet grid --------------------
+     minmax(320px, 1fr) already gives one column at 390 px; what it does not
+     give is a card whose second line (editor count, bytes queued) fits. */
+  .cards {
+    grid-template-columns: 1fr;
+  }
+  .card .mono-sm {
+    overflow-wrap: anywhere;
+  }
+
+  /* -- paths and file names ---------------------------------------------
+     The one class of string on these pages with no spaces to break at. Every
+     one of them carries the full value in a title as well. */
+  .path,
+  .clip-name,
+  .clip-list li,
+  .link-row .mono,
+  .presence-box summary {
+    overflow-wrap: anywhere;
+  }
+
+  /* -- the project page's move form (project_detail.html) ----------------
+     Three text inputs and a select written as a sentence ("MOVE x to y / z").
+     The sentence survives; each control takes its own line, because a
+     size="34" input is 34 characters wider than the screen. */
+  .move-form input[type="text"],
+  .move-form select {
+    display: block;
+    width: 100%;
+    margin: 0.25rem 0;
+    /* 16 px is the size below which Android and iOS zoom the page in on
+       focus, which then leaves the page scrolled sideways. */
+    font-size: 16px;
+  }
+  .move-form .btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: var(--tap);
+  }
+
+  /* -- the installer chooser --------------------------------------------- */
+  .installer-picks {
+    display: block;
+  }
+  .installer-pick {
+    width: 100%;
+    margin-bottom: 1rem;
+  }
+  .installer-pick .btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: var(--tap);
+    margin-top: 0.6rem;
+  }
+  .installer-phone-note {
+    margin-top: 1rem;
+  }
+}
+
+/* A touch screen of any width: the controls these pages are opened FOR.
+   Width cannot see a touch laptop and a narrow desktop window is not a
+   thumb (MOBILE_PLAN.md §3.1). */
+@media (pointer: coarse) {
+  /* The queue's [ UNTICK ] and the grid's [ RESUME ] / [ ASK THIS MACHINE
+     WHY ] sit next to text they must not be mistaken for. */
+  .queue-box .btn,
+  .fleet-grid-wrap .btn {
+    min-height: var(--tap);
+  }
+}
+
+
 
 
 

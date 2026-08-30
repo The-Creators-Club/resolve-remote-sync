@@ -25,7 +25,7 @@
         {% if e.bins %}
           {% for b in e.bins %}
             <details class="bin" data-key="bin:{{ e.editor }}:{{ e.machine }}:{{ b.bin_path }}">
-              <summary>▸ {{ b.bin_path or "(root)" }}
+              <summary title="{{ b.bin_path or "(root)" }}">▸ {{ b.bin_path or "(root)" }}
                 <span class="mono-sm {{ 'amber-text' if b.present < b.total else 'muted' }}">[{{ b.present }}/{{ b.total }} present]</span>
               </summary>
               <ul class="clip-list">
@@ -34,7 +34,7 @@
                     {% if c.uploading %}<span class="dot amber" title="uploading">⇡</span>
                     {% elif c.present %}<span class="dot green" title="online">●</span>
                     {% else %}<span class="dot red" title="offline">●</span>{% endif %}
-                    <span class="clip-name">{{ c.clip_name }}</span>
+                    <span class="clip-name" title="{{ c.clip_name }}">{{ c.clip_name }}</span>
                     {% if c.kind == "proxy" %}<span class="chip">proxy</span>{% endif %}
                   </li>
                 {% endfor %}

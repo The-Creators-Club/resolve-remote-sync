@@ -96,7 +96,31 @@ KEYS: dict[str, str] = {
     # below, the same way canonical_prefix gets its own special-cased
     # validator rather than the generic "str" one.
     "indexer_model_tier": "str",
+    # The Android app (MOBILE_PLAN.md §4 M5, 2026-08-30). A TWA is only a real
+    # app -- no URL bar -- if the ORIGIN vouches for the APK, so the dashboard
+    # has to serve `/.well-known/assetlinks.json` naming the package and every
+    # certificate allowed to sign it. Site data, not product data: each studio
+    # signs its own build, and an appliance customer has no shell to drop a
+    # file in. A LIST of fingerprints because a hand-over (upload key ->
+    # release key, or a rebuilt debug key) has two valid signers at once, and
+    # dropping the old one mid-rollout bricks every installed copy.
+    "android.package_name": "str",
+    "android.sha256_cert_fingerprints": "csv",
 }
+
+# What `keytool -list` and Play Console both print: 32 hex byte pairs, colon
+# separated. Pinned as a regex because a fingerprint that is one pair short
+# (or that arrived with the "SHA256: " label still attached) produces an
+# assetlinks.json Chrome silently refuses -- and "silently" is the whole
+# problem docs/ANDROID.md leads with (2026-08-30).
+_FINGERPRINT_RE = None      # compiled lazily below, next to its validator
+
+# A Java package name, which is what Android requires of an application id:
+# dot-separated segments, each starting with a letter or underscore. Not a
+# hostname: `tools/android/twa_manifest.py` reverses the origin's host into
+# one and has to repair labels a DNS name allows and Java does not (a leading
+# digit, a hyphen), so this check is what proves it did.
+_PACKAGE_SEGMENT_RE = None
 
 # The two model tiers the b-roll indexer ships, and the only values
 # `indexer_model_tier` accepts. Mirrors broll/indexer's `local_models.TIERS`
@@ -232,6 +256,68 @@ def _validate_nas_kind(raw: str) -> str:
     return value
 
 
+def _validate_android_package(raw: str) -> str:
+    """The APK's application id, or "" for "this site has no Android app".
+
+    Blank is a legitimate answer (the field ships empty and the asset-links
+    route answers `[]` until both halves are set), so an admin who clears it
+    is turning the app off, not making a mistake.
+    """
+    import re
+
+    global _PACKAGE_SEGMENT_RE
+    if _PACKAGE_SEGMENT_RE is None:
+        _PACKAGE_SEGMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    segments = value.split(".")
+    if len(segments) < 2 or not all(_PACKAGE_SEGMENT_RE.match(s) for s in segments):
+        raise SiteValidationError(
+            "android.package_name",
+            "must be an Android package name like 'net.ts.example.ccsync': "
+            "two or more dot-separated parts, each starting with a letter or "
+            f"underscore (got {raw!r})",
+        )
+    return value
+
+
+def _validate_android_fingerprints(raw: str) -> str:
+    """Zero or more SHA-256 certificate fingerprints, normalised to upper case
+    and stored comma-joined (the "csv" shape every list key in this table
+    uses).
+
+    Accepts newlines as well as commas because the Settings field is a
+    textarea, one per line -- which is how `keytool -list -v` and Play Console
+    hand them over, and asking an admin to re-punctuate a value they pasted is
+    how the wrong one gets typed. A leading "SHA256:" label is stripped for
+    the same reason.
+    """
+    import re
+
+    global _FINGERPRINT_RE
+    if _FINGERPRINT_RE is None:
+        _FINGERPRINT_RE = re.compile(r"^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$")
+    text = str(raw or "").replace("\r", "\n")
+    items = [p.strip() for p in re.split(r"[,\n]", text)]
+    out: list[str] = []
+    for item in items:
+        if not item:
+            continue
+        if item.upper().startswith("SHA256:"):
+            item = item[len("SHA256:"):].strip()
+        item = item.upper()
+        if not _FINGERPRINT_RE.match(item):
+            raise SiteValidationError(
+                "android.sha256_cert_fingerprints",
+                f"{item!r} is not a SHA-256 fingerprint: 32 colon-separated "
+                "hex pairs, as `keytool -list` prints them",
+            )
+        if item not in out:                 # a paste of the same key twice
+            out.append(item)
+    return ",".join(out)
+
+
 def validate(key: str, raw: str) -> str:
     """Normalise+validate one field. Raises SiteValidationError; never
     guesses a corrected value silently (an admin who fat-fingers a port
@@ -245,6 +331,10 @@ def validate(key: str, raw: str) -> str:
         return _validate_nas_kind(raw)
     if key == "indexer_model_tier":
         return _validate_model_tier(raw)
+    if key == "android.package_name":
+        return _validate_android_package(raw)
+    if key == "android.sha256_cert_fingerprints":
+        return _validate_android_fingerprints(raw)
     if kind == "int":
         return _validate_int(key, raw)
     if kind == "bool":
@@ -501,6 +591,21 @@ def _shape(db_values: Mapping[str, str], settings: Any) -> dict[str, Any]:
                 if pick("indexer_model_tier") in MODEL_TIERS else "good"
             ),
         },
+        # The Android app's identity (MOBILE_PLAN.md §4 M5, 2026-08-30). Its
+        # own object for the same reason "features" and "indexer" are: one
+        # more manifest field per knob turns this response into a flat bag.
+        # Deliberately NOT published by `api.api_site` -- no installer,
+        # companion or indexer has any use for it, and the one client that
+        # does (Chrome, verifying the TWA) reads it from
+        # `/.well-known/assetlinks.json` in the shape Google defines, not
+        # from here.
+        "android": {
+            "package_name": pick("android.package_name"),
+            "sha256_cert_fingerprints": [
+                p.strip() for p in pick("android.sha256_cert_fingerprints").split(",")
+                if p.strip()
+            ],
+        },
         # For the Settings page: which fields the DB actually overrides,
         # vs. which are still falling through to Settings/defaults.
         "_from_db": sorted(k for k in KEYS if k in db_values),
@@ -647,6 +752,12 @@ def _settings_fallback(key: str, settings: Any) -> str:
         "indexer_model_tier": settings.site_indexer_model_tier,
         "template_folders": "",
         "shared_asset_folders": "",
+        # No DASH_SITE_ANDROID_* environment twin, on purpose (2026-08-30):
+        # these two are set by an admin pasting what a build printed, which is
+        # a Settings action and never a deploy-time one. Blank means "no
+        # Android app configured", which is what a fresh site is.
+        "android.package_name": "",
+        "android.sha256_cert_fingerprints": "",
     }
     return str(mapping.get(key, ""))
 
@@ -672,6 +783,11 @@ _SECTIONS: list[tuple[str, list[str]]] = [
     ("features", ["features.youtube_download", "features.youtube_unblock",
                   "features.ai_cli_providers", "features.auto_update"]),
     ("indexer", ["indexer_model_tier"]),
+    # The Android app rides the same export/import/history path as every other
+    # manifest field (MOBILE_PLAN.md §4 M5, 2026-08-30) -- a NAS migration
+    # that lost the asset links would relaunch every editor's app with a URL
+    # bar and nothing saying why.
+    ("android", ["android.package_name", "android.sha256_cert_fingerprints"]),
 ]
 
 # toml key name (section-local) for each manifest key, where it differs from
@@ -686,6 +802,8 @@ _TOML_KEY_NAMES = {
     "features.ai_cli_providers": "ai_cli_providers",
     "features.auto_update": "auto_update",
     "indexer_model_tier": "model_tier",
+    "android.package_name": "package_name",
+    "android.sha256_cert_fingerprints": "sha256_cert_fingerprints",
 }
 
 
@@ -728,6 +846,8 @@ def export_toml(conn: sqlite3.Connection, settings: Any) -> str:
         "features.ai_cli_providers": manifest["features"]["ai_cli_providers"],
         "features.auto_update": manifest["features"]["auto_update"],
         "indexer_model_tier": manifest["indexer"]["model_tier"],
+        "android.package_name": manifest["android"]["package_name"],
+        "android.sha256_cert_fingerprints": manifest["android"]["sha256_cert_fingerprints"],
     }
     for section, keys in _SECTIONS:
         lines.append(f"[{section}]")

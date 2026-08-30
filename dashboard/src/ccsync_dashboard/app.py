@@ -72,6 +72,12 @@ _OPEN_EXACT = {
     # here only ever matters for the single-admin bootstrap window; every
     # later call is a 409. See setup_api.py.
     "/api/v1/setup/status", "/api/v1/setup/admin",
+    # Android asset links (MOBILE_PLAN.md §4 M5, 2026-08-30). Chrome fetches
+    # it with no cookie jar, from a phone that has never signed in, before it
+    # decides whether the installed TWA gets a URL bar. Carries no secret: a
+    # package name and a certificate digest are public by construction, and
+    # publishing them IS the mechanism. See android.py.
+    "/.well-known/assetlinks.json",
     # The wizard page (ZERO_TOUCH_PLAN.md WP D, 2026-08-17). Open at the
     # MIDDLEWARE level only -- ui.page_setup does its own admin-or-first-run
     # gating and redirects to /login when neither applies (see
@@ -1135,6 +1141,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # the site-manifest admin routes. Its own module, its own router, one
     # line here -- CLAUDE.md's "new logic in NEW modules" for shared files.
     app.include_router(setup_routes.router)
+    # Android asset links + the Settings panel behind them (MOBILE_PLAN.md §4
+    # M5, 2026-08-30). Its own module and its own include for the same reason
+    # setup_routes has one, and because its route is at the ROOT
+    # (/.well-known/), which no prefixed router above can carry. Imported
+    # here rather than at the top of the file so this is one hunk.
+    from . import android
+
+    app.include_router(android.router)
     # Settings -> AI providers (2026-08-18): the key store, the CLI probes and
     # the chain the /ytdl app resolves through. Its own module and router for
     # the same reason setup_routes has one -- and because everything in it

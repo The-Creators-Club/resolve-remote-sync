@@ -46,10 +46,23 @@ LONG_NAME = "2026/FF5/Elections/Interviewees/Pangolin/A001_05122026_C012.braw"
 # partials/queue_section.html) -- these are those files.
 OWNED = [
     "fleet.html", "project.html", "transfers.html", "installer.html",
+    "project_setup.html",
     "partials/fleet_grid.html", "partials/transfers.html",
     "partials/project_detail.html", "partials/bins.html",
     "partials/notices.html", "partials/queue_section.html",
-    "partials/my_queue.html",
+    "partials/my_queue.html", "partials/project_setup_panel.html",
+]
+
+# Every template that renders a <table> on one of M2's five pages, including
+# the four partials that were unowned until the round-2 sweep found their
+# tables scrolling the page at 768 (collector health, the notice checks, the
+# plan-changes ledger and the project roots box, all of which land on `/`).
+WITH_TABLES = [
+    "partials/fleet_grid.html", "partials/transfers.html",
+    "partials/project_detail.html", "partials/my_queue.html",
+    "partials/project_setup_panel.html", "partials/collector_health.html",
+    "partials/notice_checks.html", "partials/plan_changes.html",
+    "partials/project_roots.html",
 ]
 
 VISIBLE = "[document.visibilityState === 'visible']"
@@ -241,11 +254,14 @@ def test_every_poll_waits_for_a_visible_page(name):
 
 def test_the_fleet_section_of_mobile_css_is_phone_only():
     """These pages are unchanged on the desktop (goal 5): every rule M2 adds
-    lives inside the phone query or the touch query, and inside its own
-    marked section."""
+    lives inside the phone query or the tablet query, and inside its own
+    marked section. 900 px is where the nowrap sweep lives -- the sweep FAILs
+    at 768 as well as at 390, and a 1500 px line of monospace is too wide for
+    both."""
     css = MOBILE_CSS.read_text(encoding="utf-8")
     section = css[css.index("== fleet =="):css.index("== admin ==")]
     assert "@media (max-width: 600px)" in section
+    assert "@media (max-width: 900px)" in section
     assert "@media (pointer: coarse)" in section
     # Nothing outside a media query: every `{` in the section belongs either
     # to one of the two queries or to a selector inside one.
@@ -259,3 +275,35 @@ def test_the_fleet_section_of_mobile_css_is_phone_only():
         elif ch == "}":
             depth -= 1
     assert depth == 0
+
+
+@pytest.mark.parametrize("name", WITH_TABLES)
+def test_every_table_sits_in_a_scroll_x_wrapper(name):
+    """The phone layer stops at 600 px by design, so at 768 a table is still a
+    table and takes the sideways scroll with it -- which the first sweep
+    FAILed on every one of these pages. Inside a .scroll-x wrapper the scroll
+    is the element's own, which §3.2 allows; below 600 the table stacks and
+    the wrapper is inert. The class goes on the wrapper, never on the table
+    (M1's rule)."""
+    src = (TEMPLATES / name).read_text(encoding="utf-8")
+    assert '<table class="scroll-x' not in src
+    n = src.count("<table")
+    assert n and src.count('<div class="scroll-x"><table') == n
+    assert src.count("</table></div>") == n
+
+
+def test_nothing_user_generated_is_nowrap_below_the_tablet_breakpoint():
+    """The round-2 sweep's rule of thumb. `.mono`/`.mono-sm` are nowrap in
+    style.css and these pages write whole sentences in them: the notice's
+    WHAT TO DO line alone was 1517 px wide at 390. Pinned as the selectors
+    that must be released, because each one is a page the sweep FAILed."""
+    css = MOBILE_CSS.read_text(encoding="utf-8")
+    section = css[css.index("== fleet =="):css.index("== admin ==")]
+    block = section[section.index("@media (max-width: 900px)"):]
+    block = block[:block.index("@media (max-width: 600px)")]
+    for selector in ("#server-notices .mono-sm", ".queue-group summary",
+                     ".clip-list .clip-name", "#project-detail .mono-sm",
+                     ".fleet-grid-wrap .mono-sm", ".presence-box .mono-sm"):
+        assert selector in block, selector
+    assert block.count("white-space: normal") >= 2
+    assert "overflow-wrap: anywhere" in block

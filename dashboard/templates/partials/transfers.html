@@ -8,7 +8,7 @@
 {# Both tables stack on a phone (MOBILE_PLAN.md M2, 2026-08-30): a file name
    is the widest thing on this page and the one nobody can afford to have
    cropped, so it gets a row of its own rather than a column to scroll to. #}
-<table class="editors stack">
+<div class="scroll-x"><table class="editors stack">
   <thead><tr>
     {% if scope_admin %}<th>EDITOR</th>{% endif %}
     <th></th><th>FILE</th><th>PROGRESS</th><th>SPEED</th><th>ETA</th>
@@ -25,7 +25,7 @@
     </tr>
   {% endfor %}
   </tbody>
-</table>
+</table></div>
 {% else %}
 <div class="muted">nothing transferring right now</div>
 {% endif %}
@@ -68,7 +68,7 @@
   <span class="muted">recently completed files (companion reports + files arriving at the server; kept 7 days)</span>
 </div>
 {% if transfers.history %}
-<table class="editors stack">
+<div class="scroll-x"><table class="editors stack">
   <tbody>
   {% for h in transfers.history %}
     <tr>
@@ -79,7 +79,7 @@
     </tr>
   {% endfor %}
   </tbody>
-</table>
+</table></div>
 {% else %}
 <div class="muted">nothing completed recently</div>
 {% endif %}

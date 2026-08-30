@@ -18,7 +18,11 @@
   {% if plan_notice %}<div class="banner">{{ plan_notice }}</div>{% endif %}
 
   {% if plan_changes %}
-    <table class="editors">
+    {# The .scroll-x wrapper (MOBILE_PLAN.md §3.2, sweep round 2 2026-08-30):
+       the phone layer stops at 600 px, so at 768 this is still a table and it
+       took the whole page sideways with it. In a wrapper the scroll is the
+       element's own, which is what the vocabulary allows. #}
+    <div class="scroll-x"><table class="editors">
       <thead><tr><th>WHEN</th><th>WHO</th><th>WHAT</th><th>PROJECT</th><th>EDITOR</th><th>WHERE</th><th></th></tr></thead>
       <tbody>
       {% for row in plan_changes %}
@@ -49,7 +53,7 @@
         </tr>
       {% endfor %}
       </tbody>
-    </table>
+    </table></div>
     <div class="muted mono-sm" style="margin-top:0.5rem">
       Older changes are on the <a href="/admin/audit">fleet timeline</a>.
     </div>

@@ -14,7 +14,11 @@
 <details class="proj-group" data-key="notice-checks" style="margin-top:0.8rem">
   <summary><span class="marker">▸</span> WHAT THE SERVER CHECKS
     <span class="muted mono-sm">{{ notice_kinds | length }} checks</span></summary>
-  <table class="editors">
+  {# The .scroll-x wrapper (MOBILE_PLAN.md §3.2, sweep round 2 2026-08-30):
+     the phone layer stops at 600 px, so at 768 this is still a table and it
+     took the whole page sideways with it. In a wrapper the scroll is the
+     element's own, which is what the vocabulary allows. #}
+  <div class="scroll-x"><table class="editors">
     <tbody>
     {% for k in notice_kinds %}
       <tr class="editor-row">
@@ -27,5 +31,5 @@
       </tr>
     {% endfor %}
     </tbody>
-  </table>
+  </table></div>
 </details>

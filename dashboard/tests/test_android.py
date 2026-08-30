@@ -295,13 +295,19 @@ def test_package_from_origin_reverses_the_host():
 
 
 def test_package_from_origin_repairs_labels_java_would_refuse():
-    """A DNS label may start with a digit and carry hyphens; a Java package
-    segment may do neither, and an Android application id IS a Java package."""
-    package = twa_manifest.package_from_origin("https://9-lives.studio.example")
-    assert package == "example.studio._9_lives.ccsync"
-    for segment in package.split("."):
-        assert segment[0].isalpha() or segment[0] == "_"
-        assert all(ch.isalnum() or ch == "_" for ch in segment)
+    """A DNS label may start with a digit and carry hyphens; an Android
+    application id may do neither -- and aapt2 refuses a LEADING UNDERSCORE
+    too, which is a perfectly good Java identifier (measured on a runner
+    2026-08-30, the first android.yml run: "'_1._0._0._127.ccsync' is not a
+    valid Android package name")."""
+    assert twa_manifest.package_from_origin(
+        "https://9-lives.studio.example") == "example.studio.n9_lives.ccsync"
+    assert twa_manifest.package_from_origin(
+        "http://127.0.0.1:8765") == "n1.n0.n0.n127.ccsync"
+    for origin in ("https://9-lives.studio.example", "http://127.0.0.1:8765"):
+        for segment in twa_manifest.package_from_origin(origin).split("."):
+            assert "a" <= segment[0] <= "z"
+            assert all(ch.isalnum() or ch == "_" for ch in segment)
 
 
 def test_twa_manifest_is_written_from_the_fixture(tmp_path):

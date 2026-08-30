@@ -61,20 +61,23 @@ def fetch(location: str) -> dict:
 def package_from_origin(origin: str, suffix: str = "ccsync") -> str:
     """`https://nas.example.ts.net:9443` -> `net.ts.example.nas.ccsync`.
 
-    A DNS label may start with a digit and may contain hyphens; a Java package
-    segment may do neither, and Android's application id is a Java package. So
-    hyphens become underscores and a leading digit gets one in front -- the
-    result is not pretty, it is VALID, and it is stable for a given host,
-    which is what matters: changing it after an install is a different app.
+    A DNS label may start with a digit and may contain hyphens; an Android
+    application id may do neither. AAPT is stricter than Java here: a leading
+    UNDERSCORE is a fine Java identifier and aapt2 still refuses it outright
+    ("'_1._0._0._127.ccsync' is not a valid Android package name", measured on
+    a runner 2026-08-30), so a label that cannot start itself gets an `n`
+    prefix and hyphens become underscores. The result is not pretty, it is
+    VALID, and it is stable for a given host -- which is what matters:
+    changing it after an install is a different app, not an update.
     """
     host = urlparse(origin).hostname or ""
     labels = [label for label in host.split(".") if label]
     segments = []
     for label in reversed(labels):
-        seg = "".join(ch if (ch.isalnum() or ch == "_") else "_" for ch in label)
-        if not seg or not (seg[0].isalpha() or seg[0] == "_"):
-            seg = "_" + seg
-        segments.append(seg.lower())
+        seg = "".join(ch if (ch.isalnum() or ch == "_") else "_" for ch in label).lower()
+        if not seg or not ("a" <= seg[0] <= "z"):
+            seg = "n" + seg
+        segments.append(seg)
     segments.append(suffix)
     if len(segments) < 2:
         raise SystemExit(f"cannot derive a package name from {origin!r} -- pass --package")

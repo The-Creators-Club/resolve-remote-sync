@@ -35,10 +35,11 @@
    wrapped onto four rows would push the page they belong to off the bottom of
    a phone. The entry for the page you are standing on is the only scroll-snap
    target in the row, which is what scrolls it into view with no JavaScript.
-   The class is NOT in this attribute, deliberately: test_settings_hub.py pins
-   `class="settings-nav"` exactly, and that file belongs to another package,
-   so style.css gives .settings-nav the .scroll-x behaviour by selector. #}
-<nav class="settings-nav" aria-label="settings">
+   The class IS in the attribute (2026-08-30 round 2): the phone sweep exempts
+   an element from its sideways-scroll check only when it carries `scroll-x`,
+   and without it the strip read as 259px of unexplained overflow on every
+   admin page. #}
+<nav class="settings-nav scroll-x" aria-label="settings">
   {% for key, label, href, admin_only in SETTINGS_NAV %}
     {% if session_is_admin or not admin_only %}
       <a class="btn settings-nav-item{{ ' settings-nav-current' if nav_current == key }}" href="{{ href }}"{{ ' aria-current="page"' | safe if nav_current == key }}>[ {{ label }} ]</a>

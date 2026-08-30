@@ -164,7 +164,10 @@ def test_stack_turns_a_table_into_labelled_rows_below_the_phone_breakpoint():
     assert "table.stack td { display: block" in PHONE_BLOCK
     assert "table.stack td[data-label]" in PHONE_BLOCK
     assert "content: attr(data-label)" in PHONE_BLOCK
-    assert "font-size: 11px" in PHONE_BLOCK
+    # 12px, not 11: the floor in goal 1 beats the sketch in 3.2, because a
+    # heading that has become the only name a value carries cannot be the
+    # smallest text on the page.
+    assert "font-size: 12px" in PHONE_BLOCK
 
 
 def test_an_empty_data_label_asks_for_no_heading_at_all():
@@ -201,26 +204,48 @@ def test_the_tap_class_and_the_two_controls_grow_on_a_coarse_pointer_only():
     assert "min-width: var(--tap)" not in PHONE_BLOCK
 
 
-def test_the_project_tick_is_a_44px_target_on_a_coarse_pointer():
-    """The M0 sweep's worst target in the product, 13.3 x 13.3px on every
-    signed-in page, and it starts a real sync on someone's computer. The input
-    itself is 44px (a label around a 16px box measures 16px, which is what a
-    finger gets too); the painted box stays 1em, drawn by a ::before centred
-    in the hit box."""
-    assert "input[type=\"checkbox\"].proj-check" in TOUCH_BLOCK
+def test_every_tick_and_radio_is_a_44px_target_on_a_coarse_pointer():
+    """The sweep's worst targets: the project tick at 13.3 x 13.3px (which
+    starts a real sync on someone's computer) and the assignments matrix at
+    44 x 20. The INPUT is 44px, because a 16px box inside a 44px label still
+    measures 16px and still is what a finger gets; the painted box stays 1em,
+    drawn by a ::before centred in the hit box, so nothing looks like a slab
+    and nothing moves on a desktop."""
+    for selector in ('input[type="checkbox"]', 'input[type="radio"]'):
+        assert selector in TOUCH_BLOCK, selector
     assert "width: var(--tap)" in TOUCH_BLOCK
-    assert ".proj-check::before" in TOUCH_BLOCK
+    assert 'input[type="checkbox"]::before' in TOUCH_BLOCK
+    # The mark, the dot and the dash are all inset into the ELEMENT by the
+    # base rules, so each has to be re-centred on the painted box.
+    for state in (":checked::after", ":indeterminate::after"):
+        assert f'input[type="checkbox"]{state}' in TOUCH_BLOCK, state
     # The row has to grow with it or two 44px boxes 30px apart overlap and the
     # tap lands on the wrong project.
     assert ".project-link { min-height: var(--tap)" in TOUCH_BLOCK
 
 
+def test_selects_and_text_fields_get_the_hit_box_too():
+    """A <select> was 27.8px on the home page and 32.6px on the admin forms.
+    range is left out on purpose: its thumb is centred on a 14px rail and a
+    min-height would take the thumb off the track."""
+    assert "select," in TOUCH_BLOCK
+    assert 'input:not([type="checkbox"]):not([type="radio"]):not([type="range"])'         in TOUCH_BLOCK
+    assert "min-height: var(--tap)" in TOUCH_BLOCK
+
+
 def test_no_text_under_12px_on_a_phone():
-    """MOBILE_PLAN.md goal 1. The chips were the only thing in the product
-    below the floor (11px); the desktop keeps 11."""
+    """MOBILE_PLAN.md goal 1. The chips went up in the first pass; the sweep
+    of the merged branch found .stamp at 11px on all 32 renders and three
+    more behind it. The desktop keeps 11px."""
     assert ".chip { font-size: 12px; }" in PHONE_BLOCK
     assert ".chip { font-size: 12px; }" not in _strip_comments(
         CSS[:CSS.index(PHONE_LAYER_BEGIN)])
+    for selector in (".stamp", ".drawer-close", ".login-box label",
+                     "table.editors th"):
+        assert selector in PHONE_BLOCK, selector
+    # Nothing in the phone layer may state 11px or less again.
+    for small in ("font-size: 11px", "font-size: 10px", "font-size: 0."):
+        assert small not in PHONE_BLOCK, small
 
 
 def test_the_sheet_is_the_popover_api_and_no_script():
@@ -346,11 +371,12 @@ def test_the_settings_strip_is_a_scroll_x_row_that_snaps_to_the_current_page():
     """Twelve entries wrapped onto four rows is half a phone screen of
     navigation. One row, and the entry you are standing on is the ONLY snap
     target in the container, which is what scrolls it into view with no JS."""
-    # The class is given by selector, not by markup: test_settings_hub.py
-    # (another package's file) pins class="settings-nav" exactly.
-    assert 'class="settings-nav"' in SETTINGS_NAV
+    # The class is in the attribute since round 2: the sweep exempts an
+    # element from its sideways-scroll check only when it carries it.
+    assert 'class="settings-nav scroll-x"' in SETTINGS_NAV
     assert "scroll-snap-type: x mandatory" in PHONE_BLOCK
-    assert "overflow-x: auto" in PHONE_BLOCK
+    # The overflow itself comes from .scroll-x, which the nav now carries.
+    assert "overflow-x: auto" in _strip_comments(CSS)
     assert (".settings-nav-item.settings-nav-current { scroll-snap-align: center; }"
             in PHONE_BLOCK)
     # Exactly one snap target, or the container has a choice and makes the

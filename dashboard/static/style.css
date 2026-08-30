@@ -1101,6 +1101,13 @@ table.assign-grid td.assign-cell { text-align: center; white-space: nowrap; }
   -webkit-overflow-scrolling: touch;
   border-right: 1px solid var(--red-dim);
 }
+/* The one exception, and it is deliberate: the Settings strip carries the
+   class at every width -- the phone sweep exempts an element from its
+   sideways-scroll check only if the class is IN the attribute -- but above
+   --bp-phone it wraps and never scrolls, so the hint edge would be a 1px line
+   with nothing behind it. The phone query takes it back at equal specificity,
+   which is why that rule names both classes too. */
+.settings-nav.scroll-x { border-right: none; }
 
 /* On below --bp-phone, off above, and the reverse. */
 .phone-only { display: none; }
@@ -1188,7 +1195,10 @@ table.assign-grid td.assign-cell { text-align: center; white-space: nowrap; }
     content: attr(data-label);
     display: block;
     color: var(--muted);
-    font-size: 11px;
+    /* 12px, not the 11px the plan sketched: the floor in goal 1 wins over the
+       sketch, and a column heading that has become the only name a value
+       carries is not the place to go under it. */
+    font-size: 12px;
     letter-spacing: 0.1em;
   }
   /* A control in a stacked cell is a ROW, not a word in a line: full width,
@@ -1219,7 +1229,16 @@ table.assign-grid td.assign-cell { text-align: center; white-space: nowrap; }
     padding: 0.4rem 0.8rem 0.35rem;
   }
   .topbar .session { display: none; }
-  .topbar .stamp { font-size: 11px; }
+
+  /* The rest of the 12px floor (MOBILE_PLAN.md goal 1). The chips came up in
+     the first pass; the sweep of the merged branch found .stamp at 11px on
+     all 32 renders -- the smallest text in the product, on every page -- and
+     these three behind it. The desktop keeps 11px, where the same text is
+     read on a 27in panel at arm's length rather than at 390px in a car park. */
+  .stamp,
+  .drawer-close,
+  .login-box label,
+  table.editors th { font-size: 12px; }
 
   /* ---------------- the nav drawer ---------------- */
   /* Full height already; 86vw so the page behind stays visible as the thing
@@ -1322,18 +1341,14 @@ table.assign-grid td.assign-cell { text-align: center; white-space: nowrap; }
      is the ONLY scroll-snap target in the container, which is what brings it
      into view with no script at all: a mandatory snap type must come to rest
      on a snap position, and there is exactly one to choose. */
-  /* The .scroll-x behaviour by SELECTOR, not by a class in the markup:
-     test_settings_hub.py pins `class="settings-nav"` exactly and belongs to
-     another package. Here rather than beside .scroll-x because this is the
-     only width at which the strip scrolls -- above the breakpoint it wraps,
-     and the hint edge would be a 1px line with nothing behind it. */
-  .settings-nav {
+  /* The strip is one row that scrolls sideways here, and the overflow comes
+     from .scroll-x itself now that the class is in the markup (2026-08-30
+     round 2: the sweep exempts an element only if it CARRIES the class, and
+     the nav was scrolling 259px unexplained on every admin page). */
+  .settings-nav.scroll-x {
     flex-wrap: nowrap;
-    gap: 0.4rem;
-    max-width: 100%;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
     border-right: 1px solid var(--red-dim);
+    gap: 0.4rem;
     scroll-snap-type: x mandatory;
   }
   .settings-nav-item {
@@ -1390,26 +1405,45 @@ table.assign-grid td.assign-cell { text-align: center; white-space: nowrap; }
     align-items: center;
   }
 
-  /* The project tick, which the 2026-08-30 sweep found to be the worst target
-     in the product at 13.3 x 13.3px, and it is not a decorative one: it is
-     what starts and stops a real sync on someone's computer.
+  /* EVERY tick and every radio, 2026-08-30 round 2. The first pass did this
+     for the project tick alone (13.3 x 13.3px, and it starts a real sync on
+     someone's computer); the sweep of the merged branch then found the
+     assignments matrix at 44 x 20 and the same 1em box on every admin form.
 
      The INPUT is 44px, not a 16px box inside a 44px label, because that is
-     what a finger hits and what an audit measures. The painted box stays 1em:
-     the element's own border and fill are handed to a ::before that is
-     centred in the hit box, so a rail of ten projects still reads as ten
-     small ticks rather than ten slabs. The row grows with it, which is the
-     other half of the fix -- two 44px boxes 30px apart would overlap and a
-     tap between them would land on the wrong project. */
-  input[type="checkbox"].proj-check {
+     what a finger hits and what an audit measures. The PAINTED box stays 1em:
+     the element's own border and fill are handed to a ::before centred in the
+     hit box, so a rail of ten projects still reads as ten small ticks rather
+     than ten slabs, and nothing moves on a desktop because none of this
+     applies to a mouse. The rows grow with it, which is the other half of the
+     fix -- two 44px boxes 30px apart would overlap and a tap between them
+     would land on the wrong project. */
+  input[type="checkbox"],
+  input[type="radio"] {
     width: var(--tap);
     height: var(--tap);
     min-width: var(--tap);
+  }
+  /* Every state that paints the ELEMENT has to be undone, not just the resting
+     one: `input[type="checkbox"]:checked` out-specifies a bare
+     `input[type="checkbox"]`, so a plain reset left the checked box a 44px red
+     slab with a 30px tick in it (caught in a coarse-pointer render,
+     2026-08-30). The list is exactly the base block's painted states. */
+  input[type="checkbox"],
+  input[type="checkbox"]:checked,
+  input[type="checkbox"]:indeterminate,
+  input[type="checkbox"]:disabled,
+  input[type="checkbox"]:hover:not(:disabled),
+  input[type="radio"],
+  input[type="radio"]:checked,
+  input[type="radio"]:disabled,
+  input[type="radio"]:hover:not(:disabled) {
     border-color: transparent;
     background: none;
     box-shadow: none;
   }
-  .proj-check::before {
+  input[type="checkbox"]::before,
+  input[type="radio"]::before {
     content: "";
     position: absolute;
     left: 50%;
@@ -1421,21 +1455,62 @@ table.assign-grid td.assign-cell { text-align: center; white-space: nowrap; }
     background: var(--field);
     border-radius: 2px;
   }
-  .proj-check:hover:not(:disabled)::before { border-color: var(--red-hot); }
-  .proj-check:checked::before {
+  input[type="radio"]::before { border-radius: 50%; }
+  input[type="checkbox"]:hover:not(:disabled)::before,
+  input[type="radio"]:hover:not(:disabled)::before { border-color: var(--red-hot); }
+  input[type="checkbox"]:checked::before,
+  input[type="radio"]:checked::before {
     border-color: var(--red);
     background: var(--red-dim);
     box-shadow: 0 0 6px rgba(255, 33, 64, 0.55);
   }
-  /* The check mark itself is drawn by a ::after inset 2px into the ELEMENT,
-     which is now 44px: it has to be re-centred on the painted box instead. */
-  .proj-check:checked::after {
+  input[type="checkbox"]:indeterminate::before { border-color: var(--amber); }
+  input[type="checkbox"]:disabled::before,
+  input[type="radio"]:disabled::before { border-color: #3a3a42; }
+  /* The check mark, the dot and the dash are drawn by ::after inset into the
+     ELEMENT, which is now 44px: each one has to be re-centred on the painted
+     box instead of on the hit box. */
+  input[type="checkbox"]:checked::after,
+  input[type="radio"]:checked::after {
     inset: 50% auto auto 50%;
     width: calc(1em - 4px);
     height: calc(1em - 4px);
     transform: translate(-50%, -50%);
   }
+  input[type="radio"]:checked::after {
+    width: calc(1em - 6px);
+    height: calc(1em - 6px);
+  }
+  input[type="checkbox"]:indeterminate::after {
+    inset: 50% auto auto 50%;
+    width: calc(1em - 4px);
+    height: 2px;
+    transform: translate(-50%, -50%);
+  }
+  /* The focus ring belongs on the box you can see, not on the 44px of air
+     around it. */
+  input[type="checkbox"]:focus-visible,
+  input[type="radio"]:focus-visible { outline: none; }
+  input[type="checkbox"]:focus-visible::before,
+  input[type="radio"]:focus-visible::before {
+    outline: 2px solid var(--amber);
+    outline-offset: 1px;
+  }
   .project-link { min-height: var(--tap); align-items: center; }
+
+  /* The other half of what the sweep measured: a <select> is 27.8px on the
+     home page and 32.6px on the admin forms, and a text field is no better.
+     min-height rather than padding, so a control that already has room keeps
+     the padding it was designed with.
+
+     range is excluded because it is a 14px rail whose thumb is centred on it
+     and a min-height would put the thumb off the track; hidden, because it
+     has no box at all. */
+  select,
+  textarea,
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="hidden"]) {
+    min-height: var(--tap);
+  }
 }
 
 /* ---------------- the installed app ---------------- */

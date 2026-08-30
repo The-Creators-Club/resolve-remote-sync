@@ -383,20 +383,52 @@ services:
       - "--socket=/var/run/tailscale/tailscaled.sock"
       - "--statedir=/var/lib/tailscale"
       - "--tun=userspace-networking"
-    # NO `environment:` block. Every `TS_*` var (TS_STATE_DIR, TS_SOCKET,
+    # ONE env var, and it is OFF unless somebody sets it (MOBILE_PLAN.md
+    # M6, 2026-08-30). Every `TS_*` var (TS_STATE_DIR, TS_SOCKET,
     # TS_HOSTNAME, TS_SERVE_CONFIG, TS_AUTH_ONCE, TS_USERSPACE...) is
-    # containerboot's OWN vocabulary -- bare `tailscaled` above reads none of
-    # them; the three flags on the entrypoint line are the whole
-    # configuration. `TS_SERVE_CONFIG` in particular could not have worked
-    # here even with containerboot: `POST /localapi/v0/serve-config` 500s
-    # "netMap is nil" until the node is actually logged in
-    # (docs/spikes/zero-touch-spikes-2026-08-17.md S1c), so Serve is
-    # something the dashboard (WP B) sets ONLY AFTER `BackendState=="Running"`,
-    # over the same LocalAPI socket -- never a file for containerboot to
-    # apply at boot.
+    # containerboot's OWN vocabulary and bare `tailscaled` above reads none
+    # of them, so an EMPTY `TS_SERVE_CONFIG` is exactly as inert as the "no
+    # environment: block at all" this file carried until today. What changed
+    # is that the phone port NEEDS a secure origin -- a service worker, an
+    # installable manifest and a TWA all refuse anything but https -- and
+    # `deploy/tailscale/serve.json` (mounted read-only at /config below) is
+    # now the one place the TLS-on-443 -> dashboard:8480 answer is written
+    # down, for containerboot here and for the dashboard's own
+    # `POST /localapi/v0/serve-config` in WP B, which is the same document.
+    #
+    # THE SWITCH CARRIES THE PATH, NOT A `1`, on purpose: compose-go v1.16.0
+    # (the oldest compose this file targets -- see the note at the top)
+    # interpolates `:-`, `-`, `:?` and `?` and has no `${VAR:+alternative}`
+    # form, so this file cannot turn a `1` into a filename. Turning it on is
+    #   DASH_TAILSCALE_SERVE=/config/serve.json
+    # in the same Environment tab / `.env` as CCSYNC_TREE and CCSYNC_DATA.
+    #
+    # TWO THINGS TO KNOW BEFORE FLIPPING IT. (1) containerboot is what reads
+    # this variable, and the `entrypoint:` override above deliberately does
+    # not run containerboot (S1b: its `tailscale up` gives up after 60 s and
+    # crash-loops a new AuthURL every cycle) -- so the variable only bites on
+    # a deployment that has also dropped that override AND has a TS_AUTHKEY.
+    # (2) `POST /localapi/v0/serve-config` 500s "netMap is nil" until the node
+    # is logged in (docs/spikes/zero-touch-spikes-2026-08-17.md S1c), so on
+    # the appliance path Serve stays something the dashboard sets ONLY AFTER
+    # `BackendState=="Running"`. Until WP B lands, the studio recipe in
+    # docs/DOCKER.md ("Serving the dashboard over https") is the path that
+    # actually runs today, and this pair is the product's version of it.
+    environment:
+      TS_SERVE_CONFIG: "${DASH_TAILSCALE_SERVE:-}"
     volumes:
       - ${CCSYNC_DATA:?set CCSYNC_DATA to a folder this stack owns, e.g. /volume1/docker/ccsync}/tailscale:/var/lib/tailscale
       - tailscale-sock:/var/run/tailscale
+      # The DIRECTORY, not the file, and no variable in front of it. Docker
+      # creates a missing bind-mount source, and a missing DIRECTORY is an
+      # empty directory (harmless, and nothing reads it while
+      # TS_SERVE_CONFIG is empty) whereas a missing FILE would be created as
+      # a directory in the file's place -- a shape that only ever confuses
+      # whoever looks next. `./tailscale` is `dashboard/deploy/tailscale/`,
+      # beside this file, so a checkout-based deployment gets serve.json for
+      # free; a customer who pasted this file into Container Manager and
+      # wants Serve copies that one JSON next to their compose file.
+      - ./tailscale:/config:ro
     # NO PORTS. Serve is what makes this node reachable at all
     # (https:443 -> http://dashboard:8480 on the compose network, once the
     # dashboard has driven the login above and then set Serve) -- there is

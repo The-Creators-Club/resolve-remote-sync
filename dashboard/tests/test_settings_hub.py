@@ -20,6 +20,7 @@ mode of a nav redesign is a page that still exists and nothing links to.
 from __future__ import annotations
 
 import builtins
+import re
 import sys
 
 import pytest
@@ -30,6 +31,42 @@ from ccsync_dashboard.app import create_app
 from ccsync_dashboard.settings import Settings
 
 SECRET = "s" * 32
+
+# The strip's opening tag, whatever else is in its class list. It used to be
+# pinned as the exact string `class="settings-nav"`, which stopped being a
+# statement about the strip the day the phone layout wanted `scroll-x` on it
+# as well (MOBILE_PLAN.md M1 round 2, 2026-08-30): the sweep exempts an
+# element from "content scrolls sideways" only if it CARRIES that class, so
+# the class has to be in the markup and this file was the thing in the way.
+# What these tests are about is the strip being on the page, not the order of
+# words in its attribute.
+NAV_OPEN = re.compile(r'<nav[^>]*\sclass="([^"]*)"[^>]*>')
+
+
+def _strip_match(body: str):
+    """The first <nav> whose class list carries settings-nav as a WHOLE token.
+
+    Whole token, not a substring: `settings-nav-item` is the class on every
+    link inside the strip, so a substring test would still find the strip in
+    a page that had lost it and kept one link.
+    """
+    for match in NAV_OPEN.finditer(body):
+        if "settings-nav" in match.group(1).split():
+            return match
+    return None
+
+
+def has_strip(body: str) -> bool:
+    return _strip_match(body) is not None
+
+
+def strip_at(body: str) -> int:
+    """Where the strip's opening tag starts. Raises like str.index did."""
+    match = _strip_match(body)
+    if match is None:
+        raise ValueError("no settings-nav in this page")
+    return match.start()
+
 
 # key -> (url, label). The order is the strip's own.
 HUB = {
@@ -85,13 +122,27 @@ def test_every_hub_page_renders_the_strip_with_itself_marked(client, key):
     url, label = HUB[key]
     page = as_user(client, "owen").get(url)
     assert page.status_code == 200, page.text
-    assert 'class="settings-nav"' in page.text
+    assert has_strip(page.text)
     # Its own entry is the current one...
     assert f'settings-nav-current" href="{url}"' in page.text
     assert page.text.count("settings-nav-current") == 1
     # ...and every other entry is offered as a plain link.
     for other, (other_url, other_label) in HUB.items():
         assert other_label in page.text, f"{key} page does not offer {other_label}"
+
+
+def test_the_strip_is_found_whatever_else_is_in_its_class_list():
+    """What the relaxation above is FOR (MOBILE_PLAN.md M1 round 2,
+    2026-08-30): below the phone breakpoint the strip is a row that scrolls
+    sideways inside itself, and the sweep only exempts an element from
+    "content scrolls sideways" if it CARRIES `.scroll-x`. This file pinned
+    the exact attribute and was the reason the class could not be added."""
+    assert has_strip('<nav class="settings-nav" aria-label="settings">')
+    assert has_strip('<nav class="settings-nav scroll-x" aria-label="settings">')
+    assert has_strip('<nav aria-label="settings" class="scroll-x settings-nav">')
+    # ...and it is still a statement about THIS strip, not any nav.
+    assert not has_strip('<nav class="drawer-nav">')
+    assert not has_strip('<nav class="settings-nav-item">')
 
 
 @pytest.mark.parametrize("key", sorted(HUB))
@@ -131,7 +182,7 @@ def test_the_transfers_poll_cannot_eat_the_strip(client):
     element would vanish two seconds after the page painted."""
     body = as_user(client, "owen").get("/transfers").text
     polled = body[body.index('hx-get="/partials/transfers"'):]
-    assert 'class="settings-nav"' not in polled
+    assert not has_strip(polled)
 
 
 # ------------------------------------------------------- /admin/packages
@@ -204,8 +255,7 @@ def test_the_strip_does_not_offer_the_installer(client):
     behind where it belongs."""
     for url, _label in HUB.values():
         body = as_user(client, "owen").get(url).text
-        assert "[ INSTALLER ]" not in body[body.index('class="settings-nav"'):
-                                           body.index("</nav>")]
+        assert "[ INSTALLER ]" not in body[strip_at(body):body.index("</nav>")]
 
 
 def test_download_303s_to_the_browsers_own_package(client):
@@ -246,7 +296,7 @@ def test_the_installer_page_offers_both_platforms(client, tmp_path):
     assert page.text.count("nothing published for this platform yet") == 2
     assert "/download/" not in page.text
     # No Settings strip: it is not a hub page any more.
-    assert 'class="settings-nav"' not in page.text
+    assert not has_strip(page.text)
 
     settings = client.app.state.settings
     with db.connect(settings.db_path) as conn:

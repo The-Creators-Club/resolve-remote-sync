@@ -24,38 +24,46 @@
       {{ recovery.protection.counts.not_checked + recovery.protection.counts.check_failed }}
       this server cannot check.
       <a href="/admin/protection">[ THE FULL LIST ]</a></span></div>
-  {# No .stack on these two: they are already one label chip and one block of
-     prose per row, which is what .stack would make of them anyway
-     (MOBILE_PLAN.md §3.2, 2026-08-30). What they need is to stop being
-     nowrap at 390px, which mobile.css's admin section does. #}
-  <table class="editors recovery-lines" style="margin-top:0.5rem"><tbody>
+  {# .stack with EMPTY data-labels on both of these: a row is one line of
+     protection or one fact about the NAS, and its first cell is the chip that
+     names which. Round 2 (2026-08-30) corrected the first pass's judgement
+     that they were fine unstacked -- they were 620 px wide at 390, because
+     .mono-sm is nowrap and the prose beside the chip is a full sentence. #}
+  {# .scroll-x (MOBILE_PLAN.md §3.2): the phone layer stacks this table below
+     600 px, but between 600 and 900 it is still a grid, and a grid that
+     is wider than the window has to scroll inside itself rather than take
+     the page with it (round 2 of the sweep, 2026-08-30). #}
+  <div class="scroll-x">
+  <table class="editors recovery-lines stack" style="margin-top:0.5rem"><tbody>
     {% for row in recovery.protection.lines if row.state != 'ok' %}
       <tr class="editor-row">
-        <td class="mono-sm" style="white-space:nowrap">
+        <td class="mono-sm" data-label="" style="white-space:nowrap">
           {% if row.state == 'broken' %}<span class="chip red">[ MISSING ]</span>
           {% elif row.state == 'check_failed' %}<span class="chip red">[ COULD NOT RUN ]</span>
           {% else %}<span class="chip amber">[ CANNOT VERIFY ]</span>{% endif %}
         </td>
-        <td><div class="mono-sm">{{ row.title }}</div>
+        <td data-label=""><div class="mono-sm">{{ row.title }}</div>
             <div class="muted" style="margin-top:0.2rem">{{ row.detail }}</div></td>
       </tr>
     {% else %}
-      <tr class="editor-row"><td colspan="2" class="muted">
+      <tr class="editor-row"><td colspan="2" class="muted" data-label="">
         Everything this server checks is in place.</td></tr>
     {% endfor %}
   </tbody></table>
+  </div>
 
   {# 2. What this server knows about this NAS, which is what decides whether a
      command below can be printed at all. #}
   <div class="side-head" style="margin-top:1.2rem">[ WHAT THIS SERVER KNOWS ABOUT THIS NAS ]</div>
-  <table class="editors recovery-lines" style="margin-top:0.5rem"><tbody>
+  <div class="scroll-x">
+  <table class="editors recovery-lines stack" style="margin-top:0.5rem"><tbody>
     {% for fact in recovery.facts %}
       <tr class="editor-row">
-        <td class="mono-sm" style="white-space:nowrap">
+        <td class="mono-sm" data-label="" style="white-space:nowrap">
           {% if fact.verified %}<span class="chip green">[ CONFIRMED ]</span>
           {% else %}<span class="chip amber">[ NOT CONFIRMED ]</span>{% endif %}
         </td>
-        <td>
+        <td data-label="">
           <div class="mono-sm">{{ fact.label }}{% if fact.value %}: {{ fact.value }}{% endif %}</div>
           {% if not fact.verified %}
             <div class="muted" style="margin-top:0.2rem">{{ fact.why_not }}</div>
@@ -65,6 +73,7 @@
       </tr>
     {% endfor %}
   </tbody></table>
+  </div>
 
   {# 3. The wizard's one question. #}
   <div class="side-head" style="margin-top:1.2rem">[ WHAT WENT WRONG? ]</div>

@@ -42,6 +42,11 @@
 
     {% if dash_update.code_updates %}
       {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): a row is one bundle. #}
+      {# .scroll-x (MOBILE_PLAN.md §3.2): the phone layer stacks this table below
+         600 px, but between 600 and 900 it is still a grid, and a grid that
+         is wider than the window has to scroll inside itself rather than take
+         the page with it (round 2 of the sweep, 2026-08-30). #}
+      <div class="scroll-x">
       <table class="editors stack" style="margin-top:0.6rem">
         <thead><tr><th>VERSION</th><th>SIZE</th><th>PUBLISHED</th><th>NOTES</th><th></th></tr></thead>
         <tbody>
@@ -58,6 +63,7 @@
         {% endfor %}
         </tbody>
       </table>
+      </div>
     {% else %}
       <div class="muted" style="margin-top:0.6rem">no code update is available for this runtime</div>
     {% endif %}
@@ -125,6 +131,7 @@
       <div class="side-head" style="margin-top:1.2rem">[ DATABASE BACKUPS ]
         <span class="muted">taken before each update, under /data/backups</span></div>
       {# .stack: a row is one backup (MOBILE_PLAN.md §3.2, 2026-08-30). #}
+      <div class="scroll-x">
       <table class="editors stack">
         <thead><tr><th>WHEN</th><th>NAME</th><th>FROM</th><th>DATABASES</th><th>SIZE</th></tr></thead>
         <tbody>
@@ -139,6 +146,7 @@
         {% endfor %}
         </tbody>
       </table>
+      </div>
     {% endif %}
   {% endif %}
 </div>

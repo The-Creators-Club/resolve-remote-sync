@@ -30,6 +30,11 @@
     {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): a row is one published build,
        nine columns of it, and the chips inside VERSION are the reason this
        table is stacked rather than scrolled sideways: they are the answer. #}
+    {# .scroll-x (MOBILE_PLAN.md §3.2): the phone layer stacks this table below
+       600 px, but between 600 and 900 it is still a grid, and a grid that
+       is wider than the window has to scroll inside itself rather than take
+       the page with it (round 2 of the sweep, 2026-08-30). #}
+    <div class="scroll-x">
     <table class="editors stack">
       <thead><tr><th>KIND</th><th>VERSION</th><th>PLATFORM</th><th>SIZE</th><th>SHA256</th><th>PUBLISHED</th><th>BY</th><th></th><th></th></tr></thead>
       <tbody>
@@ -133,6 +138,7 @@
       {% endfor %}
       </tbody>
     </table>
+    </div>
   {% else %}
     <div class="muted">nothing published yet</div>
   {% endif %}
@@ -181,6 +187,7 @@
   <div class="side-head" style="margin-top:1.2rem">[ OUT-OF-DATE MACHINES ]</div>
   {% if packages.outdated_machines %}
     {# .stack: a row is one machine (MOBILE_PLAN.md §3.2, 2026-08-30). #}
+    <div class="scroll-x">
     <table class="editors stack">
       <thead><tr><th>EDITOR</th><th>MACHINE</th><th>RUNNING</th><th>LAST REPORT</th><th></th></tr></thead>
       <tbody>
@@ -224,13 +231,14 @@
       {% endfor %}
       </tbody>
     </table>
+    </div>
   {% else %}
     <div class="muted">all reporting machines are on the current version</div>
   {% endif %}
 
   <div class="muted" style="margin-top:0.8rem">
     Publish new builds from the base rig:
-    <span class="mono-sm">.\build_editor_package.ps1 -RebuildExe -RebuildOnboard -Publish [-MakeCurrent]</span>
+    <span class="mono-sm publish-cmd">.\build_editor_package.ps1 -RebuildExe -RebuildOnboard -Publish [-MakeCurrent]</span>
     uploads both the companion and the installer. Each machine's tray then shows “Update now”.
   </div>
 
@@ -273,6 +281,7 @@
 
     {% if feed.available %}
       {# .stack: a row is one build the vendor offers (MOBILE_PLAN.md §3.2). #}
+      <div class="scroll-x">
       <table class="editors stack" style="margin-top:0.6rem">
         <thead><tr><th>KIND</th><th>VERSION</th><th>PLATFORM</th><th>SIZE</th><th>NOTES</th><th></th><th></th></tr></thead>
         <tbody>
@@ -306,6 +315,7 @@
         {% endfor %}
         </tbody>
       </table>
+      </div>
     {% else %}
       <div class="muted">nothing new: the fleet's packages already cover everything the vendor feed offers</div>
     {% endif %}

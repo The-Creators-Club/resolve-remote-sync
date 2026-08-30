@@ -27,17 +27,27 @@
       {% if protection.checked_at %}Last looked at {{ protection.checked_at | ago }}.
       {% else %}No pass has run yet.{% endif %}</span></div>
 
-  <table class="editors" id="protection-table" style="margin-top:0.6rem">
+  {# .scroll-x (MOBILE_PLAN.md §3.2): the phone layer stacks this table below
+     600 px, but between 600 and 900 it is still a grid, and a grid that
+     is wider than the window has to scroll inside itself rather than take
+     the page with it (round 2 of the sweep, 2026-08-30). #}
+  {# .stack with EMPTY data-labels: a row here is one check, and its first
+     cell is already the label -- a chip that says which of the three states
+     it is in. The empty attribute is style.css's opt-out, so the cell becomes
+     a line with no 11 px heading over it. This page was 1683 px wide at 390
+     before round 2. #}
+  <div class="scroll-x">
+  <table class="editors stack" id="protection-table" style="margin-top:0.6rem">
     <tbody>
     {% for row in protection.lines %}
       <tr class="editor-row">
-        <td class="mono-sm" style="white-space:nowrap">
+        <td class="mono-sm" data-label="" style="white-space:nowrap">
           {% if row.state == 'ok' %}<span class="chip green">[ PROTECTED ]</span>
           {% elif row.state == 'broken' %}<span class="chip {{ 'red' if row.severity == 'error' else 'amber' }}">[ MISSING ]</span>
           {% elif row.state == 'check_failed' %}<span class="chip red">[ COULD NOT RUN ]</span>
           {% else %}<span class="chip amber" title="this server has no way to get evidence for this one; the reason is beside it">[ CANNOT VERIFY ]</span>{% endif %}
         </td>
-        <td>
+        <td data-label="">
           <div class="mono-sm">{{ row.title }}</div>
           {% if row.state != 'ok' %}
             <div class="muted" style="margin-top:0.25rem">{{ row.consequence }}</div>
@@ -54,6 +64,7 @@
     {% endfor %}
     </tbody>
   </table>
+  </div>
 
   {# The two dates nothing on this server can observe for itself. They are
      DATES, not ticks: "the key is backed up" is a claim that ages, and a
@@ -68,7 +79,7 @@
     <input type="hidden" name="key" value="release_key_backup">
     <label>THE RELEASE SIGNING KEY IS BACKED UP, ON<br>
       <input type="date" name="date" value=""></label>
-    <button class="btn" type="submit">[ I HAVE BACKED IT UP ]</button>
+    <button class="btn tap" type="submit">[ I HAVE BACKED IT UP ]</button>
     <span class="muted mono-sm">
       {% if protection.acks.release_key_backup %}last recorded
         {{ protection.acks.release_key_backup.date }}
@@ -81,7 +92,7 @@
     <input type="hidden" name="key" value="restore_drill">
     <label>A RESTORE FROM A BACKUP WAS TRIED, ON<br>
       <input type="date" name="date" value=""></label>
-    <button class="btn" type="submit">[ RECORD A RESTORE ]</button>
+    <button class="btn tap" type="submit">[ RECORD A RESTORE ]</button>
     <span class="muted mono-sm">
       {% if protection.acks.restore_drill %}last recorded
         {{ protection.acks.restore_drill.date }}

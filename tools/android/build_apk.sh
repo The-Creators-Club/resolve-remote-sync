@@ -96,6 +96,23 @@ if [ ! -f "$BW_CONFIG" ]; then
   echo "wrote $BW_CONFIG (jdk=$JDK sdk=$SDK)"
 fi
 
+# Bubblewrap validates an Android SDK by looking for `tools/source.properties`
+# -- a file from the RETIRED "SDK Tools" package, which no current SDK ships
+# and which nothing in the build actually uses. Without it `bubblewrap build`
+# dies with "The provided androidSdk isn't correct" and no hint at all
+# (measured on ubuntu-latest, 2026-08-30). One stub file satisfies the check;
+# every real tool it then invokes lives in build-tools/ and platform-tools/.
+SDK_PATH="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["androidSdkPath"])' "$BW_CONFIG" 2>/dev/null || true)"
+if [ -n "$SDK_PATH" ] && [ ! -f "$SDK_PATH/tools/source.properties" ]; then
+  if mkdir -p "$SDK_PATH/tools" 2>/dev/null; then
+    printf 'Pkg.Revision=26.1.1\n' > "$SDK_PATH/tools/source.properties"
+  else
+    sudo mkdir -p "$SDK_PATH/tools"
+    printf 'Pkg.Revision=26.1.1\n' | sudo tee "$SDK_PATH/tools/source.properties" >/dev/null
+  fi
+  echo "stubbed $SDK_PATH/tools/source.properties for bubblewrap's SDK check"
+fi
+
 # ---------------------------------------------------------------- the manifest
 ARGS=(--origin "$ORIGIN" --out "$OUT_ABS" --keystore "$KEYSTORE" --key-alias "$KEY_ALIAS")
 if [ -n "$PACKAGE" ]; then

@@ -727,6 +727,10 @@ def _complete_cli(system, user, provider, timeout):
             input=document,
             capture_output=True,
             text=True,
+            # UTF-8 by name: on Windows text=True means cp1252, and a Mandarin
+            # search term in the prompt is a UnicodeEncodeError before the CLI
+            # even starts (the base rig, 2026-08-30). The container is UTF-8 anyway.
+            encoding="utf-8", errors="replace",
             timeout=limit,
             # The data root, never the Projects tree: whatever the CLI decides
             # to read or write relative to its working directory must not land

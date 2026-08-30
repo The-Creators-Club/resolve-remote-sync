@@ -5730,6 +5730,18 @@ class CompanionApp:
                     f"{minutes} minute(s) and was restarted",
                     str(stalled.get("at") or "") or None)
         if reason == "syncthing_down":
+            # NOT on a machine that has no sync engine by design (2026-08-30).
+            # sync_enabled=false is the base rig, which works straight off
+            # the NAS and runs no lane C -- so its Syncthing is retired, not
+            # down. The supervisor still keeps the incident it recorded the
+            # minute the engine went away (nothing polls it clear without a
+            # lane C), and for two days the owner's tray said "the sync
+            # engine is not running on this computer, so project files are
+            # not being shared" about a machine sharing them straight off
+            # the share. The incident stays in the report section for the
+            # dashboard; it is not a reason this machine is blocked.
+            if not self._sync_enabled:
+                return None
             supervisor = guard.get("syncthing_supervisor") or {}
             since = str(supervisor.get("down_since") or "")
             if not since:

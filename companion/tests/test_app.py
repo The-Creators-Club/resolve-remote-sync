@@ -6439,6 +6439,31 @@ def test_nothing_blocking_means_no_blocked_key_at_all(tmp_path):
     assert "blocked" not in app.sync_guard()
 
 
+def test_a_retired_sync_engine_is_not_a_blocked_reason_on_the_base_rig(tmp_path):
+    """The base rig (sync_enabled=false) runs no lane C and its local
+    Syncthing is retired on purpose. The supervisor still keeps the incident
+    it recorded the minute the engine went away -- nothing polls it clear
+    without a lane -- and for two days the owner's tray read "the sync engine
+    is not running on this computer, so project files are not being shared"
+    about a machine sharing them straight off the NAS (2026-08-30). The
+    report section may carry the incident for the dashboard; it is not a
+    reason this machine is blocked."""
+    import time
+
+    app = _unblocked_app(tmp_path, sync_enabled=False)
+    app.syncthing_supervisor._since = time.time()
+    guard = app.sync_guard()
+    assert guard["syncthing_supervisor"]["down_since"]
+    blocked = app.blocked_report(guard)
+    assert blocked is None or blocked["reason"] != "syncthing_down"
+
+    # ...and on a machine that DOES sync, the same incident is still the
+    # reason it shows.
+    syncing = _unblocked_app(tmp_path / "syncing", sync_enabled=True)
+    syncing.syncthing_supervisor._since = time.time()
+    assert syncing.blocked_report(syncing.sync_guard())["reason"] == "syncthing_down"
+
+
 def test_not_signed_in_is_the_first_thing_an_editor_is_told(tmp_path):
     app = _make_app(tmp_path)          # require_login left ON, no identity
     blocked = app.sync_guard()["blocked"]

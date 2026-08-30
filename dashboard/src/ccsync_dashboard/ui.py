@@ -2974,6 +2974,92 @@ def page_setup(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
 
 # --------------------------------------------------------------- settings
 
+def _live_auto_derived_values(settings) -> dict[str, str]:
+    """Which of site_store.AUTO_DERIVED_KEYS has a LIVE value available RIGHT
+    NOW, and a short human sentence saying where it came from -- what the
+    Settings page greys a field out FOR (CR-follow-up, 2026-08-30, the owner:
+    "it won't let me change the dashboard url").
+
+    Before this, `admin_settings.html` greyed a key out whenever it was IN
+    AUTO_DERIVED_KEYS **and the DB row had ever been given any value at
+    all** -- which every one of them had, from the very first boot's env
+    seed (`site_store.seed_from_env_once`), so the three fields locked
+    FOREVER the moment a deployment had any DASH_SITE_* set once. Nothing
+    about that meant a live source was actually deriving anything: Alex's
+    dashboard_url was a value someone typed (or the env seeded) months ago,
+    not a value WP B's Tailscale sidecar was deriving today, and the docs
+    already promised the opposite (docs/CONFIG.md: "greys those out only
+    when a live value is actually available").
+
+    Each check is bounded and fails to "no live value" on anything short of
+    a real, current answer -- a page an admin is looking at must not hang
+    behind a NAS that stopped answering:
+
+      - dashboard_url: the bundled Tailscale sidecar (tailscale_local.py, WP
+        B), signed in with a resolvable name. `socket_present()` is a
+        Path.exists() on a unix socket -- no network at all -- so a
+        deployment with no WP B sidecar container (every one today,
+        including Alex's, which reaches its dashboard through a tailnet URL
+        he set by hand) answers instantly and never greys the field.
+      - nas_syncthing_id: this site's own Syncthing, `/rest/system/status`'s
+        `myID` -- the exact call `setup_engine._check_syncthing` already
+        makes for the same reason, bounded to 2 s here too.
+      - sftp_host: WP C's SFTP sidecar has no OUTBOUND status route in this
+        repo yet -- `internal_sftp.py` is inbound identity only, called BY
+        the sidecar, never calling it. No live source exists, so this key is
+        never in the answer, full stop, until that changes.
+    """
+    live: dict[str, str] = {}
+
+    from . import tailscale_local
+    try:
+        node = tailscale_local.summarise(tailscale_local.status())
+    except Exception:                                                # noqa: BLE001
+        node = None
+    if node and node.get("backend_state") == "Running":
+        name = node.get("dns_name") or ((node.get("ips") or [None])[0])
+        if name:
+            live["dashboard_url"] = f"the bundled Tailscale sidecar is signed in as {name}"
+
+    syncthing_url = str(getattr(settings, "syncthing_url", "") or "")
+    if syncthing_url:
+        try:
+            client = SyncthingClient.from_settings(settings)
+            client.timeout = min(client.timeout, 2.0)
+            my_id = str(client.system_status().get("myID", "") or "")
+        except Exception:                                             # noqa: BLE001
+            my_id = ""
+        if my_id:
+            live["nas_syncthing_id"] = f"this site's Syncthing reports device id {my_id[:7]}..."
+
+    return live
+
+
+def _auto_derived_env_hints(settings, manifest: dict) -> dict[str, str]:
+    """DASH_SITE_* for each AUTO_DERIVED_KEY, shown as a fallback hint
+    whenever it DIFFERS from the DB row (2026-08-30 follow-up).
+
+    Found the same night: the container's env carried
+    `DASH_SITE_DASHBOARD_URL=https://truenas.tail26290e.ts.net:9443` while
+    the DB row (what the field showed, and -- before this fix -- could not
+    be changed) held `http://100.71.216.3:8480`. `site_store`'s own rule is
+    that the DB is authoritative once written and the env is never picked up
+    automatically (docs/CONFIG.md) -- right for avoiding a surprise value
+    change on a restart, wrong for leaving the admin unable to even SEE that
+    the two disagree. This never auto-fills anything; it is text beside the
+    field.
+    """
+    from . import site_store
+
+    hints: dict[str, str] = {}
+    for key in site_store.AUTO_DERIVED_KEYS:
+        env_val = str(getattr(settings, f"site_{key}", "") or "").strip()
+        db_val = str(manifest.get(key) or "").strip()
+        if env_val and env_val != db_val:
+            hints[key] = env_val
+    return hints
+
+
 @router.get("/admin/settings")
 def page_admin_settings(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     _require_admin_page(request)
@@ -2981,10 +3067,16 @@ def page_admin_settings(request: Request, conn: sqlite3.Connection = Depends(get
 
     settings = request.app.state.settings
     manifest = site_store.resolved_manifest(conn, settings)
+    live_derived = _live_auto_derived_values(settings)
     return _render(request, "admin_settings.html", {
         **_sidebar_context(request, conn, None),
         "manifest": manifest,
-        "auto_derived": sorted(site_store.AUTO_DERIVED_KEYS),
+        # ONLY the keys with a LIVE value available right now (see
+        # _live_auto_derived_values) -- never the full AUTO_DERIVED_KEYS set,
+        # which is "could be derived once a sidecar exists", not "is".
+        "auto_derived": sorted(live_derived.keys()),
+        "auto_derived_reason": live_derived,
+        "env_hint": _auto_derived_env_hints(settings, manifest),
         "from_db": set(manifest.get("_from_db", ())),
         # A CHOICE, not free text (dash-admin-7, 2026-08-21): the field used
         # to be a plain input, so "TrueNAS" or a trailing space reached every

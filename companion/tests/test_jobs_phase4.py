@@ -104,14 +104,25 @@ class FakeDashboard:
 
 class FakeProc:
     """A child that never finishes on its own. `on_wait` is the reporter
-    thread arriving with the admin's cancel while it runs."""
+    thread arriving with the admin's cancel while it runs.
+
+    `stdout` is None: since section 10 the runner drains the child's output on
+    its own thread, and a child with nothing to drain is exactly the case this
+    suite is about -- what happens when it is STOPPED, not what it printed."""
+
+    stdout = None
 
     def __init__(self, on_wait):
         self.on_wait = on_wait
         self.terminated = False
         self.returncode = None
 
-    def communicate(self, timeout=None):
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        if self.terminated:
+            return self.returncode
         self.on_wait()
         raise subprocess.TimeoutExpired("pipeline.py", timeout or 1)
 
@@ -119,11 +130,9 @@ class FakeProc:
         self.terminated = True
         self.returncode = -1
 
-    def wait(self, timeout=None):
-        return -1
-
     def kill(self):
         self.terminated = True
+        self.returncode = -1
 
 
 def a_whisper_runner(tmp_path, dash, on_wait):

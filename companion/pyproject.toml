@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ccsync-companion"
-version = "0.9.60"
+version = "0.9.61"
 description = "Editor-side companion app for the CC Sync Resolve remote-sync system: timeline watcher, move-and-relink popup, and rclone/Syncthing sync lanes."
 requires-python = ">=3.12"
 dependencies = [

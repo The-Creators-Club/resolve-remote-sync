@@ -228,6 +228,10 @@ def test_default_toml_text_documents_every_default_key():
         "jobs_enabled", "jobs_whisper_python", "jobs_mulcam_pipeline",
         "jobs_vault_root", "jobs_media_root", "jobs_idle_seconds",
         "jobs_skip_while_resolve_running", "jobs_poll_seconds",
+        # The volunteer window (section 10, 2026-08-30) is the tray
+        # item's length, not a gate: it belongs beside the other jobs_*
+        # tunables, and is commented out for the same reason they are.
+        "jobs_volunteer_minutes",
         # The Timeline Cards role (phase 2, 2026-08-30). Commented out for a
         # stronger reason than the rest: writing `cards_agent = false` into
         # every first-run file would put the switch for a SECOND Resolve
@@ -324,6 +328,7 @@ EXAMPLE_COMMENTED_OUT = {
     "jobs_enabled", "jobs_whisper_python", "jobs_mulcam_pipeline",
     "jobs_vault_root", "jobs_media_root", "jobs_idle_seconds",
     "jobs_skip_while_resolve_running", "jobs_poll_seconds",
+    "jobs_volunteer_minutes",
     # The Timeline Cards role (phase 2, 2026-08-30): commented out because it
     # belongs on exactly ONE machine, and a shipped `cards_agent = false` in
     # every editor's file is the switch for a second Resolve client one edit

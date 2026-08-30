@@ -5227,6 +5227,15 @@ class CompanionApp:
                     self.watcher, "last_resolve_project", None),
                 cards_agent_fn=(self.cards_role.report_block
                                 if self.cards_role is not None else None),
+                # Whether the person here has lent this machine to the fleet
+                # (§10, 2026-08-30). From the RUNNER, which owns the timer, so
+                # the scheduler's answer and this machine's cannot disagree --
+                # the same rule the shared idle probe above exists for.
+                # getattr, because the reporter is built BEFORE the runner and
+                # a report that lands in that gap must not raise.
+                volunteer_until_fn=(
+                    (lambda: self.job_runner.volunteer_until_iso)
+                    if getattr(self, "job_runner", None) is not None else None),
             )
         except Exception:
             log.exception("could not build the capabilities section")

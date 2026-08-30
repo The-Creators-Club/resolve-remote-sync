@@ -284,3 +284,45 @@ def test_a_broken_ffprobe_probe_reads_as_absent(tmp_path, monkeypatch):
     monkeypatch.setattr(caps_mod.ffmpeg_tools, "ffprobe_for",
                         lambda p: (_ for _ in ()).throw(OSError("nope")))
     assert caps_mod._ffprobe(cfg(tmp_path)) is False
+
+
+# -------------------------------- the volunteer window (section 10, 2026-08-30)
+
+def test_the_volunteer_window_rides_the_section(tmp_path):
+    section = caps_mod.build(cfg(tmp_path),
+                             volunteer_until_fn=lambda: "2026-08-30T12:30:00+00:00",
+                             use_cache=False)
+    assert section["volunteer_until"] == "2026-08-30T12:30:00+00:00"
+
+
+def test_no_volunteer_window_is_none_not_missing(tmp_path):
+    """None is what a companion older than 0.9.61 reads as (section 10.2), so
+    the two must mean the same thing."""
+    section = caps_mod.build(cfg(tmp_path), use_cache=False)
+    assert section["volunteer_until"] is None
+    assert caps_mod.build(cfg(tmp_path), volunteer_until_fn=lambda: "",
+                          use_cache=False)["volunteer_until"] is None
+
+
+def test_the_volunteer_window_is_never_served_from_cache(tmp_path, monkeypatch):
+    """The click that starts it is meant to reach the fleet on the NEXT
+    report. Cached for 60 s it would be a lever that does nothing for a
+    minute -- the same rule idle_seconds is outside the cache for."""
+    monkeypatch.setattr(caps_mod, "_gpu", lambda: {})
+    monkeypatch.setattr(caps_mod, "_nvenc", lambda cfg: False)
+    monkeypatch.setattr(caps_mod, "_ffmpeg", lambda cfg: False)
+    c = cfg(tmp_path)
+    first = caps_mod.build(c, volunteer_until_fn=lambda: None)
+    second = caps_mod.build(c, volunteer_until_fn=lambda: "2026-08-30T12:30:00+00:00")
+    assert first["volunteer_until"] is None
+    assert second["volunteer_until"] == "2026-08-30T12:30:00+00:00"
+
+
+def test_a_volunteer_getter_that_throws_costs_nothing(tmp_path):
+    def boom():
+        raise RuntimeError("the runner is mid-shutdown")
+
+    section = caps_mod.build(cfg(tmp_path), volunteer_until_fn=boom,
+                             use_cache=False)
+    assert section["volunteer_until"] is None
+    assert "whisper" in section

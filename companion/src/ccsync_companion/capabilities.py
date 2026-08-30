@@ -241,6 +241,7 @@ def build(
     resolve_running_fn: Optional[Callable[[], bool]] = None,
     resolve_project_fn: Optional[Callable[[], Optional[str]]] = None,
     cards_agent_fn: Optional[Callable[[], dict[str, Any]]] = None,
+    volunteer_until_fn: Optional[Callable[[], Optional[str]]] = None,
     use_cache: bool = True,
 ) -> dict[str, Any]:
     """The `capabilities` report section. Never raises.
@@ -264,6 +265,12 @@ def build(
             # and stops while a cached hardware answer sits still, and the
             # grid chip is meant to say which timeline is on screen NOW.
             answer["cards_agent"] = _cards_block(cards_agent_fn)
+            # ...and the volunteer window (§10, 2026-08-30), for the plainest
+            # version of the same reason: it is a click that has just happened,
+            # and the whole point of clicking it is that the NEXT report says
+            # so. Served from a 60 s cache it would be a lever that does
+            # nothing for a minute.
+            answer["volunteer_until"] = _volunteer_until(volunteer_until_fn)
             return answer
 
     cfg = cfg or {}
@@ -303,7 +310,26 @@ def build(
     section["cards_agent"] = _cards_block(cards_agent_fn)
     with _lock:
         _cache = (now, dict(section))
+    # AFTER the cache is stored, like the three above: a deadline frozen into
+    # the cache would outlive the window it describes.
+    section["volunteer_until"] = _volunteer_until(volunteer_until_fn)
     return section
+
+
+def _volunteer_until(
+    volunteer_until_fn: Optional[Callable[[], Optional[str]]],
+) -> Optional[str]:
+    """When the person at this machine has lent it to the fleet until, as an
+    ISO-8601 UTC string -- or None, which is the normal answer and the one a
+    companion older than 0.9.61 gives by saying nothing (§10.2)."""
+    if volunteer_until_fn is None:
+        return None
+    try:
+        value = volunteer_until_fn()
+    except Exception:
+        log.debug("capabilities: volunteer_until_fn failed", exc_info=True)
+        return None
+    return str(value) if value else None
 
 
 def _idle_seconds(idle_probe: Any) -> Optional[float]:

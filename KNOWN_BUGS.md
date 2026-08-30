@@ -1019,6 +1019,33 @@ two editing machines) landed in the same pass.
 present -- `DELETE FROM selections WHERE editor_username='alex'` after the
 dashboard carrying v22-v25 is deployed.
 
+### CR-95 — CR-28 follow-up (2026-08-30): a wired column's stale tick could not be cleared — FIXED in repo 2026-08-30 as dashboard 0.7.26, NOT YET SHIPPED
+Owner, 2026-08-30: *"as a wired user I cannot assign any project, for some
+reason animals is ticked but I cannot untick it. They're all greyed out."*
+
+dash-admin-8 (CR-28 above) made "wired" a per-MACHINE predicate so a mixed
+account (one wired desktop, one remote laptop -- the owner's own shape) could
+still tick projects for its remote half. `api.api_tick`'s per-machine refusal
+already said so explicitly: *"UNTICKING stays allowed (below), so an existing
+one can be removed."* But `admin_assignments.html` never read that far --
+every checkbox in a wired column rendered `disabled`, ticked or not, so a
+stale tick (one written before the machine went wired, or carried over by a
+migration) sat there greyed out with nothing on the page able to send the
+DELETE that was always allowed.
+
+Fixed in the template: a wired cell is `disabled` only when it is NOT already
+ticked (a new tick is still refused, 409, and the title says why); a ticked
+wired cell stays enabled, with a title explaining that unticking is what
+clears it. `assignments.js` re-locks the box after a successful untick (the
+server would refuse a re-tick anyway) rather than leaving it clickable until
+the next reload. No server-side change -- `PUT`/`DELETE
+/api/v1/selection/{editor}/{slug}?machine=` already had the right rule; only
+the grid was hiding the DELETE half of it. Tests:
+`dashboard/tests/test_admin_assignments.py`
+(`test_wired_column_ticked_stays_enabled_and_untick_succeeds`,
+`test_wired_column_unticked_stays_disabled`,
+`test_a_remote_column_of_the_same_mixed_account_is_unaffected`).
+
 ---
 
 ### CR-27a — CR-27 recurred on the same machine, because the fix is in the repo and not on the editor
@@ -2949,6 +2976,87 @@ download into a project that machine does not sync would be a folder nothing
 manages. An account with no known machines, or an older dashboard without the
 mode tables, answers "not base-only" and behaves exactly as before. Tests in
 `ytdl/web/tests/test_api.py`. Needs a dashboard deploy to reach the fleet.
+
+### CR-96 — CR-72 follow-up (2026-08-30): the picker's per-PERSON rule still starved a mixed account's wired machine — BUILT in repo 2026-08-30 as dashboard 0.7.26, NOT YET SHIPPED, PARTIAL (see residual)
+Owner, 2026-08-30: *"I can still only select /animals as a destination on the
+base rig."* CR-72's fix was deliberately per-person and base-ONLY: a mixed
+account (a wired base rig and a remote laptop -- the owner's own shape, the
+same one CR-95/dash-admin-8 above is about) kept the ticked list on EVERY
+machine, on the reasoning that a job a remote machine's companion claims must
+land in a project that machine actually syncs. Right for the remote half,
+wrong for the wired one: sitting at the console of the wired machine itself,
+`_base_only` still answered False for the person as a whole and handed back
+the same stale ticked list CR-72 first found empty.
+
+**Fixed, in two independent halves that both widen `ytdlweb.projects
+.ticked_projects` / `resolve_project` to every active project:**
+
+1. **Per EXECUTION PLACE** (`local=False`). When the download will run on the
+   server -- the SPA's "on this machine" toggle unticked, or the fleet flag
+   off -- no machine's companion claims the job, so no machine's sync plan is
+   a constraint; any active project is a legitimate destination, the same
+   argument CR-72 already made for a base-only editor. Threaded end to end:
+   `GET /api/projects?local=`, `NewJob.local` / `NewUrlJob.local` (default
+   `True`, so an old client is unchanged), and `resolve_project` takes the
+   same flag from the job payload the picker was shown, so the two can never
+   disagree. This half needs no new information from anywhere and is
+   complete.
+2. **Per MACHINE** (`machine=<hostname>`, `projects._wired`). Same
+   `machine_state`/`editor_media_project` precedence `_base_only` already
+   reads, narrowed to ONE machine instead of requiring all of them. Built and
+   tested with a `machine=` query param supplied directly -- but **nothing in
+   the fleet can supply a real one yet**: the companion's loopback
+   (`GET /ytdl/capabilities`, `GET /status`) has no hostname or wired-mode
+   field on it today (checked; `capabilities()`'s dict is `ok, reason,
+   editor, ytdlp_version, template_version, sidecar_version,
+   scope_qualities, free_bytes` -- `Deps.is_base_rig` exists internally and
+   is not exposed), and companion is out of scope for this change. So the
+   SPA never sends `machine=`, and a person on a mixed account standing at
+   their OWN wired console with "on this machine" still ticked keeps seeing
+   the ticked list, exactly as before this entry, UNTIL either the companion
+   gains that field or they untick "on this machine" (half 1 above then
+   widens it, because on a wired machine a local write and a server write
+   land in the same place anyway).
+
+**Residual**: expose `Deps.is_base_rig` (or the hostname) on
+`GET /ytdl/capabilities`'s JSON so the SPA can pass `machine=` for real --
+one field, one line, in `ytdl_executor.capabilities()` (companion). Until
+then this is a real, tested, partial fix: it resolves the symptom whenever a
+download is server-side, and leaves the local-on-your-own-wired-console case
+to the next companion change.
+
+Tests: `ytdl/web/ytdlweb/projects.py` (`_machine_modes`, `_wired`),
+`ytdl/web/ytdlweb/tests/test_static_app.py` (the picker's `local` param and
+its live re-fetch on the "on this machine" toggle). Needs a dashboard deploy
+to reach the fleet, same as CR-72.
+
+### CR-97 — a folder box for pasted links, reversing the 2026-08-11 call — BUILT in repo 2026-08-30 as dashboard 0.7.26, NOT YET SHIPPED
+Owner, 2026-08-30: *"there should be a way to manually input the name of the
+folder/bin you want links you are downloading to go into."* This reverses
+2026-08-11's own call (`routes_api.py`'s `NewUrlJob.folder` had sat ACCEPTED
+AND IGNORED since then, with a comment naming the two-reversal history from
+that day) -- so the field is not new, it is reconnected.
+
+Blank (the default) is still `URL_JOB_TERM_DIR` -- clips loose in
+`<project>/Youtube/`, exactly as every paste has landed since 2026-08-11. A
+name given is reduced through the SAME `config.safe_term_dirname` a search
+topic is (YTDL-28's traversal / Windows-reserved-name / 255-byte rules) and
+becomes the job's `term_dir`, which every downstream reader already treats
+generically for either job kind -- `worker._phase_download`'s own docstring
+already said "neither goes deeper than one level under Youtube/, which is
+what the companion's youtube_import watcher walks" (companion untouched;
+confirmed by reading `youtube_import.py`'s `_collect`, which walks exactly
+that one level plus the loose root). `db.ledger_where` / `folder_label` /
+the history panel's destination line all key off `term_dir` already, so
+nothing there needed a change either.
+
+SPA: `#urlfolder`, beside the paste box, remembered per browser
+(`ytdl.url_folder`) like the destination project is. Tests:
+`ytdl/web/tests/test_api.py`
+(`test_a_folder_box_names_the_jobs_term_dir`,
+`test_a_blank_or_whitespace_folder_still_lands_in_the_youtube_root`),
+`ytdl/web/tests/test_static_app.py`
+(`test_the_paste_box_has_a_folder_field_again`). Needs a dashboard deploy.
 
 ### CR-73 - server YouTube downloads crawled at ~1.8 MiB/s and some ended "The downloaded file is empty" - LIVE-FIXED on the NAS + hardened in repo, 2026-08-24
 **Symptom** (owner, 2026-08-24): a server-side ytdl download at 18.3% doing
@@ -9841,6 +9949,93 @@ local-network permission grantable/durable), and routing inserts through the
 dashboard's companion-poll channel instead of browser→loopback — both remain
 open options if the block recurs. Ships with the next companion release;
 remember the upgrade channel still advertises 0.7.3 (R11's residual).
+
+---
+
+## The ytdl page "ate" a paste-and-leave, and a locked Settings URL (CR-98/99, 2026-08-30)
+
+Two more of the five things the owner hit tonight, 2026-08-30, on the base
+rig — the other three are CR-95, CR-96 and CR-97 above.
+
+### CR-98 — "I just submitted 12 youtube links... it seems to have eaten them" — ALREADY FIXED, same day, by a9ef83a; regression tests added, dashboard 0.7.26
+Owner, 2026-08-30: *"I just submitted 12 youtube links to be downloaded but I
+clicked away and came back and it seems to have eaten them"* — the downloads
+were fine (server-side, the clips landed), only the page came back showing
+nothing.
+
+Investigated: `ytdl/web/static/app.js`'s `init()` already re-reads BOTH
+halves of "what is my downloader doing" on every load — `openingJob()` asks
+`GET /api/jobs/active` fresh (attaching to a still-running job's full
+progress view, hash and all, regardless of what `#job=` a stale bookmark
+carries) and `loadQueue()` asks the same route's `queue` field for the jobs
+still waiting behind it, independently of any hash. `loadRecent()`
+(`GET /api/jobs?limit=15`) shows a job that finished while the tab was closed
+without needing either. All three run unconditionally in `init()`, before
+`openingJob()`'s attach decision. This is `a9ef83a` ("ytdl: the page shows
+the terms to tick, and the queue under the job", same day, 13:42, already on
+`main` before this branch was cut) — the queue feature the owner had just
+asked for ("there should also be a queue so you can queue up multiple
+searches") landed with this re-read built in from the start.
+
+So the literal report is **already fixed in the repo the owner hit it in** —
+what was missing was deployment (`tools\ship.cmd`, which only the owner
+runs) and a regression test pinning the exact scenario, in case a later edit
+narrows `openingJob()`/`loadQueue()` back down. Added:
+`ytdl/web/tests/test_static_app.py`
+(`test_a_paste_and_leave_is_never_mistaken_for_a_loss`,
+`test_a_finished_paste_still_shows_in_recent_on_a_fresh_load`) — both
+constructed straight from the owner's words (a still-downloading paste with
+a queue behind it; a paste that finished while the tab was away) and both
+pass against the CURRENT `app.js` with no further code change. **Ship the
+dashboard to make this real on the live NAS** — until then the deployed page
+is whatever build predates `a9ef83a`.
+
+### CR-99 — Settings → Dashboard URL was locked the moment a deployment had ever had ANY value in it — FIXED in repo 2026-08-30 as dashboard 0.7.26, NOT YET SHIPPED
+Owner, 2026-08-30: *"it won't let me change the dashboard url."* Tonight's
+values: the container's env carried
+`DASH_SITE_DASHBOARD_URL=https://truenas.tail26290e.ts.net:9443`, the DB row
+held `http://100.71.216.3:8480` — the field showed the DB row (right, per
+`site_store`'s "the DB is authoritative once written" rule) and could not be
+changed (wrong).
+
+`admin_settings.html` greyed a field out whenever its key was in
+`site_store.AUTO_DERIVED_KEYS` **and the DB row had ever been given any
+value at all** — which every deployment's `dashboard_url`/`sftp_host`/
+`nas_syncthing_id` had, from the first boot's env seed
+(`site_store.seed_from_env_once`) alone. Nothing about a stored value means a
+live source is deriving it TODAY; `site_store.AUTO_DERIVED_KEYS`'s own
+comment and `docs/CONFIG.md` already promised the opposite ("greys those out
+only when a live value is actually available"), and neither the Tailscale
+sidecar (WP B) nor the SFTP sidecar (WP C) exist on Alex's deployment (or
+most others) — so this had been permanently wrong since the day
+`AUTO_DERIVED_KEYS` was introduced.
+
+**Fixed**: `ui._live_auto_derived_values` checks each key against an actual
+live source, bounded and fail-open (a probe that cannot answer leaves the
+field EDITABLE, never locked):
+  - `dashboard_url` — the bundled Tailscale sidecar
+    (`tailscale_local.socket_present()`, a `Path.exists()` on a unix socket,
+    no network at all when absent — the common case, including tonight's)
+    signed in (`BackendState == "Running"`) with a resolvable name.
+  - `nas_syncthing_id` — this site's own Syncthing, `/rest/system/status`'s
+    `myID`, the same call `setup_engine._check_syncthing` already makes,
+    bounded to 2 s here too.
+  - `sftp_host` — WP C's SFTP sidecar has NO outbound status route in this
+    repo (`internal_sftp.py` is inbound identity only, called BY the
+    sidecar). No live source exists, so this key is never auto-derived,
+    full stop, until one is built.
+`page_admin_settings` passes only the keys with a live answer as
+`auto_derived` (was: the static full set), plus `auto_derived_reason` (why,
+shown next to the label) and `env_hint` (the DASH_SITE_* value, shown
+whenever it differs from the DB row — the truenas.tail26290e.ts.net vs
+100.71.216.3 disagreement from tonight, now visible instead of silent).
+Server-side `PUT /api/v1/admin/site` never refused these keys either — the
+`readonly` HTML attribute was the entire lock. Tests:
+`dashboard/tests/test_settings_auto_derived.py` (11 cases: editable with a
+stale stored value + no live source; never editable for `sftp_host`; greys
+correctly when Tailscale/Syncthing DO answer live; stays editable on
+NeedsLogin / unreachable / a raised exception; the env hint shows and hides
+correctly; a previously-locked field can actually be saved once unlocked).
 
 ---
 

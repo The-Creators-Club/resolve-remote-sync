@@ -1333,6 +1333,71 @@ scenarios['no_hash_and_no_active_job_attaches_nothing'] = async () => {
           polling: h.polling()};
 };
 
+// The owner, 2026-08-30: "I just submitted 12 youtube links to be downloaded
+// but I clicked away and came back and it seems to have eaten them" -- the
+// downloads were fine (server-side, 27 clips landed), only the page came back
+// showing nothing. A fresh page load (no hash: he came back to the bare URL,
+// not a bookmarked #job=) must re-read BOTH halves of "what is my downloader
+// doing" -- the active job AND the queue behind it -- the same way it would
+// have looked had the tab never closed.
+const AWAY_ACTIVE = JOB({id: 9, kind: 'urls', phase: 'downloading',
+                         terminal: false, dl_total: 12, dl_done: 7,
+                         term_dir: '', project_label: '2026/FF5/Energy'});
+const AWAY_QUEUE = [
+  {id: 10, term: '', kind: 'urls', project_label: '2026/FF5/Water',
+   phase: 'queued', position: 1, created_at: '2026-08-30T10:00:00+00:00'},
+  {id: 11, term: 'reef protest', kind: 'search', project_label: '2026/FF5/Water',
+   phase: 'queued', position: 2, created_at: '2026-08-30T10:00:00+00:00'},
+];
+
+scenarios['a_paste_and_leave_still_shows_the_running_job_and_the_queue'] = async () => {
+  const h = await boot(async (method, url) => {
+    if (url === 'api/jobs/active') {
+      return {json: {job: AWAY_ACTIVE, queue: AWAY_QUEUE}};
+    }
+    const b = baseline(method, url); if (b) return b;
+    if (url === `api/jobs/${AWAY_ACTIVE.id}`) return {json: POLLRES(AWAY_ACTIVE)};
+    return {json: {}};
+  }, null, '');
+  await flush();
+  return {
+    job_id: h.app.state.jobId,
+    hash: h.ctx.location.hash,
+    progress_hidden: h.get('progress').hidden,
+    downloads_hidden: h.get('downloads').hidden,
+    queue_hidden: h.get('queue').hidden,
+    queue_rows: h.get('queuelist').byClass('queuerow').length,
+    // Both halves asked for fresh, on THIS load -- not carried over from a
+    // session that never existed on this tab.
+    asked_active: h.calls.filter(c => c.url === 'api/jobs/active').length,
+    asked_recent: h.calls.filter(c => c.url.startsWith('api/jobs?')).length,
+  };
+};
+
+// The other half: by the time he looked, the paste had ALREADY finished (no
+// active job at all) -- the clips still have to be found, in Recent searches,
+// without a click.
+const AWAY_DONE = JOB({id: 12, kind: 'urls', phase: 'done', terminal: true,
+                       dl_total: 12, dl_done: 12, term_dir: '',
+                       project_label: '2026/FF5/Energy'});
+
+scenarios['a_finished_paste_still_shows_in_recent_on_a_fresh_load'] = async () => {
+  const h = await boot(async (method, url) => {
+    if (url === 'api/jobs/active') return {json: {job: null, queue: []}};
+    if (url.startsWith('api/jobs?')) {
+      return {json: {jobs: [AWAY_DONE]}};
+    }
+    const b = baseline(method, url); if (b) return b;
+    return {json: {}};
+  }, null, '');
+  await flush();
+  return {
+    recentsum: h.get('recentsum').textContent,
+    recent_rows: h.get('recentlist').byClass('recentrow').length,
+    job_id: h.app.state.jobId,
+  };
+};
+
 // An older server has no such route. The hash is still better than nothing.
 scenarios['a_missing_active_route_falls_back_to_the_hash'] = async () => {
   const h = await boot(async (method, url) => {
@@ -2440,14 +2505,16 @@ def test_a_server_detail_reaches_the_toast_as_text_not_markup(spa):
 
 # ------------------------------------------------------- the paste-links box
 def test_pasting_links_posts_the_whole_form_and_attaches_the_job(spa):
-    """The form is the LINKS and the shared destination pickers, and nothing
-    else: there is no folder field any more (owner, 2026-08-11), because a
-    paste's clips go into the project's Youtube root."""
+    """The form is the LINKS and the shared destination pickers, plus the
+    2026-08-30 folder box and the CR-72 follow-up's `local` flag -- an empty
+    folder box (this scenario never touches it) still posts '', which is a
+    paste's clips going into the project's Youtube root, exactly as every
+    paste has since 2026-08-11."""
     r = spa['pasted_links_start_a_job']
     assert r['job_id'] == 21, r
     assert r['body'] == {'urls': 'https://youtu.be/JJJJJJJJJJJ \n https://youtu.be/IIIIIIIIIII',
-                         'project_slug': 's', 'quality': '1080p'}, r['body']
-    assert 'folder' not in r['body'], r['body']
+                         'project_slug': 's', 'quality': '1080p', 'folder': '',
+                         'local': False}, r['body']
     assert r['progress_hidden'] is False
     # the ledger's answer is not silent: it is why 2 links fetched 1 clip
     assert 'already in the tree' in r['toast'], r['toast']
@@ -2844,6 +2911,39 @@ def test_no_hash_and_no_active_job_attaches_nothing(spa):
 def test_a_server_without_the_active_route_still_honours_the_hash(spa):
     r = spa['a_missing_active_route_falls_back_to_the_hash']
     assert r['job_id'] == 4, r
+
+
+def test_a_paste_and_leave_is_never_mistaken_for_a_loss(spa):
+    """The owner, 2026-08-30: "I just submitted 12 youtube links to be
+    downloaded but I clicked away and came back and it seems to have eaten
+    them" -- the downloads were fine server-side, only the page came back
+    showing nothing. A bare reload (no `#job=`) has to re-ask BOTH halves of
+    "what is my downloader doing" -- the running job AND the queue behind it
+    -- and show them exactly as they would have looked had the tab stayed
+    open, so a paste-and-leave never reads as data loss."""
+    r = spa['a_paste_and_leave_still_shows_the_running_job_and_the_queue']
+    assert r['job_id'] == 9, r                     # attached to the running job
+    assert r['hash'] == 'job=9'
+    assert r['progress_hidden'] is True and r['downloads_hidden'] is False, \
+        'a downloading job shows its clip list, not the phase bar'
+    assert r['queue_hidden'] is False and r['queue_rows'] == 2, \
+        'the two jobs still waiting behind it must still be on screen'
+    # >= 1, not == 1: loadQueue() is also re-asked once the first poll sees the
+    # phase (poll()'s own "seen !== job.phase" rule), which is a second ask of
+    # the SAME fresh answer, not a stale one carried over from nowhere.
+    assert r['asked_active'] >= 1, 'the active job must be asked for fresh'
+    assert r['asked_recent'] == 1, 'the recent list must be asked for fresh too'
+
+
+def test_a_finished_paste_still_shows_in_recent_on_a_fresh_load(spa):
+    """The other half of the same report: by the time he looked, the paste had
+    already finished. No active job means nothing to attach to, but the clips
+    it landed must still be right there in Recent searches -- no click, no
+    hash, nothing remembered from a session that never existed on this tab."""
+    r = spa['a_finished_paste_still_shows_in_recent_on_a_fresh_load']
+    assert r['job_id'] is None, r        # nothing IS active -- correctly so
+    assert '1' in r['recentsum'], r['recentsum']
+    assert r['recent_rows'] == 1, r
 
 
 # ------------------------------------------------------ the collapsible panels
@@ -3521,16 +3621,19 @@ def test_the_search_posts_the_ticked_shot_types_in_source():
     assert 'shot_types' not in paste, paste
 
 
-def test_the_paste_box_has_no_folder_field_left_anywhere():
-    """Owner, 2026-08-11: a paste's destination is the project, and its clips go
-    into that project's Youtube root -- there is no folder to name, in the
-    markup, in the POST or in the stylesheet."""
+def test_the_paste_box_has_a_folder_field_again():
+    """Owner, 2026-08-30, reversing 2026-08-11: "there should be a way to
+    manually input the name of the folder/bin you want links you are
+    downloading to go into". #urlfolder is in the markup, posted with the
+    paste, styled, and remembered like the project is (blank still means the
+    Youtube root, exactly as every paste has landed since 2026-08-11)."""
     js, html, css = _js(), _html(), _css()
-    assert 'id="folder"' not in html, html[html.index('id="urls"'):][:400]
+    assert 'id="urlfolder"' in html, html[html.index('id="urls"'):][:400]
     paste = js[js.index('async function runUrls()'):js.index('async function startDownload()')]
-    assert 'folder:' not in paste, paste          # not posted
-    assert "$('#folder')" not in paste, paste     # and not read
-    assert '#folder' not in css
+    assert "folder: box ? box.value.trim() : ''" in paste, paste
+    assert "$('#urlfolder')" in paste, paste
+    assert '#urlfolder' in css
+    assert "const URL_FOLDER_KEY = 'ytdl.url_folder';" in js
 
 
 def test_the_reveal_goes_to_the_companion_loopback_with_a_relative_path():

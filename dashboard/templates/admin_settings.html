@@ -43,13 +43,32 @@
         ("rclone_remote", "RCLONE REMOTE"),
         ("nas_syncthing_id", "NAS SYNCTHING ID"),
       ] %}
-        {% set is_auto = key in auto_derived and manifest[key] %}
+        {# `auto_derived` is ONLY the keys with a LIVE derived value right now
+           (ui.page_admin_settings, 2026-08-30 follow-up) -- NOT "this key
+           could theoretically be derived once a sidecar exists", which is
+           what made this grey out forever the moment a deployment had ever
+           had any DASH_SITE_* value (CR-follow-up, the owner: "it won't let
+           me change the dashboard url"). A key here means a live source
+           answered just now; `auto_derived_reason` says which one. #}
+        {% set is_auto = key in auto_derived %}
         {% set hint = FIELD_HINTS.get(key, "") %}
-        <label{% if hint %} title="{{ hint }}"{% endif %}>{{ label }}{% if is_auto %} <span class="muted">(auto-derived)</span>{% endif %}<br>
+        {% set env_val = env_hint.get(key) %}
+        <label{% if hint %} title="{{ hint }}"{% endif %}>{{ label }}{% if is_auto %} <span class="muted">(auto-derived: {{ auto_derived_reason.get(key, "") }})</span>{% endif %}<br>
           <input type="text" name="{{ key }}" value="{{ manifest[key] }}"
                  {% if hint %}title="{{ hint }}"{% endif %}
                  {{ "readonly" if is_auto }}>
         </label>
+        {# The env fallback hint (2026-08-30 follow-up): shown whenever the
+           container's DASH_SITE_* differs from the DB row, auto-derived or
+           not, because a field the admin CAN edit is still worth telling
+           them their env carries a different value -- site_store's own rule
+           is that the DB wins and the env is never picked up automatically
+           (docs/CONFIG.md), which is silent unless something says so. #}
+        {% if env_val %}
+          <p class="muted mono-sm" style="margin:-0.5rem 0 0.6rem;">
+            env DASH_SITE_{{ key | upper }}={{ env_val }} (not applied -- the row above is what is live; edit it, or Import a site.toml, to change it)
+          </p>
+        {% endif %}
       {% endfor %}
       {# NAS KIND is a choice, not free text (dash-admin-7, 2026-08-21): a
          typed "TrueNAS" was published to every installer while this

@@ -1021,17 +1021,44 @@ def test_a_paste_lands_in_the_projects_youtube_root_with_no_subfolder(client, co
     assert job['term'] == '' and job['term_dir'] == ''
 
 
-def test_a_folder_from_an_older_client_is_accepted_and_ignored(client, con):
-    """The field outlived its input box on purpose: a browser holding the
-    previous app.js in cache still posts one, and a 400 there would be a paste
-    that mysteriously fails while the search beside it works. It no longer
-    NAMES anything, though -- there are no subfolders under Youtube/ for a
-    paste to land in any more."""
-    for folder in ('reef links', 'con', 'reef: the "third" terminal', '   '):
+def test_a_folder_box_names_the_jobs_term_dir(client, con):
+    """The owner reversed the 2026-08-11 call on 2026-08-30: "there should be a
+    way to manually input the name of the folder/bin you want links you are
+    downloading to go into". A name given is reduced through the same
+    safe_term_dirname a search topic is (YTDL-28's traversal/Windows/length
+    rules), so a Windows-reserved name and a name carrying illegal characters
+    both come back safe rather than refused -- exactly as a search folder
+    does."""
+    from ytdlweb import config
+
+    cases = {
+        'reef links': config.safe_term_dirname('reef links'),
+        'con': 'con_',
+        'reef: the "third" terminal': config.safe_term_dirname(
+            'reef: the "third" terminal'),
+    }
+    for folder, want_dir in cases.items():
         r = _urls_job(client, folder=folder)
         assert r.status_code == 200, r.text
+        assert r.json()['term_dir'] == want_dir, folder
+        assert r.json()['folder'] == f'Youtube/{want_dir}', folder
         job = db.get_job(con, r.json()['job_id'])
-        assert job['term'] == '' and job['term_dir'] == '', folder
+        # `term` stays empty even with a folder named -- a paste still has no
+        # topic, whatever bin it lands in.
+        assert job['term'] == '' and job['term_dir'] == want_dir, folder
+        db.set_phase(con, job['id'], 'cancelled')
+
+
+def test_a_blank_or_whitespace_folder_still_lands_in_the_youtube_root(client, con):
+    """Blank is today's behaviour, unchanged: the default box is empty, and an
+    editor who never touches it gets exactly what 2026-08-11 shipped."""
+    for folder in ('', '   ', None):
+        over = {} if folder is None else {'folder': folder}
+        r = _urls_job(client, **over)
+        assert r.status_code == 200, r.text
+        assert r.json()['term_dir'] == '' and r.json()['folder'] == 'Youtube'
+        job = db.get_job(con, r.json()['job_id'])
+        assert job['term'] == '' and job['term_dir'] == ''
         db.set_phase(con, job['id'], 'cancelled')
 
 

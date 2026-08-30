@@ -71,21 +71,15 @@ _MODE_SQLS = (
 )
 
 
-def _base_only(con, user):
-    """True iff the editor has at least one known machine and every one of
-    them reports mode 'base' -- the dashboard's base_only_editors predicate,
-    per person because the browser asking is a person.
+def _machine_modes(con, user):
+    """machine -> 'base' | 'editor', for every machine of this editor.
 
-    Deliberately NOT "owns any wired machine": a person with one wired and one
-    remote machine keeps the ticked list, because a job they start from the
-    remote machine is claimed by THAT machine's companion (the SPA hands the
-    job id to its local loopback), and a download into a project that machine
-    does not sync is a folder nothing manages. An account with no known
-    machines is unknown, not base-only -- same rule as the dashboard's.
-
-    An older dashboard without these tables (or the v22 mode column) lands in
-    the except arm per query and answers False, which is the pre-CR-72
-    behaviour exactly.
+    Shared by `_base_only` (per-person, EVERY machine) and `_wired` (per
+    MACHINE, CR-72 follow-up 2026-08-30). Same two sources, same precedence,
+    as ccsync_dashboard.db.machine_modes: machine_state.mode (v22) wins,
+    editor_media_project.mode is the pre-v22 fallback. An older dashboard
+    without these tables (or the v22 mode column) lands in the except arm per
+    query and returns {}, which is the pre-CR-72 behaviour exactly.
     """
     modes = {}
     for sql in _MODE_SQLS:
@@ -97,7 +91,43 @@ def _base_only(con, user):
             mode = str(mode or '').strip().lower()
             if mode:
                 modes[machine] = mode
+    return modes
+
+
+def _base_only(con, user):
+    """True iff the editor has at least one known machine and every one of
+    them reports mode 'base' -- the dashboard's base_only_editors predicate,
+    per person because the browser asking is a person.
+
+    Deliberately NOT "owns any wired machine": a person with one wired and one
+    remote machine keeps the ticked list, because a job they start from the
+    remote machine is claimed by THAT machine's companion (the SPA hands the
+    job id to its local loopback), and a download into a project that machine
+    does not sync is a folder nothing manages. An account with no known
+    machines is unknown, not base-only -- same rule as the dashboard's.
+    """
+    modes = _machine_modes(con, user)
     return bool(modes) and set(modes.values()) == {'base'}
+
+
+def _wired(con, user, machine):
+    """True iff THIS machine (by hostname) is wired to the NAS -- the per
+    MACHINE half of CR-72 (2026-08-30 follow-up, owner: "I can still only
+    select /animals as a destination on the base rig").
+
+    `_base_only` only ever widened the picker for an account whose EVERY
+    machine is wired -- exactly right for a job a REMOTE machine's companion
+    will claim (it must land in a project that machine actually syncs), and
+    exactly wrong for the person standing at the console of a mixed
+    account's wired machine, who saw the picker offer nothing new because
+    their OTHER machine is remote. Same machine_state / editor_media_project
+    precedence as `_base_only` and the dashboard's own machine_modes; an
+    unnamed or unknown machine answers False, same "unknown is not wired"
+    rule `_base_only` uses for an unknown editor."""
+    machine = str(machine or '').strip()
+    if not machine:
+        return False
+    return _machine_modes(con, user).get(machine) == 'base'
 
 
 def _dev_projects():
@@ -112,12 +142,31 @@ def _dev_projects():
     return out
 
 
-def ticked_projects(user):
+def ticked_projects(user, machine=None, local=True):
     """-> {'projects': [{'slug','label'}], 'available': bool, 'error': str|None}
 
     `available` is about the DASHBOARD DATABASE, not about the editor: false
     means this app could not consult it at all. An editor who has simply ticked
     nothing gets available=true and an empty list, and the SPA says so.
+
+    `machine` and `local` are the CR-72 follow-up (2026-08-30, owner: "I can
+    still only select /animals as a destination on the base rig"): the rule
+    that widens the picker to every active project is per MACHINE and per
+    EXECUTION PLACE, not just per person.
+
+      - `local=False` -- the download is going to run ON THE SERVER (the
+        SPA's "on this machine" toggle off, or no companion answered it): no
+        machine's companion claims the job, so no machine's sync plan is a
+        constraint. Every active project is a legitimate destination, same as
+        for a base-only editor, for anyone.
+      - `machine` names the REQUESTING machine (a hostname). When it is wired
+        (`_wired`), every active project is offered even for a MIXED account
+        -- the shape `_base_only` deliberately does not cover, because a job
+        that machine's own companion claims writes straight onto the tree it
+        already works off of, the same as a base-only editor's does.
+      - Neither: the pre-CR-72-follow-up behaviour, `_base_only` alone, so an
+        older SPA (no `machine`/`local` fields) or an unnamed machine changes
+        nothing.
     """
     if not config.DASH_DB:
         return {'projects': _dev_projects(), 'available': False,
@@ -144,7 +193,9 @@ def ticked_projects(user):
         # and an empty picker told them "you sync nothing" as if it were their
         # doing. resolve_project() goes through here too, so the server-side
         # destination check widens with the picker rather than drifting from it.
-        if _base_only(con, user):
+        # `not local` and `_wired(machine)` are the per-machine/per-place
+        # follow-up above -- either is enough on its own.
+        if (not local) or _wired(con, user, machine) or _base_only(con, user):
             rows = con.execute(_ALL_SQL).fetchall()
         else:
             rows = con.execute(_SQL, (user,)).fetchall()
@@ -159,16 +210,21 @@ def ticked_projects(user):
         con.close()
 
 
-def resolve_project(user, slug):
+def resolve_project(user, slug, machine=None, local=True):
     """-> {'slug','label'} for a slug the user has ticked, or None.
 
     Every write path re-runs this server-side. The picker in the browser is a
     convenience; this is the check. Without it an editor could post any slug
     and drop files into a project they do not sync.
+
+    `machine`/`local` widen this the SAME way they widen `ticked_projects`
+    (CR-72 follow-up, 2026-08-30) -- taken from the job payload (NewJob /
+    NewUrlJob) rather than re-derived, so the picker and this check can never
+    disagree about what a given request was allowed to see.
     """
     if not slug:
         return None
-    for p in ticked_projects(user)['projects']:
+    for p in ticked_projects(user, machine=machine, local=local)['projects']:
         if p['slug'] == slug:
             return p
     return None

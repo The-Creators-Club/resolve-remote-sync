@@ -418,8 +418,16 @@ a.brand:hover { color: var(--red-hot); }
   min-height: 28px;
   max-height: 160px;
 }
-/* There is no folder box beside it any more (owner's call, 2026-08-11): a
-   paste's destination is the project picker, exactly as a search's is. */
+/* The folder/bin box beside it (owner's call, 2026-08-30, reversing
+   2026-08-11): fixed width rather than flex -- it names a bin, not a
+   sentence, and must not fight the links textarea for room the way a second
+   flex-auto field would. */
+#urlfolder {
+  flex: 0 0 auto;
+  width: 150px;
+  font-size: 12px;
+  padding: 5px 9px;
+}
 
 /* The shot-type row, which sits ABOVE the search box (2026-08-11): they are
    what the topic is read with, so they are chosen before it is typed. Nine

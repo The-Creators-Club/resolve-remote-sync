@@ -218,3 +218,103 @@ def test_a_project_the_collector_never_walked_renders_no_figure(env):
     as_user(client, "owen")
     cell = matrix_checkbox(client.get("/admin/assignments").text, DRONE, "editor1")
     assert cell and "data-proxy-bytes" not in cell
+
+
+# --------------------------------------------------- CR-28 follow-up: a wired
+# column's stale tick (2026-08-30). Owner: "as a wired user I cannot assign
+# any project, for some reason animals is ticked but I cannot untick it.
+# They're all greyed out." dash-admin-8 made "wired" per MACHINE, but the
+# template disabled the checkbox for a wired column outright, whether or not
+# it was already ticked -- so an existing tick (from before the machine went
+# wired, or on a mixed account's wired half) could never be cleared.
+
+
+def test_wired_column_ticked_stays_enabled_and_untick_succeeds(env):
+    client, conn = env
+    now = dbmod.utcnow_iso()
+    # A mixed account (dash-admin-8's own shape): one wired desktop, one
+    # remote laptop -- this is the owner's fleet exactly.
+    dbmod.upsert_machine(conn, "editor1", "BASE-RIG", now)
+    dbmod.upsert_machine_state(conn, "editor1", "BASE-RIG", None, now, mode="base")
+    dbmod.upsert_machine(conn, "editor1", "LAPTOP", now)
+    dbmod.upsert_machine_state(conn, "editor1", "LAPTOP", None, now, mode="editor")
+    # The stale tick: written directly (as a tick from before the machine
+    # went wired, or a migration, would be), bypassing api_tick's own refusal
+    # -- exactly the shape CR-28's "Live data still owed on the NAS" note
+    # describes.
+    dbmod.add_selection(conn, "editor1", FF5, created_by="editor1", now=now,
+                        machine="BASE-RIG")
+    conn.commit()
+    as_user(client, "owen")
+
+    body = client.get("/admin/assignments").text
+    ticked = matrix_checkbox(body, FF5, "editor1")
+    assert "checked" in ticked, ticked
+    assert "disabled" not in ticked, ticked           # stays enabled -- CR-28 follow-up
+
+    # An untick on the wired column actually clears it (the per-machine
+    # DELETE route, the same one assignments.js's checkbox change fires).
+    r = client.delete(f"/api/v1/selection/editor1/{FF5}?machine=BASE-RIG")
+    assert r.status_code == 200, r.text
+    assert dbmod.selection_placements(conn, "editor1", FF5, machine="BASE-RIG") == []
+
+
+def test_wired_column_unticked_stays_disabled(env):
+    """The other half of the rule: a wired cell that is NOT already ticked
+    stays disabled -- a new tick on a wired machine is refused server-side
+    (CR-28 per machine, dash-admin-8) and the grid must not invite the click
+    that earns that refusal."""
+    client, conn = env
+    now = dbmod.utcnow_iso()
+    # A mixed account, so the refusal exercised is the PER-MACHINE one
+    # (dash-admin-8), not the older per-person base_only_editors 409 -- a
+    # base-only-account's own message is covered by CR-28's own tests.
+    dbmod.upsert_machine(conn, "editor1", "BASE-RIG", now)
+    dbmod.upsert_machine_state(conn, "editor1", "BASE-RIG", None, now, mode="base")
+    dbmod.upsert_machine(conn, "editor1", "LAPTOP", now)
+    dbmod.upsert_machine_state(conn, "editor1", "LAPTOP", None, now, mode="editor")
+    conn.commit()
+    as_user(client, "owen")
+
+    body = client.get("/admin/assignments").text
+    tags = re.findall(r"<input[^>]*>", body, re.S)
+    unticked = next(t for t in tags if "matrix-check" in t
+                    and f'data-slug="{DRONE}"' in t and 'data-editor="editor1"' in t
+                    and 'data-machine="BASE-RIG"' in t)
+    assert "checked" not in unticked, unticked
+    assert "disabled" in unticked, unticked
+
+    # ...and the server still refuses a tick on it, exactly as CR-28 always has.
+    r = client.put(f"/api/v1/selection/editor1/{DRONE}?machine=BASE-RIG")
+    assert r.status_code == 409, r.text
+    assert "wired machine" in r.json()["detail"]
+
+
+def test_a_remote_column_of_the_same_mixed_account_is_unaffected(env):
+    """The wired rule is per CELL, not per person or per row: editor1's
+    LAPTOP column must render exactly as it always has, ticked or not."""
+    client, conn = env
+    now = dbmod.utcnow_iso()
+    dbmod.upsert_machine(conn, "editor1", "BASE-RIG", now)
+    dbmod.upsert_machine_state(conn, "editor1", "BASE-RIG", None, now, mode="base")
+    dbmod.upsert_machine(conn, "editor1", "LAPTOP", now)
+    dbmod.upsert_machine_state(conn, "editor1", "LAPTOP", None, now, mode="editor")
+    dbmod.add_selection(conn, "editor1", FF5, created_by="editor1", now=now,
+                        machine="LAPTOP")
+    conn.commit()
+    as_user(client, "owen")
+
+    body = client.get("/admin/assignments").text
+    # matrix_checkbox() returns the FIRST match; editor1 now has two columns
+    # for FF5 (BASE-RIG unticked+disabled, LAPTOP ticked+enabled) -- so pull
+    # every FF5/editor1 checkbox out and check both shapes are present.
+    tags = [t for t in re.findall(r"<input[^>]*>", body, re.S)
+            if "matrix-check" in t and f'data-slug="{FF5}"' in t
+            and 'data-editor="editor1"' in t]
+    assert len(tags) == 2, tags
+    by_machine = {}
+    for t in tags:
+        m = re.search(r'data-machine="([^"]*)"', t)
+        by_machine[m.group(1)] = t
+    assert "disabled" in by_machine["BASE-RIG"] and "checked" not in by_machine["BASE-RIG"]
+    assert "disabled" not in by_machine["LAPTOP"] and "checked" in by_machine["LAPTOP"]

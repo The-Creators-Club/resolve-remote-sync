@@ -317,6 +317,12 @@ DEFAULTS: dict[str, Any] = {
     # green. false leaves the engine alone; lane C still reports the error.
     # See sync/syncthing_supervisor.py.
     "supervise_syncthing": True,
+    # Relaunch the companion after a death nobody asked for -- a native abort
+    # (CR-93's Tcl_Panic), an access violation -- by way of a second copy of
+    # the exe that waits on this one's process handle (supervisor.py). A Quit,
+    # a Stop-Process, a self-upgrade and a crash-looping build all read as
+    # deliberate and are never fought. Windows frozen builds only.
+    "supervise": True,
     # The server tree's SMB path for the tray's "Grade from server
     # originals" P: swap (drive_swap.py). Empty = take it from the cached
     # site manifest's smb_unc (_apply_site_manifest), else derive it from
@@ -1018,6 +1024,13 @@ syncthing_folder_ids = []
 # your own hands. Lane C reports the error either way; nothing is restarted
 # while syncing is halted or paused. See docs/SYNC_SAFETY.md.
 # supervise_syncthing = true
+
+# Bring the companion back after a crash (CR-93, 2026-08-30): a second copy of
+# the exe waits on this one and relaunches it when it dies WITHOUT having
+# started a shutdown -- at most three times an hour, never after a Quit, a
+# Stop-Process or a self-upgrade. Commented out because the shipped value IS
+# the default; set it to false to take that into your own hands.
+# supervise = true
 
 # Path to the rclone binary. Defaults to "rclone" (must be on PATH).
 rclone_path = "rclone"

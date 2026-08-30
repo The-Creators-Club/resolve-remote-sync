@@ -196,6 +196,15 @@ syncthing_folder_ids = []
 # syncing is halted or paused, and lane C reports the error either way.
 # supervise_syncthing = true
 
+# Bring the companion itself back after a crash (CR-93, 2026-08-30): right
+# after it starts, the companion spawns a second copy of its exe that waits on
+# its process handle and relaunches it when it dies WITHOUT having started a
+# shutdown -- a native abort, an access violation. Never after a Quit, a
+# Stop-Process or a self-upgrade, and at most three times an hour, so a build
+# that cannot stay up is left to the logon autostart and the admin. Windows
+# frozen builds only. Commented out because true IS the shipped value.
+# supervise = true
+
 # Path to the rclone binary. Defaults to "rclone" (must be on PATH). The
 # bootstrap installer is responsible for getting rclone onto PATH, not this
 # app; if missing, the sync lanes report a clear error status.

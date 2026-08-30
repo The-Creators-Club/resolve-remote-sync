@@ -211,6 +211,9 @@ def test_default_toml_text_documents_every_default_key():
         # `supervise_syncthing = true` into every first-run file would make
         # the day we need to change that default a fleet-wide edit.
         "supervise_syncthing",
+        # The companion's own relaunch-on-abort supervisor (CR-93, 2026-08-30):
+        # the same kill switch, the same reasoning.
+        "supervise",
         # The project-library walk (docs/LIBRARY_WALK_PLAN.md, 2026-08-26) --
         # same class: the walk falls back to the API on its own, so pinning
         # `library_walk = true` in every first-run file only makes a later
@@ -309,6 +312,8 @@ EXAMPLE_COMMENTED_OUT = {
     "broll_ingest_staging_retention_days",
     # The Syncthing supervisor's kill switch, same class (SYNC-17).
     "supervise_syncthing",
+    # The companion's own relaunch-on-abort supervisor (CR-93), same class.
+    "supervise",
     # The project-library walk (docs/LIBRARY_WALK_PLAN.md, 2026-08-26).
     # library_walk is ON and self-healing -- every failure falls back to the
     # API walk by itself -- so an explicit `library_walk = true` copied into

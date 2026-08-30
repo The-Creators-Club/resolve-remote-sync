@@ -458,3 +458,96 @@ def test_an_unclean_exit_with_no_native_dump_says_where_else_to_look(tmp_path):
     report = json.loads(sorted(crash_report.crash_dir(cfg).glob("*.json"))[0]
                         .read_text(encoding="utf-8"))
     assert "0x80000003" in report["exception"]["traceback"]
+
+
+# ---------------------------------------------------------------------------
+# the supervisor's half (CR-93's safety net, 2026-08-30)
+# ---------------------------------------------------------------------------
+
+
+def test_mark_clean_exit_leaves_another_pids_marker_alone(tmp_path):
+    """A self-upgrade's newcomer has written its own marker by the time the
+    old build's shutdown() runs; deleting it would tell the newcomer's
+    supervisor it had quit on purpose, and hide its death from the next
+    start."""
+    cfg = _cfg(tmp_path)
+    crash_report.install_native(cfg)
+    path = crash_report.run_marker_path(cfg)
+    path.write_text(json.dumps({"pid": os.getpid() + 1, "version": "x"}), encoding="utf-8")
+    crash_report.mark_clean_exit(cfg)
+    assert path.exists(), "another process's marker was removed"
+    path.write_text(json.dumps({"pid": os.getpid(), "version": "x"}), encoding="utf-8")
+    crash_report.mark_clean_exit(cfg)
+    assert not path.exists()
+
+
+def test_a_living_predecessors_marker_is_a_handoff_not_a_crash(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    crash_report.run_marker_path(cfg).parent.mkdir(parents=True, exist_ok=True)
+    crash_report.run_marker_path(cfg).write_text(
+        json.dumps({"pid": os.getpid() + 1, "version": "x"}), encoding="utf-8")
+    monkeypatch.setattr(crash_report, "_pid_is_alive", lambda pid: True)
+    crash_report.install_native(cfg)
+    assert list((tmp_path / "crashes").glob("*.json")) == []
+    marker = json.loads(crash_report.run_marker_path(cfg).read_text(encoding="utf-8"))
+    assert marker["pid"] == os.getpid()
+
+
+def test_a_relaunch_note_reaches_the_report_and_the_log(tmp_path, monkeypatch, caplog):
+    """The supervisor brought the companion back: the UncleanExit report says
+    so, the log says so, and the note is consumed so it is said once."""
+    import logging
+
+    from ccsync_companion import supervisor
+
+    cfg = _cfg(tmp_path)
+    crash = crash_report.crash_dir(cfg)
+    crash.mkdir(parents=True, exist_ok=True)
+    crash_report.run_marker_path(cfg).write_text(
+        json.dumps({"pid": 27028, "version": "0.9.61", "started": "2026-08-30T13:50:57+00:00"}),
+        encoding="utf-8")
+    supervisor.write_relaunch_note(crash, {
+        "when": "2026-08-30T22:40:49", "previous_pid": 27028, "exit_code": 0x80000003,
+        "reason": "pid 27028 died", "attempt": 1, "supervisor_pid": 5})
+    monkeypatch.setattr(crash_report, "_pid_is_alive", lambda pid: False)
+    with caplog.at_level(logging.WARNING, logger="ccsync.crash"):
+        crash_report.install_native(cfg)
+    files = list(crash.glob("*.json"))
+    assert len(files) == 1
+    report = json.loads(files[0].read_text(encoding="utf-8"))
+    assert report["exception"]["type"] == "UncleanExit"
+    assert "the supervisor relaunched it" in report["exception"]["message"]
+    assert report["relaunch"]["previous_pid"] == 27028
+    assert not (crash / supervisor.RELAUNCH_NOTE_FILENAME).exists()
+    assert any("RELAUNCHED by its supervisor" in r.getMessage() for r in caplog.records)
+
+
+def test_start_supervisor_hands_the_spawn_this_pid_and_the_crash_dir(tmp_path, monkeypatch):
+    calls = []
+
+    def _spawn(argv, cwd, env):
+        calls.append(argv)
+        return type("Child", (), {"pid": 99})()
+
+    cfg = _cfg(tmp_path)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.delenv("CCSYNC_NO_SUPERVISOR", raising=False)
+    if sys.platform != "win32":
+        pytest.skip("the supervisor is a Windows shape")
+    assert crash_report.start_supervisor(cfg, spawn=_spawn) is True
+    assert calls[0][1:3] == ["--supervise", str(os.getpid())]
+    assert calls[0][calls[0].index("--crash-dir") + 1] == str(crash_report.crash_dir(cfg))
+
+
+def test_start_supervisor_respects_the_config_switch(tmp_path, caplog):
+    import logging
+
+    cfg = dict(_cfg(tmp_path), supervise=False)
+    with caplog.at_level(logging.INFO, logger="ccsync.crash"):
+        assert crash_report.start_supervisor(cfg, spawn=lambda *a: None) is False
+    assert any("supervise = false" in r.getMessage() for r in caplog.records)
+
+
+def test_start_supervisor_is_quiet_on_a_source_run(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    assert crash_report.start_supervisor(_cfg(tmp_path), spawn=lambda *a: None) is False

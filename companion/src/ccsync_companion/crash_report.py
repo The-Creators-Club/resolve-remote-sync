@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import config as config_mod
+from . import supervisor
 
 log = logging.getLogger("ccsync.crash")
 
@@ -499,11 +500,39 @@ def mark_clean_exit(cfg: Optional[dict[str, Any]] = None) -> None:
     """"This process MEANT to stop." Called at the top of shutdown(), not at
     the bottom: everything after that decision -- including app.py's hard-exit
     backstop for a wedged thread -- is a deliberate exit, and reporting it as
-    a crash on the next start would bury the ones that are. Never raises."""
+    a crash on the next start would bury the ones that are. Never raises.
+
+    Only OUR marker: a self-upgrade starts the new build before the old one
+    has finished shutting down, and the newcomer's marker (its own pid) is by
+    then the one on disk. Deleting it here would leave the newcomer's death
+    unreported and, since 2026-08-30, tell its supervisor it had quit on
+    purpose."""
+    try:
+        marker = _read_run_marker(cfg)
+        if marker is not None and int(marker.get("pid", -1)) not in (-1, os.getpid()):
+            log.debug("run marker belongs to pid %s, not us -- leaving it", marker.get("pid"))
+            return
+    except Exception:  # noqa: BLE001 - unreadable: ours to remove
+        pass
     try:
         run_marker_path(cfg).unlink(missing_ok=True)
     except Exception:  # noqa: BLE001
         pass
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """Liveness of another process, fail-safe: "cannot tell" is alive."""
+    if pid <= 0:
+        return False
+    try:
+        if sys.platform == "win32":
+            return supervisor.pid_is_alive_win32(pid)
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def _native_tail(cfg: Optional[dict[str, Any]] = None) -> list[str]:
@@ -526,7 +555,8 @@ def _log_tail(cfg: Optional[dict[str, Any]] = None) -> list[str]:
 
 
 def _report_unclean_exit(marker: dict[str, Any],
-                         cfg: Optional[dict[str, Any]] = None) -> Optional[Path]:
+                         cfg: Optional[dict[str, Any]] = None,
+                         relaunch: Optional[dict[str, Any]] = None) -> Optional[Path]:
     """One crash file for a previous run that never reached shutdown()."""
     native = _native_tail(cfg)
     detail = (
@@ -534,6 +564,12 @@ def _report_unclean_exit(marker: dict[str, Any],
         f"{marker.get('version', '?')}, started {marker.get('started', '?')}) "
         "stopped without ever starting a shutdown"
     )
+    if relaunch:
+        detail += (
+            f" -- the supervisor relaunched it at {relaunch.get('when', '?')} "
+            f"(exit code {relaunch.get('exit_code', '?')}, relaunch "
+            f"{relaunch.get('attempt', '?')} of {supervisor.MAX_RELAUNCHES} this hour)"
+        )
     report = {
         "schema": 1,
         "when": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -563,6 +599,8 @@ def _report_unclean_exit(marker: dict[str, Any],
         "previous_run": {k: marker.get(k) for k in ("pid", "version", "started", "frozen")},
         "log_tail": _log_tail(cfg),
     }
+    if relaunch:
+        report["relaunch"] = relaunch
     path = write_report(report, cfg)
     log.error("the previous companion did not shut down cleanly: %s%s", detail,
               f" -- report written to {path}" if path else "")
@@ -579,8 +617,27 @@ def install_native(cfg: Optional[dict[str, Any]] = None) -> None:
     cfg = cfg or {}
     try:
         marker = _read_run_marker(cfg)
+        relaunch = supervisor.read_relaunch_note(crash_dir(cfg))
+        previous_pid = int(marker.get("pid", -1)) if marker is not None else -1
+        if marker is not None and previous_pid != os.getpid() and _pid_is_alive(previous_pid):
+            # A self-upgrade's predecessor, still tearing its lanes down while
+            # we start (upgrade._default_spawn's hand-off). Not a death.
+            log.debug("run marker names pid %s, which is still running -- a "
+                      "hand-off, not a crash", marker.get("pid"))
+            marker = None
         if marker is not None:
-            _report_unclean_exit(marker, cfg)
+            _report_unclean_exit(marker, cfg, relaunch)
+        if relaunch:
+            log.warning(
+                "this companion was RELAUNCHED by its supervisor: pid %s died with "
+                "exit code %s at %s and never started a shutdown (%s). It was down "
+                "for about %.0f s. Relaunch %s of %s this hour; the crash report "
+                "above carries the native dump if faulthandler caught it.",
+                relaunch.get("previous_pid"), relaunch.get("exit_code"),
+                relaunch.get("when"), relaunch.get("reason"),
+                supervisor.RELAUNCH_DELAY_SECONDS, relaunch.get("attempt"),
+                supervisor.MAX_RELAUNCHES,
+            )
     except Exception:  # noqa: BLE001
         log.debug("could not check the previous run's marker", exc_info=True)
     try:
@@ -605,6 +662,35 @@ def install_native(cfg: Optional[dict[str, Any]] = None) -> None:
     except Exception:  # noqa: BLE001
         log.debug("faulthandler could not be enabled", exc_info=True)
     write_run_marker(cfg)
+
+
+def start_supervisor(cfg: Optional[dict[str, Any]] = None,
+                     spawn: Optional[Any] = None) -> bool:
+    """Spawn the relaunch-on-abort supervisor for THIS process (CR-93's
+    safety net, supervisor.py). Call right after install_native(): the run
+    marker it reads must exist and name us. Never raises; returns whether
+    one was started -- False on a source run, off-Windows, `supervise =
+    false`, or CCSYNC_NO_SUPERVISOR in the environment."""
+    cfg = cfg or {}
+    if not cfg.get("supervise", True):
+        log.info("supervisor: disabled by config (supervise = false) -- a crash "
+                 "leaves this machine without a companion until the next logon")
+        return False
+    try:
+        state_dir = config_mod.resolved_log_path(cfg).parent / "state"
+        child = supervisor.spawn_for(
+            os.getpid(), Path(sys.executable), crash_dir(cfg), state_dir, spawn=spawn)
+    except Exception:  # noqa: BLE001
+        log.warning("supervisor: could not start one -- a crash leaves this "
+                    "machine without a companion until the next logon", exc_info=True)
+        return False
+    if child is None:
+        log.debug("supervisor: not started (source run, not Windows, or %s set)",
+                  supervisor.DISABLE_ENV)
+        return False
+    log.info("supervisor: pid %s is watching this companion and will relaunch it "
+             "after a crash (never after a Quit or an upgrade)", getattr(child, "pid", "?"))
+    return True
 
 
 def _reset_for_tests() -> None:

@@ -36,6 +36,7 @@ from . import jobs_runner as jobs_runner_mod
 from . import timeline_cards_role as cards_role_mod
 from . import config as config_mod
 from . import crash_report
+from . import supervisor
 from . import eula as eula_mod
 from . import file_moves as file_moves_mod
 from . import machine as machine_mod
@@ -9067,6 +9068,12 @@ def run() -> None:
     if music_worker.WORKER_FLAG in sys.argv[1:]:
         sys.exit(music_worker.main(sys.argv[1:]))
 
+    # The relaunch-on-abort supervisor (CR-93's safety net) is this exe
+    # re-entered too. launcher.py and __main__.py branch on the flag before
+    # importing this module; this is the backstop for a caller that did not.
+    if supervisor.FLAG in sys.argv[1:]:
+        sys.exit(supervisor.main(sys.argv[1:]))
+
     # Before the first window of any kind: the taskbar decides which app a
     # window belongs to when its button is created, and without this it is
     # "the exe" and wears the exe's icon rather than the branded window mark
@@ -9116,6 +9123,10 @@ def run() -> None:
     # here on, a death that never reaches shutdown() is reported on the next
     # start, and a native abort leaves its thread dump in <crashes>/native.log.
     crash_report.install_native(cfg)
+    # AFTER install_native: the supervisor's whole verdict rests on the run
+    # marker that call just wrote for this pid. A death that leaves it behind
+    # is relaunched; a shutdown() that removes it is not (CR-93, 2026-08-30).
+    crash_report.start_supervisor(cfg)
     try:
         app = CompanionApp(cfg)
         app.run()

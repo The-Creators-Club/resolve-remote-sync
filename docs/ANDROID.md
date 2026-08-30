@@ -110,7 +110,7 @@ The first real APK (`ccsync-0.7.24.apk`, origin
 portable toolchain, no admin rights and no PATH changes:
 
 * `E:\Projects\_tools\jdk17` (Temurin 17 zip) and
-  `E:\Projects\_toolsndroid-sdk` (command-line tools + `platforms;android-34`
+  `E:\Projects\_tools\android-sdk` (command-line tools + `platforms;android-34`
   + `build-tools;34.0.0`); `JAVA_HOME` and `ANDROID_HOME` point at them for
   the build's process only.
 * Bubblewrap pins `build-tools;29.0.2` and installs it ITSELF through
@@ -125,7 +125,7 @@ portable toolchain, no admin rights and no PATH changes:
   gets "'gradlew.bat' is not recognized"; clear that variable for the build
   PROCESS only (`[Environment]::SetEnvironmentVariable('NoDefaultCurrentDirectoryInExePath', $null, 'Process')`)
   and run the build step from PowerShell rather than Git Bash.
-* The release keystore is `~\.ccsync-releasendroid.keystore` (alias
+* The release keystore is `~\.ccsync-release\android.keystore` (alias
   `ccsync`); its password is DPAPI-protected beside it in
   `android.keystore.pw.dpapi` and is read into the four `CCSYNC_ANDROID_*`
   variables by the operator's PowerShell session, never written anywhere

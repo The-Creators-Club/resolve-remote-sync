@@ -12,29 +12,31 @@
 
   <form class="inline-form" style="margin-bottom:0.6rem"
         hx-get="/partials/admin/audit" hx-target="#admin-audit" hx-swap="outerHTML">
-    <input type="search" name="q" value="{{ audit_query }}" style="min-width:18rem"
+    <input type="search" name="q" value="{{ audit_query }}" class="audit-filter" style="min-width:18rem"
            placeholder="filter by project, editor, computer, version or action"
            aria-label="filter the timeline">
-    <button class="btn" type="submit">[ FILTER ]</button>
+    <button class="btn tap" type="submit">[ FILTER ]</button>
     {% if audit_query %}
       {# A LINK, not a second `q` field: htmx would send both the input's
          value and the button's, and which one wins is the framework's
          business, not this page's. #}
-      <a class="btn" href="/admin/audit">[ CLEAR ]</a>
+      <a class="btn tap" href="/admin/audit">[ CLEAR ]</a>
     {% endif %}
   </form>
 
   {% if audit_rows %}
-    <table class="editors">
+    {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): a row is one recorded change,
+       and DETAIL is a JSON blob no phone column can hold. #}
+    <table class="editors stack">
       <thead><tr><th>WHEN</th><th>WHO</th><th>ACTION</th><th>SUBJECT</th><th>DETAIL</th></tr></thead>
       <tbody>
       {% for row in audit_rows %}
         <tr class="editor-row">
-          <td class="mono-sm muted" title="{{ row.at }}">{{ row.at | ago }}</td>
-          <td class="who">{{ row.actor }}</td>
-          <td class="mono-sm">{{ row.action }}</td>
-          <td class="mono-sm">{{ row.subject }}</td>
-          <td class="mono-sm muted">{{ row.detail_json }}</td>
+          <td class="mono-sm muted" data-label="WHEN" title="{{ row.at }}">{{ row.at | ago }}</td>
+          <td class="who" data-label="WHO">{{ row.actor }}</td>
+          <td class="mono-sm" data-label="ACTION">{{ row.action }}</td>
+          <td class="mono-sm" data-label="SUBJECT">{{ row.subject }}</td>
+          <td class="mono-sm muted audit-detail" data-label="DETAIL">{{ row.detail_json }}</td>
         </tr>
       {% endfor %}
       </tbody>

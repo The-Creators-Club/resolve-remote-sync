@@ -7,7 +7,10 @@
    editor's paths, their Resolve project and their tree. #}
 <div class="side-head" style="margin-top:2rem">[ WHAT THESE COMPUTERS SAID ]
   <span class="muted">diagnostics each companion uploaded. Newest first.</span></div>
-<div class="rule">{{ "─" * 100 }}</div>
+{# A .rule element, not 100 box-drawing characters: the text rule was
+   100 glyphs wide whatever the viewport, so a phone scrolled sideways
+   to see nothing (MOBILE_PLAN.md §3.2, 2026-08-30). #}
+<div class="rule"></div>
 {% if diagnostics.bundles %}
   {% for b in diagnostics.bundles %}
   <details class="diag-bundle"{% if loop.first %} open{% endif %}>

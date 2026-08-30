@@ -11,15 +11,16 @@
   {% if error %}<div class="banner">▲ {{ error }}</div>{% endif %}
 
   {% if sessions %}
-    <table class="editors">
+    {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): one row is one browser. #}
+    <table class="editors stack">
       <thead><tr><th>USERNAME</th><th>SIGNED IN</th><th>LAST SEEN</th><th>FROM</th><th></th></tr></thead>
       <tbody>
       {% for s in sessions %}
         <tr class="editor-row">
-          <td class="who">{{ s.username }}{{ " (you)" if s.username == session_user }}</td>
-          <td class="mono-sm muted">{{ s.created_at | ago }}</td>
-          <td class="mono-sm muted">{{ s.last_seen | ago }}</td>
-          <td class="mono-sm muted">{{ s.client }}</td>
+          <td class="who" data-label="USERNAME">{{ s.username }}{{ " (you)" if s.username == session_user }}</td>
+          <td class="mono-sm muted" data-label="SIGNED IN">{{ s.created_at | ago }}</td>
+          <td class="mono-sm muted" data-label="LAST SEEN">{{ s.last_seen | ago }}</td>
+          <td class="mono-sm muted" data-label="FROM">{{ s.client }}</td>
           <td>
             {# C-9 / UX-22 (UX.md, 2026-08-28): the row marked (you) signs the
                admin out of the machine they are fixing things from, and the
@@ -32,7 +33,12 @@
                   hx-confirm="Sign {{ s.username }} out of every browser? They will need to log in again. Their computer's own sync is not affected."
                   {% endif %}>
               <input type="hidden" name="username" value="{{ s.username }}">
-              <button class="btn" type="submit">[ {{ "SIGN ME OUT EVERYWHERE" if s.username == session_user else "REVOKE ALL" }} ]</button>
+              {# .tap: revoking a session is one of the two admin controls
+                 MOBILE_PLAN.md §4 M3 names for a phone. The confirm above is
+                 C-9's copy, pinned byte-for-byte by test_sessions.py and by
+                 topbar.html's plain-form twin, so it stays as written and is
+                 the one confirm over 90 characters here (2026-08-30). #}
+              <button class="btn tap" type="submit">[ {{ "SIGN ME OUT EVERYWHERE" if s.username == session_user else "REVOKE ALL" }} ]</button>
             </form>
           </td>
         </tr>

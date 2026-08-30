@@ -27,15 +27,17 @@
       {{ alerts_kinds | length }} checks ran and found nothing.
     </p>
   {% else %}
-    <table class="editors" style="margin-top:0.6rem">
+    {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): a row is one open finding,
+       and WHAT TO DO is a sentence, not a column. #}
+    <table class="editors stack" style="margin-top:0.6rem">
       <thead><tr><th>SEVERITY</th><th>WHAT</th><th>WHERE</th><th>WHAT TO DO</th></tr></thead>
       <tbody>
       {% for f in alerts_open %}
         <tr class="editor-row">
-          <td><span class="chip {{ 'red' if f.severity == 'error' else 'amber' }}">[ {{ f.severity | upper }} ]</span></td>
-          <td>{{ f.title }}<div class="muted">{{ f.diagnosis }}</div></td>
-          <td class="mono-sm">{{ f.subject }}{% if f.detail %}<div class="muted mono-sm">{{ f.detail }}</div>{% endif %}</td>
-          <td class="muted">{{ f.fix }}</td>
+          <td data-label="SEVERITY"><span class="chip {{ 'red' if f.severity == 'error' else 'amber' }}">[ {{ f.severity | upper }} ]</span></td>
+          <td data-label="WHAT">{{ f.title }}<div class="muted">{{ f.diagnosis }}</div></td>
+          <td class="mono-sm" data-label="WHERE">{{ f.subject }}{% if f.detail %}<div class="muted mono-sm">{{ f.detail }}</div>{% endif %}</td>
+          <td class="muted" data-label="WHAT TO DO">{{ f.fix }}</td>
         </tr>
       {% endfor %}
       </tbody>
@@ -81,7 +83,7 @@
     <label title="https only. The body is {subject, text} as JSON.">WEBHOOK URL<br>
       <input type="text" name="alerts_webhook_url" value="{{ alerts_settings.alerts_webhook_url }}" placeholder="https://"></label>
 
-    <div style="margin-top:0.6rem"><button class="btn" type="submit">[ SAVE ]</button></div>
+    <div style="margin-top:0.6rem"><button class="btn tap" type="submit">[ SAVE ]</button></div>
   </form>
 
   {# The password has its own form because it has its own store: a file under
@@ -91,8 +93,8 @@
     <label>SMTP PASSWORD<br>
       <input type="password" name="password" value="" autocomplete="new-password"
              placeholder="{{ 'stored: ' ~ alerts_settings.password_mask if alerts_settings.password_set else 'not set' }}"></label>
-    <button class="btn" type="submit">[ SET PASSWORD ]</button>
-    <button class="btn" type="submit" name="clear" value="1">[ CLEAR ]</button>
+    <button class="btn tap" type="submit">[ SET PASSWORD ]</button>
+    <button class="btn tap" type="submit" name="clear" value="1">[ CLEAR ]</button>
     {% if alerts_settings.password_source == "env" %}
       <div class="muted">This password comes from the deployment's own environment, so
         it cannot be changed here.</div>
@@ -102,25 +104,26 @@
   <div style="margin-top:1rem">
     <form class="inline-form" hx-post="/partials/admin/alerts/test"
           hx-target="#admin-alerts" hx-swap="outerHTML">
-      <button class="btn" type="submit">[ SEND A TEST ]</button>
+      <button class="btn tap" type="submit">[ SEND A TEST ]</button>
     </form>
-    <a class="btn" href="/admin/alerts/preview" target="_blank" rel="noopener">[ PREVIEW THIS WEEK'S REPORT ]</a>
+    <a class="btn tap" href="/admin/alerts/preview" target="_blank" rel="noopener">[ PREVIEW THIS WEEK'S REPORT ]</a>
   </div>
 
   <div class="side-head" style="margin-top:1.2rem">[ WHAT WAS SENT ]
     <span class="muted">Newest first. A failed send is kept: a channel that has
       been refusing since Tuesday is worse than no channel, because you believe
       you have one.</span></div>
-  <table class="editors" style="margin-top:0.6rem">
+  {# .stack: a row is one send (MOBILE_PLAN.md §3.2, 2026-08-30). #}
+  <table class="editors stack" style="margin-top:0.6rem">
     <thead><tr><th>WHEN</th><th>KIND</th><th>SUBJECT</th><th>TO</th><th>RESULT</th></tr></thead>
     <tbody>
     {% for row in alerts_log %}
       <tr class="editor-row">
-        <td class="mono-sm muted">{{ row.at }}</td>
-        <td class="mono-sm">{{ row.kind }}</td>
-        <td>{{ row.subject }}</td>
-        <td class="mono-sm muted">{{ row.sent_to or "-" }}</td>
-        <td>{% if row.ok %}<span class="chip lane green">sent</span>{% else %}<span class="chip red">[ {{ row.detail or "failed" }} ]</span>{% endif %}</td>
+        <td class="mono-sm muted" data-label="WHEN">{{ row.at }}</td>
+        <td class="mono-sm" data-label="KIND">{{ row.kind }}</td>
+        <td data-label="SUBJECT">{{ row.subject }}</td>
+        <td class="mono-sm muted" data-label="TO">{{ row.sent_to or "-" }}</td>
+        <td data-label="RESULT">{% if row.ok %}<span class="chip lane green">sent</span>{% else %}<span class="chip red">[ {{ row.detail or "failed" }} ]</span>{% endif %}</td>
       </tr>
     {% else %}
       <tr><td colspan="5" class="muted">Nothing has been sent yet.</td></tr>
@@ -130,7 +133,9 @@
 
   <div class="side-head" style="margin-top:1.2rem">[ WHAT THIS SERVER CHECKS ]
     <span class="muted">So that silence is provably checked, not unchecked.</span></div>
-  <ul class="muted" style="margin-top:0.4rem; columns:2">
+  {# Two columns of 11px text is one column of five characters on a phone:
+     the count is in mobile.css's admin section (MOBILE_PLAN.md, 2026-08-30). #}
+  <ul class="muted alerts-checks" style="margin-top:0.4rem; columns:2">
     {% for k in alerts_kinds %}<li>{{ k.what }}</li>{% endfor %}
   </ul>
 </div>

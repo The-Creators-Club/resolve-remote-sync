@@ -6,12 +6,12 @@
    _packages_and_feed context builder. #}
 {% block title %}CC SYNC: PACKAGES{% endblock %}
 {% block layout %}
-  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s" hx-swap="innerHTML">
+  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
   </aside>
   <main class="main">
     {% include "partials/settings_nav.html" %}
-    <div hx-get="/partials/admin/packages" hx-trigger="every 30s" hx-swap="innerHTML">
+    <div hx-get="/partials/admin/packages" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
       {% include "partials/admin_packages.html" %}
     </div>
     {# The dashboard's OWN code (ZERO_TOUCH_PLAN.md WP K). Loaded on its own

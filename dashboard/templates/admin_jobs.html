@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}CC SYNC: JOBS{% endblock %}
 {% block layout %}
-  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s" hx-swap="innerHTML">
+  <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
   </aside>
   <main class="main">
@@ -18,7 +18,7 @@
     {# Polled, unlike the alerts page: nothing here is typed into, and the
        interesting states (a job claimed, a percentage climbing, a machine
        coming back from a cooldown) all change on their own. #}
-    <div hx-get="/partials/admin/jobs" hx-trigger="every 15s" hx-swap="innerHTML">
+    <div hx-get="/partials/admin/jobs" hx-trigger="every 15s [document.visibilityState === 'visible']" hx-swap="innerHTML">
       {% include "partials/admin_jobs.html" %}
     </div>
   </main>

@@ -12,6 +12,10 @@ is running *before* you spend an afternoon on a fix.
 .\tools\check_deploy_drift.ps1
 ```
 
+**And if you are wondering WHICH publish route applies** — the interactive
+ship below, or the CI + vendor-feed path that needs no dashboard password —
+[RELEASE_PATHWAYS.md](RELEASE_PATHWAYS.md) routes you in one screen.
+
 **And if something is already broken:** [GOTCHAS.md](GOTCHAS.md) collects the
 failures that have actually happened here, symptom first. Several of them
 produce an error naming a line that is perfectly correct (a CRLF in a shell

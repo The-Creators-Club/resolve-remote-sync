@@ -107,6 +107,18 @@ ytdl = [
 # (decision 7.6: the three Claude features go through `ai_providers`).
 cards = [
     "a2wsgi>=1.10",
+    # The project-library route (2026-08-31): reads Resolve's PostgreSQL
+    # straight and decodes its transcription blobs; without them the route
+    # dies with a silent ModuleNotFoundError and the page can only show
+    # what the agent pushes. NOTE this reverses the earlier "psycopg2 is
+    # deliberately not here" -- the library route went live on this site.
+    "psycopg2-binary>=2.9",
+    "zstandard>=0.21",
+    # The lane's search: Simplified/Traditional folding + pinyin matching.
+    # Both degrade in SILENCE when absent (MulticamPipeline requirements.txt
+    # tells the story).
+    "zhconv>=1.4.3",
+    "pypinyin>=0.53",
 ]
 
 # The YouTube "unblock" plugin -- SEPARATE from `ytdl` above, and deliberately

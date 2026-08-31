@@ -139,12 +139,12 @@ PyJWT>=2.8
 # straight from PostgreSQL and decodes its transcription blobs -- without
 # these two the library route dies with a silent ModuleNotFoundError and
 # the page can only show what the agent pushes (2026-08-31).
-psycopg2-binary
-zstandard
+psycopg2-binary>=2.9
+zstandard>=0.21
 # ...round two (same day): the rest of the cards engine's needs -- the
 # lane's waveform peaks and the transcript search's Simplified/Traditional
 # folding and pinyin matching. All three degrade in SILENCE when absent
 # (MulticamPipeline requirements.txt tells the story, psycopg2 above sprang
 # the same trap an hour earlier).
-zhconv
-pypinyin
+zhconv>=1.4.3
+pypinyin>=0.53

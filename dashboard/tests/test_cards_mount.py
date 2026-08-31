@@ -157,10 +157,11 @@ FAKE_ENGINE = '''
 
 class ProjectAgentEngine:
     def __init__(self, path, root, token, db_host=None, db_name=None,
-                 readonly=False, write_allow=None, backup_dir=None):
+                 readonly=False, write_allow=None, backup_dir=None,
+                 data_dir=None):
         self.built = dict(path=path, root=root, token=token, db_host=db_host,
                           db_name=db_name, write_allow=list(write_allow or ()),
-                          backup_dir=backup_dir)
+                          backup_dir=backup_dir, data_dir=data_dir)
         self.root = root
         self.agent_name = None
         self.access_key = "a key that must be cleared"

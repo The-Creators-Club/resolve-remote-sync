@@ -45,14 +45,28 @@ files, installer = **4**).
    gh workflow run release-macos.yml  --ref main      # ~7 min
    ```
 3. **Wait for green.** `gh run watch <id> --exit-status`.
-4. **Publish**: `python tools/publish_latest.py` (add `--dry-run` first if
-   unsure). It downloads the newest green artifacts, verifies manifests
-   (refusing `git_dirty` / `tests_run: false`), signs each record with the
-   release key, and uploads channel + artefacts to
+4. **Publish**: `python tools/publish_latest.py --make-current` (add
+   `--dry-run` first if unsure). It downloads the newest green artifacts,
+   verifies manifests (refusing `git_dirty` / `tests_run: false`), signs
+   each record with the release key, and uploads channel + artefacts to
    `The-Creators-Club/ccsync-releases` with your `gh` login.
+   **`--make-current` on the FIRST publish, not later** (learned
+   2026-08-31): without it the records land STAGED, and a dashboard on
+   `policy = "current"` offers only what the channel's signed `current`
+   pointer names — staged records are simply not offered while a pointer
+   exists. And the flag cannot be added after the fact through
+   `publish_latest --force`, because a newer green run has usually
+   rebuilt the same version with different bytes, which the feed rightly
+   refuses; the recovery is a SAME-BYTES republish per record (download
+   each record's original run artifact, `publish_feed.py --manifest …
+   --make-current`), one at a time — sequential, the channel is
+   read-modify-upload.
 5. **The dashboard does the rest.** This site's `site.toml` has `[releases]
    policy = "current"`: the feed poller picks the release up and publishes +
    makes it current with no click. Editors' companions then self-upgrade.
+   The poll interval defaults to DAILY (`release_feed_interval`); a
+   `docker restart` of the dashboard container triggers a check 10 s
+   after boot when you need it now.
 6. **Verify**: `.\tools\check_deploy_drift.ps1`, or the dashboard's
    `[ PUBLISHED PACKAGES ]` box.
 

@@ -122,7 +122,7 @@ from ccsync_companion import site as site_mod
 # this ONE computer reaches the footage. The stored values ("editor"/"base")
 # and every branch keyed on them are unchanged. Published as 1.0.34 or
 # earlier -- 1.0.35 was bumped but never built, so this copy rides it.
-INSTALLER_VERSION = "1.0.37"
+INSTALLER_VERSION = "1.0.38"
 
 # NO DEFAULT since 2026-08-17 (WP0, docs/SYNOLOGY_PORT_PLAN.md). These used
 # to be one deployment's tailnet and LAN addresses compiled into every

@@ -598,8 +598,30 @@ def _open_log(log_path) -> None:
         log.exception("failed to open %s", log_path)
 
 
+def _site_dashboard_url() -> str:
+    """The dashboard URL the SITE publishes (GET /api/v1/site ->
+    `dashboard_url`), from the cached manifest. It is the address the admin
+    says browsers should use -- since the dashboard went https-only
+    (DASH_COOKIE_SECURE=1, 2026-08-31) it is the only address a login WORKS
+    on, while config.toml's `dashboard_url` stays the reporting address.
+    Blank when no manifest is cached or it names no URL; never raises."""
+    try:
+        from . import site as site_mod
+
+        got = site_mod.cached_site()
+        url = str((got or {}).get("dashboard_url", "") or "").strip()
+        return url if url.lower().startswith(("http://", "https://")) else ""
+    except Exception:
+        return ""
+
+
 def _dashboard_url(app: "CompanionApp") -> str:
-    return str(getattr(app, "config", {}).get("dashboard_url", "")).strip()
+    """What "Open dashboard" opens: the site manifest's browse URL when one
+    is published, else config.toml's `dashboard_url` exactly as before.
+    (2026-08-31: every editor's tray click opened the http reporting
+    address and met "this dashboard is configured for https only".)"""
+    return (_site_dashboard_url()
+            or str(getattr(app, "config", {}).get("dashboard_url", "")).strip())
 
 
 def _open_dashboard(url: str, app: Optional["CompanionApp"] = None) -> bool:

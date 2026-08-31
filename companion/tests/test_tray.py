@@ -3115,3 +3115,37 @@ def _join_tray_threads():
     for thread in threading.enumerate():
         if thread.name.startswith("ccsync-tray-"):
             thread.join(timeout=5.0)
+
+
+# -- Open dashboard prefers the SITE's browse URL (2026-08-31) --------------
+# The dashboard went https-only for browsers (DASH_COOKIE_SECURE=1): the
+# config.toml dashboard_url is the REPORTING address and may be plain http,
+# so the tray click follows the manifest's published dashboard_url instead,
+# falling back to config exactly as before when no manifest is cached.
+
+
+def test_open_dashboard_prefers_site_manifest_url(monkeypatch):
+    from ccsync_companion import site as site_mod
+    from ccsync_companion import tray as tray_mod
+    monkeypatch.setattr(site_mod, "cached_site",
+                        lambda *a, **k: {"dashboard_url":
+                                         "https://nas.tailnet.ts.net:9443"})
+    app = _FakeApp({"dashboard_url": "http://192.168.0.102:8480"})
+    assert tray_mod._dashboard_url(app) == "https://nas.tailnet.ts.net:9443"
+
+
+def test_open_dashboard_falls_back_to_config_url(monkeypatch):
+    from ccsync_companion import site as site_mod
+    from ccsync_companion import tray as tray_mod
+    monkeypatch.setattr(site_mod, "cached_site", lambda *a, **k: None)
+    app = _FakeApp({"dashboard_url": "http://192.168.0.102:8480"})
+    assert tray_mod._dashboard_url(app) == "http://192.168.0.102:8480"
+
+
+def test_open_dashboard_ignores_a_junk_manifest_url(monkeypatch):
+    from ccsync_companion import site as site_mod
+    from ccsync_companion import tray as tray_mod
+    monkeypatch.setattr(site_mod, "cached_site",
+                        lambda *a, **k: {"dashboard_url": "not a url"})
+    app = _FakeApp({"dashboard_url": "http://192.168.0.102:8480"})
+    assert tray_mod._dashboard_url(app) == "http://192.168.0.102:8480"

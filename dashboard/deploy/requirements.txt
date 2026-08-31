@@ -134,3 +134,10 @@ paramiko>=3.4
 # file's hash changes. Imported lazily, so a container that somehow lacks it
 # reports one clear boot problem rather than failing to import the dashboard.
 PyJWT>=2.8
+
+# The mounted Timeline Cards page (/cards) reads Resolve's project library
+# straight from PostgreSQL and decodes its transcription blobs -- without
+# these two the library route dies with a silent ModuleNotFoundError and
+# the page can only show what the agent pushes (2026-08-31).
+psycopg2-binary
+zstandard

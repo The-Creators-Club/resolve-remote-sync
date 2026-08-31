@@ -61,6 +61,7 @@ import inspect
 import json
 import logging
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -848,6 +849,22 @@ def url_is_youtube(url: Any) -> bool:
     return any(host.endswith(suffix) for suffix in YOUTUBE_HOST_SUFFIXES)
 
 
+def machine_mode(cfg: Any) -> str:
+    """"base" or "editor" for THIS computer -- app.effective_mode's rule,
+    without needing the app object.
+
+    Kept in step with `CcsyncApp.effective_mode` deliberately: config's own
+    `mode` and nothing else since 2026-08-27, because the role belongs to the
+    computer and not to whoever is signed in (CR-88). Anything that is not
+    exactly "base" is an editor machine, which is the safe direction -- a
+    machine wrongly called wired would be offered destinations it does not
+    sync."""
+    try:
+        return "base" if str((cfg or {}).get("mode", "") or "").strip().lower() == "base" else "editor"
+    except Exception:  # noqa: BLE001 - a cfg that is not a mapping is an editor
+        return "editor"
+
+
 def capabilities(deps: Deps) -> dict:
     """What GET /ytdl/capabilities answers. 200 always; `ok` carries the verdict.
 
@@ -879,6 +896,26 @@ def capabilities(deps: Deps) -> dict:
         # 180 s. An SPA that ignores the field behaves exactly as it does now.
         "scope_qualities": list(SCOPE_QUALITIES),
         "free_bytes": free_bytes_at(projects_root(deps.cfg) or Path.home()),
+        # WHICH COMPUTER IS ASKING (CR-72 follow-up, 2026-08-31). The ytdl
+        # picker's widening rule is per MACHINE -- ticked_projects/_wired take
+        # a hostname -- but the browser had no way to learn one: a page served
+        # from the NAS knows the person, never the computer they are sitting
+        # at. So a mixed account's wired machine kept being handed the picker
+        # its REMOTE machine's sync plan justifies, which is the "I can still
+        # only select /animals as a destination on the base rig" report.
+        #
+        # `platform.node()` and not machine_id: the hostname is the key
+        # `machine_state`, `selections` and every lane report are already
+        # filed under (machine.py's own docstring says so), and the server
+        # side matches on exactly that string. Both fields are free -- no
+        # syscall, no I/O -- which is what keeps this inside the SPA's 1 s
+        # probe budget.
+        "machine": platform.node(),
+        # "base" (wired) or "editor" (remote), read the way app.effective_mode
+        # reads it: THIS COMPUTER's own config, never the person's role
+        # (CR-88). Diagnostic here -- the server re-derives wiredness from
+        # machine_state rather than trusting a client that says "base".
+        "mode": machine_mode(deps.cfg),
     }
     # youtube_enabled, not local_downloads_enabled: the site's own
     # `youtube_download` flag comes first (2026-08-17). A site that never

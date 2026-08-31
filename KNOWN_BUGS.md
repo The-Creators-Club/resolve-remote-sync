@@ -2977,7 +2977,7 @@ manages. An account with no known machines, or an older dashboard without the
 mode tables, answers "not base-only" and behaves exactly as before. Tests in
 `ytdl/web/tests/test_api.py`. Needs a dashboard deploy to reach the fleet.
 
-### CR-96 — CR-72 follow-up (2026-08-30): the picker's per-PERSON rule still starved a mixed account's wired machine — BUILT in repo 2026-08-30 as dashboard 0.7.26, NOT YET SHIPPED, PARTIAL (see residual)
+### CR-96 — CR-72 follow-up (2026-08-30): the picker's per-PERSON rule still starved a mixed account's wired machine — BUILT in repo 2026-08-30 as dashboard 0.7.26 (half 1) and 2026-08-31 as companion 0.9.64 (half 2), NOT YET SHIPPED
 Owner, 2026-08-30: *"I can still only select /animals as a destination on the
 base rig."* CR-72's fix was deliberately per-person and base-ONLY: a mixed
 account (a wired base rig and a remote laptop -- the owner's own shape, the
@@ -3018,17 +3018,52 @@ the same stale ticked list CR-72 first found empty.
    widens it, because on a wired machine a local write and a server write
    land in the same place anyway).
 
-**Residual**: expose `Deps.is_base_rig` (or the hostname) on
-`GET /ytdl/capabilities`'s JSON so the SPA can pass `machine=` for real --
-one field, one line, in `ytdl_executor.capabilities()` (companion). Until
-then this is a real, tested, partial fix: it resolves the symptom whenever a
-download is server-side, and leaves the local-on-your-own-wired-console case
-to the next companion change.
+**Residual CLOSED 2026-08-31 (companion 0.9.64), which completes half 2.**
+`ytdl_executor.capabilities()` now answers `machine` (`platform.node()` -- the
+hostname `machine_state`, `selections` and every lane report are already keyed
+on, so the server matches the string exactly) and `mode` (`machine_mode(cfg)`,
+app.effective_mode's config-only rule per CR-88; diagnostic, because the
+server re-derives wiredness from `machine_state` and will not let a client
+that claims "base" widen its own picker). The SPA asks once at BOOT
+(`probeLocalMachine`, bounded by `PROBE_MS`) and puts the hostname on
+`GET /api/projects`.
 
-Tests: `ytdl/web/ytdlweb/projects.py` (`_machine_modes`, `_wired`),
-`ytdl/web/ytdlweb/tests/test_static_app.py` (the picker's `local` param and
-its live re-fetch on the "on this machine" toggle). Needs a dashboard deploy
-to reach the fleet, same as CR-72.
+Three things that deliberately keep the old behaviour, because a missing
+`machine` reads as "unknown" and unknown is not wired: no companion
+listening, a companion too old to carry the field, and the fleet's
+local-download flag off. The last is not merely tolerated but REQUIRED -- the
+page must not touch 127.0.0.1 at all with the feature off (`test_with_the
+_flag_off_the_page_never_looks_at_the_loopback`), and it does not need to,
+because half 1 already widens a server-side download. The probe is gated on
+`localWanted()` for exactly that, and re-runs when the switch is ticked back
+on so the first flip does not need a reload. It is NOT gated on the
+companion's `ok`: a tray app that cannot take the download (old yt-dlp, no
+ffmpeg, terms unaccepted) is still this computer, and a wired rig works off
+the whole tree whoever ends up fetching.
+
+Tests: `ytdl/web/ytdlweb/projects.py` (`_machine_modes`, `_wired`);
+`ytdl/web/tests/test_api.py::test_the_wired_machine_of_a_mixed_account_is
+_offered_every_project` -- the `machine=`/`local=` params reached the route
+UNTESTED on 2026-08-30 and are what the picker now runs on, so this pins all
+four cases (wired, remote, unknown machine, none named) and that
+`resolve_project` widens identically, since a picker offering what the POST
+then refuses is the worse bug;
+`ytdl/web/tests/test_static_app.py::test_the_picker_tells_the_server_which
+_computer_is_asking` (the client half, including the three negatives);
+`companion/tests/test_ytdl_executor.py` (the two new fields, and
+`machine_mode`'s safe direction: anything that is not exactly "base" is an
+editor machine, because a machine wrongly called wired would be offered
+destinations it does not sync).
+
+One test-harness note worth keeping: boot now makes a loopback call of its
+own, so `test_static_app`'s dispatch invariants ("one probe, one POST, no
+retry loop") measure from the end of boot (`dispatchedBy` / `_callsAtBoot`)
+rather than from the start of the page. The invariant is unchanged; what it
+counts is now scoped to the dispatch that it is about.
+
+Needs BOTH a dashboard deploy and a companion release to reach the fleet --
+and in that order, as ever. An editor below 0.9.64 gets half 1 only, which is
+the behaviour this entry described as partial.
 
 ### CR-97 — a folder box for pasted links, reversing the 2026-08-11 call — BUILT in repo 2026-08-30 as dashboard 0.7.26, NOT YET SHIPPED
 Owner, 2026-08-30: *"there should be a way to manually input the name of the

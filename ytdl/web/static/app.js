@@ -198,6 +198,49 @@ const WORKER_DEAD =
 // carries a path relative to that root and never a drive letter.
 const COMPANION_URL = 'http://127.0.0.1:8899';
 
+// WHICH COMPUTER THIS BROWSER IS SITTING AT (CR-72 follow-up, 2026-08-31).
+// The picker's widening rule is per MACHINE -- ticked_projects()/_wired() take
+// a hostname -- but a page served from the NAS knows the person and never the
+// computer. The only thing on this machine that can name it is the companion
+// on the loopback, so we ask it once at boot and remember the answer.
+//
+// Null means "not known", which is exactly the pre-follow-up request (no
+// `machine` param) and therefore the pre-follow-up behaviour: no companion,
+// an old companion that does not send the field, or a refused local-network
+// fetch all degrade to the list this account has ticked. Never a hard failure
+// -- a page whose project picker depended on a tray app answering would be a
+// worse page than the one this fixes.
+let localMachine = null;
+
+// Deliberately NOT gated on `ok`: a companion that declines the DOWNLOAD (old
+// yt-dlp, no ffmpeg, terms not accepted) is still this computer, and a wired
+// machine works off the whole tree whoever ends up doing the fetching.
+//
+// Only `machine` is read. The companion also answers `mode`, and this page
+// deliberately ignores it: the server re-derives wiredness from machine_state
+// itself, so a page that forwarded a self-declared "base" would be handing
+// the server a claim it must not trust anyway.
+async function probeLocalMachine() {
+  // GATED ON localWanted(), which is the same gate every other loopback call
+  // on this page carries. With the fleet flag off (or the switch unticked)
+  // the page must not touch 127.0.0.1 at all -- test_static_app pins "flag
+  // off is byte-for-byte the old page" -- and it does not need to: a
+  // server-side download is constrained by no machine's sync plan, so
+  // `local=false` already widens the picker to every active project. The
+  // hostname only ever matters when THIS machine might claim the job.
+  if (!localWanted()) return;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), PROBE_MS);
+  try {
+    const res = await fetch(`${COMPANION_URL}/ytdl/capabilities`, {signal: ctl.signal});
+    if (!res.ok) return;
+    const body = await res.json();
+    const name = String((body && body.machine) || '').trim();
+    if (name) localMachine = name;
+  } catch { /* no companion, too old, or refused: stay null */ }
+  finally { clearTimeout(timer); }
+}
+
 // One page of download history. Small because the panel is a list of pictures
 // at the bottom of a page nobody scrolls to first, and the ledger is permanent
 // -- the fleet's whole download history is a table that only grows.
@@ -619,13 +662,15 @@ async function loadProjects() {
     // localWanted() gives dispatchLocal -- whether THIS submission would even
     // try to run on this machine's companion. false (the toggle off, or the
     // fleet flag off) means a server-side download, which no machine's sync
-    // plan constrains, so the server answers every active project. There is
-    // no `machine` (hostname) to send yet -- the loopback companion has
-    // nothing that names this computer to the browser -- so a mixed
-    // account's wired machine still only widens by unticking "on this
-    // machine"; see KNOWN_BUGS.md CR-72 for the follow-up that would close
-    // that gap.
-    r = await api('api/projects?local=' + (localWanted() ? 'true' : 'false'));
+    // plan constrains, so the server answers every active project.
+    // `machine` closes the gap this comment used to describe: with a
+    // hostname the server can tell a MIXED account's wired machine from its
+    // remote one, so standing at the base rig now widens the picker on its
+    // own, without unticking "on this machine". Omitted entirely when the
+    // probe found nothing, which is the request an older SPA sent.
+    const q = 'api/projects?local=' + (localWanted() ? 'true' : 'false')
+            + (localMachine ? '&machine=' + encodeURIComponent(localMachine) : '');
+    r = await api(q);
   } catch (e) {
     sel.appendChild(el('option', null, 'could not load projects'));
     return;
@@ -2126,8 +2171,15 @@ function initLocalSwitch() {
         + 'upwards, so you can fetch one later from the download history.');
     // CR-72 follow-up: the picker's own `local` param tracks this switch, so
     // flipping it must re-ask for the project list rather than leave the
-    // dropdown answering a question that was true a moment ago.
-    loadProjects();
+    // dropdown answering a question that was true a moment ago. Ticking it
+    // back ON is also the first moment the loopback may be asked (the boot
+    // probe declines while the switch is off), so learn the hostname before
+    // re-asking -- otherwise the first flip back offers the ticked list on a
+    // wired machine and only a reload corrects it.
+    (async () => {
+      if (box.checked && !localMachine) await probeLocalMachine();
+      loadProjects();
+    })();
   };
 }
 
@@ -2695,6 +2747,10 @@ async function init() {
   // then never narrows it back, since nothing else re-fetches. Health first
   // means the first paint of the dropdown is already the right one.
   await loadHealth();
+  // AWAITED for loadHealth's own reason: the picker's first paint should be
+  // the right one. Bounded by PROBE_MS and swallowing every failure, so a
+  // machine with no tray app waits one probe and carries on.
+  await probeLocalMachine();
   await loadProjects();
   // Re-asked on a slow interval so an admin who fixes claude (or restarts the
   // worker) does not have to walk the fleet asking for reloads (YTDL-39).

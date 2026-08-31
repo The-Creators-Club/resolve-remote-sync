@@ -124,6 +124,82 @@ def test_a_base_only_editor_is_offered_every_active_project(client):
         con.close()
 
 
+def test_the_wired_machine_of_a_mixed_account_is_offered_every_project(client):
+    """The CR-72 follow-up, end to end (2026-08-30 server side, 2026-08-31
+    client side; owner: "I can still only select /animals as a destination on
+    the base rig").
+
+    `_base_only` widens the picker only for an account whose EVERY machine is
+    wired, which is right for a job a REMOTE machine's companion will claim --
+    it has to land somewhere that machine actually syncs -- and wrong for the
+    person standing at the console of a mixed account's WIRED machine. That
+    person saw the ticked list of their OTHER computer. The fix is that the
+    rule is per MACHINE: the SPA learns its own hostname from the companion's
+    /ytdl/capabilities and sends it, and `_wired` answers for that machine
+    alone.
+
+    Pinned here because nothing did: `machine` and `local` reached the route
+    untested, and they are what the picker now runs on.
+    """
+    import sqlite3
+
+    from ytdlweb import config, projects
+
+    con = sqlite3.connect(config.DASH_DB)
+    try:
+        con.executescript("""
+            CREATE TABLE IF NOT EXISTS machine_state (
+              editor_username TEXT NOT NULL,
+              machine         TEXT NOT NULL,
+              mode            TEXT
+            );
+        """)
+        con.execute("INSERT INTO machine_state VALUES(?,?,?)", (USER, 'owen-rig', 'base'))
+        con.execute("INSERT INTO machine_state VALUES(?,?,?)", (USER, MACHINE, 'editor'))
+        con.commit()
+        every = ['2025-ff4-nuclear', '2026-ff5-energy', '2026-ff5-water']
+        ticked = [p[0] for p in PROJECTS]
+
+        # Standing at the WIRED machine: the whole tree is right there.
+        r = client.get('/api/projects?machine=owen-rig').json()
+        assert [p['slug'] for p in r['projects']] == every
+        # ...and the server-side destination check widens with it, or the
+        # picker would offer a project every POST then refused. Probed with a
+        # project this editor does NOT tick, which is the only one that tells
+        # the two answers apart.
+        assert projects.resolve_project(USER, OTHER_PROJECT[0],
+                                        machine='owen-rig') is not None
+
+        # Standing at the REMOTE machine: unchanged, and deliberately so.
+        r = client.get(f'/api/projects?machine={MACHINE}').json()
+        assert [p['slug'] for p in r['projects']] == ticked
+        assert projects.resolve_project(USER, OTHER_PROJECT[0],
+                                        machine=MACHINE) is None
+
+        # A machine nobody has heard of is not wired -- same "unknown is not
+        # wired" rule an unknown editor gets.
+        r = client.get('/api/projects?machine=someone-elses-laptop').json()
+        assert [p['slug'] for p in r['projects']] == ticked
+
+        # No machine named at all is the older SPA, and changes nothing.
+        r = client.get('/api/projects').json()
+        assert [p['slug'] for p in r['projects']] == ticked
+
+        # local=false is the OTHER half: the download runs on the server, so
+        # no machine's sync plan constrains it -- true even from the remote
+        # machine, and true with no machine named.
+        r = client.get(f'/api/projects?local=false&machine={MACHINE}').json()
+        assert [p['slug'] for p in r['projects']] == every
+        r = client.get('/api/projects?local=false').json()
+        assert [p['slug'] for p in r['projects']] == every
+        assert projects.resolve_project(USER, OTHER_PROJECT[0],
+                                        machine=MACHINE, local=False) is not None
+    finally:
+        con.execute('DROP TABLE machine_state')
+        con.commit()
+        con.close()
+
+
 def test_an_editor_with_no_known_machines_is_not_base_only(client):
     """An account with no machines is unknown, not 'cannot sync' -- the
     fixture database has no machine tables at all here, which is also what an

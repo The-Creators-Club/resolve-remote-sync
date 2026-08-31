@@ -1414,6 +1414,42 @@ def test_capabilities_is_ok_when_everything_is_in_place(tmp_path):
     assert cap["free_bytes"] == 500 * 1024 ** 3
 
 
+def test_capabilities_names_this_computer_for_the_project_picker(tmp_path):
+    """CR-72 follow-up (2026-08-31). The ytdl picker's widening rule is per
+    MACHINE, but a page served from the NAS knows the person and never the
+    computer. This is the only thing on an editor's machine that can name it,
+    so the SPA asks here and passes the hostname to /api/projects -- which is
+    what lets a mixed account's WIRED machine be offered the whole tree
+    instead of its other computer's ticked list.
+
+    `platform.node()` and not machine_id: the hostname is the key
+    `machine_state` and `selections` are filed under, and the server matches
+    that string exactly.
+    """
+    import platform
+
+    cap = ex.capabilities(make_deps(tmp_path))
+    assert cap["machine"] == platform.node()
+    assert cap["mode"] in ("base", "editor")
+
+
+def test_capabilities_reports_the_computers_own_mode_not_the_persons(tmp_path):
+    """CR-88's rule, in the one field that now carries it to the browser:
+    config's `mode` decides, never the signed-in person's role. Anything that
+    is not exactly "base" is an editor machine -- the safe direction, because
+    a machine wrongly called wired would be offered destinations it does not
+    sync. (The server re-derives wiredness from machine_state anyway, so this
+    field cannot widen a picker on its own.)"""
+    assert ex.machine_mode({"mode": "base"}) == "base"
+    assert ex.machine_mode({"mode": "  BASE  "}) == "base"
+    assert ex.machine_mode({"mode": "editor"}) == "editor"
+    assert ex.machine_mode({"mode": ""}) == "editor"
+    assert ex.machine_mode({}) == "editor"
+    assert ex.machine_mode(None) == "editor"
+    # Not a mapping at all: still an answer, still the safe one.
+    assert ex.machine_mode("base") == "editor"
+
+
 def test_capabilities_says_which_rungs_this_machine_runs(tmp_path):
     """COMP-BROLL-10: the SPA knows the job's quality when it decides whether
     to dispatch, and this is what lets it not dispatch the ones only the

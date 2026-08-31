@@ -1137,6 +1137,49 @@ const projectPage = (seed, jobId) => boot(async (method, url) => {
   return {json: {}};
 }, seed);
 
+// CR-72 follow-up (2026-08-31). The picker's widening rule is per MACHINE, and
+// the ONLY thing that can tell this browser which computer it is sitting at is
+// the companion on the loopback. So boot asks /ytdl/capabilities once and puts
+// the hostname on the /api/projects request.
+//
+// `cap` scripts that companion; `flag` is the fleet's local-download switch,
+// because the probe is gated on it -- with the feature off the page must not
+// touch 127.0.0.1 at all (the invariant test_with_the_flag_off... pins), and it
+// does not need to: a server-side download widens the picker on its own.
+const pickerPage = (cap, flag = true) => boot(async (method, url) => {
+  if (url.startsWith('api/health')) {
+    return {json: {claude: 'ok', claude_detail: '', yt_dlp: 'ok',
+                   worker_alive: true, cookies: false, local_download: flag}};
+  }
+  if (url === CAP_URL) return cap ? cap() : {status: 404, json: {}};
+  if (url.startsWith('api/projects')) {
+    return {json: {projects: PROJECTS, projects_available: true, error: null}};
+  }
+  const b = baseline(method, url); if (b) return b;
+  return {json: {}};
+});
+
+const projectQuery = h => (h.calls.filter(c => c.url.startsWith('api/projects'))
+  .map(c => c.url));
+
+scenarios['the_picker_says_which_computer_is_asking'] = async () => {
+  // A companion that names the machine. Deliberately ok:false -- a tray app
+  // that cannot take the DOWNLOAD (old yt-dlp, no ffmpeg) is still this
+  // computer, and a wired rig works off the whole tree whoever fetches.
+  const named = await pickerPage(() => ({json: {ok: false, reason: 'yt-dlp too old',
+                                                machine: 'owen-rig', mode: 'base'}}));
+  // No companion at all: the request must carry no machine, which is exactly
+  // what an SPA from before this change sent.
+  const none = await pickerPage(null);
+  // A companion too old to know the field: same thing, no invention.
+  const old = await pickerPage(() => ({json: {ok: true, editor: 'owen'}}));
+  // Feature off: the loopback is never touched, so there is nothing to send.
+  const off = await pickerPage(() => ({json: {ok: true, machine: 'owen-rig'}}), false);
+  return {named: projectQuery(named), none: projectQuery(none),
+          old: projectQuery(old), off: projectQuery(off),
+          off_loopback: off.calls.filter(c => c.url.startsWith('http://127')).length};
+};
+
 scenarios['picking_a_project_remembers_it'] = async () => {
   const h = await projectPage(null, 91);
   const sel = h.get('project');
@@ -1616,6 +1659,15 @@ const LOCAL_DL_URL = 'http://127.0.0.1:8899/ytdl/download';
 const loopback = h => h.calls.filter(c => c.url.startsWith('http://127.0.0.1:8899'))
   .map(c => ({method: c.method, url: c.url, body: c.body}));
 
+// Everything the page asked the loopback WHILE DISPATCHING, i.e. after the
+// page had finished booting. Since 2026-08-31 boot itself asks
+// /ytdl/capabilities once, to learn which computer this browser is sitting at
+// for the project picker (CR-72 follow-up) -- a different question from "can
+// this machine take the job", asked at a different time. The invariants below
+// are about the DISPATCH ("one probe, one POST, and no retry loop"), so they
+// measure from the end of boot rather than from the start of the page.
+const dispatchedBy = h => loopback(h).slice(h._loopbackAtBoot || 0);
+
 // A page with one reviewed job (90) ready to submit. `flag` is the server's
 // phase-1 switch as api/health reports it -- UNDEFINED means a server that
 // predates the field at all, which is not the same test as `false`. `cap`/`dl`
@@ -1624,6 +1676,14 @@ const loopback = h => h.calls.filter(c => c.url.startsWith('http://127.0.0.1:889
 function dispatchPage(opts) {
   const {flag, cap, dl, lock, mode, quality} = opts || {};
   let started = false, downloadPolls = 0;
+  // Marked at the END of boot, not at the start of submit(): some scenarios
+  // below drive app.dispatchLocal() directly and never submit at all, and
+  // they measure the same "what did the DISPATCH ask" invariant.
+  const marked = h => {
+    h._loopbackAtBoot = loopback(h).length;
+    h._callsAtBoot = h.calls.length;
+    return h;
+  };
   return boot(async (method, url, body) => {
     if (url.startsWith('api/health')) {
       const j = {claude: 'ok', claude_detail: '', yt_dlp: 'ok',
@@ -1658,7 +1718,7 @@ function dispatchPage(opts) {
                                                              dl_state: 'pending'})]})};
     }
     return {json: {}};
-  });
+  }).then(marked);
 }
 
 const submit = async h => {
@@ -1681,7 +1741,7 @@ scenarios['the_server_flag_gates_the_whole_feature'] = async () => {
     {flag: false, mode: 'local', cap: CAPABLE, dl: ACCEPTED}));
   const older = await submit(await dispatchPage(
     {mode: 'local', cap: CAPABLE, dl: ACCEPTED}));
-  return {off: loopback(off), older: loopback(older),
+  return {off: dispatchedBy(off), older: dispatchedBy(older),
           // ...and the server was still given the selection, as always
           submitted: off.calls.filter(c => c.url === 'api/jobs/90/download').length,
           badge_hidden: off.get('dlmode').hidden,
@@ -1696,12 +1756,14 @@ scenarios['the_server_flag_gates_the_whole_feature'] = async () => {
 scenarios['a_capable_companion_is_handed_the_job'] = async () => {
   const h = await submit(await dispatchPage(
     {flag: true, mode: 'local', cap: CAPABLE, dl: ACCEPTED}));
-  const dispatched = loopback(h);
+  const dispatched = dispatchedBy(h);
   await h.timers.fire();
   await h.timers.fire();
-  return {dispatched, after_more_polls: loopback(h).length,
+  return {dispatched, after_more_polls: dispatchedBy(h).length,
           // the server's own accept comes FIRST: the job downloads either way
-          order: h.calls.map(c => c.url)
+          // Sliced at the boot mark for dispatchedBy()'s reason: boot's own
+          // picker probe is not part of the order this pins.
+          order: h.calls.slice(h._callsAtBoot || 0).map(c => c.url)
             .filter(u => u === 'api/jobs/90/download' || u.startsWith('http://127')),
           badge: h.get('dlmode').textContent,
           badge_hidden: h.get('dlmode').hidden,
@@ -1728,15 +1790,15 @@ scenarios['a_companion_that_cannot_take_it_is_never_handed_it'] = async () => {
   // in the tray (owner, 2026-08-18) -- said out loud, still server-side
   const terms = await run({cap: () => ({json: {ok: false,
     reason: "the YouTube terms have not been accepted on this machine: tray > 'Accept YouTube Terms...'"}})});
-  return {dead: loopback(dead), old: loopback(old), unable: loopback(unable),
-          refused: loopback(refused).map(c => c.url),
-          busy: loopback(busy).map(c => c.url),
+  return {dead: dispatchedBy(dead), old: dispatchedBy(old), unable: dispatchedBy(unable),
+          refused: dispatchedBy(refused).map(c => c.url),
+          busy: dispatchedBy(busy).map(c => c.url),
           // every one of them now SAYS SO (2026-08-19, the owner). Silence was
           // the old rule and it stopped being defensible when "the server did
           // it" started meaning "the clip stays on the NAS".
           spoken: [dead, old, unable, refused, busy]
             .map(p => [p.get('toast').hidden, p.get('toast').textContent]),
-          terms: {calls: loopback(terms).map(c => c.url),
+          terms: {calls: dispatchedBy(terms).map(c => c.url),
                   toast_hidden: terms.get('toast').hidden,
                   toast_text: terms.get('toast').textContent,
                   badge: terms.get('dlmode').textContent},
@@ -1756,7 +1818,7 @@ scenarios['a_hung_probe_is_abandoned_after_a_second'] = async () => {
   // the review panel is away and the job is on screen downloading regardless.
   const page = await submit(await dispatchPage(
     {flag: true, mode: 'server', cap: hang}));
-  const during = {calls: loopback(page).length,
+  const during = {calls: dispatchedBy(page).length,
                   review_hidden: page.get('review').hidden,
                   downloads_hidden: page.get('downloads').hidden,
                   badge: page.get('dlmode').textContent,
@@ -1783,7 +1845,7 @@ scenarios['a_hung_probe_is_abandoned_after_a_second'] = async () => {
   // 2026-08-19). A hung tray app therefore costs both budgets and then gives
   // up -- still bounded, which is the whole point of this scenario.
   return {during, abandoned: out === false, never_gave_up: out === stuck,
-          calls: loopback(h).length};
+          calls: dispatchedBy(h).length};
 };
 
 // COMP-BROLL-10: the local executor only runs the rungs it can NAME correctly
@@ -1800,9 +1862,9 @@ scenarios['an_out_of_scope_job_is_never_handed_over'] = async () => {
   const inScope = await run('1080p', SCOPED);
   const outOfScope = await run('2160p', SCOPED);
   const undeclared = await run('2160p', CAPABLE);
-  return {in_scope: loopback(inScope).map(c => c.url),
-          out_of_scope: loopback(outOfScope).map(c => c.url),
-          undeclared: loopback(undeclared).map(c => c.url),
+  return {in_scope: dispatchedBy(inScope).map(c => c.url),
+          out_of_scope: dispatchedBy(outOfScope).map(c => c.url),
+          undeclared: dispatchedBy(undeclared).map(c => c.url),
           // the server was still given the selection in every case
           submitted: [inScope, outOfScope, undeclared]
             .map(p => p.calls.filter(c => c.url === 'api/jobs/90/download').length),
@@ -1828,7 +1890,7 @@ scenarios['the_badge_flips_when_the_server_reclaims'] = async () => {
           reclaimed_cls: h.get('dlmode').className,
           reclaimed_title: h.get('dlmode').title,
           link_hidden_after: h.get('dlserver').hidden,
-          dispatches: loopback(h).length};
+          dispatches: dispatchedBy(h).length};
 };
 
 // The per-job escape hatch (§9). One POST however many times it is clicked, to
@@ -2504,6 +2566,29 @@ def test_a_server_detail_reaches_the_toast_as_text_not_markup(spa):
 
 
 # ------------------------------------------------------- the paste-links box
+def test_the_picker_tells_the_server_which_computer_is_asking(spa):
+    """CR-72 follow-up (2026-08-31), the client half; owner: "I can still only
+    select /animals as a destination on the base rig".
+
+    The server has taken a `machine` since 2026-08-30, and `_wired` answers
+    for that machine alone -- but nothing sent one, because a page served from
+    the NAS knows the person and never the computer. The companion's
+    /ytdl/capabilities now names it, and boot asks once.
+
+    The three negative cases matter as much as the positive one: no companion,
+    a companion too old for the field, and the fleet flag off must all send
+    the request an older SPA sent, because the server reads a missing
+    `machine` as "unknown", and unknown is not wired.
+    """
+    r = spa['the_picker_says_which_computer_is_asking']
+    assert any('machine=owen-rig' in u for u in r['named']), r['named']
+    assert all('machine=' not in u for u in r['none']), r['none']
+    assert all('machine=' not in u for u in r['old']), r['old']
+    assert all('machine=' not in u for u in r['off']), r['off']
+    # ...and with the feature off the page did not so much as look at 8899.
+    assert r['off_loopback'] == 0, r['off_loopback']
+
+
 def test_pasting_links_posts_the_whole_form_and_attaches_the_job(spa):
     """The form is the LINKS and the shared destination pickers, plus the
     2026-08-30 folder box and the CR-72 follow-up's `local` flag -- an empty

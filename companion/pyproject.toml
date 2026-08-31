@@ -37,6 +37,16 @@ dependencies = [
     # rules out. Cost is ~35 MB frozen (measured on the wheels: numpy ~19 MB
     # installed, onnxruntime ~16 MB) against a 40-odd MB exe.
     "numpy>=1.26",
+    # The Timeline Cards ROLE (timeline_cards_role.py) imports the
+    # MulticamPipeline engine into THIS frozen process, and that engine
+    # reads Resolve's project library (word-token blobs: zstd protobuf over
+    # PostgreSQL). PyInstaller cannot see those imports -- they arrive via
+    # a sys.path the checkout adds at runtime -- so the wheels must be
+    # dependencies here AND named in build.spec's hidden imports. Found
+    # live 2026-08-31: the role's sweep pushed "project database: No module
+    # named 'psycopg2'" onto every /cards state.
+    "psycopg2-binary>=2.9,<3",
+    "zstandard>=0.22,<1",
     "onnxruntime>=1.20",
     # The library walk (docs/LIBRARY_WALK_PLAN.md): the timeline watcher reads
     # a timeline's items out of Resolve's PROJECT LIBRARY instead of walking

@@ -195,7 +195,29 @@ def build_engine(project_agent_mod: Any, settings: Settings,
     """
     allow = [s.strip() for s in str(settings.cards_db_write_allow or "").split(",")
              if s.strip()]
+    # The engine's own state -- the mirror, the picker's memory, the
+    # last-picked ROOT -- lives on /data (the persistent volume), not in
+    # the container layer: a recreate used to forget the open project and
+    # the episode, and every refresh landed back on the deploy defaults
+    # (Alex, 2026-08-31).
+    import json as _json
+    import os as _os
+    from pathlib import Path as _Path
+    data = str(_Path(settings.db_path).parent / "cards")
+    try:
+        _os.makedirs(data, exist_ok=True)
+    except OSError:
+        data = None
     root = (str(settings.cards_root or "").strip() or vault_root(settings))
+    if data:
+        try:
+            with open(_os.path.join(data, "cards_ui.json"),
+                      encoding="utf-8-sig") as fh:
+                was = _json.load(fh).get("root")
+            if was and _os.path.isdir(was):
+                root = was
+        except (OSError, ValueError):
+            pass
     engine = project_agent_mod.ProjectAgentEngine(
         str(settings.cards_project or "").strip() or None,
         root,
@@ -204,6 +226,7 @@ def build_engine(project_agent_mod: Any, settings: Settings,
         db_name=str(settings.cards_db_name or "").strip() or None,
         write_allow=allow,
         backup_dir=str(settings.cards_db_backups or "").strip() or None,
+        data_dir=data,
     )
     # THE BROWSER GATE IS RETIRED (see the module docstring). Set explicitly
     # rather than left to the engine's default so the decision is visible

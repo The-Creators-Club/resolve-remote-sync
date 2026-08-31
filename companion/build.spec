@@ -30,7 +30,13 @@ block_cipher = None
 # written from the OS APIs. Do NOT re-add pystray here: the CCSYNC_TRAY_BACKEND
 # escape hatch in tray.py is a dev-machine affordance and refuses to load in a
 # frozen build for exactly this reason.
-hidden_imports = ["watchdog", "watchdog.observers", "watchdog.events"]
+hidden_imports = ["watchdog", "watchdog.observers", "watchdog.events",
+                  # the Timeline Cards role imports the MulticamPipeline
+                  # engine over a runtime sys.path, so static analysis never
+                  # sees the engine's own imports -- the project-library pair
+                  # must be named or the frozen role pushes "No module named
+                  # 'psycopg2'" onto every /cards state (2026-08-31)
+                  "psycopg2", "zstandard"]
 if sys.platform == "darwin":
     # watchdog picks its backend at import time inside a try/except chain
     # (fsevents on darwin, ReadDirectoryChangesW on win32, inotify on linux),

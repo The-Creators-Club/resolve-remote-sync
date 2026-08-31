@@ -141,3 +141,10 @@ PyJWT>=2.8
 # the page can only show what the agent pushes (2026-08-31).
 psycopg2-binary
 zstandard
+# ...round two (same day): the rest of the cards engine's needs -- the
+# lane's waveform peaks and the transcript search's Simplified/Traditional
+# folding and pinyin matching. All three degrade in SILENCE when absent
+# (MulticamPipeline requirements.txt tells the story, psycopg2 above sprang
+# the same trap an hour earlier).
+zhconv
+pypinyin

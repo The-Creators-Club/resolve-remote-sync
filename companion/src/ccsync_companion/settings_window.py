@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import logging
 import platform
+import time
 from dataclasses import dataclass
 from typing import Callable, TYPE_CHECKING
 
@@ -725,13 +726,37 @@ def _build_settings_window(app: "CompanionApp", lock) -> None:
                     ).pack(anchor="w", pady=(4, 0))
 
     refresh_job: list = [None]
+    rendered: list = [None, 0.0]   # [signature, monotonic time of last render]
+
+    def _signature(sections: list[Section]):
+        """What the window LOOKS like, as a comparable value. Rebuilding
+        every _REFRESH_MS destroyed and repacked every widget, and the bare
+        frame between the two painted as a white flash on all the
+        clickables, twice a second of every second (Alex, 2026-08-31)."""
+        return tuple(
+            (s.title,
+             tuple((i.text, i.style) if isinstance(i, Line)
+                   else ("btn", i.label) for i in s.items))
+            for s in sections)
 
     def _refresh() -> None:
         if state["closed"]:
             return
         try:
             snap = tray_mod._tray_snapshot(app)
-            _render(build_settings_model(snap, app))
+            sections = build_settings_model(snap, app)
+            sig = _signature(sections)
+            now = time.monotonic()
+            # Skip the rebuild when nothing visible changed -- but never for
+            # more than 30 s: a Button's on_click is bound to snapshot-derived
+            # arguments at build time, and a handler must not act on a
+            # snapshot older than that even when its label never moved.
+            if sig != rendered[0] or now - rendered[1] > 30.0:
+                keep = canvas.yview()[0] if rendered[0] is not None else None
+                _render(sections)
+                rendered[0], rendered[1] = sig, now
+                if keep:
+                    root.after_idle(lambda y=keep: canvas.yview_moveto(y))
         except Exception:
             log.exception("settings window: refresh failed")
         refresh_job[0] = root.after(_REFRESH_MS, _refresh)

@@ -93,6 +93,15 @@ _OPEN_EXACT = {
     # colour and five icons; sw.js is code with the version in it; /offline is
     # one sentence with no fleet state (ui.py's "installable app" block).
     "/manifest.webmanifest", "/sw.js", "/offline",
+    # The Timeline Cards page's own two (2026-09-02). Its manifest is
+    # document-relative (`/cards/manifest.webmanifest`, scope "."), and a
+    # browser fetches a manifest WITHOUT the session cookie, so behind this
+    # gate Chrome got a 303 to /login in place of the manifest, judged the
+    # page not installable, and "Install" on the phone made a plain shortcut
+    # that opens with the URL bar (Alex, 2026-09-02). The cards handler
+    # already serves both before its own gate for the same reason; neither
+    # names a path, a token or anything the login page does not.
+    "/cards/manifest.webmanifest", "/cards/icon.svg",
 }
 
 # The setup API prefix (ZERO_TOUCH_PLAN.md WP D). A prefix, not exact paths,

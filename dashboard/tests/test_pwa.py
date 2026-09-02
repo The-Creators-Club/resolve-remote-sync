@@ -244,3 +244,25 @@ def test_pwa_js_offers_the_install_chip_in_m1_s_slot():
     assert "install-slot" in src
     assert "[ INSTALL ]" in src
     assert "(display-mode: standalone)" in src
+
+
+# -- the Timeline Cards page's own manifest (2026-09-02) --------------------
+#
+# /cards/ links `manifest.webmanifest` document-relative and Chrome fetches a
+# manifest without the session cookie. Behind the login gate that fetch was a
+# 303 to /login, so the page was judged not installable and "Install" on a
+# phone made a shortcut that opens with the URL bar. The two files the cards
+# handler serves before its own gate must be open at this gate too.
+
+
+def test_the_cards_install_files_are_in_open_exact():
+    assert {"/cards/manifest.webmanifest", "/cards/icon.svg"} <= _OPEN_EXACT
+
+
+def test_the_cards_manifest_is_never_redirected_to_login(client):
+    # The cards mount is absent in this suite (no checkout, no vault), so the
+    # answer is a 404 -- what matters is that it is not the gate's 303.
+    for path in ("/cards/manifest.webmanifest", "/cards/icon.svg"):
+        res = client.get(path, follow_redirects=False)
+        assert res.status_code != 303, path
+        assert "/login" not in res.headers.get("location", ""), path

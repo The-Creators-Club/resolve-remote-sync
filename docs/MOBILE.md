@@ -143,6 +143,14 @@ If Chrome offers a plain shortcut instead of an install, and no `[ INSTALL ]`
 chip appears, the origin is not https or the manifest is not being served:
 run the checker (§6).
 
+The Timeline Cards page (`/cards/`) is a second installable app with its own
+manifest, `/cards/manifest.webmanifest`, and its own icon, `/cards/icon.svg`
+(scope `.`, so the installed app owns `/cards/` only). Both are open at the
+dashboard's login gate on purpose (CR-100, 2026-09-02): a browser fetches a
+manifest without the session cookie, and behind the gate Chrome's Install
+made a home-screen shortcut that opened with the URL bar. The checker in §6
+does not cover that manifest; the test is Install from `/cards/` itself.
+
 ### iOS, Safari
 
 1. Open the dashboard and sign in.

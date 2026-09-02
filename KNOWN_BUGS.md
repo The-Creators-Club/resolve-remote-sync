@@ -10141,6 +10141,78 @@ correctly; a previously-locked field can actually be saved once unlocked).
 
 ---
 
+## The phone's "Install" made a shortcut, and a switched episode showed no canvases (CR-100/101, 2026-09-02)
+
+Both reported by the owner from the phone on 2026-09-02, on the Timeline
+Cards page under the dashboard's `/cards` mount, over
+`https://truenas.tail26290e.ts.net:9443`. "There is no certificate" was the
+first description; the origin's certificate was fine (Let's Encrypt via
+Tailscale Serve, "Connection is secure" in the page-info sheet) and neither
+fault had anything to do with TLS.
+
+### CR-100 — "Install" on the cards page made a Chrome shortcut that opens with the URL bar — FIXED in repo 2026-09-02 as dashboard 0.7.27
+Owner: *"it's saying install but the thing that actually appears is just a
+chrome shortcut which opens the browser with the full URL bar etc, not full
+screen as we intended."*
+
+The cards page links its manifest document-relative
+(`<link rel="manifest" href="manifest.webmanifest">`, scope `.`,
+TIMELINE-CARDS-INTO-CCSYNC.md 7e), which under the mount is
+`/cards/manifest.webmanifest`. A browser fetches a manifest WITHOUT the
+session cookie, and the dashboard's `login_gate` answered that fetch with a
+303 to `/login` - so Chrome had no manifest, judged the page not
+installable, and its Install produced a home-screen shortcut instead of a
+fullscreen app. The cards handler itself serves `/manifest.webmanifest` and
+`/icon.svg` BEFORE its own gate for exactly this reason (2026-08-29); the
+dashboard's gate in front of it did not. `tools/check_mobile_origin.py`
+passed throughout because it checks the DASHBOARD's manifest, which has been
+in `_OPEN_EXACT` since M4.
+
+**Fixed**: `/cards/manifest.webmanifest` and `/cards/icon.svg` join
+`app._OPEN_EXACT` (neither names a path, a token or anything the login page
+does not). `dashboard/tests/test_pwa.py` pins both in the set and pins that
+the gate never 303s them. Verified live under the mount with a session
+before the change (both answer 200, the bare `/cards` 307s to `/cards/`);
+needs the dashboard deployed to reach the phone. After the deploy: open
+`/cards/` in Chrome, `⋮` → Install, and the icon opens fullscreen.
+
+### CR-101 — after switching the episode root, the drawer's OPEN panel said "no cut lists yet / none in Script Docs" for 30 s (Civil Defence has nine canvases) — FIXED in the MulticamPipeline repo 2026-09-02, LIVE on the NAS same day
+Owner: *"I'm in civil defence but it is reading no canvas files."*
+
+Server side was right all along: `GET /cards/api/projects` answered nine
+`.canvas` files for `/vault/Vault/2026/FF5/Civil Defence/Script Docs` (the
+container sees the folder; `cards_ui.json` held that root; the NAS
+`cards-web` tree was byte-identical to the checkout). The page was wrong:
+a root switch (`api/root` POST, and the poll noticing `d.root` moved) nulls
+`PROJS` - the last `api/projects` answer the OPEN panel renders from - and
+rebuilds through `txBuild()`, which fetches `api/projects` itself but kept
+the answer LOCAL. `openDraw()` then refetches only when
+`Date.now()-OPENFETCH>30000`, and `OPENFETCH` had been set by the draw just
+before the switch, so the panel rendered `files` from the state poll (empty:
+right for Civil Defence, which has no cut lists) and canvases from a null
+answer (`none in Script Docs`) until the throttle expired AND something
+redrew the drawer.
+
+**Fixed** (`multicam_pipeline/cards/page/01-state.js`): `txBuild` keeps a
+real `api/projects` answer as `PROJS` (a bare `{}` from its catch is not an
+answer), and both root-switch sites reset `OPENFETCH=0` beside `PROJS=null`
+so the next draw asks at once. `tests/test_open_panel.js` (node, no
+server) pins both rules against the shipped page files. Deployed by a
+staged copy + atomic rename into
+`/mnt/tank/apps/ccsync-dashboard/cards-web/…/page/01-state.js` (previous
+file kept as `.bak-20260902`; `render_page` re-reads on mtime, so no
+restart) and verified in the served page. The next
+`install_dashboard_app.py` run re-ships the whole tree from the checkout,
+which carries the same bytes.
+
+Not a fault, noted while looking: the dashboard log's `X-Forwarded-For
+from 192.168.0.102, which is not in DASH_TRUSTED_PROXIES` line is real -
+Serve proxies to the LAN address, so the session cookie goes out without
+`Secure` and every browser shares one throttle bucket. The one-line cure is
+`tailscale serve --bg --https=9443 http://100.71.216.3:8480` (the address
+the trusted list already carries, and the Funnel line already uses);
+offered to the owner, not applied.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

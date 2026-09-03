@@ -10907,7 +10907,13 @@ original. A proxy whose neither stem exists is still broken - the exception
 widens what counts as a match, it does not stop the check. Four tests in
 `test_invariants.py` (a camera proxy pairs, a real orphan still fails, both
 spellings present, the suffix list is data). `docs/SELF_DIAGNOSIS.md` records
-the exception so the next suffix is a one-line addition.
+the exception so the next suffix is a one-line addition. **Follow-up
+2026-09-03:** once those 20 cleared on the live dashboard the cap revealed the
+next 22 subjects, all macOS AppleDouble resource forks a Mac left beside the
+proxies it copied over SMB (`2026-creator-profiles-season-1/Interviewees/Creator_Interviews/Proxy/._A001_05181238_C003.mp4`),
+so `_is_sidecar_junk` now skips any file whose basename starts with a dot -
+`._*` and `.DS_Store` alike - on both sides of the pairing, since a `._` file
+is not a proxy and can never have an original.
 
 ### CR-139 - three alert kinds fired on the studio's own healthy dashboard - FIXED in repo 2026-09-03 (dashboard 0.7.29)
 Three of the forty checks were findings about nothing, which is the way a
@@ -11033,8 +11039,11 @@ count means something again.
 
 Open for the owner, none of them code:
 
-* `machine_has_plan` for `alex/Razer` - tick a project on it, or mark it a
-  base rig (CR-28: a base rig can hold no tick).
+* ~~`machine_has_plan` for `alex/Razer`~~ - RESOLVED BY DECISION 2026-09-04
+  ("it should be fine for a computer to have no projects ticked (aka the
+  Razer). Not an error."): the invariant is informational now, reports ok and
+  names the computers with nothing ticked, and the open notice clears on the
+  next collector pass. Nothing to tick.
 * `release_key_backup` - the offline signing key has no recorded backup.
 * `restore_drill` - never run against a snapshot.
 * `alerts_sink` is `none`, which is what "3 alert(s) could not be delivered"

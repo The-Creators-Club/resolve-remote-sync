@@ -8,7 +8,7 @@ name = "ccsync-dashboard"
 # check_deploy_drift.ps1 read only __init__.py, so this drifted three releases
 # behind unnoticed. test_hardening.test_dashboard_version_does_not_drift is
 # the guard.
-version = "0.7.29"
+version = "0.7.30"
 description = "CC Sync fleet dashboard: per-project, per-editor sync status served off the NAS"
 requires-python = ">=3.12"
 dependencies = [

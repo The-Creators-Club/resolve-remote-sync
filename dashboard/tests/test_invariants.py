@@ -290,17 +290,37 @@ def test_distinct_identities_are_ok(conn):
 
 # --------------------------------------------------------- the other invariants
 
-def test_a_base_rig_needs_no_plan_but_an_editor_machine_does(conn):
+def test_a_machine_with_nothing_ticked_is_ok_and_is_named(conn):
+    """Owner decision 2026-09-04: a computer with no projects ticked (the
+    Razer) is a legitimate state, not an error. The check still counts and
+    still names it, so the row is worth reading, but it never breaks and so
+    never files a notice."""
+    dbmod.upsert_machine(conn, "alex", "BASE-RIG", NOW, machine_id="base")
+    dbmod.upsert_machine(conn, "alex", "RAZER", NOW, machine_id="razer")
+    dbmod.upsert_machine(conn, "ruskin", "DESKTOP-1", NOW, machine_id="desk")
+    conn.execute("INSERT INTO machine_state (editor_username, machine, reported_at, mode) "
+                 "VALUES ('alex', 'BASE-RIG', ?, 'base')", (NOW,))
+    dbmod.add_selection(conn, "ruskin", "ff5", "owen", NOW, machine="DESKTOP-1")
+
+    outcome = invariants._check_machine_has_plan(_ctx(conn))
+    assert outcome.state == dbmod.INVARIANT_OK
+    assert outcome.subjects == []
+    assert "3 computer(s) report" in outcome.detail
+    assert "1 has nothing ticked (RAZER)" in outcome.detail
+
+
+def test_a_base_rig_is_not_named_as_having_nothing_ticked(conn):
+    """A base rig holds no tick by design (CR-28), so it is not even
+    mentioned; a fleet where every computer has a plan says so."""
     dbmod.upsert_machine(conn, "alex", "BASE-RIG", NOW, machine_id="base")
     dbmod.upsert_machine(conn, "ruskin", "DESKTOP-1", NOW, machine_id="desk")
     conn.execute("INSERT INTO machine_state (editor_username, machine, reported_at, mode) "
                  "VALUES ('alex', 'BASE-RIG', ?, 'base')", (NOW,))
-    outcome = invariants._check_machine_has_plan(_ctx(conn))
-    assert outcome.state == dbmod.INVARIANT_BROKEN
-    assert [s[0] for s in outcome.subjects] == ["ruskin/DESKTOP-1"]
-
     dbmod.add_selection(conn, "ruskin", "ff5", "owen", NOW, machine="DESKTOP-1")
-    assert invariants._check_machine_has_plan(_ctx(conn)).state == dbmod.INVARIANT_OK
+
+    outcome = invariants._check_machine_has_plan(_ctx(conn))
+    assert outcome.state == dbmod.INVARIANT_OK
+    assert "nothing ticked" not in outcome.detail
 
 
 def test_a_package_floor_above_its_own_build_is_broken(conn):
@@ -398,6 +418,47 @@ def test_the_camera_proxy_suffix_matches_case_insensitively(conn):
         ("Day1/Proxy/C0007s03.mp4", "proxy", "mp4", 2, 1),
     ], "sig", 2, NOW)
     assert invariants._check_proxy_pairs(_ctx(conn)).state == dbmod.INVARIANT_OK
+
+
+def test_an_appledouble_sidecar_in_proxy_is_not_a_finding(conn):
+    """2026-09-03 (CR-138 follow-up): a Mac copied proxies over SMB and left a
+    `._<name>` resource fork beside each one, e.g. under
+    2026-creator-profiles-season-1/Interviewees/Creator_Interviews/Proxy/.
+    The inventory classifies by extension, so 22 of them read as orphaned
+    proxies and took the whole 20-item cap the moment the S03 subjects
+    cleared. A real orphan beside them is still reported."""
+    project_id = dbmod.upsert_project(conn, "ff5", "FF5", "/data/Projects/FF5", NOW)
+    dbmod.replace_nas_media(conn, project_id, [
+        ("Interviewees/A001_05181238_C003.mov", "original", "mov", 10, 1),
+        ("Interviewees/Proxy/A001_05181238_C003.mp4", "proxy", "mp4", 2, 1),
+        ("Interviewees/Proxy/._A001_05181238_C003.mp4", "proxy", "mp4", 4, 1),
+        ("Interviewees/Proxy/.DS_Store", "proxy", "", 6, 1),
+    ], "sig", 2, NOW)
+    assert invariants._check_proxy_pairs(_ctx(conn)).state == dbmod.INVARIANT_OK
+
+    dbmod.replace_nas_media(conn, project_id, [
+        ("Interviewees/A001_05181238_C003.mov", "original", "mov", 10, 1),
+        ("Interviewees/Proxy/A001_05181238_C003.mp4", "proxy", "mp4", 2, 1),
+        ("Interviewees/Proxy/._A001_05181238_C003.mp4", "proxy", "mp4", 4, 1),
+        ("Interviewees/Proxy/GONE.mp4", "proxy", "mp4", 2, 1),
+    ], "sig2", 2, NOW)
+    outcome = invariants._check_proxy_pairs(_ctx(conn))
+    assert outcome.state == dbmod.INVARIANT_BROKEN
+    assert [s[0] for s in outcome.subjects] == ["ff5/Interviewees/Proxy/GONE.mp4"]
+
+
+def test_an_appledouble_original_cannot_pair_a_proxy(conn):
+    """The skip is on BOTH sides: a `._` sidecar filed as an original must not
+    become the missing original for a proxy that really has none."""
+    project_id = dbmod.upsert_project(conn, "ff5", "FF5", "/data/Projects/FF5", NOW)
+    dbmod.replace_nas_media(conn, project_id, [
+        ("Day1/._A001.mov", "original", "mov", 4, 1),
+        ("Day1/Proxy/._A001.mp4", "proxy", "mp4", 4, 1),
+        ("Day1/Proxy/A001.mp4", "proxy", "mp4", 2, 1),
+    ], "sig", 2, NOW)
+    outcome = invariants._check_proxy_pairs(_ctx(conn))
+    assert outcome.state == dbmod.INVARIANT_BROKEN
+    assert [s[0] for s in outcome.subjects] == ["ff5/Day1/Proxy/A001.mp4"]
 
 
 def test_project_markers_are_not_checked_without_a_tree(conn):

@@ -276,12 +276,22 @@ def _check_plan_has_share(ctx: Ctx) -> Outcome:
 
 
 def _check_machine_has_plan(ctx: Ctx) -> Outcome:
-    """SYS-9 invariant 2: a computer that reports has something to sync.
+    """SYS-9 invariant 2: what each computer that reports is set to sync.
+
+    NEVER BROKEN (owner decision, 2026-09-04: "it should be fine for a
+    computer to have no projects ticked (aka the Razer). Not an error.").
+    An empty plan is a legitimate state - a spare machine, a laptop between
+    shoots, a computer that reports so the fleet page can see it and is
+    deliberately syncing nothing - and this check used to file a notice for
+    alex/Razer every pass about a setting nobody intended to change.
+
+    The check stays registered and keeps counting, because the count is the
+    evidence that makes a green row mean something, and because a registered
+    kind with nothing writing it was this panel's own first bug. It reports
+    ok and names the computers with nothing ticked, informationally.
 
     A base rig holds no tick by design (CR-28) and the unassigned bucket is a
-    real plan, so both count as satisfied. What is left is a computer that
-    reports every minute, appears on the grid, and is syncing nothing at all
-    because nobody ever ticked anything for it.
+    real plan, so neither is even worth naming.
     """
     machines = ctx.machines()
     if not machines:
@@ -291,18 +301,20 @@ def _check_machine_has_plan(ctx: Ctx) -> Outcome:
     planned: set[tuple[str, str]] = set()
     for pairs in by_slug.values():
         planned.update(pairs)
-    bad: list[tuple[str, str]] = []
+    empty: list[str] = []
     for row in machines:
         key = (row["editor_username"], row["machine"])
         if modes.get(key) == "base":
             continue
         if key in planned:
             continue
-        bad.append((f"{key[0]}/{key[1]}",
-                    "no project ticked for this computer and it is not a base rig"))
-    if bad:
-        return broken(bad, f"{len(bad)} of {len(machines)} computer(s) have no plan")
-    return ok(f"{len(machines)} computer(s), each with a plan or a base-rig role")
+        empty.append(str(key[1] or key[0]))
+    summary = f"{len(machines)} computer(s) report"
+    if empty:
+        summary += f"; {len(empty)} has nothing ticked ({', '.join(sorted(empty))})"
+    else:
+        summary += ", each with a plan or a base-rig role"
+    return ok(summary)
 
 
 def _check_one_identity_per_computer(ctx: Ctx) -> Outcome:
@@ -608,6 +620,26 @@ def _proxy_stem_candidates(stem: str) -> list[str]:
     return candidates
 
 
+def _is_sidecar_junk(rel: str) -> bool:
+    """True for a file the OS wrote beside the media, not a media file.
+
+    macOS writes an AppleDouble `._<name>` resource fork next to every file it
+    copies onto a filesystem that cannot carry the fork - which SMB to the NAS
+    cannot. The inventory classifies by EXTENSION, so
+    `2026-creator-profiles-season-1/Interviewees/Creator_Interviews/Proxy/._A001_05181238_C003.mp4`
+    is filed as a proxy; it has no original because it is not a proxy, and it
+    never will have one. Warning on it is noise of exactly the shape the owner
+    asked to stop (2026-09-03, CR-138: 22 such notices took the whole 20-item
+    cap the moment the Sony S03 subjects cleared).
+
+    Dotfiles generally go with it (`.DS_Store` and friends): the inventory has
+    no junk predicate of its own to reuse, and this check is the thing that
+    warns, so the skip lives here rather than in the walk.
+    """
+    name = rel.rsplit("/", 1)[-1]
+    return name.startswith(".")
+
+
 def _check_proxy_pairs(ctx: Ctx) -> Outcome:
     """SYS-9 invariant 10: a proxy has the original it was made from.
 
@@ -627,6 +659,9 @@ def _check_proxy_pairs(ctx: Ctx) -> Outcome:
     `CAMERA_PROXY_SUFFIXES` stripped, case-insensitively. A proxy that
     matches under NEITHER stem is still broken: that is footage really gone,
     which is the whole point of the check.
+
+    Files the OS wrote (`._*`, `.DS_Store`) are skipped on both sides - see
+    `_is_sidecar_junk`.
     """
     projects = list(ctx.conn.execute(
         "SELECT id, slug FROM projects WHERE active=1 ORDER BY slug"))
@@ -645,6 +680,10 @@ def _check_proxy_pairs(ctx: Ctx) -> Outcome:
         proxies: list[str] = []
         for row in rows:
             rel = str(row["rel_path"] or "")
+            if _is_sidecar_junk(rel):
+                # Not a proxy and not an original: dropped from both sides so
+                # it is neither warned about nor able to answer for a real one.
+                continue
             parts = rel.split("/")
             stem = parts[-1].rsplit(".", 1)[0] if parts else ""
             if row["kind"] == "proxy":
@@ -695,11 +734,13 @@ INVARIANTS: tuple[Invariant, ...] = (
         _check_plan_has_share),
     Invariant(
         "machine_has_plan", 2,
-        "every computer that reports has something to sync",
-        "A computer with no projects ticked for it sits on the fleet page looking "
-        "healthy and syncs nothing at all.",
-        "Tick at least one project for that computer on the FLEET page, or set it "
-        "to base rig in its own CC Sync settings if it works straight off the server.",
+        "what each computer that reports is set to sync",
+        "A computer with nothing ticked syncs nothing, which is a fine way for a "
+        "spare machine or a laptop between shoots to sit. This is here to be read, "
+        "not acted on: it never reports a problem.",
+        "Nothing to do. If a computer should be syncing, tick projects for it on "
+        "the FLEET page, or set it to base rig in its own CC Sync settings if it "
+        "works straight off the server.",
         _check_machine_has_plan, severity="warn"),
     Invariant(
         "one_identity_per_computer", 3,

@@ -539,7 +539,7 @@ Numbered as SYS-9 numbers them.
 | # | key | the fact | state today |
 |---|---|---|---|
 | 1 | `plan_has_share` | every full tick is a Syncthing share to that computer's device id | checked (needs one completed `config` pass in this process) |
-| 2 | `machine_has_plan` | every reporting computer has a plan, inherits the unassigned bucket, or is a base rig (CR-28) | checked, `warn` |
+| 2 | `machine_has_plan` | what each reporting computer is set to sync: a plan, the unassigned bucket, a base rig (CR-28), or nothing at all | checked, INFORMATIONAL - never broken (owner, 2026-09-04: an empty plan is a legitimate state for a spare or a laptop between shoots), so it files no notice; the detail names the computers with nothing ticked |
 | 3 | `one_identity_per_computer` | one `machine_id` and one Syncthing device id per computer, INCLUDING the disk-clone signature | checked |
 | 4 | `project_markers` | every active project's marker exists and its slug matches the row | checked when a tree is mounted |
 | 5 | `tree_markers` | the tree root still looks like the tree, rather than an empty mount | checked when a tree is mounted |

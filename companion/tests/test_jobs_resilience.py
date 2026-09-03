@@ -43,6 +43,14 @@ class BlippingDashboard:
     def __init__(self, job=None):
         self.job = job
         self.beats = 0
+        # Set by the SECOND beat, which is the one the beater only gets to
+        # send if the first one's raise did not end its thread. A test that
+        # waits for this instead of for a wall-clock interval is the same
+        # test on a fast machine and on a hosted macOS runner where a 0.02 s
+        # Event.wait really costs a tenth of a second (release-macos run
+        # 33770397011, 2026-09-03: one beat fitted inside the 0.3 s job, and
+        # `beats > 1` failed on a build with nothing wrong with it).
+        self.beat_after_a_raise = threading.Event()
         self.results: list[dict] = []
 
     def request(self, method, url, body, headers, timeout):
@@ -52,6 +60,8 @@ class BlippingDashboard:
             return 200, {"job": job}
         if suffix.endswith("/heartbeat"):
             self.beats += 1
+            if self.beats > 1:
+                self.beat_after_a_raise.set()
             raise OSError("[Errno 111] Connection refused")
         if suffix.endswith("/result"):
             self.results.append(body)
@@ -146,13 +156,22 @@ def test_a_blip_does_not_kill_the_media_beater(tmp_path, monkeypatch):
     in a frozen windowed build the excepthook writes to a stderr that is not
     there."""
     monkeypatch.setattr(runner_mod, "HEARTBEAT_SECONDS", 0.02)
+    dash_holder: dict = {}
 
     class Slow:
+        """An encode that lasts exactly as long as it takes the beater to beat
+        twice. It used to sleep 0.3 s and hope, which is a race the test can
+        lose on a slow machine without the product being wrong: the beater is
+        a real thread on a real clock, and how many 0.02 s waits fit into
+        0.3 s is the runner's business, not the runner-under-test's."""
+
         def __init__(self, **kw):
             self.kw = kw
 
         def run(self, kind, source, out_dir, stem):
-            time.sleep(0.3)
+            # Generous, so a beater thread that really did die still fails the
+            # test in seconds rather than hanging the suite.
+            dash_holder["dash"].beat_after_a_raise.wait(5.0)
             return {"files": [f"{stem}.480p.mp4"], "seconds": 1.0,
                     "skipped": False}
 
@@ -165,12 +184,17 @@ def test_a_blip_does_not_kill_the_media_beater(tmp_path, monkeypatch):
            "inputs": {"root": "media", "rel_path": "FF5/Interview.mp4",
                       "out_root": "vault", "out_rel": "V/Ep"}}
     dash = BlippingDashboard(job)
+    dash_holder["dash"] = dash
     runner = _runner(tmp_path, dash, jobs_media_root=str(media))
     runner._capabilities_fn = lambda: {"ffmpeg": True, "ffprobe": True}
     runner.note_report_reply({"commands": {"jobs": {"offered": [9]}}})
     runner.tick()
     # More than one: the first raise used to end the thread for the rest of
-    # the job, so exactly one beat was ever attempted.
+    # the job, so exactly one beat was ever attempted. `Slow.run` returned
+    # either because the second beat arrived or because the 5 s ceiling ran
+    # out, and this is what tells those two apart.
+    assert dash.beat_after_a_raise.is_set(), (
+        "the beater sent no beat after the one that raised")
     assert dash.beats > 1
     assert dash.results[-1]["ok"] is True
 

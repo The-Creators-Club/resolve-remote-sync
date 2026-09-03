@@ -207,13 +207,15 @@ class TestResolveMappingWarning:
 
 class TestForbiddenDrive:
     def test_the_sites_drive_and_p_are_both_refused(self, monkeypatch):
+        # platform named: Windows semantics, and the macOS CI runner runs this
+        # suite too (release-macos run 33765961728, 2026-09-03).
         monkeypatch.setattr(steps.sys, "frozen", True, raising=False)
         monkeypatch.setattr(steps.sys, "executable", r"Q:\Assets\Software\onboard.exe")
-        assert steps.installer_on_forbidden_drive(Q_SITE) is True
+        assert steps.installer_on_forbidden_drive(Q_SITE, platform="win32") is True
         monkeypatch.setattr(steps.sys, "executable", r"P:\Assets\Software\onboard.exe")
-        assert steps.installer_on_forbidden_drive(Q_SITE) is True
+        assert steps.installer_on_forbidden_drive(Q_SITE, platform="win32") is True
         monkeypatch.setattr(steps.sys, "executable", r"C:\Users\me\Desktop\onboard.exe")
-        assert steps.installer_on_forbidden_drive(Q_SITE) is False
+        assert steps.installer_on_forbidden_drive(Q_SITE, platform="win32") is False
 
 
 class TestWizardPrefillIsRecomputedAfterTheManifestArrives:

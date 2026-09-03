@@ -650,15 +650,18 @@ def test_launch_companion_alive_dead_and_error(tmp_path):
 
 
 def test_installer_on_forbidden_drive_only_when_frozen(monkeypatch):
+    # Windows semantics (drive letters, UNC), named as such: on the macOS CI
+    # runner sys.platform is darwin and the darwin branch would take these
+    # paths (release-macos run 33765961728, 2026-09-03).
     monkeypatch.setattr(steps.sys, "frozen", False, raising=False)
-    assert steps.installer_on_forbidden_drive() is False
+    assert steps.installer_on_forbidden_drive(platform="win32") is False
     monkeypatch.setattr(steps.sys, "frozen", True, raising=False)
     monkeypatch.setattr(steps.sys, "executable", "P:\\onboard.exe")
-    assert steps.installer_on_forbidden_drive() is True
+    assert steps.installer_on_forbidden_drive(platform="win32") is True
     monkeypatch.setattr(steps.sys, "executable", "\\\\10.0.0.6\\share\\onboard.exe")
-    assert steps.installer_on_forbidden_drive() is True
+    assert steps.installer_on_forbidden_drive(platform="win32") is True
     monkeypatch.setattr(steps.sys, "executable", "C:\\Users\\x\\Desktop\\onboard.exe")
-    assert steps.installer_on_forbidden_drive() is False
+    assert steps.installer_on_forbidden_drive(platform="win32") is False
 
 
 # -- "is P: OURS?" before the unmount (COMMERCIAL_READINESS.md item 9,

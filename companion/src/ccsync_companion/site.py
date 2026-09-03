@@ -402,6 +402,39 @@ def brand_logo(site: Optional[dict[str, Any]] = None,
     return str(site.get("brand_logo") or "").strip()
 
 
+def notify_title(suffix: str = "") -> str:
+    """The title of every balloon, toast and modal this companion shows
+    (UX-4, sweep 2026-09-04).
+
+    Fifty-one of them were titled either "ccsync-companion:" (a package name)
+    or "CCSYNC.EXE:" (a filename), in TWO vocabularies, on a product that
+    went to real trouble to brand the drive and the dashboard header. The
+    org's short name when the manifest gives one, the product's name
+    otherwise - never a build artefact's filename.
+
+    Deliberately not memoised beyond _brand_site's stat cache: a title is
+    rendered once per notification, and a re-provisioned site must show its
+    own name on the next one."""
+    brand = org_short() or product_name()
+    return f"{brand}: {suffix}" if suffix else brand
+
+
+def server_phrase(site: Optional[dict[str, Any]] = None,
+                  path: Optional[Path] = None) -> str:
+    """"the Creators Club server" / "the server" - what the editor's copy
+    calls the machine their footage lives on (SYNC-114, APP-10, sweep
+    2026-09-04).
+
+    Two tray dialogs said "your TrueNAS username and password". That is a
+    storage vendor's name in an editor's sentence: false on the Synology
+    target (docs/TENANCY.md, the 2026-08-17 port), and the same class of leak
+    as a customer's name in code. Named after the org when the manifest names
+    one, and NEUTRAL otherwise - never after whatever hardware the vendor
+    happened to sell this site."""
+    owner = org_short(site, path)
+    return f"the {owner} server" if owner else "the server"
+
+
 def drive_phrase(capitalised: bool = False,
                  site: Optional[dict[str, Any]] = None,
                  path: Optional[Path] = None) -> str:

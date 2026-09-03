@@ -26,8 +26,15 @@
 {% endif %}
 {% set pickers = selected_by.get(project.slug, []) if selected_by is defined else [] %}
 {% set modes = selected_modes.get(project.slug, {}) if selected_modes is defined else {} %}
+{# UX-17 (usability sweep 2026-09-03): these chips read [ UP ] and
+   [ UP ON ONE ], two of four spellings of upload-only in one dashboard, on
+   the pages an admin scans. Upload-only is the mode with the largest
+   consequence in the product (lane A alone, no share, no proxies down), and
+   a two-letter chip beside a tick is not where that belongs. The full
+   sentence stays in the title; the chip is no longer the abbreviation of
+   its own tooltip. #}
 <div class="mono-sm">SELECTED BY:
-  {% for e in pickers %}<span class="who">{{ e }}</span>{% if modes.get(e) == "upload_only" %} <span class="chip amber" title="upload only: this editor's computer sends its video originals to the server and downloads nothing">[ UP ]</span>{% elif modes.get(e) == "mixed" %} <span class="chip amber" title="upload only on one of this editor's computers, a full sync on another: see Settings, Assignments">[ UP ON ONE ]</span>{% endif %}{{ ", " if not loop.last }}{% else %}<span class="muted">nobody (not syncing to any editor)</span>{% endfor %}
+  {% for e in pickers %}<span class="who">{{ e }}</span>{% if modes.get(e) == "upload_only" %} <span class="chip amber" title="upload only: this editor's computer sends its video originals to the server and downloads nothing">[ UPLOAD ONLY ]</span>{% elif modes.get(e) == "mixed" %} <span class="chip amber" title="upload only on one of this editor's computers, a full sync on another: see Settings, Assignments">[ UPLOAD ONLY ON ONE COMPUTER ]</span>{% endif %}{{ ", " if not loop.last }}{% else %}<span class="muted">nobody (not syncing to any editor)</span>{% endfor %}
   {% set tick_for = tick_editor if tick_editor is defined and tick_editor else session_user %}
   {% if tick_for %}
     {# Target ONLY this fragment's own wrapper: swapping "closest main" used to
@@ -185,7 +192,7 @@
   {% set _ = awaiting.append((m, t)) %}
 {% endfor %}{% endfor %}
 {% if awaiting %}
-<div class="mono-sm">MOVES AWAITING MACHINES:
+<div class="mono-sm">MOVES AWAITING COMPUTERS:
   {% for m, t in awaiting %}
     <div class="link-row">
       {% if t.expired_at %}<span class="chip red">[ NOT APPLIED - THIS COMPUTER MAY RE-UPLOAD THE OLD PATH ]</span>
@@ -281,8 +288,8 @@
       {% endif %}
       <td class="mono" data-label="MEDIA">
         {% if e.media %}
-          <span title="camera originals on this machine's disk / on the NAS">{{ e.media.n_originals }}/{{ project.nas_media.n_originals }} orig</span>
-          · <span title="proxies on this machine's disk / on the NAS">{{ e.media.n_proxies }}/{{ project.nas_media.n_proxies }} proxy</span>
+          <span title="camera originals on this computer's disk / on the NAS">{{ e.media.n_originals }}/{{ project.nas_media.n_originals }} orig</span>
+          · <span title="proxies on this computer's disk / on the NAS">{{ e.media.n_proxies }}/{{ project.nas_media.n_proxies }} proxy</span>
         {% else %}<span class="muted" title="no media manifest reported yet">-</span>{% endif %}
       </td>
       <td class="lane-cell" data-label="LANES">

@@ -32,7 +32,7 @@ from typing import Any, Optional
 
 from . import (
     canon, library, proxy_relink, resolve_journal, resolve_prefs, script_server,
-    ui_state,
+    ui_copy, ui_state,
 )
 
 log = logging.getLogger("ccsync.resolve")
@@ -451,10 +451,13 @@ STARTING_MESSAGE = "DaVinci Resolve is starting up"
 # three Resolve restarts changed nothing; companion-then-Resolve connected
 # first try). The companion now restarts itself when its Resolve goes away
 # (app._maybe_recover_stale_bridge), so this advice is the manual fallback.
+# UX-1: the route through ui_copy. The menu row this names is the LAST row
+# of the ten-item layout, and it is the one instruction here an editor cannot
+# work out for themselves.
 NO_SCRIPTING_MESSAGE = (
     "DaVinci Resolve is running but isn't accepting scripting connections. "
     "Quit and reopen Resolve. If that does not help, also restart the companion "
-    "(Tray > Quit CCSync, then relaunch it) before reopening Resolve."
+    f"({ui_copy.QUIT}, then relaunch it) before reopening Resolve."
 )
 # No script server and a Resolve process: for the first minutes that is a
 # Resolve launching (the server is spawned 90-470 s in) or shutting down
@@ -2229,7 +2232,7 @@ def replace_clip(media_pool_item, new_path: str, tries: int = 3, *,
         "ok": False,
         "message": (
             "Copied the file in, but Resolve wouldn't relink it. Close the clip's "
-            "timeline and use Tray > Settings > SCAN WHOLE PROJECT again."
+            f"timeline and use {ui_copy.SCAN_WHOLE_PROJECT} again."
         ),
     }
 

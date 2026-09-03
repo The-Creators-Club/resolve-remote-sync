@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}CC SYNC: OFFLINE{% endblock %}
+{% block title %}{{ brand_org | upper }}: OFFLINE{% endblock %}
 {# The page the service worker paints when a navigation cannot reach the
    server (MOBILE_PLAN.md 4 M4, 2026-08-30). It is PRECACHED, so it must say
    nothing that could be stale: no counts, no fleet state, no name. The retry

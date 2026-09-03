@@ -316,7 +316,7 @@ def test_the_sentence_is_on_the_fleet_grid(env):
     page = client.get("/")
     assert page.status_code == 200
     assert "Not syncing: the sync drive is not there on this computer" in page.text
-    assert "[ ASK THIS MACHINE WHY ]" in page.text
+    assert "[ ASK THIS COMPUTER WHY ]" in page.text  # UX-16 (2026-09-03)
 
 
 def test_the_admin_partial_shows_the_newest_bundle_per_machine(env):
@@ -345,7 +345,7 @@ def test_the_ask_button_becomes_asked(env):
                        data={"editor": "leso", "machine": "LESO-MBP"})
     assert resp.status_code == 200
     assert "[ ASKED WHY ]" in resp.text
-    assert "[ ASK THIS MACHINE WHY ]" not in resp.text
+    assert "[ ASK THIS COMPUTER WHY ]" not in resp.text  # UX-16 (2026-09-03)
 
 
 def test_the_contracts_editor_key_is_accepted_too(env):

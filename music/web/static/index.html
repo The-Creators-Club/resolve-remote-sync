@@ -49,6 +49,11 @@
   <aside id="filters" class="filter-rail">
     <section>
       <h2>Feel</h2>
+      <!-- MUSIC-16 (2026-09-03): the four sliders are mutually exclusive - the
+           API takes ONE axis - and moving a second one silently zeroed the
+           other three with no hint anywhere. The rule is now written where
+           the surprise happened. -->
+      <p class="axis-hint muted">One at a time: moving a slider clears the others.</p>
       <div id="axes"></div>
     </section>
     <section>

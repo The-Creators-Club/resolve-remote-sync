@@ -1101,7 +1101,10 @@ def _known_editors(ctx: SetupContext) -> list[str]:
 def _check_editors(ctx: SetupContext) -> TaskState:
     names = _known_editors(ctx)
     if not names:
-        return TaskState(status="todo", detail="no editors yet: Users page, add one")
+        # UX-7: every task detail is a next action, so it names a page that
+        # exists by the name the nav gives it.
+        return TaskState(status="todo",
+                         detail="no editors yet: open Settings, then USERS, and add one")
     shown = ", ".join(names[:5])
     if len(names) > 5:
         shown += f", and {len(names) - 5} more"
@@ -1142,10 +1145,16 @@ def _check_software(ctx: SetupContext) -> TaskState:
                          detail=f"could not read the packages table: {_one_line(exc)}")
     published = [p for p, v in current.items() if v]
     if not published:
+        # UX-7 / REL-10 (usability sweep 2026-09-03): this named the Users
+        # page, which has held no packages table since the 2026-08-18 Settings
+        # redesign (ui.page_admin_packages owns it). It is the only next
+        # action a brand-new customer gets for "your editors have nothing to
+        # install", and it sent them to a page of accounts and Syncthing
+        # devices, where they stopped.
         return TaskState(
             status="todo",
-            detail="no companion build is current for any platform: publish one on the Users "
-                   "page, under PUBLISHED PACKAGES",
+            detail="no companion build is current for any platform: open Settings, then "
+                   "PACKAGES, and publish one under [ AVAILABLE FROM THE VENDOR ]",
         )
     parts = [f"{p} {v} current" if v else f"{p}: none published" for p, v in current.items()]
     # warn, not ok: half a fleet cannot upgrade itself. Still optional, so it

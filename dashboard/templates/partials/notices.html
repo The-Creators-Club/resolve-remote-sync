@@ -37,8 +37,15 @@
 </section>
 {% else %}
 <section class="admin-users-box" id="server-notices" style="margin-bottom:1rem">
+  {# UX-6 (usability sweep 2026-09-03): this used to read "Every check below
+     ran and found nothing wrong" over a panel that renders [ NOT CHECKED ]
+     for every kind nothing in this build has ever evaluated. That is the
+     unchecked-reading-as-fine failure the checks panel was built to end,
+     printed in the headline above it. The counts come from _notices_context,
+     off the same registry and the same evidence set the panel uses. #}
   <div class="side-head">[ PROBLEMS THE SERVER FOUND ]
-    <span class="muted">nothing. Every check below ran and found nothing wrong.</span></div>
+    <span class="muted">nothing. {{ notice_checks_ran }} of {{ notice_checks_total }} checks ran and found nothing wrong.</span>
+    {% if notice_checks_never_ran %}<span class="chip amber" title="a check registered with nothing behind it yet reports neither OK nor a problem. Open the list below to see which.">[ {{ notice_checks_never_ran }} NEVER RAN ]</span>{% endif %}</div>
   {% if notice_error %}
     <div class="banner">▲ {{ notice_error }}</div>
   {% endif %}

@@ -380,3 +380,13 @@ python ../../server/publish_db.py --which broll
 
 `publish_db.py`, never a file copy: the container holds `broll.db` open
 read-write in WAL mode. See `docs/BACKUP_RESTORE.md`.
+
+**The live copy holds rows this one has never seen** (BROLL-1, 2026-09-04):
+every clip the fleet has drag-and-drop ingested since you pulled, and every
+`ingest_batches` row. `publish_db.py` drains them out before the rename and
+merges them back after it, and refuses to publish if it could not take that
+drain - so read what it prints rather than assuming a publish is a file swap.
+Check the b-roll ingest panel for a running batch first: a batch that starts
+between the drain and the rename is the one thing the drain cannot see.
+`docs/INDEXERS.md`, "Publishing broll.db without deleting what the fleet
+ingested".

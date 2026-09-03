@@ -20,6 +20,7 @@ no longer a dependency, so it does nothing unless someone installs it by hand.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -38,6 +39,7 @@ from . import reporter as reporter_mod
 from . import root_guard as root_guard_mod
 from . import resolve_bridge
 from . import site as site_mod
+from . import ui_copy
 from . import ui_dispatch
 from . import upgrade as upgrade_mod
 from . import ytdl_cookies
@@ -146,8 +148,23 @@ def _is_base_rig(app: "CompanionApp") -> bool:
         return False
 
 
+# APP-1 (usability sweep 2026-09-04): which `sync_guard.blocked` reasons mean
+# something is BROKEN rather than merely stopped. The three below are the ones
+# an editor cannot resolve by looking at the machine: a clock that is out makes
+# lane B exit 0 having transferred nothing, a restarted lane and a dead sync
+# engine both look exactly like "idle" from every other signal the icon reads.
+_BLOCKED_RED_REASONS = frozenset({"clock_skew", "lane_stalled", "syncthing_down"})
+# ...and the ones that are vacuously true on the base rig, whose tree IS the
+# server tree. Colouring the base rig amber for these would re-open the
+# 2026-08-19 owner's call below (a permanent amber teaches the admin to ignore
+# amber); every other reason still colours it.
+_BLOCKED_BASE_RIG_EXEMPT = frozenset({"no_selection", "folders_unfiltered"})
+
+
 def compute_overall_color(
-    statuses: list[LaneStatus], app: "CompanionApp | None" = None
+    statuses: list[LaneStatus],
+    app: "CompanionApp | None" = None,
+    guard: Optional[dict] = None,
 ) -> str:
     """red (any lane error) / orange (not syncing, or syncing) / green.
 
@@ -161,6 +178,15 @@ def compute_overall_color(
 
     ONE carve-out (2026-08-19): on the base rig "caught up" is vacuously
     true -- see the sync_enabled branch below.
+
+    `guard` is the sync_guard snapshot (APP-1, sweep 2026-09-04). Five things
+    used to decide this colour and none of them was the one place that already
+    knows why nothing is syncing: a machine whose reporter had been 401'd for a
+    week, whose clock was 40 minutes out, or whose lane C engine was dead sat
+    at a steady green above a tooltip saying "up to date", with the reason
+    reachable only by right-clicking. Optional so the four-arg-free callers in
+    the tests and any older caller keep working; absent means "no guard read",
+    never "nothing is blocking".
     """
     if any(s.state == STATE_ERROR for s in statuses):
         return "red"
@@ -191,6 +217,22 @@ def compute_overall_color(
         except Exception:
             log.exception("compute_overall_color: app state read failed")
             return "orange"
+    # APP-1 (2026-09-04). AFTER the app branches, because every reason those
+    # cover (paused, not signed in, drive gone) also appears in _BLOCKED_ORDER
+    # and they must not answer twice; BEFORE "a lane is moving bytes", because
+    # a blocked machine transferring one leftover file is still blocked.
+    blocked_reason = ""
+    try:
+        blocked = (guard or {}).get("blocked") or {}
+        if isinstance(blocked, dict):
+            blocked_reason = str(blocked.get("reason") or "")
+    except Exception:
+        log.exception("compute_overall_color: guard read failed")
+        blocked_reason = ""
+    if blocked_reason:
+        if not (blocked_reason in _BLOCKED_BASE_RIG_EXEMPT
+                and app is not None and _is_base_rig(app)):
+            return "red" if blocked_reason in _BLOCKED_RED_REASONS else "orange"
     if any(s.state == STATE_SYNCING for s in statuses):
         return "orange"
     return "green"
@@ -439,7 +481,24 @@ def human_duration(seconds: Optional[float]) -> str:
     return f"~{secs // 3600}h {(secs % 3600) // 60}m"
 
 
-def classify_lane_error(last_error: Optional[str], root_absent: bool = False) -> str:
+def drive_absent_phrase(root_state: Any = "") -> str:
+    """"drive disconnected" / "the drive is mounted at the wrong place" /
+    "the drive is not answering" - the parenthetical every line uses while
+    the tree is gone (SYNC-105, sweep 2026-09-04).
+
+    One helper because the editor gets all of them within a second (balloon,
+    tray line, tooltip, three lane lines), and on ROOT_MISPLACED five of the
+    six said "disconnected" about a drive that is plugged in."""
+    text = str(root_state or "")
+    if text == root_guard_mod.ROOT_MISPLACED:
+        return "the drive is mounted at the wrong place"
+    if text == root_guard_mod.ROOT_NOT_ANSWERING:
+        return "the drive is not answering"
+    return "drive disconnected"
+
+
+def classify_lane_error(last_error: Optional[str], root_absent: bool = False,
+                        root_state: Any = "") -> str:
     """Turn rclone's verbatim stderr tail into something actionable.
 
     rclone_lane surfaces f"rclone exited {rc}" plus the last 300 chars of
@@ -456,11 +515,18 @@ def classify_lane_error(last_error: Optional[str], root_absent: bool = False) ->
         # ("untick it on the dashboard") would unshare a project that is
         # perfectly intact, sitting on a drive in the editor's bag. Nothing in
         # here is a reason to act; plugging the drive back in is.
+        if str(root_state) == root_guard_mod.ROOT_MISPLACED:
+            # SYNC-105: it IS plugged in. "Plug it back in" is advice that
+            # reproduces the fault - the empty folder left behind has to go
+            # first, which is what the dialog says.
+            return (f"{site_mod.drive_phrase(capitalised=True)} is mounted at the "
+                    f"wrong place, so syncing is paused. Nothing was deleted. See "
+                    f"the CCSync window for what to do.")
         return (f"{site_mod.drive_phrase(capitalised=True)} is disconnected, so "
                 f"syncing is paused. Plug it back in and it resumes on its own "
                 f"-- nothing was deleted.")
     if not text:
-        return "Something went wrong. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN."
+        return f"Something went wrong. {ui_copy.DIAGNOSTICS}."
     if "sync engine" in text:
         # SYNC-17 (2026-08-18): the supervisor's own sentence, already
         # written for an editor ("the sync engine (Syncthing) is not running
@@ -475,26 +541,35 @@ def classify_lane_error(last_error: Optional[str], root_absent: bool = False) ->
         # construct). Say the same thing, minus the promise to fix it.
         return ("The sync engine (Syncthing) is not running on this machine, so "
                 "audio, graphics, subtitles and project files are not syncing. "
-                "Restart this machine, or Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.")
+                f"Restart this machine, or {ui_copy.DIAGNOSTICS}.")
     if "marker missing" in text:
         # The editor deleted a project's local folder while it was still
         # ticked -- routine when cycling projects, and nothing was lost
         # (the server copy is untouched). Say what to do, not PROBLEM.
         return ("A project folder was deleted on this machine while still ticked. "
-                "Untick it on the dashboard, or use Tray > Settings > REMOVE '<project>'.")
+                f"Untick it on the dashboard, or use {ui_copy.remove_project()}.")
+    if "made no progress" in text or "did not exit" in text:
+        # SYNC-104 (sweep 2026-09-04): the SYNC-1 stall watchdog kills the
+        # wedged child and writes its own sentence into last_error. No branch
+        # matched it, so the lane line said "Something went wrong" while
+        # _stalled_line three rows below told the true story. Same words as
+        # _stalled_line, per this repo's "the tray line, the chip and the log
+        # agree word for word" rule.
+        return ("This lane stopped moving and was restarted. If it keeps "
+                "happening, check the drive is connected.")
     if any(k in text for k in ("no space", "enospc", "disk full", "not enough space")):
         return "Your disk is full. Free up space and it will resume."
     if any(k in text for k in (
         "permission denied", "auth", "handshake", "publickey", "unable to authenticate",
     )):
         return ("The server rejected this machine's login. "
-                "Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.")
+                f"{ui_copy.DIAGNOSTICS}.")
     if any(k in text for k in (
         "timeout", "timed out", "no route", "connection refused", "connection reset",
         "network", "unreachable", "dial tcp", "lookup", "eof",
     )):
         return "Can't reach the server. Check the Tailscale tray icon is connected."
-    return "Something went wrong. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN."
+    return f"Something went wrong. {ui_copy.DIAGNOSTICS}."
 
 
 def _format_lane_line(status: LaneStatus, app: "CompanionApp | None" = None) -> str:
@@ -528,7 +603,8 @@ def _format_lane_line(status: LaneStatus, app: "CompanionApp | None" = None) -> 
 
 
 def _format_lane_line_from(
-    status: LaneStatus, paused: bool, problems: bool, root_absent: bool = False
+    status: LaneStatus, paused: bool, problems: bool, root_absent: bool = False,
+    root_state: Any = "",
 ) -> str:
     """_format_lane_line with the app state already snapshotted -- what the
     menu build actually uses, so rendering never calls back into app."""
@@ -542,14 +618,16 @@ def _format_lane_line_from(
     # "this machine isn't set up" would send them to their admin instead of
     # to the cable.
     if root_absent:
-        return f"{label}: PAUSED (drive disconnected)"
+        # SYNC-105: which of the three ways it is gone, not "disconnected"
+        # for all of them.
+        return f"{label}: PAUSED ({drive_absent_phrase(root_state)})"
     if problems:
         return f"{label}: NOT SYNCING (this machine isn't set up yet)"
     if paused:
         return f"{label}: PAUSED"
     if status.state == STATE_ERROR:
         return (f"{label}: PROBLEM. "
-                f"{classify_lane_error(status.last_error, root_absent=root_absent)}")
+                f"{classify_lane_error(status.last_error, root_absent=root_absent, root_state=root_state)}")
     detail = str(status.detail or "")
     if "sign in required" in detail.lower():
         return f"{label}: NOT SYNCING (sign in first)"
@@ -783,7 +861,7 @@ def _schedule_icon_placement_check(app: "CompanionApp", icon, delay: float = 3.0
 
 def _notify(app: "CompanionApp", msg: str) -> None:
     try:
-        app._notify_tray(msg, "ccsync-companion")
+        app._notify_tray(msg, site_mod.notify_title())
     except Exception:
         log.debug("tray notify failed")
 
@@ -833,7 +911,7 @@ def _build_sign_in_dialog(app: "CompanionApp") -> None:
         log.warning("sign-in dialog failed to open (%s)", exc)
         _notify(app, "Couldn't open the sign-in window. Restart CCSync and try again.")
         return
-    root.title("CCSYNC.EXE: sign in")
+    root.title(site_mod.notify_title("sign in"))
     theme.apply_window_icon(tk, root)
     root.attributes("-topmost", True)
     root.configure(bg=theme.BG, padx=18, pady=14)
@@ -841,9 +919,18 @@ def _build_sign_in_dialog(app: "CompanionApp") -> None:
     tk.Label(root, text="► SIGN IN", bg=theme.BG, fg=theme.RED,
              font=theme.mono(12, bold=True), justify="left", anchor="w").pack(anchor="w")
     tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
-    tk.Label(root, text="Enter your TrueNAS username and password to verify this machine.",
+    # APP-10 / SYNC-114 (sweep 2026-09-04): no storage vendor's name in an
+    # editor's sentence, and a first-run editor has no other source for
+    # where this login comes from - hence the second line.
+    tk.Label(root,
+             text=(f"Enter the username and password you use to sign in to "
+                   f"{site_mod.product_name()}. This verifies that this "
+                   f"computer is yours."),
              bg=theme.BG, fg=theme.MUTED, font=theme.mono(9), justify="left", anchor="w",
-             wraplength=360).pack(anchor="w", pady=(6, 10))
+             wraplength=360).pack(anchor="w", pady=(6, 2))
+    tk.Label(root, text="Ask your admin if you do not have one yet.",
+             bg=theme.BG, fg=theme.MUTED, font=theme.mono(9), justify="left", anchor="w",
+             wraplength=360).pack(anchor="w", pady=(0, 10))
 
     form = tk.Frame(root, bg=theme.BG)
     form.pack(anchor="w", fill="x")
@@ -948,8 +1035,10 @@ def _youtube_sign_in(app: "CompanionApp", runner: Optional[Any] = None,
         outcome = run(browser=browser)
     except Exception:  # noqa: BLE001 -- run() never raises, but the seam might
         log.exception("ytdl sign-in: browser flow crashed")
-        _notify(app, "The sign-in window failed unexpectedly. See the log, or use "
-                     "Tray > Settings > Use an exported cookies.txt")
+        # CYT-4: the cookies item is a Settings row now, not an Advanced
+        # submenu entry, and the route is ui_copy's to spell.
+        _notify(app, "The sign-in window failed unexpectedly. Try "
+                     f"{ui_copy.YOUTUBE_COOKIES} instead.")
         return
     if outcome.ok:
         log.info("ytdl sign-in: %d cookies written", outcome.cookies_written)
@@ -1031,6 +1120,15 @@ def _youtube_warning_line(snap: dict) -> str:
     if ytdl_cookies.ACCOUNT_FLAG_SIGNATURE in str(h.get("reason") or "").lower():
         return ("⚠ YouTube is refusing your signed-in session: downloads are "
                 "continuing without it")
+    # CYT-5 (usability sweep 2026-09-04): a stale record with nothing since is
+    # a week-old opinion, not news. Cookied downloads are rare (the jar is a
+    # fallback since WP3), so this line could otherwise stand for months over
+    # a session nobody has tried -- and a warning that never retires is one
+    # the editor learns to read past.
+    if h.get("aged"):
+        stamp = str(h.get("at") or "")[:10]
+        return ("YouTube sign-in has not been used since "
+                + (stamp or "the last download") + ". Sign in again if you need it")
     return "⚠ YouTube sign-in no longer works (Google rotated the session). Sign in again"
 
 
@@ -1046,7 +1144,9 @@ def _maybe_warn_youtube_session(app: "CompanionApp", snap: dict) -> None:
             setattr(app, "_yt_session_warned", status)
         except Exception:  # noqa: BLE001 -- a fake app without __dict__
             pass
-        _notify(app, _youtube_warning_line(snap) + " (tray menu → Sign in to YouTube again…)")
+        # CYT-4: "tray menu > Sign in to YouTube again" named nothing that
+        # exists; the row moved into Settings on 2026-08-27.
+        _notify(app, _youtube_warning_line(snap) + f" ({ui_copy.YOUTUBE_SIGN_IN} again)")
     elif not bad and last is not None:
         try:
             setattr(app, "_yt_session_warned", None)
@@ -1189,7 +1289,7 @@ def _show_update_dialog(app: "CompanionApp") -> None:
     except Exception:
         log.exception("apply_upgrade() raised")
         _notify(app, f"Update failed. You're still on v{config_mod.VERSION}, nothing is "
-                     "broken. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.")
+                     f"broken. {ui_copy.DIAGNOSTICS}.")
 
 
 def _show_update_dialog_locked(app: "CompanionApp", info: dict) -> bool:
@@ -1318,7 +1418,7 @@ def _build_scripting_warning_dialog(app: "CompanionApp") -> bool:
     )
     try:
         root = tk.Tk()
-        root.title("CCSYNC.EXE: Resolve scripting is down")
+        root.title(site_mod.notify_title("Resolve scripting is down"))
         theme.apply_window_icon(tk, root)
         root.attributes("-topmost", True)
         root.configure(bg=theme.BG, padx=18, pady=14)
@@ -1409,7 +1509,7 @@ def _confirm_remove_project(app: "CompanionApp", slug: str, rel: str) -> None:
     try:
         if blockers.get("blocked"):
             typed = _ask_typed_confirmation_locked(
-                app, "CCSYNC.EXE: project not ready to remove",
+                app, site_mod.notify_title("project not ready to remove"),
                 remove_blocker_body(rel, blockers), rel.split("/")[-1],
             )
             confirmed = typed
@@ -1424,7 +1524,7 @@ def _confirm_remove_project(app: "CompanionApp", slug: str, rel: str) -> None:
                 "Tick the project again any time to sync it back."
             )
             confirmed = popup.confirm_dialog(
-                "CCSYNC.EXE: remove project",
+                site_mod.notify_title("remove project"),
                 body,
                 ok_label="REMOVE FROM THIS MACHINE",
             )
@@ -1437,7 +1537,7 @@ def _confirm_remove_project(app: "CompanionApp", slug: str, rel: str) -> None:
         ok, message = app.remove_project_from_machine(slug, override=override)
     except Exception:
         log.exception("remove_project_from_machine(%s) raised", slug)
-        _notify(app, "Remove failed. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.")
+        _notify(app, f"Remove failed. {ui_copy.DIAGNOSTICS}.")
         return
     _notify(app, message if ok else f"Remove stopped: {message}")
 
@@ -1531,7 +1631,7 @@ def _confirm_resume_disk_floor(app: "CompanionApp", reason: str) -> None:
         return
     try:
         confirmed = popup.confirm_dialog(
-            "CCSYNC.EXE: resume proxy download",
+            site_mod.notify_title("resume proxy download"),
             "CCSync stopped downloading proxies because:\n\n"
             f"  {reason}\n\n"
             "Your uploads never stopped. Proxy download starts again on its own as "
@@ -1573,7 +1673,7 @@ def _confirm_resume_lane_b(app: "CompanionApp", snap: dict) -> None:
         return
     try:
         confirmed = popup.confirm_dialog(
-            "CCSYNC.EXE: resume proxy download",
+            site_mod.notify_title("resume proxy download"),
             "CCSync stopped downloading proxies because:\n\n"
             f"  {reason}\n\n"
             "Only resume once your admin has confirmed the server is healthy. If it "
@@ -1603,11 +1703,12 @@ def _confirm_halt(app: "CompanionApp") -> None:
         return
     try:
         confirmed = popup.confirm_dialog(
-            "CCSYNC.EXE: stop all syncing",
+            site_mod.notify_title("stop all syncing"),
             "Stop ALL syncing on this machine?\n\n"
             "This is stronger than Pause: uploads, proxy downloads AND the shared "
             "project files (Syncthing) all stop, and they STAY stopped after a "
-            "restart until you start them again from this menu.\n\n"
+            "restart until you start them again from the tray menu "
+            "(Start syncing again).\n\n"
             "Nothing is deleted. Use this when something looks wrong and you want "
             "the files to stop moving.",
             ok_label="STOP ALL SYNCING",
@@ -1626,6 +1727,18 @@ def _release_halt(app: "CompanionApp") -> None:
     _notify(app, message)
 
 
+def _canonical_letter(app: "CompanionApp") -> str:
+    """This site's sync drive letter, for a sentence that needs a letter
+    (SYNC-103). Defaults to P: exactly as app.canonical_drive_letter() does:
+    every machine in the field is on it, and a dialog is not the place to
+    discover that the manifest cannot be read."""
+    try:
+        return str(app.canonical_drive_letter() or "P:")
+    except Exception:
+        log.debug("could not read this site's drive letter", exc_info=True)
+        return "P:"
+
+
 def _confirm_grade_swap(app: "CompanionApp", to_server: bool) -> None:
     """Confirm, then remap P: (see app.swap_p_to_server/_to_local). Runs on
     a tray worker thread; takes the popup lock like every Tk dialog."""
@@ -1635,27 +1748,34 @@ def _confirm_grade_swap(app: "CompanionApp", to_server: bool) -> None:
     if lock is not None and not lock.acquire(blocking=False):
         _notify(app, "Another CCSync window is already open. Close it first.")
         return
+    # SYNC-103 (sweep 2026-09-04), dialog half: the letter is site data, so a
+    # second customer on Q: reads about Q:. canonical_drive_letter(), not
+    # canonical_prefix_label(): this dialog is about a Windows drive letter,
+    # and "swap your media drive to the server" would be a sentence about
+    # nothing. The behaviour half (drive_swap taking the letter) is already in.
+    letter = _canonical_letter(app)
     try:
         gap = "\n\n"
         if to_server:
             body = (
-                "Point P: at the SERVER's tree so Resolve streams full-resolution "
-                "originals while you grade?" + gap +
+                f"Point {letter} at the SERVER's tree so Resolve streams "
+                "full-resolution originals while you grade?" + gap +
                 "Pause playback first. Frames come over the network, so scrubbing "
                 "is only as fast as your connection." + gap +
                 "In Resolve, set Playback > Proxy Handling > Prefer Camera "
                 "Originals to actually use them." + gap +
-                "Syncing is not affected. Swap back from this menu when you're done."
+                "Syncing is not affected. Swap back when you are done: "
+                f"{ui_copy.finish_grading(letter)}."
             )
-            confirmed = popup.confirm_dialog("CCSYNC.EXE: grade from server",
-                                             body, ok_label="SWAP P: TO SERVER")
+            confirmed = popup.confirm_dialog(site_mod.notify_title("grade from server"),
+                                             body, ok_label=f"SWAP {letter} TO SERVER")
         else:
             body = (
-                "Point P: back at this machine's local copy (proxies)?" + gap +
+                f"Point {letter} back at this machine's local copy (proxies)?" + gap +
                 "Set Resolve's Playback > Proxy Handling back to Prefer Proxies."
             )
-            confirmed = popup.confirm_dialog("CCSYNC.EXE: back to proxies",
-                                             body, ok_label="SWAP P: BACK")
+            confirmed = popup.confirm_dialog(site_mod.notify_title("back to proxies"),
+                                             body, ok_label=f"SWAP {letter} BACK")
     finally:
         if lock is not None:
             lock.release()
@@ -1677,14 +1797,14 @@ def _confirm_grade_swap(app: "CompanionApp", to_server: bool) -> None:
                 ok, message = app.swap_p_to_server(*creds)
     except Exception:
         log.exception("grade swap raised")
-        _notify(app, "The P: swap failed. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.")
+        _notify(app, f"The {letter} swap failed. {ui_copy.DIAGNOSTICS}.")
         return
     _notify(app, message if ok else f"Swap stopped: {message}")
 
 
 def _ask_server_credentials(app: "CompanionApp") -> Optional[tuple[str, str]]:
     """Username+password dialog for the grade-swap's auth retry: the same
-    TrueNAS login the editor signs in to the dashboard with, username
+    server login the editor signs in to the dashboard with, username
     prefilled from the verified identity. Returns None on cancel. Same Tk
     plumbing and popup lock as _show_sign_in_dialog."""
     lock = getattr(app, "_popup_active_lock", None)
@@ -1721,7 +1841,7 @@ def _build_credentials_dialog(app: "CompanionApp") -> Optional[tuple[str, str]]:
         _notify(app, "Couldn't open the login window. Restart CCSync and try again.")
         return None
     result: list[Optional[tuple[str, str]]] = [None]
-    root.title("CCSYNC.EXE: server login")
+    root.title(site_mod.notify_title("server login"))
     theme.apply_window_icon(tk, root)
     root.attributes("-topmost", True)
     root.configure(bg=theme.BG, padx=18, pady=14)
@@ -1729,10 +1849,13 @@ def _build_credentials_dialog(app: "CompanionApp") -> Optional[tuple[str, str]]:
     tk.Label(root, text="► SERVER LOGIN", bg=theme.BG, fg=theme.RED,
              font=theme.mono(12, bold=True), justify="left", anchor="w").pack(anchor="w")
     tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
+    # APP-10 / SYNC-114: the server has whatever name the site manifest gives
+    # it, and "the server" when it gives it none.
     tk.Label(root,
-             text=("Windows needs your server login to stream originals. Enter the "
-                   "same TrueNAS username and password you sign in with. It is "
-                   "saved on this machine, so you'll only be asked once."),
+             text=(f"Windows needs your login for {site_mod.server_phrase()} to "
+                   f"stream originals. Use the same username and password you "
+                   f"sign in to {site_mod.product_name()} with. It is saved on "
+                   f"this computer, so you will only be asked once."),
              bg=theme.BG, fg=theme.MUTED, font=theme.mono(9), justify="left", anchor="w",
              wraplength=360).pack(anchor="w", pady=(6, 10))
 
@@ -1788,6 +1911,74 @@ def _build_credentials_dialog(app: "CompanionApp") -> Optional[tuple[str, str]]:
     return result[0]
 
 
+def quit_confirm_text(copying: dict) -> str:
+    """The sentence Quit shows while a FIX ALL copy is running (RES-8).
+
+    A function of its own so the wording is testable without a display, and
+    so both platforms say the same thing."""
+    index = int(copying.get("index") or 0)
+    total = int(copying.get("total") or 0)
+    where = "of {0} file(s) into your synced folder".format(total) if total else "files in"
+    counted = f"CCSync is copying file {index} {where}." if index else \
+        f"CCSync is copying {total or 'some'} file(s) into your synced folder."
+    return (counted + "\n\n"
+            "Quitting now abandons the file it is on. The rest of the batch is not "
+            "copied and Resolve is not repointed at it.\n\n"
+            "Quit anyway?")
+
+
+def _confirm_quit_while_copying(app: "CompanionApp") -> bool:
+    """True when Quit may go ahead (RES-8, usability sweep 2026-09-04).
+
+    Quit used to tear the process down mid-write(), leaving a multi-GB
+    .ccsync-tmp that is reported an hour later, never deleted, with no
+    filename and nothing the editor can do; if the kill lands between
+    os.replace and ReplaceClip the copy exists and Resolve still points at
+    the original.
+
+    A NATIVE message box, not popup.confirm_dialog: the FIX ALL window is a
+    live Tk root on ANOTHER thread and a second root in this process is the
+    CORE-M3/CR-93 shape. Fails OPEN -- a Quit that silently does nothing is
+    the worse bug, and the editor can always kill the process anyway.
+    """
+    from . import popup
+
+    try:
+        copying = popup.copy_in_progress()
+    except Exception:
+        log.exception("quit: could not read the copy state")
+        return True
+    if not copying:
+        return True
+    body = quit_confirm_text(copying)
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            # MB_YESNO | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST
+            answer = ctypes.windll.user32.MessageBoxW(
+                None, body + "\n\n[ Yes ] quits. [ No ] keeps copying.", "CCSync",
+                0x00000004 | 0x00000030 | 0x00010000 | 0x00040000,
+            )
+            return int(answer) == 6  # IDYES
+        if sys.platform == "darwin":
+            script = (
+                'display alert "CCSync is still copying" message '
+                + json.dumps(body)
+                + ' buttons {"Quit anyway", "Keep copying"} '
+                'default button "Keep copying" as critical'
+            )
+            proc = subprocess.run(  # noqa: S603 -- fixed argv, no shell
+                ["/usr/bin/osascript", "-e", script],
+                capture_output=True, text=True, timeout=120, check=False,
+            )
+            return "Quit anyway" in (proc.stdout or "")
+    except Exception:
+        log.exception("quit: could not ask about the copy in flight")
+        return True
+    return True
+
+
 def _guarded(app: "CompanionApp", label: str, fn) -> None:
     """Run a tray action, logging anything it raises.
 
@@ -1799,7 +1990,7 @@ def _guarded(app: "CompanionApp", label: str, fn) -> None:
         fn()
     except Exception:
         log.exception("tray action %r failed", label)
-        _notify(app, f"'{label}' didn't work. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.")
+        _notify(app, f"'{label}' didn't work. {ui_copy.DIAGNOSTICS}.")
 
 
 def _spawn(app: "CompanionApp", label: str, fn) -> None:
@@ -1870,12 +2061,13 @@ def _sync_line(snap: dict) -> str:
         # SYNC-2 (resilience sweep 2026-08-28): a drive that is plugged in and
         # not answering is not "disconnected", and telling the editor it is
         # sends them to check a cable that is fine.
-        if snap.get("root_state") == root_guard_mod.ROOT_NOT_ANSWERING:
-            return "Sync: paused (the drive is not answering)"
+        # SYNC-105: ...and a drive mounted at the wrong path is not
+        # disconnected either.
+        phrase = drive_absent_phrase(snap.get("root_state"))
         owed = str(snap.get("root_unfinished") or "")
         if owed:
-            return f"Sync: paused (drive disconnected, {owed} still to go)"
-        return "Sync: paused (drive disconnected)"
+            return f"Sync: paused ({phrase}, {owed} still to go)"
+        return f"Sync: paused ({phrase})"
     if snap.get("paused"):
         return "Sync: paused"
     # SYNC-15: anything the five branches above do not cover, in the words
@@ -2151,7 +2343,10 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     # test for whether the item exists at all: 0 on a companion with no job
     # runner, or one whose owner has turned fleet jobs off.
     _get("jobs_volunteer_minutes", lambda: _jobs_volunteer_minutes(app), 0)
-    snap["color"] = compute_overall_color(statuses, app)
+    # The guard is already in the snapshot above, and _guard_fingerprint
+    # already carries blocked['reason'] -- so APP-1's colour needs no new
+    # plumbing and cannot go stale while the menu is open (2026-09-04).
+    snap["color"] = compute_overall_color(statuses, app, snap.get("sync_guard"))
     _get("pulse", lambda: should_pulse(snap["color"], statuses), False)
     return snap
 
@@ -2419,8 +2614,10 @@ def _reporter_line(guard: dict) -> Optional[str]:
         return None
     status = str(health.get("last_status") or "")
     if status in ("HTTP 401", "HTTP 403"):
+        # UX-1: "from this menu" was the old right-click menu; this line is
+        # rendered inside the Settings window, where the button also lives.
         return ("⚠ The dashboard is refusing this computer's reports: your CCSync "
-                "sign-in was rejected. Sign in again from this menu")
+                f"sign-in was rejected. Sign in again: {ui_copy.SIGN_IN_SETTINGS}")
     since = reporter_mod.parse_server_time(health.get("last_success_at"))
     if since is None:
         return ("⚠ The dashboard has never accepted a report from this computer. "
@@ -2532,7 +2729,7 @@ def _upgrade_line(guard: dict) -> Optional[str]:
     version = str(info.get("version") or "").strip()
     target = f" to v{version}" if version else ""
     return (f"⚠ CCSync could not install the update{target} {attempts} times, so it "
-            "has stopped trying. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN")
+            f"has stopped trying. {ui_copy.DIAGNOSTICS}")
 
 
 def _reverted_line(guard: dict) -> Optional[str]:
@@ -3021,8 +3218,9 @@ def _tooltip_text(snap: dict) -> str:
         if owed:
             # Windows truncates the tooltip at ~127 chars; the summary is
             # bounded (three lanes, one byte figure) but not short.
-            return f"CCSync: PAUSED (drive disconnected, {owed} still to go)"[:120]
-        return "CCSync: PAUSED (your drive is disconnected)"
+            return (f"CCSync: PAUSED ({drive_absent_phrase(snap.get('root_state'))}, "
+                    f"{owed} still to go)")[:120]
+        return f"CCSync: PAUSED ({drive_absent_phrase(snap.get('root_state'))})"
     if not snap["signed_in"] and snap.get("require_login", True):
         return "CCSync: not signed in (nothing syncs)"
     if snap["paused"]:
@@ -3041,6 +3239,16 @@ def _tooltip_text(snap: dict) -> str:
                 parts.append(f"{human_duration(status.eta_seconds)} left")
             return _with_ingest_suffix(
                 _with_proxy_suffix(" · ".join(parts), snap), snap)[:127]
+    # APP-1 (2026-09-04): "up to date" is a CLAIM, and it was made without ever
+    # reading the one field that knows better. Everything above this point is a
+    # state the tooltip already described; anything left that sync_guard calls
+    # blocked (a 401'd reporter, a clock 40 minutes out, a dead sync engine, a
+    # project folder that moved) reached this line and was reported as caught
+    # up. The detail is the same sentence the menu's Sync: line and the fleet
+    # grid show, so there is one wording, not a third.
+    blocked = (snap.get("sync_guard") or {}).get("blocked") or {}
+    if isinstance(blocked, dict) and blocked.get("detail"):
+        return f"CCSync: {blocked['detail']}"[:127]
     # Indexing SECOND, so on a machine doing both the proxy count (the older,
     # more familiar number) is the one that survives the length limit.
     return _with_ingest_suffix(_with_proxy_suffix("CCSync: up to date", snap), snap)
@@ -3305,6 +3513,12 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
         _spawn(app, "Settings", lambda: settings_window.show_settings(app))
 
     def on_quit(icon, item):
+        # RES-8 (2026-09-04): ask BEFORE icon.stop(), which is the point of no
+        # return -- it ends the message loop and the shutdown that follows
+        # kills the copy thread inside write().
+        if not _confirm_quit_while_copying(app):
+            log.info("quit: the editor chose to let the copy finish")
+            return
         icon.stop()
         _guarded(app, "Quit", app.shutdown)
 
@@ -3505,7 +3719,7 @@ def start_tray(
     guard.install()
     try:
         icon = tray_backend.Icon(
-            "ccsync-companion",
+            site_mod.notify_title(),
             _icon_image_cached(first["color"]),
             _tooltip_text(first),
             menu=_build_menu(app, first),
@@ -3520,7 +3734,7 @@ def start_tray(
         # tray then behaves as it did before 2026-07-26: is_open() stays False
         # and the loops below update unconditionally.
         icon = tray_backend.Icon(
-            "ccsync-companion",
+            site_mod.notify_title(),
             _icon_image_cached(first["color"]),
             _tooltip_text(first),
             menu=_build_menu(app, first),

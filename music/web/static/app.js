@@ -399,7 +399,13 @@ function trackRow(t, showMatch) {
   return row;
 }
 
-function render(tracks, headline, showMatch) {
+// MUSIC-16 (2026-09-03): the empty state used to be one sentence for all
+// five callers, so a `similar` lookup with no neighbours and a facet with no
+// members both advised rewording a description that was never typed. The
+// caller knows what it asked for, so the caller supplies the words; the
+// default is the search wording, which is where the sentence came from.
+function render(tracks, headline, showMatch,
+                empty = 'Nothing matches. Try a looser description or clear the filters.') {
   // #audio lives OUTSIDE #list and has no controls, so wiping the list while a
   // preview played left it running with nothing to stop it (MUSIC-5,
   // 2026-08-11) -- closePane() also clears state.playing and the row markers.
@@ -415,7 +421,7 @@ function render(tracks, headline, showMatch) {
   const list = $('#list');
   list.textContent = '';
   if (!tracks.length) {
-    list.appendChild(el('div', 'empty', 'Nothing matches. Try a looser description or clear the filters.'));
+    list.appendChild(el('div', 'empty', empty));
     return;
   }
   const frag = document.createDocumentFragment();
@@ -448,13 +454,15 @@ async function loadTracks() {
   const seq = ++state.seq;
   const {tracks} = await api('api/tracks?' + filterParams().toString());
   if (seq !== state.seq) return;
-  render(tracks, bits.length ? bits.join('  ·  ') : 'All tracks', false);
+  render(tracks, bits.length ? bits.join('  ·  ') : 'All tracks', false,
+         bits.length ? 'No tracks match these filters. Clear one and try again.'
+                     : 'The library is empty. Drop some music in to get started.');
 }
 
 async function runSearch(q) {
   if (!q.trim()) return loadTracks();
   $('#q').value = q;
-  render([], 'Searching…', false);
+  render([], 'Searching…', false, 'Searching…');
   const pool = $('#pool').value;
   const seq = ++state.seq;
   const {tracks} = await api('api/search', {
@@ -467,11 +475,12 @@ async function runSearch(q) {
 }
 
 async function showSimilar(t) {
-  render([], 'Finding similar…', false);
+  render([], 'Finding similar…', false, 'Finding similar…');
   const seq = ++state.seq;
   const {tracks} = await api(`api/similar/${t.id}?k=25`);
   if (seq !== state.seq) return;
-  render(tracks, `Similar to ${t.filename}`, true);
+  render(tracks, `Similar to ${t.filename}`, true,
+         'Nothing in the library sounds like this one yet.');
 }
 
 function selectFacet(category, label) {
@@ -621,8 +630,7 @@ async function ingest(files) {
       FACETS = await api('api/facets');
       paintFacets();
       const s = await api('api/stats');
-      $('#stats').textContent =
-        `${s.tracks} tracks · ${s.hours}h · ${s.gb} GB · ${s.model || 'unindexed'}`;
+      paintStats(s);
       const added = r.results.filter(x => x.ok && x.track).map(x => x.track);
       // ++seq: this render is the newest answer, so a query still in flight
       // must not land on top of it (MUSIC-9).
@@ -633,6 +641,29 @@ async function ingest(files) {
   } catch (e) {
     toast(el('div', 'row bad', `Ingest failed: ${e.message}`), 9000);
   }
+}
+
+// The header line. `scores_stale` means a library rescore was deferred or
+// failed (MUSIC-1 / MUSIC-5, 2026-09-04): the tracks are all there and
+// searchable, and some of them have no tags yet. Saying so is the difference
+// between "the server is catching up" and "my drop did not work".
+function statsLine(s) {
+  // MUSIC-16 (2026-09-03): this line used to end with the raw Hugging Face
+  // checkpoint id (`laion/larger_clap_music_and_speech`), which was the only
+  // place a third party's model name was shown to a customer and means
+  // nothing to an editor. It moves to the tooltip, where support can still
+  // read it off a screenshot.
+  const base = `${s.tracks} tracks · ${s.hours}h · ${s.gb} GB`;
+  return s && s.scores_stale ? `${base} · tags catching up` : base;
+}
+
+// The stats line and its tooltip, together: two call sites, one contract.
+function paintStats(s) {
+  const node = $('#stats');
+  node.textContent = statsLine(s);
+  node.title = s && s.model
+    ? `search model: ${s.model}`
+    : 'no search model recorded for this library yet';
 }
 
 // ---------------------------------------------------------------- topbar
@@ -661,8 +692,7 @@ async function loadDashboardTopbar() {
 async function init() {
   loadDashboardTopbar();
   const s = await api('api/stats');
-  $('#stats').textContent =
-    `${s.tracks} tracks · ${s.hours}h · ${s.gb} GB · ${s.model || 'unindexed'}`;
+  paintStats(s);
 
   FACETS = await api('api/facets');
   paintFacets();

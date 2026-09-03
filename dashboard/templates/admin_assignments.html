@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}CC SYNC: ASSIGNMENTS{% endblock %}
+{% block title %}{{ brand_org | upper }}: ASSIGNMENTS{% endblock %}
 {% block layout %}
   <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
@@ -26,7 +26,7 @@
       </span>
     </div>
     {% if not assignments.columns %}
-      <div class="muted">no known editors yet -- one appears here once they
+      <div class="muted">no known editors yet: one appears here once they
         sign in, tick a project of their own, or their companion reports.</div>
     {% elif not assignments.projects %}
       <div class="muted">no active projects yet.</div>
@@ -70,8 +70,14 @@
                           {% if col_disk.get('free') is not none %}data-col-free="{{ col_disk.get('free') }}"{% endif %}
                           data-col-label="{{ c.sub or c.editor }}"
                           title="tick every project for {{ c.sub }}">[ ALL ]</button>
+                  {# DUI-5 (2026-09-04): data-col-label so the confirm and the
+                     progress label can name the COMPUTER rather than the
+                     person, and data-idle-title so the button can take its
+                     tooltip back when a run finishes. #}
                   <button type="button" class="btn"
                           data-col-none="{{ c.editor }}" data-col-machine="{{ c.machine }}"
+                          data-col-label="{{ c.sub or c.editor }}"
+                          data-idle-title="untick every project for {{ c.sub }}"
                           title="untick every project for {{ c.sub }}">[ NONE ]</button>
                   {% if c.siblings %}
                   <select class="assign-copy" data-copy-editor="{{ c.editor }}"

@@ -1,3 +1,8 @@
+{# DUI-1 (2026-09-04): a generated password rides out of band into
+   #minted-secret, above this panel and outside its 30 s poll. Top level, and
+   before the box, because htmx scans only a response's direct children for
+   an out-of-band swap. #}
+{% include "partials/minted_secret.html" %}
 <div class="admin-users-box">
   <div class="side-head">[ USERS ]
     <span class="muted">Create editor accounts, approve new Syncthing devices, set known passwords.</span></div>
@@ -35,11 +40,17 @@
             {% if u.ssh_keys %}
               {% for k in u.ssh_keys %}
                 <div>{{ k.fingerprint }}{% if k.label %} ({{ k.label }}){% endif %}
+                  {# DUI-18 (2026-09-04): one click, no question, in a panel
+                     whose [ DELETE ] asks twice. Revoking a key stops that
+                     editor's SFTP immediately and the key text is not stored
+                     anywhere this page can get it back from. #}
                   <form class="inline-form" hx-post="/partials/admin/users/keys/remove"
-                        hx-target="closest .admin-users-box" hx-swap="outerHTML" style="display:inline">
+                        hx-target="closest .admin-users-box" hx-swap="outerHTML" style="display:inline"
+                        hx-confirm="Revoke this SSH key for {{ u.username }}? Their SFTP stops now.">
                     <input type="hidden" name="username" value="{{ u.username }}">
                     <input type="hidden" name="fingerprint" value="{{ k.fingerprint }}">
-                    <button class="btn tap" type="submit">[ REVOKE ]</button>
+                    <button class="btn tap" type="submit"
+                          title="their SFTP access through this key stops immediately, and the key text is not stored anywhere this page can put it back from: they have to send it again.">[ REVOKE ]</button>
                   </form>
                 </div>
               {% endfor %}
@@ -54,19 +65,31 @@
             </form>
           </td>
           <td data-label="SET PASSWORD">
+            {# DUI-18 (2026-09-04): this locks the editor out of the dashboard
+               until somebody tells them the new one, and it used to fire on
+               one click with no answer of any kind. The route now returns a
+               result line as well (see partial_admin_set_password). #}
             <form class="inline-form" hx-post="/partials/admin/users/password"
-                  hx-target="closest .admin-users-box" hx-swap="outerHTML">
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML"
+                  hx-confirm="Set a new password for {{ u.username }}? Their old one stops working now.">
               <input type="hidden" name="username" value="{{ u.username }}">
               <input type="password" name="password" placeholder="new password" required>
-              <button class="btn tap" type="submit">[ SET ]</button>
+              <button class="btn tap" type="submit"
+                      title="the old password stops working the moment this lands, so they cannot sign in until you tell them the new one. This page does not show it again.">[ SET ]</button>
             </form>
           </td>
           <td data-label="ACTIONS">
+            {# DUI-18 (2026-09-04): DISABLE is reversible, but its consequence
+               was nowhere on screen, in a row where [ DELETE ] asks. ENABLE
+               takes no confirm: giving somebody their login back is not a
+               decision anybody regrets. #}
             <form class="inline-form" hx-post="/partials/admin/users/disable"
-                  hx-target="closest .admin-users-box" hx-swap="outerHTML">
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML"
+                  {% if not u.disabled %}hx-confirm="Stop {{ u.username }} signing in? Their computers keep syncing."{% endif %}>
               <input type="hidden" name="username" value="{{ u.username }}">
               <input type="hidden" name="disabled" value="{{ '0' if u.disabled else '1' }}">
-              <button class="btn tap" type="submit">{% if u.disabled %}[ ENABLE ]{% else %}[ DISABLE ]{% endif %}</button>
+              <button class="btn tap" type="submit"
+                      title="a disabled account cannot sign into the dashboard or SFTP. Their computers keep syncing what they already have, their sessions and report tokens are revoked, and [ ENABLE ] here undoes it.">{% if u.disabled %}[ ENABLE ]{% else %}[ DISABLE ]{% endif %}</button>
             </form>
             {# Deletion is the irreversible twin of DISABLE, so it is second and
                it asks first. The confirm names what survives as well as what
@@ -107,7 +130,11 @@
     <input type="password" name="password"
            placeholder="password (optional; blank generates a one-time password shown once)"
            style="display:block;margin:0.3rem 0;width:420px">
-    <button class="btn tap" type="submit">[ CREATE ]</button>
+    {# DUI-4 (2026-09-04): both labels live in the button and style.css picks
+       between them off htmx's own .htmx-request class. Creating an account
+       can block for up to two minutes on the NAS's job polling, and until
+       this existed the page did nothing at all for that whole time. #}
+    <button class="btn tap" type="submit"><span class="idle-label">[ CREATE ]</span><span class="busy-label">[ CREATING THE ACCOUNT... ]</span></button>
   </form>
   {% endif %}
 
@@ -122,12 +149,12 @@
        phone reads it as a labelled block instead of eight columns. #}
     <div class="scroll-x">
     <table class="editors stack">
-      <thead><tr><th>EDITOR</th><th>MACHINE</th><th>PLATFORM</th><th>MODE</th><th>RUNNING</th><th>PLAN</th><th>LAST REPORT</th><th></th></tr></thead>
+      <thead><tr><th>EDITOR</th><th>COMPUTER</th><th>PLATFORM</th><th>MODE</th><th>RUNNING</th><th>PLAN</th><th>LAST REPORT</th><th></th></tr></thead>
       <tbody>
       {% for m in admin_users.computers %}
         <tr class="editor-row">
           <td class="who" data-label="EDITOR">{{ m.editor_username }}</td>
-          <td class="mono-sm" data-label="MACHINE" title="{{ m.syncthing_device_id or 'no Syncthing device reported' }}">{{ m.machine }}</td>
+          <td class="mono-sm" data-label="COMPUTER" title="{{ m.syncthing_device_id or 'no Syncthing device reported' }}">{{ m.machine }}</td>
           <td class="mono-sm muted" data-label="PLATFORM">{{ m.platform or "?" }}</td>
           <td class="mono-sm muted" data-label="MODE">{{ m.mode }}</td>
           <td class="mono-sm" data-label="RUNNING">{{ m.companion_version or "?" }}</td>
@@ -201,7 +228,7 @@
 
   <div class="side-head" style="margin-top:0.8rem">[ DEVICES AWAITING APPROVAL ]</div>
   {% if admin_users.syncthing_error %}
-    <div class="muted">device list unavailable -- {{ admin_users.syncthing_error }}</div>
+    <div class="muted">device list unavailable: {{ admin_users.syncthing_error }}</div>
   {% elif admin_users.pending_devices %}
     {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): a row here is one device, so a
        phone reads it as a labelled block instead of five columns. #}
@@ -248,7 +275,7 @@
     </datalist>
     <div class="muted" style="margin-top:0.4rem">
       Pick the person who owns this computer. One editor can own several
-      computers, so a second machine takes the SAME username as their first.
+      computers, so a second computer takes the SAME username as their first.
       A row marked [ REPORTED ] was filled in from what that computer's
       companion already told the dashboard.
     </div>
@@ -264,7 +291,7 @@
      it has nothing to show here. #}
   <div class="side-head" style="margin-top:1.2rem">[ EDITOR ACCOUNTS ]</div>
   {% if admin_users.truenas_error %}
-    <div class="muted">account list unavailable -- {{ admin_users.truenas_error }}</div>
+    <div class="muted">account list unavailable: {{ admin_users.truenas_error }}</div>
   {% elif admin_users.editors %}
     {# .stack (MOBILE_PLAN.md §3.2, 2026-08-30): a row here is one account, so a
        phone reads it as a labelled block instead of seven columns. #}
@@ -280,11 +307,16 @@
           <td data-label="SMB">{% if e.smb %}<span class="chip green">[ ON ]</span>{% else %}<span class="chip red">[ OFF ]</span>{% endif %}</td>
           <td data-label="LOCKED">{% if e.locked %}<span class="chip red">[ LOCKED ]</span>{% else %}<span class="muted">-</span>{% endif %}</td>
           <td data-label="SET PASSWORD">
+            {# DUI-18 (2026-09-04): the NAS twin of the local [ SET ] above,
+               and a bigger blast radius: this password is their SMB and SFTP
+               credential as well as their dashboard login. #}
             <form class="inline-form" hx-post="/partials/admin/users/password"
-                  hx-target="closest .admin-users-box" hx-swap="outerHTML">
+                  hx-target="closest .admin-users-box" hx-swap="outerHTML"
+                  hx-confirm="Set a new password for {{ e.username }}? It is their NAS login too.">
               <input type="hidden" name="username" value="{{ e.username }}">
               <input type="password" name="password" placeholder="new password" required>
-              <button class="btn tap" type="submit">[ SET ]</button>
+              <button class="btn tap" type="submit"
+                      title="this is their NAS account password: the dashboard, SMB and SFTP all stop working with the old one the moment this lands. It is not shown again.">[ SET ]</button>
             </form>
           </td>
           <td data-label="ACTIONS">
@@ -321,7 +353,11 @@
     <input type="password" name="password"
            placeholder="known password (optional; otherwise randomized and unusable for dashboard login)"
            style="display:block;margin:0.3rem 0;width:420px">
-    <button class="btn tap" type="submit">[ CREATE ]</button>
+    {# DUI-4 (2026-09-04): see the local-account form above. This is the one
+       that really does block for two minutes: the NAS creates the account,
+       the group and the home directory, and this route polls that job. #}
+    <button class="btn tap" type="submit"><span class="idle-label">[ CREATE ]</span><span class="busy-label">[ CREATING THE ACCOUNT ON THE NAS... ]</span></button>
+    <div class="muted" style="margin-top:0.3rem">This can take up to two minutes: the NAS creates the account, its group and its home directory. Leave the page open.</div>
   </form>
   {% endif %}
 

@@ -894,7 +894,9 @@ def _plan_whole_tree(facts: dict[str, Fact], ctx: dict[str, Any]) -> list[Step]:
              "Afterwards",
              body=("Ownership comes back as it was in the snapshot, so re-run "
                    "server/setup_tree.py for each project, then let the fleet resume "
-                   "and watch the first pass on the Fleet page.")),
+                   # UX-7 (usability sweep 2026-09-03): the words "Fleet page"
+                   # appear nowhere in the UI. The nav calls it SYNC STATUS.
+                   "and watch the first pass on the SYNC STATUS page.")),
     ]
 
 

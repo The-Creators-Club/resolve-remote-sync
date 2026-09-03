@@ -6,6 +6,11 @@
 
    The minted secret is rendered ONCE, here, and never again: the dashboard
    stores only its hash. #}
+{# DUI-1 (2026-09-04): the minted token itself is swapped out of band into
+   #minted-secret, which sits above this panel and outside its 60 s poll.
+   Top level, before the box: htmx scans only a response's direct children
+   for hx-swap-oob. #}
+{% include "partials/minted_secret.html" %}
 <div class="admin-users-box" id="admin-report-tokens">
   <div class="side-head">[ REPORT TOKENS ]
     <span class="muted">One credential per editor, revocable on its own. Replaces the single
@@ -15,29 +20,15 @@
     <div class="banner">▲ {{ error }}</div>
   {% endif %}
 
-  {% if minted %}
-    <div class="banner">
-      NEW TOKEN FOR {{ minted_username | upper }}: copy it now, it is shown once and
-      never stored in a readable form.
-      <div class="mono-sm" style="margin-top:0.4rem; word-break:break-all">{{ minted }}</div>
-      <div class="muted" style="margin-top:0.4rem">
-        Put it in that editor's <code>~/.ccsync/config.toml</code> as
-        <code>report_token = "…"</code> and restart their companion (tray → Quit,
-        then relaunch). It outranks the shared <code>dashboard_token</code>
-        and survives every tray sign-in.
-      </div>
-    </div>
-  {% endif %}
-
   {% if report_tokens.shared_machines %}
     <div class="muted" style="margin-top:0.6rem">
-      {{ report_tokens.shared_count }} machine(s) still report with the SHARED fleet token:
+      {{ report_tokens.shared_count }} computer{{ "s" if report_tokens.shared_count != 1 }} still {{ "reports" if report_tokens.shared_count == 1 else "report" }} with the SHARED fleet token:
       <span class="mono-sm">{{ report_tokens.shared_machines | join(", ") }}</span>.
       Once this is empty, set <code>DASH_SHARED_REPORT_TOKEN_ENABLED=0</code> and redeploy.
     </div>
   {% elif report_tokens.editor_count %}
     <div class="muted" style="margin-top:0.6rem">
-      All {{ report_tokens.editor_count }} reporting machine(s) use per-editor tokens;
+      All {{ report_tokens.editor_count }} reporting computer{{ "s" if report_tokens.editor_count != 1 }} {{ "uses" if report_tokens.editor_count == 1 else "use" }} per-editor tokens;
       <code>DASH_SHARED_REPORT_TOKEN_ENABLED=0</code> is safe to set.
     </div>
   {% endif %}

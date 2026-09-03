@@ -7,7 +7,7 @@
      are what keep real content out from under them. Without it the browser
      letterboxes the page and the console black stops at the notch. #}
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>{% block title %}CC SYNC{% endblock %}</title>
+  <title>{% block title %}{{ brand_org | upper }}{% endblock %}</title>
   {# The real product mark (2026-08-10), not the old generated PNG. SVG
      with a PNG fallback for anything that won't take an SVG favicon. #}
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
@@ -38,6 +38,14 @@
      pointer while htmx has not yet processed the nodes. #}
   <script src="/static/pwa.js" defer></script>
   <script src="/static/htmx.min.js" defer></script>
+  {# DUI-2 / DUI-1 (2026-09-04). htmx_errors.js is the ONLY thing on the page
+     that notices a partial answering 500, or not answering at all: without it
+     htmx leaves the last good render on screen for ever, so a dashboard that
+     has been unreachable for an hour still shows a green fleet. copy_value.js
+     is the [ COPY ] control for the values that are shown once. Both are
+     deferred and after htmx, so htmx's own listeners are registered first. #}
+  <script src="/static/htmx_errors.js" defer></script>
+  <script src="/static/copy_value.js" defer></script>
   <script>
     // Keep <details data-key> open/closed choices across htmx innerHTML
     // swaps: the bins panel refreshes every 5s and the sidebar every 30s,
@@ -66,6 +74,37 @@
           if (seen[key]) d.setAttribute("open", "");
           else d.removeAttribute("open");
         });
+      });
+    })();
+    // DUI-7 (usability sweep 2026-09-03): both of the product's own deep
+    // links point at panels that DO NOT EXIST when the browser looks for
+    // them. The topbar's [ 3 PROBLEMS ] goes to /#server-notices and the
+    // standing halt banner to /admin/users#admin-fleet-halt, and both panels
+    // arrive a few hundred milliseconds later from an hx-trigger="load"
+    // fetch. A browser scrolls to a fragment once, at parse time, and never
+    // retries: the admin landed at the top of the page and had to hunt for
+    // the panel, in the one moment the product most needs to hand them a
+    // button. So: after any swap, if the URL names a fragment that has only
+    // just appeared, scroll to it once. Once per page load, and only for a
+    // target inside the swapped fragment, so it can never fight a reader who
+    // has scrolled away from a polled panel.
+    (function () {
+      var done = false;
+      document.addEventListener("htmx:afterSwap", function (evt) {
+        if (done || !location.hash || location.hash.length < 2) return;
+        var t = evt.detail && evt.detail.target;
+        if (!t || !t.querySelector) return;
+        var id = location.hash.slice(1);
+        var el = null;
+        try {
+          el = t.querySelector("#" + CSS.escape(id));
+        } catch (e) {
+          return;
+        }
+        if (!el && t.id === id) el = t;
+        if (!el) return;
+        done = true;
+        el.scrollIntoView();
       });
     })();
   </script>

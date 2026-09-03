@@ -2740,6 +2740,8 @@ def _swap_stub(monkeypatch, mode="editor", unc="\\\\nas\\Pool\\CC"):
 
     stub = _Stub()
     stub._server_p_unc = lambda: CompanionApp._server_p_unc(stub)
+    # SYNC-103 (2026-09-04): the swap takes the site's own drive letter now.
+    stub.canonical_drive_letter = lambda: CompanionApp.canonical_drive_letter(stub)
     stub.p_swap_available = lambda: CompanionApp.p_swap_available(stub)
     stub.swap_to_server = lambda: CompanionApp.swap_p_to_server(stub)
     return stub
@@ -2803,8 +2805,9 @@ def test_swap_p_to_server_restores_local_on_failure(monkeypatch):
     restored = []
     monkeypatch.setattr(drive_swap, "swap_to_server",
                         lambda unc, run_fn=None, **kw: (False, "Access is denied"))
+    # **kw: SYNC-103 added `letter` to both swap functions (2026-09-04).
     monkeypatch.setattr(drive_swap, "swap_to_local",
-                        lambda root, run_fn=None: (restored.append(root) or True, "back"))
+                        lambda root, run_fn=None, **kw: (restored.append(root) or True, "back"))
     stub = _swap_stub(monkeypatch)
     ok, msg = stub.swap_to_server()
     assert not ok
@@ -5870,7 +5873,8 @@ def test_a_grade_swap_invalidates_the_cached_mapping(tmp_path, monkeypatch):
 
     app = _make_app(tmp_path)
     app._p_mode_cache = (time.monotonic(), "local")
-    monkeypatch.setattr(drive_swap_mod, "swap_to_local", lambda root: (True, "ok"))
+    monkeypatch.setattr(drive_swap_mod, "swap_to_local",
+                        lambda root, **kw: (True, "ok"))
 
     app.swap_p_to_local()
     assert app._p_mode_cache is None
@@ -6645,7 +6649,10 @@ def test_a_stall_record_left_by_the_watchdog_is_read_if_present(tmp_path):
     }), encoding="utf-8")
     blocked = app.sync_guard()["blocked"]
     assert blocked["reason"] == "lane_stalled"
-    assert "Lane B" in blocked["detail"]
+    # UX-10 (sweep 2026-09-04): the lane's word, the same one the
+    # dashboard uses, and a real plural.
+    assert "Proxy download stopped making progress" in blocked["detail"]
+    assert "Lane B" not in blocked["detail"]
     assert blocked["since"] == "2026-08-28T09:00:00+00:00"
 
 
@@ -6959,7 +6966,7 @@ def test_clear_finished_staging_reports_what_it_freed(tmp_path):
     app.music_ingestor = None
     message = app.clear_finished_ingest_staging()
     assert ingestor.asked == [0]          # everything finished, now
-    assert "2 finished staging folder(s)" in message
+    assert "2 finished staging folders" in message  # UX-10
     assert "3.0 GB" in message
 
 
@@ -7237,3 +7244,118 @@ def test_shutdown_records_that_this_exit_was_deliberate(tmp_path):
     assert crash_report.run_marker_path(app.config).exists()
     app.shutdown()
     assert not crash_report.run_marker_path(app.config).exists()
+
+
+# -- SYNC-103 (usability sweep 2026-09-04): the swap uses the SITE's letter --
+
+
+def test_canonical_drive_letter_comes_from_the_manifest(tmp_path):
+    """SYNC-103 [verified]: drive_swap ran `net use P: /delete /y`
+    unconditionally, so a Q: site's swap unmapped an unrelated drive."""
+    app = _make_app(tmp_path, canonical_prefix="Q:\\")
+    assert app.canonical_drive_letter() == "Q:"
+
+
+def test_canonical_drive_letter_falls_back_to_p_never_to_a_phrase(tmp_path):
+    """canonical_prefix_label() answers "your media drive" when it cannot
+    tell, and that string must never reach an argv."""
+    app = _make_app(tmp_path, canonical_prefix="")
+    assert app.canonical_prefix_label() == "your media drive"
+    assert app.canonical_drive_letter() == "P:"
+
+
+def test_the_grade_swap_passes_the_site_letter_to_drive_swap(monkeypatch):
+    import os
+    if os.name != "nt":
+        import pytest
+        pytest.skip("windows-only feature")
+    from ccsync_companion import drive_swap
+    from ccsync_companion.app import CompanionApp
+
+    seen = {}
+    monkeypatch.setattr(drive_swap, "swap_to_server",
+                        lambda unc, run_fn=None, **kw: (seen.update(kw) or (True, "ok")))
+    stub = _swap_stub(monkeypatch)
+    stub.config = dict(stub.config, canonical_prefix="Q:\\")
+    CompanionApp.swap_p_to_server(stub)
+    assert seen.get("letter") == "Q:"
+
+
+# -- CMEDIA-3 (usability sweep 2026-09-04): the loopback says whether it is up
+
+
+def test_the_loopback_state_is_reported_when_it_is_healthy(tmp_path, monkeypatch):
+    """ALWAYS present: an absent section could only mean an older build, and
+    the whole point is that "no listener" stopped being invisible."""
+    from ccsync_companion import broll_server as broll_server_mod
+
+    app = _make_app(tmp_path)
+    app._broll_server = object()
+    app._note_loopback_state()
+    report = app.loopback_report()
+    assert report["bound"] is True
+    assert report["error"] == ""
+    assert report["port"] == broll_server_mod.PORT
+    assert app.sync_guard()["loopback"]["bound"] is True
+
+
+def test_a_taken_port_is_named_in_the_report(tmp_path, monkeypatch):
+    """CMEDIA-3 [verified]: a failed bind logged ONE warning and nothing else
+    -- no tray line, no report field, no retry -- while the web page told the
+    editor the tray app was not running."""
+    from ccsync_companion import broll_server as broll_server_mod
+
+    monkeypatch.setattr(broll_server_mod, "last_bind_error",
+                        lambda: "OSError: [WinError 10048] address in use")
+    app = _make_app(tmp_path)
+    app._broll_server = None
+    app._note_loopback_state()
+    report = app.loopback_report()
+    assert report["bound"] is False
+    assert "10048" in report["error"]
+    assert report["since"], "an outage with no start time cannot be aged"
+
+
+def test_a_switched_off_loopback_is_not_a_fault(tmp_path):
+    app = _make_app(tmp_path, broll_server_enabled=False)
+    app._broll_server = None
+    app._note_loopback_state()
+    report = app.loopback_report()
+    assert report["enabled"] is False
+    assert report["bound"] is False
+    assert report["error"] == ""
+
+
+def test_the_bind_is_retried_until_it_succeeds(tmp_path, monkeypatch):
+    """CMEDIA-3 [verified]: the port was tried once in the life of the
+    process, so quitting the program holding it fixed nothing until the
+    editor restarted the tray -- and nothing told them to."""
+    from ccsync_companion import broll_server as broll_server_mod
+
+    app = _make_app(tmp_path)
+    app._broll_server = None
+    attempts = []
+
+    def _start(cfg, **kw):
+        attempts.append(1)
+        return object() if len(attempts) > 2 else None
+
+    monkeypatch.setattr(broll_server_mod, "start", _start)
+    assert app.retry_loopback_bind() is False
+    assert app.retry_loopback_bind() is False
+    assert app.retry_loopback_bind() is True
+    # ...and once it is ours, nothing binds again.
+    assert app.retry_loopback_bind() is True
+    assert len(attempts) == 3
+
+
+def test_a_disabled_loopback_is_never_retried(tmp_path, monkeypatch):
+    from ccsync_companion import broll_server as broll_server_mod
+
+    called = []
+    monkeypatch.setattr(broll_server_mod, "start",
+                        lambda *a, **k: called.append(1))
+    app = _make_app(tmp_path, broll_server_enabled=False)
+    app._broll_server = None
+    assert app.retry_loopback_bind() is False
+    assert called == []

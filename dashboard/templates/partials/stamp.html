@@ -1,0 +1,17 @@
+{# The freshness stamp (DUI-2, usability + resilience sweep 2026-09-04).
+
+   This used to be two literals inside partials/topbar.html, which is included
+   once per full page load and never re-rendered: "updated 4s ago" was frozen
+   at load time, and so was "▲ SYNCTHING UNREACHABLE". A page left open beside
+   a dead dashboard therefore claimed to be four seconds old for as long as
+   the tab stayed open. Both live here now, in a fragment the topbar polls, so
+   the sentence can only be true.
+
+   Empty when nothing rendered it (an anonymous page, or a caller that has no
+   database handle): a blank stamp is honest, a stale one is not. #}
+{% if stamp_at %}
+  {% if not stamp_syncthing_reachable %}
+    <span class="banner">▲ SYNCTHING UNREACHABLE: data may be stale</span>
+  {% endif %}
+  <span class="stamp-at" title="when this page last heard back from the server">updated {{ stamp_at | ago }}</span>
+{% endif %}

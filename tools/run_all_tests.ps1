@@ -185,7 +185,13 @@ $consoleUserExit = $LASTEXITCODE
 # Remove-SmbShare used to drop the rule with the share still published.
 $global:LASTEXITCODE = 9999
 powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\installer\tests\Test-SmbShareGone.ps1"
-$installerExit = @($driveMapExit, $licenceExit, $prevRollbackExit, $consoleUserExit, $LASTEXITCODE) |
+$smbShareExit = $LASTEXITCODE
+# The bootstrap's foreign-tree-drive refusal reaching the capability channel
+# (OPS-1, usability + resilience sweep 2026-09-04): it used to exit 0, so the
+# wizard showed DONE to a machine with no project drive.
+$global:LASTEXITCODE = 9999
+powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\installer\tests\Test-ForeignDriveMiss.ps1"
+$installerExit = @($driveMapExit, $licenceExit, $prevRollbackExit, $consoleUserExit, $smbShareExit, $LASTEXITCODE) |
     Where-Object { $_ -ne 0 } | Select-Object -First 1
 if ($null -eq $installerExit) { $installerExit = 0 }
 $results += @{ Name = "installer"; Outcome = $(if ($installerExit -eq 0) { "PASS" } else { "FAIL (exit $installerExit)" }) }

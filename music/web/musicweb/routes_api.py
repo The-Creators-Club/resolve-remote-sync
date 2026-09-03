@@ -2,7 +2,7 @@
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from musicweb import config, db
+from musicweb import config, db, rescore
 from musicweb.db import con
 from musicweb.search import index, refresh
 
@@ -62,6 +62,11 @@ def stats():
     b = c.execute('SELECT COALESCE(SUM(bytes),0) v FROM tracks').fetchone()['v']
     return {'tracks': n, 'hours': round(d / 3600, 1), 'gb': round(b / 1e9, 2),
             'model': db.get_meta(c, 'model'), 'tagged_at': db.get_meta(c, 'tagged_at'),
+            # When set, the tags are behind the tracks: a rescore was deferred
+            # (MUSIC-5) or failed (MUSIC-1). Log-only was the old answer, and
+            # the editor's version of it was "my drop has no tags and nothing
+            # says why". 2026-09-04.
+            'scores_stale': rescore.scores_stale(c),
             # `music_root` is this host's mount of the share, not something the
             # database knows -- it says W: on the base rig and P: on an editor
             # machine for the same 376 rows. The key name predates the share

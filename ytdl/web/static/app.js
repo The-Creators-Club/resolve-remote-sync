@@ -332,16 +332,17 @@ const fmtDate = d => d ? `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}` : 
 // as a bug in the count rather than as a count of one.
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
-// A stored (forward-slash) relative path as an editor reads it. split/join
-// rather than a replace with a regex literal: a slash-escaping pattern puts a
-// slash immediately after an opening bracket, which is exactly the shape
-// tests/test_mounted_prefix.py refuses to see in a shipped asset. Deny by
-// default is the point of that guard (YTDL-42), so this file works around it
-// rather than the other way round.
-const winPath = s => String(s || '').split('/').join('\\');
-// Everything but the last segment of a backslash path -- the FOLDER a file is
-// in, which is what a "reveal" is actually about.
-const winParent = s => String(s || '').slice(0, Math.max(0, String(s || '').lastIndexOf('\\')));
+// Everything but the last segment of a stored relative path -- the FOLDER a
+// file is in, which is what a "reveal" is actually about.
+//
+// YTWEB-10 (2026-09-03): these used to be a pair that rewrote the path to
+// backslashes for display. Half this fleet is on a Mac, where a backslash is a
+// legal filename character and not a separator, so the page now shows the path
+// exactly as it is stored: forward slashes, relative, no root. split/pop/join
+// rather than a regex literal, because a slash-escaping pattern puts a slash
+// immediately after an opening bracket, which is exactly the shape
+// tests/test_mounted_prefix.py refuses to see in a shipped asset (YTDL-42).
+const relParent = s => { const parts = String(s || '').split('/'); parts.pop(); return parts.join('/'); };
 
 // One thumbnail, for the review card and the download row alike. Straight from
 // ytimg: no proxying 40 images through the NAS, and the FALLBACK URL needs
@@ -1703,7 +1704,7 @@ function renderGrid() {
   // Count AND total duration: the only disk-space proxy an editor has, and the
   // destination is the Projects pool that ops watches.
   $('#gridfoot').textContent =
-    `${sel.length} selected · ${fmtTotal(secs)} of footage · into ${m.job.project_label}\\Youtube\\${m.job.term_dir}`;
+    `${sel.length} selected · ${fmtTotal(secs)} of footage · into ${m.job.project_label}/Youtube/${m.job.term_dir}`;
   // The same two numbers in the panel HEADER, which survives a collapse: what
   // is in there and how much of it is picked is the whole reason to unfold it
   // again (2026-08-11).
@@ -2381,7 +2382,7 @@ async function loadRecent() {
     // (its clips go straight into the project's Youtube root), so naming its
     // empty `term` would print a dangling arrow.
     row.appendChild(el('span', 'name', j.kind === 'urls'
-      ? `links → ${j.project_label}\\Youtube`
+      ? `links → ${j.project_label}/Youtube`
       : `${j.term} → ${j.project_label}`));
     // A paste is never searched or filtered, so it has neither a mode, shot
     // types nor a candidate ceiling to show -- its videos are the links that
@@ -2455,8 +2456,10 @@ function historyRow(d) {
   // in Youtube\<term>, a pasted one is in Youtube itself. `folder_path` is
   // derived server-side from the stored rel_path, so this line cannot invent a
   // folder that is not there.
+  // YTWEB-10: as stored, forward slashes and all. A Mac editor was reading a
+  // Windows path for a folder on their own disk.
   meta.appendChild(el('div', 'sub',
-    [`${d.project_label}\\${winPath(d.folder_path || 'Youtube')}`,
+    [`${d.project_label}/${d.folder_path || 'Youtube'}`,
      d.channel || '', d.downloaded_by || ''].filter(Boolean).join(' · ')));
   row.appendChild(meta);
 
@@ -2593,7 +2596,7 @@ async function runFetch(d) {
 // sends no numbers (the first poll, always) rather than showing "NaN%".
 function fetchLine(d, body) {
   const p = body.progress || {};
-  const name = winPath(d.reveal_path).split('\\').pop();
+  const name = String(d.reveal_path || '').split('/').pop();
   // `percent` is present only once rclone has reported a total (broll_fetch's
   // FetchJob.progress computes it there and nowhere else), so its absence is
   // the ordinary first-poll state, not an error.
@@ -2604,12 +2607,15 @@ function fetchLine(d, body) {
 
 // The dead end, made useful. The FOLDER, not the file -- opening it is what
 // the click was for -- and no drive letter, because this page genuinely does
-// not know one (P: on Windows, /Volumes/<SSD> on a Mac). Named AND copyable:
+// not know one: the root is site data (`canonical_prefix`, default `P:\`) on
+// Windows and /Volumes/<SSD> on a Mac. It used to print `P:` anyway, which is
+// a letter that does not exist on half the fleet's machines and is the wrong
+// one for the second customer (YTWEB-10, 2026-09-03). Named AND copyable:
 // retyping a project label with three slashes in it out of a toast is not a
 // fallback anybody uses.
 function noCompanion(d, why) {
-  const folder = 'Projects\\' + winParent(winPath(d.reveal_path));
-  toast(`${why}. The clip is in ${folder} on your sync drive (P: on Windows)`,
+  const folder = 'Projects/' + relParent(d.reveal_path);
+  toast(`${why}. The clip is in ${folder} under your sync drive`,
         false, 15000,
         {label: '[ COPY PATH ]', run: () => copyText(folder)});
 }

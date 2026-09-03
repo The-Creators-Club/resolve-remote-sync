@@ -4,6 +4,8 @@ manually per README.md's "known limitations")."""
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from conftest import write_project_marker
@@ -1378,6 +1380,7 @@ def _bare_dialog(rows):
     dialog.ignore_tracker = fixer.IgnoreTracker()
     dialog.on_done = None
     dialog.editor_name = "owen"
+    dialog.canonical_prefix = ""
     dialog._fixing = False
     dialog._progress_lock = __import__("threading").Lock()
     dialog._progress = {}
@@ -1388,8 +1391,9 @@ def _bare_dialog(rows):
     dialog._batch_rows = rows
     dialog._failed_rows = []
     dialog.root = _FakeRoot()
-    for name in ("status_label", "_progress_frame", "_fix_btn", "_ignore_btn",
-                 "_retry_btn", "_stop_btn", "_skip_btn", "_cancel_btn"):
+    for name in ("status_label", "_space_label", "_progress_frame", "_fix_btn",
+                 "_ignore_btn", "_folder_btn", "_retry_btn", "_stop_btn",
+                 "_skip_btn", "_cancel_btn"):
         setattr(dialog, name, _FakeWidget())
     return dialog
 
@@ -2015,3 +2019,165 @@ def test_every_window_class_here_releases_its_root_through_ui_dispatch():
         source = inspect.getsource(builder)
         assert "release_root" in source, f"{builder.__qualname__} frees its own root"
         assert "_drop_widgets" in source, f"{builder.__qualname__} keeps its widgets"
+
+
+# -- RES-2: no route out of the dialog may destroy it mid-copy -------------
+
+
+def test_fix_all_disables_the_leave_this_folder_alone_button(monkeypatch):
+    """RES-2 [verified]: _run_fix disabled _fix_btn and _ignore_btn and left
+    _folder_btn live, and its handler ends in root.destroy() -- which returns
+    show_popup(), releases app._popup_active_lock and lets a second pass start
+    over clips the ccsync-fixall daemon is still copying (CORE-M1)."""
+    from ccsync_companion import popup
+
+    dialog = _bare_dialog([_row("a.mov")])
+    dialog._vars = []
+    monkeypatch.setattr(popup, "perform_fix_all",
+                        lambda *a, **k: _never_returns())
+    dialog._schedule_tick = lambda: None
+    dialog._run_fix(dialog.rows)
+    try:
+        assert dialog._fix_btn.state == "disabled"
+        assert dialog._ignore_btn.state == "disabled"
+        assert dialog._folder_btn.state == "disabled"
+    finally:
+        _release_never_returns()
+
+
+def test_always_leave_this_folder_alone_does_nothing_while_copying():
+    dialog = _bare_dialog([_row("a.mov")])
+    dialog._fixing = True
+
+    dialog._on_ignore_folder()
+
+    assert dialog.root.destroyed is False
+
+
+def test_skip_for_now_does_nothing_while_copying():
+    dialog = _bare_dialog([_row("a.mov")])
+    dialog._fixing = True
+
+    dialog._on_ignore()
+
+    assert dialog.root.destroyed is False
+
+
+def test_the_folder_button_still_works_when_nothing_is_copying(tmp_path,
+                                                              monkeypatch):
+    from ccsync_companion import popup
+
+    dialog = _bare_dialog([_row("a.mov")])
+    monkeypatch.setattr(popup, "perform_ignore_folders", lambda *a, **k: (["F"], []))
+    dialog._on_ignore_folder()
+    assert dialog.root.destroyed is True
+
+
+# A copy that never finishes, so _run_fix's worker is still "live" while the
+# assertions run. Released by the event so the daemon thread does not outlive
+# the test run.
+_never_returns_event = __import__("threading").Event()
+
+
+def _never_returns():
+    _never_returns_event.wait(30)
+    return []
+
+
+def _release_never_returns():
+    _never_returns_event.set()
+
+
+# -- RES-8: Quit while a FIX ALL copy is live ------------------------------
+
+
+def test_copy_in_progress_is_empty_when_nothing_is_copying():
+    from ccsync_companion import popup
+
+    popup._set_copy_state(None)
+    assert popup.copy_in_progress() == {}
+
+
+def test_the_copy_state_names_the_file_and_the_batch(monkeypatch):
+    """RES-8 [verified]: nothing outside the dialog could tell that a copy was
+    running, so the tray's Quit had nothing to ask about."""
+    from ccsync_companion import popup
+
+    popup._set_copy_state(None)
+    seen = {}
+
+    def _fake_fix_all(rows, selections, local_root, state_fn=None, **kw):
+        state_fn({"index": 12, "total": 69, "name": "A012.braw"})
+        seen["mid"] = popup.copy_in_progress()
+        return []
+
+    monkeypatch.setattr(popup, "perform_fix_all", _fake_fix_all)
+    dialog = _bare_dialog([_row("a.mov")])
+    dialog._vars = []
+    dialog._schedule_tick = lambda: None
+    dialog._run_fix(dialog.rows)
+    for _ in range(200):
+        if "mid" in seen and not popup.copy_in_progress():
+            break
+        time.sleep(0.01)
+
+    assert seen["mid"] == {"index": 12, "total": 69, "name": "A012.braw"}
+    # ...and the worker's `finally` clears it, so a Quit a second later asks
+    # nothing.
+    assert popup.copy_in_progress() == {}
+
+
+# -- UX-9: the size and the free space, before the click -------------------
+
+
+def test_space_summary_states_the_total_and_the_free_space(monkeypatch, tmp_path):
+    """UX-9 [verified]: the dialog stated no total at all, and fixer's "Your
+    disk is full" was the only space handling -- per file, after the copy had
+    begun."""
+    from ccsync_companion import popup
+
+    big = tmp_path / "big.mov"
+    big.write_bytes(b"x" * 1000)
+    monkeypatch.setattr(popup, "destination_free_bytes", lambda root: 10_000)
+    line, tight = popup.space_summary([_row(str(big))], str(tmp_path))
+    # UX-10: "1 clip", not "1 clip(s)".
+    assert line == "1 clip, 1000 B in total. This computer has 9.8 KB free."
+    assert tight is False
+
+
+def test_space_summary_goes_loud_when_the_batch_barely_fits(monkeypatch, tmp_path):
+    from ccsync_companion import popup
+
+    big = tmp_path / "big.mov"
+    big.write_bytes(b"x" * 1000)
+    monkeypatch.setattr(popup, "destination_free_bytes", lambda root: 1_050)
+    line, tight = popup.space_summary([_row(str(big))], str(tmp_path))
+    assert tight is True
+    assert "not much room" in line
+    assert "uploaded to the server" in line
+
+
+def test_space_summary_says_nothing_it_cannot_measure(monkeypatch, tmp_path):
+    """A destination we cannot stat gets the total and no claim about space:
+    0 free means "no answer", never "the disk is empty"."""
+    from ccsync_companion import popup
+
+    big = tmp_path / "big.mov"
+    big.write_bytes(b"x" * 10)
+    monkeypatch.setattr(popup, "destination_free_bytes", lambda root: 0)
+    line, tight = popup.space_summary([_row(str(big))], str(tmp_path))
+    assert line == "1 clip, 10 B in total."  # UX-10
+    assert tight is False
+
+    assert popup.space_summary([], str(tmp_path)) == ("", False)
+    # Rows whose sources have all vanished measure 0 bytes; a "0 B in total"
+    # line would be a lie about a batch that still has work in it.
+    assert popup.space_summary([_row(str(tmp_path / "gone.mov"))],
+                               str(tmp_path)) == ("", False)
+
+
+def test_destination_free_bytes_never_raises():
+    from ccsync_companion import popup
+
+    assert popup.destination_free_bytes("") == 0
+    assert popup.destination_free_bytes(r"\\no\such\share") == 0

@@ -11052,6 +11052,435 @@ Open for the owner, none of them code:
   deleting them is optional and buys back a little space.
 
 
+## Usability + resilience sweep, waves 0 and 1 (CR-145..CR-153, 2026-09-04)
+
+`docs/USABILITY_RESILIENCE_SWEEP_2026-09-03.md` section 5 is the plan: 297
+findings from the 15-agent sweep, ordered into six waves so each one is
+shippable on its own. **Waves 0 and 1 are built** - nine Opus builders over
+disjoint territories, one per theme below. Wave 0 is "the string day": no new
+mechanism anywhere, one scan test per surface, and the reason it goes first is
+that half the sweep's findings are sentences pointing at menu rows that stopped
+existing on 2026-08-27 (CR-88's ten-item tray). Wave 1 is "stop the bleeding":
+the S and S/M items where something is being lost, hidden or claimed falsely
+today. Waves 2 to 5 are untouched and stay in the plan.
+
+Dashboard **0.7.31** with **schema v47**, companion **0.9.66**, installer
+**1.0.40** (all four copies of the installer constant: `windows_bootstrap.ps1`,
+`onboarding/steps.py`, `installer/macos_bootstrap.sh` and
+`onboarding/build_onboard_macos.spec`).
+
+**Deploy order: the dashboard first, then the companions.** Two things make it
+a rule rather than a habit this time. v47 adds the five `machine_state`
+loopback columns and `SyncGuardIn.loopback`, and a companion sending a field
+the dashboard has not declared has that field accepted (`extra='allow'`) and
+then silently dropped, which is exactly how `syncthing_supervisor` was lost for
+weeks (SYS-3 / SYNC-8). And the loopback guard section below is what makes the
+new report block mean anything on the fleet page. v48 is next.
+
+**A new operator step**, and it is a data-safety one: `server/publish_db.py
+--which broll` now TAKES A DRAIN from the live index before it renames anything,
+and merges it back afterwards (CR-152). A publish that cannot take the drain
+refuses, before any rename. Nobody has to change how they run the command - but
+if a publish is ever interrupted between the swap and the merge, the recovery is
+`--apply-drain <bundle>` and the bundle is named in the run's output.
+`docs/INDEXERS.md` has the procedure.
+
+### CR-145 - about twenty companion sentences pointed at menu rows that had not existed since 2026-08-27 - FIXED in repo 2026-09-04 (companion 0.9.66)
+The CR-88 menu reduction moved COPY DIAGNOSTICS FOR YOUR ADMIN, OPEN LOG, SCAN
+WHOLE PROJECT, the YouTube items and the whole Advanced submenu into the
+Settings window. The copy that tells an editor where to click did not move with
+them, and the fix passes that chased individual sentences wrote the new path out
+by hand at each site, which is the same failure one menu move later.
+
+**Fixed** with `ccsync_companion/ui_copy.py`: a route into the UI is a constant
+there and nowhere else (UX-1, APP-2, CYT-4, CMEDIA-5, and
+`NO_SCRIPTING_MESSAGE`). Punctuation is settled too - ">" for a navigation path,
+never "->" and never an arrow glyph, because half the copy said one and half the
+other. The two rows whose label carries a value (`remove_project`,
+`repair_drive`, `finish_grading`) are functions, so a caller that has the name
+says it and one that does not gets a placeholder rather than a route reading as
+if a project were really called `<project>`.
+
+The rest of wave 0's companion half:
+
+* **APP-3** - a macOS toast is an AppleScript string literal, and a literal
+  cannot span a newline. Every multi-line safety toast was therefore silently
+  never displayed on a Mac. `tray_native._one_line` collapses newline, tab and
+  CR to a single space.
+* **APP-4** - Windows balloon text is cut at ~250 characters, at the END, which
+  is where the action is. `fit_toast` cuts the MIDDLE instead.
+* **APP-10 / SYNC-114 / RES-9 / SYNC-103's dialog half** - a storage vendor's
+  name and a hardcoded `P:` in sentences an editor reads. Both are site data now
+  (`site.drive_phrase`, `canonical_prefix`), and the scan test fails on either
+  coming back.
+* **SYNC-104** - the stall watchdog kills a wedged rclone child and writes its
+  own sentence into `last_error`; no branch matched it, so the lane line said
+  "Something went wrong" while `_stalled_line` three rows below told the truth.
+  Same words in both places now, per this repo's tray-line-and-chip-and-log
+  rule. **SYNC-105** - which way the drive is gone (unplugged, or mapped
+  somewhere else) decides the sentence; "eject it and plug it back in" was
+  advice for one of those. **SYNC-108** - `relink_pending`. **SYNC-113** - a
+  project slug appeared in tray copy, and an editor has never seen one.
+  **SYNC-116** - the tray's most-read line was a developer's parenthetical.
+* **UX-4** - `drive_reminder.notify_title` and its Settings-window twin: the
+  toast title comes from the site manifest, so it is a function resolved at call
+  time rather than a constant baked at import.
+* **UX-10** - "(s)" in a sentence a person reads. `ui_copy.count` does the
+  pluralisation, and the four call sites in `popup.py` were the visible ones.
+
+`companion/tests/test_sweep_2026_09_04_copy.py` is the pin: **311 cases**, half
+of them an AST scan over the package's user-visible string literals (the
+`test_no_em_dash.py` walk, with docstrings and log arguments subtracted) and
+half unit assertions on the functions that produce the rest, because a sentence
+about a misplaced drive is only wrong when the drive is misplaced.
+`test_tray_copy_names_real_menu_items.py` checks each route still ends at a row
+that exists.
+
+### CR-146 - the dashboard's own deep links, page names and titles - FIXED in repo 2026-09-04 (dashboard 0.7.31)
+Wave 0's dashboard half, all copy, one scan test:
+
+* **UX-7 / REL-10** - the setup wizard's next actions named pages that have not
+  existed since the 2026-08-18 Settings redesign, and so did two recovery
+  details. A task detail is a next action; naming a page nobody can find is
+  worse than naming none.
+* **UX-8** - two copies of the Settings page list, drifted apart by six pages.
+  There is ONE now, `ui.SETTINGS_NAV`, published as a template global.
+* **DUI-7** - both of the product's own deep links ([ 3 PROBLEMS ] to
+  `/#server-notices`, the halt banner to `/admin/users#admin-fleet-halt`) point
+  at panels that arrive a few hundred ms later from an `hx-trigger="load"`
+  fetch. A browser scrolls to a fragment once, at parse time, and never retries,
+  so the admin landed at the top of the page and had to hunt - in the one moment
+  the product most needs to hand them a button. `base.html` now scrolls once
+  after a swap, only for a target inside the swapped fragment, so it cannot
+  fight a reader who has scrolled away from a polled panel.
+* **UX-5** - every browser tab said "CC SYNC" even for a customer whose header
+  said their own name. Every `<title>` reads `brand_org` now.
+* **DUI-15** - this studio's own tailnet id as a placeholder in the vendor
+  build. **UX-6** - "Every check below ran" printed over a panel rendering
+  [ NOT CHECKED ]; the line counts the kinds this build actually evaluates.
+  **UX-16** - four words for one thing; the product says "computer" to a person
+  and keeps "machine" for routes, form fields and columns. **UX-17** - [ UP ]
+  and [ UP ON ONE ], two of four spellings of upload-only. **DUI-14** - " -- ",
+  the typewriter em dash the em-dash test could not see. **UX-10**'s dashboard
+  half, and the **CR-88** route sweep as one constant,
+  `health.COMPANION_DIAGNOSTICS_PATH`, re-exported to the templates.
+
+`dashboard/tests/test_sweep_2026_09_04_copy.py`, **191 checks**. Two phrases are
+deliberately left alone: **[ MOVE ON THE SERVER AND ON EVERY MACHINE ]**, which
+says "machine" on purpose and is quoted verbatim in `CLAUDE.md` and
+`docs/FILE_MOVES.md`, so changing it would silently unpick a documented
+contract; and **" -- " inside Python log strings**, which no user reads and
+which the em-dash rule explicitly exempts. The scan subtracts both, and says so
+where it does.
+
+### CR-147 - the two web UIs printed a drive letter, a state-machine enum and a model checkpoint id at editors - FIXED in repo 2026-09-04 (ytdl + music web)
+* **YTWEB-10** - every no-companion dead end read "The clip is in
+  `Projects\Foo\Youtube\bar` on your sync drive (P: on Windows)", and the
+  history row rewrote the stored path to backslashes unconditionally. Wrong
+  twice: the letter is site data, and half this fleet edits on a Mac where a
+  backslash is a legal filename character. This page is served from the NAS and
+  cannot know either, so it prints the stored relative path exactly as stored,
+  forward slashes, no root, and says "under your sync drive" with no
+  parenthetical. `ytdl/web/tests/test_no_drive_residue.py` scans the static
+  files and `ytdlweb`'s literals.
+* **MUSIC-12** - the ingest cards rendered the server's state machine straight:
+  a batch header read `done_with_errors on DESKTOP-7K2`, a track read
+  `queued_for_base_rig`. That last is the one an editor most needs a sentence
+  for (the audio never left their computer and they must drop it again) and it
+  was a bare identifier. Two lookup tables now, held to the Python enums so a
+  new state cannot ship with no sentence, with the raw value kept in `title=`
+  for support.
+* **MUSIC-16** - the header stats line ended with the raw Hugging Face
+  checkpoint id, the only place a third party's model name was shown to a
+  customer, and one empty-state sentence served all five callers, so a `similar`
+  lookup with no neighbours advised rewording a description nobody had typed.
+  `music/web/tests/test_plain_words.py` names each retired phrase by its exact
+  words, so a failure tells you which sentence came back.
+
+**Still open, deliberately**: the three SPA `<title>` tags still say CC SYNC.
+They are static HTML served before any JS runs, and the brand is only known
+after the topbar fetch, so fixing them properly means setting the title from
+`/partials/topbar`'s payload - a mechanism, which is not what wave 0 is.
+
+### CR-148 - three safety docs told an operator something untrue - FIXED in repo 2026-09-04 (docs)
+* **RES-1 / SYS-4** - `docs/GOTCHAS.md` section 15 published the CR-68 guard as
+  `is_starting()`, which is the FIRST shipped guard, the one that failed open on
+  "no listener" and killed two more launches the same evening. The section now
+  gives the four-answer table (READY / STARTING / ABSENT / UNKNOWN), the
+  drop-in is `ready_to_connect()`, and it says in words why ABSENT must hold off
+  too: `scriptapp("Resolve")` with no server present does not fail fast, it
+  blocks ~4 s retrying, so a client that "just checked" is already inside a
+  connect loop when the server appears. This matters beyond us - it is the text
+  other Resolve clients on the same machine copy from, and a tool advertising
+  that it "automatically launches Resolve if it is not running" is the
+  highest-risk shape there is.
+* **SYS-9** - `docs/BACKUP_RESTORE.md` said `.ccsync-trash` is "never pruned".
+  It has been pruned since the CR-48 era: `lane_guard.prune_trash` runs at the
+  end of a healthy lane B pass, at most every 6 h, dropping batches older than
+  **14 days** and then the oldest until what remains is under **50 GB**. That
+  was wrong in the dangerous direction - an admin was told to go looking for a
+  copy that had been swept a fortnight earlier. `.stversions/` was in the same
+  bullet as "grows forever"; it is staggered with a `maxAge` of **one year**
+  (`31536000`), which is what to size a pool against. The "grows forever" list
+  is one item now (`.prev-<ts>`), with the dashboard's own `/data/backups/`
+  pruning described.
+* **RES-21** - `docs/RESOLVE_EDIT_SAFETY.md` documented the 15-minute bar and
+  not the daily cap. Both bars are documented now, with where they live on disk
+  (`~/.ccsync/state/resolve_auto.json`), that the 15-minute bar is per project
+  AND per pass, that the daily cap of **8** unprompted rewrites is per project
+  and SHARED by both passes, that it resets at UTC midnight on purpose, and that
+  SCAN WHOLE PROJECT and FIX ALL still work while it is spent because they are
+  prompted.
+
+**One thing for the owner, not code.** Writing SYS-9 down exposed a
+disagreement the docs had been hiding: an editor's undo window is **14 days**
+(`.ccsync-trash`) and the NAS keeps **365 days** of Syncthing versions. That is
+a 26x gap between "what the person who deleted it can recover" and "what the
+server holds", and invariant 8 has no opinion on it. Neither number is wrong;
+they were just never chosen together. An owner decision, listed here so it is
+not decided by default a third time.
+
+### CR-149 - the tray was green while sync was blocked, and Quit killed a copy in flight - FIXED in repo 2026-09-04 (companion 0.9.66)
+Wave 1's companion half. Five things the machine already knew and did not say
+or act on:
+
+* **APP-1** - `compute_overall_color` and `_tooltip_text` did not read
+  `sync_guard.blocked`. An EULA park, a tripped breaker or a rejected token left
+  the icon its normal colour and the tooltip saying "up to date" - a claim made
+  without ever asking whether syncing was allowed to happen at all.
+* **RES-2** - the popup's buttons stayed live during FIX ALL, so a second click
+  started a second copy of the same batch. All three are disabled for the run
+  and re-enabled on the same thread.
+* **RES-8** - Quit mid-copy took the copy with it. `tray` now asks first, with a
+  sentence naming what is in flight, BEFORE `icon.stop()`, which is the point of
+  no return. **It fails open**: if the check cannot answer, Quit goes ahead - a
+  tray that will not close is worse than a lost copy the fixer can redo.
+* **UX-9** - how much this click is about to move, and whether the disk has room
+  for it, above [ FIX ALL ]. 0 free bytes means "no answer", never "the disk is
+  full", so the line is dropped rather than turned into a false warning.
+* **SYNC-103** - `drive_swap.py` read a literal `P:`. Every letter-carrying
+  message is a template taking the letter from `canonical_prefix`, including the
+  loopback share name and the two destructive commands.
+* **CMEDIA-3** - the 8899 loopback was tried ONCE, at start, so quitting the
+  program that held the port left the companion believing it was serving.
+  Loopback health is in `GET /status` and in `sync_guard.loopback` on every
+  report {enabled, bound, port, error, since}, healthy shape included.
+* **CYT-5** - the cookie health cache could only get worse: a `stale` record
+  with nothing since it stayed stale forever, and the clear path was gated on a
+  per-job memo. It recovers now, and a record with no activity for **7 days** is
+  reported as `aged`, which is the difference between "your sign-in stopped
+  working" and "nobody has used it".
+
+**Not covered by the Quit confirm: consolidate.** It is the other long
+media-moving operation, it runs on its own path with its own progress window,
+and wiring the confirm to it needs the same live-run registration RES-8 added to
+the fixer. Left for wave 3, named here so the gap is not mistaken for coverage.
+
+### CR-150 - a credential in a polled panel, a wipe with no confirm, and a 600 s download in the event loop - FIXED in repo 2026-09-04 (dashboard 0.7.31, schema v47)
+Wave 1's dashboard UI half:
+
+* **DUI-2** - nothing anywhere listened for `htmx:responseError`, and the only
+  freshness stamp on the page lived in a topbar rendered once per full page
+  load. A dashboard unreachable for an hour kept saying "updated 4s ago".
+  `static/htmx_errors.js` is a global handler for `htmx:responseError` and
+  `htmx:sendError`; the stamp moved into a polled fragment
+  (`partials/stamp.html`).
+* **DUI-1** - a one-time password and a one-time fleet token were painted into
+  panels `admin_users.html` re-fetches every 30 s / 60 s, and the password came
+  back through the `error` key, wearing the warning triangle, in the same
+  channel as "does not look like an OpenSSH public key". They are an
+  out-of-band swap now (`partials/minted_secret.html`) with a [ COPY ] button
+  (`static/copy_value.js`).
+* **DUI-4** - no `hx-indicator` and no `.htmx-request` rule anywhere: [ CREATE ]
+  blocks for up to two minutes with nothing on screen.
+* **DUI-5 / DCORE-2** - [ NONE ] cleared a whole computer's plan with no
+  confirmation and named the editor rather than the projects when it failed, and
+  "copy from ..." replaced a plan on a `change` event with nothing asked. Both
+  get a confirm naming both sides; the copy gets a client-side refusal of an
+  empty source AND a **server 409** on one, because a client-side refusal is one
+  curl away from bypassed and the route DELETEs the target's whole plan before
+  inserting. It also writes one `plan.tick` / `plan.untick` audit row per
+  project, in the shape `ui.partial_plan_change_undo` replays, so a copy shows
+  in RECENT PLAN CHANGES with a working [ UNDO ] and its removals reach
+  `db.recent_plan_change_devices` - the enforce cycle's 60 s grace applies to a
+  copy exactly as to an untick. No template change was needed for either.
+* **DUI-18** - [ REVOKE ] on an SSH key, [ SET ] on a password and [ DISABLE ]
+  all fired on one click, in the panel where [ DELETE ] asks.
+* **REL-2** - the HTML [ PUBLISH ] route ran a 600 s download inside the event
+  loop, on a `--workers 1` uvicorn: the whole dashboard was unavailable for the
+  duration. `run_in_threadpool` there and on the three recovery routes the same
+  sweep of `ui.py` turned up.
+
+**Schema v47** lands here too: CMEDIA-3's dashboard half. `SyncGuardIn.loopback`
+is declared (undeclared it would be accepted and dropped, the SYS-3 / SYNC-8
+mechanism), stored in five new `machine_state` columns
+(`loopback_enabled`, `loopback_bound`, `loopback_port`, `loopback_error`,
+`loopback_since`) and read back per machine, LATCHED so a machine that takes the
+port back clears its own chip. "Send to Resolve does nothing on Ruskin's PC" was
+a fault visible only in his browser. **v48 is next.**
+
+Tests: `test_sweep_2026_09_04_dash_ui.py` (**36**),
+`test_sweep_2026_09_04_copy_plan.py` (**7**),
+`test_sweep_2026_09_04_loopback_guard.py`.
+
+### CR-151 - the alarm pass had no budget, and a secret that could not be saved booted anyway - FIXED in repo 2026-09-04 (dashboard 0.7.31)
+Wave 1's dashboard core half:
+
+* **DDIAG-1** - a delivery pass had no bound at all, so a wedged SMTP server or
+  a webhook host that blackholes packets could hold the collector cycle past the
+  watchdog threshold. `ALERT_CYCLE_BUDGET_SECONDS = 120`, and a pass that spends
+  its budget is itself a notice (`alerts_delivery_slow`), cleared when one does
+  not.
+* **DDIAG-16** - the protection panel had eight lines about safety nets and no
+  line about whether anyone would ever hear. There is a ninth now, the
+  `alerts_sink` line, and a pass with no sink says **"nobody was told: no alert
+  channel is set up"** rather than reading as a broken mail server. The vendor
+  build ships `sink = none`, so this is the normal state until a site configures
+  one - which is exactly why it has to be said out loud.
+* **SYS-2** - a build the vendor offers that this dashboard is too old to
+  publish (`requires_dashboard`) was a log line and a silent no-op. It is a
+  `feed_publish_refused` notice now, cleared per platform/version; and
+  `_check_versions_behind` measures the fleet against the **vendor feed**
+  instead of against this dashboard's own shelf, which could only ever say
+  everyone is current. `GET .../feed/check` carries `refused`.
+* **DCORE-3** - a generated session secret that could not be persisted was one
+  warning in a log and then business as usual, working perfectly until the next
+  restart invalidated every session. It refuses the boot now, before the
+  strength check, on both the app-factory and console-script paths.
+  `DASH_DEV_INSECURE=1` bypasses it, as it does the other boot checks, and the
+  test suite has to construct a non-dev settings object explicitly because
+  `conftest.py` sets that variable at import time.
+
+17 tests in `test_sweep_2026_09_04_dashboard.py`.
+
+**REL-3 and REL-6 are deferred to wave 2** and not attempted here. Both already
+exist as mechanisms (the recall flag and the boot-proof retry, from the
+2026-08-28 sweep); what the sweep asks for is that each becomes a NOTICE KIND,
+and wave 2 is the batch of registry rows where those rows belong, alongside the
+mount, ytdl, loopback and jobs kinds. Adding two rows here would have meant
+touching `ALERT_KINDS` twice in two days, and a registered kind with no writer
+was the self-diagnosis build's own first bug.
+
+### CR-152 - publishing the b-roll index deleted the fleet's ingested clips, and a failed rescore wiped every tag - FIXED in repo 2026-09-04 (server, music, ytdl)
+Four data-loss shapes, one theme: a write that could only go one way.
+
+* **BROLL-1** - `publish_db.py --which broll --apply` renames the base rig's
+  copy over the live one. The live one is the ONLY place drag-and-drop ingest
+  exists: the `videos` rows the dashboard mints at claim time with their
+  segments and embeddings, the whole of `ingest_batches` / `ingest_items` (whose
+  migration says in as many words that this database is the only place the truth
+  about a batch lives), and a `share_roots` row per ingested shoot. The swap took
+  the lot, and the 10% shrink guard could not see it - 200 ingested clips against
+  a 15,000-clip archive is 1.3%. **Fixed** with `server/broll_drain.py`:
+  `publish_db` TAKES the drain out of the live file into a bundle, swaps, then
+  MERGES it back in one idempotent transaction. A drain that could not be taken
+  **refuses the publish before anything on the NAS is renamed** - a drain that
+  could not be taken is not a drain of nothing. Recovery for an interrupted run
+  is `--apply-drain <bundle>`. The music index solves this the other way round
+  (the base rig exports results, the NAS merges), which b-roll cannot copy
+  because its index really is rebuilt on the base rig and really is published as
+  a file. `docs/INDEXERS.md` has the operator procedure; 13 tests in
+  `server/tests/test_broll_drain.py`, run end to end against real databases and
+  asserting what the bug WAS in the window between swap and merge.
+* **MUSIC-1** - `write_scores` began `DELETE FROM tags` / `DELETE FROM axes`,
+  built every row in Python and committed at the end. sqlite3 auto-begins on the
+  first DML, so a failure in between left an OPEN write transaction on the
+  thread's CACHED connection, in which the library had no tags and no axes - and
+  the fleet ingest handler caught the exception and logged it WITHOUT a rollback,
+  so the next write on that threadpool thread committed the wipe. Empty facets,
+  for good, with a log line as the only evidence. Now: explicit transaction,
+  `rollback()` on any failure, and `scores_stale` left behind and shown on
+  `/api/stats`, so a library whose tags are behind says so.
+* **MUSIC-5** - every ingest `result` re-scored the whole library and rebuilt
+  the whole search index: ~8,700 row writes plus a full matrix read per track,
+  so a 200-track album drop was ~1.7M row writes and 200 rebuilds through the
+  container's single SQLite writer. Coalesced now
+  (`RESCORE_MIN_SECONDS = 60`, `MUSIC_RESCORE_MIN_SECONDS`), forced once at
+  `release`. 11 tests in `music/web/tests/test_rescore_transaction.py`.
+* **YTWEB-6** - `_note_ok` was the only writer on the live-call path, so the AI
+  health cache could only go GREEN. A key later revoked, rate limited or paying
+  against an exhausted balance left `claude: 'ok'` for the life of the
+  container: the pip stayed green, the pre-submit warning stayed cleared, and
+  every search failed twenty minutes in. `recheck_health` could not help - it
+  begins "return unless the cache is red". `note_failure` on every `claude_cli`
+  path now; `ytdl/web/tests/test_health_recovery.py` ends with the pair of
+  directions, red then green again, with no restart.
+
+### CR-153 - the installer said DONE to a machine with no project drive - FIXED in repo 2026-09-04 (installer 1.0.40)
+The install and first-run half of wave 1:
+
+* **OPS-1** - the bootstrap's "that drive letter is already something else"
+  refusal was the ONLY refusal in the script that did not reach the capability
+  channel: it exited 0, so the wizard showed DONE to a machine with no tree
+  drive. `New-ForeignDriveMiss` feeds `Add-CapabilityMiss` and the script exits
+  **3**, which the wizard renders as **NOT READY YET** with the reason.
+  `installer/tests/Test-ForeignDriveMiss.ps1` is a sixth installer script and is
+  registered in `tools/run_all_tests.ps1` (the installer row's exit code is now
+  the first non-zero of six, not five - `Test-SmbShareGone.ps1` had been
+  collapsed into `$LASTEXITCODE` and is captured properly now).
+* **OPS-4** - the bootstrap's stdout is streamed into the wizard as it runs,
+  instead of appearing all at once at the end. A ten-minute silent install is
+  indistinguishable from a hung one.
+* **OPS-5** - the log died with the window. It is written to
+  `~/.ccsync/logs/onboard-<ts>.log` and the finish page has [ COPY LOG ], with
+  the file named at the bottom of the page for the case where the clipboard is
+  the thing that failed.
+* **OPS-6** - an admin says "the dashboard is nas.tail26290e.ts.net" and the
+  editor types exactly that; `urlopen` raised `ValueError("unknown url type")`,
+  swallowed into False, so the page said "wait a few seconds and retry" forever.
+  A scheme-less URL is normalised (a tailnet name to `https://`, a bare IP or
+  `host:port` to `http://`, because that is the container's own port with no
+  certificate on it) and the probe returns a VERDICT rather than a boolean, so
+  "not reachable" and "reachable but not a CC Sync dashboard" read differently.
+* **OPS-21** - `installer/START_HERE.md` is rewritten around the dashboard's
+  own [ INSTALLER ] button rather than a shared folder, and says up front that
+  Resolve **Studio** is required.
+* **OPS-25** - the finish page's two half-truths.
+
+27 tests in `onboarding/tests/test_install_ux.py`, all in `steps.py`: `onboard.py`
+is page layout and wiring with no automated tests by design, so anything that
+DECIDES something lives on the other side of that seam.
+
+**Left for a real Mac**: OPS-4's progress bar. The macOS bootstrap's long step
+is a `curl` whose progress meter writes to the terminal with carriage returns,
+and rendering that into the wizard's text widget needs to be watched on the
+machine rather than reasoned about from here. The streamed output itself works
+on both platforms; it is the CR-rewriting that is unverified.
+
+### CR-154 - the health endpoint reported Syncthing reachable on a dashboard that had never talked to it - FIXED in repo 2026-09-04 (dashboard 0.7.31)
+`GET /api/v1/health` answered `syncthing_reachable: true`, and an overall `ok`,
+on a deployment with no Syncthing at all. The evidence it reads is "did a
+collector cycle that NEEDS Syncthing complete", and the two ends of that
+question had drifted: `collector.SYNCTHING_FREE_KINDS` grew from `("prune",)`
+to `("prune", "invariants", "alerts")` in the 2026-08-28 resilience sweep, when
+the invariants pass and the alerts pass were both given permission to run
+without it, while `db.fetch_collector_status` still excluded `'prune'` with a
+literal in its SQL. So the first cycle's `invariants` and `alerts` rows - cycles
+that by construction prove nothing about Syncthing - were read as proof that
+Syncthing had been reached.
+
+In the field that is the wrong direction on three doors at once: the container
+healthcheck, `ship.ps1`'s post-deploy poll and the wizard's connection test all
+take that endpoint at its word, so a Syncthing-less or Syncthing-broken
+deployment looked healthy to every automatic check that exists. Lane C being
+dead fleet-wide is exactly what those checks are for.
+
+It surfaced as `test_api.py::test_health_endpoint` failing **only in full
+runs**, which is the tell that sent the first look at it in the wrong direction:
+it reads as fixture leakage between suites, and it is not. It is a thread race
+inside the one test - the collector's first cycle writing an `invariants` row
+against the request reading the table - so it appears when the box is loaded
+enough for the background thread to win, and never when the file is run alone.
+
+**Fixed** by giving the list one owner: `db.SYNCTHING_FREE_KINDS` is the
+constant, `collector.py` aliases it (`SYNCTHING_FREE_KINDS =
+db.SYNCTHING_FREE_KINDS`, so the collector's own gate and the query can no
+longer disagree), and `fetch_collector_status` filters `NOT IN` off the constant
+with generated placeholders rather than a literal. Test in `test_collector.py`,
+`test_syncthing_free_kinds_are_not_evidence_of_reachability`, which asserts both
+that the two names are the same object's contents and that a row of each free
+kind leaves the endpoint unconvinced.
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

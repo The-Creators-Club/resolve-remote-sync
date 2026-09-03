@@ -286,7 +286,7 @@ $env:CCSYNC_DASHBOARD_TOKEN = $null
 # 1.0.16: macOS caught up (SSD-aware bootstrap, Resolve Mapped Mount helper,
 # macos_uninstall.sh). Nothing changed on the Windows side; the number is
 # shared, so it moves when either platform's installer does.
-$InstallerVersion = "1.0.39"
+$InstallerVersion = "1.0.40"
 
 # When our stdout is a pipe (onboard.exe captures it), PS 5.1 encodes it with
 # the console OEM codepage -- so the wizard, which decodes UTF-8, would see
@@ -1246,10 +1246,34 @@ function Set-SmbLoopbackFirewallRule {
 # and blind to a disconnected persistent mapping in every case -- the two
 # situations where getting this wrong destroys the base rig. "Can't tell"
 # counts as foreign.
+#
+# The message an editor gets when the answer is "not ours" (OPS-1, usability +
+# resilience sweep 2026-09-04). Its own function, and pure, because the
+# refusal it belongs to is top-level script code no test can reach: this is
+# the half that can be checked (installer/tests/Test-ForeignDriveMiss.ps1).
+# The two cases are deliberately NOT one string -- "somebody else owns it" is
+# something the editor can fix in Explorer, "this session would not say" is
+# something they cannot -- but both are hard capability misses, not warnings:
+# with no tree drive no Resolve path resolves, lane B has nowhere to land, and
+# the run used to exit 0 with the wizard rendering the green DONE page.
+function New-ForeignDriveMiss {
+    param(
+        [string]$DriveRoot,
+        [string]$Target,
+        [switch]$Undetermined
+    )
+    if ($Undetermined) {
+        return "the $DriveRoot project drive was NOT created: this logon session would not report its drive mappings, so $DriveRoot was left alone rather than risk deleting a real NAS mapping. Nothing in DaVinci Resolve can find the project tree until $DriveRoot exists. Sign out and back in, then re-run this installer; if $DriveRoot is still there afterwards, ask your admin."
+    }
+    return "the $DriveRoot project drive was NOT created: it is already mapped to '$Target', which is not a mapping this installer made. Nothing in DaVinci Resolve can find the project tree until that is sorted. Disconnect it yourself (Explorer > This PC > right-click $DriveRoot > Disconnect) and re-run this installer, or ask your admin. If this machine works straight off the NAS, run the wizard again and pick 'I'M PHYSICALLY CONNECTED TO THE SERVER/NAS' instead: that role never touches drive mappings."
+}
+
 $existingDisplayRoot = $null
+$script:PDriveUndetermined = $false
 $pMapping = Get-DriveMapping -Letter $DriveLetter
 if ($null -eq $pMapping) {
     $script:PIsForeign = $true
+    $script:PDriveUndetermined = $true
     $existingDisplayRoot = "<could not be determined>"
     Write-Warn2 "could not read this logon session's drive mappings, so $DriveRoot is being treated as somebody else's and left alone. That is deliberate: guessing 'there is no $DriveRoot' here is how a real NAS mapping gets deleted."
 }
@@ -1272,6 +1296,15 @@ if ($script:PIsForeign) {
     Write-Warn2 "If this IS the machine that should get a local $DriveRoot, disconnect that mapping yourself first (Explorer > This PC > right-click $DriveRoot > Disconnect) and re-run."
     Write-Warn2 "If this is the base rig, you want the BASE role in onboard.exe -- it never touches drive mappings."
     Write-Warn2 "Skipping the whole $DriveRoot mapping section; everything else below still runs."
+    # OPS-1 (usability + resilience sweep 2026-09-04): the ONLY refusal in
+    # this file that never reached the capability channel, so the run exited 0
+    # and onboard.exe -- which branches on the exit code alone -- rendered
+    # "DONE: SEND THESE TWO VALUES TO YOUR ADMIN" for a machine with no tree
+    # drive. Everything else below really does still run, which is why this
+    # stays a MISS (exit 3, the "finished, but something is missing" page)
+    # rather than an abort: INST-5 built that contract for exactly this shape.
+    Add-CapabilityMiss (New-ForeignDriveMiss -DriveRoot $DriveRoot -Target $existingDisplayRoot `
+        -Undetermined:$script:PDriveUndetermined)
 }
 elseif ($DryRun) {
     Write-Step "[dry-run] would remove any existing '$TaskName' task / '$substFallbackName' Run entry, unmount $DriveRoot (subst /D + net use /delete), then remap $DriveRoot (elevated: loopback share '\\localhost\$ShareName' -> $CCRoot via net use /persistent:yes; unelevated: logon task + '$SubstCommand')"

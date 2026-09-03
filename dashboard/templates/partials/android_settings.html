@@ -31,9 +31,13 @@
        form without htmx (app.py's csrf_gate reads either). #}
     <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
     <div>
+      {# DUI-15 (usability sweep 2026-09-03): the placeholder used to be this
+         studio's OWN tailnet id, which identifies a customer more precisely
+         than their name does (CLAUDE.md, "no customer's name in code"). A
+         shape, not a value. #}
       <label>PACKAGE NAME
         <input type="text" name="package_name" style="width:100%"
-               placeholder="net.ts.tail26290e.truenas.ccsync"
+               placeholder="net.ts.your-tailnet.your-host.ccsync"
                value="{{ manifest.android.package_name }}">
       </label>
       <span class="muted">The application id the APK was built with. Blank
@@ -81,7 +85,7 @@
       {% endif %}
       <div style="margin-top:0.4rem" class="muted">
         {% if android_check.google_url %}
-          Google decides, not this page. Open this from a machine that can
+          Google decides, not this page. Open this from a computer that can
           reach this site's public URL and read what it says:
           <div style="overflow-wrap:anywhere"><code>{{ android_check.google_url }}</code></div>
         {% else %}

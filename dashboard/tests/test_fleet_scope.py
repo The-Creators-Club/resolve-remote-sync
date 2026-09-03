@@ -156,7 +156,7 @@ def test_the_fleet_page_renders_for_an_editor(env):
     assert r.status_code == 200
     assert "EDITOR2-PC" not in r.text
     # ...and it still says how big the fleet is, without naming anyone.
-    assert "other machine(s) in" in r.text
+    assert "other computer" in r.text  # UX-16 / UX-10 (2026-09-03)
 
 
 def test_the_fleet_page_shows_an_admin_everything_and_no_hidden_line(env):
@@ -164,4 +164,4 @@ def test_the_fleet_page_shows_an_admin_everything_and_no_hidden_line(env):
     r = login(client, "admin").get("/")
     assert r.status_code == 200
     assert "EDITOR2-PC" in r.text
-    assert "other machine(s) in" not in r.text
+    assert "other computer" not in r.text  # UX-16 / UX-10 (2026-09-03)

@@ -576,3 +576,25 @@ def test_collector_health_notes_a_clean_cycle_green(conn, fake, collector):
     health = dbmod.collector_health(conn)
     config = next(k for k in health["kinds"] if k["kind"] == "config")
     assert config["status"] == "green" and config["note"] is None
+
+
+def test_syncthing_free_kinds_are_not_evidence_of_reachability(conn):
+    """Every kind that runs WITHOUT Syncthing must be excluded from
+    db.fetch_collector_status's reachability verdict, not just `prune`.
+
+    The two lists drifted (2026-09-04): collector.SYNCTHING_FREE_KINDS grew to
+    three kinds with the resilience sweep while fetch_collector_status still
+    excluded the literal 'prune', so the `invariants`/`alerts` runs of the
+    first cycle made a Syncthing-less dashboard report syncthing_reachable and
+    ok=true on /api/v1/health. It showed up as a flaky test_health_endpoint --
+    whether that first cycle's rows beat the request was a thread race."""
+    assert set(collector_mod.SYNCTHING_FREE_KINDS) == set(dbmod.SYNCTHING_FREE_KINDS)
+    now = dbmod.utcnow_iso()
+    for kind in collector_mod.SYNCTHING_FREE_KINDS:
+        dbmod.record_poll_run(conn, kind, now, now, True, None)
+    conn.commit()
+    assert dbmod.fetch_collector_status(conn)["syncthing_reachable"] is False
+    # ...and a real Syncthing-backed kind still is
+    dbmod.record_poll_run(conn, "connections", now, now, True, None)
+    conn.commit()
+    assert dbmod.fetch_collector_status(conn)["syncthing_reachable"] is True

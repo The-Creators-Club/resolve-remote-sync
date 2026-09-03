@@ -163,7 +163,10 @@
           <input type="hidden" name="snapshot" value="{{ recovery_preview.snapshot }}">
           <label class="mono-sm"><input type="checkbox" name="include_changed" value="1">
             also bring back the ones that are there but different</label>
-          <button class="btn tap" type="submit">[ RESTORE INTO A NEW FOLDER ]</button>
+          {# DUI-4 (2026-09-04): this copies real files out of a snapshot and
+             can run for minutes. Until now the page did nothing visible for
+             the whole of it. #}
+          <button class="btn tap" type="submit"><span class="idle-label">[ RESTORE INTO A NEW FOLDER ]</span><span class="busy-label">[ COPYING THE FILES BACK... ]</span></button>
         </form>
       {% endif %}
     {% endif %}
@@ -190,7 +193,8 @@
   </p>
   <form hx-post="/partials/admin/recovery/drill" hx-target="#recovery" hx-swap="outerHTML">
     <input type="hidden" name="problem" value="{{ recovery_problem }}">
-    <button class="btn tap" type="submit">[ REHEARSE A RESTORE NOW ]</button>
+    {# DUI-4 (2026-09-04): a rehearsal restores real bytes and takes a moment. #}
+    <button class="btn tap" type="submit"><span class="idle-label">[ REHEARSE A RESTORE NOW ]</span><span class="busy-label">[ REHEARSING... ]</span></button>
   </form>
   {% if recovery.drills %}
     <div style="margin-top:0.5rem">

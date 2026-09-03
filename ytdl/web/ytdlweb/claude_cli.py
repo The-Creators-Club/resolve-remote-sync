@@ -158,8 +158,30 @@ def _invoke(system, user, timeout=None):
     are invoked with tools disallowed. Not a policy the model is asked to
     follow -- a capability it is not given.
     """
-    provider = ai_backend.current_provider()
-    text = ai_backend.complete(system, user, provider=provider, timeout=timeout)
+    # A call that failed IS the probe too (YTWEB-6, 2026-09-04). Until this
+    # date only success was recorded here, so the cache could go green and
+    # never come back: once anything had worked, a key later revoked, rate
+    # limited past its cap or paying against an exhausted balance left
+    # `claude: ok` in place for the life of the container. The pip stayed
+    # green, `setBanner('health', null)` cleared the pre-submit warning, and
+    # every search failed twenty minutes later with claude_auth: in job.error.
+    # note_failure is what recheck_health's "only while red" rule needs in
+    # order to do the self-healing it was built for -- YTDL-5's mirror, written
+    # at last. The two worker call sites still call it: this covers every OTHER
+    # caller, including the ones on a request thread.
+    provider = None
+    try:
+        provider = ai_backend.current_provider()
+        text = ai_backend.complete(system, user, provider=provider,
+                                   timeout=timeout)
+    except ClaudeError as exc:
+        note_failure(exc)
+        raise
+    except Exception as exc:                                    # noqa: BLE001
+        # Not classified, so it lands as `error` with its own text -- which is
+        # still a truer health line than a stale `ok`.
+        note_failure(exc)
+        raise
     # A call that worked IS the probe, and it is the only thing that ever
     # writes `ok` back: without it one transient timeout showed red on every
     # editor's page until the container was restarted, including after an admin

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
 from . import canon
+from . import ui_copy
 from . import resolve_bridge
 from .sync.rclone_lane import nfc_key
 
@@ -542,10 +543,11 @@ def is_placeholder(path: str) -> bool:
     return bool(attrs & PLACEHOLDER_ATTRIBUTES)
 
 
+# UX-1: the route is ui_copy's to spell, so the next menu move edits one file.
 PLACEHOLDER_FAILURE_MESSAGE = (
     "Google Drive (or your cloud drive) couldn't download this file. Right-click it "
     "in the Google Drive folder → \"Available offline\", wait for it to finish, then "
-    "run Tray > Settings > SCAN WHOLE PROJECT again."
+    f"run {ui_copy.SCAN_WHOLE_PROJECT} again."
 )
 
 
@@ -1196,7 +1198,7 @@ def fix_clip(
             "ok": False,
             "message": (
                 "CCSync doesn't know where your sync folder is (local_root is not set), "
-                "so it won't copy anything. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN."
+                f"so it won't copy anything. {ui_copy.DIAGNOSTICS}."
             ),
             "copied_to": None,
         }

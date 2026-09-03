@@ -969,25 +969,55 @@ ESTABLISHED pair owned by Resolve.exe; a long tail of TIME_WAIT rows is a
 poller.
 
 **The fix in the companion** is `ccsync_companion/script_server.py`: read the
-TCP table (no connection, ~6 ms), and refuse to call `scriptapp` while a
-`fuscript` listener exists with no ESTABLISHED connection from its parent
-process. Everything else fails open. `resolve_bridge.connect()` is the one
-chokepoint, so nothing else in the companion needs to know.
+TCP table (no connection, ~6 ms) and classify what the kernel shows into four
+answers, then connect on two of them only.
+
+| answer | what the TCP table shows | may you call `scriptapp()`? |
+|---|---|---|
+| `READY` | a `fuscript` listener on 1144 AND an ESTABLISHED connection to it owned by the listener's parent (Resolve) | yes |
+| `STARTING` | a `fuscript` listener, no host connection yet | **no** - this is the killing window |
+| `ABSENT` | nothing listening on 1144 | **no** - see below |
+| `UNKNOWN` | the table could not be read, the listener is not `fuscript`, or the platform has no probe | yes, fail OPEN |
+
+`resolve_bridge.connect()` is the one chokepoint in the companion, so nothing
+else in it needs to know.
+
+**`ABSENT` holding off is the whole lesson of the second attempt.** The first
+shipped guard (0.9.45, the same evening) failed open on "no listener" and
+killed two more launches (17:56 and 17:57 on 2026-08-21), because
+`scriptapp("Resolve")` with no server present **does not fail fast**: measured
+4.0 s per call on the base rig, 8 s when a second thread queues behind it, and
+it is retrying its connect the whole time. A client that "just checked whether
+Resolve is up" is therefore already inside a connect loop at the instant the
+server appears, which is exactly the `STARTING` case a snapshot taken before
+the call cannot see. Connect only when there is positively something
+registered to connect to. `is_starting()` alone is NOT the guard - it covers
+`STARTING` only, so a client gated on it walks straight into the 4 s loop from
+`ABSENT`.
 
 **For any other Resolve client on the same machine** (the MCP server, the
-MulticamPipeline tools): copy `script_server.py` next to your code - it is
-stdlib-only, Windows via ctypes and macOS via lsof - and gate every
-`scriptapp()` call:
+MulticamPipeline tools, a second product): copy `script_server.py` next to
+your code - it is stdlib-only, Windows via ctypes and macOS via lsof - and
+gate every `scriptapp()` call on `ready_to_connect()`:
 
-    from script_server import is_starting
-    if is_starting():
-        return None          # Resolve is launching; try again next poll
+    from script_server import ready_to_connect
+
+    if not ready_to_connect():
+        return None          # STARTING or ABSENT; try again next poll
     app = dvr.scriptapp("Resolve")
+
+`ready_to_connect()` is `state()[0] in (READY, UNKNOWN)`, never raises, and
+caches its answer for 250 ms, so it is cheap enough to ask before every call
+rather than once per session. Do not substitute `is_starting()` (CR-68: "the
+two ports use it (`not ready_to_connect()`, **never** `is_starting()`)").
 
 One badly behaved client is enough to take the server down for all of them,
 so every client on a machine has to carry the guard. "Wait N seconds after
 Resolve.exe appears" does not work: the server starts 90-470 s in, and it is
-the server's start, not the process's, that opens the window.
+the server's start, not the process's, that opens the window. A tool whose
+description says it "automatically launches Resolve if it is not running" is
+the highest-risk shape there is: it is the client most likely to be calling
+during someone else's launch.
 
 ## 16. The project library knows what the API will not tell you (library walk, 2026-08-26)
 

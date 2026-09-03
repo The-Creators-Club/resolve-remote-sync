@@ -382,6 +382,13 @@ def test_executor_marks_stale_once_per_batch_and_ok_again_on_success(tmp_path, m
     calls = []
     monkeypatch.setattr(ytdl_cookies, "mark_stale", lambda reason, path=None: calls.append(("stale", reason)))
     monkeypatch.setattr(ytdl_cookies, "mark_ok", lambda reason="", path=None: calls.append(("ok", reason)))
+    # CYT-5 (2026-09-04): the clear path asks the FILE now, not a per-job memo.
+    # Both writers are stubbed here, so the file never changes -- this stands
+    # in for it, and it is what makes the "then cleared" half of this test
+    # about the executor rather than about the memo it used to consult.
+    monkeypatch.setattr(ytdl_cookies, "recorded_status",
+                        lambda path=None: (ytdl_cookies.STATUS_STALE
+                                           if any(c[0] == "stale" for c in calls) else ""))
     monkeypatch.setattr(ex, "_cookies_file", lambda cfg: str(tmp_path / "c.txt"))
 
     class Proc:
@@ -439,3 +446,22 @@ def test_the_tray_line_for_a_flagged_session_says_downloads_carry_on():
     assert "refusing your signed-in session" in line
     assert "continuing without it" in line
     assert "rotated" not in line
+
+
+def test_an_aged_stale_record_reads_as_unused_not_as_a_fault():
+    """CYT-5 (2026-09-04): the record is the only word we have, so it stands
+    -- but a week with nothing tried against the session is not a reason to
+    keep telling the editor their sign-in is broken."""
+    from ccsync_companion import tray
+
+    snap = {"ytdl_cookies_health": {
+        "status": ytdl_cookies.STATUS_STALE, "reason": "yt-dlp: rotated",
+        "at": "2026-08-01T09:00:00Z", "aged": True}}
+    line = tray._youtube_warning_line(snap)
+    assert "has not been used since 2026-08-01" in line
+    assert "no longer works" not in line
+    assert "—" not in line
+
+    # A fresh record keeps the old, louder sentence.
+    snap["ytdl_cookies_health"]["aged"] = False
+    assert "no longer works" in tray._youtube_warning_line(snap)

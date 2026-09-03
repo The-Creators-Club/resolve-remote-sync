@@ -221,7 +221,7 @@ def test_no_confirm_was_emptied_instead_of_shortened(client, url):
 STACKED = {
     "/partials/admin/jobs": ("JOB", "KIND", "STATE", "WHERE", "PROGRESS", "AGE", "WHY"),
     "/partials/admin/users": ("USERNAME", "ROLE", "STATUS", "SSH KEYS",
-                              "EDITOR", "MACHINE", "PLATFORM", "LAST REPORT"),
+                              "EDITOR", "COMPUTER", "PLATFORM", "LAST REPORT"),  # UX-16
     "/partials/admin/sessions": ("USERNAME", "SIGNED IN", "LAST SEEN", "FROM"),
     "/partials/admin/report-tokens": ("EDITOR", "LABEL", "CREATED", "LAST USED"),
     "/partials/admin/packages": ("KIND", "VERSION", "PLATFORM", "SIZE", "SHA256",

@@ -19,7 +19,8 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import canon, fixer, resolve_bridge, ui_dispatch
+from . import canon, fixer, resolve_bridge, ui_copy, ui_dispatch
+from . import site as site_mod
 
 log = logging.getLogger("ccsync.popup")
 
@@ -330,6 +331,61 @@ def placeholder_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [row for row in rows if fixer.is_placeholder(row.get("file_path", ""))]
 
 
+def destination_free_bytes(local_root: str) -> int:
+    """Free space on the destination, or 0 when it cannot be measured.
+
+    0 means "no answer", never "the disk is full": UX-9's line is dropped
+    entirely rather than telling an editor their drive is empty because a
+    stat failed."""
+    if not local_root:
+        return 0
+    try:
+        import shutil
+
+        return int(shutil.disk_usage(local_root).free)
+    except Exception:
+        log.debug("could not measure free space on %s", local_root, exc_info=True)
+        return 0
+
+
+# UX-9 (usability sweep 2026-09-04): the point at which the batch is close
+# enough to the free space that the editor is told in red rather than amber.
+# Not a refusal -- FIX ALL never refuses, and a destination whose free space
+# we cannot read gets no line at all rather than a guess.
+SPACE_TIGHT_FRACTION = 0.9
+
+
+def space_summary(rows: list[dict[str, Any]], local_root: str) -> tuple[str, bool]:
+    """(sentence, tight) for the line above [ FIX ALL ] (UX-9, 2026-09-04).
+
+    FIX ALL was the editor's first real decision and it stated no total at
+    all: a first-day editor with a 900 GB card dump on their desktop clicked
+    it and found out mid-batch, one file at a time, that the disk was full,
+    with part of the batch already copied and the tree holding a mixture.
+    fixer.py's "Your disk is full" was the only space handling anywhere and
+    it arrives after the copy has begun.
+
+    ("", False) when there is nothing to say -- no rows, or a destination
+    that cannot be measured."""
+    if not rows:
+        return "", False
+    total = batch_total_bytes(rows)
+    free = destination_free_bytes(local_root)
+    if not total:
+        return "", False
+    line = f"{ui_copy.count(len(rows), 'clip')}, {human_bytes(total)} in total."  # UX-10
+    if not free:
+        return line, False
+    tight = total > free * SPACE_TIGHT_FRACTION
+    line += f" This computer has {human_bytes(free)} free."
+    if tight:
+        # Said in the editor's terms, and it says what happens NEXT: a copy
+        # into the tree is also an upload, which is the part nobody expects.
+        line += (" That is not much room. Everything copied in is also uploaded "
+                 "to the server.")
+    return line, tight
+
+
 def preflight_summary(rows: list[dict[str, Any]]) -> str:
     """The warning shown BEFORE the copy starts.
 
@@ -610,6 +666,39 @@ def perform_ignore_folders(rows: list[dict[str, Any]],
     return persisted, failed
 
 
+# -- RES-8 (usability sweep 2026-09-04): is a FIX ALL copy live RIGHT NOW? ---
+#
+# The tray's Quit tore the process down mid-write() with no question asked,
+# stranding a multi-GB .ccsync-tmp that is reported an hour later and never
+# deleted, and (if the kill lands between os.replace and ReplaceClip) a copy
+# Resolve is not pointed at. `_popup_active_lock.locked()` is the wrong
+# question for that: it is true for every dialog this process opens, including
+# the sign-in box. This is the narrow one, and it is deliberately MODULE state
+# rather than something hung off the dialog: the asker is the tray thread, the
+# dialog belongs to another thread and its widgets may not be touched from
+# here at all (CORE-H8/CORE-M3, CR-93).
+_copy_state_lock = threading.Lock()
+_copy_state: dict[str, Any] = {}
+
+
+def copy_in_progress() -> dict[str, Any]:
+    """{} when no FIX ALL copy is running, else {"index", "total", "name"}.
+
+    Written by the ccsync-fixall worker's own lifetime (see _run_fix), so
+    "empty" means the copy thread has actually finished, not that the window
+    has closed. Never raises: a caller deciding whether to warn must never be
+    the thing that fails."""
+    with _copy_state_lock:
+        return dict(_copy_state)
+
+
+def _set_copy_state(info: Optional[dict[str, Any]]) -> None:
+    with _copy_state_lock:
+        _copy_state.clear()
+        if info:
+            _copy_state.update(info)
+
+
 class PopupDialog:
     """tkinter Toplevel wrapper. Only imported/instantiated at call time (see
     show_popup below) so a headless environment (no display) degrades to a
@@ -687,7 +776,7 @@ class PopupDialog:
             raise
 
     def _build(self, tk, ttk, theme, rows, local_root) -> None:
-        self.root.title("CCSYNC.EXE")
+        self.root.title(site_mod.notify_title())
         # Every other root in this process sets the app icon; the one an
         # editor sees most often -- the media-outside-tree dialog -- showed
         # the default Tk feather, which reads as "some random program is
@@ -743,7 +832,8 @@ class PopupDialog:
         r += 1
         _label(
             self.root,
-            f"{len(rows)} timeline clip(s) live outside {local_root} and will NOT sync.\n"
+            f"{ui_copy.count(len(rows), 'timeline clip')} live outside "  # UX-10
+            f"{local_root} and will NOT sync.\n"
             "Pick a destination. FIX ALL copies them in and relinks Resolve.\n"
             "Your original file is left exactly where it is. Nothing is moved or deleted.",
             fg=theme.MUTED, wraplength=620,
@@ -781,6 +871,19 @@ class PopupDialog:
         self._retry_btn.pack(side="left", padx=(18, 0))
         self._retry_btn.pack_forget()
         r += 1
+
+        # UX-9 (2026-09-04): how much this click is about to move, and whether
+        # it fits. Its own label, above the pre-flight line and below the
+        # buttons, because status_label is overwritten the moment the copy
+        # starts and this is the number the editor needed BEFORE the click.
+        space_text, space_tight = space_summary(rows, local_root)
+        self._space_label = _label(
+            self.root, space_text, fg=theme.RED if space_tight else theme.MUTED,
+            font=theme.mono(9), wraplength=620)
+        if space_text:
+            self._space_label.grid(row=r, column=0, columnspan=2, sticky="w",
+                                   pady=(0, 6))
+            r += 1
 
         # Pre-flight: cloud placeholders have to download before they can be
         # read, which is what made a working FIX ALL look hung for twenty
@@ -992,6 +1095,15 @@ class PopupDialog:
         try:
             self._fix_btn.config(state="disabled")
             self._ignore_btn.config(state="disabled")
+            # RES-2 (usability sweep 2026-09-04): the folder button was the
+            # one control this bar forgot, and its handler ends in
+            # root.destroy() -- which ends mainloop(), returns show_popup()
+            # and releases app._popup_active_lock while the ccsync-fixall
+            # daemon is still copying multi-GB files and calling ReplaceClip.
+            # Exactly the second-pass-over-the-same-clips shape CORE-M1
+            # closed for the X, and the destroy-under-a-live-worker shape
+            # CR-93 aborts on.
+            self._folder_btn.config(state="disabled")
             self._retry_btn.pack_forget()
             self._progress_frame.grid()
             for btn in (self._stop_btn, self._skip_btn, self._cancel_btn):
@@ -1000,13 +1112,21 @@ class PopupDialog:
             pass
         preflight = preflight_summary(rows)
         self.status_label.config(
-            text=(f"Copying {len(rows)} file(s) in. Your originals stay exactly where "
-                  f"they are. Nothing is moved or deleted."
+            text=(f"Copying {ui_copy.count(len(rows), 'file')} in. Your originals "  # UX-10
+                  f"stay exactly where they are. Nothing is moved or deleted."
                   + ("\n" + preflight if preflight else "")))
+
+        # RES-8: registered BEFORE the thread starts and cleared in its
+        # `finally`, so the window between "the editor clicked FIX ALL" and
+        # "the worker is really gone" is covered at both ends.
+        _set_copy_state({"index": 0, "total": len(rows), "name": ""})
 
         def _publish(info):
             with self._progress_lock:
                 self._progress = info
+            _set_copy_state({"index": int(info.get("index") or 0),
+                             "total": int(info.get("total") or 0),
+                             "name": str(info.get("name") or "")})
 
         def _worker():
             results: list[dict[str, Any]] = []
@@ -1024,6 +1144,10 @@ class PopupDialog:
                 # _deliver_results runs the finisher exactly once.
                 with self._progress_lock:
                     self._pending_results = list(results)
+                # RES-8: nothing is being written any more, whatever the
+                # window does next. Cleared before the marshal, which is the
+                # one call here that can fail.
+                _set_copy_state(None)
                 self._safe_after(self._deliver_results)
 
         threading.Thread(target=_worker, name="ccsync-fixall", daemon=True).start()
@@ -1173,6 +1297,9 @@ class PopupDialog:
             try:
                 self._fix_btn.config(state="normal")
                 self._ignore_btn.config(state="normal")
+                # RES-2: re-enabled with the other two, on the same thread
+                # and in the same batch-is-over branch.
+                self._folder_btn.config(state="normal")
                 if self._failed_rows:
                     self._retry_btn.pack(side="left", padx=(18, 0))
             except Exception:
@@ -1203,7 +1330,8 @@ class PopupDialog:
                 if len(failures) > 12:
                     # bug-hunt-2026-09-03 comp-ui-2: Open log moved into Settings on
                     # 2026-08-27; the copy must name a row the tray menu still has.
-                    shown += f"\n… and {len(failures) - 12} more (see Tray > Settings > OPEN LOG)"
+                    shown += (f"\n… and {len(failures) - 12} more "
+                              f"(see {ui_copy.OPEN_LOG})")
                 if any(r.get("placeholder") for r in failures):
                     shown += ("\nThese are online-only cloud files. Make them available "
                               "offline in your cloud drive, then press RETRY FAILED.")
@@ -1246,12 +1374,23 @@ class PopupDialog:
                       "pick it up", getattr(fn, "__name__", fn), exc_info=True)
 
     def _on_ignore(self) -> None:
+        # RES-2 (2026-09-04): disabling a button is a hint, not a lock -- a
+        # keyboard activation, an accessibility tool or a stale click already
+        # queued can still reach the handler, and every route out of this
+        # dialog that ends in destroy() has to make the same check
+        # _on_close_request makes.
+        if self._fixing:
+            return
         perform_ignore_all(self.rows, self.ignore_tracker)
         if self.on_done is not None:
             self.on_done([])
         self.root.destroy()
 
     def _on_ignore_folder(self) -> None:
+        # RES-2 (2026-09-04): see _on_ignore. This one is the reason the guard
+        # exists -- it is the route that destroyed the window mid-copy.
+        if self._fixing:
+            return
         persisted, failed = perform_ignore_folders(
             self.rows, self.ignore_tracker, reason="the editor chose it in the fixer")
         if failed:
@@ -1262,7 +1401,7 @@ class PopupDialog:
             try:
                 self.status_label.config(
                     text="CCSync could not save that choice, so these clips are only "
-                         "skipped until you restart. Tray > Settings > COPY DIAGNOSTICS "
+                         f"skipped until you restart. {ui_copy.DIAGNOSTICS}"
                          "FOR YOUR ADMIN.")
             except Exception:
                 log.debug("could not update the popup status line", exc_info=True)
@@ -1276,7 +1415,7 @@ class PopupDialog:
     # Every widget this dialog keeps a handle on. Cleared on the Tk thread
     # when the window closes -- see show() (CR-93).
     WIDGET_ATTRS = (
-        "status_label", "_progress_frame", "_file_label", "_file_bar",
+        "status_label", "_space_label", "_progress_frame", "_file_label", "_file_bar",
         "_batch_label", "_batch_bar", "_fix_btn", "_ignore_btn", "_folder_btn",
         "_retry_btn", "_stop_btn", "_skip_btn", "_cancel_btn",
     )
@@ -2085,7 +2224,7 @@ def show_popup(
             )
         log.warning(
             "%d clip(s) auto-skipped for this session -- fix them in Resolve, or use "
-            "tray → Scan whole project once a display is available", len(rows),
+            "%s once a display is available", len(rows), ui_copy.SCAN_WHOLE_PROJECT,
         )
         try:
             # how="headless" (UX-4, resilience sweep 2026-08-28): this batch

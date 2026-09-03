@@ -554,3 +554,118 @@ def test_a_credentialed_timeout_is_not_mistaken_for_an_auth_failure():
     assert not drive_swap.is_auth_failure("net use failed: TimeoutExpired")
     assert not drive_swap.is_auth_failure(drive_swap._CONNECT_TIMEOUT_MSG)
     assert not drive_swap.is_auth_failure("mapping P: failed: ArgumentError")
+
+
+# -- SYNC-103 (usability sweep 2026-09-04): the letter is SITE DATA ---------
+#
+# CLAUDE.md's rule is that the drive letter comes from the site manifest's
+# canonical_prefix and that a second customer does not fork the installer.
+# This module was the one that never got the message: `net use P: /delete /y`
+# ran unconditionally, against whatever P: happened to be on a Q: site.
+
+
+def test_normalise_letter_accepts_the_shapes_a_manifest_carries():
+    f = drive_swap.normalise_letter
+    assert f("Q:") == "Q:"
+    assert f("q:\\") == "Q:"
+    assert f("Q:/") == "Q:"
+    assert f("q") == "Q:"
+    assert f("P:\\") == "P:"
+
+
+def test_normalise_letter_refuses_anything_that_is_not_a_letter():
+    """"" is "we cannot tell", and the callers turn that into P: rather than
+    handing an arbitrary string to `net use ... /delete /y`."""
+    f = drive_swap.normalise_letter
+    for junk in ("", None, "   ", r"\\nas\share", "/Volumes/Creators_Club",
+                 "PQ:", "1:", "your media drive"):
+        assert f(junk) == "", junk
+
+
+def test_the_loopback_share_is_named_after_the_letter():
+    """windows_bootstrap.ps1 creates CCSync_$DriveLetter, so a Q: site's own
+    share is CCSync_Q -- which classify_p_target used to call "other"."""
+    assert drive_swap.loopback_share("Q:") == "CCSync_Q"
+    assert drive_swap.loopback_share("P:") == drive_swap.LOOPBACK_SHARE
+    assert drive_swap.loopback_share("nonsense") == drive_swap.LOOPBACK_SHARE
+
+
+def test_classify_knows_a_q_site_owns_its_own_loopback_share():
+    f = drive_swap.classify_p_target
+    assert f(r"\\localhost\CCSync_Q", r"D:\Creators_Club", "", "Q:") == "local"
+    # ...and P:'s share is not Q:'s: on a Q: site a stray CCSync_P mapping is
+    # somebody else's business.
+    assert f(r"\\localhost\CCSync_P", r"D:\Creators_Club", "", "Q:") == "other"
+
+
+def test_the_swap_never_touches_a_letter_this_site_does_not_own(monkeypatch):
+    """SYNC-103 [verified]: every argv below said P: whatever the site's
+    prefix was, so the swap deleted an unrelated mapping and then mapped the
+    server at a letter Resolve does not read."""
+    calls = []
+
+    def run(args):
+        calls.append(list(args))
+        if list(args) == ["net", "use", "Q:"]:
+            return _proc(0, "Remote name   " + r"\\localhost\CCSync_Q" + "\n")
+        return _proc(0, "")
+
+    connects = _fake_wnet(monkeypatch, 0)
+    ok, msg = drive_swap.swap_to_server(r"\\nas\Pool\CC", run, letter="Q:")
+
+    assert ok, msg
+    assert connects[0][1] == "Q:"
+    assert ["net", "use", "P:", "/delete", "/y"] not in calls
+    assert ["net", "use", "Q:", "/delete", "/y"] in calls
+    assert "Q:" in msg and "P:" not in msg
+
+
+def test_the_restore_maps_this_site_s_own_loopback_share():
+    calls = []
+
+    def run(args):
+        calls.append(list(args))
+        return _proc(0, "")
+
+    ok, msg = drive_swap.swap_to_local(r"D:\Creators_Club", run, letter="Q:")
+
+    assert ok, msg
+    assert ["net", "use", "Q:", r"\\localhost\CCSync_Q",
+            "/persistent:yes"] in calls
+    assert not any("CCSync_P" in " ".join(c) for c in calls)
+    assert "Q:" in msg
+
+
+def test_an_unreadable_prefix_still_means_p():
+    """Every machine in the field is on P:, so "we could not tell" is P: and
+    never a guess."""
+    calls = []
+
+    def run(args):
+        calls.append(list(args))
+        return _proc(0, "")
+
+    drive_swap.swap_to_local(r"D:\Creators_Club", run, letter="your media drive")
+    assert ["net", "use", "P:", "/delete", "/y"] in calls
+
+
+def _reports_q(target):
+    """_reports_p's twin for a Q: site: the ownership probe is `net use Q:`
+    there, which is the whole point of SYNC-103."""
+    def run(args):
+        if list(args) == ["net", "use", "Q:"] and target:
+            return _proc(0, f"Remote name   {target}\n")
+        return _proc(0, "")
+    return run
+
+
+def test_the_refusals_name_the_site_s_own_letter():
+    ok, msg = drive_swap.swap_to_server(
+        r"\\nas\Pool\CC", _reports_q(r"\\SOMEONE\Else"), letter="Q:")
+    assert not ok
+    assert "Q: is currently mapped to" in msg
+
+    ok, msg = drive_swap.swap_to_server(
+        r"\\nas\Pool\CC", _reports_q(""), letter="Q:")
+    assert not ok
+    assert "what Q: is mapped to" in msg

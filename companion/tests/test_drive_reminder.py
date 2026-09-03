@@ -87,7 +87,7 @@ def test_the_sentences_carry_the_drive_phrase_and_no_em_dash():
     assert first.endswith("Plug it back in to finish syncing.")
     assert again.startswith("Your Studio drive is still disconnected")
     assert again.endswith("Plug it back in to finish syncing.")
-    for text in (first, again, dr.NOTIFY_TITLE):
+    for text in (first, again, dr.notify_title()):
         assert "—" not in text
         assert len(text) < 250
 
@@ -119,7 +119,7 @@ def test_begin_warns_once_records_and_is_idempotent(tmp_path):
     assert len(notes.sent) == 1
     message, title = notes.sent[0]
     assert "was disconnected before syncing finished: 2 uploads (1.9 GB left)" in message
-    assert title == dr.NOTIFY_TITLE
+    assert title == dr.notify_title()
     record = json.loads((tmp_path / "state" / dr.STATE_FILENAME).read_text())
     assert record["summary"] == "2 uploads (1.9 GB left)"
 

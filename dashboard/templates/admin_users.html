@@ -1,11 +1,18 @@
 {% extends "base.html" %}
-{% block title %}CC SYNC: USERS{% endblock %}
+{% block title %}{{ brand_org | upper }}: USERS{% endblock %}
 {% block layout %}
   <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
   </aside>
   <main class="main">
     {% include "partials/settings_nav.html" %}
+    {# DUI-1 (2026-09-04): the one-time credential slot. It is deliberately
+       ABOVE every polling wrapper on this page and is itself never polled:
+       the USERS panel below refreshes every 30 s and REPORT TOKENS every
+       60 s, and a password or a fleet token painted inside either of them
+       had a lifetime of under a minute. Both mints swap into this element
+       out of band (partials/minted_secret.html). #}
+    <div id="minted-secret"></div>
     <div hx-get="/partials/admin/users" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
       {% include "partials/admin_users.html" %}
     </div>

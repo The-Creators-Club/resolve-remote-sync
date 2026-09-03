@@ -3082,3 +3082,51 @@ def test_the_snapshot_carries_the_phase(tmp_path):
     assert job.snapshot()["phase"] is None
     job._set(phase="converting")
     assert job.snapshot()["phase"] == "converting"
+
+
+# ---------------------------------------------------------------------------
+# CYT-5 (usability sweep 2026-09-04): the stale mark can clear itself again
+# ---------------------------------------------------------------------------
+
+
+def test_a_later_job_clears_a_stale_mark_a_previous_one_wrote(tmp_path, ytdlp):
+    """CYT-5 [verified]: `mark_ok` was gated on `self._cookie_health_stale`, a
+    PER-JOB memo initialised False in every new DownloadJob, so the record
+    could only be cleared inside the very job that wrote it. Every later
+    successful cookied download returned early without calling mark_ok and the
+    tray asked for a fresh sign-in forever."""
+    from ccsync_companion import ytdl_cookies
+
+    fleet = FakeFleet(manifest_for())
+    ytdlp.plan({VID1: {"attempts": [{"exit": 1, "stderr": ACCOUNT_FLAG}]}})
+    deps = cookied_deps(tmp_path, fleet, ytdlp)
+    job = ex.DownloadJob(7, deps)
+    job._cookies_first = True
+    job.run()
+    assert ytdl_cookies.health(deps.cfg)["status"] == ytdl_cookies.STATUS_STALE
+
+    # A SECOND job, exactly as a later download would arrive: its memo is
+    # False, and the session works this time.
+    fleet2 = FakeFleet(manifest_for())
+    ytdlp.plan({VID1: {"attempts": [{}]}})
+    deps2 = cookied_deps(tmp_path, fleet2, ytdlp)
+    job2 = ex.DownloadJob(8, deps2)
+    job2._cookies_first = True
+    assert job2._cookie_health_stale is False
+    job2.run()
+
+    assert ytdl_cookies.health(deps2.cfg)["status"] == ytdl_cookies.STATUS_OK
+
+
+def test_an_anonymous_success_never_clears_the_mark(tmp_path, ytdlp):
+    """The session was not asked, so it proves nothing about the session."""
+    from ccsync_companion import ytdl_cookies
+
+    ytdl_cookies.mark_stale("the session was refused")
+    fleet = FakeFleet(manifest_for())
+    ytdlp.plan({VID1: {"attempts": [{}]}})
+    deps = make_deps(tmp_path, fleet=fleet, ytdlp=ytdlp)
+
+    run_job(deps)
+
+    assert ytdl_cookies.recorded_status() == ytdl_cookies.STATUS_STALE

@@ -21,12 +21,31 @@
     el.className = "toast " + (kind || "ok");
     el.textContent = message;
     host.appendChild(el);
-    // Auto-dismiss: this is a confirmation, not something worth keeping
-    // around, and a pile of stale toasts from a fast "tick all" would bury
-    // the grid's own scrollbar.
+    // DUI-5 (usability + resilience sweep, 2026-09-04): an ERROR stays until
+    // it is clicked. "3 of 40 change(s) failed" used to vanish after four
+    // seconds, from a corner of a page the admin was not looking at, and the
+    // copy-plan path reloaded the window before its toast could be read at
+    // all. A success still auto-dismisses: it is a confirmation, and a pile
+    // of them from a fast "tick all" would bury the grid's own scrollbar.
+    if (kind === "err") {
+      el.title = "click to dismiss";
+      el.addEventListener("click", function () {
+        if (el.parentNode) el.parentNode.removeChild(el);
+      });
+      return;
+    }
     setTimeout(function () {
       if (el.parentNode) el.parentNode.removeChild(el);
     }, 4000);
+  }
+
+  // What a cell is called, for a message a human reads. DUI-5: every toast on
+  // this page named the EDITOR ("could not update jsmith") in a grid where the
+  // editor is a whole column and the thing that failed is one cell.
+  function cellLabel(box) {
+    var project = box.dataset.projectLabel || box.dataset.slug || "that project";
+    var machine = box.dataset.machineLabel || box.dataset.machine || box.dataset.editor;
+    return machine ? (project + " on " + machine) : project;
   }
 
   // ?machine= (2026-08-18): the plan belongs to a COMPUTER, so every cell
@@ -164,7 +183,7 @@
       }).catch(function (err) {
         box.checked = !wanted;   // rollback: the browser already flipped it
         setUpmode(upBox, upWas);
-        toast('could not update "' + box.dataset.editor + '": ' + err.message, "err");
+        toast("could not tick " + cellLabel(box) + ": " + err.message, "err");
       });
       return;
     }
@@ -179,7 +198,7 @@
       writeCell(box, true, on ? "upload_only" : "full").catch(function (err) {
         setUpmode(box, !on);
         if (mainBox) mainBox.checked = mainWas;
-        toast('could not update "' + box.dataset.editor + '": ' + err.message, "err");
+        toast("could not set upload-only for " + cellLabel(box) + ": " + err.message, "err");
       });
     }
   });
@@ -193,14 +212,46 @@
     );
   }
 
+  // The label a running column shows, and the flag its loop checks. DUI-5:
+  // a column run gave no progress at all -- individual checkbox pulses inside
+  // a grid that scrolls sideways -- and navigating away mid-run left the
+  // column half applied with nothing said.
+  function runProgress(btn, done, total) {
+    if (!btn) return;
+    if (btn.dataset.idleLabel === undefined) btn.dataset.idleLabel = btn.textContent;
+    btn.textContent = "[ " + done + " / " + total + " ... ]";
+    btn.title = "click to stop after the change that is in flight";
+  }
+
+  function runDone(btn) {
+    if (!btn) return;
+    if (btn.dataset.idleLabel !== undefined) btn.textContent = btn.dataset.idleLabel;
+    btn.title = btn.dataset.idleTitle || "";
+    delete btn.dataset.running;
+  }
+
   // Sequential on purpose: a fleet can have ~100 projects, and firing every
   // write for one editor at once would be a hundred simultaneous rows
   // hitting that editor's selection queue -- easy to reorder (position is
   // insertion order), hard to reason about if one of them 404s midway.
-  function runColumn(editor, machine, wanted, freeBytes, machineLabel) {
+  function runColumn(editor, machine, wanted, freeBytes, machineLabel, btn) {
     var who = machine ? (editor + " on " + machine) : editor;
     var boxes = columnBoxes(editor, machine).filter(function (b) { return b.checked !== wanted; });
     if (!boxes.length) return;
+    if (!wanted) {
+      // DUI-5 (2026-09-04): [ NONE ] fired straight into a loop of DELETEs
+      // over a whole computer's plan with nothing asked, in a page where
+      // unticking ONE project asks. confirmCapacity was only ever called on
+      // the way in, so the destructive half of the pair was the unguarded
+      // one.
+      var what = boxes.length + " project" + (boxes.length === 1 ? "" : "s");
+      if (!window.confirm(
+            "Untick all " + what + " for " + who + "?\n\n"
+            + "Their copies stay on disk. Nothing new comes down and proxy "
+            + "sync stops for all of them.")) {
+        return;
+      }
+    }
     if (wanted) {
       // The COLUMN TOTAL (UX-1): [ ALL ] is the click the finding was written
       // about, and one project at a time each looked affordable.
@@ -222,17 +273,32 @@
       }
     }
     var i = 0;
-    var failed = 0;
+    var failed = [];
+    if (btn) { btn.dataset.running = "1"; runProgress(btn, 0, boxes.length); }
     (function next() {
-      if (i >= boxes.length) {
-        if (failed) {
-          toast(failed + " of " + boxes.length + " change(s) failed for " + who, "err");
+      // DUI-5: [ STOP ]. The button becomes its own stop control while the
+      // run is going, and the flag is checked HERE rather than mid-write, so
+      // a stop never leaves a request half made.
+      var stopped = btn && btn.dataset.running !== "1";
+      if (i >= boxes.length || stopped) {
+        runDone(btn);
+        if (failed.length) {
+          // DUI-5: name them. "3 of 40 change(s) failed" left the admin with
+          // no way to find out which three except by reading 40 checkboxes.
+          toast((stopped ? "stopped after " + i + " of " + boxes.length + ". " : "")
+                + failed.length + " of " + boxes.length + " change(s) failed: "
+                + failed.slice(0, 6).join(", ")
+                + (failed.length > 6 ? ", and " + (failed.length - 6) + " more" : ""),
+                "err");
+        } else if (stopped) {
+          toast("stopped after " + i + " of " + boxes.length + " for " + who, "ok");
         } else {
           toast((wanted ? "ticked all for " : "unticked all for ") + who, "ok");
         }
         return;
       }
       var box = boxes[i++];
+      runProgress(btn, i, boxes.length);
       box.checked = wanted;
       // A column tool only ever ADDS full ticks or REMOVES ticks: an
       // upload-only cell is already checked, so [ ALL ] skips it (the filter
@@ -240,7 +306,7 @@
       if (!wanted) setUpmode(siblingBox(box, "matrix-upmode"), false);
       writeCell(box, wanted, "full").catch(function () {
         box.checked = !wanted;
-        failed += 1;
+        failed.push(box.dataset.projectLabel || box.dataset.slug);
       }).then(next);
     })();
   }
@@ -248,15 +314,23 @@
   grid.addEventListener("click", function (evt) {
     var allBtn = evt.target.closest && evt.target.closest("[data-col-all]");
     var noneBtn = evt.target.closest && evt.target.closest("[data-col-none]");
+    var btn = allBtn || noneBtn;
+    // A second click on a running column is the [ STOP ] (DUI-5): the loop
+    // reads this flag before each write.
+    if (btn && btn.dataset.running === "1") {
+      btn.dataset.running = "0";
+      return;
+    }
     if (allBtn) {
       runColumn(allBtn.getAttribute("data-col-all"),
                 allBtn.getAttribute("data-col-machine"), true,
                 numberOr(allBtn.getAttribute("data-col-free"), null),
-                allBtn.getAttribute("data-col-label"));
+                allBtn.getAttribute("data-col-label"), allBtn);
     }
     if (noneBtn) {
       runColumn(noneBtn.getAttribute("data-col-none"),
-                noneBtn.getAttribute("data-col-machine"), false);
+                noneBtn.getAttribute("data-col-machine"), false,
+                null, noneBtn.getAttribute("data-col-label"), noneBtn);
     }
   });
 
@@ -272,6 +346,40 @@
     if (!source) return;
     var editor = sel.getAttribute("data-copy-editor");
     var target = sel.getAttribute("data-copy-target");
+    // DCORE-2 (2026-09-04): this handler fires on `change` -- a stray scroll
+    // over a focused select is enough -- and the route behind it DELETEs the
+    // target's whole plan before inserting the source's rows. Nothing asked,
+    // and the only feedback was "copied 8 project(s)", which never mentioned
+    // the 14 that were removed. The two counts are already in the DOM (this
+    // grid renders every column for this editor), so the question can name
+    // both sides without a round trip.
+    var sourceTicked = columnBoxes(editor, source).filter(function (b) { return b.checked; });
+    var targetTicked = columnBoxes(editor, target).filter(function (b) { return b.checked; });
+    var sourceSlugs = {};
+    sourceTicked.forEach(function (b) { sourceSlugs[b.dataset.slug] = true; });
+    var losing = targetTicked.filter(function (b) { return !sourceSlugs[b.dataset.slug]; });
+    if (!sourceTicked.length) {
+      // A source with an empty plan copies nothing and silently empties the
+      // target. Refused here, and the route should refuse it too (DCORE-2
+      // asks the JSON API for a 409).
+      sel.value = "";
+      toast(source + " has no projects ticked. Copying it would leave "
+            + target + " with nothing.", "err");
+      return;
+    }
+    if (!window.confirm(
+          "Replace " + target + "'s " + targetTicked.length + " project(s) with "
+          + source + "'s " + sourceTicked.length + "?\n\n"
+          + (losing.length
+             ? target + " stops syncing " + losing.length + " of them: "
+               + losing.slice(0, 6).map(function (b) {
+                   return b.dataset.projectLabel || b.dataset.slug;
+                 }).join(", ")
+               + (losing.length > 6 ? ", and " + (losing.length - 6) + " more" : "") + "."
+             : "Nothing is removed from " + target + "."))) {
+      sel.value = "";
+      return;
+    }
     sel.disabled = true;
     fetch("/api/v1/admin/machines/" + encodeURIComponent(editor) + "/" +
           encodeURIComponent(target) + "/copy-plan?source=" + encodeURIComponent(source), {
@@ -286,6 +394,9 @@
       }
       return resp.json();
     }).then(function (body) {
+      // The reload is deliberate (the whole column changes), which is also
+      // why this toast has never been read by anybody: DUI-5. The count that
+      // matters is on the confirm above, before the write.
       toast("copied " + body.projects + " project(s) from " + source + " to " + target, "ok");
       window.location.reload();
     }).catch(function (err) {

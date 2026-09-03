@@ -158,6 +158,9 @@ class OnboardWizard:
 
         self._last_back_btn = None
         self._install_back_btn = None
+        # What the editor typed before normalise_dashboard_url put a scheme on
+        # it, kept only so the next page can show the rewrite (OPS-6).
+        self._url_rewritten_from: Optional[str] = None
 
         self.container = tk.Frame(self.root, bg=theme.BG, padx=22, pady=18)
         self.container.pack(fill="both", expand=True)
@@ -580,8 +583,31 @@ class OnboardWizard:
                 steps.default_base_local_root(site=self._site()) if role == "base"
                 else steps.default_local_root(site=self._site()))
 
+    def _normalise_dashboard_url_field(self) -> str:
+        """Put a scheme on what was typed and write the result back into the
+        field (OPS-6, 2026-09-04).
+
+        The admin says "the dashboard is nas.tail26290e.ts.net" and the editor
+        types exactly that. urlopen answers ValueError("unknown url type"),
+        which every caller here swallowed, so the wizard said "not reachable
+        yet, wait a few seconds" forever and nothing anywhere said "put
+        https:// in front". Writing it BACK is the point: the editor sees what
+        is actually being tried, and it is the same string that goes into
+        config.toml, so the companion cannot end up with the unusable form.
+        """
+        typed = self.dashboard_url_var.get().strip()
+        fixed = steps.normalise_dashboard_url(typed)
+        if fixed and fixed != typed:
+            self.dashboard_url_var.set(fixed)
+            # Said on the NEXT page, not this one: this one is about to be
+            # swapped out, and an editor who never sees the rewrite cannot
+            # correct a wrong guess (https for a name, http for an address).
+            self._url_rewritten_from = typed
+        return fixed
+
     def _on_role_next(self) -> None:
         self._on_role_changed()  # ensure defaults match the final choice
+        self._normalise_dashboard_url_field()
         if not self.dashboard_url_var.get().strip():
             # Refuse here rather than three pages later on an opaque
             # "dashboard isn't reachable": nothing in this installer knows
@@ -624,7 +650,9 @@ class OnboardWizard:
                            lambda: webbrowser.open(TAILSCALE_DOWNLOAD_URL),
                            primary=False).pack(side="left")
 
-        self.conn_status_lbl = _label(frame, "", fg=theme.MUTED)
+        self._dashboard_url_note(frame)
+
+        self.conn_status_lbl = _label(frame, "", fg=theme.MUTED, wraplength=560)
         self.conn_status_lbl.pack(anchor="w", pady=(6, 6))
 
         theme.neon_button(tk, frame, "CHECK CONNECTION", self._on_check_connection,
@@ -632,6 +660,23 @@ class OnboardWizard:
 
         self._next_btn = self._nav_bar(frame, back=self.show_role, next_=self.show_signin,
                                         next_label="NEXT", next_enabled=False)
+
+    def _dashboard_url_note(self, frame) -> None:
+        """The address every check on this page uses, and what it was typed as
+        when the wizard put a scheme on it (OPS-6). Shown on both pages that
+        can fail because of it, so "not reachable" is never the first hint
+        that the address is not what the editor thinks it is."""
+        url = self.dashboard_url_var.get().strip()
+        if not url:
+            return
+        _label(frame, f"dashboard: {url}", fg=theme.MUTED,
+               font=theme.mono(9), wraplength=560).pack(anchor="w", pady=(0, 2))
+        if self._url_rewritten_from:
+            _label(frame,
+                   f"(you typed '{self._url_rewritten_from}', which has no http:// or "
+                   "https:// in front. Go Back and edit it if the one above is wrong.)",
+                   fg=theme.AMBER, font=theme.mono(9), wraplength=560).pack(
+                anchor="w", pady=(0, 4))
 
     def _on_install_tailscale(self) -> None:
         self.conn_status_lbl.config(text="installing via winget… this opens its own window", fg=theme.AMBER)
@@ -660,16 +705,22 @@ class OnboardWizard:
 
         def _worker():
             up = steps.tailscale_up()
-            reachable = steps.dashboard_reachable(self.dashboard_url_var.get()) if up else False
+            # OPS-6 (2026-09-04): the probe, not the boolean. "wait a few
+            # seconds and retry" was printed for a typo'd hostname too, which
+            # is a wait that never ends -- and for a missing scheme, which is
+            # not a network problem at all.
+            probe = (steps.dashboard_probe(self.dashboard_url_var.get()) if up
+                     else {"ok": False, "message": ""})
 
             def _ui():
-                if up and reachable:
-                    self.conn_status_lbl.config(text="connected -- dashboard reachable", fg=theme.GREEN)
+                if up and probe.get("ok"):
+                    self.conn_status_lbl.config(text="connected: the dashboard is answering",
+                                                fg=theme.GREEN)
                     if self._next_btn is not None:
                         self._next_btn.config(state="normal", fg=theme.RED, command=self.show_signin)
-                elif up and not reachable:
+                elif up:
                     self.conn_status_lbl.config(
-                        text="tailscale is up, but the dashboard isn't reachable yet -- wait a few seconds and retry",
+                        text=str(probe.get("message") or "the dashboard is not reachable yet"),
                         fg=theme.AMBER)
                 else:
                     icon_word = "menu-bar" if IS_MACOS else "tray"
@@ -698,6 +749,7 @@ class OnboardWizard:
         _label(form, "password:").grid(row=1, column=0, sticky="w")
         _entry(form, self.password_var, width=30, show="*").grid(row=1, column=1, sticky="w", padx=(10, 0))
 
+        self._dashboard_url_note(frame)
         self.signin_status_lbl = _label(frame, "", fg=theme.RED, wraplength=560)
         self.signin_status_lbl.pack(anchor="w", pady=(12, 0))
 
@@ -715,6 +767,10 @@ class OnboardWizard:
                 text="no dashboard url set -- go Back to the role page and enter "
                      "the one your admin gave you; nothing can be verified without it")
             return
+        # The base-rig path never sees the tailscale page, so this is where a
+        # scheme-less address would otherwise surface as "sign-in failed:
+        # unknown url type" (OPS-6, 2026-09-04).
+        self._normalise_dashboard_url_field()
         self.signin_status_lbl.config(text="verifying against the dashboard…", fg=theme.MUTED)
 
         def _worker():
@@ -848,8 +904,16 @@ class OnboardWizard:
                                            wraplength=560)
         self.local_root_space_lbl.pack(anchor="w", pady=(0, 6))
 
-        self.install_btn = theme.neon_button(tk, frame, "BEGIN INSTALL", self._on_begin_install, primary=True)
-        self.install_btn.pack(anchor="w", pady=(0, 10))
+        btn_row = tk.Frame(frame, bg=theme.BG)
+        btn_row.pack(anchor="w", pady=(0, 10))
+        self.install_btn = theme.neon_button(tk, btn_row, "BEGIN INSTALL", self._on_begin_install, primary=True)
+        self.install_btn.pack(side="left")
+        # OPS-5: the log is the only record of what happened, and the person
+        # who needs it is usually on the other end of a message from the
+        # editor. One click puts the whole file on the clipboard.
+        self.copy_log_btn = theme.neon_button(tk, btn_row, "COPY LOG", self._on_copy_log,
+                                              primary=False)
+        self.copy_log_btn.pack(side="left", padx=(12, 0))
 
         # One trace for the wizard's lifetime -- the callback reads whichever
         # widgets the current page bound, so re-entering this page must not
@@ -869,6 +933,17 @@ class OnboardWizard:
         self.log_text.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
+        # OPS-5: name the file on the page itself. "Send them this list"
+        # (show_finish) is only actionable if the editor can find the list.
+        log_path = steps.install_log_path()
+        self.log_path_lbl = _label(
+            frame,
+            f"log file: {log_path}" if log_path is not None
+            else "log file: could not be created (your home folder is not writable), "
+                 "so use COPY LOG before closing this window",
+            fg=theme.MUTED, font=theme.mono(8), wraplength=560)
+        self.log_path_lbl.pack(anchor="w", pady=(0, 4))
+
         # This page has no NEXT, so _nav_bar's return value is None -- which is
         # what made the "disable BACK while installing" guard below dead code
         # (clicking BACK mid-_clean_slate destroyed the log widget under the
@@ -878,12 +953,51 @@ class OnboardWizard:
         self._install_back_btn = self._last_back_btn
 
     def _append_log(self, text: str) -> None:
+        # OPS-5 (2026-09-04): to disk FIRST, on the calling thread. The widget
+        # write is queued to the main thread, and the failures worth reading
+        # are the ones where that main thread never runs again.
+        steps.append_install_log(text)
+
         def _ui():
             self.log_text.config(state="normal")
             self.log_text.insert("end", text if text.endswith("\n") else text + "\n")
             self.log_text.see("end")
             self.log_text.config(state="disabled")
         self._safe_after(_ui)
+
+    def _on_copy_log(self) -> None:
+        """Whole log to the clipboard (OPS-5). The file when there is one --
+        it holds the python-level lines the widget never sees -- else whatever
+        the widget has, which is better than nothing on a machine that could
+        not open the file in the first place."""
+        text = steps.read_install_log()
+        if not text:
+            try:
+                text = self.log_text.get("1.0", "end").strip()
+            except tk.TclError:
+                text = ""
+        if not text:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self._flash_button(self.copy_log_btn, "COPY LOG")
+
+    def _flash_button(self, button, restore_label: str) -> None:
+        """Say COPIED for a second and change back (OPS-25). On the pages
+        whose whole purpose is copying something, a button that does nothing
+        visible reads as a button that did nothing."""
+        try:
+            button.config(text="[ COPIED ]")
+        except tk.TclError:
+            return
+
+        def _restore():
+            try:
+                button.config(text=f"[ {restore_label} ]")
+            except tk.TclError:
+                pass  # the page moved on, which is the same as restored
+
+        self.root.after(1200, _restore)
 
     def _local_root_problem(self) -> Optional[str]:
         return steps.validate_local_root(self.local_root_var.get(), self._effective_role(),
@@ -1032,6 +1146,9 @@ class OnboardWizard:
 
             tailnet_host = steps.dashboard_host(self.dashboard_url_var.get())
             self._append_log(f"running bootstrap for editor '{self.verified_username}'…")
+            self._append_log(
+                "this is the long part (a few minutes, up to half an hour on a slow "
+                "connection). Every step it takes appears below as it happens.")
             exit_code, output = steps.run_bootstrap(
                 editor_name=self.verified_username,
                 dashboard_token=self.report_token,
@@ -1040,9 +1157,14 @@ class OnboardWizard:
                 dashboard_url=self.dashboard_url_var.get(),
                 companion_exe_source=companion_src,
                 site=self._site(),
+                # OPS-4 (2026-09-04): line by line, as the child prints it.
+                # The whole install used to be captured to a pipe and dumped
+                # in one block at the end, so the editor watched an empty
+                # window with both buttons disabled for anything up to half an
+                # hour with no way to tell working from hung.
+                on_line=self._append_log,
             )
             self.bootstrap_output = output
-            self._append_log(output)
 
             # The bootstrap owns config.toml's seeding path and may have
             # written it itself (it only skips when the file already exists),
@@ -1184,7 +1306,13 @@ class OnboardWizard:
                            "this list instead. Everything else installed fine, so re-running\n"
                            "the installer once the cause is sorted will finish the job.",
                    fg=theme.AMBER, wraplength=560).pack(anchor="w", pady=(0, 10))
-            for warning in warnings[:6]:
+            # OPS-25 (2026-09-04): the heading counts every warning and the
+            # list showed six, so a seventh vanished with nothing saying so --
+            # on the one page whose instruction is "send them this list".
+            # Truncating is still right (the page has a fixed height and the
+            # rest of it is the two values the admin needs), but silence about
+            # it is not, and the log now holds all of them.
+            for warning in steps.finish_warning_lines(warnings):
                 _label(frame, f"  • {warning}", fg=theme.RED, font=theme.mono(9),
                        wraplength=560).pack(anchor="w", pady=(0, 2))
             _label(frame, "", font=theme.mono(4)).pack(anchor="w")
@@ -1195,13 +1323,20 @@ class OnboardWizard:
                            f"in as {self.verified_username}, and will start automatically next login.",
                    wraplength=560).pack(anchor="w", pady=(0, 16))
 
-        device_id_display = self.device_id or "(not found automatically -- open http://127.0.0.1:8384, "
-        if not self.device_id:
-            device_id_display += "Actions > Show ID)"
-        self._labeled_copy_field(frame, "Syncthing device ID:", device_id_display)
+        # OPS-25 (2026-09-04): the placeholder is instructions to the EDITOR,
+        # and [ COPY ] used to put it on the clipboard, from where it was
+        # pasted into the message to the admin as if it were an ID. A field
+        # holding no value has nothing to copy, and says so on the button.
+        device_id_display, device_id_copyable = steps.finish_copy_field(
+            self.device_id,
+            "(not found automatically - open http://127.0.0.1:8384, Actions > Show ID)")
+        self._labeled_copy_field(frame, "Syncthing device ID:", device_id_display,
+                                 copyable=device_id_copyable)
 
-        pub_display = self.pub_key or "(no SSH public key found -- check ~/.ssh/ccsync_ed25519.pub)"
-        self._labeled_copy_field(frame, "SSH public key:", pub_display)
+        pub_display, pub_copyable = steps.finish_copy_field(
+            self.pub_key, "(no SSH public key found - check ~/.ssh/ccsync_ed25519.pub)")
+        self._labeled_copy_field(frame, "SSH public key:", pub_display,
+                                 copyable=pub_copyable)
 
         icon_hint = ("the CCSync menu-bar icon's \"Sign in…\"" if IS_MACOS
                      else "right-click the tray icon → \"Sign in…\"")
@@ -1212,7 +1347,18 @@ class OnboardWizard:
         _label(frame, "Send these to your admin to finish signup.", fg=theme.AMBER,
                font=theme.mono(10, bold=True)).pack(anchor="w", pady=(10, 0))
 
+        self._finish_log_note(frame)
         self._nav_bar(frame, back=None, next_=self.root.destroy, next_label="CLOSE")
+
+    def _finish_log_note(self, frame) -> None:
+        """Name the install log on the way out (OPS-5). This window is about
+        to be closed and everything it showed goes with it; the file is what
+        the admin can be asked for a week later."""
+        path = steps.install_log_path()
+        if path is None:
+            return
+        _label(frame, f"install log: {path}", fg=theme.MUTED, font=theme.mono(8),
+               wraplength=560).pack(anchor="w", pady=(10, 0))
 
     def show_finish_base(self) -> None:
         self._install_finished()
@@ -1230,9 +1376,10 @@ class OnboardWizard:
         _label(frame, f"dashboard: {self.dashboard_url_var.get().strip()}",
                fg=theme.MUTED, font=theme.mono(10)).pack(anchor="w", pady=(0, 10))
 
+        self._finish_log_note(frame)
         self._nav_bar(frame, back=None, next_=self.root.destroy, next_label="CLOSE")
 
-    def _labeled_copy_field(self, parent, label_text, value):
+    def _labeled_copy_field(self, parent, label_text, value, copyable: bool = True):
         block = tk.Frame(parent, bg=theme.BG)
         block.pack(anchor="w", fill="x", pady=(0, 12))
         _label(block, label_text, fg=theme.MUTED).pack(anchor="w")
@@ -1250,8 +1397,13 @@ class OnboardWizard:
         def _copy():
             self.root.clipboard_clear()
             self.root.clipboard_append(value)
+            self._flash_button(btn, "COPY")
 
-        theme.neon_button(tk, row, "COPY", _copy, primary=False).pack(side="left", padx=(8, 0))
+        btn = theme.neon_button(tk, row, "COPY" if copyable else "NOTHING TO COPY",
+                                _copy if copyable else (lambda: None), primary=False)
+        if not copyable:
+            btn.config(state="disabled", fg=theme.MUTED)
+        btn.pack(side="left", padx=(8, 0))
 
     # -- entrypoint --------------------------------------------------
 
@@ -1260,6 +1412,22 @@ class OnboardWizard:
 
 
 def main() -> None:
+    # OPS-5 (usability + resilience sweep 2026-09-04): open the run's log file
+    # before the first window exists, and put python's own logging in it too.
+    # A frozen windowed build has no stderr (console=False in both specs), so
+    # until now every log.exception in this process was written to nowhere at
+    # all -- including the ones from the worker thread that decide whether an
+    # install finished.
+    log_path = steps.start_install_log()
+    if log_path is not None:
+        try:
+            handler = logging.FileHandler(str(log_path), encoding="utf-8")
+            handler.setFormatter(logging.Formatter("%(asctime)s [onboard] %(message)s"))
+            logging.getLogger().addHandler(handler)
+        except OSError:
+            pass  # the wizard installs with or without a log
+        log.info("onboarding wizard (installer %s) starting; log file: %s",
+                 steps.INSTALLER_VERSION, log_path)
     OnboardWizard().run()
 
 

@@ -268,6 +268,56 @@ It now re-stats the database on the way through (at most every couple of
 seconds) and reopens or rebuilds when it has moved. A container running a
 musicweb from before 2026-08-21 still needs that POST, or a restart.
 
+## Publishing `broll.db` without deleting what the fleet ingested
+
+*BROLL-1, 2026-09-04.* `broll.db` is published as a **file** (the index really
+is rebuilt on the base rig), and the live copy on the NAS is the **only** place
+drag-and-drop ingest exists: the `videos` rows the dashboard mints at claim
+time with their segments and vectors, the `share_roots` row for the shoot, and
+the whole of `ingest_batches` / `ingest_items` - every batch's state, lease and
+per-clip progress. The base rig's copy has never seen any of it, so until this
+date the rename took the lot, silently: the shrink check compares row counts,
+and 200 ingested clips against a 15,000-clip archive is a 1.3% difference
+against a 10% threshold.
+
+`publish_db.py --which broll` now does the music trick in the other direction,
+by itself, as part of the publish:
+
+```
+checkpoint -> snapshot -> verify -> upload -> DRAIN the live copy
+           -> rename    -> MERGE the drain back
+```
+
+The drain is a small SQLite bundle written **beside the live index** by the
+dashboard container, `broll.db.drain-<ts>`. It is never deleted, and the merge
+is one transaction in which every write is keyed: a clip the newly published
+index already has is left exactly as the publish left it, and one it lacks is
+re-inserted with a fresh id, its children and its vector.
+
+Two things an operator will meet:
+
+- **A drain that cannot be taken stops the publish**, before anything is
+  renamed, naming the reason (a container that is not running is the usual
+  one). `--allow-loss` publishes anyway and says what that costs. A NAS with
+  no `broll.db` yet is not this case: a first publish has nothing to lose and
+  proceeds.
+- **A merge that fails after the rename is not a loss.** The new index is
+  live, the drained rows are in the bundle, and the command to put them back
+  is printed:
+
+  ```powershell
+  python publish_db.py --which broll --apply-drain /broll-data/broll.db.drain-<ts> --apply
+  ```
+
+  It is idempotent, so running it twice is safe, and so is running it after a
+  `--rollback` (the `.prev` carries the rows too).
+
+**Pause ingest first if you can.** The drain is taken as late as possible, but
+a batch that starts between the drain and the rename is the one thing it
+cannot see; that batch's rows would be lost by the swap. Look at Dashboard ->
+B-roll -> the ingest panel, or at the `open_batches` count the publish prints,
+before you publish over a working day.
+
 ## The CLAP audio tower is an artefact now (`export_audio_encoder.py`)
 
 *2026-08-18, `docs/MUSIC_INGEST_PLAN.md` step 1.* The drain above is the

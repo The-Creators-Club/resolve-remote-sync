@@ -66,6 +66,7 @@ from typing import Any, Callable, Optional
 
 from . import config as config_mod
 from . import secretfile
+from . import ui_copy
 from . import upgrade as upgrade_mod
 from .reporter import HttpPostFn, default_http_post
 
@@ -534,8 +535,9 @@ class IdentityManager:
             with self._lock:
                 self._identity = None
             return False, (
-                "The server's sign-in reply couldn't be used. If this keeps happening, "
-                "check this machine's clock is correct, then Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN."
+                "The server's sign-in reply couldn't be used. If this keeps "
+                "happening, check this machine's clock is correct, then "
+                f"{ui_copy.DIAGNOSTICS}."
             )
         return True, None
 

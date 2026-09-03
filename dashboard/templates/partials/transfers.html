@@ -59,7 +59,7 @@
         <li><span class="clip-name" title="{{ f.name }}">{{ f.name }}</span><span class="muted mono-sm">{{ f.size | human_bytes if f.size is not none else "" }}</span></li>
       {% endfor %}
       {% if q.truncated %}<li class="muted">… and {{ q.n_files - (q.files | length) }} more</li>{% endif %}
-      {% if q.manifest_truncated %}<li class="muted">(this machine's manifest was capped; totals may undercount)</li>{% endif %}
+      {% if q.manifest_truncated %}<li class="muted">(this computer's manifest was capped; totals may undercount)</li>{% endif %}
     </ul>
   </details>
 {% endfor %}

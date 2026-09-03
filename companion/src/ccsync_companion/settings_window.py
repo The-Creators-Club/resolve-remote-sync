@@ -41,7 +41,9 @@ from dataclasses import dataclass
 from typing import Callable, TYPE_CHECKING
 
 from . import config as config_mod
+from . import site as site_mod
 from . import tray as tray_mod
+from . import ui_copy
 from . import upgrade as upgrade_mod
 from . import ytdl_cookies
 
@@ -152,7 +154,7 @@ def action_set_role(app: "CompanionApp", role: str) -> None:
                 "projects, this is not the setting you want."
             )
             confirmed = popup.confirm_dialog(
-                "CCSYNC.EXE: switch to WIRED TO THE SERVER", body,
+                site_mod.notify_title("switch to WIRED TO THE SERVER"), body,
                 ok_label="WIRED TO THE SERVER",
             )
         finally:
@@ -179,7 +181,7 @@ def action_set_role(app: "CompanionApp", role: str) -> None:
                 'Type "REMOTE" to confirm:'
             )
             confirmed = tray_mod._ask_typed_confirmation_locked(
-                app, "CCSYNC.EXE: switch to REMOTE EDITOR", body, "REMOTE",
+                app, site_mod.notify_title("switch to REMOTE EDITOR"), body, "REMOTE",
             )
         finally:
             if lock is not None:
@@ -234,8 +236,8 @@ def action_repair_p_mapping(app: "CompanionApp") -> None:
             ok, message = app.repair_p_mapping()
         except Exception:
             log.exception("settings: repair of the media drive mapping failed")
-            tray_mod._notify(app, "CCSync could not repair the drive mapping. Tray > "
-                                  "Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.")
+            tray_mod._notify(app, "CCSync could not repair the drive mapping. "
+                                  f"{ui_copy.DIAGNOSTICS}.")
             return
         tray_mod._notify(app, message)
         if ok:
@@ -251,8 +253,7 @@ def action_forget_ignored_folder(app: "CompanionApp", folder: str) -> None:
             forgotten = app.ignore_tracker.forget_folder(folder)
         except Exception:
             log.exception("settings: could not forget the folder ignore %s", folder)
-            tray_mod._notify(app, "CCSync could not undo that. Tray > Settings > COPY "
-                                  "DIAGNOSTICS FOR YOUR ADMIN.")
+            tray_mod._notify(app, f"CCSync could not undo that. {ui_copy.DIAGNOSTICS}.")
             return
         if forgotten:
             tray_mod._notify(app, f"CCSync will offer clips in {folder} again.")
@@ -357,6 +358,10 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
         Line(tray_mod._format_lane_line_from(
             s, paused=bool(snap.get("paused")), problems=bool(snap.get("problems")),
             root_absent=bool(snap.get("root_absent")),
+            # SYNC-105 (sweep 2026-09-04): which way the drive is gone, so
+            # these three lines say the same thing as the balloon and the
+            # tray line rather than "disconnected" about a plugged-in drive.
+            root_state=snap.get("root_state"),
         ))
         for s in snap.get("statuses", [])
     ]
@@ -565,10 +570,14 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
             f"FORGET: {folder}",
             (lambda folder=folder: action_forget_ignored_folder(app, folder))))
     if snap.get("p_swap_available"):
+        # SYNC-103 (sweep 2026-09-04): the letter is site data, and these
+        # two labels are what ui_copy.finish_grading() quotes back at the
+        # editor from the confirm dialog.
+        swap_letter = tray_mod._canonical_letter(app)
         advanced_items.append(Button(
-            "FINISH GRADING: P: BACK TO LOCAL PROXIES"
+            f"FINISH GRADING: {swap_letter} BACK TO LOCAL PROXIES"
             if snap.get("p_mode") == "server"
-            else "GRADE FROM SERVER ORIGINALS (SWAP P:)…",
+            else f"GRADE FROM SERVER ORIGINALS (SWAP {swap_letter})…",
             lambda: tray_mod.action_grade_swap(app, snap),
         ))
     if not halt_active:
@@ -605,7 +614,9 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
 
 # -- the Tk shell -------------------------------------------------------
 
-_WINDOW_TITLE = "CCSYNC.EXE: SETTINGS"
+def _window_title() -> str:
+    """UX-4: a function for the same reason drive_reminder.notify_title is."""
+    return site_mod.notify_title("SETTINGS")
 _REFRESH_MS = 2000
 
 
@@ -674,7 +685,7 @@ def _build_settings_window(app: "CompanionApp", lock) -> None:
             tray_mod._spawn(app, label, fn)
         return _handler
 
-    root.title(_WINDOW_TITLE)
+    root.title(_window_title())
     theme.apply_window_icon(tk, root)
     root.configure(bg=theme.BG)
     root.geometry("720x640")

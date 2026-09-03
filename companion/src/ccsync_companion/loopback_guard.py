@@ -76,6 +76,7 @@ from urllib.parse import urlsplit
 
 from . import config as config_mod
 from . import secretfile
+from . import ui_copy
 
 log = logging.getLogger("ccsync.broll")
 
@@ -111,9 +112,11 @@ BUNDLE_SUFFIXES = (
 # The tray menu has had no "Open log" item since CR-88's ten-item layout
 # (bug-hunt-2026-09-03 comp-broll-music): the way an editor gets their log to
 # an admin is the Settings window's button, so name that.
-REFUSED_MESSAGE = ("this request was refused by the CC Sync companion - see "
-                   "its log (Tray > Settings > COPY DIAGNOSTICS FOR YOUR "
-                   "ADMIN) for the reason")
+# CMEDIA-5 (sweep 2026-09-04): the route through ui_copy, so the next menu
+# move cannot leave the one sentence an editor ever reads pointing at nothing.
+REFUSED_MESSAGE = (f"this request was refused by the CC Sync companion - open "
+                   f"{ui_copy.OPEN_LOG} for the reason, or send "
+                   f"{ui_copy.DIAGNOSTICS} to your admin")
 
 
 # -- the loopback token ------------------------------------------------------

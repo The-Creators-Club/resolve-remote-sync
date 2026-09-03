@@ -42,7 +42,7 @@ import logging
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 
-from musicweb import ingest_batches
+from musicweb import ingest_batches, rescore
 from musicweb.db import con
 from musicweb.fleet_auth import require_fleet_token, require_identity
 from musicweb.schemas import (ClaimIn, HeartbeatIn, ItemResultIn, ItemStatusIn,
@@ -128,6 +128,30 @@ def _refresh_search(conn):
                     'next reload', type(exc).__name__, exc)
 
 
+def _settle_scores(conn):
+    """The unconditional rescore at the end of a batch. Never fatal.
+
+    The other half of MUSIC-5 (2026-09-04): per-item rescoring is coalesced, so
+    the last few tracks of a drop can be written and not yet tagged. A batch is
+    finished exactly once, and this is the one place where paying for the full
+    library pass is unambiguously worth it -- after it, `scores_stale` is clear
+    and every track in the drop has its facets.
+
+    Best-effort because the batch IS released: raising here would make the
+    companion retry a release that already happened, and the marker plus the
+    next result (or a base-rig --retag) still fix the scores.
+    """
+    if not rescore.scores_stale(conn):
+        return
+    try:
+        rescore.rescore_library(conn)
+        _refresh_search(conn)
+    except Exception as exc:                                    # noqa: BLE001
+        log.error('music ingest: the end-of-batch rescore failed (%s: %s); the '
+                  'tracks are searchable by similarity and the library is '
+                  'marked as needing a retag', type(exc).__name__, exc)
+
+
 @router.post('/batches/{uid}/claim', dependencies=[Depends(require_fleet_token)])
 def claim(uid: str, body: ClaimIn, editor: str = Depends(require_identity)):
     """Take the batch and receive the work order.
@@ -192,7 +216,15 @@ def item_result(uid: str, item_uid: str, body: ItemResultIn,
     batch = _leaseholder_or_410(conn, uid, editor, x_ccsync_machine)
     item = _item_or_404(conn, uid, item_uid)
     result = ingest_batches.write_item_result(conn, batch, item, body)
-    _refresh_search(conn)
+    # Only when the scores actually landed (MUSIC-5, 2026-09-04). A full
+    # `search.Index` rebuild is a load_matrix + load_window_matrix +
+    # projection.apply, and doing one per item made a 200-track album drop 200
+    # complete rebuilds on the container's single worker. A deferred result is
+    # still picked up: `search._looks_stale` re-stats the database (and its
+    # -wal) every couple of seconds and rebuilds when it has moved, and
+    # `release` forces both halves at the end of the batch.
+    if not (result.get('scores') or {}).get('deferred'):
+        _refresh_search(conn)
     return result
 
 
@@ -233,5 +265,7 @@ def release(uid: str, body: ReleaseIn, editor: str = Depends(require_identity),
             return {'ok': True, 'state': batch['state'], 'already_finished': True}
     else:
         batch = _leaseholder_or_410(conn, uid, editor, x_ccsync_machine)
-    return ingest_batches.release(conn, batch, state=body.state,
-                                  summary=body.summary)
+    out = ingest_batches.release(conn, batch, state=body.state,
+                                 summary=body.summary)
+    _settle_scores(conn)
+    return out

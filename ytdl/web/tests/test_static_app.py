@@ -2935,9 +2935,12 @@ def test_the_history_lists_the_ledger_with_a_thumbnail_and_a_destination(spa):
     assert r['titles'][1] == '<img src=x onerror=alert(1)>', r['titles']
     # the destination, honestly, for BOTH shapes: a search's clip is in a term
     # folder, a pasted one is in the project's Youtube root itself
-    assert '2026/FF5/Energy\\Youtube\\algal reef' in r['rows'][0], r['rows'][0]
-    assert '2026/FF5/Energy\\Youtube ' in r['rows'][1], r['rows'][1]
-    assert 'Youtube\\ ' not in r['rows'][1], 'a dangling separator for the root'
+    # YTWEB-10 (2026-09-03): as STORED, forward slashes and all. This line used
+    # to be rewritten to backslashes for every reader, half of whom are on a
+    # Mac, where a backslash is a filename character and not a separator.
+    assert '2026/FF5/Energy/Youtube/algal reef' in r['rows'][0], r['rows'][0]
+    assert '2026/FF5/Energy/Youtube ' in r['rows'][1], r['rows'][1]
+    assert 'Youtube/ ' not in r['rows'][1], 'a dangling separator for the root'
     assert 'sam' in r['rows'][1], r['rows'][1]
     assert '2026-08-11 09:30' in r['rows'][0], r['rows'][0]
     assert r['note'].startswith('showing 3 of 3'), r['note']
@@ -2972,10 +2975,14 @@ def test_no_companion_shows_the_path_instead_of_an_error(spa):
     # loopback self-test instead.
     assert 'may not be running' in r['text'], r['text']
     assert '127.0.0.1:8899/status' in r['text'], r['text']
-    assert 'Projects\\2026\\FF5\\Energy\\Youtube\\algal reef' in r['text'], r['text']
-    assert 'P: on Windows' in r['text'], r['text']    # no drive letter is known
+    assert 'Projects/2026/FF5/Energy/Youtube/algal reef' in r['text'], r['text']
+    # YTWEB-10: this used to end "on your sync drive (P: on Windows)". The
+    # drive letter is site data (`canonical_prefix`) and there is no letter at
+    # all on a Mac, so the sentence names the relative folder and stops.
+    assert 'under your sync drive' in r['text'], r['text']
+    assert 'P:' not in r['text'], r['text']
     assert r['button'] is True and '[ COPY PATH ]' in r['label']
-    assert r['copied'] == ['Projects\\2026\\FF5\\Energy\\Youtube\\algal reef'], r['copied']
+    assert r['copied'] == ['Projects/2026/FF5/Energy/Youtube/algal reef'], r['copied']
     assert 'copied' in r['after_copy'], r['after_copy']
     assert '<' not in r['raw'], 'the toast was assigned as innerHTML'
 
@@ -2985,7 +2992,7 @@ def test_a_companion_that_predates_the_route_says_upgrade_not_error(spa):
     through the dashboard's channel -- nothing the editor can fix by retrying."""
     r = spa['history_says_so_when_the_companion_is_too_old']
     assert 'too old' in r['toast'], r['toast']
-    assert 'Youtube\\algal reef' in r['toast'], r['toast']
+    assert 'Youtube/algal reef' in r['toast'], r['toast']
 
 
 def test_the_history_is_paged_and_asks_for_the_next_page_by_offset(spa):

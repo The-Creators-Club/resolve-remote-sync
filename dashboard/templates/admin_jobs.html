@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}CC SYNC: JOBS{% endblock %}
+{% block title %}{{ brand_org | upper }}: JOBS{% endblock %}
 {% block layout %}
   <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
@@ -9,10 +9,10 @@
     <div class="detail-head"><h1>[ FLEET JOBS ]</h1></div>
     <p class="muted" style="margin: 0.4rem 0 0.9rem; max-width: 62ch;">
       Work the fleet is doing for itself: transcriptions, 480p proxies, audio
-      extractions and waveform peaks. A job is offered to every machine that
+      extractions and waveform peaks. A job is offered to every computer that
       can do it and claimed by the first one to ask, so nothing here is
       assigned to anybody. What this page is for is the opposite case: a queue
-      that is not moving, and why. That answer is under each row, per machine,
+      that is not moving, and why. That answer is under each row, per computer,
       in words.
     </p>
     {# Polled, unlike the alerts page: nothing here is typed into, and the

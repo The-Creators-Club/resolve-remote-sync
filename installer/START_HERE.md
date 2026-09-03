@@ -23,12 +23,27 @@ one, so if your tray says every lane is "NOT SYNCING (this machine isn't set
 up yet)", that is usually all it means: click **► Accept the licence agreement
 to start syncing…** in the tray menu.
 
-Follow the wizard: pick **REMOTE EDITOR** on the role page (BASE is only
-for the studio base rig). It cleans out any older CCSync install first,
-remounts your P: drive fresh, installs everything, signs you in with your
-NAS account (you can't finish without valid credentials), and at the
-end shows you two values — your **Syncthing device ID** and **SSH public
-key** — to send to your admin so they can approve you.
+<!-- OPS-21 (usability + resilience sweep 2026-09-04): the role buttons are
+quoted exactly as onboard.py renders them, the drive letter is site data
+(canonical_prefix), and the Mac paragraph below describes the .app wizard --
+this file used to say a Mac editor had no wizard at all, which sent every one
+of them down the Terminal path. -->
+Follow the wizard. On the role page ("HOW IS THIS MACHINE CONNECTED?") pick
+**I'M A REMOTE EDITOR**; the other button, **I'M PHYSICALLY CONNECTED TO THE
+SERVER/NAS**, is for machines that edit straight off the studio NAS and it
+never touches drive mappings. It cleans out any older CCSync install
+first, remounts your project drive fresh — `P:` unless your studio uses a
+different letter, which the wizard reads from the dashboard — installs
+everything, signs you in with your NAS account (you can't finish without
+valid credentials), and at the end shows you two values — your **Syncthing
+device ID** and **SSH public key** — to send to your admin so they can
+approve you.
+
+If anything goes wrong, the wizard writes everything it did to
+`~/.ccsync/logs/onboard-<date>.log` (`%USERPROFILE%\.ccsync\logs\` on
+Windows) and names the file on the last page; there is a `[ COPY LOG ]`
+button next to `[ BEGIN INSTALL ]`. Send that to your admin rather than a
+photo of the screen.
 
 "Cleans out" only means the old app files are replaced. Nothing you've
 synced is touched — your project tree folder, proxies, sign-in, Syncthing
@@ -38,19 +53,25 @@ companion updates itself: when your admin publishes a new version, the tray show
 a one-click "Update now".
 
 During the install a **UAC (administrator) prompt appears once** — approve
-it. It's what lets the installer set up the P: drive so it shows up in
+it. It's what lets the installer set up the project drive so it shows up in
 Explorer named properly instead of echoing your local disk's name. If you
 decline it, everything still works; the drive just keeps the wrong name.
 
 If you'd rather do it by hand, follow the manual steps below instead.
 
-**On a Mac?** There's no click-through wizard, but the setup script does the
-same work — see step 2. Sign in to the dashboard on your Mac and click
-`[ INSTALLER ]`: it serves the Mac script (`ccsync-onboard-<version>.sh`) to
-your Downloads folder. Your admin will give you the exact flags to run it
-with (which SSD to sync to, your username, your token). Everything after
-that — the menu-bar app, automatic upload, the out-of-tree popup, dashboard
-reporting, one-click updates — works the same as on Windows.
+**On a Mac?** Same wizard, same three questions. Sign in to the dashboard on
+your Mac and click `[ INSTALLER ]`: it downloads
+`ccsync-onboard-<version>.zip`, which unzips to **CCSync Onboarding.app**.
+Double-click it and follow the pages exactly as above. macOS will say the app
+was downloaded from the internet: right-click the app and choose **Open** the
+first time, which is the one-click version of clearing the quarantine flag.
+Everything after that — the menu-bar app, automatic upload, the out-of-tree
+popup, dashboard reporting, one-click updates — works the same as on Windows.
+
+(The wizard has run on macOS since installer 1.0.17. The old shell script,
+`ccsync-onboard-<version>.sh`, still exists and does the same work from
+Terminal if your admin asks you to use it — see step 2 for the flags — but
+it is the fallback now, not the normal route.)
 
 ---
 
@@ -80,8 +101,9 @@ Set-ExecutionPolicy -Scope Process Bypass
 The script asks for admin rights by itself, once, for the one step that
 needs them — approve that prompt when it appears. Running the *whole* script
 elevated is the one thing that quietly breaks the install: a drive mapped
-from an elevated window is invisible to your normal session, so `P:` won't
-exist for Resolve until you log off and back on again. If you already did it
+from an elevated window is invisible to your normal session, so the project
+drive (`P:` by default) won't exist for Resolve until you log off and back on
+again. If you already did it
 that way, log off and on before opening Resolve.
 
 `-DashboardToken` is the value your admin gives you; without it the app installs
@@ -155,11 +177,12 @@ they've added both. It only takes them a minute.
 **Do not map any of our server's shares to a drive letter yourself** — no
 `net use`, no "Map network drive", no mounting the NAS over SMB on a Mac.
 
-On Windows, `P:` is created for you and is the only one you need. In Explorer
-it shows up under your studio's tree name so you can tell it apart from your own
-drives — only project material goes in there. On a Mac there is no `P:`
-drive at all: Resolve's **Mapped Mount** setting does that job, and the setup
-script fills it in for you (see EDITOR_SETUP.md step 6).
+On Windows, your project drive (`P:` by default; your studio may use another
+letter, and the wizard tells you which) is created for you and is the only one
+you need. In Explorer it shows up under your studio's tree name so you can tell
+it apart from your own drives — only project material goes in there. On a Mac
+there is no project drive at all: Resolve's **Mapped Mount** setting does that
+job, and the installer fills it in for you (see EDITOR_SETUP.md step 6).
 
 Why it matters: the shared Resolve database stores clip paths using the
 *server's* drive letters. If you map a share to a letter that collides with
@@ -235,8 +258,8 @@ script with it, or the app can't report status or follow your ticks.)
    `library_db_host` (and `library_db_name` / `library_db_user` /
    `library_db_password` if yours differ) in `~/.ccsync/config.toml` to point
    it at the right place, or `library_walk = false` to turn it off.
-4. **macOS only:** the setup script already set Resolve's **Mapped Mount**
-   (`P:\` → your sync folder) for you. Check it under Preferences → Media
+4. **macOS only:** the installer already set Resolve's **Mapped Mount**
+   (your project prefix, `P:\` by default, → your sync folder) for you. Check it under Preferences → Media
    Storage. If step 2 said it couldn't — because Resolve was open, or had
    never been launched on this Mac — quit Resolve, then run
    `./ccsync-onboard-*.sh --resolve-mapping-only --local-root "/Volumes/<YourSSD>/<tree>"`.

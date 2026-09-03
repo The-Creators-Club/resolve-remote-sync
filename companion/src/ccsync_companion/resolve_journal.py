@@ -51,6 +51,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from . import ui_copy
+
 log = logging.getLogger("ccsync.resolve_journal")
 
 JOURNAL_DIRNAME = "resolve_edits"
@@ -293,9 +295,8 @@ def allow_automatic(project_name: Any, source: str,
                 log.warning(
                     "resolve journal: %s has already had %d unprompted rewrites "
                     "today, so this one is held (%d held so far) -- this looks "
-                    "like a configuration problem, Tray > Settings > COPY "
-                    "DIAGNOSTICS FOR YOUR ADMIN",
-                    slug, count, held + 1,
+                    "like a configuration problem, %s",
+                    slug, count, held + 1, ui_copy.DIAGNOSTICS,
                 )
                 return False
             _automatic_at[key] = now

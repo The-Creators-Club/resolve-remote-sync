@@ -721,7 +721,9 @@ def test_snapshots_says_dsm_cannot_be_asked(conn, tmp_path):
 def test_editors_todo_when_none_are_known(conn):
     state = setup_engine.run_check(ctx(conn, Settings()), "editors")
     assert state.status == "todo"
-    assert "Users page" in state.detail
+    # UX-7 (usability sweep 2026-09-03): a next action names the page by the
+    # name the nav gives it, not "the Users page".
+    assert "Settings, then USERS" in state.detail
 
 
 def test_editors_counts_every_editor_the_dashboard_knows(conn):
@@ -760,7 +762,10 @@ def publish(conn, platform, version, current=True):
 def test_software_todo_when_nothing_is_published(conn):
     state = setup_engine.run_check(ctx(conn, Settings()), "software")
     assert state.status == "todo"
-    assert "PUBLISHED PACKAGES" in state.detail
+    # UX-7 / REL-10: the packages table has been at /admin/packages since the
+    # 2026-08-18 redesign; this detail used to send a new customer to Users.
+    assert "Settings, then PACKAGES" in state.detail
+    assert "Users page" not in state.detail
 
 
 def test_software_warns_when_only_one_platform_has_a_build(conn):

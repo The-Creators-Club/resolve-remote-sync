@@ -30,7 +30,9 @@
              {% endif %}
            {% endif %}
            {{ 'checked' if p.slug in selected_slugs }}>
-    {% if upload_only_slugs is defined and p.slug in upload_only_slugs %}<span class="chip amber" title="upload only: {{ toggle_editor }}'s computer sends its video originals for this project to the server and downloads nothing. Change it on the project page or on Settings, Assignments.">[ UP ]</span>{% endif %}
+    {# UX-17 (usability sweep 2026-09-03): [ UPLOAD ONLY ], not [ UP ]. Same
+       words on this rail, on the project page and in the queue panel. #}
+    {% if upload_only_slugs is defined and p.slug in upload_only_slugs %}<span class="chip amber" title="upload only: {{ toggle_editor }}'s computer sends its video originals for this project to the server and downloads nothing. Change it on the project page or on Settings, Assignments.">[ UPLOAD ONLY ]</span>{% endif %}
     {% endif %}
     <a class="proj-name" href="/project/{{ p.slug }}" title="{{ p.label }}">
       <span class="dot {{ p.status }}">●</span>

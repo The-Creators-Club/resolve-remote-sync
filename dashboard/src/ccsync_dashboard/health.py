@@ -380,6 +380,14 @@ WHY_INFORMATIONAL = frozenset({"upload_only"})
 # out makes the pass exclude every file on the NAS and exit 0 (SYS-4).
 CLOCK_SKEW_WHY_SECONDS = 60.0
 
+# CR-88 (2026-08-27) route sweep, usability sweep 2026-09-03 (UX-1). The tray
+# menu is ten items and Copy diagnostics is not one of them: it lives in the
+# companion's Settings window under HELP. Every dashboard sentence that sends
+# an admin to it reads this one constant (ui.py republishes it to the
+# templates as a Jinja global, alerts.py interpolates it), so the next time
+# the companion moves a button there is one string to change.
+COMPANION_DIAGNOSTICS_PATH = "Settings > Help > Copy diagnostics"
+
 _LANE_WORDS = {
     "A": "upload",
     "lane_a_video_up": "upload",
@@ -470,8 +478,17 @@ def _why_sentence(code: str, row: Mapping[str, Any]) -> str:
     if code == "folders_unfiltered":
         count = _why_get(row, "folders_unfiltered")
         if count:
-            return (f"Not syncing safely: {count} shared folder(s) on this computer "
-                    f"have no ignore filter yet")
+            # UX-10 (usability sweep 2026-09-03): "(s)" is not a word. This
+            # sentence is read on the fleet grid and quoted into the tray, and
+            # _duration_words above already models the rule.
+            try:
+                one = int(count) == 1
+            except (TypeError, ValueError):
+                one = False
+            folders = "folder" if one else "folders"
+            verb = "has" if one else "have"
+            return (f"Not syncing safely: {count} shared {folders} on this computer "
+                    f"{verb} no ignore filter yet")
         return ("Not syncing safely: a shared folder on this computer has no ignore "
                 "filter yet")
     if code == "upload_only":

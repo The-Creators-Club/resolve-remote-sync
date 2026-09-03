@@ -40,8 +40,46 @@ from typing import Callable, Optional
 
 log = logging.getLogger("ccsync.drive_swap")
 
+# The DEFAULT drive letter and loopback share, not the only ones (SYNC-103,
+# usability sweep 2026-09-04). The letter is site data -- it comes from the
+# site manifest's `canonical_prefix` and CLAUDE.md's rule is that a second
+# customer on Q: does not fork the installer -- and this module used to be the
+# one place that never got the message: `net use P: /delete /y` ran
+# UNCONDITIONALLY, so on a Q: site the grade swap unmapped whatever P: happened
+# to be (somebody else's mapping), mapped the server at a letter Resolve does
+# not use, and then "restored" P: to \\localhost\CCSync_P, a share that does
+# not exist on that machine: windows_bootstrap.ps1 creates
+# `CCSync_$DriveLetter`. Every public function
+# below takes `letter` and defaults to P_DRIVE, which is what the whole fleet
+# is on today.
 P_DRIVE = "P:"
 LOOPBACK_SHARE = "CCSync_P"
+
+
+def normalise_letter(value: str) -> str:
+    """"Q:" from "Q", "q:", "Q:\\", "Q:/" -- or "" for anything that is not a
+    single drive letter.
+
+    "" is the "we cannot tell" answer, and callers turn it into P_DRIVE
+    rather than guessing: a UNC canonical_prefix, a POSIX path (a Mac's
+    manifest is read by the same config on a Windows machine that roams) or a
+    typo must never become an argument to `net use ... /delete /y`."""
+    text = str(value or "").strip().rstrip("\\/")
+    if len(text) == 2 and text[1] == ":" and text[0].isalpha():
+        return text[0].upper() + ":"
+    if len(text) == 1 and text.isalpha():
+        return text.upper() + ":"
+    return ""
+
+
+def loopback_share(letter: str = P_DRIVE) -> str:
+    """The loopback share name for a drive letter: `CCSync_P`, `CCSync_Q`.
+
+    The name the Windows installer creates, derived the same way there. A
+    letter we could not parse keeps the historic name, because on every
+    machine in the field today that IS the share."""
+    return "CCSync_" + (normalise_letter(letter) or P_DRIVE)[0]
+
 
 # Every subprocess AND the Win32 connect share one ceiling: an SMB connect to
 # a sleeping tailnet host routinely runs long, and the editor is watching a
@@ -181,7 +219,7 @@ _CONNECT_ERRORS = {
     55: "System error 55: the share is no longer available on the server",
     66: "System error 66: the server offered the wrong resource type for a drive",
     67: "System error 67: the network name was not found -- check the share path",
-    85: f"System error 85: {P_DRIVE} is already in use by another mapping",
+    85: "System error 85: {letter} is already in use by another mapping",
     86: "System error 86: that password is not correct for this server",
     # 1219: a credential prompt cannot fix this one -- Windows already holds a
     # session to the host as somebody else and refuses a second identity. Its
@@ -195,22 +233,28 @@ _CONNECT_ERRORS = {
     # "the server wants credentials", still the retry path.
     1223: "System error 1223: the connection was cancelled -- the server "
           "wants credentials for this share",
-    1200: f"System error 1200: {P_DRIVE} is not a valid device name",
+    1200: "System error 1200: {letter} is not a valid device name",
     1203: "System error 1203: no network provider accepted the path",
     1326: "System error 1326: the user name or password is incorrect",
     1327: "System error 1327: this account cannot log on with a blank password",
 }
 
 _CONNECT_TIMEOUT_MSG = (
-    f"the server did not answer within {_TIMEOUT_S}s -- P: was not remapped"
+    f"the server did not answer within {_TIMEOUT_S}s -- the drive was not remapped"
 )
 
 
-def _connect_message(code: int) -> str:
-    return _CONNECT_ERRORS.get(int(code), f"System error {int(code)} mapping {P_DRIVE}")
+def _connect_message(code: int, letter: str = P_DRIVE) -> str:
+    # SYNC-103: the two letter-carrying messages are templates now, so a Q:
+    # site is not told about a P: it does not have.
+    text = _CONNECT_ERRORS.get(int(code))
+    if text is None:
+        return f"System error {int(code)} mapping {letter}"
+    return text.format(letter=letter)
 
 
-def _connect_p_drive(server_unc: str, username: str, password: str) -> int:
+def _connect_p_drive(server_unc: str, username: str, password: str,
+                     letter: str = P_DRIVE) -> int:
     """One WNetAddConnection2W call. Returns the Win32 error code (0 = ok).
 
     NULL user/password (username="" here) means "use whatever this logon
@@ -219,7 +263,7 @@ def _connect_p_drive(server_unc: str, username: str, password: str) -> int:
     persist_credentials() writes."""
     nr = NETRESOURCEW()
     nr.dwType = RESOURCETYPE_DISK
-    nr.lpLocalName = P_DRIVE
+    nr.lpLocalName = normalise_letter(letter) or P_DRIVE
     nr.lpRemoteName = str(server_unc)
     return int(_wnet_add_fn()(nr, password or None, username or None,
                               CONNECT_TEMPORARY))
@@ -227,6 +271,7 @@ def _connect_p_drive(server_unc: str, username: str, password: str) -> int:
 
 def _connect_p_drive_timed(
     server_unc: str, username: str, password: str, timeout: float = _TIMEOUT_S,
+    letter: str = P_DRIVE,
 ) -> Optional[int]:
     """The connect under the same 30 s ceiling subprocess.run(timeout=30) gave
     `net use`. Returns the error code, or None when the call outlived it.
@@ -245,7 +290,8 @@ def _connect_p_drive_timed(
 
     def _call() -> None:
         try:
-            outcome.append(("code", _connect_p_drive(server_unc, username, password)))
+            outcome.append(("code", _connect_p_drive(server_unc, username,
+                                                    password, letter)))
         except BaseException as exc:      # noqa: BLE001 -- reported on the caller's thread
             outcome.append(("exc", exc))
 
@@ -260,10 +306,12 @@ def _connect_p_drive_timed(
     return int(value)                      # type: ignore[arg-type]
 
 
-def current_p_target(run_fn: RunFn = _default_run) -> str:
-    """Where P: points right now: a UNC path, a subst directory, or ""."""
+def current_p_target(run_fn: RunFn = _default_run, letter: str = P_DRIVE) -> str:
+    """Where the sync drive points right now: a UNC path, a subst directory,
+    or "". `letter` is site data (SYNC-103) and defaults to P:."""
+    letter = normalise_letter(letter) or P_DRIVE
     try:
-        proc = run_fn(["net", "use", P_DRIVE])
+        proc = run_fn(["net", "use", letter])
         if proc.returncode == 0:
             # Locale-proof: the first line carrying a UNC-shaped value, taken
             # to the END OF THE FIELD rather than to the first space. `\S+`
@@ -283,7 +331,7 @@ def current_p_target(run_fn: RunFn = _default_run) -> str:
         proc = run_fn(["subst"])
         if proc.returncode == 0:
             for line in (proc.stdout or "").splitlines():
-                if line.upper().startswith(P_DRIVE.upper()):
+                if line.upper().startswith(letter.upper()):
                     m = re.search(r"=>\s*(.+)$", line)
                     if m:
                         return m.group(1).strip()
@@ -292,13 +340,19 @@ def current_p_target(run_fn: RunFn = _default_run) -> str:
     return ""
 
 
-def classify_p_target(target: str, local_root: str, server_unc: str) -> str:
-    """"local" | "server" | "other" | "none" for a current_p_target() value."""
+def classify_p_target(target: str, local_root: str, server_unc: str,
+                      letter: str = P_DRIVE) -> str:
+    """"local" | "server" | "other" | "none" for a current_p_target() value.
+
+    SYNC-103: the loopback share is named after the LETTER
+    (windows_bootstrap.ps1's `CCSync_$DriveLetter`), so a Q: site's own
+    \\\\localhost\\CCSync_Q classified as "other" -- somebody else's mapping --
+    and every swap on that site was refused, or worse, unmapped."""
     t = str(target or "").strip()
     if not t:
         return "none"
     norm = os.path.normcase(t.rstrip("\\/"))
-    if norm.endswith(os.path.normcase("\\" + LOOPBACK_SHARE)):
+    if norm.endswith(os.path.normcase("\\" + loopback_share(letter))):
         return "local"
     if local_root and norm == os.path.normcase(str(local_root).rstrip("\\/")):
         return "local"  # legacy subst mapping
@@ -307,11 +361,15 @@ def classify_p_target(target: str, local_root: str, server_unc: str) -> str:
     return "other"
 
 
-def _unmap(run_fn: RunFn) -> None:
-    """Remove whatever P: currently is. /y answers the open-files prompt --
-    Resolve holds handles on P: paths, and the whole point of the swap is
-    doing it under a running Resolve."""
-    for args in (["net", "use", P_DRIVE, "/delete", "/y"], ["subst", P_DRIVE, "/D"]):
+def _unmap(run_fn: RunFn, letter: str = P_DRIVE) -> None:
+    """Remove whatever the sync drive currently is. /y answers the open-files
+    prompt -- Resolve holds handles on those paths, and the whole point of the
+    swap is doing it under a running Resolve.
+
+    SYNC-103: takes the letter, because this pair of commands is destructive
+    and ran against P: on every site whatever their canonical prefix was."""
+    letter = normalise_letter(letter) or P_DRIVE
+    for args in (["net", "use", letter, "/delete", "/y"], ["subst", letter, "/D"]):
         try:
             run_fn(args)
         except Exception as exc:
@@ -370,15 +428,17 @@ def is_auth_failure(message: str) -> bool:
 # returned both when nothing is mapped and when the mapping table could not be
 # read at all (current_p_target swallows the failure), and "we could not tell"
 # must never render as "it is ours".
+# SYNC-103 (2026-09-04): {letter}, not a literal P:. Both are formatted, so
+# neither may carry a stray brace.
 _FOREIGN_P_REFUSAL = (
-    "P: is currently mapped to {target}, which CCSync did not create. "
+    "{letter} is currently mapped to {target}, which CCSync did not create. "
     "Swapping would replace it and CCSync cannot put it back."
 )
 _UNKNOWN_P_REFUSAL = (
-    "CCSync could not tell what P: is mapped to, so it is being left exactly "
-    "as it is. Nothing was changed. If P: is not mapped at all, restart the "
-    "CCSync app or re-run the installer to put your local mapping back, then "
-    "try the swap again."
+    "CCSync could not tell what {letter} is mapped to, so it is being left "
+    "exactly as it is. Nothing was changed. If {letter} is not mapped at all, "
+    "restart the CCSync app or re-run the installer to put your local mapping "
+    "back, then try the swap again."
 )
 
 
@@ -388,8 +448,9 @@ def swap_to_server(
     username: str = "",
     password: str = "",
     local_root: str = "",
+    letter: str = P_DRIVE,
 ) -> tuple[bool, str]:
-    """Map P: to the server tree. On failure the caller MUST restore the
+    """Map the sync drive to the server tree. On failure the caller MUST restore the
     local map (see app.swap_p_to_server) -- this function reports, it does
     not roll back. username/password (the editor's TrueNAS login) go to
     WNetAddConnection2W when given -- the retry path after is_auth_failure().
@@ -398,6 +459,9 @@ def swap_to_server(
     password touches no argv. run_fn still drives the unmap steps (nothing
     secret on those) and stays in the signature -- app.py and the tray call
     this exact shape."""
+    # SYNC-103: `letter` last, keyword, defaulting to P: -- app.py passes the
+    # site manifest's canonical_prefix and every older caller keeps working.
+    letter = normalise_letter(letter) or P_DRIVE
     if not str(server_unc or "").strip():
         return False, "server_p_unc is not configured"
     # local_root is a keyword with a default because the signature is public
@@ -405,33 +469,34 @@ def swap_to_server(
     # LEGACY `subst P: <local_root>` mapping would classify as "other" and be
     # refused, so the caller passes the same local_root it would hand
     # swap_to_local.
-    target = current_p_target(run_fn)
-    state = classify_p_target(target, local_root, server_unc)
+    target = current_p_target(run_fn, letter)
+    state = classify_p_target(target, local_root, server_unc, letter)
     if state == "other":
-        return False, _FOREIGN_P_REFUSAL.format(target=target)
+        return False, _FOREIGN_P_REFUSAL.format(target=target, letter=letter)
     if state == "none":
-        return False, _UNKNOWN_P_REFUSAL
+        return False, _UNKNOWN_P_REFUSAL.format(letter=letter)
     if state == "server":
         # Already there. Re-running the unmap+connect would work, but saying so
         # is cheaper and cannot fail halfway.
-        return True, "P: already shows the SERVER originals"
-    _unmap(run_fn)
+        return True, f"{letter} already shows the SERVER originals"
+    _unmap(run_fn, letter)
     try:
         # _TIMEOUT_S passed rather than defaulted so the ceiling is read at
         # call time -- one knob for the subprocess and the Win32 halves alike.
-        code = _connect_p_drive_timed(str(server_unc), username, password, _TIMEOUT_S)
+        code = _connect_p_drive_timed(str(server_unc), username, password,
+                                      _TIMEOUT_S, letter)
     except Exception as exc:
         # SYNC-4 (2026-08-11): the exception must NEVER be interpolated here.
         # There is no argv left to leak (R1), but a ctypes ArgumentError
         # repr's the arguments it was handed -- the password among them.
         log.debug("WNetAddConnection2W raised %s (target %s, user %s)",
                   type(exc).__name__, server_unc, username or "<stored>")
-        return False, f"mapping P: failed: {type(exc).__name__}"
+        return False, f"mapping {letter} failed: {type(exc).__name__}"
     if code is None:
         return False, _CONNECT_TIMEOUT_MSG
     if code != 0:
-        return False, _connect_message(code)
-    return True, "P: now shows the SERVER originals"
+        return False, _connect_message(code, letter)
+    return True, f"{letter} now shows the SERVER originals"
 
 
 def persist_credentials(
@@ -480,34 +545,42 @@ def _cred_write(target: str, username: str, password: str) -> bool:
     return bool(_cred_write_fn()(cred, 0))
 
 
-def swap_to_local(local_root: str, run_fn: RunFn = _default_run) -> tuple[bool, str]:
-    """Map P: back to this machine's copy: loopback share first (the
-    bootstrap's primary), subst fallback (its legacy)."""
-    _unmap(run_fn)
+def swap_to_local(local_root: str, run_fn: RunFn = _default_run,
+                  letter: str = P_DRIVE) -> tuple[bool, str]:
+    """Map the sync drive back to this machine's copy: loopback share first
+    (the bootstrap's primary), subst fallback (its legacy).
+
+    SYNC-103 (2026-09-04): on a site whose prefix is not P: this unmapped P:
+    and then mapped P: at \\\\localhost\\CCSync_P, a share that does not exist
+    there -- so the drive Resolve actually reads was left on the server and an
+    unrelated letter was mangled."""
+    letter = normalise_letter(letter) or P_DRIVE
+    _unmap(run_fn, letter)
     # Still a subprocess on purpose (R1): the loopback share is this machine's
     # own, authenticated by the caller's token -- there is no secret to keep
     # off an argv here, and net use is the shape the bootstrap already uses.
-    loopback = ["net", "use", P_DRIVE, f"\\\\localhost\\{LOOPBACK_SHARE}",
+    loopback = ["net", "use", letter, f"\\\\localhost\\{loopback_share(letter)}",
                 "/persistent:yes"]
     try:
         proc = run_fn(loopback)
         if proc.returncode == 0:
-            return True, "P: is back to your local copy (proxies)"
+            return True, f"{letter} is back to your local copy (proxies)"
     except Exception as exc:
         log.debug("loopback remap [%s] failed: %s", _redacted(loopback),
                   type(exc).__name__)
     if not str(local_root or "").strip():
-        return False, "local_root is not configured -- P: is currently UNMAPPED"
+        return False, f"local_root is not configured -- {letter} is currently UNMAPPED"
     try:
-        proc = run_fn(["subst", P_DRIVE, str(local_root)])
+        proc = run_fn(["subst", letter, str(local_root)])
     except Exception as exc:
-        return False, f"P: could not be restored ({exc}) -- remap it by hand or re-run the installer"
+        return False, (f"{letter} could not be restored ({exc}) -- remap it by hand "
+                       "or re-run the installer")
     if proc.returncode != 0:
         return False, (
-            f"P: could not be restored ({_error_tail(proc)}) -- remap it by hand "
+            f"{letter} could not be restored ({_error_tail(proc)}) -- remap it by hand "
             "or re-run the installer"
         )
-    return True, "P: is back to your local copy (proxies, via subst)"
+    return True, f"{letter} is back to your local copy (proxies, via subst)"
 
 
 # How a NAS's SFTP path maps onto its SMB namespace. The two vendors put the

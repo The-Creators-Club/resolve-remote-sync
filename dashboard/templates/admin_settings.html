@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}CC SYNC: SETTINGS{% endblock %}
+{% block title %}{{ brand_org | upper }}: SETTINGS{% endblock %}
 {% block layout %}
   <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
@@ -18,7 +18,7 @@
        label. A dict rather than per-field markup because the inputs below are
        one generic loop, and a second hand-written block would drift. #}
     {% set FIELD_HINTS = {
-      "brand_logo": "Your studio's mark in every editor's tray and window title. Blank wears the product's own. A bare name (cc_mark_white.png) selects a mark the companion build already ships; anything with a slash is a path on the EDITOR's machine. It must be WHITE on transparent -- the tray tints it to carry sync status, so a pre-coloured logo comes out a solid blob.",
+      "brand_logo": "Your studio's mark in every editor's tray and window title. Blank wears the product's own. A bare name (cc_mark_white.png) selects a mark the companion build already ships; anything with a slash is a path on the EDITOR's machine. It must be WHITE on transparent: the tray tints it to carry sync status, so a pre-coloured logo comes out a solid blob.",
     } %}
 
     {# One column with 16 px inputs below --bp-phone (MOBILE_PLAN.md §4 M3,
@@ -66,7 +66,7 @@
            (docs/CONFIG.md), which is silent unless something says so. #}
         {% if env_val %}
           <p class="muted mono-sm" style="margin:-0.5rem 0 0.6rem;">
-            env DASH_SITE_{{ key | upper }}={{ env_val }} (not applied -- the row above is what is live; edit it, or Import a site.toml, to change it)
+            env DASH_SITE_{{ key | upper }}={{ env_val }} (not applied: the row above is what is live; edit it, or Import a site.toml, to change it)
           </p>
         {% endif %}
       {% endfor %}
@@ -98,7 +98,7 @@
          the manifest carries is now on this page. #}
       <label><input type="checkbox" name="features.auto_update"
                     {{ "checked" if manifest.features.auto_update }}> Automatic companion updates
-        <span class="muted">editors' machines take a newer published build without anyone clicking</span></label>
+        <span class="muted">editors' computers take a newer published build without anyone clicking</span></label>
       <label><input type="checkbox" disabled
                     {{ "checked" if manifest.features.ai_cli_providers }}> AI CLI providers
         <span class="muted">set on <a href="#ai-providers">AI providers</a> below, where accepting the notice turns it on</span></label>
@@ -176,7 +176,7 @@
     </fieldset>
 
     <div class="side-head" style="margin-top:1.4rem">[ EXPORT / IMPORT ]
-      <span class="muted">site.toml-shaped text -- for a NAS migration or a backup.</span></div>
+      <span class="muted">site.toml-shaped text, for a NAS migration or a backup.</span></div>
     <div style="margin-top:0.4rem">
       <a class="btn tap" href="/api/v1/admin/site/export" download="site.toml">[ EXPORT site.toml ]</a>
     </div>

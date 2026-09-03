@@ -34,10 +34,18 @@ The fix is the same shape the deploy already uses for code and for music.db
   verify the CANDIDATE   -> PRAGMA quick_check ON THE NAS, through the
                             container's own python3
   compare row counts     -> refuse a surprise shrink (--allow-shrink)
+  drain the live copy    -> broll only: the rows that exist ONLY on the NAS
+                            (fleet-ingested clips, ingest_batches/_items) into
+                            a bundle beside the live file. A drain that cannot
+                            be taken REFUSES the publish (--allow-loss);
+                            BROLL-1, 2026-09-04, broll_drain.py
   rename                 -> <target> to <target>.prev-<ts> (with its -wal/-shm,
                             SERVER-7), then <target>.new to <target>. A rename
                             is atomic; a copy is not, and the container picks
                             up a REPLACED file on its next connection.
+  merge the drain back   -> broll only, one transaction, idempotent. The
+                            bundle is never deleted, so a merge that failed is
+                            `--apply-drain <bundle>` away.
 
 `--rollback` is the same rename in reverse, from the newest `.prev-<ts>`.
 
@@ -55,6 +63,7 @@ import tempfile
 import time
 from pathlib import Path
 
+import broll_drain
 import common
 from common import (
     DEFAULT_APPS_ROOT,
@@ -86,6 +95,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # so counting it would make every legitimate publish look like a catastrophic
 # shrink. Those rows are drained by index_music.py --queue BEFORE a publish;
 # see music/web/DEPLOY.md.
+#
+# `drain` says the LIVE copy holds rows that exist nowhere else and that the
+# swap would therefore delete (BROLL-1, 2026-09-04). broll.db does: the
+# dashboard's own b-roll app mints `videos` rows for drag-and-drop ingest and
+# keeps every batch's state in `ingest_batches`/`ingest_items` INSIDE that
+# file. They are copied out before the rename and merged back after it; see
+# broll_drain.py. music.db does not -- its NAS-only rows go the other way,
+# drained on the base rig and merged with `python -m musicweb.drain apply`, so
+# a music.db that is published has already been reconciled by hand.
 SPECS = {
     "broll": {
         "filename": "broll.db",
@@ -93,6 +111,7 @@ SPECS = {
         "container_dir": "/broll-data",
         "tables": ("videos", "segments", "embeddings"),
         "what": "the b-roll search index",
+        "drain": True,
     },
     "music": {
         "filename": "music.db",
@@ -100,6 +119,7 @@ SPECS = {
         "container_dir": "/music-data",
         "tables": ("tracks", "windows", "tags"),
         "what": "the music search index",
+        "drain": False,
     },
 }
 
@@ -326,6 +346,99 @@ def shrink_refusals(live: dict, new: dict, pct: float) -> list[str]:
     return out
 
 
+# --------------------------------------------------------------------------
+# The drain (BROLL-1, 2026-09-04): the rows only the live copy has
+# --------------------------------------------------------------------------
+
+def container_python(backend, container: str, program: str, args: list,
+                     dry_run: bool) -> tuple[int, dict, str]:
+    """Run `program` under the container's python3 with `args`. (rc, json, why).
+
+    The paths go in as ARGV rather than being interpolated into the source, so
+    unlike read_live_counts this does not have to refuse a path with an
+    apostrophe in it -- and the drain is the one step whose refusal would stop
+    a publish outright.
+    """
+    cmd = ("python3 -c " + shell_quote(program) + " "
+           + " ".join(shell_quote(a) for a in args))
+    rc, out, err = backend.container_exec(container, cmd, dry_run)
+    if dry_run:
+        return 0, {}, ""
+    payload = {}
+    lines = [ln for ln in (out or "").splitlines() if ln.strip()]
+    if lines and lines[-1].lstrip().startswith("{"):
+        try:
+            payload = json.loads(lines[-1])
+        except ValueError:
+            payload = {}
+    why = ""
+    if rc != 0:
+        why = ((payload.get("error") or err or out or f"rc={rc}").strip()[:400]
+               or f"rc={rc}")
+    return rc, payload, why
+
+
+def take_drain(backend, container: str, container_path: str, bundle_path: str,
+               dry_run: bool) -> tuple[dict, str]:
+    """Copy the live index's NAS-only rows into `bundle_path`. ({counts}, why).
+
+    Three answers, deliberately, because they mean three different things:
+    a summary (the drain is in hand), `{}` with no reason (there is no live
+    index yet -- a first publish has nothing to lose), and `{}` WITH a reason,
+    which is the one main() refuses on. A drain that could not be taken is not
+    a drain of nothing.
+    """
+    rc, payload, why = container_python(
+        backend, container, broll_drain.EXPORT_PROGRAM,
+        [container_path, bundle_path], dry_run)
+    if rc == broll_drain.RC_NO_LIVE:
+        return {}, ""
+    if rc != 0:
+        return {}, why
+    if not payload:
+        return {}, "the container did not answer JSON"
+    return payload, ""
+
+
+def apply_drain(backend, container: str, container_path: str, bundle_path: str,
+                dry_run: bool) -> tuple[dict, str]:
+    """Merge `bundle_path` into the (now live) index. ({report}, why).
+
+    Idempotent by construction: every row is keyed, and a video already in the
+    live file is skipped rather than duplicated. So the operator's recovery for
+    a failure here is to run the same command again.
+    """
+    rc, payload, why = container_python(
+        backend, container, broll_drain.APPLY_PROGRAM,
+        [container_path, bundle_path], dry_run)
+    if rc != 0:
+        return {}, why
+    if not payload:
+        return {}, "the container did not answer JSON"
+    return payload, ""
+
+
+def drain_line(summary: dict) -> str:
+    """One line naming what the drain is holding, for the operator's log."""
+    if not summary:
+        return "drain: no live index on the NAS yet -- nothing to preserve"
+    if not summary.get("ingest_schema", True):
+        return ("drain: the live index predates the ingest tables -- nothing "
+                "exists only on the NAS")
+    return (f"drain taken: {summary.get('videos', 0)} fleet-ingested clips, "
+            f"{summary.get('ingest_batches', 0)} ingest batches "
+            f"({summary.get('open_batches', 0)} still running), "
+            f"{summary.get('ingest_items', 0)} items -> {summary.get('bundle', '')}")
+
+
+def drain_applied_line(report: dict) -> str:
+    return (f"drain applied: {report.get('videos_inserted', 0)} clips put back "
+            f"({report.get('videos_already_there', 0)} were already in the new "
+            f"index), {report.get('batches', 0)} batches, "
+            f"{report.get('items', 0)} items, "
+            f"{report.get('embeddings', 0)} embeddings")
+
+
 def build_rollback_script(target: str, prev: str, aside: str) -> str:
     """Put `prev` back, keeping what is live now as `aside`.
 
@@ -497,6 +610,32 @@ def do_rollback(args, backend, spec) -> int:
     return 0
 
 
+def do_apply_drain(args, backend, spec) -> int:
+    """`--apply-drain <bundle>`: the second half of a publish, on its own.
+
+    Exists because the merge happens AFTER the rename, so a dropped ssh session
+    between the two leaves the new index live and the drained rows sitting in a
+    bundle. The bundle is never deleted for exactly this reason, and every
+    write in it is idempotent, so this is a re-run rather than a repair.
+    """
+    container = backend.dashboard_container
+    container_path = posixpath.join(spec["container_dir"], spec["filename"])
+    print(f"Merging {args.apply_drain} into the live {spec['filename']}")
+    if args.dry_run:
+        print("[dry-run] nothing was changed. Re-run with --apply.")
+        return 0
+    report, why = apply_drain(backend, container, container_path,
+                              args.apply_drain, False)
+    if why:
+        print(f"FAILED to apply the drain ({why}). The live index is unchanged "
+              f"by this command: the merge is one transaction and it rolled "
+              f"back. The bundle is still at {args.apply_drain}.",
+              file=sys.stderr)
+        return 1
+    print(drain_applied_line(report))
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -513,6 +652,15 @@ def main():
                     help="skip the on-NAS PRAGMA quick_check of the staged copy. "
                          "Last resort only -- it is the check that catches the "
                          "failure this script exists to prevent.")
+    ap.add_argument("--allow-loss", action="store_true",
+                    help="publish even when the drain of the live index could not "
+                         "be taken. Everything the fleet ingested since the source "
+                         "copy was pulled -- clips, batches, per-item progress -- "
+                         "is then gone for good (BROLL-1).")
+    ap.add_argument("--apply-drain", default="",
+                    help="skip the publish and merge an existing drain bundle "
+                         "into the live index (the path this script printed). "
+                         "Idempotent: safe to run twice.")
     ap.add_argument("--rollback", action="store_true",
                     help="put the previous index back (the newest .prev-<ts>)")
     ap.add_argument("--from-prev", default="",
@@ -537,6 +685,9 @@ def main():
 
     if args.rollback:
         return do_rollback(args, backend, spec)
+
+    if args.apply_drain:
+        return do_apply_drain(args, backend, spec)
 
     source = Path(args.source) if args.source else spec["source"]
     if not source.is_file():
@@ -628,9 +779,45 @@ def main():
                 return 1
             print(f"staged copy verified: {got} bytes")
 
+        # THE DRAIN (BROLL-1, 2026-09-04). Taken here rather than earlier so
+        # the window between "what the live file held" and "the rename" is as
+        # short as it can be: everything slow (the snapshot, the upload, the
+        # byte check) has already happened. A batch that starts inside this
+        # window is the one thing the drain cannot see, which is why the
+        # runbook says to pause ingest first (docs/INDEXERS.md).
+        stamp = time.strftime('%Y%m%dT%H%M%S')
+        bundle = f"{container_path}.drain-{stamp}"
+        bundle_host = f"{target}.drain-{stamp}"
+        drain = {}
+        if spec.get("drain"):
+            if args.dry_run:
+                print(f"[dry-run] would copy the live index's fleet-ingested clips "
+                      f"and its ingest_batches/ingest_items into {bundle_host}, "
+                      f"and merge them back after the swap")
+            else:
+                drain, why_drain = take_drain(backend, container, container_path,
+                                              bundle, False)
+                if why_drain and not args.allow_loss:
+                    print(f"FAILED: could not drain the live {spec['filename']} "
+                          f"({why_drain}). Nothing was swapped. Publishing without "
+                          f"the drain would delete every clip the fleet has "
+                          f"ingested since {source.name} was pulled, and every "
+                          f"ingest batch with its per-clip progress -- the "
+                          f"container is the only place those rows exist. Fix the "
+                          f"container (is it running?) and re-run, or pass "
+                          f"--allow-loss if you know there is nothing to lose.\n"
+                          f"  The uploaded copy is still staged at {staging}.",
+                          file=sys.stderr)
+                    return 1
+                if why_drain:
+                    print(f"--allow-loss given: publishing without a drain "
+                          f"({why_drain}).", file=sys.stderr)
+                else:
+                    print(drain_line(drain))
+
         verify = "" if args.no_integrity_check else quick_check_snippet(
             container, container_path + ".new", target + ".new", spec["filename"])
-        old = f"{target}.prev-{time.strftime('%Y%m%dT%H%M%S')}"
+        old = f"{target}.prev-{stamp}"
         swap = ida.build_db_swap_script(
             remote_dir, staging, target, old, size,
             filename=spec["filename"], owner=owner, mode=mode,
@@ -651,6 +838,23 @@ def main():
             return rc
         print(f"published: {target} ({ida.human_bytes(size)}); previous index kept "
               f"at {old}")
+
+        # The other half of the drain. It runs against the file that is now
+        # live, and it is idempotent, so the failure message is a command the
+        # operator can simply run again -- the bundle is never deleted.
+        if drain and drain.get("ingest_schema", True):
+            report, why_apply = apply_drain(backend, container, container_path,
+                                            bundle, False)
+            if why_apply:
+                print(f"WARNING: the new index is live, but the drained rows have "
+                      f"NOT been merged into it yet ({why_apply}). Nothing is lost "
+                      f"-- they are in {bundle_host}. Put them back with:\n"
+                      f"  python publish_db.py --which {args.which} --apply-drain "
+                      f"{shell_quote(bundle)} --apply", file=sys.stderr)
+            else:
+                print(drain_applied_line(report))
+                print(f"  the drain bundle is kept at {bundle_host}")
+
         print(f"Roll back with: python publish_db.py --which {args.which} "
               f"--rollback --apply")
         return 0

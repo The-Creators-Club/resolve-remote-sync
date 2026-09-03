@@ -838,8 +838,14 @@ def test_the_other_two_route_groups_still_answer(live_server, monkeypatch):
     status, _headers, body = client.get("/status")
     assert status == 200
     data = json.loads(body)
-    assert set(data.keys()) == {"ok", "resolve_connected", "mounts", "version"}
+    # The b-roll status contract, not an exact dict: this test is about three
+    # route groups sharing one listener, and pinning the whole body made it
+    # fail for a field added to another group's neighbour (CMEDIA-3 added
+    # `loopback` on 2026-09-04). test_broll_server.py owns the exact shape.
+    assert {"ok", "resolve_connected", "mounts", "version"} <= set(data.keys())
     assert "projects" not in data["mounts"]
+    assert data["loopback"]["bound"] is True
+    assert data["loopback"]["port"] == _srv.server_address[1]
 
     status, _headers, body = client.get("/music/status")
     assert status == 200 and json.loads(body)["ok"] is True

@@ -47,6 +47,7 @@ import shutil
 import smtplib
 import sqlite3
 import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -106,6 +107,17 @@ WEEKLY_HOUR = 8             # 08:00 site-local
 # hangs rather than refuses must not park enforce, connections and provision
 # behind it.
 SEND_TIMEOUT_SECONDS = 20.0
+
+# DDIAG-1 (2026-09-04): a ceiling on the PASS, not on one send. The per-send
+# ceiling above bounds each conversation; nothing bounded the run of them, and
+# `scan()` legitimately produces dozens of findings on an unhappy fleet (40 per
+# kind, 42 kinds, every error re-sending once a day). 46 sends against a relay
+# that hangs rather than refuses is 920 s, which is past
+# app.WATCHDOG_WEDGED_SECONDS (900 s): the watchdog then replaces the container
+# with one that is due the same cycle, for ever. Deliberately far below that
+# threshold, and safe to spend: an alert that is not sent this pass is still
+# OPEN, so the next cycle offers it again.
+ALERT_CYCLE_BUDGET_SECONDS = 120.0
 
 MAX_SETTING_CHARS = 400
 MAX_PASSWORD_CHARS = 400
@@ -832,7 +844,7 @@ def _check_engine_down(ctx: Ctx) -> list[Finding]:
             f"The sync engine on {who} has been down for "
             f"{_duration_words(age)}. Project files and folders shared with "
             f"that computer are not moving in either direction.",
-            "Ask that editor to quit and restart CC Sync from the tray. If it "
+            "Ask that editor to quit CC Sync from the tray and start it again. If it "
             "comes back down, send us their diagnostics.",
             f"{g.get('supervisor_attempts') or 0} automatic restart attempt(s) "
             f"failed. {g.get('supervisor_last_error') or ''}"))
@@ -867,7 +879,7 @@ def _check_lane_stalled(ctx: Ctx) -> list[Finding]:
             who,
             f"{sentence}. A drive that has stopped answering reads exactly "
             f"like this, and the other lanes on that computer wait behind it.",
-            "Ask that editor to restart CC Sync from the tray, and to check "
+            "Ask that editor to quit CC Sync from the tray and start it again, and to check "
             "the sync drive opens in Explorer or Finder.",
             f"lane={g.get('stalled_lane')} seconds={g.get('stalled_seconds')} "
             f"killed={g.get('stalled_killed')}"))
@@ -892,7 +904,7 @@ def _check_lane_error(ctx: Ctx) -> list[Finding]:
                 f"{_duration_words(age)}. Whatever that lane carries is not "
                 f"moving for that editor.",
                 "Open the computer's row on the FLEET page and read the error, "
-                "then ask that editor to restart CC Sync from the tray.",
+                "then ask that editor to quit CC Sync from the tray and start it again.",
                 str(lane.get("last_error") or "")))
     return out
 
@@ -907,11 +919,14 @@ def _check_folders_unfiltered(ctx: Ctx) -> list[Finding]:
         who = ctx.name(_who(e))
         out.append(_f(
             who,
-            f"{count} shared folder(s) on {who} have no ignore filter written "
+            # UX-10 (usability sweep 2026-09-03): "(s)" is not a word, and
+            # the count is right here.
+            f"{count} shared folder{'' if count == 1 else 's'} on {who} "
+            f"{'has' if count == 1 else 'have'} no ignore filter written "
             f"yet. Without it, that computer will carry camera originals in "
             f"both directions over the internet instead of proxies only.",
             "It normally writes itself on the next sync turn. If it is still "
-            "here tomorrow, ask that editor to restart CC Sync from the tray.",
+            "here tomorrow, ask that editor to quit CC Sync from the tray and start it again.",
             str(g.get("folders_unfiltered_names") or "")))
     return out
 
@@ -930,8 +945,10 @@ def _check_restarts(ctx: Ctx) -> list[Finding]:
             f"{count} times in the last day. It is putting itself back "
             f"together each time, so the row looks fine, but something on that "
             f"computer keeps knocking it over.",
-            "Ask that editor for Copy diagnostics from the CC Sync tray and "
-            "send it to us.",
+            # CR-88 route sweep (usability sweep 2026-09-03): Copy
+            # diagnostics left the tray menu on 2026-08-27.
+            f"Ask that editor to open {health.COMPANION_DIAGNOSTICS_PATH} on "
+            f"that computer and send it to us.",
             f"last {g.get('restarts_last_at')}: {g.get('restarts_last_error') or ''}"))
     return out
 
@@ -948,7 +965,10 @@ def _check_crashes(ctx: Ctx) -> list[Finding]:
             f"{g['crash_count']} background task(s) on {who} have crashed and "
             f"written a report. The tray stays up and the lanes look normal, "
             f"which is why nobody notices.",
-            "Ask that editor for Copy diagnostics from the CC Sync tray.",
+            # CR-88 route sweep (usability sweep 2026-09-03): the tray menu
+            # has no Copy diagnostics since 2026-08-27.
+            f"Ask that editor to open {health.COMPANION_DIAGNOSTICS_PATH} on "
+            f"that computer and send it to us.",
             f"newest: {g.get('crash_newest') or '?'}"))
     return out
 
@@ -1308,20 +1328,38 @@ def _check_file_moves(ctx: Ctx) -> list[Finding]:
 def _check_versions_behind(ctx: Ctx) -> list[Finding]:
     """A computer several releases behind the current build.
 
-    Counts PUBLISHED builds newer than the one running, not a version-number
-    difference: what matters is how many fixes that machine has not taken.
+    Counts BUILDS newer than the one running, not a version-number difference:
+    what matters is how many fixes that machine has not taken. Published here
+    and offered by the vendor's feed both count (SYS-2, 2026-09-04) - a fix
+    that exists and has not reached the machine is missing from it either way.
     """
-    published: dict[str, list[tuple]] = {}
+    published: dict[str, set[tuple]] = {}
     for r in _rows(ctx.conn,
                    "SELECT platform, version FROM companion_packages "
                    "WHERE kind='companion' AND (retracted_at IS NULL OR retracted_at='')"):
-        published.setdefault(str(r["platform"]), []).append(db.version_tuple(r["version"]))
+        published.setdefault(str(r["platform"]), set()).add(db.version_tuple(r["version"]))
+    # SYS-2 (2026-09-04): plus what the VENDOR is offering. Counting only what
+    # this dashboard published makes the one case that can never self-heal
+    # invisible: a companion build that names a newer `requires_dashboard` is
+    # refused here, so it is never in `companion_packages`, so every machine is
+    # "0 releases behind" while the whole fleet stops updating. The feed's
+    # picture is a fact about the vendor's channel, not about this dashboard's
+    # shelf, and an empty one means UNKNOWN (no check has run) rather than
+    # "nothing on offer".
+    try:
+        for platform, versions in db.get_feed_offered(ctx.conn).items():
+            for version in versions:
+                tup = db.version_tuple(version)
+                if tup:
+                    published.setdefault(platform, set()).add(tup)
+    except sqlite3.Error:
+        log.debug("alerts: could not read what the vendor feed offers", exc_info=True)
     out = []
     for e in ctx.editors:
         version = db.version_tuple(e.get("companion_version"))
         if not version:
             continue
-        newer = [v for v in published.get(e.get("platform") or "", []) if v > version]
+        newer = [v for v in published.get(e.get("platform") or "", set()) if v > version]
         if len(newer) < VERSIONS_BEHIND_ALERT:
             continue
         who = ctx.name(_who(e))
@@ -2175,14 +2213,29 @@ def _send_committed(conn: sqlite3.Connection, *args: Any, **kwargs: Any) -> dict
 
 def deliver(
     conn: sqlite3.Connection, settings: Any, findings: list[dict[str, Any]], now: str,
+    *, budget_seconds: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     """Send what is new, re-send what is still an error, say what recovered.
 
     The repeat rule is the SEVERITY's: an "error" repeats once a day for as
     long as it is true, because an outage nobody acted on must not go quiet; a
     "warn" is said once and not again until it has cleared and come back.
+
+    DDIAG-1 (2026-09-04): the pass stops sending once `budget_seconds` is
+    spent and reports how many it left (`undelivered`). Every one of those is
+    still an OPEN condition with no `alert_log` row, so the next cycle picks it
+    up unchanged - the alternative was a run of 20 s timeouts long enough for
+    the collector watchdog to replace the container mid-pass, which loses the
+    same messages AND takes the dashboard with them. `clock` is injected so a
+    test can spend the budget without waiting for it.
     """
-    sent = failed = recovered = 0
+    sent = failed = recovered = undelivered = 0
+    # Read at CALL time, never bound as a default argument: the module
+    # constant is what an operator or a test changes, and a default captured
+    # at import cannot be changed by either.
+    budget = ALERT_CYCLE_BUDGET_SECONDS if budget_seconds is None else budget_seconds
+    deadline = clock() + max(0.0, float(budget))
     seen: set[tuple[str, str]] = set()
     for finding in findings:
         kind = str(finding["kind"])
@@ -2191,6 +2244,11 @@ def deliver(
         severity = finding.get("severity", SEV_WARN)
         was_open = _is_open(conn, kind, subject)
         if was_open and severity != SEV_ERROR:
+            continue
+        if clock() >= deadline:
+            # Left for the next pass, and NOT recorded: an alert_log row is
+            # what "we told somebody" means, and dedup reads any row.
+            undelivered += 1
             continue
         mail_subject, text = compose_alert(kind, subject, _finding_body(finding))
         result = _send_committed(conn, settings, mail_subject, text, kind=kind,
@@ -2210,13 +2268,20 @@ def deliver(
     for kind, subject in _open_subjects(conn, checked_kinds):
         if (kind, subject) in seen:
             continue
+        if clock() >= deadline:
+            # A recovery left unsent stays OPEN in the ledger, so it is said
+            # next pass. Losing the good news for ten minutes is the cheap
+            # half of this budget; the expensive half is above.
+            undelivered += 1
+            continue
         mail_subject, text = compose_recovered(kind, subject)
         result = _send_committed(conn, settings, mail_subject, text,
                                  kind=kind + RECOVERED_SUFFIX, dedup_subject=subject,
                                  now=now, dedup=False)
         recovered += 1
         failed += 0 if result["ok"] else 1
-    return {"sent": sent, "failed": failed, "recovered": recovered}
+    return {"sent": sent, "failed": failed, "recovered": recovered,
+            "undelivered": undelivered}
 
 
 def _open_subjects(
@@ -2260,6 +2325,7 @@ def run_cycle(
     """
     findings = scan(conn, settings, now, watchdog_restarts=watchdog_restarts)
     result = deliver(conn, settings, findings, now)
+    _record_delivery_budget(conn, result, now)
     weekly = False
     if weekly_due(conn, now):
         subject, text = compose_weekly(conn, now, settings)
@@ -2300,8 +2366,56 @@ def run_cycle(
     db.meta_set_json(conn, db.META_ALERTS_OPEN, counts)
     conn.commit()
     note = None
-    if result["failed"]:
+    sink = get_settings(conn).get("alerts_sink") or SINK_NONE
+    if result.get("undelivered"):
+        # DDIAG-1: the number that says the relay is slow, not that the fleet
+        # is broken.
+        note = (f"{result['sent']} of {result['sent'] + result['undelivered']} "
+                f"alert(s) sent this pass; the alert channel is slow")
+    elif result["failed"] and sink == SINK_NONE:
+        # DDIAG-16 (2026-09-04): with no sink this is not a fault, it is the
+        # setting. "could not be delivered" on the collector health panel read
+        # as a broken mail server on a site that had simply never configured
+        # one, which is the wrong thing to go looking for.
+        note = (f"{result['failed']} alert(s) were written down here and "
+                f"nobody was told: no alert channel is set up")
+    elif result["failed"]:
         note = f"{result['failed']} alert(s) could not be delivered"
     elif counts.get(SEV_ERROR):
         note = f"{counts[SEV_ERROR]} problem(s) open"
-    return {**result, "weekly": weekly, "open": counts, "note": note}
+    return {**result, "weekly": weekly, "open": counts, "note": note,
+            "sink": sink}
+
+
+def _record_delivery_budget(
+    conn: sqlite3.Connection, result: dict[str, Any], now: str,
+) -> None:
+    """File (or close) the "this pass ran out of time" notice (DDIAG-1).
+
+    Called on EVERY pass, whether or not the budget was spent: a kind
+    registered in `NOTICE_KINDS` with a writer that only runs on the bad day
+    renders [ OK ] the rest of the time, which is the exact "unchecked as
+    fine" mistake finding 1 of the 08-28 fix pass was. Never raises: a
+    database an older build migrated has no `notices` table, and the delivery
+    that just happened must not be undone by the bookkeeping about it.
+    """
+    left = int(result.get("undelivered") or 0)
+    try:
+        if left:
+            db.notice(
+                conn, "alerts_delivery_slow", "warn", "delivery",
+                body=(f"Sending this server's alerts took longer than the "
+                      f"{int(ALERT_CYCLE_BUDGET_SECONDS)} seconds one pass is "
+                      f"allowed, so {left} of them were left for the next pass. "
+                      f"The usual cause is a mail server or a webhook that "
+                      f"accepts the connection and then does not answer. "
+                      f"Nothing has been lost: anything still wrong is offered "
+                      f"again every cycle."),
+                fix=("On Settings, Alerts: press [ SEND A TEST ] and time it. If "
+                     "it hangs, correct the mail server or webhook address, or "
+                     "switch the channel off until it is fixed."),
+                now=now)
+        else:
+            db.clear_notice(conn, "alerts_delivery_slow", "delivery", now=now)
+    except sqlite3.Error:
+        log.exception("alerts: could not record the delivery budget")

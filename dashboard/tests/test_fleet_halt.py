@@ -93,7 +93,9 @@ def test_a_tripped_breaker_is_stored_and_shown_on_the_grid(env):
     assert "the NAS listed the tree as EMPTY" in page.text
     # ...and the fleet BANNER, not only the row chip: a row chip on a grid of
     # ten machines is not an alarm.
-    assert "PROXY DOWNLOAD STOPPED on 1 machine(s)" in page.text
+    # UX-16 / UX-10 (usability sweep 2026-09-03): "computer", and the
+    # noun agrees with the count.
+    assert "PROXY DOWNLOAD STOPPED on 1 computer" in page.text
 
 
 def test_a_breaker_that_clears_clears_the_alarm(env):
@@ -127,7 +129,7 @@ def test_a_halted_machine_shows_on_the_grid(env):
     }), headers=report_headers())
     page = as_admin(client).get("/partials/fleet")
     assert "SYNC HALTED" in page.text
-    assert "SYNCING STOPPED on 1 machine(s)" in page.text
+    assert "SYNCING STOPPED on 1 computer" in page.text  # UX-16 / UX-10
 
 
 def test_the_skipped_exists_counter_reaches_the_grid(env):

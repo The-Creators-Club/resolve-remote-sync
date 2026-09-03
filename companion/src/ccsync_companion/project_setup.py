@@ -33,6 +33,8 @@ from typing import Any, Callable, Optional
 from urllib.parse import quote
 
 from . import popup
+from . import site as site_mod
+from . import ui_copy
 
 log = logging.getLogger("ccsync.project_setup")
 
@@ -217,8 +219,11 @@ class ProjectSetupPrompter:
             elif self._notify is not None:
                 try:
                     self._notify(
-                        f"You can set up '{name}' later from the tray menu.",
-                        "ccsync-companion",
+                        # UX-1: name the row, not "the menu" - it is the
+                        # only prompt in there and it disappears once done.
+                        f"You can set up '{name}' later: right-click the CCSync "
+                        f"tray icon and choose Set up '{name}' on the server.",
+                        site_mod.notify_title(),
                     )
                 except Exception:
                     pass

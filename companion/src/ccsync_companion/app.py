@@ -58,6 +58,7 @@ from . import drive_reminder as drive_reminder_mod
 from . import shutdown_guard as shutdown_guard_mod
 from . import stills as stills_mod
 from . import theme
+from . import ui_copy
 from . import ui_dispatch
 from . import upgrade as upgrade_mod
 from . import site as site_mod
@@ -1577,6 +1578,15 @@ class CompanionApp:
         # None whenever it is switched off or could not take its port --
         # which must never be more than a missing convenience.
         self._broll_server: Any = None
+        # CMEDIA-3 (usability sweep 2026-09-04): whether that port is actually
+        # held, so the state is visible to somebody. A failed bind logged one
+        # WARNING and then ran happily forever with no listener: no tray line,
+        # no report field, no alert kind and NO RETRY, so quitting the program
+        # holding 8899 did not fix it either. What the editor saw was the web
+        # page's "tray app not running", which is wrong in its first clause and
+        # sends them to restart something that is already running.
+        self._loopback_state: dict[str, Any] = {
+            "bound": False, "port": 0, "error": "", "since": ""}
 
         # Shared LUT library (luts.py): the link manager plus the cached
         # stray scan the tray reads. Built here so stray_lut_count() is safe
@@ -2237,12 +2247,23 @@ class CompanionApp:
                         self._notify_tray(
                             f"Sync paused: {site_mod.drive_phrase(capitalised=True)} is "
                             "not answering - reconnect it or restart this computer.",
-                            "ccsync-companion",
+                            site_mod.notify_title(),
+                        )
+                    elif state == root_guard_mod.ROOT_MISPLACED:
+                        # SYNC-105 (sweep 2026-09-04): the drive is plugged
+                        # in. This balloon used to fall into the `else` and
+                        # say "disconnected", one second before the dialog
+                        # said something else about the same event.
+                        self._notify_tray(
+                            f"Sync paused: {site_mod.drive_phrase(capitalised=True)} is "
+                            "mounted at the wrong place. See the CCSync window for "
+                            "what to do.",
+                            site_mod.notify_title(),
                         )
                     else:
                         self._notify_tray(
                             f"Sync paused: {site_mod.drive_phrase()} is disconnected.",
-                            "ccsync-companion",
+                            site_mod.notify_title(),
                         )
             self._root_pause_lanes()
             if state == root_guard_mod.ROOT_MISPLACED:
@@ -2289,7 +2310,7 @@ class CompanionApp:
             log.info("local_root %s is back -- resuming sync",
                      self.config.get("local_root"))
             self._root_resume_lanes()
-            self._notify_tray("Drive reconnected, sync resumed.", "ccsync-companion")
+            self._notify_tray("Drive reconnected, sync resumed.", site_mod.notify_title())
         except Exception:
             log.exception("root guard: could not resume after the drive came back")
 
@@ -2325,7 +2346,7 @@ class CompanionApp:
             self._notify_tray(
                 "macOS is blocking access to the sync volume after the update. "
                 "Re-grant CCSync Full Disk Access in System Settings → Privacy & "
-                "Security → Full Disk Access.", "ccsync-companion")
+                "Security → Full Disk Access.", site_mod.notify_title())
         except Exception:
             log.exception("could not check whether macOS is blocking the sync volume")
 
@@ -2352,7 +2373,7 @@ class CompanionApp:
         self._notify_tray(
             f"{site_mod.drive_phrase(capitalised=True)} is mounted at the wrong "
             f"path. Sync is paused until it is fixed. See the CCSync window.",
-            "ccsync-companion")
+            site_mod.notify_title())
         body = (
             f"{site_mod.drive_phrase(capitalised=True)} is plugged in, but macOS "
             f"mounted it somewhere other than {mount_point}.\n\n"
@@ -2383,7 +2404,7 @@ class CompanionApp:
             return
         try:
             popup.confirm_dialog(
-                "CCSYNC.EXE: drive mounted at the wrong path", body, ok_label="OK",
+                site_mod.notify_title("drive mounted at the wrong path"), body, ok_label="OK",
             )
         except Exception:
             log.exception("could not show the misplaced-drive dialog")
@@ -2548,7 +2569,7 @@ class CompanionApp:
             f"Some files in your project folder weren't on the server, so CCSync moved "
             f"them (never deleted) to:\n{trash_dir}\nCopy anything you still need back "
             f"out of there.",
-            "ccsync-companion: files moved to .ccsync-trash",
+            site_mod.notify_title("files moved to .ccsync-trash"),
         )
 
     def _notify_breaker_tripped(self, reason: str) -> None:
@@ -2563,7 +2584,7 @@ class CompanionApp:
             f"{reason}\n"
             "Your uploads are still running and nothing has been deleted. When your "
             'admin says the server is fine, use the tray\'s "Resume proxy download".',
-            "ccsync-companion: proxy download stopped",
+            site_mod.notify_title("proxy download stopped"),
         )
 
     def _notify_disk_floor_park(self, reason: str) -> None:
@@ -2579,7 +2600,7 @@ class CompanionApp:
             f"{reason}\n"
             "Your uploads are still running. Free up some space and it starts again "
             "on its own.",
-            "ccsync-companion: proxy download paused",
+            site_mod.notify_title("proxy download paused"),
         )
 
     def _syncthing_supervision_suppressed(self) -> str:
@@ -2626,7 +2647,7 @@ class CompanionApp:
         the message. The lane latches this so a wedged drive costs one toast,
         not one per re-check.
         """
-        self._notify_tray(message, "ccsync-companion")
+        self._notify_tray(message, site_mod.notify_title())
 
     def _handle_mapping_warning(self, item: dict[str, Any]) -> None:
         path = item.get("file_path", "")
@@ -2663,9 +2684,9 @@ class CompanionApp:
         self._notify_tray(
             f"Resolve is looking for your media on {letter} but {letter} is not "
             "pointing at your synced folder, so clips will show offline. Your "
-            f"uploads and downloads are still running. Tray > Settings > REPAIR "
-            f"{letter} NOW.",
-            "ccsync-companion: mapping warning",
+            f"uploads and downloads are still running. "
+            f"{ui_copy.repair_drive(letter)}.",
+            site_mod.notify_title("mapping warning"),
         )
 
     def _handle_non_canonical(self, items: list[dict[str, Any]],
@@ -2838,7 +2859,7 @@ class CompanionApp:
             self._notify_tray(
                 f"Re-addressed {fixed} clip(s) to {self.config.get('canonical_prefix')} "
                 "so they stay online for every editor.",
-                "ccsync-companion",
+                site_mod.notify_title(),
             )
 
     def undo_last_relink(self) -> None:
@@ -2868,15 +2889,16 @@ class CompanionApp:
         except Exception:
             log.exception("undo of the last relink failed")
             self._notify_tray(
-                "CCSync could not undo the last clip-path change. Tray > Settings > OPEN LOG, "
-                "and send it to your admin.", "ccsync-companion: undo failed",
+                f"CCSync could not undo the last clip-path change. "
+                f"{ui_copy.OPEN_LOG}, and send it to your admin.",
+                site_mod.notify_title("undo failed"),
             )
             return
         message = result.get("message") or "Nothing to undo."
         if summary and result.get("undone"):
             message += f" (that pass changed {summary})"
         log.info("undo last relink: %s", message)
-        self._notify_tray(message, "ccsync-companion: undo")
+        self._notify_tray(message, site_mod.notify_title("undo"))
 
     def _handle_foreign(self, item: dict[str, Any]) -> None:
         """One tray warning per clip stored under ANOTHER machine's path.
@@ -2893,17 +2915,24 @@ class CompanionApp:
         self._notify_tray(
             f"\u201c{name}\u201d points at {path[:60]}\u2026 - a path that only exists on "
             "another editor's machine, so it can never sync or come online here. "
-            "Whoever imported it should re-import it through the P: drive (their "
-            "companion will offer the fix).",
-            "ccsync-companion: foreign clip",
+            # RES-9 (sweep 2026-09-04): the last two Resolve strings that
+            # named a drive letter as a literal. canonical_prefix_label()
+            # falls back to "your media drive", which is also the only true
+            # sentence on a Mac - there is no drive letter there at all.
+            f"Whoever imported it should re-import it through "
+            f"{self.canonical_prefix_label()} (their companion will offer the fix).",
+            site_mod.notify_title("foreign clip"),
         )
 
     # -- popup plumbing (shared by the passive watcher and the manual
     # "Scan whole project" tray action) -------------------------------
-    def _notify_tray(self, msg: str, title: str = "ccsync-companion") -> None:
+    def _notify_tray(self, msg: str, title: str = "") -> None:
+        # UX-4: the default is resolved HERE, at call time, not in the
+        # signature - a default evaluated at import would be the brand from
+        # before this machine had ever fetched its site manifest.
         if self._tray_icon is not None:
             try:
-                self._tray_icon.notify(msg, title)
+                self._tray_icon.notify(msg, title or site_mod.notify_title())
             except Exception:
                 log.debug("tray notify failed (backend may not support it)")
 
@@ -3058,7 +3087,7 @@ class CompanionApp:
             self._notify_tray(
                 "Can't reach the server right now, so CCSync doesn't know where this "
                 "media belongs. It'll ask again once the connection is back. Nothing "
-                "was changed.", "ccsync-companion")
+                "was changed.", site_mod.notify_title())
             return
 
         popup.show_popup(
@@ -3100,19 +3129,19 @@ class CompanionApp:
             self._notify_tray(
                 f"{site_mod.drive_phrase(capitalised=True)} is disconnected, so "
                 f"CCSync can't tell where your media is. Plug it back in and try "
-                f"again.", "ccsync-companion")
+                f"again.", site_mod.notify_title())
             return
         if self._local_root_is_broken():
             log.error("scan whole project refused: local_root is misconfigured")
             self._notify_tray(
                 "CCSync's sync folder isn't set up correctly, so it can't tell which media "
-                "is in the wrong place. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.", "ccsync-companion")
+                f"is in the wrong place. {ui_copy.DIAGNOSTICS}.", site_mod.notify_title())
             return
         result = resolve_bridge.get_media_pool_items()
         if not result.get("ok"):
             message = result.get("message", "unknown error")
             log.warning("scan whole project: %s", message)
-            self._notify_tray(f"Whole-project scan failed: {message}", "ccsync-companion")
+            self._notify_tray(f"Whole-project scan failed: {message}", site_mod.notify_title())
             return
 
         # AFTER the Resolve call and its refusals: a scan that could not run
@@ -3159,7 +3188,7 @@ class CompanionApp:
             log.info("whole-project scan: all media is in the tree%s", extra)
             self._notify_tray(
                 f"Whole-project scan: all media is in the tree{extra}",
-                "ccsync-companion")
+                site_mod.notify_title())
             return
 
         log.info("whole-project scan: %d clip(s) outside %s", len(out_of_tree), local_root)
@@ -3238,17 +3267,17 @@ class CompanionApp:
             log.info("consolidate ignored: sync_enabled=false on this machine")
             self._notify_tray(
                 "This machine works directly off the NAS, so there's nothing to copy in.",
-                "ccsync-companion",
+                site_mod.notify_title(),
             )
             return
         if self._paused:
             self._notify_tray(
-                "Syncing is paused. Resume it from the tray first.", "ccsync-companion")
+                "Syncing is paused. Resume it from the tray first.", site_mod.notify_title())
             return
         if self.config_problems:
             self._notify_tray(
-                "CCSync isn't fully set up on this machine yet, so nothing can be copied in. "
-                "Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.", "ccsync-companion")
+                "CCSync isn't fully set up on this machine yet, so nothing can be "
+                f"copied in. {ui_copy.DIAGNOSTICS}.", site_mod.notify_title())
             return
         if self._root_absent or self._local_root_is_broken():
             # SYNC-6 (2026-08-11): the fourth gate, missing here while both
@@ -3263,11 +3292,11 @@ class CompanionApp:
             self._notify_tray(
                 f"{site_mod.drive_phrase(capitalised=True)} is disconnected, so "
                 f"CCSync can't copy media in. Plug it back in and try again.",
-                "ccsync-companion")
+                site_mod.notify_title())
             return
         if not self._consolidate_lock.acquire(blocking=False):
             self._notify_tray("Already copying a project's media in. Let it finish.",
-                              "ccsync-companion")
+                              site_mod.notify_title())
             return
         try:
             self._consolidate_active = True
@@ -3281,7 +3310,7 @@ class CompanionApp:
         if not result.get("ok"):
             message = result.get("message", "unknown error")
             log.warning("consolidate: %s", message)
-            self._notify_tray(f"Consolidate failed: {message}", "ccsync-companion")
+            self._notify_tray(f"Consolidate failed: {message}", site_mod.notify_title())
             return
 
         local_root = self.config.get("local_root", "")
@@ -3293,7 +3322,7 @@ class CompanionApp:
             self._notify_tray(
                 "Can't reach the server, so CCSync doesn't know where this project lives. "
                 "Nothing was copied or uploaded. Try again once you're back online.",
-                "ccsync-companion")
+                site_mod.notify_title())
             return
 
         out_of_tree = [
@@ -3320,7 +3349,7 @@ class CompanionApp:
             self._notify_tray(
                 "CCSync can't tell which project this is, so it won't copy anything in. "
                 "Open the project in Resolve and set it up on the dashboard first.",
-                "ccsync-companion",
+                site_mod.notify_title(),
             )
             return
 
@@ -3339,21 +3368,21 @@ class CompanionApp:
             )
             self._notify_tray(
                 "CCSync got a project location that points outside your sync folder, so "
-                "nothing was copied or uploaded. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.",
-                "ccsync-companion",
+                f"nothing was copied or uploaded. {ui_copy.DIAGNOSTICS}.",
+                site_mod.notify_title(),
             )
             return
 
         results: list[dict[str, Any]] = []
         if not self._popup_active_lock.acquire(blocking=False):
-            self._notify_tray("A popup is already open. Close it first.", "ccsync-companion")
+            self._notify_tray("A popup is already open. Close it first.", site_mod.notify_title())
             return
         try:
             plan = consolidate.plan_local_consolidation(
                 out_of_tree, local_root, self.editor_identity() or "",
                 project_prefix, server_roots,
             )
-            self._notify_tray("Checking the NAS…", "ccsync-companion: consolidate")
+            self._notify_tray("Checking the NAS…", site_mod.notify_title("consolidate"))
             reconcile = consolidate.reconcile_with_nas(self.config, subpath, self._state_dir)
             report = consolidate.build_report(plan, reconcile)
             if not reconcile.get("ok"):
@@ -3364,11 +3393,11 @@ class CompanionApp:
                             reconcile.get("error"))
                 self._notify_tray(
                     "Couldn't check the server, so nothing was copied or uploaded. "
-                    "Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.", "ccsync-companion")
+                    f"{ui_copy.DIAGNOSTICS}.", site_mod.notify_title())
                 return
             if plan["count"] == 0 and (reconcile["uploads"] or {}).get("count", 0) == 0:
                 self._notify_tray("Nothing to copy in: this project is already tidy.",
-                                  "ccsync-companion")
+                                  site_mod.notify_title())
                 return
             if not popup.confirm_dialog(
                 "COPY THIS PROJECT'S MEDIA IN", report, ok_label="COPY & UPLOAD"
@@ -3437,8 +3466,8 @@ class CompanionApp:
             self._notify_tray(
                 f"{len(results) - len(failures) - len(skipped)}/{len(results)} copied in"
                 f"{skipped_part}, {len(failures)} failed. "
-                f"Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.",
-                "ccsync-companion")
+                f"{ui_copy.DIAGNOSTICS}.",
+                site_mod.notify_title())
             # SYNC-12 (2026-08-11): this branch fell through to the
             # "Copy & upload finished" toast below, so the editor read the
             # failure report and then, a beat later, an unqualified success.
@@ -3450,12 +3479,12 @@ class CompanionApp:
             verb = "Cancelled" if getattr(window, "cancelled", lambda: False)() else "Stopped"
             self._notify_tray(
                 f"{verb}: {done} of {plan['count']} copied in{skipped_part}, the rest "
-                f"were left alone. Nothing was moved or deleted.", "ccsync-companion")
+                f"were left alone. Nothing was moved or deleted.", site_mod.notify_title())
             return
         self._notify_tray(
             f"Copy & upload finished ({len(results) - len(failures) - len(skipped)} "
             f"copied in{skipped_part})." if skipped else "Copy & upload finished.",
-            "ccsync-companion: consolidate")
+            site_mod.notify_title("consolidate"))
 
     def _subpath_is_contained(self, subpath: str) -> bool:
         """True when `local_root/<subpath>` really lands under local_root.
@@ -3785,7 +3814,7 @@ class CompanionApp:
         except Exception:
             log.exception("could not show the Resolve scripting warning")
             self._notify_tray(
-                resolve_bridge.NO_SCRIPTING_MESSAGE, "ccsync-companion")
+                resolve_bridge.NO_SCRIPTING_MESSAGE, site_mod.notify_title())
         finally:
             with self._scripting_warn_lock:
                 self._scripting_warn_open = False
@@ -3931,9 +3960,10 @@ class CompanionApp:
         self._notify_tray(
             f"“{first}”{more} point at paths that only exist on another "
             "editor's machine, so they can never sync or come online here. "
-            "Whoever imported them should re-import through the P: drive "
-            "(their companion will offer the fix). Details in the log.",
-            "ccsync-companion: foreign clips",
+            f"Whoever imported them should re-import through "  # RES-9
+            f"{self.canonical_prefix_label()} (their companion will offer the "
+            f"fix). Details in the log.",
+            site_mod.notify_title("foreign clips"),
         )
 
     def _relink_proxies_once(self, items: list[dict[str, Any]]) -> None:
@@ -3990,6 +4020,15 @@ class CompanionApp:
             # the P: mapping fresh without the tray forking `net use` every
             # 10 s (COMP-CORE-6, 2026-08-14).
             self._refresh_p_mapping_mode()
+            # CMEDIA-3 (2026-09-04): and the loopback port, for the same
+            # reason -- this is the slow tick the process already has, and
+            # the bind used to be attempted exactly once in the life of the
+            # process, so quitting whatever held 8899 fixed nothing until the
+            # editor restarted the tray. A no-op once the port is ours.
+            try:
+                self.retry_loopback_bind()
+            except Exception:
+                log.exception("loopback rebind failed")
             if self._media_tree_stop_event.wait(self.media_tree_refresh_interval):
                 break
 
@@ -4143,10 +4182,12 @@ class CompanionApp:
         from . import drive_swap
 
         try:
+            letter = self.canonical_drive_letter()
             return drive_swap.classify_p_target(
-                drive_swap.current_p_target(),
+                drive_swap.current_p_target(letter=letter),
                 str(self.config.get("local_root", "")),
                 self._server_p_unc(),
+                letter,
             )
         except Exception:
             return "none"
@@ -4206,14 +4247,18 @@ class CompanionApp:
             # local_root so drive_swap can tell a LEGACY subst mapping of this
             # machine's own copy from somebody else's P: before it unmaps
             # anything (UX-6, resilience sweep 2026-08-28).
+            # SYNC-103: the letter is site data, and this is the call that
+            # unmaps a drive before it maps one.
+            letter = self.canonical_drive_letter()
             ok, message = drive_swap.swap_to_server(unc, username=username,
                                                     password=password,
-                                                    local_root=str(self.config.get("local_root", "")))
+                                                    local_root=str(self.config.get("local_root", "")),
+                                                    letter=letter)
             if ok and username:
                 drive_swap.persist_credentials(unc, username, password)
             if not ok:
                 restored, restore_msg = drive_swap.swap_to_local(
-                    str(self.config.get("local_root", "")))
+                    str(self.config.get("local_root", "")), letter=letter)
                 suffix = " P: was restored to your local copy." if restored else f" AND {restore_msg}"
                 message = message + suffix
         finally:
@@ -4233,6 +4278,19 @@ class CompanionApp:
         """
         prefix = str(self.config.get("canonical_prefix", "") or "").strip()
         return prefix.rstrip("\\/") or "your media drive"
+
+    def canonical_drive_letter(self) -> str:
+        """"P:" -- the sync drive's LETTER, for the Windows calls that need an
+        argument rather than a sentence (SYNC-103, sweep 2026-09-04).
+
+        Unlike canonical_prefix_label() this never falls back to a phrase:
+        `net use "your media drive" /delete /y` is not a thing, so an
+        unreadable or non-letter canonical_prefix falls back to P:, which is
+        what every machine in the field is on."""
+        from . import drive_swap
+
+        return drive_swap.normalise_letter(
+            self.config.get("canonical_prefix", "")) or drive_swap.P_DRIVE
 
     def p_repair_available(self) -> bool:
         """Whether [ REPAIR P: NOW ] can do anything on this machine.
@@ -4265,7 +4323,7 @@ class CompanionApp:
         letter = self.canonical_prefix_label()
         if not self.p_repair_available():
             return False, (f"{letter} cannot be repaired from here on this computer. "
-                           "Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.")
+                           f"{ui_copy.DIAGNOSTICS}.")
         mode = self.p_mapping_mode()
         if mode == "local":
             return True, f"{letter} is already pointing at your synced folder."
@@ -4276,7 +4334,8 @@ class CompanionApp:
         if mode == "other":
             target = ""
             try:
-                target = drive_swap.current_p_target()
+                target = drive_swap.current_p_target(
+                    letter=self.canonical_drive_letter())
             except Exception:
                 log.debug("could not re-read the P: target for the refusal", exc_info=True)
             return False, (
@@ -4319,7 +4378,9 @@ class CompanionApp:
 
         self._p_swap_busy = True
         try:
-            ok, message = drive_swap.swap_to_local(str(self.config.get("local_root", "")))
+            ok, message = drive_swap.swap_to_local(
+                str(self.config.get("local_root", "")),
+                letter=self.canonical_drive_letter())
         finally:
             self._p_swap_busy = False
         self._p_mode_cache = None
@@ -4464,7 +4525,8 @@ class CompanionApp:
                 sample = ", ".join((pending.get("samples") or [])[:3])
                 out["blocked"] = True
                 out["reasons"].append(
-                    f"{count} video file(s) have not been uploaded yet"
+                    f"{ui_copy.count(count, 'video file')} have not been "
+                    f"uploaded yet"
                     + (f" (e.g. {sample})" if sample else "")
                 )
         if self.syncthing_admin is not None and not upload_only:
@@ -4499,7 +4561,8 @@ class CompanionApp:
             if need_local:
                 out["blocked"] = True
                 out["reasons"].append(
-                    f"{need_local} shared file(s) have not arrived on this machine yet"
+                    f"{ui_copy.count(need_local, 'shared file')} have not "
+                    f"arrived on this machine yet"
                 )
         return out
 
@@ -4776,7 +4839,7 @@ class CompanionApp:
                       "cannot ask anyone to accept it")
             self._notify_tray(
                 "NOT SYNCING: this build is missing its licence document. "
-                "Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.", "ccsync-companion")
+                f"{ui_copy.DIAGNOSTICS}.", site_mod.notify_title())
             # Settled, for _licence_watch's purposes: retrying a packaging
             # fault every minute produces the same ERROR forever and no
             # window. The tray item still reaches this path on request.
@@ -4799,7 +4862,7 @@ class CompanionApp:
             return
         try:
             accepted = popup.licence_dialog(
-                "CCSYNC.EXE: licence agreement",
+                site_mod.notify_title("licence agreement"),
                 (f"This machine is NOT SYNCING until someone here accepts the "
                  f"{site_mod.product_name()} licence agreement (version "
                  f"{eula_mod.EULA_VERSION}).\n\n"
@@ -4825,7 +4888,7 @@ class CompanionApp:
                         "machine stays not-syncing")
             self._notify_tray(
                 "NOT SYNCING: the licence agreement was not accepted. "
-                "Tray > Accept the licence agreement…", "ccsync-companion")
+                f"{ui_copy.ACCEPT_LICENCE}.", site_mod.notify_title())
             return
         try:
             eula_mod.record_acceptance()
@@ -4836,7 +4899,7 @@ class CompanionApp:
             log.exception("licence accepted but the record could not be written")
             self._notify_tray(
                 "Couldn't save your acceptance. Check disk space and try again.",
-                "ccsync-companion")
+                site_mod.notify_title())
             return
         log.info("licence agreement v%s accepted on this machine", eula_mod.EULA_VERSION)
         # STRAIGHT BACK INTO SYNC, no restart. _start_lanes() is the one door
@@ -4847,7 +4910,7 @@ class CompanionApp:
             self._start_lanes()
         except Exception:
             log.exception("could not start the sync lanes after the licence was accepted")
-        self._notify_tray("Licence accepted, syncing is starting.", "ccsync-companion")
+        self._notify_tray("Licence accepted, syncing is starting.", site_mod.notify_title())
 
     def _start_lanes(self) -> None:
         """Actually start the sync lanes/sequencer, per sync_enabled/managed
@@ -5118,18 +5181,18 @@ class CompanionApp:
             if not quiet_refusals:
                 self._notify_tray(
                     "Can't update while a CCSync window is open. Close it and try again.",
-                    "ccsync-companion")
+                    site_mod.notify_title())
             return "popup"
         if blocker:
             if not quiet_refusals:
                 self._notify_tray(
                     "Can't update while media is being copied in. Let it finish, then try again.",
-                    "ccsync-companion")
+                    site_mod.notify_title())
             return "consolidate"
         # "Installing", not "Updating": the offered build may be OLDER than
         # the running one (upgrade.py's "different, not newer"), and every
         # other string on this path now refuses to call that an update.
-        self._notify_tray(f"Installing v{info['version']}…", "ccsync-companion")
+        self._notify_tray(f"Installing v{info['version']}…", site_mod.notify_title())
         try:
             applied = self.upgrade.apply()
         except Exception:
@@ -5137,9 +5200,9 @@ class CompanionApp:
             applied = False
         if not applied:
             self._notify_tray(
-                f"Update failed. You're still on v{config_mod.VERSION}, nothing is broken. "
-                "Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.",
-                "ccsync-companion",
+                f"Update failed. You're still on v{config_mod.VERSION}, nothing is "
+                f"broken. {ui_copy.DIAGNOSTICS}.",
+                site_mod.notify_title(),
             )
             return "failed"
         return ""
@@ -5468,6 +5531,13 @@ class CompanionApp:
         except Exception:
             log.exception("upgrade report failed")
         try:
+            # CMEDIA-3 (usability sweep 2026-09-04): whether "Send to Resolve"
+            # can work on this machine at all. Always present, healthy shape
+            # included -- an absent section could only mean an older build.
+            guard["loopback"] = self.loopback_report()
+        except Exception:
+            log.exception("loopback report failed")
+        try:
             # SYNC-2: the root guard's answer as a plain string, so the grid
             # can tell "the drive is out" from "the drive is wedged" without
             # parsing a lane detail. Always present -- including `unknown`,
@@ -5576,10 +5646,11 @@ class CompanionApp:
             return ("CCSync could not move that folder back. Close Resolve and "
                     "Explorer on it and try again.")
         if failed:
-            return (f"{len(done)} folder(s) put back; {len(failed)} could not be "
-                    "moved. Close Resolve and Explorer on them and try again.")
-        return (f"{len(done)} project folder(s) put back where CCSync expects "
-                "them. Syncing starts again on the next pass.")
+            return (f"{ui_copy.count(len(done), 'folder')} put back; "
+                    f"{len(failed)} could not be moved. Close Resolve and "
+                    f"Explorer on them and try again.")
+        return (f"{ui_copy.count(len(done), 'project folder')} put back where "
+                f"CCSync expects them. Syncing starts again on the next pass.")
 
     # -- ingest staging (MEDIA-3, resilience sweep 2026-08-28) -------------
     def _ingestors(self) -> list[Any]:
@@ -5623,7 +5694,7 @@ class CompanionApp:
             freed += int(one.get("bytes") or 0)
         if not removed:
             return "There is no finished staging to clear on this computer."
-        return (f"Cleared {removed} finished staging folder(s), "
+        return (f"Cleared {ui_copy.count(removed, 'finished staging folder')}, "
                 f"{freed / 1e9:.1f} GB.")
 
     # -- the one sentence: why is this machine not syncing? (SYNC-15) -------
@@ -5772,8 +5843,14 @@ class CompanionApp:
             slugs = [str(s) for s in (guard.get("folders_unfiltered") or []) if s]
             if not slugs:
                 return None
-            return (f"{len(slugs)} project(s) are not sharing yet - waiting for their "
-                    f"filter list: {', '.join(slugs[:3])}", None)
+            # SYNC-113 (sweep 2026-09-04): slugs appear nowhere an editor
+            # has ever seen. The sequencer knows the label it shows them.
+            seq = self.sequencer
+            names = [seq.label_for_slug(slug) if seq is not None else slug
+                     for slug in slugs[:3]]
+            return (f"{ui_copy.count(len(slugs), 'project')} are not sharing "
+                    f"yet - waiting for their filter list: {', '.join(names)}",
+                    None)
         if reason == "lane_stalled":
             stalled = guard.get("stalled") or self._lane_stall_record()
             if not isinstance(stalled, dict) or not stalled.get("lane"):
@@ -5782,8 +5859,9 @@ class CompanionApp:
                 minutes = max(1, int(float(stalled.get("seconds") or 0) // 60))
             except (TypeError, ValueError):
                 minutes = 1
-            return (f"Lane {stalled.get('lane')} stopped making progress for "
-                    f"{minutes} minute(s) and was restarted",
+            lane_said = ui_copy.lane_words(stalled.get("lane"), "syncing")
+            return (f"{lane_said.capitalize()} stopped making progress for "
+                    f"{ui_copy.count(minutes, 'minute')} and was restarted",
                     str(stalled.get("at") or "") or None)
         if reason == "syncthing_down":
             # NOT on a machine that has no sync engine by design (2026-08-30).
@@ -5819,8 +5897,21 @@ class CompanionApp:
             errors = [s for s in states.values() if s.state == STATE_ERROR]
             if len(errors) < 2:
                 return None
-            return ("This computer cannot reach the server: "
-                    + str(errors[-1].last_error or "both sync lanes are failing"), None)
+            # SYNC-113: this sentence is rendered by the tray, the Settings
+            # window AND the dashboard's machine row. rclone's verbatim tail
+            # is exactly what classify_lane_error exists to keep off screen;
+            # it stays in the log and in Copy diagnostics.
+            last = errors[-1].last_error
+            if not last:
+                return ("This computer cannot reach the server: both sync lanes "
+                        "are failing", None)
+            try:
+                from . import tray as tray_mod
+                said = tray_mod.classify_lane_error(last)
+            except Exception:
+                log.debug("could not classify the transport error", exc_info=True)
+                said = "both sync lanes are failing"
+            return ("This computer cannot reach the server: " + said, None)
         return None
 
     # The stall record another agent's watchdog writes (wave 2, SYNC-1).
@@ -5981,7 +6072,7 @@ class CompanionApp:
             self._notify_tray(
                 f"SYNCING IS STOPPED on this machine.\n{reason}\n"
                 "Nothing is uploading, downloading or sharing until it is started "
-                "again.", "ccsync-companion: syncing stopped",
+                "again.", site_mod.notify_title("syncing stopped"),
             )
         log.warning("sync halted (%s): %s -- %d lane C folder(s) paused",
                     scope, reason, paused)
@@ -6095,7 +6186,7 @@ class CompanionApp:
         dashboard, an unreadable cache all mean "wait for the click"."""
         try:
             self._notify_tray(
-                upgrade_mod.offer_toast(info["version"]), "ccsync-companion")
+                upgrade_mod.offer_toast(info["version"]), site_mod.notify_title())
         except Exception:
             log.exception("could not notify about the available build")
         try:
@@ -6262,7 +6353,7 @@ class CompanionApp:
                          wanted, command.get("requested_by") or "an admin")
                 self._notify_tray(
                     f"Your administrator is updating CCSync to v{wanted}.",
-                    "ccsync-companion",
+                    site_mod.notify_title(),
                 )
             else:
                 log.info("retrying pushed update to v%s", wanted)
@@ -6349,7 +6440,7 @@ class CompanionApp:
             log.warning("lane B breaker resumed by %s from the dashboard", by)
             self._notify_tray(
                 f"{by} checked the server and started proxy download again.",
-                "ccsync-companion: proxy download resumed",
+                site_mod.notify_title("proxy download resumed"),
             )
         except Exception:
             log.exception("could not apply the dashboard's resume-proxy-download request")
@@ -6437,10 +6528,20 @@ class CompanionApp:
                     log.info("file move #%s by %s: %s -> %s/%s (%s)", move["id"], who,
                              move["from_rel"], move["to_project_rel"], move["to_rel"], detail)
                     if paths is not None:
+                        # SYNC-108 (sweep 2026-09-04): relink_pending is the
+                        # RES-10 case - Resolve was not open, or that project
+                        # was not, so nothing has been repointed yet. The
+                        # toast claimed it had, in writing, about a clip that
+                        # is offline the next time that project opens.
+                        followed = (
+                            "Your copy followed and Resolve was relinked."
+                            if not relink_pending else
+                            "Your copy followed. The clip will reconnect the next "
+                            "time you open that project in Resolve."
+                        )
                         self._notify_tray(
-                            f"{who} moved '{name}' to {where} on the server. Your copy "
-                            f"followed and Resolve was relinked.",
-                            "ccsync-companion: file moved")
+                            f"{who} moved '{name}' to {where} on the server. {followed}",
+                            site_mod.notify_title("file moved"))
                 else:
                     log.warning("file move #%s by %s could not be applied here "
                                 "(attempt %s): %s", move["id"],
@@ -6453,13 +6554,13 @@ class CompanionApp:
                             f"{who} moved '{name}' to {where} on the server, but your copy "
                             f"could not follow yet: {detail}. Nothing was deleted and "
                             f"CCSync will keep trying.",
-                            "ccsync-companion: file move needs attention")
+                            site_mod.notify_title("file move needs attention"))
                     elif entry.get("state") == file_moves_mod.STATE_BLOCKED:
                         self._notify_tray(
                             f"Your copy of '{name}' still could not be moved to {where} "
                             f"after a week of trying: {detail}. Nothing was deleted; ask "
                             f"your admin.",
-                            "ccsync-companion: file move blocked")
+                            site_mod.notify_title("file move blocked"))
         except Exception:
             log.exception("could not apply the dashboard's file moves")
 
@@ -6566,7 +6667,7 @@ class CompanionApp:
                                 command["id"], who, detail)
                     self._notify_tray(
                         f"{who} put back the clip paths CC Sync changed in Resolve.",
-                        "ccsync-companion: clip paths put back")
+                        site_mod.notify_title("clip paths put back"))
                 else:
                     log.warning("resolve undo #%s (asked for by %s) %s: %s",
                                 command["id"], who, state, detail)
@@ -6620,7 +6721,7 @@ class CompanionApp:
         name = str(entry.get("from_rel", "")).rsplit("/", 1)[-1] or "a clip"
         self._notify_tray(
             f"'{name}' moved on the server. CCSync can repoint Resolve to where it is now.",
-            "ccsync-companion: this clip moved")
+            site_mod.notify_title("this clip moved"))
         threading.Thread(
             target=self._show_moved_clip_dialog, args=(entry, name),
             name="ccsync-moved-clip", daemon=True,
@@ -6640,7 +6741,7 @@ class CompanionApp:
                 f"project's clips at the new location for you. Nothing is deleted and "
                 f"the change is journalled, so it can be undone."
             )
-            if not popup.confirm_dialog("CCSYNC.EXE: this clip moved on the server",
+            if not popup.confirm_dialog(site_mod.notify_title("this clip moved on the server"),
                                         body, ok_label="RELINK IT"):
                 return
             matched, text = self._relink_moved_result(
@@ -6650,7 +6751,7 @@ class CompanionApp:
                 self.file_moves.clear_relink_pending(entry["id"])
             self._notify_tray(
                 text or "Nothing in this project pointed at the old location.",
-                "ccsync-companion: relink")
+                site_mod.notify_title("relink"))
         except Exception:
             log.exception("could not offer the moved-clip relink")
         finally:
@@ -6736,7 +6837,7 @@ class CompanionApp:
                 self._start_lanes()
                 self._notify_tray(
                     "Your administrator started syncing again.",
-                    "ccsync-companion: syncing resumed",
+                    site_mod.notify_title("syncing resumed"),
                 )
         except Exception:
             log.exception("could not apply the fleet halt flag")
@@ -7293,7 +7394,7 @@ class CompanionApp:
             self._notify_tray(
                 "Another CCSync window is open, so the diagnostics went to the log "
                 "and to your admin's dashboard instead of the clipboard.",
-                "ccsync-companion")
+                site_mod.notify_title())
             return False
         try:
             import tkinter as tk
@@ -7323,7 +7424,7 @@ class CompanionApp:
             self._upload_diagnostics_async("button")
             self._notify_tray(
                 "Diagnostics copied, and sent to your admin's dashboard.",
-                "ccsync-companion")
+                site_mod.notify_title())
             return True
         except Exception:
             log.exception("could not copy diagnostics to the clipboard")
@@ -7331,7 +7432,7 @@ class CompanionApp:
             self._upload_diagnostics_async("button")
             self._notify_tray(
                 "Couldn't reach the clipboard. The diagnostics were written to the log "
-                "and sent to your admin's dashboard.", "ccsync-companion")
+                "and sent to your admin's dashboard.", site_mod.notify_title())
             return False
         finally:
             self._popup_active_lock.release()
@@ -7432,7 +7533,7 @@ class CompanionApp:
             )
             self._notify_tray(
                 "You're not signed in, so nothing will sync. Right-click the tray icon "
-                "→ Sign in…", "ccsync-companion")
+                "→ Sign in…", site_mod.notify_title())
             return
         if self._managed and self.sequencer is not None:
             try:
@@ -7716,6 +7817,57 @@ class CompanionApp:
         except Exception:
             log.exception("failed to start the b-roll Send-to-Resolve server")
             self._broll_server = None
+        self._note_loopback_state()
+
+    def _note_loopback_state(self) -> None:
+        """Record whether 8899 is held, for the report and the tray
+        (CMEDIA-3, 2026-09-04). Never raises: this is the diagnostic, and a
+        diagnostic that can fail a start step is worse than the bug."""
+        try:
+            enabled = broll_server_mod.is_enabled(self.config)
+            bound = self._broll_server is not None
+            state = {
+                "enabled": bool(enabled),
+                "bound": bool(bound),
+                "port": int(broll_server_mod.configured_port(self.config)),
+                # "" when it is bound, and "" when the feature is simply
+                # switched off: an error is a FAULT, and a choice is not one.
+                "error": "" if bound or not enabled else (
+                    broll_server_mod.last_bind_error() or "the port could not be taken"),
+            }
+            if bound or not enabled:
+                state["since"] = ""
+            else:
+                state["since"] = (self._loopback_state.get("since")
+                                  or datetime.now(timezone.utc).isoformat())
+            self._loopback_state = state
+        except Exception:
+            log.exception("could not record the loopback state")
+
+    def loopback_report(self) -> dict[str, Any]:
+        """`sync_guard.loopback` = {enabled, bound, port, error, since}.
+
+        ALWAYS present, including the healthy shape: an absent section could
+        only mean "a companion too old to send one", and the whole point of
+        CMEDIA-3 is that "no listener" stopped being invisible."""
+        return dict(self._loopback_state or {})
+
+    def retry_loopback_bind(self) -> bool:
+        """Try the port again. True when it is held afterwards.
+
+        CMEDIA-3: the port was tried ONCE, at start, so quitting the program
+        that held it (the retired standalone BRoll Companion is the usual
+        one) did nothing until the editor restarted the tray -- and nothing
+        told them to. Cheap: one bind attempt a minute on a machine that has
+        no listener, and not called at all once it does."""
+        if self._broll_server is not None:
+            return True
+        if not broll_server_mod.is_enabled(self.config):
+            return False
+        self._start_broll_server()
+        if self._broll_server is not None:
+            log.info("broll: the loopback port is ours now (it was taken at start)")
+        return self._broll_server is not None
 
     def _ytdl_deps(self) -> Any:
         """What the /ytdl download executor is allowed to know about this
@@ -8088,21 +8240,21 @@ class CompanionApp:
         self.music_ingestor.request_run()
         self._notify_tray(
             "Analysing the music batch now. It keeps going while you work.",
-            "ccsync-companion: music")
+            site_mod.notify_title("music"))
 
     def pause_music_ingest(self) -> None:
         if self.music_ingestor is None:
             return
         self.music_ingestor.pause()
         self._notify_tray("Music indexing paused. Nothing already indexed is lost.",
-                          "ccsync-companion: music")
+                          site_mod.notify_title("music"))
 
     def resume_music_ingest(self) -> None:
         if self.music_ingestor is None:
             return
         self.music_ingestor.resume()
         self._notify_tray("Music indexing will carry on from where it stopped.",
-                          "ccsync-companion: music")
+                          site_mod.notify_title("music"))
 
     def cancel_music_ingest(self) -> None:
         """Tray action, CONFIRMED: the tracks already in the library stay, the
@@ -8128,7 +8280,7 @@ class CompanionApp:
         if not confirmed:
             return
         self.music_ingestor.cancel("cancelled from the tray")
-        self._notify_tray("Music indexing stopped.", "ccsync-companion: music")
+        self._notify_tray("Music indexing stopped.", site_mod.notify_title("music"))
 
     def index_broll_now(self) -> None:
         """Tray action: "don't wait until I'm away" for the current batch."""
@@ -8138,7 +8290,7 @@ class CompanionApp:
         self.broll_ingestor.request_run()
         self._notify_tray(
             "Indexing the b-roll batch now. It keeps going while you work.",
-            "ccsync-companion: b-roll")
+            site_mod.notify_title("b-roll"))
         # The window follows from the tick that starts crunching (the
         # `show_window` seam), not from here: one place decides, so a batch
         # that is still gated on something else does not get a window with
@@ -8149,14 +8301,14 @@ class CompanionApp:
             return
         self.broll_ingestor.pause()
         self._notify_tray("B-roll indexing paused. Nothing already indexed is lost.",
-                          "ccsync-companion: b-roll")
+                          site_mod.notify_title("b-roll"))
 
     def resume_broll_ingest(self) -> None:
         if self.broll_ingestor is None:
             return
         self.broll_ingestor.resume()
         self._notify_tray("B-roll indexing will carry on from where it stopped.",
-                          "ccsync-companion: b-roll")
+                          site_mod.notify_title("b-roll"))
 
     def cancel_broll_ingest(self) -> None:
         """Tray action, CONFIRMED: a cancel throws away an evening of GPU time
@@ -8182,7 +8334,7 @@ class CompanionApp:
         if not confirmed:
             return
         self.broll_ingestor.cancel("cancelled from the tray")
-        self._notify_tray("B-roll indexing stopped.", "ccsync-companion: b-roll")
+        self._notify_tray("B-roll indexing stopped.", site_mod.notify_title("b-roll"))
 
     def generate_proxies_now(self) -> None:
         """Tray action: scan now and encode without waiting for idle."""
@@ -8197,7 +8349,7 @@ class CompanionApp:
         self.show_proxy_progress()
         self._notify_tray(
             "Making the missing proxies now. It stops on its own when they're done.",
-            "ccsync-companion",
+            site_mod.notify_title(),
         )
 
     def stop_proxy_generation(self) -> None:
@@ -8205,7 +8357,7 @@ class CompanionApp:
         if self.proxy_generator is None:
             return
         self.proxy_generator.cancel_run()
-        self._notify_tray("Stopped making proxies.", "ccsync-companion")
+        self._notify_tray("Stopped making proxies.", site_mod.notify_title())
 
     def proxy_history_report(self) -> str:
         """Render the ledger as text and return the file's path ("" if none).
@@ -8268,7 +8420,7 @@ class CompanionApp:
             log.info("share LUTs: another CCSync window is open -- not opening a second")
             self._notify_tray(
                 "Another CCSync window is open. Close it and try sharing again.",
-                "ccsync-companion")
+                site_mod.notify_title())
             return
         try:
             confirmed = popup.confirm_dialog(
@@ -8425,8 +8577,8 @@ class CompanionApp:
         if leftovers:
             self._notify_tray(
                 f"Found {len(leftovers)} half-copied file(s) from an interrupted copy. "
-                "Nothing was deleted. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.",
-                "ccsync-companion")
+                f"Nothing was deleted. {ui_copy.DIAGNOSTICS}.",
+                site_mod.notify_title())
         # ...and the OTHER half of an interrupted FIX ALL: the 0-byte final
         # name it reserved before starting the copy. Unlike the partial above
         # that one is deleted -- it is empty, so it is provably not the
@@ -8557,7 +8709,7 @@ class CompanionApp:
                     # a lie the editor cannot act on -- signing in again
                     # produces a token the same clock rejects again. Name the
                     # clock instead when we have measured it.
-                    self._notify_tray(self._identity_expired_text(), "ccsync-companion")
+                    self._notify_tray(self._identity_expired_text(), site_mod.notify_title())
                 else:
                     self.on_signed_in()
             except Exception:
@@ -8929,7 +9081,7 @@ class CompanionApp:
             if errors:
                 self._notify_tray(
                     "NOT SYNCING: CCSync isn't fully set up on this machine. "
-                    "Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.", "ccsync-companion")
+                    f"{ui_copy.DIAGNOSTICS}.", site_mod.notify_title())
             else:
                 # The licence gate (_start_lanes) is silent apart from the log
                 # and the lane detail, and an editor whose sync simply never
@@ -8938,7 +9090,7 @@ class CompanionApp:
                 # once tells them nothing (2026-08-17, item 3).
                 eula_problem = self.eula_problem()
                 if eula_problem:
-                    self._notify_tray(f"NOT SYNCING: {eula_problem}", "ccsync-companion")
+                    self._notify_tray(f"NOT SYNCING: {eula_problem}", site_mod.notify_title())
                     # ...and ASK, rather than leaving a toast the editor has to
                     # decode into an action (2026-08-18). A toast said the same
                     # thing on the machines that upgraded to 0.8.0 and every one
@@ -8966,7 +9118,7 @@ class CompanionApp:
                 revert_timer = threading.Timer(3.0, lambda: self._notify_tray(
                     f"The last update kept crashing, so CCSync went back to "
                     f"v{config_mod.VERSION}.",
-                    "ccsync-companion",
+                    site_mod.notify_title(),
                 ))
                 revert_timer.daemon = True
                 revert_timer.start()
@@ -8978,7 +9130,7 @@ class CompanionApp:
                 # Windows drops notify() calls for icons not yet registered.
                 timer = threading.Timer(3.0, lambda: self._notify_tray(
                     f"Update complete. Now running v{config_mod.VERSION}.",
-                    "ccsync-companion",
+                    site_mod.notify_title(),
                 ))
                 timer.daemon = True
                 timer.start()

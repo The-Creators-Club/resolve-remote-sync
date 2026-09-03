@@ -68,6 +68,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from . import config as config_mod
+from . import site as site_mod
 from . import ffmpeg_tools, proxy_history, proxy_relink, proxy_scan
 
 # "ccsync.proxy_gen", NOT __name__ -- setup_logging() only attaches handlers
@@ -1500,7 +1501,7 @@ class ProxyGenerator:
         rel, gap = self._biggest_gap_project()
         text = self._notify_text(rel, totals, int(gap.get("missing", 0)))
         try:
-            self._notify(text, "ccsync-companion")
+            self._notify(text, site_mod.notify_title())
         except Exception:
             log.exception("proxy gen: could not show the missing-proxy notification")
         self._notified_episode = True
@@ -1910,7 +1911,7 @@ class ProxyGenerator:
                 self._notify(
                     f"CCSync stopped making video proxies: {why}. Free some space and "
                     "they will resume on their own.",
-                    "ccsync-companion: low disk space",
+                    site_mod.notify_title("low disk space"),
                 )
             except Exception:
                 log.debug("proxy gen: could not show the low-space notification",

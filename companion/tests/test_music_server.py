@@ -936,8 +936,14 @@ def test_the_broll_routes_still_answer_on_the_same_listener(live_server, tmp_pat
     status, _headers, body = client.get("/status")
     assert status == 200
     data = json.loads(body)
-    assert set(data.keys()) == {"ok", "resolve_connected", "mounts", "version"}
+    # The b-roll status contract, not an exact dict: this test is about the
+    # two route groups sharing one listener, and pinning the whole body made
+    # it fail for a field added to the OTHER group's neighbour (CMEDIA-3 added
+    # `loopback` on 2026-09-04). test_broll_server.py owns the exact shape.
+    assert {"ok", "resolve_connected", "mounts", "version"} <= set(data.keys())
     assert "music" not in data["mounts"]
+    assert data["loopback"]["bound"] is True
+    assert data["loopback"]["port"] == srv.server_address[1]
 
     status, _headers, body = client.post_json(
         "/insert",

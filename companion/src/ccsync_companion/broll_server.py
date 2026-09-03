@@ -619,7 +619,8 @@ def _discard(path: Path) -> None:
         log.warning("broll ingest: could not remove %s (%s)", path, exc)
 
 
-def build_status_response(mounts: dict, caller: Optional[Callable[..., dict]] = None) -> dict:
+def build_status_response(mounts: dict, caller: Optional[Callable[..., dict]] = None,
+                          port: int = 0) -> dict:
     """GET /status body, per SPEC.md: {ok, resolve_connected, mounts, version}.
 
     `version` is this companion's version now that the standalone one is
@@ -646,6 +647,11 @@ def build_status_response(mounts: dict, caller: Optional[Callable[..., dict]] = 
         "resolve_connected": bool((probe or {}).get("resolve_connected")),
         "mounts": mounts,
         "version": ccsync_config.VERSION,
+        # CMEDIA-3 (2026-09-04): an answer to "is the loopback THIS
+        # companion's?". A reply proves something is listening; it does not
+        # say what. The web UI's failure sentence blamed a tray app that was
+        # running, and a page that can read this can tell the two apart.
+        "loopback": {"bound": True, "port": port or PORT},
     }
 
 
@@ -1835,7 +1841,8 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
             return
         if path == "/status":
             mounts = self.server.companion_config.get("mounts", {})
-            self._send_json(200, build_status_response(mounts))
+            self._send_json(200, build_status_response(
+                mounts, port=int(self.server.server_address[1])))
         elif path == "/music/status":
             status, result = music_server.build_status_response()
             self._send_json(status, result)
@@ -2103,6 +2110,20 @@ def configured_port(ccsync_cfg: dict[str, Any]) -> int:
     return port
 
 
+# CMEDIA-3 (usability sweep 2026-09-04): why the last bind failed, for the
+# report and the tray. A module global rather than a return value because
+# start() answers None for BOTH "switched off" and "the port is taken", and
+# the two need different words in front of an editor -- one is a choice and
+# the other is a fault with a named remedy.
+_LAST_BIND_ERROR = ""
+
+
+def last_bind_error() -> str:
+    """The OSError text from the most recent failed bind, or "" once one has
+    succeeded. Never raises."""
+    return _LAST_BIND_ERROR
+
+
 def start(ccsync_cfg: dict[str, Any],
           ytdl_deps: Optional[Any] = None,
           ingest_deps: Optional[Any] = None,
@@ -2115,6 +2136,7 @@ def start(ccsync_cfg: dict[str, Any],
     endpoint for one button in a web page, and the app it lives in is the
     one that moves the footage.
     """
+    global _LAST_BIND_ERROR
     if not is_enabled(ccsync_cfg):
         log.info("broll: Send-to-Resolve server disabled by config")
         return None
@@ -2136,6 +2158,7 @@ def start(ccsync_cfg: dict[str, Any],
                              ytdl_deps=ytdl_deps, ingest_deps=ingest_deps,
                              music_ingest_deps=music_ingest_deps)
     except OSError as exc:
+        _LAST_BIND_ERROR = f"{type(exc).__name__}: {exc}"
         log.warning(
             "broll: could not listen on %s:%d (%s) -- \"Send to Resolve\" in the "
             "b-roll web UI will not work on this machine. The usual cause is the "
@@ -2163,6 +2186,7 @@ def start(ccsync_cfg: dict[str, Any],
             pass
         return None
 
+    _LAST_BIND_ERROR = ""
     log.info(
         "broll: Send-to-Resolve listening on http://%s:%d (mounts: %s; "
         "/music/* mounts: %s; /ytdl/* mounts: %s; browser origins allowed: %s)",

@@ -680,7 +680,12 @@ class Sequencer:
         if state == STATE_STARTUP:
             return "starting up"
         if state == STATE_NO_SELECTION:
-            return f"no selection ({no_selection_reason})" if no_selection_reason else "no selection"
+            # SYNC-116 (sweep 2026-09-04): this is the tray's most-read line,
+            # and "no selection (zero projects selected)" is a developer
+            # describing a data structure. A new editor whose admin has not
+            # ticked anything yet reasonably read it as "the software is
+            # broken". _describe_no_selection writes the whole sentence now.
+            return no_selection_reason or "Nothing to sync yet"
         if state == STATE_RUNNING:
             item = slug_to_item.get(current_slug or "", {})
             label = item.get("label") or item.get("rel_path") or current_slug or "?"
@@ -691,6 +696,15 @@ class Sequencer:
         if state == STATE_PAUSED:
             return "paused"
         return "stopped"
+
+    def label_for_slug(self, slug: str) -> str:
+        """The name this project goes by on screen, for a slug (SYNC-113).
+
+        Falls back to the rel path and then to the slug itself: a sentence
+        that names SOMETHING beats one that names nothing, and a slug the
+        sequencer has never seen is exactly when that happens."""
+        item = self._slug_to_item.get(str(slug)) or {}
+        return str(item.get("label") or item.get("rel_path") or slug)
 
     def known_rels(self) -> list[str]:
         """Selected-project rel paths (any depth), PLUS borrowed-folder rels
@@ -1045,11 +1059,17 @@ class Sequencer:
 
     @staticmethod
     def _describe_no_selection(selection: Optional[list[dict]], source: str) -> str:
+        """The whole sentence the tray shows, not a parenthetical (SYNC-116).
+
+        Three states an editor can tell apart: nobody has ticked anything for
+        this computer yet; the dashboard cannot be reached but a plan is
+        cached; and the dashboard cannot be reached and there is no plan
+        here at all."""
         if selection is None:
             if source == "none":
-                return "dashboard unreachable, no cache"
-            return "dashboard unreachable"
-        return "zero projects selected"
+                return "Waiting for the server: this computer has no plan saved yet"
+            return "Waiting for the server: using the plan saved on this computer"
+        return "Nothing to sync yet: no projects are ticked for this computer"
 
     # -- selection access -----------------------------------------------------
     def _selection_get(self) -> tuple[Any, str]:

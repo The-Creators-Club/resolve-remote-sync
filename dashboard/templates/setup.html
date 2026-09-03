@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}CC SYNC: SETUP{% endblock %}
+{% block title %}{{ brand_org | upper }}: SETUP{% endblock %}
 {% block layout %}
   <main class="main" id="setup-main" style="max-width:56rem">
     {# Only for someone who is signed in: this page is also the FIRST-RUN
@@ -8,7 +8,7 @@
        three links that bounce them to /login. #}
     {% if session_user %}{% include "partials/settings_nav.html" %}{% endif %}
     <div class="side-head">[ SETUP ]
-      <span class="muted">First-run wizard -- every step here can be re-run later from Settings.</span>
+      <span class="muted">First-run wizard: every step here can be re-run later from Settings.</span>
     </div>
 
     <div id="setup-error" class="banner" style="display:none"></div>
@@ -39,7 +39,7 @@
       <div class="side-head">[ 3. YOUR STUDIO ]</div>
       <form id="setup-studio-form">
         <label>ORG NAME<br><input type="text" name="org_name" placeholder="Your Studio"></label>
-        <label>SHORT NAME<br><input type="text" name="org_short" placeholder="optional -- falls back to org name"></label>
+        <label>SHORT NAME<br><input type="text" name="org_short" placeholder="optional: falls back to org name"></label>
         <label>TREE NAME<br><input type="text" name="tree_name" placeholder="e.g. Your_Studio"></label>
         <label>DRIVE LETTER<br><input type="text" name="canonical_prefix" placeholder="P:\"></label>
         <label>TEMPLATE FOLDERS (comma-separated)<br>

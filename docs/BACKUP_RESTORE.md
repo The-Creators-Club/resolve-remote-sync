@@ -49,7 +49,7 @@ what the NAS holds and where.
 |---|---|---|
 | The project tree (all footage, projects, renders) | `<pool_root>/<tree_name>/Projects` | NAS snapshots (below) + Syncthing `ignoreDelete` + staggered versioning |
 | The shared asset libraries (LUTs, stills, music, b-roll archive) | `<tree_name>/Assets/...` | NAS snapshots + Syncthing versioning (LUTs/Stills only) |
-| `dashboard.db` — projects, editors, ticks, transfer history | `<apps_root>/data/dashboard.db` (container: `/data`) | NAS snapshots of the **apps** dataset |
+| `dashboard.db` — projects, editors, ticks, transfer history | `<apps_root>/data/dashboard.db` (container: `/data`) | NAS snapshots of the **apps** dataset, plus a backup-API copy into `<apps_root>/data/backups/<ts>-<label>/` before every dashboard self-update (§3) |
 | `broll.db` — the b-roll search index | `<tree_name>/Assets/B-roll Archive/broll.db` | NAS snapshots + the `.prev-<ts>` a publish leaves behind |
 | `music.db` — the music index (incl. editors' queued ingests) | `<apps_root>/music-data/music.db` | NAS snapshots + `.prev-<ts>` / `.old.<ts>` |
 | `client_shares.db` — client folders and their links (`docs/CLIENT_FOLDERS.md`) | `<tree_name>/Assets/B-roll Archive/client_shares.db`, beside `broll.db` | NAS snapshots. **Deliberately not** in `broll.db`, so a publish cannot replace it; restore like any file (§4a), never one of the `-wal`/`-shm` pair without the other |
@@ -80,6 +80,15 @@ one really is a dataset.**
 >
 > `python setup_snapshots.py --list --apply` is the check: it must name a dataset with
 > a slash in it for **both** targets.
+>
+> Since 2026-09-03 (CR-140) you do not have to remember to run it: the deploy
+> puts both dataset names into the container (`DASH_TREE_DATASET`,
+> `DASH_UPDATE_SNAPSHOT_DATASET`, §3) and the protection panel checks each one
+> against the NAS's snapshot tasks on every collector cycle. The studio's own
+> box is the case above - tree `tank/TheCreatorsPool` has hourly, daily and
+> weekly tasks; apps is flat `tank` with **no task on it** - and the panel now
+> says so instead of shrugging. On DSM both read CANNOT VERIFY permanently:
+> Synology's snapshot schedules have no readable API.
 
 ### Cadence and retention
 
@@ -208,6 +217,47 @@ $env:CCSYNC_REQUIRE_SNAPSHOT = "1"
 
 With it, a failed snapshot is a refusal (exit 2) with nothing touched.
 Recommended for a customer site once §2 is done and verified.
+
+### The dashboard updating ITSELF is the fourth privileged operation
+
+An OTA update applied from Settings -> PACKAGES runs inside the container, so
+`server/common.snapshot_before` is not available to it. It takes the same
+precaution twice over (`dashboard_update.py`):
+
+1. **Database copies first.** `backup_databases()` copies every database the
+   update could migrate - `dashboard.db`, and `broll.db` / `music.db` /
+   `ytdl.db` where the deployment has them - into
+   `/data/backups/<ts>-<label>/`, e.g. `20260828T101500Z-before-0.7.19`. Each
+   copy goes through SQLite's **backup API**, never `shutil.copy`: all of them
+   are open in WAL mode by a process still serving requests, and copying the
+   `.db` alone silently loses exactly the rows an admin restoring would want.
+   Per-database best effort - an index that could not be copied does not stop
+   the update, and the result records which ones were skipped and why.
+2. **Then a NAS snapshot**, `dashboard_update.snapshot_before()`, on the same
+   best-effort terms as `server/common.snapshot_before`. A container cannot
+   work out its own dataset (it sees `/data`, not the pool path), so this one
+   is told: `DASH_UPDATE_SNAPSHOT_DATASET` plus `DASH_NAS_API_KEY`. Unset, the
+   step reports **skipped, and why**, rather than pretending - and the
+   `/data/backups/<ts>-<label>/` copies are then the whole recovery path.
+
+Putting a backup back is deliberately NOT part of a code rollback: rolling the
+code back is cheap and reversible, restoring a database throws away everything
+that has happened since, so it is a separate explicit flag on the rollback
+route (Settings -> PACKAGES lists the backups by name and date).
+`prune_backups` keeps the newest 3 per label, then trims the directory to 8
+entries or 8 GB, and never removes the newest one of all.
+
+**Both dataset names are set by the deploy since 2026-09-03** (CR-140):
+`[tree] dataset` and `[apps] dataset` in the site manifest, or, absent, the
+installer derives them on TrueNAS from `df --output=source` over the mount
+point, which returns blank rather than guessing a name that would send a
+snapshot to the wrong place. They reach the container as `DASH_TREE_DATASET`
+and `DASH_UPDATE_SNAPSHOT_DATASET`, and the protection panel checks each one
+against the NAS's snapshot tasks: blank reads **CANNOT VERIFY**, never
+"missing". The environment is baked at container create time, so changing
+either needs a `--recreate` (an image-mode deploy implies one). Before CR-140
+the finding told the operator to set variables the installer had no way to
+set, i.e. to hand-edit a compose file the next deploy overwrote.
 
 ---
 
@@ -350,15 +400,28 @@ Three consequences that bite:
 1. **A whole-tree rollback under a live fleet fights the fleet.** Editors'
    copies are newer than the restored ones, so they push the pre-restore state
    back up. Pause the lanes first (§4b step 1).
-2. **`.stversions/` is inside the folder and is snapshotted with it** — it also
-   grows forever and nothing prunes it. Include it when sizing a pool.
+2. **`.stversions/` is inside the folder and is snapshotted with it.**
+   Staggered versioning does thin it out and does drop versions past `maxAge`,
+   but `maxAge` on the NAS side is a **year** (`provision.py`,
+   `setup_syncthing_folder.py`: `31536000`), so for pool-sizing purposes treat
+   it as a year of every overwrite. Include it when sizing a pool.
 3. **A restored file gets a new mtime.** Syncthing will re-send it to every
    editor who has that project ticked; a large restore is a real WAN transfer,
    not a metadata update.
 
 `.ccsync-trash` on editor machines (lane B's `--backup-dir`) is **not** part of
-this story and is never pruned — that is a companion-side item, tracked
-separately.
+this story: it is on the editor's own disk, it is never snapshotted, and it is
+**pruned**. Since the CR-48 era `lane_guard.prune_trash` runs at the end of a
+healthy lane B pass, at most every 6 h, and drops any batch older than
+`trash_max_age_days` (**14**, `lane_guard.DEFAULT_TRASH_MAX_AGE_DAYS`), then
+the oldest batches until what remains is under `trash_max_bytes` (**50 GB**) -
+never the newest batch, and nothing at all while the breaker is tripped.
+`docs/SYNC_SAFETY.md` section 2 is the full description. So it is a **14-day
+undo window on one machine**, not a backup: if the answer to "can I get that
+file back" is more than a fortnight old, the answer is a NAS snapshot (§4a),
+not that folder. (This paragraph said "never pruned" until 2026-09-04, SYS-9
+of the 09-03 sweep; it was wrong in the dangerous direction - an admin was
+told to look for a copy that had been swept a fortnight earlier.)
 
 ---
 
@@ -520,6 +583,16 @@ By hand, on a deployment the dashboard has no snapshot mount on:
 - **Backing up editor machines.** `P:` is a replica. Anything an editor keeps
   only on their own disk (Resolve local databases, scratch renders) is theirs
   to back up.
-- **Automatic pruning of `.prev-<ts>`, `app.old.<ts>`, `.stversions/` or
-  `.ccsync-trash`.** All four grow forever, on purpose in three cases and as an
-  open defect in the fourth (`.ccsync-trash`, companion-side).
+- **Automatic pruning of `.prev-<ts>`.** One per `publish_db.py` run, kept
+  forever on purpose: an index publish is the operation with the longest gap
+  between "done" and "somebody notices it was wrong", and `--rollback` reads
+  the newest one. Sweep them by hand when the archive dataset gets tight.
+  (Corrected 2026-09-04, SYS-9: this bullet used to name four things that
+  "grow forever" and three of them do not. `app.old.<ts>` is pruned by the
+  NEXT successful deploy, most recent kept and never one a container still
+  has bind-mounted (OPS-2); `.stversions/` is staggered with a one-year
+  `maxAge`; `.ccsync-trash` is pruned at 14 days / 50 GB, section 5.)
+- **Automatic pruning of the dashboard's own `/data/backups/`** beyond what
+  `dashboard_update.prune_backups` already does: newest 3 per label, then the
+  whole directory trimmed to 8 entries or 8 GB, newest first, and never the
+  newest of all.

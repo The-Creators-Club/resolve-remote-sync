@@ -70,6 +70,61 @@ const MI_TOO_OLD =
   'icon (check for updates), then reload this page. Until then, dropped ' +
   'tracks are uploaded here and indexed on the base rig.';
 
+/* MUSIC-12 (usability sweep, 2026-09-03): the cards used to render the server
+   enum straight, so a batch header read `done_with_errors on DESKTOP-7K2` and
+   a track read `queued_for_base_rig - drums.wav`. The state machine's names
+   are exact and stay exact in the database, on the wire and in the CSS class;
+   these are the sentences an editor reads instead. The raw value goes in
+   `title=` on every one of them, because support asks for it by name.
+
+   `queued_for_base_rig` is the one that most needs a sentence: it does NOT
+   queue anything (musicweb/ingest_batches.py:86-100, KNOWN_BUGS MUSIC-ING-2).
+   The audio is still on the editor's own machine and dropping it again is the
+   only thing that moves it, so the words say that and nothing else. */
+const MI_BATCH_WORDS = {
+  queued: 'waiting for your computer',
+  claimed: 'starting',
+  running: 'working',
+  done: 'all done',
+  done_with_errors: 'finished, some tracks failed',
+  cancelled: 'cancelled',
+  failed: 'failed',
+};
+
+const MI_ITEM_WORDS = {
+  pending: 'waiting',
+  transcoding: 'converting',
+  embedding: 'analysing',
+  indexed: 'analysed',
+  uploading: 'uploading',
+  live: 'in the library',
+  duplicate: 'already in the library',
+  failed: 'failed',
+  cancelled: 'cancelled',
+  skipped: 'skipped',
+  queued_for_base_rig: "couldn't be analysed here - drop it again to upload it instead",
+};
+
+/* An unknown state is shown as it came, never blanked: a dashboard deployed
+   ahead of this page must not turn a real state into an empty card. */
+const miWords = (map, state) => map[state] || String(state || '');
+
+/* MUSIC-12: batch cards carried no time at all, so yesterday's batch and this
+   morning's looked identical. Coarse on purpose - the exact stamp is in the
+   tooltip and nobody schedules anything by this line. */
+function miAgo(iso) {
+  const t = Date.parse(iso || '');
+  if (!Number.isFinite(t)) return '';
+  const secs = Math.max(0, (Date.now() - t) / 1000);
+  if (secs < 90) return 'just now';
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins} min ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours} h ago`;
+  const days = Math.round(hours / 24);
+  return days === 1 ? 'yesterday' : `${days} days ago`;
+}
+
 const mi = {
   open: false,
   items: [],          // the drop, in order
@@ -853,6 +908,17 @@ async function miRun() {
 /* Live view + controls                                                    */
 /* ---------------------------------------------------------------------- */
 
+/* One track's line, in both places tracks are listed (the live panel and an
+   expanded batch card). MUSIC-12: the words, not the enum; the enum stays in
+   the class name, which the CSS colours by, and in `title=`. */
+function miItemLine(item) {
+  const node = el('div', `mi-item-state state-${item.state}`,
+    `${miWords(MI_ITEM_WORDS, item.state)} · ${item.orig_name}` +
+    (item.error ? ` - ${item.error}` : ''));
+  node.title = item.state;
+  return node;
+}
+
 function miRenderLive() {
   const box = $('#mi-live-body');
   const live = $('#mi-live');
@@ -865,9 +931,12 @@ function miRenderLive() {
 
   const batch = mi.batch;
   const lb = (mi.loopback && mi.loopback.batch) || null;
-  box.appendChild(el('div', 'mi-live-head', batch
-    ? `${batch.state}${batch.machine ? ` on ${batch.machine}` : ''}`
-    : 'waiting for the server…'));
+  // MUSIC-12: the sentence, with the enum kept in the tooltip for support.
+  const head = el('div', 'mi-live-head', batch
+    ? `${miWords(MI_BATCH_WORDS, batch.state)}${batch.machine ? ` on ${batch.machine}` : ''}`
+    : 'waiting for the server…');
+  if (batch) head.title = batch.state;
+  box.appendChild(head);
 
   if (batch) {
     box.appendChild(el('div', 'muted',
@@ -895,8 +964,7 @@ function miRenderLive() {
   if (mi.batchItems.length) {
     const list = el('div', 'mi-item-states');
     for (const item of mi.batchItems.slice(0, 200)) {
-      list.appendChild(el('div', `mi-item-state state-${item.state}`,
-        `${item.state} · ${item.orig_name}` + (item.error ? ` - ${item.error}` : '')));
+      list.appendChild(miItemLine(item));
     }
     box.appendChild(list);
   }
@@ -1033,9 +1101,19 @@ function miRenderBatches() {
     const card = el('div', `mi-batch state-${batch.state}`);
 
     const head = el('div', 'mi-batch-head');
-    head.appendChild(el('span', 'mi-batch-state', batch.state));
+    // MUSIC-12: the sentence, the enum in the tooltip, and a time - without
+    // one, yesterday's batch and this morning's looked identical.
+    const state = el('span', 'mi-batch-state', miWords(MI_BATCH_WORDS, batch.state));
+    state.title = batch.state;
+    head.appendChild(state);
     if (mi.scope === 'all' && batch.editor) {
       head.appendChild(el('span', 'muted', batch.editor));
+    }
+    const when = miAgo(batch.updated_at || batch.created_at);
+    if (when) {
+      const stamp = el('span', 'muted', when);
+      stamp.title = batch.created_at ? `started ${batch.created_at}` : '';
+      head.appendChild(stamp);
     }
     card.appendChild(head);
 
@@ -1045,7 +1123,9 @@ function miRenderBatches() {
     }
     card.appendChild(el('div', 'muted', who.join(' · ')));
     card.appendChild(el('div', 'muted',
-      `${batch.n_done}/${batch.n_items} done · ${batch.n_live} live · ` +
+      // MUSIC-12: `live` is the item enum; the panel above already says "in
+      // the library" for the same number and the two lines are read together.
+      `${batch.n_done}/${batch.n_items} done · ${batch.n_live} in the library · ` +
       `${batch.n_failed} failed · ${batch.n_duplicate} duplicate` +
       (batch.upload_paused ? ' · uploads paused' : '') +
       (batch.cancel_requested ? ' · cancelling' : '')));
@@ -1068,8 +1148,7 @@ function miRenderBatches() {
     if (mi.expanded === batch.uid) {
       const list = el('div', 'mi-item-states');
       for (const item of mi.expandedItems.slice(0, 200)) {
-        list.appendChild(el('div', `mi-item-state state-${item.state}`,
-          `${item.state} · ${item.orig_name}` + (item.error ? ` - ${item.error}` : '')));
+        list.appendChild(miItemLine(item));
       }
       card.appendChild(list);
     }

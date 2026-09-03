@@ -15,20 +15,12 @@
    this browser's own package, so the click is the download. /installer
    survives only as the chooser /download falls back to when the User-Agent
    names neither platform. #}
-{% set SETTINGS_NAV = [
-  ("site",        "SITE",        "/admin/settings",    true),
-  ("users",       "USERS",       "/admin/users",       true),
-  ("assignments", "ASSIGNMENTS", "/admin/assignments", true),
-  ("transfers",   "TRANSFERS",   "/transfers",         false),
-  ("setup",       "SETUP",       "/setup",             true),
-  ("packages",    "PACKAGES",    "/admin/packages",    true),
-  ("audit",       "TIMELINE",    "/admin/audit",       true),
-  ("alerts",      "ALERTS",      "/admin/alerts",      true),
-  ("jobs",        "JOBS",        "/admin/jobs",        true),
-  ("invariants",  "INVARIANTS",  "/admin/invariants",  true),
-  ("protection",  "PROTECTION",  "/admin/protection",  true),
-  ("recovery",    "RECOVERY",    "/admin/recovery",    true),
-] %}
+{# UX-8 (usability sweep 2026-09-03): the list itself moved to ui.SETTINGS_NAV
+   and reaches both this strip and partials/topbar.html as a Jinja global. It
+   lived here as a literal, with a second copy of the KEYS in the topbar that
+   decides whether the drawer marks [ SETTINGS ] as current; the six pages
+   added after 2026-08-18 went into this copy only, so the drawer marked
+   nothing at all on six of the twelve pages. One list, no drift. #}
 {# The strip is a .scroll-x row below --bp-phone (2026-08-30, MOBILE_PLAN.md
    M1 and 3.2): above the breakpoint it wraps as it always has, and below it
    becomes ONE row that scrolls sideways inside itself -- twelve entries

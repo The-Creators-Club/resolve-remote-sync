@@ -26,6 +26,10 @@ const PRECACHE = [
   '/static/mobile.css',
   '/static/htmx.min.js',
   '/static/pwa.js',
+  // DUI-2 (2026-09-04): the "this page has stopped updating" banner is the
+  // one script a phone on a bad connection needs most, so it is precached
+  // beside htmx rather than fetched at the moment the network is failing.
+  '/static/htmx_errors.js',
   '/static/icons/icon.svg',
   '/static/icons/icon-180.png',
   '/static/icons/icon-192.png',

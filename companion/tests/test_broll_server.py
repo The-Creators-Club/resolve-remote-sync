@@ -1196,6 +1196,10 @@ def test_build_status_response_shape(monkeypatch):
         "resolve_connected": True,
         "mounts": {"broll": "B:/"},
         "version": config_mod.VERSION,
+        # CMEDIA-3 (2026-09-04): a reply proves something is listening, not
+        # what. The port comes from the socket at the route, and defaults
+        # here to the one the whole product hardcodes in its URLs.
+        "loopback": {"bound": True, "port": broll_server.PORT},
     }
 
 
@@ -1221,9 +1225,14 @@ def test_status_over_http(live_server):
     status, _headers, body = client.get("/status")
     assert status == 200
     data = json.loads(body)
-    assert set(data.keys()) == {"ok", "resolve_connected", "mounts", "version"}
+    assert set(data.keys()) == {"ok", "resolve_connected", "mounts", "version",
+                                "loopback"}
     assert data["ok"] is True
     assert data["version"] == config_mod.VERSION
+    # CMEDIA-3: the port is the LIVE socket's, not the configured one -- the
+    # test server binds an ephemeral port and the answer has to say so.
+    assert data["loopback"]["bound"] is True
+    assert data["loopback"]["port"] == _srv.server_address[1]
 
 
 # ---------------------------------------------------------------------------

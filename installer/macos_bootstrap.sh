@@ -53,7 +53,7 @@
 #     Finish page without scraping the human-facing summary.
 set -u
 
-INSTALLER_VERSION="1.0.39"
+INSTALLER_VERSION="1.0.40"
 
 # ----------------------------------------------------------------------
 # PINNED DOWNLOADS (2026-08-17, docs/COMMERCIAL_READINESS.md item 13)
@@ -163,11 +163,30 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Which of the two required flags are missing, by name (OPS-25, usability +
+# resilience sweep 2026-09-04). A forgotten --editor-name used to print the
+# whole usage block with nothing pointing at the line that was wrong, on the
+# one path an editor is following from a message their admin sent them. Pure
+# text in, text out, so installer/tests/test_macos_site_values.sh can check it.
+missing_required_flags() {  # $1 = tailnet host, $2 = editor name
+    _missing=""
+    if [ -z "$1" ]; then _missing="--tailnet-host"; fi
+    if [ -z "$2" ]; then
+        if [ -n "$_missing" ]; then _missing="$_missing and --editor-name"
+        else _missing="--editor-name"; fi
+    fi
+    echo "$_missing"
+}
+
 # --resolve-mapping-only touches nothing that needs a NAS or an account, so it
 # must not demand the two arguments a full install needs -- it is the command
 # the error messages below tell editors to re-run after quitting Resolve.
 if [ "$RESOLVE_MAPPING_ONLY" != 1 ]; then
-    if [ -z "$TAILNET_HOST" ] || [ -z "$EDITOR_NAME" ]; then
+    MISSING_FLAGS="$(missing_required_flags "$TAILNET_HOST" "$EDITOR_NAME")"
+    if [ -n "$MISSING_FLAGS" ]; then
+        echo "Missing required argument: $MISSING_FLAGS"
+        echo "Your admin gives you both values (the NAS host and your username)."
+        echo ""
         usage
     fi
 fi
@@ -1395,6 +1414,14 @@ write_mapping_helper() {
     emit_mapping_helper > "$dest"
 }
 
+# What the editor is told when the wait above ran out (OPS-25, 2026-09-04).
+# Its own function so the wording is checked by
+# installer/tests/test_macos_site_values.sh: the install does NOT stop here,
+# and a message that did not say so read as a failed install.
+resolve_quit_timeout_warning() {
+    echo "gave up waiting for DaVinci Resolve after ${RESOLVE_PREFS_WAIT_SECONDS}s - carrying on WITHOUT setting Resolve's Mapped Mount. Everything else still installs. When you can quit Resolve, run: $0 --resolve-mapping-only"
+}
+
 resolve_mapping_manual_instructions() {
     echo "      Set it by hand instead (one-time):"
     echo "        DaVinci Resolve > Preferences (Cmd+,) > Media Storage,"
@@ -1475,7 +1502,16 @@ run_resolve_mapping() {
     # Ask for the quit BEFORE doing any work, so the editor is prompted once
     # for all the preference edits rather than hitting the "Resolve is
     # running" warning per step.
-    wait_for_resolve_quit || true
+    #
+    # OPS-25 (2026-09-04): the return used to be discarded with `|| true`, so
+    # "Please quit DaVinci Resolve. This will continue automatically" simply
+    # stopped being true at the deadline, in silence, and the editor found out
+    # minutes later from an unrelated-looking "Resolve is running" further
+    # down. Say it where it happens, and name the one command that finishes
+    # the job afterwards.
+    if ! wait_for_resolve_quit; then
+        warn "$(resolve_quit_timeout_warning)"
+    fi
     if [ ! -d "$CC_ROOT" ]; then
         warn "the local root $CC_ROOT does not exist (yet) -- the mapping will still be written, but Resolve cannot resolve $CANONICAL_PREFIX paths until it does."
     fi

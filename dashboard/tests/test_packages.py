@@ -408,7 +408,8 @@ def test_c4_unsigned_make_current_confirm_copy_is_pinned():
     text = (DASHBOARD_ROOT / "templates" / "partials" / "admin_packages.html").read_text(
         encoding="utf-8")
     assert ("This build has no release signature. Companions verify signatures, "
-            "so making it current stops EVERY machine in the fleet from updating, "
+            # UX-16 (usability sweep 2026-09-03): "computer".
+            "so making it current stops EVERY computer in the fleet from updating, "
             "silently. Republish it through tools\\ship.cmd instead. "
             "Make it current anyway?") in text
 

@@ -148,17 +148,18 @@ def test_every_stacked_cell_says_which_column_it_is(env):
     assert tds, "the machine table rendered no cells"
     bare = [td for td in tds if "data-label=" not in td]
     assert not bare, f"cells with no data-label: {bare}"
-    for label in ("STATUS", "EDITOR", "MACHINE", "LANES", "VERSION", "LAST REPORT"):
+    # UX-16 (2026-09-03): the column is COMPUTER now.
+    for label in ("STATUS", "EDITOR", "COMPUTER", "LANES", "VERSION", "LAST REPORT"):
         assert f'data-label="{label}"' in body
 
 
 def test_the_grids_buttons_are_thumb_sized(env):
-    """[ ASK THIS MACHINE WHY ] is a 12 px word between two chips. On a touch
+    """[ ASK THIS COMPUTER WHY ] is a 12 px word between two chips. On a touch
     screen it is a control, so it carries .tap."""
     client, _ = env
     body = page(client, "/")
     grid = body[body.index('class="fleet-grid-wrap"'):body.index("live-transfers-window")]
-    assert "[ ASK THIS MACHINE WHY ]" in grid
+    assert "[ ASK THIS COMPUTER WHY ]" in grid
     for btn in re.findall(r'<button class="btn[^"]*"', grid):
         assert "tap" in btn, btn
 

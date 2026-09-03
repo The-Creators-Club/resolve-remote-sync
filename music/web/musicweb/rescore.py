@@ -33,6 +33,7 @@ matrix. That is why one new track re-scores all of them, and why there is no
 import os
 import re
 import threading
+import time
 from datetime import datetime, timezone
 
 import numpy as np
@@ -161,6 +162,27 @@ def score_all(track_matrix, cats, axes):
 
 
 def write_scores(con, track_ids, tags, axvals):
+    """Replace every tag and axis row. ONE transaction, always.
+
+    MUSIC-1, 2026-09-04. This used to be a bare `DELETE FROM tags` / `DELETE
+    FROM axes`, thousands of tuples built in Python, an executemany and a
+    commit at the end -- and sqlite3 auto-begins on the first DML, so from the
+    deletes until that commit there is an OPEN write transaction in which the
+    library has no tags and no axes. A failure anywhere in between (SQLITE_FULL
+    on a container whose data root filled, a MemoryError building ~9,000
+    tuples) left that transaction open on the thread's CACHED connection
+    (`db.con()`), holding the writer lock -- and the next write on that same
+    threadpool thread, another `result` or an `/api/peaks` INSERT, committed
+    the wipe. Empty facets, permanently, with the only evidence a log line.
+
+    `with con:` is the whole fix: it commits on the way out and ROLLS BACK on
+    an exception, so the worst case is "the tags are the ones from before".
+    """
+    with con:
+        _write_scores_rows(con, track_ids, tags, axvals)
+
+
+def _write_scores_rows(con, track_ids, tags, axvals):
     con.execute('DELETE FROM tags')
     con.execute('DELETE FROM axes')
 
@@ -183,7 +205,8 @@ def write_scores(con, track_ids, tags, axvals):
             rows.append((tid, axis, float(d['raw'][i]), float(d['pct'][i])))
     con.executemany('INSERT OR REPLACE INTO axes(track_id,axis,raw,pct) '
                     'VALUES(?,?,?,?)', rows)
-    con.commit()
+    # No commit here: the caller's `with con:` owns the transaction, and this
+    # function exists only so that the delete and the reinsert cannot be split.
 
 
 # --------------------------------------------------------- source-bias axes
@@ -243,6 +266,64 @@ def compute_directions(mat, filenames, min_group=MIN_GROUP):
 
 # ------------------------------------------------------------- the whole job
 
+# `meta` key: set when a rescore failed or was deferred, cleared when one
+# lands. /api/stats returns it so the header can say the tags are behind
+# instead of the editor seeing an untagged track and concluding the drop
+# failed (MUSIC-1 / MUSIC-5, 2026-09-04).
+SCORES_STALE = 'scores_stale'
+
+# How rarely a fleet-ingest result may trigger a full library rescore
+# (MUSIC-5). Every result used to do one: at 397 tracks that is a ~2.5 MB
+# matrix read, a label-space scoring pass and ~8,700 row writes, so a 200-track
+# album drop cost ~1.7M row writes -- serialised through the single-worker
+# container's one SQLite writer, which is also serving /api/report for the
+# whole fleet. The VALUE of a rescore per track is real (a percentile is a rank
+# among the others); its FREQUENCY is not. Coalesced here and forced once at
+# `release`, so a finished batch is fully tagged either way.
+RESCORE_MIN_SECONDS = float(os.environ.get('MUSIC_RESCORE_MIN_SECONDS', '60'))
+
+_rescore_lock = threading.Lock()
+_last_rescore = None            # time.monotonic() of the last one, None = never
+
+
+def note_rescored():
+    global _last_rescore
+    with _rescore_lock:
+        _last_rescore = time.monotonic()
+
+
+def rescore_due(now=None):
+    """Has RESCORE_MIN_SECONDS passed since the last one?
+
+    True the first time in a process, always: a container that has just started
+    knows nothing about what the library's scores look like, and the very first
+    drop after a restart is exactly the one an editor is watching.
+    """
+    now = time.monotonic() if now is None else now
+    with _rescore_lock:
+        return _last_rescore is None or (now - _last_rescore) >= RESCORE_MIN_SECONDS
+
+
+def mark_scores_stale(con, when=None):
+    """Record that the tags are behind the tracks. Never raises.
+
+    Best-effort by design: it is called on the failure path, where the reason
+    the rescore failed (a full disk, a locked database) is just as likely to
+    stop this write. A marker that could turn one failure into two would be
+    worse than no marker.
+    """
+    try:
+        with con:
+            db.set_meta(con, SCORES_STALE, when or _now())
+    except Exception:                                           # noqa: BLE001
+        pass
+
+
+def scores_stale(con):
+    """The ISO time the tags fell behind, or None."""
+    return db.get_meta(con, SCORES_STALE)
+
+
 def rescore_library(con, encoder=None):
     """Recompute the source-bias axes, the tags and the axes. -> a summary.
 
@@ -250,44 +331,67 @@ def rescore_library(con, encoder=None):
     because a library scored two ways is a library whose facets disagree with
     its search. Seconds on 376 tracks: nothing here decodes audio, it all comes
     off the stored embeddings.
+
+    Any failure rolls back and leaves `scores_stale` behind (MUSIC-1,
+    2026-09-04): the connection is a POOLED one and must never be handed back
+    inside an open write transaction, and a rescore that did not happen has to
+    be visible to somebody other than the log.
     """
     ids, mat = db.load_matrix(con)
     if not ids:
         return {'tracks': 0, 'labels': 0, 'axes': 0, 'debias': 0}
 
-    # The source-bias axes depend on the library's composition, so they are
-    # refreshed whenever it changes -- adding one track to a small library can
-    # tip a group over MIN_GROUP.
-    names = [r['filename'] for r in con.execute(
-        'SELECT filename FROM tracks WHERE embedding IS NOT NULL ORDER BY id')]
-    dirs = compute_directions(mat, names)
-    db.save_debias(con, dirs)
+    try:
+        # The source-bias axes depend on the library's composition, so they are
+        # refreshed whenever it changes -- adding one track to a small library
+        # can tip a group over MIN_GROUP.
+        names = [r['filename'] for r in con.execute(
+            'SELECT filename FROM tracks WHERE embedding IS NOT NULL ORDER BY id')]
+        dirs = compute_directions(mat, names)
+        db.save_debias(con, dirs)
 
-    encoder = _encoder_or_shared(encoder)
-    cats, axes = label_space(encoder)
-    tags, axvals = score_all(mat, cats, axes)
-    write_scores(con, ids, tags, axvals)
-    db.set_meta(con, 'vocab_hash', vocab.vocab_hash())
-    db.set_meta(con, 'tagged_at', _now())
-    con.commit()
+        encoder = _encoder_or_shared(encoder)
+        cats, axes = label_space(encoder)
+        tags, axvals = score_all(mat, cats, axes)
+        write_scores(con, ids, tags, axvals)
+        with con:
+            db.set_meta(con, 'vocab_hash', vocab.vocab_hash())
+            db.set_meta(con, 'tagged_at', _now())
+            con.execute('DELETE FROM meta WHERE key=?', (SCORES_STALE,))
+    except BaseException:
+        # Nothing above may leave a half-applied score set on a shared
+        # connection. rollback() on a connection with no transaction open is a
+        # no-op, so this is safe wherever the failure happened.
+        con.rollback()
+        mark_scores_stale(con)
+        raise
+    note_rescored()
     return {'tracks': len(ids),
             'labels': sum(len(v) for v in vocab.CATEGORIES.values()),
             'axes': len(vocab.AXES), 'debias': int(dirs.shape[0])}
 
 
-def apply_for_track(con, track_id, encoder=None):
+def apply_for_track(con, track_id, encoder=None, force=False):
     """Score a newly ingested track -- by re-scoring the library around it.
 
-    The fleet `result` route's call. There is no cheaper honest version: a
-    track's `pct` is its rank among the others and its `score` is a softmax
-    over labels that were z-scored down the library's own column, so the new
-    row cannot be computed without touching every other row's numbers. The
-    write is ~22 rows per track (5 categories at TOP_K plus 4 axes) and the
-    whole thing is one pass of numpy over a (N, 512) matrix.
+    The fleet `result` route's call. There is no cheaper honest version of the
+    computation: a track's `pct` is its rank among the others and its `score`
+    is a softmax over labels z-scored down the library's own column, so the new
+    row cannot be computed without touching every other row's numbers.
+
+    There IS a cheaper frequency (MUSIC-5, 2026-09-04). Inside
+    RESCORE_MIN_SECONDS of the last one this returns `deferred` instead,
+    marking the library stale; `release` passes force=True, so a batch is
+    always fully tagged by the time it finishes, and the editor is told the
+    tags are catching up rather than shown a track with none.
 
     Returns the summary plus this track's own tags/axes, which the route hands
     back so the SPA can show what the drop was labelled without re-querying.
     """
+    if not force and not rescore_due():
+        mark_scores_stale(con)
+        return {'deferred': True, 'scores_stale': scores_stale(con),
+                'track_id': track_id, 'tags': [], 'axes_values': []}
     summary = rescore_library(con, encoder)
     summary['track_id'] = track_id
     summary['tags'] = [dict(r) for r in con.execute(

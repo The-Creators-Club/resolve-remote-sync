@@ -487,7 +487,9 @@ def test_no_selection_when_client_returns_none_none():
 
     assert lane_a.calls == []
     assert lane_b.calls == []
-    assert "dashboard unreachable" in detail
+    # SYNC-116 (sweep 2026-09-04): the editor-facing sentence, not
+    # "no selection (dashboard unreachable, no cache)".
+    assert detail == "Waiting for the server: this computer has no plan saved yet"
 
 
 # -- pause/resume/stop -----------------------------------------------------

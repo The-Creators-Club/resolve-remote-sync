@@ -30,6 +30,7 @@ files and pass stale ones. It checks SHAPE, not liveness.
 
 from __future__ import annotations
 
+import calendar
 import json
 import logging
 import os
@@ -220,6 +221,15 @@ STATUS_STALE = "stale"          # yt-dlp refused the session on a real download
 STATUS_EXPIRED = "expired"      # the login cookies in the file are past their expiry
 STATUS_NONE = "none"            # no cookies file at all
 
+# CYT-5 (usability sweep 2026-09-04): a `stale` record with nothing since is
+# not evidence of anything after a while. Since WP3 made the jar a FALLBACK,
+# cookied downloads are rare, so the last word on the session can be months
+# old -- and the CR-80 variant is worse, because its remedy is to do nothing,
+# so the warning could never retire. Past this age the record still stands
+# (it is the only word we have) but it is reported as ageing, and the tray
+# says so calmly instead of asking for a sign-in nothing has tested.
+STALE_MAX_AGE_DAYS = 7
+
 # yt-dlp stderr fragments that mean "the session you gave me does not work",
 # as opposed to a network blip or a private video. Lower-cased substring
 # matches; each is a phrase yt-dlp has used verbatim. Matched ONLY when a
@@ -295,6 +305,46 @@ def mark_ok(reason: str = "", path: Optional[Path] = None) -> None:
     _write_status(STATUS_OK, reason, path)
 
 
+def recorded_status(path: Optional[Path] = None) -> str:
+    """The STATUS FILE's own word, with no cookie-file reads and no inference:
+    "ok" / "stale" / "" when there is no readable record.
+
+    CYT-5 (2026-09-04): the clear path used to be gated on a PER-JOB memo
+    (`DownloadJob._cookie_health_stale`, initialised False in every new job),
+    so a stale mark could only ever be cleared inside the very job that wrote
+    it. Every later successful cookied download took the early-return path
+    without calling mark_ok, and the tray asked for a fresh sign-in forever.
+    The file is the authority; this is how a caller asks it. Never raises."""
+    target = path or status_path()
+    try:
+        if not target.is_file():
+            return ""
+        rec = json.loads(target.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        return ""
+    except Exception:
+        log.debug("ytdl cookies: status unreadable", exc_info=True)
+        return ""
+    return str(rec.get("status") or "")
+
+
+def _record_age_days(at: str, now: Optional[float] = None) -> Optional[float]:
+    """Days since a record's `at` stamp, or None when it cannot be read.
+
+    None is "we cannot tell", and the caller treats that as NOT aged: a
+    warning that retires itself because a timestamp was unparseable is the
+    opposite of the point."""
+    text = str(at or "").strip()
+    if not text:
+        return None
+    try:
+        stamp = time.strptime(text, "%Y-%m-%dT%H:%M:%SZ")
+    except (ValueError, TypeError):
+        return None
+    seconds = (now if now is not None else time.time()) - calendar.timegm(stamp)
+    return seconds / 86400.0
+
+
 def classify_failure(stderr: Any, cookies_used: bool) -> Optional[str]:
     """The stale-signature that matched, or None. `cookies_used` False -> None
     always (see STALE_SIGNATURES)."""
@@ -348,8 +398,13 @@ def health(cfg: Optional[dict[str, Any]] = None, path: Optional[Path] = None,
             except (OSError, ValueError):
                 rec = {}
         if rec.get("status") == STATUS_STALE:
+            # CYT-5: `aged` is the difference between "your sign-in stopped
+            # working" and "nothing has used your sign-in for a week", which
+            # are the same record and very different sentences.
+            age = _record_age_days(str(rec.get("at") or ""), now)
             return {"status": STATUS_STALE, "reason": str(rec.get("reason") or ""),
-                    "at": str(rec.get("at") or "")}
+                    "at": str(rec.get("at") or ""),
+                    "aged": bool(age is not None and age > STALE_MAX_AGE_DAYS)}
         try:
             text = Path(cookies_file).read_text(encoding="utf-8", errors="replace")
         except OSError:

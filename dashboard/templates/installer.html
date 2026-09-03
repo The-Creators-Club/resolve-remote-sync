@@ -7,7 +7,7 @@
    setting a Mac up from a Windows browser, whom a User-Agent guess can never
    serve. It renders no Settings strip for the same reason it has no hub
    entry. #}
-{% block title %}CC SYNC: INSTALLER{% endblock %}
+{% block title %}{{ brand_org | upper }}: INSTALLER{% endblock %}
 {% block layout %}
   <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}
@@ -15,7 +15,7 @@
   <main class="main">
     <div class="side-head">[ INSTALLER ]
       <span class="muted">The full clean-install and repair package for a new editor
-        machine. Save it to the machine's own disk: running it off the shared drive
+        computer. Save it to that computer's own disk: running it off the shared drive
         locks the file for everyone and the wizard refuses it.</span></div>
 
     {# On a phone this page cannot do what it is for: the companion runs on

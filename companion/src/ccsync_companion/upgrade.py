@@ -1147,11 +1147,13 @@ def offer_dialog_text(version: Any, running: Optional[str] = None) -> tuple[str,
     """(title, body, ok-button label) for the confirmation dialog, so the
     LAST thing shown before the swap agrees with the menu item that opened
     it."""
+    from . import site as site_mod
+
     order = compare_to_running(version, running)
     current = config_mod.VERSION if running is None else running
     if order == VERSION_OLDER:
         return (
-            "CCSYNC.EXE: roll back",
+            site_mod.notify_title("roll back"),
             f"Roll back to v{version}? That is OLDER than the v{current} on this "
             f"machine. You would LOSE whatever v{current} fixed. The companion "
             f"will restart itself.",
@@ -1159,12 +1161,12 @@ def offer_dialog_text(version: Any, running: Optional[str] = None) -> tuple[str,
         )
     if order == VERSION_NEWER:
         return (
-            "CCSYNC.EXE: update",
+            site_mod.notify_title("update"),
             f"Update to v{version}? The companion will restart itself.",
             "UPDATE",
         )
     return (
-        "CCSYNC.EXE: switch build",
+        site_mod.notify_title("switch build"),
         f"Switch to v{version}? You are running v{current}. The companion will "
         f"restart itself.",
         "SWITCH",

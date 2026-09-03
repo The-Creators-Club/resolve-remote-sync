@@ -2151,6 +2151,7 @@ def api_get_selection(
 def audit_plan_change(
     conn: sqlite3.Connection, actor: str, action: str, editor: str, slug: str,
     target: str | None, before: list[dict[str, str]], after: list[dict[str, str]],
+    extra: dict[str, Any] | None = None,
 ) -> int:
     """Record one tick or untick in the fleet audit ledger (SYS-11 / DASH-8,
     resilience sweep 2026-08-28), and answer 0 for a change that changed
@@ -2168,11 +2169,18 @@ def audit_plan_change(
     """
     if before == after:
         return 0
-    return db.audit(conn, actor, action, slug, {
+    detail = {
         "editor": editor, "slug": slug, "machine": target or "",
         "scope": "machine" if target else "person",
         "before": before, "after": after,
-    })
+    }
+    # `extra` is how a batch says WHICH batch it came from ("via": "plan.copy",
+    # DCORE-2 2026-09-04) without changing the shape the undo replays or the
+    # freeze reads. Never allowed to overwrite the six keys above: a row that
+    # lies about its own placements is worse than no row.
+    for key, value in (extra or {}).items():
+        detail.setdefault(key, value)
+    return db.audit(conn, actor, action, slug, detail)
 
 
 def _sync_mode_arg(mode: str | None) -> str:
@@ -4546,22 +4554,58 @@ def api_copy_machine_plan(
             detail=f"{machine!r} is a wired machine: it works directly off the NAS "
                    "and syncs nothing, so a plan cannot be copied onto it",
         )
+    # DCORE-2 (usability sweep 2026-09-04): a copy REPLACES a plan, and until
+    # now it was the one plan change that left no trace -- no audit row, so no
+    # [ UNDO ] and no `frozen_devices` entry, so the next enforce cycle
+    # unshared every wiped project immediately, with none of the 60 s grace an
+    # untick gets. Snapshot both sides here and record the difference the way
+    # a tick and an untick record themselves: ONE ROW PER PROJECT, in the
+    # shape ui.partial_plan_change_undo replays and db.recent_plan_change_devices
+    # reads. A `plan.copy`-actioned row would appear in neither.
+    now = db.utcnow_iso()
+    before_slugs = [r["slug"] for r in db.selections_for_machine(conn, editor, machine)]
+    before = {slug: db.selection_placements(conn, editor, slug, machine=machine)
+              for slug in before_slugs}
     try:
-        count = db.copy_machine_plan(conn, editor, source, machine, admin,
-                                     db.utcnow_iso())
+        count = db.copy_machine_plan(conn, editor, source, machine, admin, now)
     except ValueError as exc:
         # bug-hunt-2026-09-03 dash-db-1: a WIRED source holds no plan of its
         # own (it used to inherit the unassigned bucket, which is the bug
         # being fixed there). db.copy_machine_plan refuses rather than copying
         # nothing, and a silent empty copy is exactly the answer an admin
-        # would read as "done".
+        # would read as "done". DCORE-2 added the second refusal of the same
+        # shape: a source with an EMPTY plan, which wiped the target.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    after_slugs = [r["slug"] for r in db.selections_for_machine(conn, editor, machine)]
+    added, removed = [], []
+    for slug in sorted(set(before_slugs) | set(after_slugs)):
+        was = before.get(slug, [])
+        now_placed = db.selection_placements(conn, editor, slug, machine=machine)
+        # An emptied placement is an UNTICK: that action is what earns the
+        # project its enforce-cycle freeze, and rendering it as [ UNTICKED ]
+        # in the panel is also what it is.
+        action = db.AUDIT_TICK if now_placed else db.AUDIT_UNTICK
+        if audit_plan_change(conn, admin, action, editor, slug, machine, was,
+                             now_placed, {"via": db.AUDIT_PLAN_COPY,
+                                          "copied_from": source}):
+            (added if now_placed else removed).append(slug)
+    # The SUMMARY row, for the fleet timeline only: "who replaced which
+    # computer's plan with which, and what it cost". The per-project rows
+    # above are what the panel and the undo use.
+    db.audit(conn, admin, db.AUDIT_PLAN_COPY, machine, {
+        "editor": editor, "machine": machine, "source": source,
+        "projects": count, "added": added, "removed": removed,
+    }, now=now)
     conn.commit()
     _nudge_collector(request)
-    log.info("%s copied %s's plan from %s to %s (%d project(s))",
-             admin, editor, source, machine, count)
+    log.info("%s copied %s's plan from %s to %s (%d project(s): %d added, "
+             "%d removed)", admin, editor, source, machine, count,
+             len(added), len(removed))
     return {"ok": True, "editor": editor, "machine": machine,
-            "source": source, "projects": count}
+            "source": source, "projects": count,
+            # Named in the answer as well as the ledger: the toast said
+            # "copied 8 project(s)" and never mentioned the 14 it removed.
+            "added": added, "removed": removed}
 
 
 @router.post("/admin/devices/approve")
@@ -6346,6 +6390,27 @@ class IngestStagingIn(_BoundedSectionIn):
     oldest_at: str | None = Field(default=None, max_length=64)
 
 
+class LoopbackIn(_BoundedSectionIn):
+    """`sync_guard.loopback`: can "Send to Resolve" work on this machine at
+    all (CMEDIA-3, usability sweep 2026-09-04).
+
+    The 8899 listener is the one companion service a WEB PAGE depends on, and
+    when the port is taken (the absorbed standalone BRoll Companion, a second
+    tray, anything) every Send-to-Resolve click fails in the browser with
+    nothing anywhere on the fleet page saying why. The companion sends this
+    section on every report including the healthy shape, so an absent one can
+    only mean a build too old to know -- never "it is fine".
+
+    `error` is a FAULT and not a choice: the companion sends "" both when the
+    port is held and when the feature is switched off.
+    """
+    enabled: bool | None = None
+    bound: bool | None = None
+    port: int | None = Field(default=None, ge=0, le=65535)
+    error: str | None = Field(default=None, max_length=500)
+    since: str | None = Field(default=None, max_length=64)
+
+
 class SyncGuardIn(BaseModel):
     """The companion's `sync_guard` section (item 9, 2026-08-17).
 
@@ -6408,6 +6473,11 @@ class SyncGuardIn(BaseModel):
     moved_project_dirs: list[MovedProjectDirIn] | None = Field(
         default=None, max_length=20)
     ingest_staging: IngestStagingIn | None = None
+    # CMEDIA-3 (usability sweep 2026-09-04): the loopback server's own health.
+    # Declared, not merely allowed as an extra, because the fleet page has to
+    # be able to say "8899 is taken on that machine" -- an undeclared sub-key
+    # reaches nobody (SYS-3, SYNC-8).
+    loopback: LoopbackIn | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -6446,6 +6516,7 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
     rh = guard.resolve_health
     stray = guard.stray_projects
     staging = guard.ingest_staging
+    loopback = guard.loopback
     restart_records = [] if restarts is None else [
         r for r in (restarts.sequencer, restarts.watcher, restarts.media_tree)
         if r is not None
@@ -6559,6 +6630,24 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
             None if guard.moved_project_dirs is None
             else len(guard.moved_project_dirs)),
         "ingest_staging_bytes": staging.bytes if staging is not None else None,
+        # CMEDIA-3 (usability sweep 2026-09-04). Same LATCH rule as the group
+        # above: written from any guard-bearing report, so a machine that has
+        # taken the port back CLEARS its chip rather than carrying this
+        # morning's bind failure until the dashboard restarts.
+        "loopback_enabled": (
+            None if loopback is None or loopback.enabled is None
+            else int(bool(loopback.enabled))),
+        "loopback_bound": (
+            None if loopback is None or loopback.bound is None
+            else int(bool(loopback.bound))),
+        "loopback_port": loopback.port if loopback is not None else None,
+        # "" is the healthy answer over there, and it is stored as NULL: a
+        # column that is either a fault or nothing is one the grid can chip
+        # on without knowing the empty-string convention.
+        "loopback_error": (
+            (loopback.error or None) if loopback is not None else None),
+        "loopback_since": (
+            (loopback.since or None) if loopback is not None else None),
     }
 
 
@@ -7516,6 +7605,12 @@ def api_report(
     # v38 (wave 4's ingest contract): is this editor's footage anywhere but
     # their own disk. Same shape and the same reasoning as the two above.
     db.store_resolve_health(
+        conn, editor, machine, flatten_sync_guard(payload.sync_guard, received_at))
+    # CMEDIA-3 (usability sweep 2026-09-04): whether the 8899 loopback is
+    # actually held on that machine. Same shape and the same latch rule as
+    # the three above -- a Send-to-Resolve button that cannot work must not
+    # be invisible on the only page anybody watches.
+    db.store_loopback_state(
         conn, editor, machine, flatten_sync_guard(payload.sync_guard, received_at))
     # An overridden "Remove from this machine" destroyed a local copy the
     # gate said was not caught up. There is nowhere on the grid for a

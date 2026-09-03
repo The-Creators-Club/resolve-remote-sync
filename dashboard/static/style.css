@@ -1700,3 +1700,68 @@ input[type="range"]:disabled {
   outline-offset: 2px;
 }
 /* ==== theme-common END ==================================================== */
+
+/* ===== BEGIN sweep 2026-09-04: waiting, staleness, one-time secrets ======= */
+/* DUI-4: no htmx control on this dashboard had ANY loading feedback, including
+   [ CREATE ] on the Users page, which blocks for up to two minutes while the
+   NAS provisions an account. htmx has always added .htmx-request to the
+   element making the request (for a form, the form itself); nothing in either
+   stylesheet reacted to it, so the predictable response was to click again.
+   pointer-events is what actually prevents the second click; the dimming is
+   what explains why. */
+.htmx-request .btn,
+.btn.htmx-request {
+  opacity: 0.5;
+  pointer-events: none;
+  cursor: progress;
+}
+.htmx-request input,
+.htmx-request select,
+.htmx-request textarea { opacity: 0.6; }
+/* The two multi-minute actions say what they are doing rather than only going
+   dim (DUI-4): the button carries both labels and CSS chooses. No JS, so it
+   works on a swapped-in partial with no re-binding. */
+.busy-label { display: none; }
+.htmx-request .busy-label { display: inline; }
+.htmx-request .idle-label { display: none; }
+
+/* DUI-2: the banner htmx_errors.js paints when a partial stops answering. It
+   is fixed to the bottom, not the top: the buttons that provoked the failure
+   are at the bottom of these panels, and a refusal two thousand pixels above
+   the viewport is a refusal nobody reads. */
+.stale-banner {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 60;
+  margin: 0;
+  padding: 0.5rem 0.9rem;
+  text-align: center;
+}
+
+/* DUI-1: the one-time credential box. Loud on purpose and NOT the amber
+   warning banner: this is the success an admin has to act on, and it used to
+   share both the channel and the triangle with "does not look like an OpenSSH
+   public key". */
+.minted-box {
+  border: 1px solid var(--green);
+  border-left: 3px solid var(--green);
+  background: var(--panel);
+  padding: 0.6rem 0.9rem;
+  margin: 0.6rem 0;
+}
+.minted-value {
+  word-break: break-all;
+  user-select: all;
+  margin: 0.4rem 0;
+  color: var(--text);
+}
+/* DUI-5: an error toast stays until it is clicked. .toast-host is
+   pointer-events:none so the grid underneath stays usable, so the toast that
+   can be dismissed has to take them back. */
+.toast.err {
+  pointer-events: auto;
+  cursor: pointer;
+}
+/* ===== END sweep 2026-09-04 =============================================== */

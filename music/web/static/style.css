@@ -495,6 +495,10 @@ a.brand:hover { color: var(--red-hot); }
 }
 
 .filter-rail section, .facet { margin-bottom: 18px; }
+/* MUSIC-16 (2026-09-03): the "one at a time" rule for the Feel sliders,
+   in the rail rather than as a surprise after the second slider. */
+.axis-hint { font-size: 10px; margin: 0 0 8px; line-height: 1.4; }
+
 .filter-rail h2 {
   font-size: 10px;
   font-weight: normal;

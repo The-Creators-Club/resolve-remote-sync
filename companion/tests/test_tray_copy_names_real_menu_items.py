@@ -67,3 +67,44 @@ def test_the_scan_would_catch_a_regression() -> None:
     assert not _offenders('"""was Tray → Copy diagnostics"""', "<x>")
     assert not _offenders('x = 1  # was Tray → Copy diagnostics', "<x>")
     assert not _offenders('log.info("was Tray → Copy diagnostics")', "<x>")
+
+
+# -- and the other half of the same promise (UX-1, sweep 2026-09-04) ---------
+#
+# The scan above knows the two spellings that named the OLD shape. It cannot
+# know whether a route written today still ends somewhere. So the routes live
+# in ui_copy.py (tests/test_sweep_2026_09_04_copy.py pins that they live
+# nowhere else), and each carries the label of the row it ends at: deleting
+# or renaming that row without touching the copy is what this test fails on.
+
+MENU_SOURCES = ("tray.py", "settings_window.py")
+
+
+def _menu_source() -> str:
+    return "\n".join((SRC / name).read_text(encoding="utf-8")
+                     for name in MENU_SOURCES)
+
+
+def test_every_route_ends_at_a_row_that_exists() -> None:
+    from ccsync_companion import ui_copy
+
+    source = _menu_source()
+    missing = {route: row for route, row in ui_copy.ROUTE_ROWS.items()
+               if row not in source}
+    assert not missing, (
+        f"these routes name a menu row that no longer appears in "
+        f"{' or '.join(MENU_SOURCES)}: {missing}. Either the row moved (fix "
+        f"the route in ui_copy.py) or the copy is pointing at nothing again, "
+        f"which is exactly what the 2026-08-27 menu reduction did.")
+
+
+def test_every_route_is_spelled_one_way() -> None:
+    """One arrow, one prefix. Half the copy said "Tray >" and half "Tray →"."""
+    from ccsync_companion import ui_copy
+
+    for route in ui_copy.ROUTES:
+        assert route.startswith("Tray > "), route
+        assert "→" not in route and "->" not in route, route
+        assert "…" not in route, (
+            f"{route!r}: the ellipsis is on the button, not in the sentence "
+            f"pointing at it - it reads as a truncation mid-line.")

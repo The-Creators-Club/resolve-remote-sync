@@ -643,7 +643,13 @@ def state_sentence(state: Any) -> str:
     if text == ROOT_NOT_ANSWERING:
         return "the sync drive is not answering - reconnect it or restart"
     if text == ROOT_MISPLACED:
-        return "the sync drive is mounted at the wrong place - eject it and plug it back in"
+        # SYNC-105 (sweep 2026-09-04): "eject it and plug it back in" was
+        # advice that REPRODUCES the fault. The empty folder the mount left
+        # behind is what the drive is now mounted on top of, and it has to go
+        # first - which is what the dialog has always said and this sentence,
+        # carried to the tray AND the dashboard, did not.
+        return ("the sync drive is mounted at the wrong place - eject it, delete "
+                "the leftover empty folder, then plug it back in")
     return "the sync drive is disconnected"
 
 

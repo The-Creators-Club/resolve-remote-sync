@@ -648,7 +648,72 @@ def check_now(conn, settings, app_state) -> dict[str, Any]:
         conn.commit()
     except Exception:                                                 # noqa: BLE001
         log.warning("could not record the feed's runtime-mismatch state", exc_info=True)
-    return {"ok": True, "error": None, "applied": applied, "retracted": retracted}
+    refused = record_offer_state(conn, valid_records, now)
+    return {"ok": True, "error": None, "applied": applied, "retracted": retracted,
+            "refused": refused}
+
+
+def record_offer_state(conn, valid_records: list[dict[str, Any]], now: str) -> list[str]:
+    """What the vendor is offering, and what of it this dashboard cannot hand
+    out yet (SYS-2, 2026-09-04). Returns the refused "kind/platform version"
+    strings.
+
+    Two durable facts, written on EVERY check whether or not anything is
+    wrong. `db.set_feed_offered` is what lets `alerts._check_versions_behind`
+    measure the fleet against the vendor's channel rather than against this
+    dashboard's own shelf; the notice is the half a `policy = "current"` site
+    could never see, because its only previous statement was a log line and
+    nobody clicks anything there.
+
+    The refusal itself is REL-4/SYS-13's and is correct: a companion whose
+    `requires_dashboard` is above this build is staged, never made current.
+    What was missing is that the same site then reads as fully up to date on
+    the fleet grid, in the weekly report and on the Packages page - the
+    fleet's updates have stopped and every page agrees that nothing is wrong.
+
+    Never raises: this is the tail of a poller, and a diagnosis must not be
+    able to fail the check it describes.
+    """
+    offered: dict[str, list[str]] = {}
+    refused: list[str] = []
+    subjects: list[str] = []
+    try:
+        for record in package_records(valid_records):
+            kind = str(record.get("kind") or "")
+            platform = str(record.get("platform") or "")
+            version = str(record.get("version") or "")
+            if kind != "companion" or not platform or not version:
+                continue
+            offered.setdefault(platform, []).append(version)
+            if package_store.blocks_on_dashboard_version(
+                    kind, record.get("requires_dashboard")):
+                refused.append(f"{kind}/{platform} {version}")
+                subjects.append(f"{platform} {version}")
+                db.notice(
+                    conn, "feed_publish_refused", "error", f"{platform} {version}",
+                    body=(f"A new CC Sync build for {platform} ({version}) is on "
+                          f"offer but cannot be handed to the computers here: it "
+                          f"needs dashboard "
+                          f"{str(record.get('requires_dashboard') or '')} and this "
+                          f"dashboard is {VERSION}. Until the dashboard is "
+                          f"updated, every computer in the fleet stays on the "
+                          f"build it has and this server reports them all as up "
+                          f"to date."),
+                    fix=("On the dashboard: SETTINGS, PACKAGES, then update the "
+                         "DASHBOARD from the vendor feed. The companion build "
+                         "becomes available to the fleet straight after."),
+                    now=now)
+        # Every check, refusals or none: being asked to clear a kind is the
+        # evidence that its writer ran (db._mark_notice_checked).
+        db.clear_notices_of_kind(conn, "feed_publish_refused", subjects, now=now)
+        db.set_feed_offered(conn, offered)
+        conn.commit()
+    except Exception:                                                 # noqa: BLE001
+        log.warning("could not record what the vendor feed offers", exc_info=True)
+    if refused:
+        log.warning("release feed: %s cannot be made current here (this dashboard "
+                    "is %s)", ", ".join(refused), VERSION)
+    return refused
 
 
 def _apply_policy(conn, settings, app_state, valid_records: list[dict[str, Any]], now: str) -> list[str]:
@@ -1012,6 +1077,11 @@ def api_admin_feed_check(request: FastAPIRequest, conn=Depends(get_conn)) -> dic
             # build was withdrawn from under their fleet, not deduce it from
             # the current pointer having moved.
             "retracted": result.get("retracted") or [],
+            # SYS-2 (2026-09-04): and what it CANNOT hand out. The admin who
+            # just pressed the button is the one person who can act on "this
+            # build needs a newer dashboard", and the answer used to be a log
+            # line on a machine they have no shell on.
+            "refused": result.get("refused") or [],
             "view": build_feed_view(conn, settings, request.app.state)}
 
 

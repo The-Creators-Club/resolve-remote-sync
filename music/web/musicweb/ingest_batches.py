@@ -910,10 +910,19 @@ def write_item_result(conn, batch, item, body):
     try:
         scores = rescore.apply_for_track(conn, track_id)
     except Exception as exc:                                    # noqa: BLE001
+        # ROLLBACK FIRST (MUSIC-1, 2026-09-04). rescore_library rolls back its
+        # own connection, but this handler must not depend on that: `conn` is
+        # this thread's CACHED connection, and handing it back inside an open
+        # write transaction meant the next write on this thread committed
+        # whatever was in it -- which, for the failure this catches, is
+        # "the library has no tags and no axes". A second rollback is a no-op.
+        conn.rollback()
+        rescore.mark_scores_stale(conn)
         log.error('music ingest: track %s written but not scored (%s: %s); it is '
                   'searchable by similarity and has no tags until the next '
                   'result or a base-rig --retag', track_id, type(exc).__name__, exc)
-        scores = {'error': f'{type(exc).__name__}: {exc}'}
+        scores = {'error': f'{type(exc).__name__}: {exc}',
+                  'scores_stale': rescore.scores_stale(conn)}
     return {'ok': True, 'state': 'indexed', 'track_id': track_id,
             'rel_path': dest_name, 'scores': scores, **counts}
 

@@ -55,6 +55,7 @@ from . import broll_server
 from . import broll_upload
 from . import broll_vlm_sidecar as sidecar_mod
 from . import config as config_mod
+from . import site as site_mod
 from . import ingest_kinds
 from . import popup
 from . import root_guard
@@ -984,7 +985,7 @@ class BrollIngestor:
         self.log.warning("%s", message)
         if self._notify is not None:
             try:
-                self._notify(message, f"ccsync-companion: {self.kind.label}")
+                self._notify(message, site_mod.notify_title(self.kind.label))
             except Exception:
                 self.log.debug("the tray notification failed", exc_info=True)
 
@@ -1918,7 +1919,7 @@ class BrollIngestor:
         if self._notify is None:
             return
         try:
-            self._notify(message, f"ccsync-companion: {self.kind.label}")
+            self._notify(message, site_mod.notify_title(self.kind.label))
         except Exception:
             self.log.debug("the tray notification failed", exc_info=True)
 

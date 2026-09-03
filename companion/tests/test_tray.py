@@ -2236,7 +2236,9 @@ def test_the_tooltip_suffix_yields_to_everything_louder():
 
     app = _proxy_app(missing=12)
     app._root_absent = True
-    assert _tooltip_text(_tray_snapshot(app)) == "CCSync: PAUSED (your drive is disconnected)"
+    # SYNC-104/105 (sweep 2026-09-04): the tooltip says which of the three
+    # ways the drive is gone, in the same words as the tray line.
+    assert _tooltip_text(_tray_snapshot(app)) == "CCSync: PAUSED (drive disconnected)"
 
     app = _proxy_app(missing=12)
     app.paused = True
@@ -3229,3 +3231,169 @@ def test_open_dashboard_ignores_a_junk_manifest_url(monkeypatch):
                         lambda *a, **k: {"dashboard_url": "not a url"})
     app = _FakeApp({"dashboard_url": "http://192.168.0.102:8480"})
     assert tray_mod._dashboard_url(app) == "http://192.168.0.102:8480"
+
+
+# -- APP-1: the icon and the tooltip read sync_guard.blocked ---------------
+#
+# Before 2026-09-04 the colour consulted five things and the tooltip four, and
+# `sync_guard.blocked` -- the one field whose whole job is to answer "why is
+# this machine not syncing" -- was in neither. A reporter 401'd for a week
+# showed a steady green mark over "CCSync: up to date".
+
+
+def _blocked(reason, detail="something is wrong"):
+    return {"blocked": {"reason": reason, "detail": detail, "since": None}}
+
+
+def test_a_blocked_machine_is_not_green():
+    """APP-1 [verified]: green with `blocked` set was the shipped behaviour --
+    compute_overall_color() never received the guard at all."""
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    assert compute_overall_color(_idle3(), app) == "green"
+    assert compute_overall_color(
+        _idle3(), app, _blocked("transport_offline")) == "orange"
+
+
+def test_a_broken_blocked_reason_is_red_not_amber():
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    for reason in ("clock_skew", "lane_stalled", "syncthing_down"):
+        assert compute_overall_color(_idle3(), app, _blocked(reason)) == "red"
+    assert compute_overall_color(
+        _idle3(), app, _blocked("project_dir_moved")) == "orange"
+
+
+def test_no_guard_and_an_empty_guard_stay_green():
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    assert compute_overall_color(_idle3(), app, None) == "green"
+    assert compute_overall_color(_idle3(), app, {}) == "green"
+    assert compute_overall_color(_idle3(), app, {"blocked": None}) == "green"
+
+
+def test_the_base_rig_keeps_its_green_for_the_vacuous_reasons():
+    """2026-08-19's carve-out survives APP-1: a machine whose tree IS the
+    server tree can never tick a project, and a permanent amber on the one
+    machine the admin watches all day teaches them to ignore amber."""
+    app = _FakeApp({"dashboard_url": "", "mode": "base"},
+                   identity=_FakeIdentity("alex"))
+    app._sync_enabled = False
+    assert compute_overall_color(_idle3(), app, _blocked("no_selection")) == "green"
+    # ...but a broken clock on the base rig is still a fault.
+    assert compute_overall_color(_idle3(), app, _blocked("clock_skew")) == "red"
+
+
+def test_the_snapshot_hands_the_guard_to_the_colour():
+    from ccsync_companion.tray import _tray_snapshot
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    assert _tray_snapshot(app)["color"] == "green"
+    app.sync_guard = lambda: _blocked("folders_unfiltered")
+    assert _tray_snapshot(app)["color"] == "orange"
+
+
+def test_the_tooltip_says_why_instead_of_up_to_date():
+    """APP-1 [verified]: `_tooltip_text` ended `return ... "up to date"` with
+    no read of sync_guard anywhere in the function."""
+    from ccsync_companion.tray import _tooltip_text, _tray_snapshot
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    assert _tooltip_text(_tray_snapshot(app)) == "CCSync: up to date"
+    app.sync_guard = lambda: _blocked(
+        "transport_offline", "This computer cannot reach the server")
+    tip = _tooltip_text(_tray_snapshot(app))
+    assert tip == "CCSync: This computer cannot reach the server"
+    assert "up to date" not in tip
+
+
+def test_the_tooltip_stays_inside_the_windows_limit():
+    from ccsync_companion.tray import _tooltip_text, _tray_snapshot
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    app.sync_guard = lambda: _blocked("folders_unfiltered", "x" * 400)
+    assert len(_tooltip_text(_tray_snapshot(app))) <= 127
+
+
+def test_a_louder_tooltip_state_still_wins_over_blocked():
+    """The reasons above this line in _tooltip_text (not set up, drive gone,
+    paused) are the same reasons _BLOCKED_ORDER puts first, and they must not
+    be answered twice in two different wordings."""
+    from ccsync_companion.tray import _tooltip_text, _tray_snapshot
+
+    app = _FakeApp({"dashboard_url": ""}, identity=_FakeIdentity("owen"))
+    app.paused = True
+    app.sync_guard = lambda: _blocked("paused", "Syncing is paused from this computer's tray")
+    assert _tooltip_text(_tray_snapshot(app)) == "CCSync: PAUSED"
+
+
+# -- RES-8: Quit while a FIX ALL copy is live ------------------------------
+
+
+def test_quit_asks_nothing_when_no_copy_is_running(monkeypatch):
+    from ccsync_companion import popup
+    from ccsync_companion import tray as tray_mod
+
+    popup._set_copy_state(None)
+    assert tray_mod._confirm_quit_while_copying(_FakeApp({})) is True
+
+
+def test_quit_mid_copy_asks_and_a_no_keeps_copying(monkeypatch):
+    """RES-8 [verified]: on_quit went straight to icon.stop() + shutdown(),
+    tearing the process down inside write() and stranding a multi-GB
+    .ccsync-tmp that is reported an hour later and never deleted."""
+    from ccsync_companion import popup
+    from ccsync_companion import tray as tray_mod
+
+    popup._set_copy_state({"index": 12, "total": 69, "name": "A012.braw"})
+    asked = {}
+    monkeypatch.setattr(tray_mod.sys, "platform", "win32")
+
+    class _Fake:
+        class windll:
+            class user32:
+                @staticmethod
+                def MessageBoxW(handle, body, title, flags):
+                    asked["body"] = body
+                    return 7  # IDNO
+
+    monkeypatch.setitem(__import__("sys").modules, "ctypes", _Fake)
+    try:
+        assert tray_mod._confirm_quit_while_copying(_FakeApp({})) is False
+        assert "12" in asked["body"] and "69" in asked["body"]
+        _Fake.windll.user32.MessageBoxW = staticmethod(lambda *a: 6)  # IDYES
+        assert tray_mod._confirm_quit_while_copying(_FakeApp({})) is True
+    finally:
+        popup._set_copy_state(None)
+
+
+def test_quit_fails_open_when_it_cannot_ask(monkeypatch):
+    """A Quit that silently does nothing is the worse bug: the question is a
+    courtesy, not a lock."""
+    from ccsync_companion import popup
+    from ccsync_companion import tray as tray_mod
+
+    popup._set_copy_state({"index": 1, "total": 2, "name": "a.mov"})
+    monkeypatch.setattr(tray_mod.sys, "platform", "win32")
+
+    class _Boom:
+        class windll:
+            class user32:
+                @staticmethod
+                def MessageBoxW(*a):
+                    raise OSError("no user32 here")
+
+    monkeypatch.setitem(__import__("sys").modules, "ctypes", _Boom)
+    try:
+        assert tray_mod._confirm_quit_while_copying(_FakeApp({})) is True
+    finally:
+        popup._set_copy_state(None)
+
+
+def test_the_quit_question_names_the_file_and_the_batch():
+    from ccsync_companion.tray import quit_confirm_text
+
+    text = quit_confirm_text({"index": 12, "total": 69, "name": "A012.braw"})
+    assert "file 12" in text and "69" in text
+    assert "abandons" in text
+    assert "—" not in text  # no em dashes in copy an editor reads
+    # A batch that has not published its first chunk yet still says something
+    # true about what is at stake.
+    assert "69" in quit_confirm_text({"index": 0, "total": 69})

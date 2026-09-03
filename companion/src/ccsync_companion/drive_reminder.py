@@ -58,6 +58,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
+from . import site as site_mod
+
 log = logging.getLogger("ccsync.drive_reminder")
 
 STATE_FILENAME = "drive_unfinished.json"
@@ -68,7 +70,11 @@ DEFAULT_REMINDER_MINUTES = 30.0
 
 # Balloon titles are 64 WCHARs on Windows (tray_native cuts at 60); the
 # message is 250. Everything rendered here stays well inside both.
-NOTIFY_TITLE = "ccsync-companion: sync unfinished"
+def notify_title() -> str:
+    """The reminder's balloon title. A FUNCTION, not a constant: read at
+    import time it would be the title from before this machine ever fetched
+    its site manifest (UX-4, sweep 2026-09-04)."""
+    return site_mod.notify_title("sync unfinished")
 
 # Lane name -> (singular, plural) noun for the sentence. Anything not listed
 # (a lane added later) falls back to "files".
@@ -325,7 +331,7 @@ class DriveReminder:
 
     def _say(self, message: str) -> None:
         try:
-            self._notify(message, NOTIFY_TITLE)
+            self._notify(message, notify_title())
         except Exception:
             log.debug("drive reminder: notify failed", exc_info=True)
         log.warning("%s", message)

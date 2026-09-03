@@ -81,6 +81,7 @@ from . import ffmpeg_tools
 from . import machine as machine_mod
 from . import resolve_bridge
 from . import root_guard
+from . import ui_copy
 from . import upgrade as upgrade_mod
 from . import sidecar_tools
 from . import ytdl_attestation
@@ -357,8 +358,11 @@ REASON_NO_IDENTITY = ("this machine has no valid sign-in token -- sign in "
 # per user and gates the browser; this is the per-machine half, because "this
 # computer downloads other people's video" is a fact about the machine and
 # whoever owns it.
+# CYT-4 (sweep 2026-09-04): this one is read IN THE BROWSER, in its own
+# louder toast, by an editor who then right-clicks the tray and finds no
+# YouTube item at all - it moved into the Settings window on 2026-08-27.
 REASON_NOT_ATTESTED = ("the YouTube terms have not been accepted on this "
-                       "machine: tray > 'Accept YouTube Terms...'")
+                       f"computer: {ui_copy.YOUTUBE_TERMS}")
 # COMP-BROLL-5 (2026-08-14). ffmpeg is an OPTIONAL dependency on this fleet
 # (ffmpeg_tools.ffmpeg_available says so, and proxy_generation_enabled is
 # tri-state for the same reason), but EVERY rung this executor runs is a
@@ -2615,9 +2619,22 @@ class DownloadJob:
             # A cookied download that worked is proof the session is alive;
             # clear a stale mark so the tray warning goes away by itself once
             # things are fine again (2026-08-17).
-            if cookies_used and self._cookie_health_stale:
+            #
+            # CYT-5 (usability sweep 2026-09-04): the clear used to be gated on
+            # `self._cookie_health_stale` as well -- a PER-JOB memo, False in
+            # every new DownloadJob -- so the record could only be cleared
+            # inside the same job that wrote it. Every later successful cookied
+            # download took this early return without calling mark_ok, and the
+            # tray asked for a fresh sign-in forever, which is the exact
+            # opposite of the comment above. The FILE is the authority now (one
+            # small read, and only on the rare cookied path); the memo stays on
+            # the write side below, where its job is one mark_stale per job
+            # rather than forty.
+            if cookies_used:
                 self._cookie_health_stale = False
-                ytdl_cookies.mark_ok("a download succeeded with the signed-in session")
+                if ytdl_cookies.recorded_status() == ytdl_cookies.STATUS_STALE:
+                    ytdl_cookies.mark_ok(
+                        "a download succeeded with the signed-in session")
             return True, ""
         stderr = str(getattr(proc, "stderr", "") or "")
         # The one thing worth reading out of a failure BEYOND the clip row:

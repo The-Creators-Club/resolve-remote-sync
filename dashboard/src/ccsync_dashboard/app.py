@@ -447,7 +447,89 @@ def _log_shared_token_migration(conn, settings: Settings) -> None:
                  "DASH_SHARED_REPORT_TOKEN_ENABLED=0 to retire it", usage["editor"])
 
 
+# DCORE-3 (2026-09-04). What a secret that could not be written costs, per
+# variable: the sentence the refusal prints. DASH_SESSION_SECRET is the one
+# that makes this a refusal rather than a warning - it signs every companion's
+# machine-identity token, which never expires (CR-86), so a value that lives
+# only in this process 401s the whole fleet at once the next time the container
+# restarts, and DASH_SESSION_SECRET_PREVIOUS cannot help because nobody knows
+# the value that was lost.
+_EPHEMERAL_SECRET_COSTS = {
+    "DASH_SESSION_SECRET":
+        "every computer and every browser would be signed out the next time "
+        "this server restarts",
+    "DASH_REPORT_TOKEN":
+        "the computers in the fleet would stop being able to report the next "
+        "time this server restarts",
+    "BROLL_INGEST_TOKEN":
+        "b-roll indexing would stop being accepted the next time this server "
+        "restarts",
+    "SYNCTHING_API_KEY":
+        "this server would lose control of its own sync engine the next time "
+        "it restarts",
+    "CCSYNC_INTERNAL_TOKEN":
+        "the file-transfer sidecar would stop trusting this server the next "
+        "time it restarts",
+}
+
+
+def check_persisted_secrets(
+    provenance: dict[str, str], env=None,
+) -> list[str]:
+    """Which freshly GENERATED secrets did not make it to disk.
+
+    DCORE-3 (2026-09-04): `ensure_secrets` logs one warning and carries on with
+    an in-memory value when `<data>/secrets` cannot be written - the case its
+    own docstring names ("this process does not own it yet", routine on a
+    restored dataset or a Synology volume). Everything then works, until a
+    restart mints a different key. A dashboard that cannot keep its own
+    identity has to say so while somebody is still watching the deploy, not on
+    the morning the whole fleet 401s.
+
+    Only "generated" is checked: "env" is the deployment's own value and needs
+    no file, and "file"/"sidecar-file" were read from one. Reads the directory
+    back rather than trusting the write, because that is the fact in question.
+    """
+    out: list[str] = []
+    directory = secrets_boot.secrets_dir(env)
+    for name, source in sorted(provenance.items()):
+        if source != "generated":
+            continue
+        try:
+            if not (directory / name.lower()).is_file():
+                out.append(name)
+        except OSError:
+            out.append(name)
+    return out
+
+
+def _refuse_ephemeral_secrets(provenance: dict[str, str], settings: Settings) -> None:
+    """Refuse to serve on a generated secret that could not be persisted.
+
+    Bypassable only by DASH_DEV_INSECURE=1, the same single hatch
+    `check_boot_secrets` uses, and loud in the log when it is taken.
+    """
+    lost = check_persisted_secrets(provenance)
+    if not lost:
+        return
+    directory = secrets_boot.secrets_dir()
+    detail = "; ".join(
+        f"{name} ({_EPHEMERAL_SECRET_COSTS.get(name, 'it would change on the next restart')})"
+        for name in lost)
+    message = (
+        f"refusing to start: this server generated a secret it could not save "
+        f"to {directory}, so it exists only in memory: {detail}. Fix who owns "
+        f"that folder on the NAS (it must be writable by the user this "
+        f"container runs as), or set the value in the container's environment, "
+        f"then start the dashboard again.")
+    if settings.dev_insecure:
+        log.warning("DASH_DEV_INSECURE=1 bypassed a boot refusal: %s", message)
+        return
+    raise RuntimeError(message)
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
+    boot_provenance: dict[str, str] = {}
     if settings is None:
         # Fills in any of the five secrets this deployment's environment does
         # not already carry, from <data>/secrets/ or freshly generated
@@ -460,7 +542,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # filesystem here, which is what makes this a no-op for every
         # deployment that already sets all five in its compose env (every
         # deployment today) -- see secrets_boot.ensure_secrets' docstring.
-        secrets_boot.ensure_secrets()
+        boot_provenance = secrets_boot.ensure_secrets()
         settings = Settings.from_env()
 
     # Before the first thing that can refuse to start. Writes a JSON crash file
@@ -480,6 +562,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # cookie, which outranks everything else in this file. Same rule, same
     # function (broll.check_ingest_token), same answer.
     # COMMERCIAL_READINESS.md item 15, 2026-08-17.
+    # DCORE-3 (2026-09-04): before the strength check, because a secret that
+    # cannot survive a restart is a stronger objection than a weak one, and
+    # both are things to hear while the deploy is still on screen.
+    _refuse_ephemeral_secrets(boot_provenance, settings)
+
     boot_problems = auth.check_boot_secrets(settings)
     if boot_problems and not settings.dev_insecure:
         raise RuntimeError(
@@ -1282,8 +1369,11 @@ def run() -> None:
     """
     import uvicorn
 
-    secrets_boot.ensure_secrets()
+    provenance = secrets_boot.ensure_secrets()
     settings = Settings.from_env()
+    # DCORE-3: the same refusal on the console-script path. create_app is
+    # handed a Settings here, so its own check sees no provenance.
+    _refuse_ephemeral_secrets(provenance, settings)
     uvicorn.run(create_app(settings), host="0.0.0.0", port=settings.port, workers=1)
 
 

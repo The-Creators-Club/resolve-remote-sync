@@ -4,7 +4,7 @@
    "where do I update the dashboard" is not a question about editor accounts.
    Nothing here changed but the address -- same partials, same routes, same
    _packages_and_feed context builder. #}
-{% block title %}CC SYNC: PACKAGES{% endblock %}
+{% block title %}{{ brand_org | upper }}: PACKAGES{% endblock %}
 {% block layout %}
   <aside class="sidebar" hx-get="/partials/sidebar" hx-trigger="every 30s [document.visibilityState === 'visible']" hx-swap="innerHTML">
     {% include "partials/sidebar.html" %}

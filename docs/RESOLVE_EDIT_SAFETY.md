@@ -37,13 +37,48 @@ is the guarantee that always holds — which is why the undo below replays the
 journal rather than the `.drp`.
 
 The save point is taken at most once per project per 15 minutes, and the two
-unprompted passes may each run at most once per project per 15 minutes.
-Held clips are logged, not dropped; **Tray → Advanced → Scan whole project**
-runs the pass immediately.
+unprompted passes may each run at most once per project per 15 minutes
+(`resolve_journal.SAVE_POINT_INTERVAL_SECONDS` and
+`AUTOMATIC_MIN_INTERVAL_SECONDS`, both 900 s). The 15-minute bar is counted
+per project **and per pass**, so the canonical relink and the proxy repoint do
+not queue behind each other. Held clips are logged, not dropped; **Tray →
+Settings → SCAN WHOLE PROJECT** runs the canonical relink immediately, because
+that button is the editor asking and nothing rate-limits a prompted path. It
+does **not** force the automatic proxy repoint, which has no user-initiated
+bypass: that one waits for its next pass.
+
+**And at most 8 unprompted rewrites per project per day** (RES-2 of the
+2026-08-28 resilience sweep; `AUTOMATIC_MAX_PER_DAY = 8`). The 15-minute bar
+bounds a loop, not a day: a machine with a wrong `canonical_prefix` or
+`local_root` is wrong every 15 minutes, so before the cap it was entitled to
+about 96 unprompted rewrites of hundreds of clip paths a day. The daily count
+is per project and **shared by both passes**. When it is spent, every further
+unprompted pass on that project is held for the rest of the day and the log
+carries a WARNING:
+
+> resolve journal: `<project>` has already had 8 unprompted rewrites today, so
+> this one is held (N held so far) - this looks like a configuration problem,
+> Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN
+
+That WARNING is the signal to check `local_root` and `canonical_prefix` on
+that machine, not to wait it out. It resets at **UTC midnight** - UTC on
+purpose, so a DST change or a travelling laptop cannot hand a machine a second
+day's allowance. SCAN WHOLE PROJECT still works while the cap is spent (it is
+prompted), and so does FIX ALL.
+
+Both bars live on disk, at `~/.ccsync/state/resolve_auto.json`
+(`automatic_at` per project per pass, `daily` with the day, the count and how
+many passes were held). RES-2 again: they used to be module globals, so an
+OTA, a crash, an EULA park or the editor quitting and reopening the tray reset
+them, and every one of those is routine. If the limiter itself fails, it
+**allows** the pass: a broken bar must not leave an editor staring at Media
+Offline.
 
 ## Undoing
 
-**Tray → Advanced → "Undo the last clip-path change CCSync made…"**
+**Tray → Settings → [ UNDO THE LAST CLIP-PATH CHANGE CCSYNC MADE… ]** (the
+Advanced submenu it used to live in went with the 2026-08-27 Settings-window
+split; `tray.action_undo_last_relink` is the same action either way)
 
 **Or from the dashboard, on somebody else's computer** (SYS-15b, 2026-08-29):
 Settings → RECOVERY → "CC Sync changed clip paths in somebody's Resolve

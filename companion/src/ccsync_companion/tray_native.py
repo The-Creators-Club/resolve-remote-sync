@@ -60,6 +60,48 @@ from typing import Any, Callable, Optional
 log = logging.getLogger("ccsync.tray.native")
 
 
+# The Windows balloon's hard limit (szInfo is 256 WCHARs including the
+# terminator). Cited HERE, at the one call site that knows it, rather than at
+# every authoring site.
+TOAST_LIMIT = 250
+
+
+def _flatten_toast(message: Any) -> str:
+    """One line: newline, tab and CR all collapse to a single space (APP-3)."""
+    return " ".join(str(message).split())
+
+
+def fit_toast(message: Any, limit: int = TOAST_LIMIT) -> str:
+    """Cut an overlong toast in the MIDDLE, never at the end (APP-4).
+
+    This codebase's toast convention is "what happened, then what to do next",
+    and the old hard slice at `limit` threw away the half that says what to
+    do: any breaker reason longer than about 45 characters silently deleted
+    the sentence naming the fix. So the TAIL is kept -- the last sentence or
+    line, up to half the budget -- and the variable middle is ellipsised. The
+    full text goes to the log whenever this shortens anything, because the
+    thing that was too long to show is usually the thing worth reading.
+    """
+    text = str(message)
+    if len(text) <= limit:
+        return text
+    tail = ""
+    for sep in ("\n", ". ", "? ", "! "):
+        idx = text.rfind(sep)
+        while idx != -1:
+            candidate = text[idx + len(sep):].strip()
+            if candidate and len(candidate) <= limit // 2:
+                if len(candidate) > len(tail):
+                    tail = candidate
+                break
+            idx = text.rfind(sep, 0, idx)
+    joiner = " ... "
+    head = text[:max(0, limit - len(tail) - len(joiner))].rstrip()
+    fitted = (head + joiner + tail) if tail else text[:limit]
+    log.info("toast shortened to fit (%d chars): %s", limit, text)
+    return fitted[:limit]
+
+
 # -- the platform-independent menu model ------------------------------------
 
 
@@ -831,11 +873,11 @@ class _WindowsIcon:
 
         szInfo is 256 WCHARs INCLUDING the terminator and szInfoTitle 64;
         overlong text does not truncate, it makes the whole call fail, so it
-        is cut here.
+        is cut here -- through fit_toast, which cuts the MIDDLE (APP-4).
         """
         if not self._added:
             return
-        self._modify(info=(str(message)[:250], str(title or self.name)[:60]))
+        self._modify(info=(fit_toast(message), str(title or self.name)[:60]))
 
     # -- window + icon -----------------------------------------------------
 
@@ -1403,11 +1445,24 @@ class _DarwinIcon:
         def _quote(text: str) -> str:
             return str(text).replace("\\", "\\\\").replace('"', '\\"')
 
-        script = (f'display notification "{_quote(message)}" '
+        # APP-3 (sweep 2026-09-04): an AppleScript string literal cannot span
+        # lines, so a message with a newline in it made osascript exit with a
+        # syntax error -- discarded by check=False, and never seen by the
+        # except either. The callers that write multi-line toasts are exactly
+        # the four safety latches (trash, breaker, free-space park, sync
+        # halted), so on a Mac the notifications that matter most were the
+        # only ones that silently did nothing. Reflow first, THEN quote.
+        flat = _flatten_toast(message)
+        script = (f'display notification "{_quote(flat)}" '
                   f'with title "{_quote(title or self.name)}"')
         try:
-            subprocess.run(["osascript", "-e", script], check=False,
-                           capture_output=True, timeout=10)
+            done = subprocess.run(["osascript", "-e", script], check=False,
+                                  capture_output=True, timeout=10)
+            if done.returncode != 0:
+                # Not fatal: a notification is a nicety. But a backend that
+                # has been failing for months must at least say so.
+                log.debug("macOS notification refused (rc=%s): %s",
+                          done.returncode, (done.stderr or b"")[:200])
         except Exception:
             log.debug("macOS notification failed", exc_info=True)
 

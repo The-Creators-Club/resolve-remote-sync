@@ -31,6 +31,7 @@ import posixpath
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -131,7 +132,7 @@ from ccsync_companion import site as site_mod
 # CCSYNC_CANONICAL_PREFIX/CCSYNC_TREE_NAME) so one failed fetch cannot map
 # one letter while config.toml names another. Both bootstraps changed, so
 # the shared number moves.
-INSTALLER_VERSION = "1.0.39"
+INSTALLER_VERSION = "1.0.40"
 
 # NO DEFAULT since 2026-08-17 (WP0, docs/SYNOLOGY_PORT_PLAN.md). These used
 # to be one deployment's tailnet and LAN addresses compiled into every
@@ -719,7 +720,11 @@ def verify_account(
     the dashboard not configured for login, or a network/transport error).
     Never raises -- this is the install gate, callers branch on "ok".
     """
-    dashboard_url = str(dashboard_url or "").strip()
+    # OPS-6 (2026-09-04): a scheme-less address used to surface here as
+    # "sign-in failed: unknown url type: 'nas.../api/v1/verify'", which names
+    # neither the cause nor the fix. Normalised on the way in so the base-rig
+    # path (which never sees the tailscale page) gets the same answer.
+    dashboard_url = normalise_dashboard_url(dashboard_url)
     if not dashboard_url:
         return {"ok": False, "error": "no dashboard URL configured"}
     if not str(username or "").strip():
@@ -807,6 +812,134 @@ def tailscale_up(run: RunFn = subprocess.run, platform: Optional[str] = None) ->
     return False
 
 
+# OPS-6 (usability + resilience sweep 2026-09-04). The admin says "the
+# dashboard is nas.tail26290e.ts.net" and the editor types exactly that.
+# urlopen then raises ValueError("unknown url type"), which dashboard_reachable
+# swallowed into False, so the tailscale page said "the dashboard isn't
+# reachable yet, wait a few seconds and retry" forever and NEXT never enabled.
+# Nothing anywhere said "put https:// in front".
+#
+# Which scheme is a GUESS, and it is the guess the two shapes in the field
+# make true: a tailnet name is served by Tailscale Serve, which is https and
+# only https; a LAN address is the container's own port, which is plain http
+# (the dashboard has no certificate there). An explicit port that is not 443
+# says the same thing about a name. A URL that already carries a scheme is
+# returned untouched -- the editor's answer beats ours.
+_IPV4_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+
+
+def normalise_dashboard_url(dashboard_url: str) -> str:
+    """The dashboard URL with a scheme, ready for urlopen. "" stays "".
+
+    Idempotent, and safe to call on anything already valid: this is the one
+    helper the role page, the reachability probe, verify_account and
+    fetch_site all go through, so a value typed once cannot be normalised in
+    one place and rejected in another.
+    """
+    text = str(dashboard_url or "").strip()
+    if not text:
+        return ""
+    if "://" in text:
+        return text
+    if text.startswith("//"):
+        text = text[2:]
+    host_port = text.split("/", 1)[0]
+    host = host_port
+    port = ""
+    if host_port.startswith("["):           # [::1]:8480
+        host, _, rest = host_port.partition("]")
+        host = host.lstrip("[")
+        port = rest.lstrip(":")
+    elif host_port.count(":") == 1:
+        host, _, port = host_port.partition(":")
+    host = host.lower()
+    numeric = bool(_IPV4_RE.match(host)) or ":" in host
+    local = host in ("localhost", "127.0.0.1", "::1") or host.endswith(".local")
+    if port and port != "443":
+        scheme = "http"
+    elif numeric or local:
+        scheme = "http"
+    else:
+        scheme = "https"
+    return f"{scheme}://{text}"
+
+
+# What a failed reach actually was. "that address does not exist on this
+# network" and "nothing answered yet" are different problems with different
+# fixes, and the wizard used to print the second for both (OPS-6).
+DASHBOARD_REACH_UNKNOWN_HOST = "unknown_host"
+DASHBOARD_REACH_REFUSED = "refused"
+DASHBOARD_REACH_TIMEOUT = "timeout"
+DASHBOARD_REACH_HTTP = "http"
+DASHBOARD_REACH_BLANK = "blank"
+DASHBOARD_REACH_ERROR = "error"
+
+
+def dashboard_probe(
+    dashboard_url: str,
+    http_get: HttpGetFn = default_http_get,
+    timeout: float = 10,
+) -> dict[str, Any]:
+    """GET {dashboard_url}/api/v1/health and say what happened.
+
+    Returns {"ok", "kind", "message", "url"} -- never raises. `url` is the
+    normalised form the caller should write back into its field, so an editor
+    who typed a bare hostname sees what was actually tried.
+    """
+    url_base = normalise_dashboard_url(dashboard_url)
+    if not url_base:
+        return {"ok": False, "kind": DASHBOARD_REACH_BLANK, "url": "",
+                "message": "no dashboard address set. Ask your admin for it."}
+    url = f"{url_base.rstrip('/')}/api/v1/health"
+    try:
+        http_get(url, timeout)
+        return {"ok": True, "kind": "ok", "url": url_base,
+                "message": f"connected: {url_base} is answering"}
+    except urllib.error.HTTPError as exc:
+        # Something IS there: a 404 is an older dashboard, a 502 is the
+        # container down behind a proxy that is up. Either way the address is
+        # right, which is the thing the editor is being asked to fix.
+        return {"ok": False, "kind": DASHBOARD_REACH_HTTP, "url": url_base,
+                "message": (f"{url_base} answered with an error ({getattr(exc, 'code', '?')}). "
+                            "The address is right, so this is the dashboard's end: "
+                            "tell your admin.")}
+    except Exception as exc:
+        kind, message = _classify_reach_error(exc, url_base)
+        return {"ok": False, "kind": kind, "url": url_base, "message": message}
+
+
+def _classify_reach_error(exc: Exception, url_base: str) -> tuple[str, str]:
+    """Which of the three failures this was, from the exception alone.
+
+    Matched on the wrapped reason where there is one (URLError wraps
+    socket.gaierror / ConnectionRefusedError / socket.timeout) and on the text
+    otherwise: urllib's own error text is the only evidence a stubbed opener
+    leaves, and this has to give the same answer for both.
+    """
+    import socket
+
+    reason = getattr(exc, "reason", None)
+    blob = f"{reason} {exc}".lower()
+    if isinstance(reason, socket.gaierror) or isinstance(exc, socket.gaierror) or any(
+            marker in blob for marker in ("getaddrinfo", "name or service not known",
+                                          "nodename nor servname", "name resolution",
+                                          "no such host", "temporary failure in name")):
+        return (DASHBOARD_REACH_UNKNOWN_HOST,
+                f"that address does not exist on this network: {url_base}. "
+                "Check the spelling with your admin.")
+    if isinstance(reason, TimeoutError) or isinstance(exc, TimeoutError) or "timed out" in blob:
+        return (DASHBOARD_REACH_TIMEOUT,
+                f"{url_base} did not answer in time. If you have just signed in to "
+                "Tailscale, wait a few seconds and check again.")
+    if isinstance(reason, ConnectionRefusedError) or isinstance(exc, ConnectionRefusedError) or (
+            "refused" in blob):
+        return (DASHBOARD_REACH_REFUSED,
+                f"{url_base} refused the connection: the address exists, but nothing "
+                "is serving the dashboard on that port. Check the port with your admin.")
+    return (DASHBOARD_REACH_ERROR,
+            f"could not reach {url_base}: {exc}")
+
+
 def dashboard_reachable(
     dashboard_url: str,
     http_get: HttpGetFn = default_http_get,
@@ -814,16 +947,11 @@ def dashboard_reachable(
 ) -> bool:
     """True if GET {dashboard_url}/api/v1/health succeeds. This is the real
     end-to-end check the wizard gates "Next" on -- Tailscale can report
-    "up" while the tailnet route to the dashboard is still settling."""
-    dashboard_url = str(dashboard_url or "").strip()
-    if not dashboard_url:
-        return False
-    url = f"{dashboard_url.rstrip('/')}/api/v1/health"
-    try:
-        http_get(url, timeout)
-        return True
-    except Exception:
-        return False
+    "up" while the tailnet route to the dashboard is still settling.
+
+    Kept as the boolean it always was; dashboard_probe is where the reason
+    lives now."""
+    return bool(dashboard_probe(dashboard_url, http_get=http_get, timeout=timeout)["ok"])
 
 
 def fetch_site(
@@ -844,7 +972,7 @@ def fetch_site(
     The answer is cached to ~/.ccsync/state/site.json (companion site.py) on
     the way past: the companion reads it offline, and the wizard is the one
     process here guaranteed to have just talked to the dashboard."""
-    url = site_mod.site_url(str(dashboard_url or "").strip())
+    url = site_mod.site_url(normalise_dashboard_url(dashboard_url))
     if not url:
         return {}
     try:
@@ -1060,12 +1188,22 @@ _bootstrap_child: Optional[subprocess.Popen] = None
 
 def default_bootstrap_run(cmd: list[str], timeout: Optional[float] = None,
                           env: Optional[dict] = None,
+                          on_line: Optional[Callable[[str], None]] = None,
                           **kwargs: Any) -> "subprocess.CompletedProcess":
     global _bootstrap_child
     popen_kwargs: dict[str, Any] = dict(kwargs)
     popen_kwargs.pop("capture_output", None)
     popen_kwargs.setdefault("stdout", subprocess.PIPE)
-    popen_kwargs.setdefault("stderr", subprocess.PIPE)
+    if on_line is not None:
+        # OPS-4 (usability + resilience sweep 2026-09-04): merged, not a second
+        # pipe. The bootstrap's own warnings go to stderr, and reading two
+        # pipes from one thread is what communicate() exists to avoid -- while
+        # reading them on two threads would interleave a warning somewhere
+        # other than after the step that produced it, which is the one thing
+        # the editor is reading this log for.
+        popen_kwargs["stderr"] = subprocess.STDOUT
+    else:
+        popen_kwargs.setdefault("stderr", subprocess.PIPE)
     if os.name == "nt":
         popen_kwargs["creationflags"] = (
             popen_kwargs.get("creationflags", 0)
@@ -1075,7 +1213,10 @@ def default_bootstrap_run(cmd: list[str], timeout: Optional[float] = None,
     proc = subprocess.Popen(cmd, env=env, **popen_kwargs)
     _bootstrap_child = proc
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
+        if on_line is not None:
+            stdout, stderr = _stream_child(proc, on_line, timeout, cmd)
+        else:
+            stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         terminate_bootstrap()
         raise
@@ -1083,6 +1224,59 @@ def default_bootstrap_run(cmd: list[str], timeout: Optional[float] = None,
         if _bootstrap_child is proc:
             _bootstrap_child = None
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
+def _stream_child(proc: "subprocess.Popen", on_line: Callable[[str], None],
+                  timeout: Optional[float],
+                  cmd: list[str]) -> tuple[str, str]:
+    """Read the child's merged output line by line, handing each line to
+    `on_line` as it arrives, and return the aggregate the caller still needs
+    (parse_device_id and bootstrap_capability_warnings both scan the whole
+    thing afterwards).
+
+    The timeout is kept -- `powershell -File` inherits a closed stdin, so a
+    winget prompt is a hang with no way out -- but communicate() cannot
+    enforce it here, so a watchdog thread kills the process group on the
+    deadline; the read loop then ends because the pipe closed, and this raises
+    TimeoutExpired carrying everything read so far, exactly as before.
+    """
+    lines: list[str] = []
+    timed_out = threading.Event()
+    finished = threading.Event()
+
+    def _watchdog() -> None:
+        if not timeout:
+            return
+        if not finished.wait(timeout):
+            timed_out.set()
+            terminate_bootstrap()
+
+    watcher = threading.Thread(target=_watchdog, daemon=True)
+    watcher.start()
+    try:
+        stream = proc.stdout
+        if stream is not None:
+            for raw in stream:
+                line = raw.rstrip("\r\n")
+                lines.append(line)
+                try:
+                    on_line(line)
+                except Exception:
+                    # The sink is a GUI callback. A page swapped out from
+                    # under it must never stop the install that is running.
+                    pass
+    finally:
+        finished.set()
+    try:
+        proc.wait(timeout=30)
+    except Exception:
+        pass
+    output = "\n".join(lines)
+    if output:
+        output += "\n"
+    if timed_out.is_set():
+        raise subprocess.TimeoutExpired(cmd, timeout or 0, output=output, stderr="")
+    return output, ""
 
 
 def terminate_bootstrap() -> bool:
@@ -1124,6 +1318,7 @@ def run_bootstrap(
     script_path: Optional[Path] = None,
     platform: Optional[str] = None,
     site: Optional[dict[str, Any]] = None,
+    on_line: Optional[Callable[[str], None]] = None,
 ) -> tuple[int, str]:
     """Invoke the platform's bootstrap with the verified editor's identity:
     `powershell -ExecutionPolicy Bypass -File windows_bootstrap.ps1 ...` on
@@ -1144,7 +1339,14 @@ def run_bootstrap(
     A timeout is reported like any other bootstrap failure -- a non-zero
     exit code plus an explanatory message -- rather than raised, since
     _clean_slate has already run by the time callers get here and the
-    wizard needs a normal failed-install result, not an exception."""
+    wizard needs a normal failed-install result, not an exception.
+
+    `on_line`, when given, is called with each line of the child's output as
+    it is printed (OPS-4, 2026-09-04): the whole install used to be captured
+    to a pipe and shown in one block at the end, so the editor watched a dead
+    window for two to thirty minutes with no way to tell working from hung.
+    The aggregate is still returned -- parse_device_id and
+    bootstrap_capability_warnings read it after the fact."""
     script = find_bootstrap_script(script_path, platform=platform)
     site = site or {}
     # The manifest values the bootstrap has its own flags for. Passing them
@@ -1251,20 +1453,33 @@ def run_bootstrap(
         if tree_name:
             child_env["CCSYNC_TREE_NAME"] = tree_name
 
+    # OPS-4 (2026-09-04): passed only when a caller asked for it, so an
+    # injected `run` (every test, and any hand-rolled runner) keeps the exact
+    # signature it had. The wizard's sink is thread-safe by construction
+    # (_append_log marshals through _safe_after).
+    stream_kwargs: dict[str, Any] = {"on_line": on_line} if on_line is not None else {}
     try:
         result = run(cmd, timeout=BOOTSTRAP_TIMEOUT_SECONDS, env=child_env,
-                     **CAPTURE_TEXT_KWARGS)
+                     **stream_kwargs, **CAPTURE_TEXT_KWARGS)
     except subprocess.TimeoutExpired as exc:
         partial = ((exc.stdout or "") if isinstance(exc.stdout, str) else "") + (
             (exc.stderr or "") if isinstance(exc.stderr, str) else ""
         )
-        message = (
-            f"{partial}\nbootstrap timed out after {BOOTSTRAP_TIMEOUT_SECONDS}s "
+        explanation = (
+            f"bootstrap timed out after {BOOTSTRAP_TIMEOUT_SECONDS}s "
             "-- it may be stuck on a prompt (e.g. winget) or a stalled download; "
             f"re-run the installer, or run {bootstrap_script_name(platform)} by "
             "hand to see where it hangs."
         )
-        return 1, message
+        if on_line is not None:
+            # Streamed callers have already SEEN `partial` line by line; only
+            # the verdict is news to them (OPS-4). It still travels in the
+            # returned text, which is what the capability scan reads.
+            try:
+                on_line(explanation)
+            except Exception:
+                pass
+        return 1, f"{partial}\n{explanation}"
     output = (getattr(result, "stdout", "") or "") + (getattr(result, "stderr", "") or "")
     return getattr(result, "returncode", 1), output
 
@@ -1596,6 +1811,120 @@ def local_root_space_warning(
 # refuses to sync while it is there rather than pretending a half-installed
 # machine is a working one.
 INSTALL_BREADCRUMB_FILENAME = "install_in_progress.json"
+
+# -- OPS-5 (usability + resilience sweep 2026-09-04): the install log ---------
+# A frozen windowed build has no stderr (console=False in both specs), so every
+# log.info/log.exception in the wizard went nowhere, and the bootstrap's output
+# only ever reached a tk.Text that dies with the window. On failure the editor
+# was told to "send them this list" with no path, no copy button and no file --
+# the owner debugging a remote install had nothing to ask for but a photo of
+# the screen. Everything the wizard shows is teed here as it happens (not at
+# the end: the interesting failures are the ones that take the window with
+# them), one file per run, kept.
+INSTALL_LOG_DIRNAME = "logs"
+_install_log_path: Optional[Path] = None
+_install_log_lock = threading.Lock()
+
+
+def install_log_dir(home: Optional[Path] = None) -> Path:
+    base = Path(home) if home is not None else Path.home()
+    return base / ".ccsync" / INSTALL_LOG_DIRNAME
+
+
+def start_install_log(home: Optional[Path] = None,
+                      now: Optional[str] = None) -> Optional[Path]:
+    """Open (create) this run's log file and return its path, or None when the
+    disk will not have it. Never raises: a wizard that cannot write a log must
+    still install, and every caller degrades to "no path to show"."""
+    global _install_log_path
+    stamp = now or time.strftime("%Y%m%d-%H%M%S")
+    target = install_log_dir(home) / f"onboard-{stamp}.log"
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target, "a", encoding="utf-8"):
+            pass
+    except OSError:
+        _install_log_path = None
+        return None
+    _install_log_path = target
+    return target
+
+
+def install_log_path() -> Optional[Path]:
+    """This run's log file, once start_install_log has opened one."""
+    return _install_log_path
+
+
+def append_install_log(text: str) -> None:
+    """Tee one chunk of the wizard's log to disk. Opened and closed per write
+    on purpose: the process this is protecting against is one that dies
+    without unwinding, and a buffered handle would take the last lines -- the
+    ones that say why -- with it. Never raises, from any thread."""
+    path = _install_log_path
+    if path is None:
+        return
+    body = str(text)
+    if not body.endswith("\n"):
+        body += "\n"
+    try:
+        with _install_log_lock:
+            with open(path, "a", encoding="utf-8", errors="replace") as fh:
+                fh.write(body)
+    except OSError:
+        pass
+
+
+def read_install_log() -> str:
+    """The whole log as text, for [ COPY LOG ]. "" when there is none."""
+    path = _install_log_path
+    if path is None:
+        return ""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+# -- OPS-25 (usability + resilience sweep 2026-09-04): the finish page's two --
+# -- half-truths ---------------------------------------------------------
+# Both were shaped by the page's fixed height, and both lied to the one person
+# who has to act on it. They live here, not in onboard.py, because onboard.py
+# is GUI wiring with no tests by design and these are decisions.
+FINISH_WARNINGS_SHOWN = 6
+
+
+def finish_warning_lines(warnings: list[str],
+                         limit: int = FINISH_WARNINGS_SHOWN) -> list[str]:
+    """The warning lines the finish page renders, truncation included.
+
+    The heading counts every warning and the list showed the first six, so a
+    seventh disappeared with nothing saying so, on the page whose instruction
+    is "send them this list". Truncating is still right; silence about it is
+    not.
+    """
+    items = [str(w) for w in (warnings or [])]
+    shown = items[:max(0, int(limit))]
+    hidden = len(items) - len(shown)
+    if hidden > 0:
+        shown.append(
+            f"... and {hidden} more. All of them are in the install log (use "
+            "COPY LOG on the previous page, or the file named at the bottom of "
+            "this one).")
+    return shown
+
+
+def finish_copy_field(value: Optional[str], placeholder: str) -> tuple[str, bool]:
+    """(what the field shows, whether there is anything to copy).
+
+    [ COPY ] used to put the PLACEHOLDER on the clipboard -- the sentence
+    "(not found automatically ...)" -- which the editor then pasted into the
+    message to their admin as if it were a device ID. A field with no value
+    has nothing to copy and must say so on the button.
+    """
+    text = str(value or "").strip()
+    if text:
+        return text, True
+    return placeholder, False
 
 
 def install_state_dir(home: Optional[Path] = None) -> Path:

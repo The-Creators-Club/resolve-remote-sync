@@ -59,12 +59,14 @@
 {% endif %}
 
 {# Every page under Settings, so the drawer can light [ SETTINGS ] up for all
-   six of them rather than only the site form. Same list as
-   partials/settings_nav.html, which marks the individual entry. "installer"
-   is deliberately absent since 2026-08-18: the installer is a download with
-   its own drawer entry, not a hub page (see below). #}
-{% set SETTINGS_PAGES = ["site", "users", "assignments", "transfers", "setup",
-                         "packages"] %}
+   of them rather than only the site form. SETTINGS_PAGES is a Jinja global
+   DERIVED from ui.SETTINGS_NAV, which partials/settings_nav.html renders:
+   one list, so a thirteenth page cannot be marked in the strip and unmarked
+   in the drawer. It was a literal here until UX-8 (usability sweep
+   2026-09-03), and it had been wrong since the six 08-28 pages landed, with
+   a comment claiming the two lists matched. "installer" is still absent, and
+   deliberately: the installer is a download with its own drawer entry, not a
+   hub page (see below). #}
 <div class="nav-drawer" id="nav-drawer" popover>
   <div class="drawer-head">
     <span class="drawer-brand">{{ brand_org | upper }} <span class="dim">//</span> MENU</span>
@@ -153,7 +155,7 @@
          hx-confirm cannot reach it -- onsubmit + window.confirm is the
          matching mechanism for a form that submits itself. #}
       <form method="post" action="/logout-everywhere" class="inline-form"
-            title="revoke this account's sessions on every device -- use it if a machine was lost"
+            title="revoke this account's sessions on every device. Use it if a computer was lost"
             onsubmit="return window.confirm('Sign yourself out of every browser, including this one? You will need to log in again to finish what you are doing.');">
         <input type="hidden" name="csrf" value="{{ csrf_token or '' }}">
         <button class="btn" type="submit">[ LOGOUT ALL ]</button></form>
@@ -179,16 +181,33 @@
   </div>
 </div>
 
-{% if view and not view.syncthing_reachable %}
-  <span class="banner">▲ SYNCTHING UNREACHABLE: data may be stale</span>
-{% endif %}
+{# DUI-2 (2026-09-04): the Syncthing banner used to sit here as a literal, and
+   this include is rendered once per page load -- so a warning about stale data
+   was itself frozen for the life of the tab. It moved into partials/stamp.html
+   with the "updated Ns ago" line below, which is polled. #}
 {# The staleness stamp and the session chip are ONE flex item (2026-08-18):
    as two siblings a wrap could put "updated 4s ago" on one row and the user
    plus their logout button on the next. .topbar-right carries the
    margin-left:auto that used to sit on .stamp, so the pair still parks at
    the right edge of whichever row it lands on. #}
 <span class="topbar-right">
-<span class="stamp">{{ ("updated " + (view.generated_at | ago)) if view else "" }}</span>
+{# DUI-2 (2026-09-04): POLLED, so it can only say "4s ago" while the server is
+   still answering. Server-rendered on first paint (the include) so a browser
+   that never loads htmx still gets a true stamp for that one render, and
+   static/htmx_errors.js is what says so out loud when the polls stop. No
+   `load` trigger beside the interval: that would be a second request on every
+   page load for a fragment the include has already filled in. #}
+{% if session_user %}
+<span class="stamp" id="topbar-stamp"
+      hx-get="/partials/stamp"
+      hx-trigger="every 30s [document.visibilityState === 'visible']"
+      hx-swap="innerHTML">{% include "partials/stamp.html" %}</span>
+{% else %}
+{# No session, no poll: /partials/stamp is behind the login gate, and a
+   fragment that answers with the login page would be swapped into the topbar
+   as a login form (2026-09-04). #}
+<span class="stamp"></span>
+{% endif %}
 <span class="session">
   {% if session_user %}
     <span class="muted">{{ session_user }}{{ " (admin)" if session_is_admin }}</span>

@@ -55,7 +55,10 @@ DB_OPEN_RETRY_SECONDS = 5.0
 # `invariants` is here for the same reason: most of what it verifies is a
 # table read, and a deployment with no Syncthing must still be told that a
 # disk was cloned or that a published build carries a bricking floor.
-SYNCTHING_FREE_KINDS = ("prune", "invariants", "alerts")
+# ...and the list itself lives in db.py, because db.fetch_collector_status has
+# to exclude exactly these kinds when it decides whether Syncthing is
+# reachable. Two copies drifted once (2026-09-04): see the constant there.
+SYNCTHING_FREE_KINDS = db.SYNCTHING_FREE_KINDS
 
 # Syncthing's own folder marker. Its presence is proof Syncthing has actually
 # been serving a directory -- and its ABSENCE is Syncthing's only mass-delete

@@ -366,7 +366,8 @@ def test_the_grid_says_a_computer_is_being_refused(app_env):
     client.post("/api/v1/report", json=payload(), headers=bad)
     html = _as_admin(client).get("/partials/fleet").text
     assert "BEING REFUSED" in html
-    assert "COMPUTER(S) ARE BEING REFUSED" in html
+    # UX-10 (2026-09-03): the noun agrees with the count now.
+    assert "1 COMPUTER IS BEING REFUSED" in html
 
 
 def test_the_grid_counts_the_retired_key_drain(app_env, tmp_path):

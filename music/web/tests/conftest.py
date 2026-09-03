@@ -116,3 +116,19 @@ def client(seeded_db):
     from fastapi.testclient import TestClient
     with TestClient(app, headers={'X-Ingest-Token': INGEST_TOKEN}) as c:
         yield c
+
+
+@pytest.fixture(autouse=True)
+def _fresh_rescore_clock():
+    """Every test gets its own rescore clock (MUSIC-5, 2026-09-04).
+
+    `rescore` coalesces library rescores per PROCESS, which is what stops a
+    200-track drop doing 200 full passes -- and a test suite is one process, so
+    without this whichever test scored first would leave every later one
+    `deferred`. The coalescer itself is exercised deliberately, in
+    tests/test_rescore_transaction.py.
+    """
+    from musicweb import rescore
+    rescore._last_rescore = None
+    yield
+    rescore._last_rescore = None

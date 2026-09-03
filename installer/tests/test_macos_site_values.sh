@@ -42,8 +42,10 @@ LOW_SPACE_SRC="$(slice 'LOW_SPACE_WARN_KB=' 'free_kb_for_path() {')"
 SITE_VALUE_SRC="$(slice 'site_value() {' 'site_number() {')"
 PREFIX_SRC="$(slice 'canonical_prefix_letter() {' 'CANONICAL_PREFIX="$(site_value')"
 VERIFY_SRC="$(slice 'verify_sha256() {' '# ------')"
+MISSING_FLAGS_SRC="$(slice 'missing_required_flags() {' '# --resolve-mapping-only touches')"
+QUIT_WARN_SRC="$(slice 'resolve_quit_timeout_warning() {' 'resolve_mapping_manual_instructions() {')"
 
-for name in SITE_VALUE_SRC PREFIX_SRC VERIFY_SRC LOW_SPACE_SRC; do
+for name in SITE_VALUE_SRC PREFIX_SRC VERIFY_SRC LOW_SPACE_SRC MISSING_FLAGS_SRC QUIT_WARN_SRC; do
     eval "body=\$$name"
     case "$body" in
         *'}'*) ;;
@@ -58,6 +60,8 @@ eval "$SITE_VALUE_SRC"
 eval "$PREFIX_SRC"
 eval "$VERIFY_SRC"
 eval "$LOW_SPACE_SRC"
+eval "$MISSING_FLAGS_SRC"
+eval "$QUIT_WARN_SRC"
 
 # --- site_value ------------------------------------------------------------
 # One flat JSON object by contract (dashboard api.api_site). sed, not a JSON
@@ -188,6 +192,36 @@ check "a nearly empty drive still names a figure" \
 case "$(low_space_message 42991616)" in
     *—*) bad "low_space_message contains an em dash" ;;
     *) ok "low_space_message has no em dash" ;;
+esac
+
+# --- missing_required_flags / resolve_quit_timeout_warning (OPS-25, ---------
+# --- usability + resilience sweep 2026-09-04) ------------------------------
+# A forgotten flag used to print the usage block with nothing naming the flag,
+# and the 180 s "this will continue automatically" wait ended in silence: the
+# return was discarded with `|| true` and an unrelated-looking "Resolve is
+# running" appeared minutes later. Both are text, so both are pinned here.
+check "both flags given"            ""              "$(missing_required_flags host jsmith)"
+check "no editor name"              "--editor-name" "$(missing_required_flags host '')"
+check "no tailnet host"             "--tailnet-host" "$(missing_required_flags '' jsmith)"
+check "neither flag" "--tailnet-host and --editor-name" "$(missing_required_flags '' '')"
+
+RESOLVE_PREFS_WAIT_SECONDS=180
+QUIT_WARNING="$(resolve_quit_timeout_warning)"
+case "$QUIT_WARNING" in
+    *"180s"*) ok "the give-up warning names the wait it gave up on" ;;
+    *) bad "the give-up warning does not name the deadline: $QUIT_WARNING" ;;
+esac
+case "$QUIT_WARNING" in
+    *"--resolve-mapping-only"*) ok "the give-up warning names the command that finishes the job" ;;
+    *) bad "the give-up warning does not name --resolve-mapping-only" ;;
+esac
+case "$QUIT_WARNING" in
+    *"Everything else still installs"*) ok "the give-up warning says the install is not over" ;;
+    *) bad "the give-up warning reads like a failed install" ;;
+esac
+case "$QUIT_WARNING" in
+    *—*) bad "resolve_quit_timeout_warning contains an em dash" ;;
+    *) ok "resolve_quit_timeout_warning has no em dash" ;;
 esac
 
 echo ""

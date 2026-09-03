@@ -17,8 +17,8 @@ from fastapi.responses import (FileResponse, HTMLResponse, PlainTextResponse,
                                RedirectResponse, Response)
 from fastapi.templating import Jinja2Templates
 
-from . import (VERSION, auth, dashboard_update, db, local_users, oidc, package_store,
-               provision, release_feed, site_store)
+from . import (VERSION, auth, dashboard_update, db, health, local_users, oidc,
+               package_store, provision, release_feed, site_store)
 from .api import (
     approve_username_error, build_admin_users_view, build_editors_view,
     build_packages_view, build_presence_view, build_project_view, build_projects_view,
@@ -121,6 +121,45 @@ templates.env.filters["ago"] = ago
 templates.env.filters["bar"] = bar
 templates.env.filters["eta"] = eta
 
+# UX-8 (usability sweep 2026-09-03): ONE list, in one place. The Settings
+# strip (partials/settings_nav.html) and the drawer's "which page lights
+# [ SETTINGS ] up" test (partials/topbar.html) each carried their own copy,
+# with a comment in the second asserting they matched; six pages were added
+# to the strip and not to the copy, so an admin standing on ALERTS, JOBS,
+# INVARIANTS, PROTECTION, RECOVERY or TIMELINE opened the phone drawer and
+# found nothing marked at all. A thirteenth page cannot drift now: both
+# templates read these globals.
+#
+# (key, label, href, admin_only). admin_only is per ENTRY, not per strip:
+# /transfers is an editor-visible page that happens to hang here.
+SETTINGS_NAV: tuple[tuple[str, str, str, bool], ...] = (
+    ("site",        "SITE",        "/admin/settings",    True),
+    ("users",       "USERS",       "/admin/users",       True),
+    ("assignments", "ASSIGNMENTS", "/admin/assignments", True),
+    ("transfers",   "TRANSFERS",   "/transfers",         False),
+    ("setup",       "SETUP",       "/setup",             True),
+    ("packages",    "PACKAGES",    "/admin/packages",    True),
+    ("audit",       "TIMELINE",    "/admin/audit",       True),
+    ("alerts",      "ALERTS",      "/admin/alerts",      True),
+    ("jobs",        "JOBS",        "/admin/jobs",        True),
+    ("invariants",  "INVARIANTS",  "/admin/invariants",  True),
+    ("protection",  "PROTECTION",  "/admin/protection",  True),
+    ("recovery",    "RECOVERY",    "/admin/recovery",    True),
+)
+SETTINGS_PAGES: tuple[str, ...] = tuple(key for key, _, _, _ in SETTINGS_NAV)
+templates.env.globals["SETTINGS_NAV"] = SETTINGS_NAV
+templates.env.globals["SETTINGS_PAGES"] = SETTINGS_PAGES
+
+# CR-88 (2026-08-27) route sweep, usability sweep 2026-09-03: the tray's
+# right-click menu is ten items and Copy diagnostics is NOT one of them. It
+# moved into the companion's Settings window, under HELP, and a dashboard
+# sentence that tells an admin to tell an editor to "use Copy diagnostics on
+# the tray" sends them looking for a menu item that is not there. ONE
+# constant, because three surfaces say it (the diagnostics panel twice, the
+# fleet grid's CRASHES chip) and alerts.py says it twice more.
+COMPANION_DIAGNOSTICS_PATH = health.COMPANION_DIAGNOSTICS_PATH
+templates.env.globals["COMPANION_DIAGNOSTICS_PATH"] = COMPANION_DIAGNOSTICS_PATH
+
 
 def _render(request: Request, name: str, context: dict) -> HTMLResponse:
     settings = request.app.state.settings
@@ -147,9 +186,16 @@ def _render(request: Request, name: str, context: dict) -> HTMLResponse:
     # had just saved. Cached on app.state and dropped by site_store.invalidate
     # on every write, so this stays one dict lookup per render.
     manifest = site_store.manifest_for_app(request.app, settings)
+    # UX-5 (usability sweep 2026-09-03): every <title> reads this too now, so
+    # the tab, the bookmark, the phone's app switcher and the login page all
+    # say what the header says. The last "or" is what keeps a title from
+    # rendering as an empty string on a site whose manifest could not be read:
+    # the product's name is the floor, never the first customer's.
     context.setdefault("brand_org", (manifest.get("org_short")
                                      or manifest.get("org_name")
-                                     or manifest.get("product_name")))
+                                     or manifest.get("product_name")
+                                     or settings.site_product_name
+                                     or "CC Sync"))
     context.setdefault("brand_product", manifest.get("product_name")
                        or settings.site_product_name)
     # Which nav entry to mark (2026-08-18). The drawer in partials/topbar.html
@@ -181,6 +227,21 @@ def _render(request: Request, name: str, context: dict) -> HTMLResponse:
     # and 15 s timers, and a count on each of those would be one extra
     # connection per poll per open tab for a number nobody is reading in a
     # fragment. Best-effort: a topbar that cannot count must still render.
+    # DUI-2 (2026-09-04): the topbar's freshness stamp on first paint. FULL
+    # PAGES ONLY, and only for a session that can poll it -- the fragment
+    # itself is behind the login gate. Its own connection for the same reason
+    # the two counts below take one: _render has no request-scoped handle, and
+    # a stamp is not worth threading one through every call site for.
+    if not name.startswith("partials/") and context.get("session_user"):
+        try:
+            conn = db.connect(settings.db_path)
+            try:
+                context.update({k: v for k, v in _stamp_context(conn).items()
+                                if k not in context})
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            log.exception("could not stamp this page render")
     if not name.startswith("partials/") and context.get("session_is_admin"):
         context.setdefault("notice_counts", _notice_counts_safe(settings))
         # SYS-8: the same idea for the alert scan, read from the LAST SCAN'S
@@ -454,16 +515,62 @@ def page_logout_everywhere(request: Request):
 
 
 @router.get("/partials/topbar")
-def partial_topbar(request: Request, current: str = ""):
+def partial_topbar(request: Request, current: str = "",
+                   conn: sqlite3.Connection = Depends(get_conn)):
     """The shared header, fetched by the mounted SPAs (/broll, /music) so their
     pages carry the dashboard's real topbar -- session, admin links, nav --
     instead of a hand-copied imitation that drifts. `current` names the nav
     entry for the page doing the fetching; anything unrecognized simply
-    highlights nothing. No view is passed, so the staleness stamp and the
-    Syncthing banner stay off -- this render answers 'who am I and where can I
-    go', not 'is the fleet healthy'."""
+    highlights nothing.
+
+    The freshness stamp comes with it since DUI-2 (2026-09-04): it used to be
+    left out here because no `view` was passed, so an SPA's header said
+    nothing about whether the server was still answering. It is its own read
+    now (_stamp_context), not the fleet view, so this stays one cheap query."""
     return _render(request, "partials/topbar.html",
-                   {"nav_current": current.strip().lower()})
+                   {"nav_current": current.strip().lower(),
+                    **_stamp_context(conn)})
+
+
+# ----------------------------------------------------------- freshness stamp
+#
+# DUI-2 (usability + resilience sweep, 2026-09-04). The page's ONLY freshness
+# indicator was `updated {{ view.generated_at | ago }}` inside
+# partials/topbar.html, which is a plain {% include %} rendered once per full
+# page load and never again. So a dashboard whose partials had been 500ing for
+# an hour -- a container restart, a NAS reboot, a wifi drop -- kept painting a
+# green fleet with "updated 4s ago" beside it, indefinitely. Two halves fix
+# that and they are deliberately independent: this fragment can only say "4s"
+# while the server is answering, and static/htmx_errors.js says so out loud
+# when it stops.
+#
+# The stamp is the SERVER's own clock at the moment it answered, not the fleet
+# view's generated_at: what the reader needs from it is "is this page still
+# talking to the dashboard", and a view builder's timestamp cannot answer that
+# on a page that has no view.
+
+def _stamp_context(conn) -> dict:
+    """When the server last answered this page, and whether Syncthing is up.
+
+    The Syncthing banner rides in the same fragment because it was frozen into
+    the same include: "data may be stale" that itself goes stale is worse than
+    no banner at all."""
+    try:
+        collector = db.fetch_collector_status(conn)
+        reachable = bool(collector["syncthing_reachable"])
+    except Exception:  # noqa: BLE001
+        # A topbar that cannot read the collector must still render, and must
+        # not accuse Syncthing of being down on the strength of a failed read.
+        log.exception("could not read collector status for the freshness stamp")
+        reachable = True
+    return {"stamp_at": db.utcnow_iso(), "stamp_syncthing_reachable": reachable}
+
+
+@router.get("/partials/stamp")
+def partial_stamp(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
+    """The polled half of DUI-2. Every open tab asks for this on its own
+    cadence, so it is kept to one collector read and no view build."""
+    return _render(request, "partials/stamp.html", _stamp_context(conn))
 
 
 @router.get("/partials/queue")
@@ -1097,17 +1204,31 @@ def partial_transfers(request: Request, conn: sqlite3.Connection = Depends(get_c
 
 def _notices_context(conn, error: str | None = None) -> dict:
     open_rows = db.open_notices(conn)
+    # UX-6 (usability sweep 2026-09-03): the clean state used to read "Every
+    # check below ran and found nothing wrong" over a panel that renders
+    # [ NOT CHECKED ] for any kind nothing has ever evaluated, which is the
+    # unchecked-reads-as-fine mistake wave 4 exists to end. Counted here
+    # rather than in the template so the panel and its headline can never
+    # disagree: same registry, same evidence set.
+    kinds = db.notice_kinds()
+    checked = set(db.notice_check_times(conn))
+    ran = sum(1 for k in kinds if k["kind"] in checked)
     return {
         "notices": open_rows,
         "notice_error": error,
         # The registry, so an empty panel says WHAT was checked (owner,
         # 2026-08-28): silence must read as "checked and fine".
-        "notice_kinds": db.notice_kinds(),
+        "notice_kinds": kinds,
         "open_kinds": {row["kind"] for row in open_rows},
         # Finding 1 (resilience sweep 2026-08-28 fix pass): a registry entry
         # with no writer must render NOT CHECKED, never a false OK. Evidence,
         # not the registry itself -- see db.notice_check_times.
-        "checked_kinds": set(db.notice_check_times(conn)),
+        "checked_kinds": checked,
+        # UX-6: how many of the registry's kinds this build has actually
+        # evaluated, and how many have never run.
+        "notice_checks_ran": ran,
+        "notice_checks_total": len(kinds),
+        "notice_checks_never_ran": len(kinds) - ran,
     }
 
 
@@ -1420,7 +1541,13 @@ async def partial_admin_recovery_preview(
     form = await _form(request)
     error, preview = "", None
     try:
-        preview = recovery.preview_restore(
+        # REL-2's sweep (2026-09-04): a preview walks a whole snapshot of a
+        # project on the NAS. Same rule as the publish above -- an `async`
+        # route (it awaits the form) must not do filesystem work of unknown
+        # length inside the event loop, because --workers 1 means everyone
+        # else's request is behind it.
+        preview = await run_in_threadpool(
+            recovery.preview_restore,
             request.app.state.settings, conn, str(form.get("slug") or ""),
             str(form.get("snapshot") or ""))
     except recovery.RecoveryError as exc:
@@ -1445,7 +1572,10 @@ async def partial_admin_recovery_restore(
     form = await _form(request)
     error, notice, result = "", "", None
     try:
-        result = recovery.restore_into_quarantine(
+        # REL-2's sweep (2026-09-04): this COPIES files, so it is the longest
+        # blocking call on the page. Off the event loop.
+        result = await run_in_threadpool(
+            recovery.restore_into_quarantine,
             request.app.state.settings, conn, str(form.get("slug") or ""),
             str(form.get("snapshot") or ""), admin,
             include_changed=str(form.get("include_changed") or "") == "1")
@@ -1471,7 +1601,10 @@ async def partial_admin_recovery_drill(
     form = await _form(request)
     error, notice = "", ""
     try:
-        result = recovery.run_drill(request.app.state.settings, conn, admin)
+        # REL-2's sweep (2026-09-04): a rehearsal restores real bytes. Same
+        # rule as the two routes above.
+        result = await run_in_threadpool(recovery.run_drill,
+                                         request.app.state.settings, conn, admin)
         notice = (f"rehearsed a restore from {result['snapshot']}: {result['detail']}."
                   if result["ok"] else
                   f"the rehearsal FAILED: {result['detail']}.")
@@ -1922,11 +2055,19 @@ async def partial_admin_create_user(
         else:
             db.record_known_editor(conn, username, "admin")
             conn.commit()
-            if generated:
-                error = f"{username}: created with a generated password: {generated}"
+        # DUI-1 (2026-09-04): a generated password used to come back through
+        # the `error` key, so the one success an admin must transcribe wore
+        # the warning triangle -- and it was painted INSIDE this panel, which
+        # admin_users.html re-fetches every 30 s. The next poll swapped the
+        # credential away for good and there was no [ COPY ] button. It is an
+        # out-of-band swap into #minted-secret now: an element outside every
+        # polling wrapper on the page. Never `error`, never in this panel.
         return _render(request, "partials/admin_users.html", {
             "admin_users": build_admin_users_view(settings, conn),
             "error": error,
+            "minted_secret": generated if error is None else None,
+            "minted_kind": "password",
+            "minted_username": username,
         })
 
     error = None
@@ -1978,8 +2119,15 @@ async def partial_admin_set_password(request: Request, conn: sqlite3.Connection 
     username = form.get("username", "").strip().lower()
     password = form.get("password", "").strip()
 
+    # DUI-18 (2026-09-04): [ SET ] answered with an empty banner slot, so a
+    # write that locks somebody out of the dashboard looked identical to a
+    # click that did nothing. It gets a result line of its own -- `notice`,
+    # not `error`, which the panel already renders without the triangle.
+    done = f"Password set for {username}. Tell them the new password: it is not shown here again."
+
     if str(settings.auth_method or "smb").strip().lower() == "local":
         error = None
+        notice = None
         if not password:
             error = "password required"
         else:
@@ -1989,12 +2137,15 @@ async def partial_admin_set_password(request: Request, conn: sqlite3.Connection 
                 error = str(exc)
             else:
                 conn.commit()
+                notice = done
         return _render(request, "partials/admin_users.html", {
             "admin_users": build_admin_users_view(settings, conn),
             "error": error,
+            "notice": notice,
         })
 
     error = None
+    notice = None
     if not nas_factory.nas_configured(settings):
         error = "DASH_NAS_PW is not configured on the dashboard"
     elif not is_valid_username(username):
@@ -2021,10 +2172,13 @@ async def partial_admin_set_password(request: Request, conn: sqlite3.Connection 
             await run_in_threadpool(nas.set_known_password, username, password)
         except NasError as exc:
             error = str(exc)
+        else:
+            notice = done
 
     return _render(request, "partials/admin_users.html", {
         "admin_users": build_admin_users_view(settings, conn),
         "error": error,
+        "notice": notice,
     })
 
 
@@ -2233,10 +2387,16 @@ async def partial_admin_remove_ssh_key(request: Request, conn: sqlite3.Connectio
 
 def _report_tokens_render(request, conn, *, error: str | None = None,
                           minted: str | None = None, minted_username: str = ""):
+    # DUI-1 (2026-09-04): the token itself leaves this panel. It used to be a
+    # banner inside a box that admin_users.html re-fetches every 60 s, so the
+    # one value the dashboard will never be able to show again had a lifetime
+    # of under a minute and no [ COPY ] control. It goes out of band into
+    # #minted-secret now, which no poll targets.
     return _render(request, "partials/admin_report_tokens.html", {
         "report_tokens": build_report_tokens_view(conn),
         "error": error,
-        "minted": minted,
+        "minted_secret": minted,
+        "minted_kind": "token",
         "minted_username": minted_username,
     })
 
@@ -2584,13 +2744,20 @@ def page_download_platform(
 # by every route below that re-renders admin_packages.html, so a Check now /
 # Publish / policy change never leaves the packages table and the feed
 # section disagreeing about what is on this dashboard.
-def _packages_and_feed(conn, request: Request, error: str | None = None) -> dict:
+def _packages_and_feed(conn, request: Request, error: str | None = None,
+                       refused: list | None = None) -> dict:
     settings = request.app.state.settings
     return {
         "packages": build_packages_view(conn, settings),
         "feed": release_feed.build_feed_view(conn, settings, request.app.state),
         "nas_kind": getattr(settings, "nas_kind", ""),
         "error": error,
+        # What the check REFUSED to take, from the check's own answer rather
+        # than the stored view (2026-09-04, with the dashboard-core builder's
+        # `refused` list): a build the vendor offers and this dashboard would
+        # not accept is otherwise indistinguishable from one the vendor never
+        # published, and both look like "nothing new".
+        "feed_refused": refused or [],
     }
 
 
@@ -3101,14 +3268,19 @@ def partial_admin_feed_check(request: Request, conn: sqlite3.Connection = Depend
     _require_admin_page(request)
     settings = request.app.state.settings
     error = None
+    refused: list = []
     if not settings.release_feed_url:
         error = "DASH_RELEASE_FEED_URL is not configured"
     else:
         result = release_feed.check_now(conn, settings, request.app.state)
         if not result["ok"]:
             error = f"feed check failed: {result.get('error')}"
+        # Tolerant of a release_feed that predates the key: a check that
+        # cannot say what it refused must not be the reason this page 500s.
+        refused = list(result.get("refused") or [])
 
-    return _render(request, "partials/admin_packages.html", _packages_and_feed(conn, request, error))
+    return _render(request, "partials/admin_packages.html",
+                   _packages_and_feed(conn, request, error, refused))
 
 
 @router.post("/partials/admin/feed/publish")
@@ -3128,9 +3300,19 @@ async def partial_admin_feed_publish(
         error = "DASH_RELEASE_FEED_URL is not configured"
     else:
         try:
-            release_feed.publish_from_feed(
-                conn, settings, request.app.state, kind=kind, platform=platform, version=version,
-                make_current=make_current, published_by=user,
+            # REL-2 (2026-09-04): this downloads the artefact from the vendor
+            # feed with a 600 s timeout (release_feed.ARTIFACT_FETCH_TIMEOUT),
+            # synchronously. The route is `async` only because it awaits the
+            # form, so that download used to run ON the event loop -- and
+            # deploy/run.sh runs uvicorn with --workers 1, so one admin's
+            # [ PUBLISH ] stalled every companion report, every lane status,
+            # the fleet grid and all four mounts for as long as it took. The
+            # JSON twin (release_feed.py's plain `def` route) was always
+            # correct; this is the button a human actually clicks.
+            await run_in_threadpool(
+                release_feed.publish_from_feed,
+                conn, settings, request.app.state, kind=kind, platform=platform,
+                version=version, make_current=make_current, published_by=user,
             )
         except package_store.PackageStoreError as exc:
             error = exc.detail

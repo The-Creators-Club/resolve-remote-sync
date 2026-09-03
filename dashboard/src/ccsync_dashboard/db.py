@@ -566,6 +566,21 @@ CREATE INDEX IF NOT EXISTS ix_user_ssh_keys_username ON user_ssh_keys(username);
 # runs every 15s, so a healthy collector is never anywhere near this.
 COLLECTOR_STALE_SECONDS = 180.0
 
+# The collector kinds that run even in a Syncthing-less deployment, so a run of
+# one of them is NOT evidence that Syncthing is reachable. It lives here rather
+# than in collector.py (which re-exports it) because BOTH sides have to agree:
+# collector.run_cycle uses it to decide what still runs without a Syncthing
+# URL, and fetch_collector_status below uses it to decide what may not count as
+# proof of reachability. They drifted -- the list grew from ("prune",) to three
+# kinds with the resilience sweep while the query below still excluded only
+# 'prune', so the `invariants`/`alerts` runs of the very first cycle made every
+# Syncthing-less (or Syncthing-broken) dashboard report syncthing_reachable and
+# ok=true on /api/v1/health, which is the exact fault the staleness check in
+# fetch_collector_status exists to catch. It surfaced as a flaky
+# test_api.py::test_health_endpoint: whether the first cycle's rows landed
+# before the request was a thread race (2026-09-04).
+SYNCTHING_FREE_KINDS = ("prune", "invariants", "alerts")
+
 MISSING_FILES_CAP = 500
 MISSING_FILES_MAX_AGE_DAYS = 7
 HISTORY_MAX_AGE_DAYS = 30
@@ -1558,6 +1573,27 @@ ALTER TABLE jobs ADD COLUMN target_machine TEXT;
 ALTER TABLE machine_state ADD COLUMN cap_volunteer_until TEXT;
 """
 
+# v47: IS THE 8899 LOOPBACK ACTUALLY HELD (CMEDIA-3, usability sweep
+# 2026-09-04).
+#
+# Five flat columns beside the other guard sections rather than a JSON blob,
+# for the reason v44 gives: the grid renders them, and "which machine cannot
+# take a Send to Resolve" has to be answerable without decoding a document.
+#
+# `loopback_bound` false with `loopback_enabled` true is the whole point --
+# the feature is on and the port is somebody else's (the absorbed standalone
+# BRoll Companion is the known holder), so every click in the b-roll and
+# music UIs fails in the browser and nothing on the fleet page says why.
+# NULL everywhere means a companion too old to report it, which is not the
+# same answer as "bound" and must never be rendered as one.
+SCHEMA_V47 = """
+ALTER TABLE machine_state ADD COLUMN loopback_enabled INTEGER;
+ALTER TABLE machine_state ADD COLUMN loopback_bound INTEGER;
+ALTER TABLE machine_state ADD COLUMN loopback_port INTEGER;
+ALTER TABLE machine_state ADD COLUMN loopback_error TEXT;
+ALTER TABLE machine_state ADD COLUMN loopback_since TEXT;
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -1666,6 +1702,9 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # the person at the machine saying "go ahead" -- and a database that had
     # one without the others would answer half of every scheduling question.
     (46, SCHEMA_V46),
+    # 47: the loopback server's health (CMEDIA-3, usability sweep
+    # 2026-09-04). Its own step, and gapless like every one before it.
+    (47, SCHEMA_V47),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -2657,6 +2696,13 @@ NOTICE_KINDS: dict[str, dict[str, str]] = {
     # -- the release channel ---------------------------------------------------
     "feed_unreachable": {"severity": "warn", "what":
         "the vendor release feed cannot be reached, so no new builds arrive"},
+    # SYS-2 (2026-09-04). "Deploy the dashboard before the companions" is a
+    # refusal the feed poller makes correctly and used to state only in a log
+    # line, on a site whose policy is `current` and where nobody clicks
+    # anything: the fleet then reads as up to date for ever because the build
+    # that would have made it outdated was never published here.
+    "feed_publish_refused": {"severity": "error", "what":
+        "a new build for the fleet cannot be handed out until this dashboard is updated"},
     "feed_runtime_mismatch": {"severity": "warn", "what":
         "a build on offer was made for a different system than this one"},
     # -- configuration and faults ---------------------------------------------
@@ -2666,6 +2712,11 @@ NOTICE_KINDS: dict[str, dict[str, str]] = {
         "this server is running with its security checks relaxed"},
     "server_error": {"severity": "error", "what":
         "a page or an API call failed with an error"},
+    # DDIAG-1 (2026-09-04). The pass ran out of its delivery budget, so some
+    # of what it found was left for the next cycle. Written by alerts.run_cycle
+    # (never registered without its writer, finding 1 of the 08-28 fix pass).
+    "alerts_delivery_slow": {"severity": "warn", "what":
+        "sending the alerts took so long that some were left for the next pass"},
 }
 
 
@@ -4055,6 +4106,41 @@ def get_feed_runtime_mismatch(conn: sqlite3.Connection) -> dict[str, Any] | None
     return value if isinstance(value, dict) else None
 
 
+# SYS-2 (2026-09-04): what the VENDOR is offering, per platform, kept where a
+# check that has only a database connection can read it. The verified feed
+# records live in `app_state` (release_feed._cache), which is process memory
+# the collector's alert pass cannot reach -- so "the fleet is behind the
+# vendor" used to be measurable only from what this dashboard had managed to
+# publish, and a dashboard that REFUSES to publish (a companion needing a
+# newer dashboard) reported a fleet that was 0 releases behind for ever.
+META_FEED_OFFERED = "feed_offered_versions"
+
+
+def set_feed_offered(conn: sqlite3.Connection, offered: Any) -> None:
+    """{platform: [version, ...]} for companion builds the vendor channel
+    carries. Written by every feed check, including one that found nothing
+    new: a stale picture is worse than none here."""
+    if offered is None:
+        meta_delete(conn, META_FEED_OFFERED)
+        return
+    meta_set_json(conn, META_FEED_OFFERED, offered)
+
+
+def get_feed_offered(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    """{platform: [version, ...]}, empty when no feed check has ever run.
+    Empty means UNKNOWN, never "the vendor has nothing": every caller falls
+    back on what this dashboard has published rather than concluding the
+    fleet is current."""
+    value = meta_get_json(conn, META_FEED_OFFERED)
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for platform, versions in value.items():
+        if isinstance(versions, list):
+            out[str(platform)] = [str(v) for v in versions]
+    return out
+
+
 # How long an admin's pushed update may sit unanswered before the dashboard
 # stops asking (REL-8). Long enough for a machine that is away for a fortnight;
 # short enough that a request nobody can satisfy does not ride every report for
@@ -4803,13 +4889,29 @@ def copy_machine_plan(
     dash-db-1): a base rig holds no tick, so since that fix its plan reads
     empty, and copying nothing while answering "ok, 0 projects" is the shape
     that makes an admin believe the laptop was filled. The target being wired
-    is refused a layer up (api.api_copy_machine_plan, 409)."""
+    is refused a layer up (api.api_copy_machine_plan, 409).
+
+    Raises ValueError too when the source holds NO projects (DCORE-2,
+    2026-09-04): the DELETE below runs either way, so "copy an empty plan"
+    and "wipe this computer's plan" were the same call, and the route
+    answered ok.
+    """
     if (editor, source) in base_machines(conn):
         raise ValueError(
             f"{source!r} is a wired machine: it works directly off the NAS and "
             "holds no plan, so there is nothing to copy from it"
         )
     rows = selections_for_machine(conn, editor, source)
+    if not rows:
+        # DCORE-2 (usability sweep 2026-09-04): the DELETE below is
+        # unconditional, so an EMPTY source does not copy nothing -- it
+        # EMPTIES the target, and answered "ok, 0 projects" while doing it.
+        # assignments.js asks first now, but a client-side refusal is one
+        # curl away from bypassed and this is the shape that silently stops a
+        # computer syncing.
+        raise ValueError(
+            f"{source} has no projects ticked - copying it would empty {target}."
+        )
     conn.execute(
         "DELETE FROM selections WHERE editor_username=? AND machine=?",
         (editor, target),
@@ -5096,6 +5198,14 @@ PLAN_UNDO_WINDOW_SECONDS = 3600
 AUDIT_TICK = "plan.tick"
 AUDIT_UNTICK = "plan.untick"
 AUDIT_PLAN_UNDO = "plan.undo"
+# DCORE-2 (usability sweep 2026-09-04). A copy is a BATCH of ticks and
+# unticks, and it is recorded as one row per project in exactly that shape --
+# that is what puts it in RECENT PLAN CHANGES with a working [ UNDO ] (which
+# restores one project's placements) and what gives its removals the same
+# 60 s enforce-cycle grace an untick gets. This kind is the SUMMARY row
+# beside them, for the fleet timeline: "who replaced which computer's plan
+# with which", which no per-project row can say.
+AUDIT_PLAN_COPY = "plan.copy"
 
 
 def audit(
@@ -5315,6 +5425,37 @@ def store_resolve_health(
          guard.get("stray_projects_count"), guard.get("stray_projects_bytes"),
          guard.get("moved_project_dirs_count"), guard.get("ingest_staging_bytes"),
          editor, machine),
+    )
+
+
+def store_loopback_state(
+    conn: sqlite3.Connection, editor: str, machine: str,
+    guard: Mapping[str, Any] | None,
+) -> None:
+    """Write the v47 loopback columns onto the machine's row (CMEDIA-3,
+    usability sweep 2026-09-04).
+
+    Its own UPDATE for the reason store_resolve_health gives, and THE LATCH
+    RULE for the same reason: these are written by any report that carried a
+    guard section at all, so a machine that has taken 8899 back clears its
+    chip. A COALESCE would leave [ SEND TO RESOLVE IS DEAD ] on the grid for
+    ever after the editor closed the program that was holding the port.
+
+    `guard` None (a companion with no sync_guard at all) leaves every column
+    alone: it has no opinion to record, and neither has one too old to carry
+    this section -- which is why an all-NULL row means "never said", not
+    "bound".
+    """
+    if guard is None or not guard.get("at"):
+        return
+    conn.execute(
+        """UPDATE machine_state
+              SET loopback_enabled=?, loopback_bound=?, loopback_port=?,
+                  loopback_error=?, loopback_since=?
+            WHERE editor_username=? AND machine=?""",
+        (guard.get("loopback_enabled"), guard.get("loopback_bound"),
+         guard.get("loopback_port"), guard.get("loopback_error"),
+         guard.get("loopback_since"), editor, machine),
     )
 
 
@@ -6062,6 +6203,16 @@ def fetch_sync_guard_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict
             "stray_projects_bytes": r["stray_projects_bytes"],
             "moved_project_dirs_count": r["moved_project_dirs_count"],
             "ingest_staging_bytes": r["ingest_staging_bytes"],
+            # v47 (CMEDIA-3, usability sweep 2026-09-04). All NULL is "a
+            # companion too old to say", which the reader must not render as
+            # bound: the b-roll and music pages' one dependency on this
+            # machine either works or it does not, and until now it failed
+            # only in the editor's browser.
+            "loopback_enabled": r["loopback_enabled"],
+            "loopback_bound": r["loopback_bound"],
+            "loopback_port": r["loopback_port"],
+            "loopback_error": r["loopback_error"],
+            "loopback_since": r["loopback_since"],
         }
         for r in conn.execute(
             """SELECT editor_username, machine, breaker_tripped, breaker_reason,
@@ -6082,7 +6233,9 @@ def fetch_sync_guard_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict
                       resolve_out_of_tree, resolve_bad_prefix, resolve_missing,
                       resolve_ignored, resolve_last_scan_at,
                       stray_projects_count, stray_projects_bytes,
-                      moved_project_dirs_count, ingest_staging_bytes
+                      moved_project_dirs_count, ingest_staging_bytes,
+                      loopback_enabled, loopback_bound, loopback_port,
+                      loopback_error, loopback_since
                FROM machine_state"""
         )
     }
@@ -7469,10 +7622,13 @@ def fetch_collector_status(
            JOIN (SELECT kind, MAX(id) AS id FROM poll_runs GROUP BY kind) m ON m.id = p.id"""
     ):
         kinds[row["kind"]] = dict(row)
-    # 'prune' is the one kind that also runs in a Syncthing-less deployment,
-    # so it can never be evidence that Syncthing is reachable.
+    # The kinds that also run in a Syncthing-less deployment can never be
+    # evidence that Syncthing is reachable -- read off the one list the
+    # collector itself gates on, never a literal here (2026-09-04).
+    placeholders = ",".join("?" for _ in SYNCTHING_FREE_KINDS)
     latest = conn.execute(
-        "SELECT ok, finished_at FROM poll_runs WHERE kind <> 'prune' ORDER BY id DESC LIMIT 1"
+        f"SELECT ok, finished_at FROM poll_runs WHERE kind NOT IN ({placeholders})"
+        " ORDER BY id DESC LIMIT 1", SYNCTHING_FREE_KINDS
     ).fetchone()
     reachable = bool(latest["ok"]) if latest is not None else False
     stale = False

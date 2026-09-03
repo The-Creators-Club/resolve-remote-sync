@@ -104,6 +104,15 @@ DRILL_MAX_AGE_DAYS = 365
 # says so in its own detail.
 TRASH_BOUND_BYTES = 50 * 1024 ** 3
 
+# DDIAG-16 (2026-09-04). A sink that was configured once and has delivered
+# nothing since is the same hole as no sink at all: a mailbox that started
+# bouncing in March takes the alarm with it and says nothing, because the only
+# place a failed send is stated is the Alerts page, which is where somebody who
+# already trusts the alarm goes. 30 days is wider than any real quiet spell -
+# the weekly report alone puts four successful sends inside it - so a window
+# with nothing in it is evidence, not a slow month.
+ALERT_SEND_MAX_AGE_SECONDS = 30 * 24 * 3600
+
 # Which dataset holds what. Neither is a Settings field on purpose: a
 # container sees `/data` and `/projects`, never the pool path behind them
 # (dashboard_update.snapshot_before says so), so the pool-side names are
@@ -596,6 +605,59 @@ def _check_editor_trash(ctx: Ctx) -> Outcome:
               f"half of the rule is not reported by any computer)")
 
 
+def _check_alerts_sink(ctx: Ctx) -> Outcome:
+    """Whether a human is actually told when any of the lines above breaks
+    (DDIAG-16, 2026-09-04).
+
+    Green needs BOTH halves, on this module's inverted default: a sink is set
+    AND something has been delivered through it inside
+    ALERT_SEND_MAX_AGE_SECONDS. A configured-but-silent channel is the state
+    that feels safest and is not, so it is reported as missing rather than as
+    "configured".
+
+    `alerts` is imported here rather than at module scope because
+    `alerts.compose_weekly` imports THIS module for the weekly report's
+    protection block; the cycle is real and this is the end that can afford to
+    be lazy.
+    """
+    from . import alerts
+
+    try:
+        sink = alerts.get_settings(ctx.conn).get("alerts_sink") or alerts.SINK_NONE
+    except sqlite3.Error:
+        return not_checked("this server could not read its own alert settings")
+    if sink == alerts.SINK_NONE:
+        return broken(
+            [("no alert channel", "no mail server and no webhook is set, so "
+                                  "nothing this server finds is ever sent to "
+                                  "anybody")],
+            "nobody is told when something breaks here")
+    try:
+        row = ctx.conn.execute(
+            "SELECT at FROM alert_log WHERE ok=1 ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    except sqlite3.Error:
+        return not_checked("this server could not read its record of what it sent")
+    last = str(row["at"]) if row else ""
+    if not last:
+        return broken(
+            [(sink, "this channel is set up but nothing has ever been sent "
+                    "through it")],
+            f"the {sink} channel has never delivered anything")
+    try:
+        age = db.age_seconds(last, ctx.now)
+    except (ValueError, TypeError):
+        return not_checked("this server could not read when it last sent anything")
+    if age > ALERT_SEND_MAX_AGE_SECONDS:
+        return broken(
+            [(sink, f"nothing has been delivered through this channel since "
+                    f"{last[:10]}")],
+            f"the {sink} channel has sent nothing for "
+            f"{int(age // 86400)} day(s)")
+    return ok(f"the {sink} channel delivered something {int(age // 3600)} "
+              f"hour(s) ago")
+
+
 # The registry. Order is the order the panel and the report print, worst
 # consequence first: everything about restoring lost footage, then the
 # release channel, then the two "deleted files are still somewhere" lines.
@@ -682,6 +744,22 @@ LINES: tuple[ProtectionLine, ...] = (
         "Check that computer's row on the FLEET page for [ RESUME ]: pruning is "
         "paused while its download safety brake is on.",
         _check_editor_trash,
+        severity="warn"),
+    # DDIAG-16 (2026-09-04). The panel had eight lines about safety nets and
+    # none about whether their failure ever reaches a person. WARN, not error:
+    # the vendor build ships with no sink on purpose, and a permanent red on a
+    # fresh install is how an owner learns to ignore the panel that carries the
+    # real ones.
+    ProtectionLine(
+        "alerts_sink",
+        "somebody is told when this breaks",
+        "whether a problem here reaches a person",
+        "This server checks dozens of things every ten minutes and writes down "
+        "what is wrong. With no way to send it, all of that waits until "
+        "somebody opens the page.",
+        "On Settings, Alerts: choose mail or a webhook, then press "
+        "[ SEND A TEST ].",
+        _check_alerts_sink,
         severity="warn"),
 )
 

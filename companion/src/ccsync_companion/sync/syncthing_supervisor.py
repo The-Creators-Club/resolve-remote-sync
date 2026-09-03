@@ -55,6 +55,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .. import site as site_mod
+
 log = logging.getLogger("ccsync.sync.supervisor")
 
 STATE_FILENAME = "syncthing_supervisor.json"
@@ -728,7 +730,7 @@ class SyncthingSupervisor:
         if self._notify is None:
             return
         try:
-            self._notify(message, "ccsync-companion")
+            self._notify(message, site_mod.notify_title())  # UX-4
         except Exception:
             log.debug("supervisor: tray notify failed")
 

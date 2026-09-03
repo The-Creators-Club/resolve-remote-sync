@@ -71,6 +71,17 @@ def _secrets_dir(env: Mapping[str, str]) -> Path:
     return Path(db_path).parent / "secrets"
 
 
+def secrets_dir(env: Mapping[str, str] | None = None) -> Path:
+    """Where the persisted secrets live (DCORE-3, 2026-09-04).
+
+    Public because `app.py`'s boot refusal has to look at the SAME directory
+    `ensure_secrets` writes to: deriving it a second time from DASH_DB_PATH is
+    how the two silently go out of step, and the whole point of that refusal is
+    that it can prove a file landed.
+    """
+    return _secrets_dir(os.environ if env is None else env)
+
+
 def _write_secret_file(path: Path, value: str) -> None:
     """0600, POSIX; on Windows (dev only -- the shipped image is Linux) the
     mode argument to os.open is accepted but not enforced, which is a no-op

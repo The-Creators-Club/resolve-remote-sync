@@ -231,3 +231,73 @@ def test_the_recorded_reason_is_written_for_the_editor():
     # Every other signature keeps the shape it had.
     assert yc.stale_reason("cookies are no longer valid") == \
         "yt-dlp: cookies are no longer valid"
+
+
+# -- CYT-5 (usability sweep 2026-09-04): a stale mark ages out --------------
+
+
+def _cookie_jar(tmp_path, monkeypatch):
+    """A configured, non-expired jar, so health() gets past its own guards."""
+    jar = tmp_path / "cookies.txt"
+    jar.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    monkeypatch.setattr(yc, "enabled", lambda: True)
+    monkeypatch.setattr(yc, "resolve", lambda cfg=None: str(jar))
+    return jar
+
+
+def test_recorded_status_reads_the_file_and_nothing_else(tmp_path):
+    """The clear path needs the FILE's word, with no cookie reads and no
+    inference: health() answers "ok" for a machine with no record at all,
+    which is the wrong question for "should I clear a stale mark?"."""
+    path = tmp_path / "status.json"
+    assert yc.recorded_status(path) == ""
+    yc.mark_stale("the session was refused", path)
+    assert yc.recorded_status(path) == yc.STATUS_STALE
+    yc.mark_ok("a download succeeded", path)
+    assert yc.recorded_status(path) == yc.STATUS_OK
+
+
+def test_recorded_status_survives_a_corrupt_record(tmp_path):
+    path = tmp_path / "status.json"
+    path.write_text("{not json", encoding="utf-8")
+    assert yc.recorded_status(path) == ""
+
+
+def test_a_fresh_stale_mark_is_not_aged(tmp_path, monkeypatch):
+    import time as _time
+
+    _cookie_jar(tmp_path, monkeypatch)
+    path = tmp_path / "status.json"
+    yc.mark_stale("the session was refused", path)
+    health = yc.health({}, path, now=_time.time())
+    assert health["status"] == yc.STATUS_STALE
+    assert health["aged"] is False
+
+
+def test_a_week_old_stale_mark_is_reported_as_aged(tmp_path, monkeypatch):
+    """CYT-5 [verified]: since WP3 made the jar a fallback, cookied downloads
+    are rare, so the last word on the session could be months old and the tray
+    still asked for a sign-in nothing had tested. The CR-80 variant is worse:
+    its remedy is to do nothing, so the warning could never retire."""
+    import time as _time
+
+    _cookie_jar(tmp_path, monkeypatch)
+    path = tmp_path / "status.json"
+    yc.mark_stale("the session was refused", path)
+    health = yc.health({}, path, now=_time.time() + (yc.STALE_MAX_AGE_DAYS + 1) * 86400)
+    assert health["status"] == yc.STATUS_STALE, "the record still stands"
+    assert health["aged"] is True
+
+
+def test_an_unreadable_stamp_is_never_aged(tmp_path, monkeypatch):
+    """"We cannot tell" is NOT "it is old": a warning that retires itself
+    because a timestamp would not parse is the opposite of the point."""
+    import json as _json
+    import time as _time
+
+    _cookie_jar(tmp_path, monkeypatch)
+    path = tmp_path / "status.json"
+    path.write_text(_json.dumps({"status": yc.STATUS_STALE, "reason": "x",
+                                 "at": "who knows"}), encoding="utf-8")
+    assert yc.health({}, path, now=_time.time())["aged"] is False
+    assert yc._record_age_days("") is None

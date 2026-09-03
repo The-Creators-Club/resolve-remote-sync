@@ -36,15 +36,18 @@
   <span class="mono-sm muted">set by {{ fleet.fleet_halt.set_by }} {{ fleet.fleet_halt.set_at | ago }}</span>
 </div>
 {% endif %}
+{# UX-16 / UX-10 (usability sweep 2026-09-03): the product says "computer"
+   to a person, "machine" only in code, routes and the database. And "(s)" is
+   not a word: the count is known here, so the noun agrees with it. #}
 {% if fleet.breaker_tripped %}
-<div class="banner alarm">⛔ PROXY DOWNLOAD STOPPED on {{ fleet.breaker_tripped | length }} machine(s):
+<div class="banner alarm">⛔ PROXY DOWNLOAD STOPPED on {{ fleet.breaker_tripped | length }} computer{{ "s" if fleet.breaker_tripped | length != 1 }}:
   {% for m in fleet.breaker_tripped %}{{ m.editor }}/{{ m.machine }}{{ ", " if not loop.last }}{% endfor %}.
   Check the server, then use [ RESUME ] below (or have each editor use the tray's
   "Resume proxy download").
 </div>
 {% endif %}
 {% if fleet.halted %}
-<div class="banner alarm">⛔ SYNCING STOPPED on {{ fleet.halted | length }} machine(s):
+<div class="banner alarm">⛔ SYNCING STOPPED on {{ fleet.halted | length }} computer{{ "s" if fleet.halted | length != 1 }}:
   {% for m in fleet.halted %}{{ m.editor }}/{{ m.machine }}{{ ", " if not loop.last }}{% endfor %}.
 </div>
 {% endif %}
@@ -71,7 +74,7 @@
 <div class="banner alarm">⛔ {{ fleet.collector.enforce_refusal.count }} SHARE REMOVAL(S) REFUSED:
   shares are FROZEN. No untick is being applied on
   {{ fleet.collector.enforce_refusal.folders | length }} folder(s),
-  {{ fleet.collector.enforce_refusal.devices | length }} computer(s). Approve the pending
+  {{ fleet.collector.enforce_refusal.devices | length }} computer{{ "s" if fleet.collector.enforce_refusal.devices | length != 1 }}. Approve the pending
   devices (Settings, then USERS), then this clears itself on the next cycle. To allow a
   removal this large deliberately, raise DASH_ENFORCE_MAX_REMOVALS (limit
   {{ fleet.collector.enforce_refusal.limit }}).
@@ -91,14 +94,14 @@
    once, and the grid's only symptom used to be rows going stale -- which is
    exactly what a switched-off machine looks like. #}
 {% if fleet.report_refused %}
-<div class="banner alarm">⛔ {{ fleet.report_refused | length }} COMPUTER(S) ARE BEING REFUSED:
+<div class="banner alarm">⛔ {{ fleet.report_refused | length }} COMPUTER{{ "S" if fleet.report_refused | length != 1 }} {{ "IS" if fleet.report_refused | length == 1 else "ARE" }} BEING REFUSED:
   {% for m in fleet.report_refused %}{{ m.editor }}/{{ m.machine }}{{ ", " if not loop.last }}{% endfor %}.
   They are reporting and the dashboard is turning them away{% if fleet.report_refused[0].reason %} ({{ fleet.report_refused[0].reason }}){% endif %}.
   Have each editor click "Sign in..." on that computer's tray.
 </div>
 {% endif %}
 {% if fleet.identity_key_drain and fleet.identity_key_drain.count %}
-<div class="banner">ℹ️ [ {{ fleet.identity_key_drain.count }} COMPUTER(S) STILL ON A RETIRED SIGNING KEY ]
+<div class="banner">ℹ️ [ {{ fleet.identity_key_drain.count }} COMPUTER{{ "S" if fleet.identity_key_drain.count != 1 }} STILL ON A RETIRED SIGNING KEY ]
   <span class="mono-sm muted">They are accepted because DASH_SESSION_SECRET_PREVIOUS still carries the old key:
   {% for m in fleet.identity_key_drain.machines %}{{ m }}{{ ", " if not loop.last }}{% endfor %}.
   Each one clears when its editor signs in again at the tray. Remove that variable once this reaches zero.</span>
@@ -128,7 +131,7 @@
    _scope_editors_view). An admin has nothing hidden, so this line does not
    appear for them. #}
 {% if fleet.machines_hidden %}
-<div class="muted">Showing your machines. {{ fleet.machines_hidden }} other machine(s) in
+<div class="muted">Showing your computers. {{ fleet.machines_hidden }} other computer{{ "s" if fleet.machines_hidden != 1 }} in
   the fleet: {{ fleet.summary.machines_unhealthy }} unhealthy,
   {{ fleet.summary.machines_outdated }} on an old build.</div>
 {% endif %}
@@ -143,7 +146,7 @@
    took the whole page sideways with it. In a wrapper the scroll is the
    element's own, which is what the vocabulary allows. #}
 <div class="scroll-x"><table class="editors stack">
-  <thead><tr><th></th><th>EDITOR</th><th>MACHINE</th><th>LANES</th><th>VERSION</th><th>LAST REPORT</th></tr></thead>
+  <thead><tr><th></th><th>EDITOR</th><th>COMPUTER</th><th>LANES</th><th>VERSION</th><th>LAST REPORT</th></tr></thead>
   <tbody>
   {% for e in fleet.editors %}
     <tr>
@@ -151,7 +154,7 @@
       <td class="who" data-label="EDITOR">{{ e.editor_username }}
         {% if not e.verified %}<span class="chip amber" title="this companion has not signed in with verified credentials">[ UNVERIFIED ]</span>{% endif %}
       </td>
-      <td class="mono-sm" data-label="MACHINE">{{ e.machine }}</td>
+      <td class="mono-sm" data-label="COMPUTER">{{ e.machine }}</td>
       <td class="lane-cell" data-label="LANES">
         {# SYS-7 (resilience sweep 2026-08-28). THE FIRST LINE OF THE ROW: one
            plain sentence for why this computer is not syncing, composed by
@@ -178,7 +181,7 @@
         {# Transport health (B17): the companion computes this every heavy
            tick and the server used to drop it, so a lane C riding the public
            relay pool at 1-5 MB/s looked identical to a merely slow editor. #}
-        {% if e.transport.relayed %}<span class="chip amber" title="{{ e.transport.relayed }} Syncthing peer(s) connected via a RELAY, not directly -- lane C on this machine is limited to relay speed (1-5 MB/s), not the link. Checked {{ e.transport.at | ago }}.">[ RELAYED: {{ e.transport.relayed }} ]</span>
+        {% if e.transport.relayed %}<span class="chip amber" title="{{ e.transport.relayed }} Syncthing peer(s) connected via a RELAY, not directly: lane C on this computer is limited to relay speed (1-5 MB/s), not the link. Checked {{ e.transport.at | ago }}.">[ RELAYED: {{ e.transport.relayed }} ]</span>
         {% elif e.transport.direct %}<span class="chip lane green" title="{{ e.transport.direct }} Syncthing peer(s) connected directly. Checked {{ e.transport.at | ago }}.">direct:{{ e.transport.direct }}</span>{% endif %}
         {% if e.transport.orphan_partials %}<span class="chip amber" title="{{ e.transport.orphan_partial_bytes | human_bytes }} of orphaned rclone .partial files left on the NAS by an interrupted lane A. Never deleted automatically; remove them by hand to reclaim the space.">[ ORPHANS: {{ e.transport.orphan_partials }} ]</span>{% endif %}
         {# The safety latches, first among the chips: they outrank every
@@ -190,7 +193,7 @@
           {% if session_is_admin %}{% if e.guard.resume_requested %}<span class="chip amber" title="waiting for {{ e.machine }} to report in and pick this up">[ RESUME ASKED ]</span>{% else %}<form class="inline-form" hx-post="/partials/admin/machines/resume-lane-b" hx-target="closest .fleet-grid-wrap" hx-swap="innerHTML">
             <input type="hidden" name="editor" value="{{ e.editor_username }}">
             <input type="hidden" name="machine" value="{{ e.machine }}">
-            <button class="btn tap" type="submit" title="clear this machine's proxy-download breaker on its next report. Only once you have checked the server.">[ RESUME ]</button>
+            <button class="btn tap" type="submit" title="clear this computer's proxy-download breaker on its next report. Only once you have checked the server.">[ RESUME ]</button>
           </form>{% endif %}{% endif %}{% endif %}
         {# SYNC-8 (resilience sweep 2026-08-28). The companion has been
            sending this since 0.9.x and the dashboard dropped it at the model
@@ -204,8 +207,10 @@
            age as negative), transfer nothing, exit 0 and report green. #}
         {% if e.guard.clock_skew_dir %}<span class="chip red" title="this computer's clock is {{ e.guard.clock_skew_abs | eta }} {{ "ahead of" if e.guard.clock_skew_dir == "AHEAD" else "behind" }} the server's. Proxy download uses a minimum file age, so a clock this far out can make it transfer nothing at all while reporting no error. Fix the clock on that machine (enable automatic time).">[ CLOCK {{ e.guard.clock_skew_abs | eta }} {{ e.guard.clock_skew_dir }} ]</span>{% endif %}
         {# APP-6: crash_report.py writes these and its own docstring names
-           "the tray stayed up with a dead lane" as the failure to fix. #}
-        {% if e.guard.crash_count %}<span class="chip amber" title="{{ e.guard.crash_count }} background task(s) on this computer have crashed and written a report{% if e.guard.crash_newest %} (newest: {{ e.guard.crash_newest }}){% endif %}. The tray stays up and the lanes look normal, so ask the editor for Copy diagnostics.">[ CRASHES: {{ e.guard.crash_count }} ]</span>{% endif %}
+           "the tray stayed up with a dead lane" as the failure to fix.
+           CR-88 route sweep (2026-09-03): Copy diagnostics is not a tray menu
+           item any more, so the path comes from one constant. #}
+        {% if e.guard.crash_count %}<span class="chip amber" title="{{ e.guard.crash_count }} background task(s) on this computer have crashed and written a report{% if e.guard.crash_newest %} (newest: {{ e.guard.crash_newest }}){% endif %}. The tray stays up and the lanes look normal, so ask the editor to open {{ COMPANION_DIAGNOSTICS_PATH }} in the companion and send it to you.">[ CRASHES: {{ e.guard.crash_count }} ]</span>{% endif %}
         {# DASH-2: this computer is talking to us and we are refusing it. On the
            row as well as in the banner, because the fix is on THAT machine. #}
         {% if e.guard.report_refused_at %}<span class="chip red" title="the last report from this computer was refused {{ e.guard.report_refused_at | ago }}: {{ e.guard.report_refused_reason }}. Nothing below is current. The editor has to click Sign in... on this computer's tray.">[ BEING REFUSED: SIGN IN ON ITS TRAY ]</span>{% endif %}
@@ -218,7 +223,7 @@
            above what it fell back from, so it needs no clearing. #}
         {% if e.guard.upgrade_reverted_from %}<span class="chip amber" title="this computer installed {{ e.guard.upgrade_reverted_from }}, could not start it, and put itself back on {{ e.companion_version }}. That build should not be made current for the fleet.">[ REVERTED FROM {{ e.guard.upgrade_reverted_from }} ]</span>{% endif %}
         {% if e.guard.folders_unfiltered %}<span class="chip amber" title="{{ e.guard.folders_unfiltered }} Syncthing folder(s) on this computer have no ignore filter written{% if e.guard.folders_unfiltered_names %}: {{ e.guard.folders_unfiltered_names }}{% endif %}. Without it, lane C carries camera originals both ways.">[ UNFILTERED FOLDERS: {{ e.guard.folders_unfiltered }} ]</span>{% endif %}
-        {% if e.guard.sync_conflicts %}<span class="chip amber" title="{{ e.guard.sync_conflicts }} Syncthing sync-conflict file(s) in this machine's tree. Two people saved one project file; nothing was lost, but somebody's edit is sitting in a renamed copy.">[ CONFLICTS: {{ e.guard.sync_conflicts }} ]</span>{% endif %}
+        {% if e.guard.sync_conflicts %}<span class="chip amber" title="{{ e.guard.sync_conflicts }} Syncthing sync-conflict file(s) in this computer's tree. Two people saved one project file; nothing was lost, but somebody's edit is sitting in a renamed copy.">[ CONFLICTS: {{ e.guard.sync_conflicts }} ]</span>{% endif %}
         {# v38 (wave 4's ingest contract, resilience sweep 2026-08-28): footage
            that is on ONE computer and nowhere else. Every one of these looks
            like a perfectly green machine on every other signal here, because
@@ -238,8 +243,8 @@
            lane chip beside it. #}
         {% if e.guard.stalled_lane %}<span class="chip red" title="lane {{ e.guard.stalled_lane }} on this computer made no progress for {{ e.guard.stalled_seconds }} second(s){% if e.guard.stalled_killed %} and was killed{% else %} and was reported without being killed{% endif %}, {{ e.guard.stalled_at | ago }}. A local drive that stops answering reads exactly like this.">[ STALLED {{ e.guard.stalled_lane | upper }}{{ ", KILLED" if e.guard.stalled_killed }} ]</span>{% endif %}
         {% if e.guard.halt_active %}<span class="chip red" title="{{ e.guard.halt_reason }}">[ SYNC HALTED{{ " (FLEET)" if e.guard.halt_scope == "fleet" }} ]</span>{% endif %}
-        {% if e.guard.skipped_exists %}<span class="chip amber" title="{{ e.guard.skipped_exists }} file(s) exist on the NAS under the same name at a different size. Lane A is copy --ignore-existing, so this machine's newer versions will never upload.">[ WON'T UPLOAD: {{ e.guard.skipped_exists }} ]</span>{% endif %}
-        {% if e.guard.trash_bytes and e.guard.trash_bytes > 5000000000 %}<span class="chip amber" title="{{ e.guard.trash_count }} recoverable file(s) in this machine's .ccsync-trash. Pruned automatically after 14 days.">[ TRASH: {{ e.guard.trash_bytes | human_bytes }} ]</span>{% endif %}
+        {% if e.guard.skipped_exists %}<span class="chip amber" title="{{ e.guard.skipped_exists }} file(s) exist on the NAS under the same name at a different size. Lane A is copy --ignore-existing, so this computer's newer versions will never upload.">[ WON'T UPLOAD: {{ e.guard.skipped_exists }} ]</span>{% endif %}
+        {% if e.guard.trash_bytes and e.guard.trash_bytes > 5000000000 %}<span class="chip amber" title="{{ e.guard.trash_count }} recoverable file(s) in this computer's .ccsync-trash. Pruned automatically after 14 days.">[ TRASH: {{ e.guard.trash_bytes | human_bytes }} ]</span>{% endif %}
         {# B-roll ingest (BROLL_INGEST_PLAN.md §3.2, 2026-08-18): which
            computers are crunching a batch and how far along they are. The
            WARNING chip is separate and shows even when nothing is running --
@@ -297,7 +302,7 @@
            the CPU. #}
         {% if e.music_ingest.active %}<span class="chip {{ "amber" if e.music_ingest.warning else "green" }}" title="music batch {{ e.music_ingest.batch[:8] if e.music_ingest.batch else "?" }}{% if e.music_ingest.track %} - {{ e.music_ingest.track }}{% endif %}{% if e.music_ingest.state %} ({{ e.music_ingest.state }}{% if e.music_ingest.gate %}: {{ e.music_ingest.gate }}{% endif %}){% endif %}{% if e.music_ingest.percent %} · {{ e.music_ingest.percent }}% of this track{% endif %}{% if e.music_ingest.failed %} · {{ e.music_ingest.failed }} failed{% endif %} · reported {{ e.music_ingest.at | ago }}">[ INDEXING MUSIC: {{ e.music_ingest.done }}/{{ e.music_ingest.total }} ]</span>{% endif %}
         {% if e.music_ingest.warning %}<span class="chip amber" title="{{ e.music_ingest.warning }}">[ MUSIC MODEL ]</span>{% endif %}
-        {% if e.proxy.missing %}<span class="chip amber" title="{{ e.proxy.missing }} clip(s) on this machine have no proxy yet, so nobody else on the fleet can see that footage{% if e.proxy.state %} (proxy generator: {{ e.proxy.state }}){% endif %}{% if e.proxy.left %}; {{ e.proxy.left }} queued to encode{% endif %}.">[ {{ e.proxy.missing }} NEED PROXIES ]</span>{% endif %}
+        {% if e.proxy.missing %}<span class="chip amber" title="{{ e.proxy.missing }} clip(s) on this computer have no proxy yet, so nobody else on the fleet can see that footage{% if e.proxy.state %} (proxy generator: {{ e.proxy.state }}){% endif %}{% if e.proxy.left %}; {{ e.proxy.left }} queued to encode{% endif %}.">[ {{ e.proxy.missing }} NEED PROXIES ]</span>{% endif %}
         {# SYS-7: the bundle that answers the question, without an inbound
            connection to an editor's PC and without asking a non-technical
            person to click anything on the machine that is broken. The request
@@ -309,19 +314,21 @@
           {% else %}<form class="inline-form" hx-post="/partials/admin/machines/ask-why" hx-target="closest .fleet-grid-wrap" hx-swap="innerHTML">
             <input type="hidden" name="editor" value="{{ e.editor_username }}">
             <input type="hidden" name="machine" value="{{ e.machine }}">
-            <button class="btn tap" type="submit" title="ask this computer to upload its own diagnostics on its next report. It answers within a report interval; nothing connects to the machine.">[ ASK THIS MACHINE WHY ]</button>
+            {# UX-16 (usability sweep 2026-09-03): the button an admin presses says
+               "computer", the word the rest of the product uses to a person. #}
+            <button class="btn tap" type="submit" title="ask this computer to upload its own diagnostics on its next report. It answers within a report interval; nothing connects to it.">[ ASK THIS COMPUTER WHY ]</button>
           </form>{% endif %}
           {% if e.diagnostics.id %}<button class="btn tap" hx-get="/partials/admin/diagnostics?editor={{ e.editor_username }}&machine={{ e.machine }}"
                   hx-target="#fleet-diagnostics" hx-swap="innerHTML"
                   title="what this computer said, {{ e.diagnostics.received_at | ago }}">[ READ THE ANSWER ]</button>{% endif %}
         {% endif %}
         {% if e.transport.express_last_error %}<span class="chip amber" title="last express-lane failure: {{ e.transport.express_last_error }}">[ EXPRESS FAILED ]</span>
-        {% elif e.transport.express_dropped %}<span class="chip amber" title="{{ e.transport.express_dropped }} file(s) dropped by the express lane's batch cap -- they still go up on the next periodic pass.">[ EXPRESS DROPPED: {{ e.transport.express_dropped }} ]</span>{% endif %}
+        {% elif e.transport.express_dropped %}<span class="chip amber" title="{{ e.transport.express_dropped }} file(s) dropped by the express lane's batch cap: they still go up on the next periodic pass.">[ EXPRESS DROPPED: {{ e.transport.express_dropped }} ]</span>{% endif %}
       </td>
       {# Per-machine build, compared against the current package for THAT
          machine's own platform (see X-5) -- never the windows one by default. #}
       <td class="mono-sm muted" data-label="VERSION">{{ e.companion_version or "?" }}
-        {% if e.companion_version_unknown %}<span class="chip amber" title="this companion has never reported its version -- it predates the upgrade channel">[ VERSION UNKNOWN ]</span>
+        {% if e.companion_version_unknown %}<span class="chip amber" title="this companion has never reported its version: it predates the upgrade channel">[ VERSION UNKNOWN ]</span>
         {% elif e.companion_outdated %}<span class="chip amber" title="{{ e.platform }}: running {{ e.companion_version }}, current is {{ e.current_companion_version }}">[ OUT OF DATE: {{ e.current_companion_version }} ]</span>{% endif %}
         {# REL-3 (resilience sweep 2026-08-28): this machine is RUNNING a build
            the vendor recalled. Un-currenting it says nothing about the
@@ -350,13 +357,13 @@
   <span class="muted">no report for over a week. Each one still holds the sync plan below, and is still shared the projects in it.</span></div>
 <div class="rule"></div>
 <div class="scroll-x"><table class="editors stack">
-  <thead><tr><th></th><th>EDITOR</th><th>MACHINE</th><th>PLATFORM</th><th>STILL PLANNED</th><th>LAST REPORT</th><th></th></tr></thead>
+  <thead><tr><th></th><th>EDITOR</th><th>COMPUTER</th><th>PLATFORM</th><th>STILL PLANNED</th><th>LAST REPORT</th><th></th></tr></thead>
   <tbody>
   {% for m in fleet.lost_machines %}
     <tr>
       <td data-label="STATUS"><span class="dot red" title="no report since {{ m.last_seen }}">●</span></td>
       <td class="who" data-label="EDITOR">{{ m.editor_username }}</td>
-      <td class="mono-sm" data-label="MACHINE" title="{{ m.syncthing_device_id or 'no Syncthing device ever reported' }}">{{ m.machine }}</td>
+      <td class="mono-sm" data-label="COMPUTER" title="{{ m.syncthing_device_id or 'no Syncthing device ever reported' }}">{{ m.machine }}</td>
       <td class="mono-sm muted" data-label="PLATFORM">{{ m.platform or "?" }}</td>
       <td class="mono-sm" data-label="STILL PLANNED">{% if m.projects %}{{ m.projects | length }} project{{ "" if m.projects | length == 1 else "s" }}: {{ m.projects | join(", ") }}{% else %}nothing{% endif %}</td>
       <td class="muted" data-label="LAST REPORT">{{ m.last_seen | ago }}</td>
@@ -367,7 +374,7 @@
               hx-confirm="Forget the computer {{ m.machine }} ({{ m.editor_username }})? Its sync plan, its status rows and its Syncthing device go, so it stops being sent projects. Files already on it stay there. If its companion is still installed and signed in, it will register itself again on its next report.">
           <input type="hidden" name="editor" value="{{ m.editor_username }}">
           <input type="hidden" name="machine" value="{{ m.machine }}">
-          <button class="btn tap" type="submit" title="remove this computer from the fleet. Leave it if the machine is only away for a while.">[ FORGET ]</button>
+          <button class="btn tap" type="submit" title="remove this computer from the fleet. Leave it if the computer is only away for a while.">[ FORGET ]</button>
         </form>
         {% endif %}
       </td>

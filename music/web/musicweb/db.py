@@ -429,11 +429,19 @@ def prune_missing(con, present, force=False, max_share=0.2, floor=5):
 
 
 def save_debias(con, dirs):
-    con.execute('DELETE FROM debias')
-    if dirs is not None and dirs.size:
-        con.executemany('INSERT INTO debias(idx,vec) VALUES(?,?)',
-                        [(i, to_blob(d)) for i, d in enumerate(dirs)])
-    con.commit()
+    """Replace the source-bias directions. One transaction (MUSIC-1, 2026-09-04).
+
+    Same shape as rescore.write_scores had: a DELETE, then rows, then a commit.
+    A failure between them left the wipe uncommitted on a POOLED connection,
+    where the next write on that thread committed it -- and a silently empty
+    `debias` is not an error anywhere, it is queries quietly scored without the
+    source-bias axes for ever after.
+    """
+    with con:
+        con.execute('DELETE FROM debias')
+        if dirs is not None and dirs.size:
+            con.executemany('INSERT INTO debias(idx,vec) VALUES(?,?)',
+                            [(i, to_blob(d)) for i, d in enumerate(dirs)])
 
 
 # ------------------------------------------------------------------ ingest

@@ -57,8 +57,8 @@
                release signing exists carries no signature, and every companion
                that verifies will refuse it -- so the fleet silently stops
                upgrading. Say it here, where MAKE CURRENT is clicked. #}
-            {% if not p.signature %}<span class="chip red" title="published without a release signature -- companions that verify will REFUSE this build; republish through tools\ship.cmd">[ UNSIGNED ]</span>{% endif %}
-            {% if p.signature and not p.signed_binary %}<span class="chip amber" title="the record is signed, but the binary itself carries no Authenticode/Developer ID signature -- fresh installs meet SmartScreen/Gatekeeper">[ NO CODE SIG ]</span>{% endif %}
+            {% if not p.signature %}<span class="chip red" title="published without a release signature: companions that verify will REFUSE this build; republish through tools\ship.cmd">[ UNSIGNED ]</span>{% endif %}
+            {% if p.signature and not p.signed_binary %}<span class="chip amber" title="the record is signed, but the binary itself carries no Authenticode/Developer ID signature: fresh installs meet SmartScreen/Gatekeeper">[ NO CODE SIG ]</span>{% endif %}
           </td>
           <td class="mono-sm muted" data-label="PLATFORM">{{ p.platform }}</td>
           <td class="mono-sm" data-label="SIZE">{{ p.size_bytes | human_bytes }}</td>
@@ -71,7 +71,7 @@
                the click is made on; the override needs the version typed. #}
             {% if p.soak and not p.is_current and not p.retracted %}
               <div class="muted mono-sm" style="margin-bottom:0.2rem">
-                canary: {{ p.soak.machines }} machine(s) on {{ p.version }}
+                canary: {{ p.soak.machines }} computer{{ "s" if p.soak.machines != 1 }} on {{ p.version }}
                 for {{ p.soak.minutes }} min, {{ p.soak.crashes }} crashes
                 {%- if p.soak.reverted %}, {{ p.soak.reverted }} rolled back{% endif %}
                 (soak {{ p.soak.soak_minutes }} min)
@@ -81,13 +81,13 @@
                 <input type="hidden" name="platform" value="{{ p.platform }}">
                 <input type="hidden" name="version" value="{{ p.version }}">
                 <select name="target">
-                  <option value="">pick a machine…</option>
+                  <option value="">pick a computer…</option>
                   {% for m in packages.machines_by_platform.get(p.platform, []) %}
                     <option value="{{ m.editor_username }}/{{ m.machine }}">{{ m.editor_username }}/{{ m.machine }} ({{ m.companion_version or "?" }})</option>
                   {% endfor %}
                 </select>
                 <button class="btn tap" type="submit"
-                        title="ask one machine to take this build on its next report">[ PUSH TO ONE MACHINE ]</button>
+                        title="ask one computer to take this build on its next report">[ PUSH TO ONE COMPUTER ]</button>
               </form>
             {% endif %}
             {% if not p.is_current and not p.retracted %}
@@ -106,7 +106,7 @@
             <form class="inline-form" hx-post="/partials/admin/packages/current"
                   hx-target="closest .admin-packages-box" hx-swap="outerHTML"
                   {% if not p.signature %}
-                  hx-confirm="This build has no release signature. Companions verify signatures, so making it current stops EVERY machine in the fleet from updating, silently. Republish it through tools\ship.cmd instead. Make it current anyway?"
+                  hx-confirm="This build has no release signature. Companions verify signatures, so making it current stops EVERY computer in the fleet from updating, silently. Republish it through tools\ship.cmd instead. Make it current anyway?"
                   {% endif %}>
               <input type="hidden" name="kind" value="{{ p.kind }}">
               <input type="hidden" name="platform" value="{{ p.platform }}">
@@ -114,7 +114,7 @@
               <input type="hidden" name="force" value="1">
               <input type="text" name="confirm" placeholder="type {{ p.version }}" size="12">
               <button class="btn tap" type="submit"
-                      title="{% if not p.signature %}hand this UNSIGNED build to the whole fleet, which stops every machine updating{% else %}hand this build to the whole fleet without waiting for the soak{% endif %}">[ MAKE CURRENT ANYWAY ]</button>
+                      title="{% if not p.signature %}hand this UNSIGNED build to the whole fleet, which stops every computer updating{% else %}hand this build to the whole fleet without waiting for the soak{% endif %}">[ MAKE CURRENT ANYWAY ]</button>
             </form>
             {% endif %}
             {% endif %}
@@ -152,7 +152,7 @@
       <span class="chip red">[ RECALLED ]</span>
       <span class="mono-sm">{{ p.kind }} {{ p.version }} {{ p.platform }}</span>
       was withdrawn by the vendor{% if p.retracted_reason %}: {{ p.retracted_reason }}{% endif %}.
-      {{ p.machines_running }} machine(s) are still running it.
+      {{ p.machines_running }} computer{{ "s" if p.machines_running != 1 }} {{ "is" if p.machines_running == 1 else "are" }} still running it.
       {% if p.kind == "companion" and p.machines_running %}
       <form class="inline-form" hx-post="/partials/admin/packages/roll-fleet-back"
             hx-target="closest .admin-packages-box" hx-swap="outerHTML">
@@ -166,7 +166,7 @@
           {% endfor %}
         </select>
         <button class="btn tap" type="submit"
-                title="ask every machine still running the recalled build to take the chosen one on its next report">[ ROLL THE FLEET BACK ]</button>
+                title="ask every computer still running the recalled build to take the chosen one on its next report">[ ROLL THE FLEET BACK ]</button>
       </form>
       {% endif %}
     </div>
@@ -178,23 +178,23 @@
   {% for gap in packages.arch_gaps %}
     <div class="banner" style="margin-top:0.6rem">
       ▲ no {{ gap.platform }}/{{ gap.arch }} build published:
-      {{ gap.machines }} machine(s) report that CPU and the current build is for
+      {{ gap.machines }} computer{{ "s" if gap.machines != 1 }} {{ "reports" if gap.machines == 1 else "report" }} that CPU and the current build is for
       a different one, so they are offered nothing rather than a binary that
       cannot run.
     </div>
   {% endfor %}
 
-  <div class="side-head" style="margin-top:1.2rem">[ OUT-OF-DATE MACHINES ]</div>
+  <div class="side-head" style="margin-top:1.2rem">[ OUT-OF-DATE COMPUTERS ]</div>
   {% if packages.outdated_machines %}
     {# .stack: a row is one machine (MOBILE_PLAN.md §3.2, 2026-08-30). #}
     <div class="scroll-x">
     <table class="editors stack">
-      <thead><tr><th>EDITOR</th><th>MACHINE</th><th>RUNNING</th><th>LAST REPORT</th><th></th></tr></thead>
+      <thead><tr><th>EDITOR</th><th>COMPUTER</th><th>RUNNING</th><th>LAST REPORT</th><th></th></tr></thead>
       <tbody>
       {% for m in packages.outdated_machines %}
         <tr class="editor-row">
           <td class="who" data-label="EDITOR">{{ m.editor_username }}</td>
-          <td class="mono-sm" data-label="MACHINE">{{ m.machine }}</td>
+          <td class="mono-sm" data-label="COMPUTER">{{ m.machine }}</td>
           <td class="mono-sm" data-label="RUNNING"><span class="chip amber">[ {{ m.companion_version or "?" }} ]</span>
             {% if m.upgrade and m.upgrade.upgrade_reverted_from %}<span class="chip amber" title="this computer installed {{ m.upgrade.upgrade_reverted_from }}, could not start it, and put itself back on the build it is running. Do not make that build current.">[ REVERTED FROM {{ m.upgrade.upgrade_reverted_from }} ]</span>{% endif %}
           </td>
@@ -223,7 +223,7 @@
                 <input type="hidden" name="editor" value="{{ m.editor_username }}">
                 <input type="hidden" name="machine" value="{{ m.machine }}">
                 <button class="btn tap" type="submit"
-                        title="update this machine to the current build on its next report, without waiting for its editor to click">[ UPDATE NOW ]</button>
+                        title="update this computer to the current build on its next report, without waiting for its editor to click">[ UPDATE NOW ]</button>
               </form>
             {% endif %}
           </td>
@@ -233,13 +233,13 @@
     </table>
     </div>
   {% else %}
-    <div class="muted">all reporting machines are on the current version</div>
+    <div class="muted">all reporting computers are on the current version</div>
   {% endif %}
 
   <div class="muted" style="margin-top:0.8rem">
     Publish new builds from the base rig:
     <span class="mono-sm publish-cmd">.\build_editor_package.ps1 -RebuildExe -RebuildOnboard -Publish [-MakeCurrent]</span>
-    uploads both the companion and the installer. Each machine's tray then shows “Update now”.
+    uploads both the companion and the installer. Each computer's tray then shows “Update now”.
   </div>
 
   {# The vendor release feed (ZERO_TOUCH_PLAN.md WP E, 2026-08-17): "we
@@ -261,8 +261,26 @@
     </div>
     <form class="inline-form" hx-post="/partials/admin/feed/check"
           hx-target="closest .admin-packages-box" hx-swap="outerHTML" style="margin:0.4rem 0">
-      <button class="btn tap" type="submit">[ CHECK NOW ]</button>
+      {# DUI-4 (2026-09-04): a check fetches the vendor's channel over the
+         internet, so it is not instant. #}
+      <button class="btn tap" type="submit"><span class="idle-label">[ CHECK NOW ]</span><span class="busy-label">[ CHECKING THE FEED... ]</span></button>
     </form>
+
+    {# What the check REFUSED (2026-09-04). A build this dashboard will not
+       accept -- an unsigned record, one below the downgrade floor, one whose
+       min_version is above itself -- used to leave the page looking exactly
+       like a feed with nothing new in it, and the evidence was one log line
+       in a container nobody opens. #}
+    {% if feed_refused %}
+      <div class="muted" style="margin-top:0.4rem">
+        <span class="chip red">[ REFUSED ]</span>
+        this dashboard would not take
+        {% for r in feed_refused %}<span class="mono-sm">{{ r }}</span>{{ ", " if not loop.last }}{% endfor %}
+        from the feed. Nothing was published. Ask whoever publishes these
+        builds: it is the release record that is being refused, not the
+        download.
+      </div>
+    {% endif %}
 
     <div class="muted" style="margin-top:0.4rem">
       policy:
@@ -298,7 +316,10 @@
                 <input type="hidden" name="kind" value="{{ p.kind }}">
                 <input type="hidden" name="platform" value="{{ p.platform }}">
                 <input type="hidden" name="version" value="{{ p.version }}">
-                <button class="btn tap" type="submit">[ PUBLISH ]</button>
+                {# DUI-4 (2026-09-04): a publish DOWNLOADS the artefact from
+                   the vendor feed, tens of megabytes over the internet. The
+                   button said nothing for the whole of it. #}
+                <button class="btn tap" type="submit"><span class="idle-label">[ PUBLISH ]</span><span class="busy-label">[ DOWNLOADING THE BUILD... ]</span></button>
               </form>
             </td>
             <td data-label="PUBLISH + MAKE CURRENT">
@@ -308,7 +329,8 @@
                 <input type="hidden" name="platform" value="{{ p.platform }}">
                 <input type="hidden" name="version" value="{{ p.version }}">
                 <input type="hidden" name="make_current" value="1">
-                <button class="btn tap" type="submit">[ PUBLISH + MAKE CURRENT ]</button>
+                {# DUI-4 (2026-09-04): same download as [ PUBLISH ] beside it. #}
+                <button class="btn tap" type="submit"><span class="idle-label">[ PUBLISH + MAKE CURRENT ]</span><span class="busy-label">[ DOWNLOADING THE BUILD... ]</span></button>
               </form>
             </td>
           </tr>

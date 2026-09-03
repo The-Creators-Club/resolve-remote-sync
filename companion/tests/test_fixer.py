@@ -1659,8 +1659,10 @@ def test_list_project_dirs_folds_the_two_spellings_of_one_project(tmp_path):
     write_project_marker(project_dir, slug="ete")
     # NTFS is normalisation-PRESERVING and case-folds nothing else, so the
     # second spelling has to be materialised here to reproduce what APFS does
-    # for free: one directory that answers is_dir() to either spelling.
-    (tmp_path / "Projects" / selected.replace("/", os.sep)).mkdir(parents=True)
+    # for free: one directory that answers is_dir() to either spelling. On
+    # APFS itself that mkdir finds the directory already there (FileExistsError
+    # on the macOS CI runner, 2026-09-03), which is exactly the shape wanted.
+    (tmp_path / "Projects" / selected.replace("/", os.sep)).mkdir(parents=True, exist_ok=True)
 
     rels = fixer.list_project_dirs(str(tmp_path), extra_rels=[selected])
     assert rels == [walked]

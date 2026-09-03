@@ -1452,7 +1452,10 @@ def test_an_unsigned_offer_is_refused_with_no_fallback(tmp_path, caplog):
     ("version", "6.6.6"),
     ("sha256", "b" * 64),
     ("filename", "ccsync-onboard-9.9.9.exe"),
-    ("platform", "macos"),
+    # The OTHER platform, whichever this runner is: on the macOS CI runner
+    # _info() already says "macos", and "tampering" a field to its own value
+    # is not tampering (release-macos run 33764856227, 2026-09-03).
+    ("platform", "windows" if upgrade_mod.platform_key() == "macos" else "macos"),
     ("kind", "onboard"),
     ("size_bytes", 999),
     ("min_version", "1.2.3"),

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -44,6 +45,13 @@ def make(**over):
 # ------------------------------------------------------------- the backoff
 
 def test_an_empty_queue_makes_this_machine_ask_less_often():
+    """THE SHAPE THE DASHBOARD REALLY SENDS (bug-hunt-2026-09-03
+    comp-ytdl-jobs-3). Until 2026-09-03 the dashboard omitted the whole
+    `queue` block when the queue was empty, so this backoff -- written for
+    exactly that state -- was unreachable in the fleet and this test was
+    green on a message no wire ever carried. The dashboard now always sends
+    `db.queue_depth`'s four keys, zeros included, to a companion that can run
+    jobs; the block below is that reply verbatim."""
     r = make(jobs_poll_seconds=20)
     r.note_report_reply({"commands": {"jobs": {
         "queue": {"queued": 0, "running": 0, "pinned": 0, "oldest_age_s": None}}}})
@@ -76,6 +84,46 @@ def test_a_dashboard_too_old_to_send_a_depth_keeps_the_old_cadence():
     r.note_report_reply({"commands": {"halt": {"active": False}}})
     assert r.wait_seconds() == 20.0
     assert r.status()["queue"] == {}
+
+
+def test_a_new_offer_wakes_a_backed_off_loop():
+    """The backoff must never be a delay on WORK (bug-hunt-2026-09-03
+    comp-ytdl-jobs-3). Once the depth signal really arrives, an idle machine
+    is asleep for up to two minutes, and a job submitted onto an idle fleet --
+    including an admin's forced [ RUN NOW ] -- would sit there waiting for the
+    sleep to end. The offer that lands on the report reply interrupts it."""
+    r = make(jobs_poll_seconds=120)
+    r.note_report_reply({"commands": {"jobs": {"queue": {
+        "queued": 0, "running": 0, "pinned": 0, "oldest_age_s": None}}}})
+    assert r.wait_seconds() == runner_mod.IDLE_BACKOFF_MAX_SECONDS
+    ticks: list[int] = []
+    first, again = threading.Event(), threading.Event()
+
+    def tick():
+        ticks.append(1)
+        (first if len(ticks) == 1 else again).set()
+
+    r.tick = tick
+    r.start()
+    try:
+        assert first.wait(5.0), "the loop never ran its first tick"
+        r.note_report_reply({"commands": {"jobs": {"offered": [7], "queue": {
+            "queued": 1, "running": 0, "pinned": 0, "oldest_age_s": 0.2}}}})
+        assert again.wait(5.0), \
+            "a backed-off machine slept through a new offer"
+    finally:
+        r.stop()
+
+
+def test_a_forced_job_wakes_the_loop_too_and_a_cancel_does_not():
+    """A cancel needs no wake: the thread that acts on it is already inside
+    the job it stops."""
+    r = make(jobs_poll_seconds=20)
+    r.note_report_reply({"commands": {"jobs": {"forced": [7]}}})
+    assert r._wake.is_set() is True
+    r._wake.clear()
+    r.note_report_reply({"commands": {"jobs": {"cancel": [7]}}})
+    assert r._wake.is_set() is False
 
 
 def test_an_unreadable_block_changes_nothing():

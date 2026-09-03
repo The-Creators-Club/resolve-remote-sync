@@ -151,14 +151,16 @@ def test_platform_restricts_which_packages_a_target_needs(tmp_path, monkeypatch)
     packages = {f.package for f in findings}
     assert packages == {"colorama", "watchdog"}
 
-    # A fresh Target: check() mutates `.names` in place, and re-using the same
-    # instance across two check() calls would union this run's packages onto
-    # the first's rather than proving --platform's filter actually narrowed it.
-    target2 = _fake_target("companion", lock, ["win32", "darwin"])
-    monkeypatch.setattr(check_licenses, "TARGETS", [target2])
+    # The SAME Target instance, deliberately (bug-hunt-2026-09-03
+    # server-tools-4): check() used to accumulate the names it considered onto
+    # the module-level Target and never reset them, so a second call in one
+    # process reported the first call's platform slice (colorama here) as
+    # UNSCANNED, which --strict turns into a FAIL for a package this slice
+    # never asked about.
     findings, _ = check_licenses.check(platforms=["darwin"])
     packages = {f.package for f in findings}
     assert packages == {"pyobjc-core", "pyobjc-framework-cocoa", "watchdog"}
+    assert "colorama" not in packages
 
 
 def test_platform_with_no_overlap_warns_instead_of_silently_passing(tmp_path, monkeypatch):

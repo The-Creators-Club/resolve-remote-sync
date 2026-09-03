@@ -1364,15 +1364,28 @@ class _DarwinIcon:
         self.run_detached()
         self._stopped.wait()
 
-    def stop(self) -> None:
+    def _remove_status_item(self, item) -> None:
         try:
             import AppKit
 
-            if self._status_item is not None:
-                AppKit.NSStatusBar.systemStatusBar().removeStatusItem_(self._status_item)
+            AppKit.NSStatusBar.systemStatusBar().removeStatusItem_(item)
         except Exception:
             log.debug("could not remove the menu bar item", exc_info=True)
-        self._status_item = None
+
+    def stop(self) -> None:
+        """bug-hunt-2026-09-03 comp-ui-5: removeStatusItem_ used to run inline,
+        on whatever thread asked for the shutdown. The Quit menu item is the
+        main thread, but app.shutdown() (SIGTERM, a self-upgrade) is not, and
+        this is the same off-main AppKit touch comp-app-core-2 fixed for
+        _apply_title/_apply_image/_apply_menu -- at the moment the process is
+        handing over to a new build.
+
+        `_stopped.set()` stays on the calling thread: the hop is async, so a
+        shutdown must never depend on the runloop draining first.
+        """
+        item, self._status_item = self._status_item, None
+        if item is not None:
+            self._to_main(lambda: self._remove_status_item(item))
         self._stopped.set()
 
     def notify(self, message: str, title: Optional[str] = None) -> None:

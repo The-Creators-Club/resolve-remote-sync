@@ -124,6 +124,14 @@ def unpack_flow(secret: str, cookie: str | None, now: float | None = None) -> di
 
 
 def _http_get_json(url: str) -> dict[str, Any]:
+    """Discovery only, and the ONE call in this module that still follows a
+    redirect (bug-hunt-2026-09-03 dash-core-2). Real IdPs 301 their
+    `.well-known` document -- an issuer configured without its trailing
+    slash, a vanity hostname in front of Keycloak or Entra -- so refusing the
+    hop here turns a working deployment into a login outage. It is safe HERE
+    and nowhere else in this file: the request carries no credential, and
+    `Discovery.get`'s issuer check bounds what the fetched document may claim
+    about itself."""
     import requests
 
     response = requests.get(url, timeout=HTTP_TIMEOUT)
@@ -134,10 +142,24 @@ def _http_get_json(url: str) -> dict[str, Any]:
 
 def _http_post_form(url: str, data: dict[str, str],
                     basic: tuple[str, str] | None) -> dict[str, Any]:
+    """The token exchange. Redirects are REFUSED (bug-hunt-2026-09-03
+    dash-core-2, and CLAUDE.md's "no dashboard call follows a redirect"): when
+    the IdP does not advertise client_secret_basic the client secret rides in
+    the FORM BODY, and `requests` strips an Authorization header across a host
+    change but never a body -- so a 307/308 from anything that can answer for
+    the token endpoint replays `client_secret=` to wherever it points."""
     import requests
 
     response = requests.post(url, data=data, timeout=HTTP_TIMEOUT, auth=basic,
+                             allow_redirects=False,
                              headers={"Accept": "application/json"})
+    if 300 <= response.status_code < 400:
+        raise OidcError(
+            f"token endpoint answered {response.status_code} redirecting to "
+            f"{response.headers.get('Location', '(no Location)')!r}: the sign-in was "
+            "stopped rather than sending the client secret on. Point "
+            "DASH_OIDC_ISSUER at the address the IdP actually serves"
+        )
     if response.status_code != 200:
         raise OidcError(f"token endpoint answered {response.status_code}")
     return response.json()

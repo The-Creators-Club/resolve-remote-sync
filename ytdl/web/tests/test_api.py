@@ -18,6 +18,26 @@ def _headers(user):
     return {'x-ccsync-user': user}
 
 
+_VIDEO_IDS = iter([c * 11 for c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'])
+
+
+def _create_accepts(client, slug, **widen):
+    """Would a JOB POST carrying these widening flags be accepted for `slug`?
+
+    The picker's answer and the create's answer have to be the same answer
+    (ytdl-web-1, bug-hunt-2026-09-03), so the test that pins the picker asks
+    this rather than resolve_project: the flags are a request BODY on the way
+    in, and the SPA spent a release sending only half of them.
+    """
+    r = client.post('/api/jobs/urls',
+                    json={'urls': [f'https://youtu.be/{next(_VIDEO_IDS)}'],
+                          'project_slug': slug, **widen})
+    if r.status_code == 400 and 'not one you are syncing' in r.json()['detail']:
+        return False
+    assert r.status_code == 200, r.json()
+    return True
+
+
 def test_me_reads_the_gate_injected_header(client):
     assert client.get('/api/me').json() == {'user': USER}
 
@@ -143,7 +163,7 @@ def test_the_wired_machine_of_a_mixed_account_is_offered_every_project(client):
     """
     import sqlite3
 
-    from ytdlweb import config, projects
+    from ytdlweb import config
 
     con = sqlite3.connect(config.DASH_DB)
     try:
@@ -166,15 +186,17 @@ def test_the_wired_machine_of_a_mixed_account_is_offered_every_project(client):
         # ...and the server-side destination check widens with it, or the
         # picker would offer a project every POST then refused. Probed with a
         # project this editor does NOT tick, which is the only one that tells
-        # the two answers apart.
-        assert projects.resolve_project(USER, OTHER_PROJECT[0],
-                                        machine='owen-rig') is not None
+        # the two answers apart -- and probed by POSTING A JOB BODY rather than
+        # by calling resolve_project in Python (ytdl-web-1,
+        # bug-hunt-2026-09-03): the flags reach the route off the SPA's payload,
+        # and while this test asked the predicate directly it could not see
+        # that the payload never carried `machine` at all.
+        assert _create_accepts(client, OTHER_PROJECT[0], machine='owen-rig')
 
         # Standing at the REMOTE machine: unchanged, and deliberately so.
         r = client.get(f'/api/projects?machine={MACHINE}').json()
         assert [p['slug'] for p in r['projects']] == ticked
-        assert projects.resolve_project(USER, OTHER_PROJECT[0],
-                                        machine=MACHINE) is None
+        assert not _create_accepts(client, OTHER_PROJECT[0], machine=MACHINE)
 
         # A machine nobody has heard of is not wired -- same "unknown is not
         # wired" rule an unknown editor gets.
@@ -192,12 +214,137 @@ def test_the_wired_machine_of_a_mixed_account_is_offered_every_project(client):
         assert [p['slug'] for p in r['projects']] == every
         r = client.get('/api/projects?local=false').json()
         assert [p['slug'] for p in r['projects']] == every
-        assert projects.resolve_project(USER, OTHER_PROJECT[0],
-                                        machine=MACHINE, local=False) is not None
+        assert _create_accepts(client, OTHER_PROJECT[0], machine=MACHINE,
+                               local=False)
     finally:
         con.execute('DROP TABLE machine_state')
         con.commit()
         con.close()
+
+
+def _machine_state(rows):
+    """The dashboard's machine_state table, seeded with `rows` and dropped
+    again. Session-scoped fixture database, so a test that leaves the table
+    behind changes the next one."""
+    import contextlib
+    import sqlite3
+
+    from ytdlweb import config
+
+    @contextlib.contextmanager
+    def _cm():
+        con = sqlite3.connect(config.DASH_DB)
+        try:
+            con.executescript("""
+                CREATE TABLE IF NOT EXISTS machine_state (
+                  editor_username TEXT NOT NULL,
+                  machine         TEXT NOT NULL,
+                  mode            TEXT
+                );
+            """)
+            for row in rows:
+                con.execute('INSERT INTO machine_state VALUES(?,?,?)', row)
+            con.commit()
+            yield con
+        finally:
+            con.execute('DROP TABLE machine_state')
+            con.commit()
+            con.close()
+    return _cm()
+
+
+def _ready_for_review(client, body):
+    """POST a paste, park it at review, and hand back the job id.
+
+    A url job because it is the shortest route to a manifest: its clip rows are
+    written by the create itself (db.create_url_job), so no search, no Claude
+    call and no worker run stands between the POST and the DOWNLOAD button.
+    """
+    r = client.post('/api/jobs/urls', json=body)
+    assert r.status_code == 200, r.json()
+    job_id = r.json()['job_id']
+    db.set_phase(db.con(), job_id, 'ready_for_review')
+    return job_id
+
+
+def test_a_widened_job_can_actually_be_downloaded(client, con):
+    """ytdl-web-2 (bug-hunt-2026-09-03). The CR-72 follow-up widened the
+    destination check at CREATE on two signals and stored neither, so
+    start_download re-ran it with the NARROW defaults and answered "<project>
+    is no longer a project you sync, so nothing can be downloaded into it" --
+    for a project that was never ticked and never had to be.
+
+    Both halves are here because they fail for different reasons and reach
+    different editors. `local: false` needs no machine table at all and is what
+    the SPA posts for EVERYONE while the fleet's local-download flag is off
+    (its shipped default), so it made the DOWNLOAD button unreachable for every
+    widened job in the fleet. The wired-machine half is the mixed account
+    standing at its base rig.
+
+    Walked end to end (create -> ready_for_review -> DOWNLOAD) rather than
+    against resolve_project directly: the seam the defect lived in is between
+    those two calls, and a test that asks the predicate cannot see it.
+    """
+    other_slug = OTHER_PROJECT[0]          # active, and USER does not tick it
+    links = {'urls': ['https://youtu.be/AAAAAAAAAAA'], 'quality': '1080p'}
+
+    # Half 1: the download runs on the server, which no machine's sync plan
+    # constrains.
+    job_id = _ready_for_review(client, {**links, 'project_slug': other_slug,
+                                        'local': False})
+    r = client.post(f'/api/jobs/{job_id}/download')
+    assert r.status_code == 200, r.json()
+    assert r.json()['queued'] == 1
+    db.set_phase(con, job_id, 'cancelled')          # not a busy job for half 2
+
+    # Half 2: the person is standing at the WIRED machine of a mixed account.
+    with _machine_state([(USER, 'owen-rig', 'base'), (USER, MACHINE, 'editor')]):
+        job_id = _ready_for_review(
+            client, {**links, 'urls': ['https://youtu.be/BBBBBBBBBBB'],
+                     'project_slug': other_slug, 'machine': 'owen-rig'})
+        r = client.post(f'/api/jobs/{job_id}/download')
+        assert r.status_code == 200, r.json()
+
+
+def test_the_download_check_reads_the_job_and_never_the_request(client, con):
+    """The other direction of ytdl-web-2, and the reason the flags are stored
+    rather than re-derived: a start_download that trusted a client-supplied
+    `local=false` would let any editor download into any active project.
+
+    So a job created under the NARROW rule keeps being checked under it, even
+    while a job of the same editor's created under the wide one passes.
+    """
+    other_slug = OTHER_PROJECT[0]
+    # Created narrow (no `local`, no `machine`) -- which the ticked list
+    # refuses, so the job cannot exist to be downloaded in the first place.
+    r = client.post('/api/jobs/urls', json={'urls': ['https://youtu.be/CCCCCCCCCCC'],
+                                            'project_slug': other_slug})
+    assert r.status_code == 400
+    assert 'not one you are syncing' in r.json()['detail']
+
+    # ...and a job whose project is unticked AFTER the create still 409s at
+    # DOWNLOAD (YTDL-30), because the stored pair widens on wiredness and the
+    # server-side executor, never on "it was fine last week".
+    slug, _label, _pos = PROJECTS[0]
+    job_id = _ready_for_review(client, {'urls': ['https://youtu.be/DDDDDDDDDDD'],
+                                        'project_slug': slug})
+    import sqlite3
+
+    from ytdlweb import config
+
+    dash = sqlite3.connect(config.DASH_DB)
+    try:
+        dash.execute('DELETE FROM selections WHERE editor_username=? AND '
+                     'project_slug=?', (USER, slug))
+        dash.commit()
+        r = client.post(f'/api/jobs/{job_id}/download')
+        assert r.status_code == 409
+        assert 'no longer a project you sync' in r.json()['detail']['detail']
+    finally:
+        dash.execute('INSERT OR IGNORE INTO selections VALUES(?,?,?,?,?,?)',
+                     (USER, MACHINE, slug, PROJECTS[0][2], '2026-08-11', 'seed'))
+        dash.commit()
+        dash.close()
 
 
 def test_an_editor_with_no_known_machines_is_not_base_only(client):
@@ -929,7 +1076,12 @@ def test_download_re_validates_the_destination_project(client, con, job, monkeyp
     from ytdlweb import projects
     db.add_video(con, job['id'], 'vid00000001', 'u')
     db.set_phase(con, job['id'], 'ready_for_review')
-    monkeypatch.setattr(projects, 'resolve_project', lambda user, slug: None)
+    # **kw since ytdl-web-2 (bug-hunt-2026-09-03): the re-check now hands the
+    # widening the JOB was created under back in, and a stub with the old
+    # two-argument signature would fail as a TypeError rather than as the 409
+    # this test is about.
+    monkeypatch.setattr(projects, 'resolve_project',
+                        lambda user, slug, **kw: None)
     r = client.post(f'/api/jobs/{job["id"]}/download')
     assert r.status_code == 409
     assert 'no longer a project you sync' in r.json()['detail']['detail']

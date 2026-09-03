@@ -189,8 +189,14 @@ class BorrowedFolderManager:
         # and nothing sits at the new one, exactly as repath does for a
         # selected project.
         old_path = str(folder.get("path", "")).rstrip("/\\")
+        # bug-hunt-2026-09-03 comp-sync-4: `folder` is the dict fetched BEFORE
+        # the re-point, and _repoint pauses. Deciding the unpause from it left
+        # a lender that had been running paused until the next pass noticed --
+        # a borrowed subtree silently stopped syncing for a whole rotation.
+        paused_now = bool(folder.get("paused"))
         if old_path != want_path.rstrip("/\\"):
-            self._repoint(slug, old_path, want_path, rel)
+            if self._repoint(slug, old_path, want_path, rel):
+                paused_now = True
             outcome = "repaired"
 
         try:
@@ -208,24 +214,30 @@ class BorrowedFolderManager:
         if ignores_ok == "repaired":
             outcome = "repaired"
 
-        if folder.get("paused") and self.halted():
+        if paused_now and self.halted():
             log.info("borrowed folder %s stays paused: syncing is stopped on this machine",
                      slug)
-        elif folder.get("paused") and ignores_ok != "unconfirmed":
+        elif paused_now and ignores_ok != "unconfirmed":
             log.info("borrowed folder %s was paused -- releasing it", slug)
             self.admin.set_folder_paused(slug, False)
             outcome = "repaired"
-        elif folder.get("paused"):
+        elif paused_now:
             log.warning(
                 "borrowed folder %s stays paused: its restricted .stignore could not be "
                 "confirmed, and the lender's whole folder must not go online here", slug)
         return outcome
 
-    def _repoint(self, slug: str, old_path: str, want_path: str, rel: str) -> None:
+    def _repoint(self, slug: str, old_path: str, want_path: str, rel: str) -> bool:
+        """Re-point the folder at the lender's new path. Returns True when the
+        folder was PAUSED for the move, which is the caller's cue to decide
+        the unpause from that rather than from the pre-repoint dict
+        (bug-hunt-2026-09-03 comp-sync-4). True even when the pause call
+        itself failed: set_folder_paused(False) is idempotent, and the wrong
+        way to be wrong here is to leave a lender's subtree stopped."""
         if not self._mkdir_allowed(want_path):
             # Leave the folder pointed where it is: a re-point at a path we
             # cannot create is worse than a stale one (SYNC-6).
-            return
+            return False
         log.warning("borrowed folder %s is at %r, re-pointing it at %r (the lender moved "
                     "on the NAS)", slug, old_path, want_path)
         try:
@@ -242,6 +254,7 @@ class BorrowedFolderManager:
                             slug, old_path, want_path, exc_info=True)
         Path(want_path).mkdir(parents=True, exist_ok=True)
         self.admin.set_folder_path(slug, want_path, rel)
+        return True
 
     def _ensure_ignores(self, slug: str, want_ignores: list[str]) -> str:
         """"ok" | "repaired" | "unconfirmed". The check is BOTH halves:

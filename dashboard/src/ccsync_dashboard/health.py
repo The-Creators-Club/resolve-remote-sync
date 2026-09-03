@@ -150,15 +150,11 @@ def fleet_status(project_statuses: Iterable[str]) -> str:
     return worst(project_statuses)
 
 
-def lane_chip_status(lane: Mapping[str, Any], now: str) -> str:
-    """Dot color for a single reported lane, factoring in report freshness."""
-    if lane["state"] == "error":
-        return RED
-    if age_seconds(lane["received_at"], now) >= STALE_REPORT_SECONDS * 3:
-        return RED  # companion silent for 15+ minutes
-    if lane["state"] == "syncing":
-        return AMBER
-    return GREEN
+# bug-hunt-2026-09-03 dash-collector-8: the pre-SYS-1 `lane_chip_status` used
+# to sit here, shadowed at import by the SYS-1 rewrite below and so dead since
+# 2026-08-28. Deleted rather than left as a reference copy: it encoded the OLD
+# rule (no stall test), so a maintainer could edit it to no effect and a reader
+# could conclude the stall is not applied to a lane's dot. It is.
 
 
 # --------------------------------------------------------------- SYS-1: stall

@@ -454,7 +454,7 @@ STARTING_MESSAGE = "DaVinci Resolve is starting up"
 NO_SCRIPTING_MESSAGE = (
     "DaVinci Resolve is running but isn't accepting scripting connections. "
     "Quit and reopen Resolve. If that does not help, also restart the companion "
-    "(tray → Exit, then relaunch) before reopening Resolve."
+    "(Tray > Quit CCSync, then relaunch it) before reopening Resolve."
 )
 # No script server and a Resolve process: for the first minutes that is a
 # Resolve launching (the server is spawned 90-470 s in) or shutting down
@@ -2229,7 +2229,7 @@ def replace_clip(media_pool_item, new_path: str, tries: int = 3, *,
         "ok": False,
         "message": (
             "Copied the file in, but Resolve wouldn't relink it. Close the clip's "
-            "timeline and use tray → Scan whole project again."
+            "timeline and use Tray > Settings > SCAN WHOLE PROJECT again."
         ),
     }
 
@@ -2276,11 +2276,19 @@ def link_proxy_media(media_pool_item, proxy_path: str, *,
     apart). Resolve validates the pairing itself and returns False on a
     timecode/frame-count mismatch, so a same-named but wrong file is refused
     rather than silently attached.
+
+    A failure carries a machine-readable `reason` alongside the message
+    (bug-hunt-2026-09-03 comp-resolve-2): `"refused"` means Resolve looked at
+    this pairing and declined it, `"scripting_error"` means the call never got
+    an answer. proxy_relink.apply_relinks may only remember the first kind --
+    remembering the second skips a good clip until the tray restarts.
     """
     if media_pool_item is None:
-        return {"ok": False, "message": "no media pool item to relink"}
+        return {"ok": False, "reason": "scripting_error",
+                "message": "no media pool item to relink"}
     if not proxy_path:
-        return {"ok": False, "message": "no proxy path given"}
+        return {"ok": False, "reason": "scripting_error",
+                "message": "no proxy path given"}
     ui_state.wait_while_menu_open()  # same GIL courtesy as the enumerators
     project_name = _before_mutation(source) if journal else ""
     clip_name = ""
@@ -2300,10 +2308,12 @@ def link_proxy_media(media_pool_item, proxy_path: str, *,
                 clip_path = _safe_clip_property(media_pool_item, "File Path")
         except Exception as exc:
             log.warning("resolve: LinkProxyMedia(%s) raised: %s", proxy_path, exc, exc_info=True)
-            return {"ok": False, "message": _SCRIPTING_ERROR_MESSAGE}
+            return {"ok": False, "reason": "scripting_error",
+                    "message": _SCRIPTING_ERROR_MESSAGE}
     if not result:
         return {
             "ok": False,
+            "reason": "refused",
             "message": f"Resolve wouldn't accept {proxy_path} as this clip's proxy",
         }
     if journal:

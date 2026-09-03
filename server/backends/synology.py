@@ -802,9 +802,17 @@ class SynologyBackend:
         key = (pubkey or "").strip()
         if not key:
             return False, "no SSH public key given"
+        # bug-hunt-2026-09-03 server-tools-2: without `set -e` this `;`-list
+        # returned the rc of the LAST command, the chmod -- which succeeds on a
+        # re-key because authorized_keys is already there from the previous
+        # enrolment. A failed printf/mv then read as success and left the OLD
+        # key live, i.e. a revocation the operator was told had happened. The
+        # grep read-back is the half that closes that: verify_home_permissions
+        # only stats mode and owner, never the file's content. `set -e` goes
+        # AFTER the MISSING_HOME probe, which exits 3 with its own message.
         script = (
             f"if [ ! -d {common.shell_quote(home)} ]; then echo MISSING_HOME; exit 3; fi; "
-            f"umask 077; mkdir -p {common.shell_quote(home + '/.ssh')}; "
+            f"set -e; umask 077; mkdir -p {common.shell_quote(home + '/.ssh')}; "
             f"printf '%s\\n' {common.shell_quote(key)} > "
             f"{common.shell_quote(home + '/.ssh/.authorized_keys.ccsync')}; "
             f"mv -f {common.shell_quote(home + '/.ssh/.authorized_keys.ccsync')} "
@@ -812,7 +820,9 @@ class SynologyBackend:
             f"chown -R {common.shell_quote(username + ':' + PRIMARY_GROUP)} "
             f"{common.shell_quote(home + '/.ssh')}; "
             f"chmod 700 {common.shell_quote(home + '/.ssh')}; "
-            f"chmod 600 {common.shell_quote(home + '/.ssh/authorized_keys')}"
+            f"chmod 600 {common.shell_quote(home + '/.ssh/authorized_keys')}; "
+            f"grep -qxF {common.shell_quote(key)} "
+            f"{common.shell_quote(home + '/.ssh/authorized_keys')}"
         )
         rc, out, err = self._root(script, dry_run=False, timeout=60)
         if "MISSING_HOME" in out:
@@ -820,7 +830,9 @@ class SynologyBackend:
                            f"account has nowhere to keep an authorized_keys. Turn it on in "
                            f"Control Panel > User & Group > Advanced and re-run.")
         if rc != 0:
-            return False, f"installing the SSH key failed (exit {rc}): {(err or out).strip()[:200]}"
+            detail = (err or out).strip()[:200]
+            return False, (f"installing the SSH key failed (exit {rc}): "
+                           f"{detail or 'the key was not there when it was read back'}")
         print(f"installed SSH key: {home}/.ssh/authorized_keys (0600, owned by {username})")
         return True, ""
 
@@ -927,6 +939,13 @@ class SynologyBackend:
                                    False, 60)
         uid = _first_int(out)
         if uid is None:
+            # The one deliberate exception to SEC-2 (bug-hunt-2026-09-03
+            # server-tools-6): `synouser --add` takes the password as an
+            # argument only, so this value is on the remote argv for the ~1 s
+            # the call runs. It is safe HERE because it is random, single-use,
+            # never stored and never reused, and the account it creates is
+            # /sbin/nologin. Do not copy this pattern for a credential anyone
+            # keeps: everything else goes on stdin (common.SUDO_PW_PREAMBLE).
             rc, _out, err = self._root(
                 f"synouser --add {common.shell_quote(name)} "
                 f"{common.shell_quote(_random_password())} "
@@ -1422,29 +1441,53 @@ def _rule_denies(rule, group: str) -> bool:
     return bool(rule.get("deny_ip")) and not rule.get("allow_ip")
 
 
+# The two .env values the operator already owns rather than one we mint. Their
+# rotation is "change the account password on the NAS" (docs/SECRETS.md), so a
+# refusal that says `openssl rand -hex 24` is advice nobody can follow
+# (bug-hunt-2026-09-03 server-tools-1).
+OPERATOR_OWNED_ENV = ("TRUENAS_PW", "DASH_NAS_PW")
+
+
+def _env_refusal(name: str, what: str) -> common.EnvError:
+    head = f"{name} contains {what}, which a .env value cannot carry safely."
+    if name in OPERATOR_OWNED_ENV:
+        return common.EnvError(
+            f"{head} That value is your NAS admin password, so the fix is to set a password "
+            f"without {what} on the NAS (Control Panel > User & Group) and re-run.")
+    return common.EnvError(
+        f"{head} It is a secret this installer generates, so replace it with a fresh one: "
+        f"`openssl rand -hex 24`.")
+
+
 def render_env_file(values: dict) -> str:
     """The `.env` compose reads beside compose.yaml, as text.
 
-    Compose interpolates `${...}` in .env values, and a newline would end the
-    assignment silently -- both are refused rather than escaped, because every
-    value here is a generated secret and one that needs escaping is one that
-    was pasted from somewhere it should not have been.
+    Every value is SINGLE-quoted (bug-hunt-2026-09-03 server-tools-1). Compose
+    parses this file with compose-go's dotenv, where an UNQUOTED value loses
+    everything after an inline " #", loses its leading/trailing whitespace, and
+    loses a wrapping pair of quotes -- silently, so a truncated NAS password
+    reads as a container that starts healthy and fails every authentication.
+    A single-quoted value is literal there: no interpolation, no escapes.
+
+    A value containing a single quote is refused rather than escaped, because
+    compose-go and python-dotenv disagree about what `\\'` means inside single
+    quotes and a password that differs by one byte is worse than a refusal.
     """
     lines = [
         "# ccsync stack -- generated by server/install_dashboard_app.py.",
         "# Mode 0600, owned by root: this file holds the dashboard session",
         "# secret, the fleet report token, the Syncthing API key, the b-roll",
         "# ingest token and the NAS admin password. Do not copy it anywhere.",
+        "# Every value is single-quoted, i.e. literal: compose does not",
+        "# interpolate inside single quotes.",
     ]
     for name in sorted(values):
         value = str(values[name] if values[name] is not None else "")
         if "\n" in value or "\r" in value:
-            raise common.EnvError(f"{name} contains a newline, which a .env cannot carry")
-        if "$" in value:
-            raise common.EnvError(
-                f"{name} contains a '$', which docker compose would interpolate out of the "
-                f".env. Generate it with `openssl rand -hex 24`.")
-        lines.append(f"{name}={value}")
+            raise _env_refusal(name, "a newline")
+        if "'" in value:
+            raise _env_refusal(name, "a single quote")
+        lines.append(f"{name}='{value}'")
     return "\n".join(lines) + "\n"
 
 

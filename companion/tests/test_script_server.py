@@ -161,3 +161,55 @@ def test_the_windows_tables_read_without_error():
     assert rows and all(len(r) == 4 for r in rows)
     assert os.getpid() in procs
     assert ss._probe_uncached()[0] in (ss.READY, ss.STARTING, ss.ABSENT, ss.UNKNOWN)
+
+
+# bug-hunt-2026-09-03 comp-resolve-5: lsof truncates COMMAND to 9 characters
+# unless it is told not to, so this is what a Mac really reported. fuscript is
+# re-parented here (R1), which is the case the name check is the fallback for.
+LSOF_TRUNCATED = """p300
+cfuscript
+R1
+f7
+n*:1144
+TST=LISTEN
+p200
+cDaVinci r
+R1
+f120
+n127.0.0.1:50413->127.0.0.1:1144
+TST=ESTABLISHED
+"""
+
+
+def test_a_clipped_resolve_command_is_still_recognised_as_the_host():
+    rows, procs = ss.parse_lsof(LSOF_TRUNCATED)
+    assert procs[200] == ("davinci r", 1)
+    # The parent arm cannot answer here (fuscript's parent is 1), so this is
+    # the name arm alone: before the fix it said STARTING for ever.
+    assert ss.classify(rows, procs, 999)[0] == ss.READY
+
+
+def test_a_short_name_is_not_mistaken_for_a_clipped_resolve():
+    assert ss.is_resolve_name("res") is False
+    assert ss.is_resolve_name("") is False
+    assert ss.is_resolve_name("resolve") is True
+    assert ss.is_resolve_name("DaVinci Resolve") is True
+    assert ss.is_resolve_name("python.exe") is False
+
+
+def test_the_darwin_probe_asks_lsof_not_to_truncate(monkeypatch):
+    seen = {}
+
+    class _Out:
+        stdout = LSOF_TRUNCATED
+        returncode = 0
+
+    def fake_run(argv, **kwargs):
+        seen["argv"] = list(argv)
+        return _Out()
+
+    monkeypatch.setattr(ss.subprocess, "run", fake_run)
+    rows, procs = ss._darwin_tables()
+    assert "+c" in seen["argv"]
+    assert seen["argv"][seen["argv"].index("+c") + 1] == "0"
+    assert ss.classify(rows, procs, 999)[0] == ss.READY

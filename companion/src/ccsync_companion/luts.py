@@ -45,6 +45,7 @@ import os
 import platform
 import re
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -61,6 +62,12 @@ LIBRARY_REL = ("Assets", "Luts")
 # the LUT/DCTL directory, never from an additional LUT location, so copying
 # one into the library would put it somewhere Resolve does not look.
 LUT_EXTENSIONS = frozenset({".cube", ".ilut", ".olut", ".3dl", ".dat", ".mga", ".cms", ".lut"})
+
+# bug-hunt-2026-09-03 comp-ui-3: how long a status stays deduped in _report.
+# A LUT library that has been unreachable all day must say so more than once,
+# but the check runs every cycle and this is a warning nobody can act on more
+# than hourly. Same shape as reporter.AUTH_RELOG_SECONDS.
+WARN_RELOG_SECONDS = 3600.0
 
 
 # -- the stale-index detector ----------------------------------------------
@@ -342,10 +349,22 @@ def copy_into_library(entries: list[dict], library: Path) -> dict:
     one. Returns {"copied": n, "skipped": n, "errors": [...]}"""
     copied = skipped = 0
     errors: list[str] = []
+    library_resolved = _resolved(library)
     for entry in entries:
         src = Path(str(entry.get("path", "")))
         rel = str(entry.get("dest_rel") or src.name)
         dest = library.joinpath(*[p for p in rel.split("/") if p])
+        # bug-hunt-2026-09-03 comp-ui-4: the only file-writing function in this
+        # module, and the join above honours `..` and a drive-qualified
+        # segment. `_dest_rel()` never produces either today, but adopt() takes
+        # whatever list of entries it is handed, and the destination is inside
+        # a Syncthing-shared tree: a miss here writes a file the fleet then
+        # replicates. Fail closed instead.
+        if not _is_under(_resolved(dest), library_resolved):
+            errors.append(f"{src.name}: refused, {rel} is outside the LUT library")
+            log.warning("luts: refusing to copy %s to %s -- outside the library %s",
+                        src, dest, library)
+            continue
         try:
             if dest.exists():
                 skipped += 1
@@ -396,8 +415,13 @@ class LutLinkManager:
         self._location_exists_fn = location_exists_fn or os.path.isdir
         self._last_status = ""
         # Warn once per streak, not once per check: "the library hasn't
-        # arrived yet" is normal for a new editor's first hours.
-        self._warned: set[str] = set()
+        # arrived yet" is normal for a new editor's first hours. Keyed status
+        # -> when it was last logged (monotonic), because a set alone made
+        # this once per PROCESS: nothing detected the end of a streak, so a
+        # library that went away for a whole day after one transient miss at
+        # boot left companion.log completely silent about it
+        # (bug-hunt-2026-09-03 comp-ui-3).
+        self._warned: dict[str, float] = {}
         # The Resolve session whose stale LUT index we have already repaired.
         # In-process only: a companion restart re-reading the same log and
         # refreshing once more is harmless, while a marker persisted to disk
@@ -484,9 +508,15 @@ class LutLinkManager:
         return self._report(status, False, "")
 
     def _report(self, status: str, changed: bool, message: str) -> dict[str, Any]:
+        # A different status ends the streak: whatever was being suppressed is
+        # no longer what is happening, and if it comes back it is news again.
+        if status != self._last_status:
+            self._warned.clear()
         self._last_status = status
-        if message and status not in self._warned:
-            self._warned.add(status)
+        now = time.monotonic()
+        last = self._warned.get(status)
+        if message and (last is None or now - last >= WARN_RELOG_SECONDS):
+            self._warned[status] = now
             log.warning("luts: %s", message)
         return {"status": status, "changed": changed, "message": message}
 

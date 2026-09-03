@@ -295,6 +295,35 @@ elseif ($copySucceeded) {
     }
 }
 
+# --- 2c. flush the shell's icon cache -------------------------------------
+# 2026-09-03: the mark shipped in the exe (build.spec's icon.ico) is drawn on
+# TRANSPARENCY now instead of the opaque black square it used to carry -- the
+# Start Menu tile, the taskbar button and Explorer all read that icon out of
+# the exe. Windows does not: it reads it out of its own icon cache, keyed on
+# the exe path, and a new file at the same path with the same shell metadata
+# does not always invalidate it. So an editor upgrades, and keeps looking at
+# the old black tile until something else happens to evict the entry (a
+# reboot, sometimes weeks).
+#
+# `ie4uinit.exe -show` is the documented, per-user, non-elevated way to ask
+# the shell to rebuild it (`-ClearIconCache` on Windows 7/8 only). Entirely
+# cosmetic, so it is best effort in every direction: no output is checked, a
+# missing binary or a non-zero exit is ignored, and nothing here can fail an
+# upgrade over an icon.
+if ($DryRun) { Write-Step "[dry-run] would refresh the shell icon cache (ie4uinit.exe -show)" }
+elseif ($copySucceeded) {
+    try {
+        $ie4 = Join-Path $env:SystemRoot "System32\ie4uinit.exe"
+        if (Test-Path -LiteralPath $ie4) {
+            Start-Process -FilePath $ie4 -ArgumentList "-show" -WindowStyle Hidden -ErrorAction Stop
+            Write-Step "asked the shell to refresh its icon cache (the Start Menu/taskbar mark)"
+        }
+    }
+    catch {
+        # An icon is decoration. Not even a warning: the upgrade succeeded.
+    }
+}
+
 # --- 3. (re)register autostart ---------------------------------------------
 # Always run this (and steps 4-5), even if the copy above ultimately failed:
 # the companion was already killed, so re-registering autostart and

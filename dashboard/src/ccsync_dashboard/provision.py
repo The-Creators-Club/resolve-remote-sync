@@ -181,10 +181,19 @@ def shared_asset_folders_for(rels: Iterable[str]) -> list:
     """(id, rel, label) triples for a list of rel paths. The id is slugify(rel)
     -- exactly what the two default ids already are -- so the Syncthing folder
     id a site's extra library gets is derived by the same rule as everything
-    else in the fleet, not invented per component."""
+    else in the fleet, not invented per component.
+
+    `..` segments are DROPPED here as well as refused by site_store's
+    validator (bug-hunt-2026-09-03 dash-core-3): a rel that reaches this
+    function is mkdir'd under the tree root by setup's storage task and
+    handed to Syncthing as a folder path, and this is also the door the
+    DASH_SITE_SHARED_ASSETS environment value comes through, which no
+    validator sees. Leading separators were already stripped for the same
+    reason."""
     out = []
     for rel in rels:
         rel = str(rel).replace("\\", "/").strip("/")
+        rel = "/".join(p for p in rel.split("/") if p and p != "..")
         if not rel:
             continue
         out.append((slugify(rel), rel, _ASSET_LABELS.get(rel, rel)))
@@ -371,15 +380,42 @@ def write_marker(directory: Path, slug: str, created_by: str = "dashboard") -> N
 def write_marker_data(directory: Path, data: dict) -> None:
     """Atomic full-marker write (tmp + replace). The caller holds the whole
     dict (from read_marker_data) -- the link-authoring endpoints go through
-    here so every key they do not own survives verbatim."""
+    here so every key they do not own survives verbatim.
+
+    The temp file is written in the PARENT (the Projects dir), never inside
+    the project (bug-hunt-2026-09-03 dash-db-3). A project directory is a
+    sendreceive Syncthing folder with ignoreDelete, and its .stignore carries
+    no `*.tmp` pair -- anything the fsWatcher catches between the write and
+    the replace is fanned out to every ticked editor and its later removal is
+    never propagated, which is the B12 / orphaned-`.part` shape. The parent
+    is on the same filesystem, so the replace is still atomic; its own name
+    carries the project and the pid so two writers cannot collide."""
     import json
     import os as _os
+    import uuid as _uuid
 
     payload = json.dumps(data, indent=1, ensure_ascii=False)
-    target = Path(directory) / MARKER_FILENAME
-    tmp = Path(directory) / (MARKER_FILENAME + ".tmp")
+    directory = Path(directory)
+    target = directory / MARKER_FILENAME
+    parent = directory.parent
+    if parent == directory or not parent.is_dir():
+        parent = directory
+    tmp = parent / (
+        f"{MARKER_FILENAME}.{directory.name}.{_os.getpid()}."
+        f"{_uuid.uuid4().hex[:8]}.tmp"
+    )
     tmp.write_text(payload, encoding="utf-8")
-    _os.replace(tmp, target)
+    try:
+        _os.replace(tmp, target)
+    except OSError:
+        # A temp file left in the Projects root is harmless (nothing shares
+        # that directory) but it is still litter, and the caller decides what
+        # a failed marker write means.
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def scan_project_dirs(projects_dir: Path, max_depth: int = 8) -> list[tuple[str, str | None]]:

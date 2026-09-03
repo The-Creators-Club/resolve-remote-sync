@@ -272,3 +272,59 @@ def test_dashboard_disk_low_fires_when_the_volume_cannot_be_measured(conn, tmp_p
     monkeypatch.setattr(notices.shutil, "disk_usage", raises)
     notices._check_dashboard_space(conn, settings, NOW)
     assert any(r["kind"] == "dashboard_disk_low" for r in dbmod.open_notices(conn))
+
+
+# --------------------------------------------- bug-hunt-2026-09-03 fix pass
+
+def _seed_disk(conn, editor, machine, free, disk_at):
+    conn.execute(
+        "INSERT INTO machine_state (editor_username, machine, reported_at, "
+        "received_at, disk_root_free_bytes, disk_root_total_bytes, disk_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (editor, machine, disk_at, disk_at, free, 500 * 1024 ** 3, disk_at))
+
+
+def test_machine_disk_low_ignores_a_reading_older_than_the_silent_threshold(conn):
+    """dash-collector-6: nothing but that machine reporting again with more
+    space could clear this notice, so a retired laptop's last reading kept a
+    warn open for ever, with a fix nobody could act on."""
+    now = "2026-08-28T12:00:00+00:00"
+    stale = "2026-08-01T12:00:00+00:00"
+    _seed_disk(conn, "jsmith", "OLD-LAPTOP", 30 * 1024 ** 3, stale)
+    notices._check_machine_space(conn, None, now)
+    assert [r for r in dbmod.open_notices(conn)
+            if r["kind"] == "machine_disk_low"] == []
+    # ...and the kind is still CHECKED, so the panel does not read as a gap.
+    assert "machine_disk_low" in dbmod.notice_check_times(conn)
+
+
+def test_machine_disk_low_still_fires_on_a_fresh_reading(conn):
+    now = "2026-08-28T12:00:00+00:00"
+    fresh = "2026-08-28T11:00:00+00:00"
+    _seed_disk(conn, "jsmith", "EDIT-PC", 30 * 1024 ** 3, fresh)
+    notices._check_machine_space(conn, None, now)
+    assert [r["subject"] for r in dbmod.open_notices(conn)
+            if r["kind"] == "machine_disk_low"] == ["jsmith/EDIT-PC"]
+
+
+def test_a_stale_reading_lets_an_open_disk_notice_clear(conn):
+    fresh = "2026-08-28T11:00:00+00:00"
+    _seed_disk(conn, "jsmith", "EDIT-PC", 30 * 1024 ** 3, fresh)
+    notices._check_machine_space(conn, None, "2026-08-28T12:00:00+00:00")
+    assert any(r["kind"] == "machine_disk_low" for r in dbmod.open_notices(conn))
+    notices._check_machine_space(conn, None, "2026-09-28T12:00:00+00:00")
+    assert not any(r["kind"] == "machine_disk_low" for r in dbmod.open_notices(conn))
+
+
+def test_the_feed_kinds_are_checked_on_a_site_with_no_feed(conn):
+    """dash-collector-7: the early return stamped no evidence at all, so both
+    kinds sat at [ NOT CHECKED ] for ever on the vendor default - which the
+    panel's contract reads as "no writer runs anywhere in this build"."""
+    class _NoFeed:
+        release_feed_url = ""
+
+    notices._check_release_feed(conn, _NoFeed(), NOW)
+    checked = dbmod.notice_check_times(conn)
+    assert "feed_unreachable" in checked
+    assert "feed_runtime_mismatch" in checked
+    assert dbmod.open_notices(conn) == []

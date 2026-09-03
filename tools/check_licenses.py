@@ -64,7 +64,7 @@ import json
 import re
 import sys
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -137,7 +137,6 @@ class Target:
     platforms: list[str]
     venvs: list[Path]
     why: str
-    names: set[str] = field(default_factory=set)
 
 
 TARGETS = [
@@ -271,7 +270,8 @@ class Finding:
 
 
 def check(strict: bool = False, only: list[str] | None = None,
-          platforms: list[str] | None = None) -> tuple[list[Finding], list[str]]:
+          platforms: list[str] | None = None,
+          counts: dict[str, int] | None = None) -> tuple[list[Finding], list[str]]:
     """`only` restricts which TARGETS run at all; `platforms` restricts which of
     a running target's OWN declared platforms are required on THIS host.
 
@@ -289,6 +289,12 @@ def check(strict: bool = False, only: list[str] | None = None,
     target's FULL platform closure still gets asserted -- CI just now runs it
     split across the three jobs that can each cover their own slice, instead
     of demanding one job cover all of it.
+
+    `counts`, when given, is filled with {label: packages considered} for the
+    printed summary. The name set used to live on the module-level Target and
+    was never reset, so a second check() in the same process unioned the first
+    run's platform slice onto this one and reported its packages UNSCANNED,
+    which is a FAIL under --strict (bug-hunt-2026-09-03 server-tools-4).
     """
     allow = load_allowlist(ALLOWLIST_PATH)
     findings: list[Finding] = []
@@ -313,13 +319,16 @@ def check(strict: bool = False, only: list[str] | None = None,
                 f"{target.label}: none of {platforms} is in its own "
                 f"{target.platforms} -- nothing checked for it on this run")
             continue
+        names: set[str] = set()
         for platform in wanted_platforms:
-            target.names |= parse_lock(target.lock, platform)
+            names |= parse_lock(target.lock, platform)
+        if counts is not None:
+            counts[target.label] = len(names)
 
         rows, venv_warnings = scan_venvs(target.venvs)
         warnings.extend(f"{target.label}: {w}" for w in venv_warnings)
 
-        for name in sorted(target.names):
+        for name in sorted(names):
             row = rows.get(name)
             entry = allow.get(name, {})
             allowed_targets = entry.get("targets", [])
@@ -401,7 +410,9 @@ def main(argv: list[str] | None = None) -> int:
                          "asserts only what it could have installed.")
     args = ap.parse_args(argv)
 
-    findings, warnings = check(strict=args.strict, only=args.only, platforms=args.platform)
+    package_counts: dict[str, int] = {}
+    findings, warnings = check(strict=args.strict, only=args.only, platforms=args.platform,
+                               counts=package_counts)
     failures = [f for f in findings if f.status == "FAIL"]
 
     if args.json:
@@ -418,7 +429,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n=== {target.label} ===")
         print(f"    {target.why}")
         print(f"    lock: {target.lock.relative_to(REPO)}  "
-              f"platforms: {', '.join(target.platforms)}  packages: {len(target.names)}")
+              f"platforms: {', '.join(target.platforms)}  "
+              f"packages: {package_counts.get(target.label, 0)}")
         if not rows:
             print("    nothing to report")
         for f in sorted(rows, key=lambda r: (r.status, r.package)):

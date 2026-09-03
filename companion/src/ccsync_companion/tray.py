@@ -460,7 +460,7 @@ def classify_lane_error(last_error: Optional[str], root_absent: bool = False) ->
                 f"syncing is paused. Plug it back in and it resumes on its own "
                 f"-- nothing was deleted.")
     if not text:
-        return "Something went wrong. Tray → Copy diagnostics for your admin."
+        return "Something went wrong. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN."
     if "sync engine" in text:
         # SYNC-17 (2026-08-18): the supervisor's own sentence, already
         # written for an editor ("the sync engine (Syncthing) is not running
@@ -475,25 +475,26 @@ def classify_lane_error(last_error: Optional[str], root_absent: bool = False) ->
         # construct). Say the same thing, minus the promise to fix it.
         return ("The sync engine (Syncthing) is not running on this machine, so "
                 "audio, graphics, subtitles and project files are not syncing. "
-                "Restart this machine, or tray → Copy diagnostics for your admin.")
+                "Restart this machine, or Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.")
     if "marker missing" in text:
         # The editor deleted a project's local folder while it was still
         # ticked -- routine when cycling projects, and nothing was lost
         # (the server copy is untouched). Say what to do, not PROBLEM.
         return ("A project folder was deleted on this machine while still ticked. "
-                "Untick it on the dashboard, or use Advanced → Remove a project from this machine.")
+                "Untick it on the dashboard, or use Tray > Settings > REMOVE '<project>'.")
     if any(k in text for k in ("no space", "enospc", "disk full", "not enough space")):
         return "Your disk is full. Free up space and it will resume."
     if any(k in text for k in (
         "permission denied", "auth", "handshake", "publickey", "unable to authenticate",
     )):
-        return "The server rejected this machine's login. Tray → Copy diagnostics for your admin."
+        return ("The server rejected this machine's login. "
+                "Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.")
     if any(k in text for k in (
         "timeout", "timed out", "no route", "connection refused", "connection reset",
         "network", "unreachable", "dial tcp", "lookup", "eof",
     )):
         return "Can't reach the server. Check the Tailscale tray icon is connected."
-    return "Something went wrong. Tray → Copy diagnostics for your admin."
+    return "Something went wrong. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN."
 
 
 def _format_lane_line(status: LaneStatus, app: "CompanionApp | None" = None) -> str:
@@ -948,7 +949,7 @@ def _youtube_sign_in(app: "CompanionApp", runner: Optional[Any] = None,
     except Exception:  # noqa: BLE001 -- run() never raises, but the seam might
         log.exception("ytdl sign-in: browser flow crashed")
         _notify(app, "The sign-in window failed unexpectedly. See the log, or use "
-                     "Advanced → YouTube: use an exported cookies.txt…")
+                     "Tray > Settings > Use an exported cookies.txt")
         return
     if outcome.ok:
         log.info("ytdl sign-in: %d cookies written", outcome.cookies_written)
@@ -964,32 +965,49 @@ def _install_youtube_cookies(app: "CompanionApp", picker: Optional[Any] = None) 
     The actual validate-and-copy is ytdl_cookies.install, so this function is
     only the GUI around it and stays out of the test's way.
 
-    No popup lock: askopenfilename is a native modal, not one of this
-    process's Tk roots, so it does not hit the sibling-Tk-root hazard the
-    themed dialogs take the lock for (AUDIT_2 CORE-H8)."""
+    bug-hunt-2026-09-03 comp-ui-1: the docstring used to claim there was no Tk
+    root here (only "a native modal"), and the code built one six lines below
+    it on the tray worker thread -- outside ui_dispatch, so the interpreter was
+    pinned for the life of the process (CR-93) and, on macOS, Tk-Aqua was
+    touched off the main thread. The picker now goes through
+    ui_dispatch.dispatch + release_root like every other root in this package,
+    and takes `_popup_active_lock` for the sibling-Tk-root hazard (AUDIT_2
+    CORE-H8). No caller holds that lock: both entry points are tray._spawn
+    workers (action_youtube_cookies_file, _youtube_sign_in's fallback) and the
+    Settings window releases its hold before spawning either."""
     from . import ytdl_cookies
 
     if picker is None:
+        lock = getattr(app, "_popup_active_lock", None)
+        if lock is not None and not lock.acquire(blocking=False):
+            _notify(app, "Another CCSync window is already open. Close it first.")
+            return
         try:
             import tkinter as tk
             from tkinter import filedialog
 
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            try:
-                chosen = filedialog.askopenfilename(
-                    parent=root,
-                    title="Choose your exported YouTube cookies.txt",
-                    filetypes=[("cookies.txt", "*.txt"), ("All files", "*.*")],
-                )
-            finally:
-                root.destroy()
+            def _ask() -> Any:
+                root = tk.Tk()
+                try:
+                    root.withdraw()
+                    root.attributes("-topmost", True)
+                    return filedialog.askopenfilename(
+                        parent=root,
+                        title="Choose your exported YouTube cookies.txt",
+                        filetypes=[("cookies.txt", "*.txt"), ("All files", "*.*")],
+                    )
+                finally:
+                    ui_dispatch.release_root(root, "the YouTube cookies picker")
+
+            chosen = ui_dispatch.dispatch(_ask)
         except Exception as exc:
             log.warning("youtube cookies: file picker unavailable (%s)", exc)
             _notify(app, "Couldn't open the file chooser. Set ytdl_cookies_file in "
                          "config.toml instead.")
             return
+        finally:
+            if lock is not None:
+                lock.release()
     else:
         chosen = picker()
 
@@ -1063,8 +1081,12 @@ def _show_youtube_terms_dialog(app: "CompanionApp", confirm=None) -> None:
 
     askokcancel, not a themed form: there is nothing to type, and the native
     modal is the one dialog every editor already knows. `confirm` is the test
-    seam and returns True/False; no popup lock, for _install_youtube_cookies'
-    reason (a native modal is not one of this process's Tk roots).
+    seam and returns True/False.
+
+    bug-hunt-2026-09-03 comp-ui-1: askokcancel needs a parent, and the parent
+    built here IS one of this process's Tk roots -- the old docstring said
+    otherwise. It goes through ui_dispatch + release_root and takes
+    `_popup_active_lock`, for the reasons in _install_youtube_cookies.
     """
     from . import ytdl_attestation
 
@@ -1081,19 +1103,26 @@ def _show_youtube_terms_dialog(app: "CompanionApp", confirm=None) -> None:
 
     body = f"{ytdl_attestation.NOTICE_TEXT}\n\nAccepting as: {who}"
     if confirm is None:
+        lock = getattr(app, "_popup_active_lock", None)
+        if lock is not None and not lock.acquire(blocking=False):
+            _notify(app, "Another CCSync window is already open. Close it first.")
+            return
         try:
             import tkinter as tk
             from tkinter import messagebox
 
-            root = tk.Tk()
-            root.withdraw()
-            root.attributes("-topmost", True)
-            try:
-                agreed = messagebox.askokcancel(
-                    ytdl_attestation.TITLE, body, parent=root, icon="warning",
-                    default="cancel")
-            finally:
-                root.destroy()
+            def _ask() -> Any:
+                root = tk.Tk()
+                try:
+                    root.withdraw()
+                    root.attributes("-topmost", True)
+                    return messagebox.askokcancel(
+                        ytdl_attestation.TITLE, body, parent=root, icon="warning",
+                        default="cancel")
+                finally:
+                    ui_dispatch.release_root(root, "the YouTube terms dialog")
+
+            agreed = ui_dispatch.dispatch(_ask)
         except Exception as exc:
             # NO FALLBACK TO "ACCEPT". A dialog that could not be shown is a
             # notice nobody read, and recording agreement to text that was
@@ -1102,6 +1131,9 @@ def _show_youtube_terms_dialog(app: "CompanionApp", confirm=None) -> None:
             _notify(app, "Couldn't show the YouTube terms. Open the "
                          "downloader in the dashboard and accept them there.")
             return
+        finally:
+            if lock is not None:
+                lock.release()
     else:
         agreed = bool(confirm(ytdl_attestation.TITLE, body))
 
@@ -1157,7 +1189,7 @@ def _show_update_dialog(app: "CompanionApp") -> None:
     except Exception:
         log.exception("apply_upgrade() raised")
         _notify(app, f"Update failed. You're still on v{config_mod.VERSION}, nothing is "
-                     "broken. Tray → Copy diagnostics for your admin.")
+                     "broken. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.")
 
 
 def _show_update_dialog_locked(app: "CompanionApp", info: dict) -> bool:
@@ -1405,7 +1437,7 @@ def _confirm_remove_project(app: "CompanionApp", slug: str, rel: str) -> None:
         ok, message = app.remove_project_from_machine(slug, override=override)
     except Exception:
         log.exception("remove_project_from_machine(%s) raised", slug)
-        _notify(app, "Remove failed. Tray → Copy diagnostics for your admin.")
+        _notify(app, "Remove failed. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.")
         return
     _notify(app, message if ok else f"Remove stopped: {message}")
 
@@ -1645,7 +1677,7 @@ def _confirm_grade_swap(app: "CompanionApp", to_server: bool) -> None:
                 ok, message = app.swap_p_to_server(*creds)
     except Exception:
         log.exception("grade swap raised")
-        _notify(app, "The P: swap failed. Tray → Copy diagnostics for your admin.")
+        _notify(app, "The P: swap failed. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.")
         return
     _notify(app, message if ok else f"Swap stopped: {message}")
 
@@ -1767,7 +1799,7 @@ def _guarded(app: "CompanionApp", label: str, fn) -> None:
         fn()
     except Exception:
         log.exception("tray action %r failed", label)
-        _notify(app, f"'{label}' didn't work. Tray → Copy diagnostics for your admin.")
+        _notify(app, f"'{label}' didn't work. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.")
 
 
 def _spawn(app: "CompanionApp", label: str, fn) -> None:
@@ -2500,7 +2532,7 @@ def _upgrade_line(guard: dict) -> Optional[str]:
     version = str(info.get("version") or "").strip()
     target = f" to v{version}" if version else ""
     return (f"⚠ CCSync could not install the update{target} {attempts} times, so it "
-            "has stopped trying. Copy diagnostics for your admin")
+            "has stopped trying. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN")
 
 
 def _reverted_line(guard: dict) -> Optional[str]:
@@ -3329,7 +3361,7 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
     problem_items = []
     if snap["problems"]:
         problem_items = [tray_backend.MenuItem(
-            "⚠ NOT SET UP: nothing will sync (Copy diagnostics for your admin)",
+            "⚠ NOT SET UP: nothing will sync (Settings > COPY DIAGNOSTICS FOR YOUR ADMIN)",
             None, enabled=False,
         )]
 

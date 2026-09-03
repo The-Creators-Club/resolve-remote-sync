@@ -689,6 +689,67 @@ def test_a_row_with_no_claimed_machine_column_at_all_reads_as_unknown(con, job):
     assert db.claimed_machine_of(None) is None
 
 
+# ------------------------------------- the create-time widening (013)
+# ytdl-web-2 (bug-hunt-2026-09-03). The destination check widens on `local` and
+# `machine`; start_download re-ran it with neither, so a job the CR-72
+# follow-up had legitimately accepted could never be downloaded.
+
+
+def test_a_pre_013_row_reads_as_the_narrow_pair_and_runs_once(tmp_path):
+    """The migration's defaults ARE projects.resolve_project's defaults, so an
+    existing job re-validates exactly as it did before the columns existed --
+    the direction that matters, because the alternative is a backfill that
+    invents permission nobody granted. And the runner is driven by the
+    PREDICATE (migrations/README.md), so reaching the file twice must not be a
+    second ALTER of the same column."""
+    con = _at_v9(tmp_path, 'v9-widening.db')
+    con.execute("INSERT INTO jobs(created_by,term,term_dir,project_slug,"
+                "project_label,phase,created_at,updated_at) "
+                "VALUES(?,'reef','reef','s','2026/FF5/Energy','ready_for_review',"
+                "'x','x')", (USER,))
+    con.commit()
+    job_id = con.execute('SELECT id FROM jobs').fetchone()['id']
+
+    db.ensure_schema(con)
+    db.ensure_schema(con)
+
+    assert db._MIGRATIONS[13][0] == '013_jobs_created_widening.sql'
+    assert max(db._MIGRATIONS) == db.CURRENT_SCHEMA_VERSION
+    assert sorted(db._MIGRATIONS) == list(range(2, db.CURRENT_SCHEMA_VERSION + 1))
+    # The newest file's contract: ensure_schema refuses to record a migration
+    # whose effect is still absent, so its predicate must answer TRUE here.
+    assert db._MIGRATIONS[13][1](con) is True
+    assert con.execute('PRAGMA user_version').fetchone()[0] == \
+        db.CURRENT_SCHEMA_VERSION
+    old = db.get_job(con, job_id)
+    assert db.created_widening_of(old) == (None, True)
+    con.close()
+
+
+def test_the_widening_a_job_was_created_under_is_what_comes_back(con):
+    """Written once at create and read by start_download. Both are stored
+    because neither may be re-derived from the request that presses DOWNLOAD:
+    a client-supplied local=False there would be any editor writing into any
+    active project."""
+    slug, label, _ = PROJECTS[0]
+    wide = db.create_job(con, USER, 'reef', 'reef', slug, label,
+                         created_local=False, created_machine='owen-rig')
+    assert db.created_widening_of(db.get_job(con, wide)) == ('owen-rig', False)
+    narrow = db.create_url_job(con, USER, '', '', slug, label,
+                               _url_videos('vid00000013'))
+    assert db.created_widening_of(db.get_job(con, narrow)) == (None, True)
+
+
+def test_a_row_with_no_widening_columns_reads_as_the_narrow_pair(con, job):
+    """A partial SELECT, or a database migration 013 has not reached. The
+    fallback is deliberately the narrow pair: never more permissive than the
+    row can prove."""
+    partial = con.execute('SELECT id, term FROM jobs WHERE id=?',
+                          (job['id'],)).fetchone()
+    assert db.created_widening_of(partial) == (None, True)
+    assert db.created_widening_of(None) == (None, True)
+
+
 def test_con_is_per_thread(con):
     """A sqlite3 connection may only be used on the thread that created it, and
     this app has two kinds of caller: the request threadpool and the worker."""
@@ -1216,7 +1277,7 @@ def test_the_migrations_scope_default_is_the_pythons_default():
     assert f"term_scope       TEXT NOT NULL DEFAULT '{db.DEFAULT_TERM_SCOPE}'" in schema
     assert db.DEFAULT_TERM_SCOPE in db.TERM_SCOPES
     assert db._MIGRATIONS[11][0] == '011_jobs_term_scope_dates.sql'
-    assert db.CURRENT_SCHEMA_VERSION == 12
+    assert db.CURRENT_SCHEMA_VERSION >= 11
 
 
 def test_the_scope_and_dates_are_written_once_at_create(con):
@@ -1332,7 +1393,9 @@ def test_the_012_migration_is_registered_in_order_and_runs_once(tmp_path):
     it produces, and its predicate answers TRUE afterwards -- ensure_schema
     refuses to record a migration whose effect is still absent."""
     assert db._MIGRATIONS[12][0] == '012_terms_review_and_queue.sql'
-    assert max(db._MIGRATIONS) == db.CURRENT_SCHEMA_VERSION == 12
+    # "the newest file" moved to 013 (ytdl-web-2, bug-hunt-2026-09-03); what
+    # this test still owns is 012's own registration and its predicate.
+    assert max(db._MIGRATIONS) == db.CURRENT_SCHEMA_VERSION
 
     con = db.connect(tmp_path / 'twice.db')
     con.executescript(_V11_DDL)

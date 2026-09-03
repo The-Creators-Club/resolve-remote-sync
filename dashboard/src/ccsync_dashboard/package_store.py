@@ -76,6 +76,60 @@ def unlink_package_file(settings, row: sqlite3.Row | dict[str, Any]) -> None:
         pass  # a stray file is harmless; the DB row is the source of truth
 
 
+def make_current(
+    conn: sqlite3.Connection,
+    settings,
+    *,
+    platform: str,
+    version: str,
+    kind: str = "companion",
+) -> None:
+    """Point `current` at an ALREADY PUBLISHED build, through the same gates a
+    fresh publish passes. Raises `PackageStoreError`; commits nothing.
+
+    bug-hunt-2026-09-03 dash-release-jobs-2: `db.set_current_package` carries
+    the retraction check and nothing else, so the feed's `current` policy was a
+    third door onto `is_current` that the REL-4 / SYS-13 ordering gate did not
+    cover -- it could advertise a build `api._upgrade_info` then refuses to
+    offer, which reads as a fleet that has quietly stopped upgrading while the
+    Packages page says CURRENT. The gate lives here, beside the one in
+    `store_verified_package`, so both doors ask the same question.
+
+    Deliberately NOT here: the REL-1 soak gate and the UX-9 unsigned-binary
+    typed confirmation, both of which live in `api.make_current_refusal`. They
+    are answers a human gives, and the feed poller has no human in scope;
+    extending them to the unattended path is a policy decision for the owner,
+    not something to acquire by refactor (verifier note, 2026-09-03).
+    """
+    row = db.get_package(conn, platform, version, kind)
+    if row is None:
+        raise PackageStoreError(
+            404, f"{kind} {version} for {platform} is not published here.")
+    requires_dashboard = _row_value(row, "requires_dashboard")
+    if blocks_on_dashboard_version(kind, requires_dashboard):
+        raise PackageStoreError(
+            409,
+            f"{kind} {version} needs dashboard {requires_dashboard} and this "
+            f"dashboard is {VERSION}. Update the dashboard first, then make this "
+            f"build current.",
+        )
+    if not db.set_current_package(conn, platform, version, kind):
+        raise PackageStoreError(
+            409,
+            f"{kind} {version} for {platform} cannot be made current: it has "
+            f"been retracted by the vendor.",
+        )
+
+
+def _row_value(row: Any, key: str) -> Any:
+    """A column an older database may not have yet: sqlite3.Row raises
+    IndexError, not KeyError (db._row_value's reason, during a redeploy)."""
+    try:
+        return row[key]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
 def store_verified_package(
     conn: sqlite3.Connection,
     settings,

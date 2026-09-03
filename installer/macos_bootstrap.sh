@@ -53,7 +53,7 @@
 #     Finish page without scraping the human-facing summary.
 set -u
 
-INSTALLER_VERSION="1.0.38"
+INSTALLER_VERSION="1.0.39"
 
 # ----------------------------------------------------------------------
 # PINNED DOWNLOADS (2026-08-17, docs/COMMERCIAL_READINESS.md item 13)
@@ -340,7 +340,14 @@ BIN_DIR="$HOME/.local/ccsync/bin"
 # docs/COMMERCIAL_READINESS.md item 11). "Creators_Club" and P:\ were literals
 # here; the companion already reads canonical_prefix from its own config, so
 # the two halves now agree by construction rather than by luck.
-TREE_NAME="$(site_value tree_name)"
+# CCSYNC_TREE_NAME / CCSYNC_CANONICAL_PREFIX first (the same shape as
+# CCSYNC_NAS_SYNCTHING_ID below, and there is no flag for either): the
+# onboarding wizard has already fetched the manifest and written both into
+# config.toml before it runs this script, and a fetch that fails HERE is
+# non-fatal -- so without them the two halves silently disagree about the
+# letter every stored clip path names (bug-hunt-2026-09-03 install-onboard-2).
+TREE_NAME="${CCSYNC_TREE_NAME:-}"
+[ -n "$TREE_NAME" ] || TREE_NAME="$(site_value tree_name)"
 [ -n "$TREE_NAME" ] || TREE_NAME="CCSync"
 
 # The prefix Resolve's Mapped Mount and the companion's stored clip paths use.
@@ -360,7 +367,8 @@ canonical_prefix_letter() {
     esac
 }
 
-CANONICAL_PREFIX="$(site_value canonical_prefix)"
+CANONICAL_PREFIX="${CCSYNC_CANONICAL_PREFIX:-}"
+[ -n "$CANONICAL_PREFIX" ] || CANONICAL_PREFIX="$(site_value canonical_prefix)"
 [ -n "$CANONICAL_PREFIX" ] || CANONICAL_PREFIX='P:\'
 CANONICAL_DRIVE="$(canonical_prefix_letter "$CANONICAL_PREFIX")"
 if [ -z "$CANONICAL_DRIVE" ]; then

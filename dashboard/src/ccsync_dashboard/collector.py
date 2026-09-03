@@ -1275,6 +1275,16 @@ class Collector:
         # Cross-project folder links (SHARED_FOLDERS_PLAN.md §4.1): a device
         # whose plan holds a BORROWER of this folder receives the lender's
         # folder too; its own restricted .stignore limits what it pulls (D4).
+        # A BASE RIG HOLDS NO TICK (CR-28), belt and braces here as well as in
+        # db (bug-hunt-2026-09-03 dash-db-1): the write paths refuse a tick on
+        # a wired machine, but the unassigned bucket (`machine=''`) is a READ
+        # that fans out to every machine of that editor with no plan of its
+        # own, and this cycle is what turns that read into a real Syncthing
+        # share with the machine whose tree root IS the NAS share. Two
+        # predicates because there are two routes in: the per-machine map, and
+        # the person-level fallback for devices the registry cannot place.
+        base_pairs = db.base_machines(conn)
+        base_editors = db.base_only_editors(conn)
         borrowers_of = db.fetch_borrowers_by_lender(conn)
         machine_devices: dict[tuple[str, str], str] = {}
         for row in db.fetch_machines(conn):
@@ -1334,6 +1344,8 @@ class Collector:
                 for borrower in sorted(borrowers_of.get(slug, set())):
                     plan_rows.extend(selections.get(borrower, []))
                     plan_editors.extend(editor_selections.get(borrower, []))
+                plan_rows = [p for p in plan_rows if p not in base_pairs]
+                plan_editors = [e for e in plan_editors if e not in base_editors]
                 for editor, machine in plan_rows:
                     device_id = machine_devices.get((editor, machine))
                     if device_id and device_id not in id_to_editor:

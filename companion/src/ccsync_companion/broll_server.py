@@ -102,6 +102,7 @@ import re
 import shutil
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -633,7 +634,11 @@ def build_status_response(mounts: dict, caller: Optional[Callable[..., dict]] = 
     Resolve read behind it. A child that never answers is killed; the panel
     then simply says Resolve: no.
     """
-    probe = (caller if caller is not None else music_server.call)(
+    # Through the shared probe cache (bug-hunt-2026-09-03 comp-broll-music-3):
+    # this route needs no Origin and no token, so a page full of <img> tags
+    # pointed at it used to spawn one worker child each.
+    probe = music_server.cached_probe(
+        caller if caller is not None else music_server.call,
         music_worker.BROLL_STATUS_ACTION, timeout=STATUS_TIMEOUT,
     )
     return {
@@ -1196,10 +1201,14 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
 
         origin = self.headers.get("Origin")
         if origin:
-            allowed = getattr(self.server, "allowed_origins", frozenset())
-            if not loopback_guard.origin_allowed(
-                origin, allowed, dev=getattr(self.server, "dev_origins", False)
-            ):
+            policy = getattr(self.server, "origin_policy", None)
+            if policy is not None:
+                allowed, dev = policy()
+            else:
+                # A server object from a test that pins the old shape.
+                allowed = getattr(self.server, "allowed_origins", frozenset())
+                dev = getattr(self.server, "dev_origins", False)
+            if not loopback_guard.origin_allowed(origin, allowed, dev=dev):
                 log.warning(
                     "broll: refusing %s %s from origin %r -- this companion "
                     "serves %s. If that is the dashboard your editors actually "
@@ -1361,6 +1370,9 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
                 break
             chunks.append(chunk)
             remaining -= len(chunk)
+            # What do_POST's tail drain subtracts (comp-broll-music-4): a body
+            # this method has already swallowed must not be waited for again.
+            self._body_consumed += len(chunk)
         return b"".join(chunks)
 
     def _read_json_body(self, key: str = "error") -> Any:
@@ -1402,10 +1414,27 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
         self._guarded(lambda: self._vet_request() and self._dispatch_get())
 
     def do_POST(self) -> None:
-        self._guarded(
-            lambda: self._vet_request() and self._post_authorised()
-            and self._content_type_ok() and self._dispatch_post()
-        )
+        """Same envelope as do_PUT, including the tail drain.
+
+        bug-hunt-2026-09-03 comp-broll-music-4: a 403 from _post_authorised, a
+        415 from _content_type_ok or a 500 from _guarded used to answer and
+        close with the body still in flight, so a page POSTing a 200 KB
+        /broll/ingest/prepare saw ERR_CONNECTION_RESET instead of the refusal
+        that names the fix -- the exact misdiagnosis do_PUT's finally was
+        written to avoid. _read_body counts what it consumed, so the drain
+        after a body that WAS read is a no-op rather than a wait for bytes no
+        client is going to send.
+        """
+        self._body_consumed = 0
+
+        def _dispatch() -> None:
+            try:
+                (self._vet_request() and self._post_authorised()
+                 and self._content_type_ok() and self._dispatch_post())
+            finally:
+                self._drain_small_body()
+
+        self._guarded(_dispatch)
 
     # How much of THIS request's body has been read. Only the PUT route has a
     # body big enough to care, and it is what lets the tail drain below know
@@ -1971,22 +2000,24 @@ class BrollCompanionServer(ThreadingHTTPServer):
         self.music_ingest_deps = music_ingest_deps
 
         # Who may drive this listener (loopback_guard.py, 2026-08-17).
-        # Computed ONCE, here, rather than per request: it reads the cached
-        # site manifest off disk, and a request thread is not the place for
-        # that. A companion whose dashboard_url is blank ends up with an EMPTY
-        # allow-list, which is the honest answer -- it is pointed at no
-        # dashboard, so no page is entitled to drive it; local callers still
-        # have the token.
+        # CACHED, not computed per request: building it reads the cached site
+        # manifest off disk, and a request thread is not the place for a file
+        # read. It was computed ONCE, in this constructor, until
+        # bug-hunt-2026-09-03 comp-broll-music-2: app.start() kicks
+        # site.refresh_site() off on a background thread and then starts this
+        # server synchronously a few statements later, so a manifest whose
+        # dashboard_url has just CHANGED (a re-provision, a moved Serve host)
+        # lands after the frozenset is frozen, and every browser call 403s for
+        # the whole session. The TTL below is what makes that self-heal
+        # in-session instead of at the next tray start. The config half comes
+        # from the dict this server was handed, so an edited config.toml still
+        # needs a restart -- that is the rest of the companion's rule too.
+        self._origin_lock = threading.Lock()
+        self._origin_deadline = 0.0
         self.allowed_origins = frozenset()
         self.dev_origins = False
-        try:
-            self.allowed_origins = loopback_guard.allowed_origins(
-                ccsync_cfg, site=site_mod.cached_site()
-            )
-            self.dev_origins = loopback_guard.dev_origins_enabled(ccsync_cfg)
-        except Exception:
-            log.warning("broll: could not build the origin allow-list -- "
-                        "browser callers will all be refused", exc_info=True)
+        self.refresh_origin_policy()
+        self._origin_deadline = time.monotonic() + self.ORIGIN_TTL_S
         # The other way in, for callers that have no Origin to offer. Best
         # effort: a machine that cannot write ~/.ccsync still serves the
         # dashboard's pages perfectly well.
@@ -1995,6 +2026,41 @@ class BrollCompanionServer(ThreadingHTTPServer):
         except Exception:
             log.warning("broll: could not publish a loopback token",
                         exc_info=True)
+
+    # How long a built allow-list is trusted before it is rebuilt from the
+    # cached site manifest. Long enough that a burst of requests costs one
+    # file read, short enough that an admin who re-provisions a site does not
+    # have to talk an editor through restarting their tray.
+    ORIGIN_TTL_S = 30.0
+
+    def refresh_origin_policy(self) -> None:
+        """Rebuild `allowed_origins`/`dev_origins`. Never raises.
+
+        A failure leaves the last good policy in place rather than an empty
+        one: a site.json that has gone unreadable is not a reason to start
+        refusing the dashboard the editor is looking at.
+        """
+        try:
+            allowed = loopback_guard.allowed_origins(
+                self.ccsync_cfg, site=site_mod.cached_site()
+            )
+            self.allowed_origins = allowed
+            self.dev_origins = loopback_guard.dev_origins_enabled(self.ccsync_cfg)
+        except Exception:
+            log.warning("broll: could not build the origin allow-list -- "
+                        "keeping the one already held", exc_info=True)
+
+    def origin_policy(self) -> tuple[frozenset, bool]:
+        """(allow-list, dev-origins) for THIS request, rebuilt at most every
+        ORIGIN_TTL_S seconds (comp-broll-music-2). One thread does the rebuild;
+        the others read the cached frozenset, never the file."""
+        now = time.monotonic()
+        if now >= self._origin_deadline:
+            with self._origin_lock:
+                if now >= self._origin_deadline:
+                    self._origin_deadline = now + self.ORIGIN_TTL_S
+                    self.refresh_origin_policy()
+        return self.allowed_origins, self.dev_origins
 
 
 def make_server(

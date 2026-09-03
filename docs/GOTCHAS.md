@@ -1494,3 +1494,50 @@ setuid**, so the page cannot write a share owned by somebody else without
 `group_add` AND a group-writable, setgid vault on the host. Neither half works
 alone and both fail quietly -- `docs/DOCKER.md`, "The chown, and why it is
 needed BEFORE the first deploy".
+
+## 23. A dead pid still holds its handles (single-instance, CR-120, 2026-09-03)
+
+The companion's single-instance slot on Windows is the named mutex
+`Local\ccsync-companion-single-instance`. R11 (2026-08-12) taught the guard to
+wait when the environment says this build was spawned to REPLACE a pid
+(`CCSYNC_REPLACES_PID`): a self-upgrade's or self-restart's child reaches the
+guard about a second after being spawned, while the predecessor is still
+tearing down its lanes and still holding the mutex. The wait retried
+`CreateMutexW` and gave up early if the predecessor's pid had read dead before
+a retry that still saw `ERROR_ALREADY_EXISTS` -- reasoning that a dead process
+has already dropped its handles, so the mutex must be somebody else's.
+
+**A pid can read dead while the process still owns every handle it had.**
+Windows sets `Process->ExitStatus` at the START of termination:
+`NtTerminateProcess` writes it before the threads are torn down, and
+`ExitProcess` runs `LdrShutdownProcess` (every `DLL_PROCESS_DETACH`) before
+its own final `NtTerminateProcess`. `GetExitCodeProcess` reports that status,
+so it answers "not `STILL_ACTIVE`" for tens to hundreds of milliseconds -- and
+for a frozen Python + Tk + ctypes process, comfortably longer -- while the
+handle table, the named mutex included, is still intact. On the base rig at
+16:34 on 2026-09-03 the replacement refused 1.4 s after being spawned, the
+predecessor finished the shutdown it had already announced, and the machine
+had NO companion until the owner relaunched the tray.
+
+Two rules come out of it, both in `companion/src/ccsync_companion/app.py`:
+
+**"pid gone" only starts a clock.** `_acquire_mutex_win32` keeps retrying for
+`PREDECESSOR_RELEASE_GRACE_SECONDS` (15 s) after the first dead reading and
+only calls the slot a different companion's if it is still held when that
+expires. The overall 90 s deadline is unchanged, and a slot that frees is
+taken on the next retry whatever the probe says -- that was R11's other point.
+
+**Ask the process OBJECT, not the exit code.** `_pid_is_alive_win32` opens
+with `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE` (`SYNCHRONIZE`,
+0x00100000, is what `WaitForSingleObject` needs on a process handle -- without
+it the wait fails with access denied) and treats `WaitForSingleObject(h, 0) ==
+WAIT_OBJECT_0` as dead, because the object is signalled only once termination
+is complete. `GetExitCodeProcess` is the fallback for when the wait call
+itself fails. Signalled is dead whatever the exit code says, which is also how
+the old "a process that genuinely exited with 259 reads as alive forever" case
+stopped mattering. Every other arm still fails SAFE (unknown means alive):
+letting a second companion take a live instance's slot is the worse mistake,
+and it is the one the guard exists to prevent.
+
+The POSIX path (`_acquire_lock_file`) shares the probe but not the bug: a pid
+file has no handle semantics, so there is nothing to hold on past death.

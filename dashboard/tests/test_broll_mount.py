@@ -347,6 +347,23 @@ def test_a_non_ascii_ingest_token_is_refused_not_a_500(tmp_path, broll_env):
         assert "X-Ingest-Token" in r.json()["detail"]
 
 
+def test_the_ingest_header_is_read_whatever_case_it_arrives_in():
+    """bug-hunt-2026-09-03 dash-mounts-ui-4: the gate compared the raw header
+    name, alone among the four gates in this file and music.py. h11 lowercases
+    for us, so this is asserted against a scope built BY HAND - which is the
+    only shape that ever differs: a middleware, another ASGI server or an
+    in-process caller. Absent here is a 401 on every ingest POST, so the
+    failure direction is a refused indexer, not a bypass."""
+    gate = broll.BrollGate(app=None, token=TOKEN)
+    for name in (b"x-ingest-token", b"X-Ingest-Token", b"X-INGEST-TOKEN"):
+        scope = {"type": "http", "path": "/api/ingest/shares",
+                 "headers": [(b"host", b"nas"), (name, TOKEN.encode())]}
+        assert gate._token_ok(scope) is True, name
+    wrong = {"type": "http", "path": "/api/ingest/shares",
+             "headers": [(b"X-Ingest-Token", b"nope")]}
+    assert gate._token_ok(wrong) is False
+
+
 def test_a_session_alone_can_never_reach_ingest(tmp_path, broll_env, monkeypatch):
     """The verified hole: with no BROLL_INGEST_TOKEN in the environment the
     b-roll app's own guard flips to dev mode, so every logged-in editor -- or

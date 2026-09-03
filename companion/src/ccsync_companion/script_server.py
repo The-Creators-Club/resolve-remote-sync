@@ -93,6 +93,33 @@ SCRIPT_SERVER_PORT = 1144
 _SERVER_NAMES = {"fuscript.exe", "fuscript"}
 _RESOLVE_NAMES = {"resolve.exe", "resolve", "davinci resolve"}
 
+# The shortest observed name that may be matched as a truncated spelling of
+# one of the above. "resolve" is 7 characters; anything shorter is somebody
+# else's process, not a clipped Resolve.
+_NAME_PREFIX_MIN = 7
+
+
+def is_resolve_name(name: str) -> bool:
+    """Is this process name Resolve's, allowing for a clipped one?
+
+    bug-hunt-2026-09-03 comp-resolve-5: lsof truncates COMMAND to 9
+    characters by default (`+c w`, w=9), including in -F output, so
+    `DaVinci Resolve` arrives as `davinci r` and an exact-set test can never
+    match on a Mac. The probe passes `+c 0` now, but a machine whose lsof
+    ignores it (or any other clipping producer) must still be recognised, or
+    READY on macOS rests entirely on the parent-pid arm and this documented
+    fallback is dead code.
+    """
+    name = (name or "").strip().lower()
+    if not name:
+        return False
+    if name in _RESOLVE_NAMES:
+        return True
+    if len(name) < _NAME_PREFIX_MIN:
+        return False
+    return any(known.startswith(name) for known in _RESOLVE_NAMES)
+
+
 # A snapshot survives this long. Four companion threads poll the bridge and
 # the watcher alone asks every 3 s; the table is cheap but not free, and two
 # asks within a quarter second cannot see a different Resolve.
@@ -135,7 +162,7 @@ def classify(
                and pid != own_pid and pid not in server_pids]
     for pid in clients:
         name = processes.get(pid, ("", 0))[0]
-        if pid in parents or name in _RESOLVE_NAMES:
+        if pid in parents or is_resolve_name(name):
             return READY, "Resolve (pid %d) is registered with its script server" % pid
     return STARTING, ("script server pid %s is up but Resolve has not registered "
                       "with it yet" % ",".join(str(p) for p in server_pids))
@@ -278,7 +305,12 @@ def parse_lsof(text: str) -> tuple[list[tuple[int, int, int, int]], dict[int, tu
 
 def _darwin_tables() -> tuple[list[tuple[int, int, int, int]], dict[int, tuple[str, int]]]:
     out = subprocess.run(
-        ["lsof", "-nP", "-iTCP:%d" % SCRIPT_SERVER_PORT, "-F", "pcRnT"],
+        # `+c 0` turns off lsof's 9-character COMMAND truncation, which
+        # otherwise reports `DaVinci Resolve` as `davinci r` and makes the
+        # name half of classify() unmatchable (bug-hunt-2026-09-03
+        # comp-resolve-5). is_resolve_name still tolerates a clipped name for
+        # an lsof that does not honour it.
+        ["lsof", "-nP", "+c", "0", "-iTCP:%d" % SCRIPT_SERVER_PORT, "-F", "pcRnT"],
         capture_output=True, text=True, timeout=5,
     )
     # lsof exits 1 when nothing matches -- that is "no listener", not an

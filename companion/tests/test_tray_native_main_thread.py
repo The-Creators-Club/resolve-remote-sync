@@ -90,3 +90,44 @@ def test_the_hop_runs_inline_when_there_is_no_appkit():
 
 def test_the_hop_never_raises():
     tray_native._darwin_on_main_thread(lambda: 1 / 0)
+
+
+def test_stop_removes_the_status_item_on_the_main_thread():
+    """bug-hunt-2026-09-03 comp-ui-5: stop() is reachable from the Quit item
+    (main thread) AND from app.shutdown() on a worker (SIGTERM, self-upgrade),
+    where removeStatusItem_ inline is the same off-main AppKit touch the three
+    setters above were fixed for."""
+    icon, queued = _icon()
+    item = icon._status_item
+    removed = []
+    icon._remove_status_item = removed.append
+
+    icon.stop()
+
+    assert removed == [], "removeStatusItem_ ran on the caller's thread"
+    assert len(queued) == 1
+    queued[0]()
+    assert removed == [item]
+
+
+def test_stop_does_not_wait_for_the_runloop_to_drain():
+    """The hop is async, so a shutdown that waited on it would hang whenever
+    the main thread is parked (a modal dialog's tkwait, MAC-11)."""
+    icon, queued = _icon()
+    icon._remove_status_item = lambda item: None
+
+    icon.stop()
+
+    assert icon._stopped.is_set()
+    assert icon._status_item is None
+    assert len(queued) == 1
+
+
+def test_stop_with_no_status_item_queues_nothing():
+    icon, queued = _icon()
+    icon._status_item = None
+
+    icon.stop()
+
+    assert queued == []
+    assert icon._stopped.is_set()

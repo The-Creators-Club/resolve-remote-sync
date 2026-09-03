@@ -99,6 +99,43 @@ def run_remote_script(script: str, workdir: Path, acl_stub: str = SYNOACLTOOL_ST
                           capture_output=True, text=True, timeout=120)
 
 
+class ExecSsh:
+    """FakeSsh's signature, but it RUNS the command under stub sudo/chown.
+
+    The suite asserts on generated script TEXT nearly everywhere, which cannot
+    see a script whose exit status does not follow its failures
+    (bug-hunt-2026-09-03 server-tools-2). `chown` is stubbed because MSYS's
+    real one refuses `jsmith:users`; anything else can be stubbed per test.
+    """
+
+    def __init__(self, workdir: Path, stubs: dict | None = None):
+        self.workdir = Path(workdir)
+        self.commands = []
+        self.bindir = self.workdir / "execbin"
+        self.bindir.mkdir(exist_ok=True)
+        bodies = {"sudo": SUDO_STUB, "chown": "#!/bin/sh\nexit 0\n"}
+        bodies.update(stubs or {})
+        for name, body in bodies.items():
+            path = self.bindir / name
+            path.write_text(body, encoding="utf-8", newline="\n")
+            path.chmod(0o755)
+
+    def __call__(self, cmd, dry_run=False, timeout=120):
+        self.commands.append(cmd)
+        if dry_run:
+            return 0, "", ""
+        env = dict(os.environ)
+        env["PATH"] = str(self.bindir) + os.pathsep + env.get("PATH", "")
+        env["SUDO_PW"] = "not-a-real-password"
+        done = subprocess.run([BASH, "-c", cmd], cwd=str(self.workdir), env=env,
+                              capture_output=True, text=True, timeout=120)
+        return done.returncode, done.stdout, done.stderr
+
+    @property
+    def text(self) -> str:
+        return "\n".join(self.commands)
+
+
 def inner(cmd: str) -> str:
     """A wrapped `sudo sh -c '...'` command with its inner quoting undone.
 
@@ -276,7 +313,7 @@ def test_the_stack_files_are_uploaded_not_heredocd_and_the_env_is_root_only(monk
     # The files went over SFTP, into the SHARE VIEW of the staging dir...
     assert put.uploads and put.uploads[0][0] == "/docker/ccsync/.stack-stage"
     assert "image: python" in put.file("compose.yaml")
-    assert "DASH_SESSION_SECRET=s3cret" in put.file(".env")
+    assert "DASH_SESSION_SECRET='s3cret'" in put.file(".env")
     # ...and nothing about them reached a command line.
     assert "s3cret" not in ssh.text
     assert "services:" not in ssh.text
@@ -356,13 +393,66 @@ def test_the_dashboard_binds_loopback_by_default_and_never_the_world(monkeypatch
 
 def test_an_env_file_refuses_what_compose_would_eat():
     body = render_env_file({"DASH_REPORT_TOKEN": "abc123", "SYNCTHING_API_KEY": "k"})
-    assert "DASH_REPORT_TOKEN=abc123" in body and body.endswith("\n")
+    assert "DASH_REPORT_TOKEN='abc123'" in body and body.endswith("\n")
     with pytest.raises(common.EnvError):
         render_env_file({"X": "two\nlines"})
-    with pytest.raises(common.EnvError):
-        # compose interpolates ${...} out of a .env value -- a secret that
-        # needs escaping is one that was pasted from somewhere it should not be.
-        render_env_file({"X": "a$b"})
+
+
+def _dotenv(body: str) -> dict:
+    """What compose's dotenv makes of the rendered file.
+
+    A deliberately small reimplementation of compose-go's `extractVarValue`
+    (bug-hunt-2026-09-03 server-tools-1): an UNQUOTED value is cut at the first
+    " #", stripped of surrounding whitespace and unwrapped of a matching quote
+    pair, while a SINGLE-quoted value is literal - no interpolation, no
+    escapes. python-dotenv reads the same grammar.
+    """
+    out = {}
+    for line in body.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name, _, value = line.partition("=")
+        if value.startswith("'"):
+            out[name] = value[1:value.index("'", 1)]
+            continue
+        value = value.split(" #")[0].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        out[name] = value
+    return out
+
+
+@pytest.mark.parametrize("value", [
+    "Str0ng$Pass!",     # compose interpolates $Pass out of an unquoted value,
+                        # and this one is the operator's own NAS password
+    "hunter2 #1",       # an inline " #" starts a comment: silent truncation
+    "  padded  ",       # leading/trailing whitespace is stripped
+    '"quoted"',         # a wrapping quote pair is removed
+    "a#b", "!@%^&*()", "pw\t#x",
+])
+def test_every_env_value_survives_composes_dotenv_verbatim(value):
+    """A truncated NAS password is a container that starts healthy and fails
+    every authentication with no hint at the cause, so the ROUND TRIP is the
+    test, not the shape of the line we wrote."""
+    body = render_env_file({"DASH_NAS_PW": value, "DASH_REPORT_TOKEN": "abc123"})
+    assert _dotenv(body) == {"DASH_NAS_PW": value, "DASH_REPORT_TOKEN": "abc123"}
+
+
+def test_the_one_refusal_left_tells_the_operator_which_kind_of_secret_it_is():
+    """`openssl rand -hex 24` is advice nobody can follow for the NAS admin
+    password: its rotation is changing that account's password on the NAS."""
+    with pytest.raises(common.EnvError) as caught:
+        render_env_file({"TRUENAS_PW": "it's mine"})
+    text = str(caught.value)
+    assert "single quote" in text and "NAS admin password" in text
+    assert "openssl" not in text
+
+    with pytest.raises(common.EnvError) as caught:
+        render_env_file({"DASH_SESSION_SECRET": "it's mine"})
+    text = str(caught.value)
+    assert "openssl rand -hex 24" in text and "NAS admin password" not in text
+    assert "—" not in text
 
 
 def test_the_rendered_compose_carries_no_secret_and_names_every_one():
@@ -463,6 +553,70 @@ def test_creating_an_editor_writes_the_key_over_ssh_and_touches_no_home_mode():
     # the HOME itself is never chmod'd or chown'd
     assert "chmod 700 '/var/services/homes/jsmith'" not in text
     assert "chown -R 'jsmith:users' '/var/services/homes/jsmith'" not in text
+
+
+def test_the_key_script_stops_at_the_first_failure_and_reads_the_key_back():
+    """bug-hunt-2026-09-03 server-tools-2. A `;`-list returns the LAST
+    command's status, and the last command was `chmod 600 authorized_keys` --
+    which succeeds on a RE-KEY, because the previous enrolment's file is
+    already there. A failed printf/mv therefore read as success and left the
+    OLD key live: a revocation the operator was told had happened."""
+    dsm, ssh = FakeDsmApi(groups={"editors": 65536}), FakeSsh()
+    backend(dsm=dsm, ssh=ssh).create_editor("jsmith", "J Smith", 65536,
+                                            "ssh-ed25519 AAAA test", "/homes")
+    text = inner(ssh.text)
+    guard = text.index("set -e")
+    # AFTER the MISSING_HOME probe, which is meant to exit 3 with its own
+    # message (the SERVER-4 lesson: an `if` CONDITION is exempt anyway).
+    assert text.index("MISSING_HOME") < guard < text.index("printf")
+    # ...and the file is READ BACK: verify_home_permissions only stats mode and
+    # owner, so a chmod-only success is invisible to every other check.
+    assert "grep -qxF 'ssh-ed25519 AAAA test' " \
+           f"'{HOME_ROOT}/jsmith/.ssh/authorized_keys'" in text
+
+
+@needs_bash
+def test_a_key_write_that_fails_is_reported_as_a_failure(tmp_path, monkeypatch):
+    """The same script actually run, with a `mv` that fails the way an over
+    quota or read-only home does, and an authorized_keys already in place from
+    a previous enrolment (the re-key path, which is the security-relevant one).
+    """
+    homes = tmp_path / "homes"
+    (homes / "jsmith" / ".ssh").mkdir(parents=True)
+    old = homes / "jsmith" / ".ssh" / "authorized_keys"
+    old.write_text("ssh-ed25519 AAAA old\n", encoding="utf-8", newline="\n")
+    monkeypatch.setattr("backends.synology.HOME_ROOT", str(homes).replace("\\", "/"))
+
+    ssh = ExecSsh(tmp_path, stubs={"mv": "#!/bin/sh\necho 'mv: read-only' >&2\nexit 1\n"})
+    ok, err = backend(ssh=ssh)._install_authorized_keys("jsmith", "ssh-ed25519 AAAA new")
+    assert ok is False and "installing the SSH key failed" in err
+    # ...and the operator is not told a key was revoked that is still live.
+    assert old.read_text(encoding="utf-8").strip() == "ssh-ed25519 AAAA old"
+
+
+@needs_bash
+def test_a_key_write_that_works_is_read_back_and_reported(tmp_path, monkeypatch):
+    homes = tmp_path / "homes"
+    (homes / "jsmith").mkdir(parents=True)
+    monkeypatch.setattr("backends.synology.HOME_ROOT", str(homes).replace("\\", "/"))
+    ssh = ExecSsh(tmp_path)
+    ok, err = backend(ssh=ssh)._install_authorized_keys("jsmith", "ssh-ed25519 AAAA new")
+    assert ok is True and err == ""
+    installed = homes / "jsmith" / ".ssh" / "authorized_keys"
+    assert installed.read_text(encoding="utf-8").strip() == "ssh-ed25519 AAAA new"
+
+
+def test_the_service_accounts_argv_password_is_documented_as_the_exception():
+    """bug-hunt-2026-09-03 server-tools-6. `synouser --add` takes the password
+    as an argument only, so this one value is on the remote argv that any local
+    NAS account can read out of `ps` (AUDIT SEC-2). It is safe here and nowhere
+    else: random, single-use, never stored, /sbin/nologin. The comment is the
+    fix - what must not happen is the next reader copying the pattern."""
+    source = (Path(__file__).resolve().parent.parent / "backends" / "synology.py"
+              ).read_text(encoding="utf-8")
+    call = source.index('f"synouser --add ')      # the call site, not the docstring
+    preamble = source[max(0, call - 700):call]
+    assert "SEC-2" in preamble and "nologin" in preamble
 
 
 @pytest.mark.parametrize("username,reason", [

@@ -301,3 +301,79 @@ def test_jobs_switched_off_is_its_own_refusal(conn):
     machine(conn, "off", dict(MEDIA_CAPS, jobs_enabled=False))
     answer = jobs_mod.explain(conn, queue(conn, "peaks"))
     assert answer["machines"][0]["reason"] == jobs_mod.REFUSE_JOBS_DISABLED
+
+
+# ------------------------------------- the depth on the wire (dash-api-3)
+#
+# bug-hunt-2026-09-03 dash-api-3: the depth block was sent only when the queue
+# was NON-empty, and an empty queue is the one state a companion needs it for.
+# jobs_runner.wait_seconds reads a missing depth as "cannot tell" and stays on
+# the base cadence, so IDLE_BACKOFF never engaged on any machine in the field.
+#
+# Version-gated: a companion older than 0.9.65 has no wake event, so telling it
+# the fleet is idle would let it sleep up to IDLE_BACKOFF_MAX_SECONDS with a
+# job (an admin's RUN NOW included) waiting. Those builds keep the old silence.
+
+@pytest.fixture
+def client_env(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from ccsync_dashboard import auth
+    from ccsync_dashboard.app import create_app
+    from ccsync_dashboard.settings import Settings
+
+    projects = tmp_path / "Projects"
+    projects.mkdir(parents=True)
+    settings = Settings(db_path=str(tmp_path / "dash.db"),
+                        session_secret="test-secret-not-a-real-one",
+                        report_token="companion-token-not-a-real-one",
+                        admin_users=frozenset({"owen"}),
+                        projects_dir=str(projects))
+    app = create_app(settings)
+    with TestClient(app) as client:
+        c = dbmod.connect(settings.db_path)
+        yield client, c, auth
+        c.close()
+
+
+def _report(client, auth, version, capabilities=None):
+    body = {"editor_name": "alex", "machine": "EDIT-PC",
+            "companion_version": version,
+            "reported_at": dbmod.utcnow_iso(), "lanes": []}
+    if capabilities is not None:
+        body["capabilities"] = capabilities
+    r = client.post("/api/v1/report", json=body, headers={
+        "X-CCSync-Token": "companion-token-not-a-real-one",
+        "X-CCSync-Identity": auth.make_identity_token(
+            "test-secret-not-a-real-one", "alex")})
+    assert r.status_code == 200, r.text
+    return r.json()["commands"]
+
+
+def test_an_idle_fleet_tells_a_new_companion_the_queue_is_empty(client_env):
+    client, conn, auth = client_env
+    cmds = _report(client, auth, "0.9.65", dict(MEDIA_CAPS))
+    assert cmds["jobs"]["queue"] == {"queued": 0, "running": 0, "pinned": 0,
+                                     "oldest_age_s": None}
+    # ...and nothing else: an empty depth is not an offer.
+    assert "offered" not in cmds["jobs"]
+
+
+def test_an_older_companion_still_hears_nothing_on_an_idle_fleet(client_env):
+    """0.9.64 cannot be roused from a backed-off sleep, so silence (which it
+    reads as "cannot tell") is the safe answer for it."""
+    client, conn, auth = client_env
+    assert "jobs" not in _report(client, auth, "0.9.64", dict(MEDIA_CAPS))
+    assert "jobs" not in _report(client, auth, "", dict(MEDIA_CAPS))
+
+
+def test_a_machine_with_jobs_switched_off_is_not_sent_a_depth(client_env):
+    client, conn, auth = client_env
+    caps = dict(MEDIA_CAPS, jobs_enabled=False)
+    assert "jobs" not in _report(client, auth, "0.9.65", caps)
+
+
+def test_a_non_empty_queue_still_reaches_an_older_companion(client_env):
+    client, conn, auth = client_env
+    queue(conn, "peaks")
+    assert _report(client, auth, "0.9.64", dict(MEDIA_CAPS))["jobs"]["queue"]["queued"] == 1

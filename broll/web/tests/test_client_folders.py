@@ -37,10 +37,18 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app import client_folders as cf
-from app.main import app as broll_app
+from app.main import SHARE_ASSETS, app as broll_app
 from tests.factories import insert_segment, insert_video
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
+
+
+def share_asset_sources() -> set[str]:
+    """The SOURCE files behind /share/assets: main.SHARE_ASSETS minus the
+    images, which carry no URLs (broll-4, 2026-09-03). That mount is the one
+    prefix an operator publishes past the tailnet with a Funnel, so its
+    contents are exactly the files a client viewer loads."""
+    return {n for n in SHARE_ASSETS if n.endswith((".js", ".css", ".html", ".svg"))}
 
 # Enough of a file that serve_file_with_range has something to stat and read.
 JPEG = b"\xff\xd8\xff\xd9"
@@ -255,6 +263,114 @@ def test_the_ledger_is_a_separate_database_that_survives_replacing_the_index(as_
     body = anon.get(f"/share/{folder['token']}/api/folder").json()
     assert body["items"][0]["id"] == new_id
     assert anon.get(f"/share/{folder['token']}/media/poster/{new_id}.jpg").status_code == 200
+
+
+def _curated_clip(conn, data_root, *, rel_path="Inbox/A001.mp4", video_hash="a1b2c3",
+                  share="broll"):
+    """One indexed clip with a content hash and the three files its card
+    needs. The `seeded` fixture's clips are hash-less on purpose (the factory's
+    default), which is the pre-hash world; these are the ones the pipeline
+    fingerprinted."""
+    vid = insert_video(conn, share=share, rel_path=rel_path, hash=video_hash,
+                       duration_s=12.0, in_inbox=1)
+    for sub, ext, blob in (("posters", "jpg", JPEG), ("sprites", "jpg", JPEG),
+                           ("proxies", "mp4", MP4)):
+        d = data_root / sub
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{vid}.{ext}").write_bytes(blob)
+    return vid
+
+
+def test_a_clip_the_sorter_moved_stays_in_a_live_client_link(as_editor, conn, data_root):
+    """broll-1, 2026-09-03. The item's two identities are the id and the
+    (share, rel_path); the sorter files an inbox clip under a category and
+    POSTs /api/ingest/moved, which rewrites videos.rel_path. Both tests then
+    failed at once, the client's card vanished mid-link and its media 404d,
+    while the clip sat in the index under the same id. The content hash is the
+    third, rename-stable identity."""
+    vid = _curated_clip(conn, data_root)
+    folder = _create(as_editor, title="Acme")
+    _add(as_editor, folder["id"], vid)
+
+    # What routes_ingest.py's /api/ingest/moved does, verbatim.
+    conn.execute("UPDATE videos SET rel_path = ?, in_inbox = 0, status = 'sorted' "
+                 "WHERE id = ?", ("Nature/A001.mp4", vid))
+    conn.commit()
+
+    anon = TestClient(broll_app)
+    body = anon.get(f"/share/{folder['token']}/api/folder").json()
+    assert [i["id"] for i in body["items"]] == [vid], "the moved clip left the client's page"
+    assert body["n_items"] == 1
+    for kind, ext in (("poster", "jpg"), ("sprite", "jpg"), ("proxy", "mp4")):
+        r = anon.get(f"/share/{folder['token']}/media/{kind}/{vid}.{ext}")
+        assert r.status_code == 200, f"{kind}: {r.status_code}"
+
+    mine = as_editor.get(f"api/client-folders/{folder['id']}").json()["items"]
+    assert [(i["missing"], i["rel_path"]) for i in mine] == [(False, "Nature/A001.mp4")]
+    # ...and the stored name followed the clip, so the next read is one
+    # indexed lookup rather than a hash scan.
+    stored = cf.open_connection().execute(
+        "SELECT rel_path, hash FROM client_folder_items").fetchone()
+    assert (stored["rel_path"], stored["hash"]) == ("Nature/A001.mp4", "a1b2c3")
+
+
+def test_a_hash_that_names_two_clips_resolves_to_neither(as_editor, conn, data_root):
+    """broll-1's guard. videos.hash is NOT unique (the pipeline indexes
+    duplicates and records duplicate_of), so an ambiguous hash must fall
+    through to the old behaviour -- the item is dropped and the panel says
+    `missing` -- rather than publish a clip nobody curated."""
+    vid = _curated_clip(conn, data_root)
+    folder = _create(as_editor, title="Acme")
+    _add(as_editor, folder["id"], vid)
+
+    conn.execute("UPDATE videos SET rel_path = ? WHERE id = ?", ("Nature/A001.mp4", vid))
+    twin = _curated_clip(conn, data_root, rel_path="Nature/A001 copy.mp4")
+    conn.commit()
+    assert twin != vid
+
+    anon = TestClient(broll_app)
+    assert anon.get(f"/share/{folder['token']}/api/folder").json()["items"] == []
+    mine = as_editor.get(f"api/client-folders/{folder['id']}").json()["items"]
+    assert [i["missing"] for i in mine] == [True]
+
+
+def test_a_hashless_item_is_unchanged_by_the_third_identity(as_editor, seeded, conn):
+    """A clip the index never hashed (and a v1 item with nothing to backfill)
+    must not match every other hash-less row: blank matches nothing."""
+    folder = _create(as_editor, title="Acme")
+    _add(as_editor, folder["id"], seeded["harbor"])
+    conn.execute("UPDATE videos SET rel_path = 'day1/renamed.mov' WHERE id = ?",
+                 (seeded["harbor"],))
+    conn.commit()
+    anon = TestClient(broll_app)
+    assert anon.get(f"/share/{folder['token']}/api/folder").json()["items"] == []
+
+
+def test_a_v1_ledger_gains_the_hash_column_and_is_backfilled(as_editor, conn, data_root):
+    """The migration half of broll-1: folders curated before 2026-09-03 carry
+    no hash, and a ledger nobody backfilled would only protect clips curated
+    after the upgrade."""
+    vid = _curated_clip(conn, data_root)
+    folder = _create(as_editor, title="Acme")
+    _add(as_editor, folder["id"], vid)
+
+    # Back to a v1 file: the column and the version go away.
+    old = cf.open_connection()
+    old.execute("ALTER TABLE client_folder_items DROP COLUMN hash")
+    old.execute("PRAGMA user_version = 1")
+    old.commit()
+    old.close()
+
+    cf.ensure_schema()
+    row = cf.open_connection().execute(
+        "SELECT hash FROM client_folder_items").fetchone()
+    assert row["hash"] == "a1b2c3", "the migration did not backfill from videos"
+
+    conn.execute("UPDATE videos SET rel_path = ? WHERE id = ?", ("Nature/A001.mp4", vid))
+    conn.commit()
+    anon = TestClient(broll_app)
+    assert [i["id"] for i in anon.get(
+        f"/share/{folder['token']}/api/folder").json()["items"]] == [vid]
 
 
 def test_a_rebuild_that_gives_the_old_id_to_another_clip_serves_none_of_it(
@@ -522,12 +638,23 @@ def test_the_share_assets_mount_carries_the_viewer_and_nothing_else(mounted, see
 def test_the_viewer_page_and_script_use_only_document_relative_urls():
     """Under /broll/share/<token>/ a leading slash would leave the prefix; an
     absolute origin would leave the host. The SPA's rule, re-pinned here for
-    the two new files (test_mounted_prefix.py covers the SPA's own)."""
-    for name in ("share.html", "share.js", "share.css", "clientfolders.js"):
+    the two new files (test_mounted_prefix.py covers the SPA's own).
+
+    The list is DERIVED from the mount's own allow-list (broll-4, 2026-09-03):
+    sprite.js was published past the tailnet by SHARE_ASSETS and scanned by
+    neither test, so a `/media/...` URL added to it would have 404d for every
+    client viewer with a green suite. A file added to the mount is pinned the
+    day it is added, not the day someone remembers this list.
+    """
+    for name in sorted(share_asset_sources() | {"share.html", "clientfolders.js"}):
         text = (STATIC / name).read_text(encoding="utf-8")
         for m in re.finditer(r"""(?:src|href|url\(|fetch\(|fetchJson\()\s*=?\s*["'`]?(/[a-z][^"'`)\s]*)""", text):
             pytest.fail(f"{name}: root-relative URL {m.group(1)!r}")
-        assert not re.search(r"https?://[\w.:@-]+", text), f"{name} names an absolute origin"
+        # An XML namespace is a name, not a fetch: inline SVG (style.css's
+        # tick mask, favicon.svg itself) must declare it.
+        origins = [m for m in re.findall(r"https?://[\w.:@-]+", text)
+                   if not m.endswith("www.w3.org")]
+        assert not origins, f"{name} names an absolute origin: {origins}"
     share_js = (STATIC / "share.js").read_text(encoding="utf-8")
     for needle in ('fetchJson("api/folder")', "`api/videos/${", "`media/poster/${",
                    "url(media/sprite/${", "`media/proxy/${"):
@@ -642,6 +769,29 @@ def test_the_folder_has_a_size_limit(as_editor, conn, monkeypatch):
     _add(as_editor, folder["id"], ids[0], ids[1])
     r = as_editor.post(f"api/client-folders/{folder['id']}/items", json={"video_ids": [ids[2]]})
     assert r.status_code == 422 and "at most 2" in r.json()["detail"]
+
+
+def test_a_batch_that_would_overrun_the_cap_is_refused_before_anything_is_added(
+        as_editor, conn, monkeypatch):
+    """broll-5, 2026-09-03. The cap was tested INSIDE the insert loop, so a
+    batch that overran it raised after earlier INSERTs; get_shares_db closes
+    without committing, sqlite rolled the whole batch back, and the editor was
+    told only that the folder was full -- not that the clips which had fitted
+    were dropped too. Refuse up front, and say how many would fit."""
+    monkeypatch.setattr(cf, "MAX_ITEMS", 3)
+    ids = [insert_video(conn, share="s", rel_path=f"c{i}.mov") for i in range(5)]
+    folder = _create(as_editor)
+    _add(as_editor, folder["id"], ids[0], ids[1])
+
+    r = as_editor.post(f"api/client-folders/{folder['id']}/items",
+                       json={"video_ids": [ids[2], ids[3], ids[4]]})
+    assert r.status_code == 422
+    detail = r.json()["detail"]
+    assert "room for 1 more" in detail and "3 new clips were sent" in detail, detail
+    assert "Nothing was added" in detail
+    assert "—" not in detail
+    # The refusal is total and honest: the folder is as it was.
+    assert as_editor.get(f"api/client-folders/{folder['id']}").json()["n_items"] == 2
 
 
 # --- 5. the scripts -------------------------------------------------------------------------

@@ -1195,6 +1195,42 @@ After regenerating, run `python tools/check_licenses.py` — a new transitive
 dependency with a copyleft licence is exactly what the gate exists to catch,
 and the lock is where it first appears.
 
+## Regenerating the icon assets
+
+Every raster mark in the repo is drawn from ONE file,
+`companion/src/ccsync_companion/assets/cc_mark_white.png` (the Creators Club
+mark, white on transparency - the same asset the tray tints per status and the
+popups wear in the title bar). One command redraws them all:
+
+```powershell
+companion\.venv\Scripts\python.exe tools\gen_icons.py            # write
+companion\.venv\Scripts\python.exe tools\gen_icons.py --check    # report stale, write nothing
+```
+
+It writes the companion's `icon.ico` (16/24/32/48/64/128/256 - the icon
+Windows shows in the Start Menu, the taskbar and Explorer, via `build.spec`'s
+`exe_icon`) and `icon.png`, `dashboard/static/favicon.png` + `favicon.ico`,
+`broll/web/static/favicon.png`, and the four PWA icons in
+`dashboard/static/icons/`. The `any` icons are the mark in the brand red on
+FULL TRANSPARENCY (2026-09-03: they used to be baked onto an opaque black
+square, which is what put a black tile in the Start Menu); the **maskable**
+pair keeps an opaque ground because a launcher crops it and fills nothing, but
+that ground is the brand red with a white mark, and the mark is scaled to
+clear the 80 % safe circle. `icon-180.png` (the apple-touch-icon) and
+`icon.svg` are NOT written here and stay with `tools/make_icons.js`: iOS
+composites a transparent apple-touch-icon onto black. Pillow only, from the
+companion venv - the dashboard venv has no PIL, which is why
+`dashboard/tests/test_pwa.py` pins the PWA sizes by reading the PNG IHDR.
+
+**A new mark only reaches a machine with a new build.** The Start Menu and the
+taskbar read the icon out of the installed `ccsync-companion.exe`, so the
+change lands when a build carrying it is published and installed;
+`installer/windows_upgrade.ps1` then asks the shell to drop its icon cache
+(`ie4uinit.exe -show`), without which Windows can keep drawing the old tile
+from cache for weeks.
+
+---
+
 ---
 
 ## Quick reference

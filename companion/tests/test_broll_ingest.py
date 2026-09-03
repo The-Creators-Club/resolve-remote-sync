@@ -1690,3 +1690,71 @@ def test_a_drop_that_fits_is_still_accepted(tmp_path, monkeypatch):
         {"local_id": "c1", "name": "A.MP4", "size": 5 * 10 ** 9,
          "source": "upload"}]})
     assert status == 202
+
+
+# ---------------------------------------------------------------------------
+# The checkpoint survives the threads that write it
+# (bug-hunt-2026-09-03 comp-broll-music-1)
+# ---------------------------------------------------------------------------
+
+
+def test_a_checkpoint_is_not_lost_to_a_thread_adding_a_key(tmp_path, caplog):
+    """_save() used to put LIVE references to _batch and _staging in the
+    snapshot and serialise them after releasing the lock. json.dumps with
+    indent= is the pure-Python encoder, which yields the GIL mid-iteration, so
+    the tick thread doing item["described"] = True or outputs["proxy"] = ...
+    while the heartbeat thread saved raised "dictionary changed size during
+    iteration"; the broad except swallowed it, os.replace never ran, and the
+    state file silently stopped being written at exactly the moment there was
+    most to record. Three threads reach _save, and the docstring promises a
+    checkpoint at EVERY transition.
+    """
+    import threading
+
+    ingestor = make_ingestor(tmp_path)
+    ingestor._batch = {
+        "batch_id": "b1",
+        "items": [{"local_id": f"c{i}", "name": f"A{i}.MP4", "outputs": {},
+                   "uploads": {}} for i in range(300)],
+    }
+    ingestor._staging = {f"s{i}": {"items": {}, "ended_at": None}
+                         for i in range(20)}
+
+    stop = threading.Event()
+
+    def _crunch_like():
+        """What _crunch_item does, at speed: keys _item_from_manifest did not
+        pre-create, added with no lock held. Bounded so the state file cannot
+        grow without limit while the saves run."""
+        n = 0
+        while not stop.is_set():
+            n += 1
+            for item in ingestor._batch["items"]:
+                item["described"] = True
+                if len(item["outputs"]) > 200:
+                    item["outputs"].clear()
+                    item["uploads"].clear()
+                item["outputs"][f"stage{n}"] = n
+                item["uploads"][f"u{n}"] = n
+            for entry in ingestor._staging.values():
+                if len(entry["items"]) > 200:
+                    entry["items"].clear()
+                entry["items"][f"i{n}"] = n
+
+    mutator = threading.Thread(target=_crunch_like, daemon=True)
+    with caplog.at_level("WARNING"):
+        mutator.start()
+        try:
+            # 40 saves against a batch this size is where the old shape
+            # failed about thirty times out of forty (measured); one lost
+            # write is the defect.
+            for _ in range(40):
+                ingestor._save()
+        finally:
+            stop.set()
+            mutator.join(timeout=5)
+
+    assert not [r for r in caplog.records if "could not write" in r.getMessage()]
+    saved = json.loads(ingestor.state_path.read_text(encoding="utf-8"))
+    assert saved["batch"]["batch_id"] == "b1"
+    assert len(saved["batch"]["items"]) == 300

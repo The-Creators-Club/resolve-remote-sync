@@ -215,12 +215,26 @@ def allocate_name(conn, orig_name, transcoded=None, reserved=None):
     alongside the disk. That is build_archive's BROLL-IDX-5 lesson, one
     library over: settle against CLAIMED names, never against what is on disk
     alone.
+
+    The `tracks` table is the THIRD member of the collision set
+    (bug-hunt-2026-09-03 music-3). The disk answers "free" for every candidate
+    when the library mount is absent, or when a row's file was removed by hand
+    without a --prune, and `write_item_result` upserts ON CONFLICT(rel_path):
+    the old cue's embedding, windows and probe fields are replaced in place
+    while its id -- and so its preview proxy -- stays. And a share this host
+    cannot see is refused outright here rather than answered with a name, on
+    the same helper music-1's gate uses, so there is one notion of "the share
+    looks wrong" and not two.
     """
+    ok, why = config.share_root_ready(conn)
+    if not ok:
+        raise HTTPException(503, why)
     reserved = reserved if reserved is not None else set()
     name = final_name_for(orig_name, transcoded)
     stem, ext = Path(name).stem, Path(name).suffix
     candidate, i = name, 2
-    while candidate.lower() in reserved or _taken_on_disk(candidate):
+    while (candidate.lower() in reserved or _taken_on_disk(candidate)
+           or _taken_by_a_track(conn, candidate)):
         candidate = f'{stem} ({i}){ext}'
         i += 1
     reserved.add(candidate.lower())
@@ -261,6 +275,25 @@ def _taken_on_disk(name):
                 return True
         except (config.PathTraversalError, config.UnknownShareError, OSError):
             return True
+    return False
+
+
+def _taken_by_a_track(conn, name):
+    """True if an INDEXED track already claims this flat name.
+
+    bug-hunt-2026-09-03 music-3: the library is flat, so rel_path IS the name,
+    and both of its Unicode spellings are asked about for the same reason
+    _taken_on_disk asks about both (CR-90). Never raises, and a query that
+    cannot run counts as TAKEN: the collision loop simply mints another name,
+    which is the harmless direction.
+    """
+    try:
+        for spelling in _spellings(name):
+            if conn.execute('SELECT 1 FROM tracks WHERE rel_path = ? LIMIT 1',
+                            (spelling,)).fetchone():
+                return True
+    except sqlite3.Error:
+        return True
     return False
 
 

@@ -1225,7 +1225,8 @@ class UpgradeManager:
             log.warning("upgrade: %s", note)
 
     def _accept_offer(self, info: dict[str, Any]) -> tuple[bool, str]:
-        """(ok, reason) -- signature, then downgrade floor. Never raises.
+        """(ok, reason) -- signature, kind/platform, then downgrade floor.
+        Never raises.
 
         Called on EVERY offer as it arrives and again inside
         download_and_verify: the tray must not show "Update available" for a
@@ -1235,6 +1236,34 @@ class UpgradeManager:
             ok, detail = verify_offer(info)
             if not ok:
                 return False, f"release signature rejected ({detail})"
+            # bug-hunt-2026-09-03 comp-core-1: the signature covers `kind` and
+            # `platform` precisely so a Mac cannot be handed a Windows exe and
+            # the onboard installer cannot be offered as a companion
+            # self-upgrade -- but until now only api._upgrade_info compared
+            # them to anything, and the dashboard is the party the offline key
+            # was introduced to remove from the trust chain. Both kinds are
+            # published into the same table by the same key, so a genuinely
+            # signed `onboard` record verified here and was renamed over the
+            # running exe. Refused BEFORE note_floor, so a foreign record
+            # cannot raise this machine's persisted downgrade floor either.
+            # `arch` is deliberately NOT checked (owner decision on comp-core-1,
+            # 2026-09-03): release_pubkey.OPTIONAL_KIND_EXTRA_FIELDS states that
+            # arch is the DASHBOARD's to enforce, and a client test would refuse
+            # every record published before REL-16 added the field.
+            kind = str(info.get("kind") or "").strip()
+            if kind != "companion":
+                return False, (
+                    f"the release record for v{info.get('version')} is kind "
+                    f"{kind or 'unset'!r}, not a companion build. Only a "
+                    f"companion record may be installed over this program"
+                )
+            offered_platform = str(info.get("platform") or "").strip()
+            if offered_platform != platform_key():
+                return False, (
+                    f"the release record for v{info.get('version')} is for "
+                    f"platform {offered_platform or 'unset'!r}, and this machine "
+                    f"is {platform_key()!r}"
+                )
             # BEFORE note_floor, which is monotonic and persisted
             # (comp-app-core-3, 2026-08-21). A record that says "you may not
             # install below X" while offering X-1 is self-contradictory and
@@ -1342,12 +1371,38 @@ class UpgradeManager:
             )
             self.last_failure = ERROR_REFUSED
             return None
-        if url.startswith("/"):
+        parsed_url = urllib.parse.urlparse(url)
+        if not parsed_url.scheme and not parsed_url.netloc:
+            # bug-hunt-2026-09-03 comp-core-5: same_origin waves through ANY
+            # relative URL, but only the absolute-path case used to be
+            # resolved -- a `url` published without its leading slash reached
+            # urllib unresolved and raised "unknown url type", which was filed
+            # as ERROR_DOWNLOAD and then counted against REL-8's 8-attempt
+            # budget, so a formatting slip in the record looked exactly like an
+            # AV quarantine. The leading-slash case keeps its plain
+            # concatenation deliberately: a dashboard_url with a path prefix
+            # (a reverse proxy mount) must keep that prefix, which urljoin
+            # would strip.
             if not base:
                 log.warning("upgrade: dashboard_url is not configured -- cannot download")
                 self.last_failure = ERROR_REFUSED
                 return None
-            url = base + url
+            if url.startswith("/"):
+                url = base + url
+            else:
+                resolved = urllib.parse.urljoin(base + "/", url)
+                if not same_origin(resolved, base):
+                    log.error(
+                        "upgrade: REFUSING a relative update URL that resolves off the "
+                        "dashboard's own host (%r against %r -> %r)", url, base, resolved,
+                    )
+                    self.last_failure = ERROR_REFUSED
+                    return None
+                log.info(
+                    "upgrade: the offered URL %r is relative -- resolved against "
+                    "dashboard_url as %r", url, resolved,
+                )
+                url = resolved
         # TRANSPORT (item 4): checked after the origin is resolved, because
         # "which scheme and host will this actually hit" is only settled here.
         ok_transport, note = transport_ok(base)

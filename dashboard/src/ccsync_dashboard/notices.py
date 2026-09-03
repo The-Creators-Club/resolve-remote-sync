@@ -29,7 +29,10 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from . import db
+# alerts is imported for its SILENT_SECONDS threshold only (dash-collector-6):
+# "a machine has gone quiet" has to mean the same number in both modules.
+# alerts imports db and health, never notices, so this is not a cycle.
+from . import alerts, db
 
 log = logging.getLogger("ccsync.dashboard.notices")
 
@@ -57,6 +60,19 @@ def _hours_since(ts: str, now: str) -> float | None:
         return db.age_seconds(ts, now) / 3600.0
     except (TypeError, ValueError):
         return None
+
+
+def _stale_reading(ts: Any, now: str) -> bool:
+    """Whether a measurement is too old to say anything about today
+    (bug-hunt-2026-09-03 dash-collector-6). A reading with NO timestamp is
+    treated as stale: an unstamped number cannot be shown to be current, and
+    the safe direction for a notice nobody can clear is not to open it."""
+    if not ts:
+        return True
+    age = _hours_since(str(ts), now)
+    if age is None:
+        return True
+    return age * 3600.0 > alerts.SILENT_SECONDS
 
 
 def _since(ts: str, now: str) -> str:
@@ -488,6 +504,15 @@ def _check_machine_space(conn, settings, now: str) -> None:
         "disk_root_total_bytes AS total, disk_at, trash_bytes FROM machine_state"
     ):
         subject = f"{row['editor_username']}/{row['machine']}"
+        # bug-hunt-2026-09-03 dash-collector-6: a measurement from a machine
+        # that has stopped reporting is not a fact about that machine today.
+        # Without this gate a retired laptop's last reading kept a warn open
+        # for ever, with a fix ("untick a project for that computer") that
+        # nobody can act on, because the only way to clear was for the same
+        # machine to report again with more space. The threshold is the one
+        # alerts.py uses for "this machine has gone quiet".
+        if _stale_reading(row["disk_at"], now):
+            continue
         free = row["free"]
         if free is not None and int(free) < MACHINE_DISK_FLOOR_BYTES:
             open_disks.append(subject)
@@ -551,6 +576,15 @@ def _check_dashboard_space(conn, settings, now: str) -> None:
 
 def _check_release_feed(conn, settings, now: str) -> None:
     if not getattr(settings, "release_feed_url", ""):
+        # bug-hunt-2026-09-03 dash-collector-7: returning here used to stamp
+        # no evidence at all, so on the vendor default (no feed configured)
+        # both kinds sat at [ NOT CHECKED ] for ever - which the checks
+        # panel's contract reads as "no writer runs anywhere in this build",
+        # i.e. a gap, rather than "there is no feed here to check". Closing
+        # them is also right on its own terms: a site that removes its feed
+        # URL must not keep an open feed_unreachable nothing can now clear.
+        db.clear_notices_of_kind(conn, "feed_unreachable", (), now=now)
+        db.clear_notices_of_kind(conn, "feed_runtime_mismatch", (), now=now)
         return
     state = db.get_feed_state(conn)
     error = str(state.get("last_error") or "")

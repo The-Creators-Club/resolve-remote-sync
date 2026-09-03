@@ -81,7 +81,14 @@ def _project_priority(local_root: str, project_rel: str, selected_rels: Optional
     archive on a base rig holding hundreds. `rel` last, purely so the order is
     stable/deterministic between refreshes.
     """
-    selected = 0 if (selected_rels is not None and project_rel in selected_rels) else 1
+    # bug-hunt-2026-09-03 comp-core-3: a walked rel is NFD on a Mac and the
+    # dashboard's selection is NFC, so an accented project read off the disk
+    # tested as UNSELECTED and could be the one MAX_PROJECTS dropped.
+    # Comparison only -- the rel that is returned, and later walked, is
+    # untouched.
+    selected = 0 if (
+        selected_rels is not None and rclone_lane.nfc_key(project_rel) in selected_rels
+    ) else 1
     try:
         mtime = os.stat(
             os.path.join(local_root, "Projects", project_rel.replace("/", os.sep))
@@ -134,11 +141,20 @@ def scan_local_manifest(
     # Selection rels union in so a just-selected project whose marker file
     # hasn't synced down yet still gets a rollup (see fixer.list_project_dirs).
     project_rels = fixer.list_project_dirs(local_root, extra_rels=selected_rels or ())
+    # bug-hunt-2026-09-03 comp-core-3: fold the SELECTION once, and compare
+    # every walked rel through the same fold below. Both membership tests used
+    # to be exact string tests, so on a Mac a diacritic project was reported
+    # twice -- once rollup-only under its NFD spelling, which the dashboard
+    # slugified into a phantom project (CR-90's mechanism one level up).
+    selected_keys = (
+        None if selected_rels is None
+        else {rclone_lane.nfc_key(rel) for rel in selected_rels}
+    )
     # B6: cap the project COUNT, keeping the ones that matter (see
     # prioritize_project_rels). Applied before the walk, so the dropped
     # projects cost nothing to skip.
     project_rels, dropped = prioritize_project_rels(
-        local_root, project_rels, selected_rels
+        local_root, project_rels, selected_keys
     )
     if dropped != _last_truncation_logged:
         _last_truncation_logged = dropped
@@ -154,7 +170,10 @@ def scan_local_manifest(
                      len(project_rels))
     for project_rel in project_rels:
         project_dir = Path(local_root) / "Projects" / project_rel.replace("/", os.sep)
-        include_files = selected_rels is not None and project_rel in selected_rels
+        include_files = (
+            selected_keys is not None
+            and rclone_lane.nfc_key(project_rel) in selected_keys
+        )
 
         n_originals = 0
         bytes_originals = 0

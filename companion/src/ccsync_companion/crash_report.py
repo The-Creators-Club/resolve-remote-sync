@@ -685,8 +685,19 @@ def start_supervisor(cfg: Optional[dict[str, Any]] = None,
                     "machine without a companion until the next logon", exc_info=True)
         return False
     if child is None:
-        log.debug("supervisor: not started (source run, not Windows, or %s set)",
-                  supervisor.DISABLE_ENV)
+        # bug-hunt-2026-09-03 comp-core-2: this used to be a DEBUG line, on the
+        # strength of supervisor.spawn_for's claim that launchd covers macOS.
+        # It does not -- the companion LaunchAgent has no KeepAlive by design
+        # -- so a Mac has no relaunch-after-abort net at all and its log said
+        # nothing about it. WARNING there, INFO everywhere else (a source run
+        # is a developer's own choice).
+        line = ("supervisor: not started (source run, not Windows, or %s set) -- "
+                "if this companion dies without shutting down, nothing relaunches "
+                "it and this machine syncs nothing until the next logon")
+        if sys.platform == "darwin":
+            log.warning(line, supervisor.DISABLE_ENV)
+        else:
+            log.info(line, supervisor.DISABLE_ENV)
         return False
     log.info("supervisor: pid %s is watching this companion and will relaunch it "
              "after a crash (never after a Quit or an upgrade)", getattr(child, "pid", "?"))

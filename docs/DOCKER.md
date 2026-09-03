@@ -594,7 +594,15 @@ sudo docker exec tailscale tailscale serve --bg --https=9443 http://192.168.0.10
 sudo docker exec tailscale tailscale serve status
 ```
 
-That publishes `https://truenas.tail26290e.ts.net:9443/`. Then, in
+That publishes `https://truenas.tail26290e.ts.net:9443/`. The memorable
+address is a redirect in front of it, not a second hostname:
+`https://thecreatorsclub.co/dash` 302s here from the site repo's
+`public/_redirects` (`X:\sites\TheCreatorsClub`, deployed by a push to
+main; 2026-09-02). It carries this port literally, so a serve port change
+is a two-repo change. A hostname of our own in front would need a
+certificate Tailscale cannot issue and a reverse proxy the 2026-08-17
+decision ruled out, and would 403 every Send-to-Resolve call until every
+companion's `dashboard_url` followed. Then, in
 `site.toml` on the deploying machine:
 
 ```toml

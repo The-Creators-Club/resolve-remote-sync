@@ -47,7 +47,7 @@ from pathlib import Path
 
 from app import config
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # secrets.token_urlsafe(16) -> 22 chars of [A-Za-z0-9_-]. The pattern is a
 # little wider than what we mint so a future longer token still routes; it is
@@ -103,6 +103,13 @@ CREATE TABLE client_folder_items (
     -- re-indexed archive (new ids, same files) can be re-resolved by name.
     share       TEXT NOT NULL,
     rel_path    TEXT NOT NULL,
+    -- The clip's CONTENT fingerprint (videos.hash), carried as a third
+    -- identity so a clip that is MOVED or renamed after curation survives:
+    -- the sorter files an inbox clip under a category and POSTs
+    -- /api/ingest/moved, which rewrites videos.rel_path, and both the id test
+    -- and the (share, rel_path) test then fail (broll-1, 2026-09-03). Blank
+    -- when the index had no hash for the clip; never matched blank.
+    hash        TEXT NOT NULL DEFAULT '',
     ord         INTEGER NOT NULL,
     -- The curator's caption for this clip in this folder ("drone, golden
     -- hour, 4K master available"). Shown on the public page under the
@@ -119,7 +126,7 @@ CREATE TABLE client_share_settings (
     value TEXT NOT NULL
 );
 
-PRAGMA user_version = 1;
+PRAGMA user_version = 2;
 """
 
 
@@ -149,6 +156,14 @@ def ensure_schema(db_path: Path | None = None) -> None:
         if version == 0:
             conn.executescript(_SCHEMA)
             version = SCHEMA_VERSION
+        if version == 1:
+            # v2 (broll-1, 2026-09-03): the content hash as a third identity.
+            conn.execute(
+                "ALTER TABLE client_folder_items ADD COLUMN hash TEXT NOT NULL DEFAULT ''")
+            _backfill_hashes(conn)
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            conn.commit()
+            version = SCHEMA_VERSION
         if version > SCHEMA_VERSION:
             raise RuntimeError(
                 f"FATAL: {path} has user_version={version}, newer than this app "
@@ -157,6 +172,38 @@ def ensure_schema(db_path: Path | None = None) -> None:
             )
     finally:
         conn.close()
+
+
+def _backfill_hashes(conn: sqlite3.Connection) -> None:
+    """Fill the new `hash` column for items whose clip the index still files
+    under the same (share, rel_path). Best effort by design.
+
+    The two databases are deliberately separate (publish_db.py must never be
+    able to take a customer's client links with it), so this reaches across
+    the boundary ONCE, at migration time, read only. Every failure here is
+    survivable: an item with a blank hash simply keeps the pre-2026-09-03
+    behaviour, id then name, and picks its hash up the next time it is
+    curated. A missing or unreadable broll.db must not stop the folder ledger
+    from opening.
+    """
+    index_path = config.get_db_path()
+    if not index_path.exists():
+        return
+    try:
+        index = sqlite3.connect(index_path)
+        try:
+            rows = index.execute(
+                "SELECT share, rel_path, hash FROM videos "
+                "WHERE hash IS NOT NULL AND hash != ''").fetchall()
+        finally:
+            index.close()
+    except sqlite3.Error:
+        return
+    for share, rel_path, video_hash in rows:
+        conn.execute(
+            "UPDATE client_folder_items SET hash = ? "
+            "WHERE hash = '' AND share = ? AND rel_path = ?",
+            (video_hash, share, rel_path))
 
 
 def open_connection(db_path: Path | None = None) -> sqlite3.Connection:
@@ -396,13 +443,13 @@ def folder_dict(row: sqlite3.Row) -> dict:
 
 # --- items -----------------------------------------------------------------------
 
-def _video_identity(index_conn: sqlite3.Connection, video_id: int) -> tuple[str, str]:
+def _video_identity(index_conn: sqlite3.Connection, video_id: int) -> tuple[str, str, str]:
     row = index_conn.execute(
-        "SELECT share, rel_path FROM videos WHERE id = ?", (video_id,)
+        "SELECT share, rel_path, hash FROM videos WHERE id = ?", (video_id,)
     ).fetchone()
     if row is None:
         raise ClientFolderError(f"clip {video_id} is not in the archive index")
-    return row["share"], row["rel_path"]
+    return row["share"], row["rel_path"], row["hash"] or ""
 
 
 def add_items(conn: sqlite3.Connection, index_conn: sqlite3.Connection, folder_id: int,
@@ -432,24 +479,37 @@ def add_items(conn: sqlite3.Connection, index_conn: sqlite3.Connection, folder_i
     next_ord = int(ord_row[0]) + 1
     added, already = [], []
     now = now_iso()
+    n_existing = len(present)
+    pending = []
     for vid in video_ids:
         vid = int(vid)
         if vid in present:
             already.append(vid)
             continue
-        share, rel_path = _video_identity(index_conn, vid)
+        share, rel_path, video_hash = _video_identity(index_conn, vid)
         if (share, rel_path) in present_names:
             already.append(vid)
             continue
-        if len(present) >= MAX_ITEMS:
-            raise ClientFolderError(f"a client folder holds at most {MAX_ITEMS} clips")
-        conn.execute(
-            "INSERT INTO client_folder_items (folder_id, video_id, share, rel_path, ord, "
-            "added_by, added_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (folder_id, vid, share, rel_path, next_ord, added_by, now),
-        )
+        pending.append((vid, share, rel_path, video_hash))
         present.add(vid)
         present_names.add((share, rel_path))
+    # bug-hunt-2026-09-03 broll-5: the cap used to be tested inside the insert
+    # loop, so a batch that overran it raised after earlier INSERTs and
+    # get_shares_db closed the connection unstamped -- sqlite rolled the whole
+    # batch back and the editor was told nothing about the clips that HAD
+    # fitted. Refuse before anything is written, and say how many would fit.
+    room = max(0, MAX_ITEMS - n_existing)
+    if len(pending) > room:
+        raise ClientFolderError(
+            f"a client folder holds at most {MAX_ITEMS} clips. This one has "
+            f"{n_existing}, so there is room for {room} more and {len(pending)} new "
+            f"clips were sent. Nothing was added.")
+    for vid, share, rel_path, video_hash in pending:
+        conn.execute(
+            "INSERT INTO client_folder_items (folder_id, video_id, share, rel_path, hash, ord, "
+            "added_by, added_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (folder_id, vid, share, rel_path, video_hash, next_ord, added_by, now),
+        )
         added.append(vid)
         next_ord += 1
     conn.execute("UPDATE client_folders SET updated_at = ? WHERE id = ?", (now, folder_id))
@@ -566,6 +626,44 @@ PUBLIC_VIDEO_COLUMNS = (
 )
 
 
+def _resolve_by_hash(index_conn: sqlite3.Connection, item: sqlite3.Row) -> sqlite3.Row | None:
+    """The item's clip found by content hash, but ONLY when the hash names
+    exactly one clip in that share.
+
+    `videos.hash` is not unique: the pipeline indexes duplicates and records
+    `duplicate_of`, so a hash can name several rows and there is no way to
+    tell which one the editor curated. Ambiguity resolves to None, which is
+    the pre-2026-09-03 behaviour (the item is dropped and the panel says
+    `missing`) rather than a guess the client would see as somebody else's
+    footage. A blank hash matches nothing on purpose: an item migrated from a
+    v1 ledger with no hash to backfill, or a clip the index never hashed,
+    must not collide with every other unhashed row.
+    """
+    video_hash = item["hash"] if "hash" in item.keys() else ""
+    if not video_hash:
+        return None
+    rows = index_conn.execute(
+        "SELECT * FROM videos WHERE share = ? AND hash = ?",
+        (item["share"], video_hash)).fetchall()
+    return rows[0] if len(rows) == 1 else None
+
+
+def _refresh_item_path(conn: sqlite3.Connection, item_id: int, rel_path: str) -> None:
+    """Move the item's stored name to where the clip lives now, so the next
+    read costs one indexed lookup instead of a hash scan.
+
+    Best effort: this runs on the PUBLIC page's read path as well as the
+    curator's, and a client viewing a link must never see a 500 because the
+    ledger happened to be locked by an editor's write.
+    """
+    try:
+        conn.execute("UPDATE client_folder_items SET rel_path = ? WHERE id = ?",
+                     (rel_path, item_id))
+        conn.commit()
+    except sqlite3.Error:
+        pass
+
+
 def resolve_items(conn: sqlite3.Connection, index_conn: sqlite3.Connection,
                   folder_id: int, public: bool) -> list[dict]:
     """The folder's clips joined with what broll.db knows about them, in order.
@@ -577,7 +675,8 @@ def resolve_items(conn: sqlite3.Connection, index_conn: sqlite3.Connection,
     whose stored id no longer names the clip it was curated as -- gone from the
     index, or renumbered so the id belongs to something else -- is re-resolved
     by (share, rel_path), which is how an archive rebuilt with new ids keeps
-    its folders; and one that cannot be found BY NAME is DROPPED rather than
+    its folders, then by content hash, which is how a clip the sorter MOVED
+    keeps them; and one that none of the three finds is DROPPED rather than
     shown as a broken card or, worse, served as whatever inherited its number
     (the panel reports it as `missing`, the public page never sees it).
     """
@@ -604,6 +703,18 @@ def resolve_items(conn: sqlite3.Connection, index_conn: sqlite3.Connection,
             video = index_conn.execute(
                 "SELECT * FROM videos WHERE share = ? AND rel_path = ?",
                 (item["share"], item["rel_path"])).fetchone()
+        if video is None:
+            # LAST, after id and name (broll-1, 2026-09-03): the clip was
+            # MOVED or renamed since it was curated -- the sorter's
+            # /api/ingest/moved rewrites videos.rel_path for every inbox clip
+            # it files -- so both of the identities above are stale while the
+            # footage is untouched. The client's card used to vanish and its
+            # media 404. Hash is last because it is NOT unique (the pipeline
+            # records duplicate_of), so a rebuild that renumbers ids must get
+            # its answer from the two exact identities first.
+            video = _resolve_by_hash(index_conn, item)
+            if video is not None:
+                _refresh_item_path(conn, item["id"], video["rel_path"])
         if video is None:
             if not public:
                 out.append({"video_id": item["video_id"], "share": item["share"],

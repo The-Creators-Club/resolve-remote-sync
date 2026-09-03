@@ -286,7 +286,12 @@ class BrollGate:
         # refusal with a 500 and a traceback (KNOWN_BUGS DASH-5, 2026-08-11).
         supplied = b""
         for key, value in scope.get("headers", ()):
-            if key == b"x-ingest-token":
+            # .lower() like every other header read in this file and in
+            # music.py (bug-hunt-2026-09-03 dash-mounts-ui-4). h11 hands us
+            # lowercased names, so a raw compare is inert today; a scope built
+            # by hand or by another server would read the header as ABSENT,
+            # and absent here is a 401 on every ingest POST.
+            if key.lower() == b"x-ingest-token":
                 supplied = value
                 break
         return hmac.compare_digest(self._token.encode("utf-8", "surrogateescape"), supplied)

@@ -997,3 +997,30 @@ def test_health_carries_the_feed_age_and_the_data_gauge(world):
 def test_the_packages_page_shows_the_data_gauge(world):
     html = world["client"].get("/admin/packages").text
     assert "data volume:" in html or "FREE on the data volume" in html
+
+
+def test_reload_panel_never_swaps_an_unchecked_response(world):
+    """bug-hunt-2026-09-03 dash-mounts-ui-3, the DASH-4 shape in the one panel
+    that deliberately does not use htmx: `reloadPanel` sends HX-Request, so
+    login_gate answers an expired session with a 200 carrying HX-Redirect
+    (never a 303). Plain fetch does not understand that header, so an
+    unchecked `outerHTML =` wrote the LOGIN DOCUMENT into the packages panel.
+    Asserted on the source, because the failure is somebody deleting the
+    guard: the browser half has no harness here."""
+    src = (REPO / "dashboard" / "static" / "dashboard_update.js").read_text(encoding="utf-8")
+    body = src.split("function reloadPanel()", 1)[1].split("\n  }", 1)[0]
+    assert "resp.ok" in body, "reloadPanel no longer checks the status"
+    assert "HX-Redirect" in body, "reloadPanel no longer checks for HX-Redirect"
+    guard = min(body.index("resp.ok"), body.index("HX-Redirect"))
+    assert guard < body.index("outerHTML"), "the guard must precede the swap"
+
+
+def test_the_login_gate_answers_an_hx_request_with_hx_redirect(world):
+    """The premise of the test above: an expired session answers this fetch
+    with a status only htmx knows what to do with."""
+    client = world["client"]
+    client.cookies.clear()
+    res = client.get("/partials/admin/dashboard-update",
+                     headers={"HX-Request": "true"}, follow_redirects=False)
+    assert res.status_code == 401
+    assert res.headers.get("HX-Redirect")

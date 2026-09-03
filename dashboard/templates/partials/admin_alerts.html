@@ -84,6 +84,15 @@
         <option value="0" {% if alerts_settings.alerts_smtp_tls != "1" %}selected{% endif %}>off</option>
       </select>
     </label>
+    {# bug-hunt-2026-09-03 dash-collector-3: STARTTLS used to run with no certificate check,
+       so anyone answering on the relay's port got the stored password. Verification is on by
+       default; this is the one click-path opt-out for a relay with its own certificate. #}
+    <label title="Off only for a mail server with its own certificate. When on, a certificate that does not match the host is a refusal, never a silent fallback.">VERIFY THE MAIL SERVER'S CERTIFICATE<br>
+      <select name="alerts_smtp_verify_tls">
+        <option value="1" {% if alerts_settings.alerts_smtp_verify_tls != "0" %}selected{% endif %}>on</option>
+        <option value="0" {% if alerts_settings.alerts_smtp_verify_tls == "0" %}selected{% endif %}>off (a server with its own certificate)</option>
+      </select>
+    </label>
 
     <div class="side-head" style="margin-top:0.8rem">[ WEBHOOK ]</div>
     <label title="https only. The body is {subject, text} as JSON.">WEBHOOK URL<br>

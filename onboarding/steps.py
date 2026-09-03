@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import re
 import subprocess
 import sys
@@ -122,7 +123,15 @@ from ccsync_companion import site as site_mod
 # this ONE computer reaches the footage. The stored values ("editor"/"base")
 # and every branch keyed on them are unchanged. Published as 1.0.34 or
 # earlier -- 1.0.35 was bumped but never built, so this copy rides it.
-INSTALLER_VERSION = "1.0.38"
+# 1.0.39: the wizard and the bootstrap can no longer disagree about the tree
+# drive (bug-hunt-2026-09-03 install-onboard-1/-2). ensure_config resolves
+# canonical_prefix through the CACHED manifest like every sibling value
+# instead of falling back to a literal P:\, and run_bootstrap hands both
+# site keys to the platform's bootstrap (-CanonicalPrefix/-TreeName,
+# CCSYNC_CANONICAL_PREFIX/CCSYNC_TREE_NAME) so one failed fetch cannot map
+# one letter while config.toml names another. Both bootstraps changed, so
+# the shared number moves.
+INSTALLER_VERSION = "1.0.39"
 
 # NO DEFAULT since 2026-08-17 (WP0, docs/SYNOLOGY_PORT_PLAN.md). These used
 # to be one deployment's tailnet and LAN addresses compiled into every
@@ -215,6 +224,22 @@ def site_drive_letter(site: Optional[dict] = None) -> str:
         prefix = str(site.get("canonical_prefix") or "").strip()
     m = _CANONICAL_PREFIX_RE.match(prefix)
     return m.group(1).upper() if m else DEFAULT_DRIVE_LETTER
+
+
+def site_canonical_prefix(site: Optional[dict] = None) -> str:
+    """The exact string this site's Resolve clip paths are addressed with
+    ("P:\\" unless the manifest says otherwise), normalised to "<LETTER>:\\".
+
+    Same contract as site_drive_letter, and it exists because ensure_config
+    used to read the key straight off the passed dict with a hardcoded "P:\\"
+    fallback (bug-hunt-2026-09-03 install-onboard-1): a single failed
+    fetch_site -- which returns {} on ANY error -- then wrote P:\\ into
+    config.toml while the same wizard run resolved Q everywhere else from the
+    cache. A junk prefix degrades to the default here for the same reason
+    site_drive_letter's does: windows_bootstrap.ps1 refuses it outright, and
+    that refusal is the one that must be seen.
+    """
+    return f"{site_drive_letter(site)}:\\"
 
 
 def subst_task_name(drive_letter: Optional[str] = None) -> str:
@@ -1137,6 +1162,17 @@ def run_bootstrap(
     # dashboard URL) is what this machine can actually reach, so it stays the
     # fallback rather than the other way round.
     nas_host = sftp_host or tailnet_host
+    # The two keys COMMERCIAL_READINESS item 11 is actually about had no flag
+    # at all until bug-hunt-2026-09-03 install-onboard-2: the bootstrap
+    # fetched them itself, and a fetch that failed there (explicitly
+    # non-fatal) fell back to "P:\\"/"CCSync" while the wizard had already
+    # written the site's real answer into config.toml -- so the machine got a
+    # drive letter, a logon task and a loopback share the config, the
+    # companion and the uninstaller all disagree with. Only ever the
+    # MANIFEST's values: config.toml's canonical_prefix is the local root on
+    # a base rig, which the bootstrap refuses as not-a-drive-letter.
+    canonical_prefix = str(site.get("canonical_prefix") or "").strip()
+    tree_name = str(site.get("tree_name") or "").strip()
 
     if _is_mac(platform):
         cmd = [
@@ -1176,6 +1212,10 @@ def run_bootstrap(
             cmd += ["-SftpPort", str(sftp_port)]
         if local_root:
             cmd += ["-LocalRoot", str(local_root)]
+        if canonical_prefix:
+            cmd += ["-CanonicalPrefix", canonical_prefix]
+        if tree_name:
+            cmd += ["-TreeName", tree_name]
         if companion_exe_source:
             cmd += ["-CompanionExeSource", str(companion_exe_source)]
 
@@ -1201,6 +1241,15 @@ def run_bootstrap(
     if _is_mac(platform):
         child_env["DASHBOARD_TOKEN"] = str(dashboard_token or "")
         child_env["DASHBOARD_URL"] = str(dashboard_url or "")
+        # macos_bootstrap.sh has no flags for these two either (same reason
+        # CCSYNC_NAS_SYNCTHING_ID travels this way): it reads them flag-first,
+        # ahead of its own manifest fetch. Only set when the wizard actually
+        # has a manifest value -- an env var carrying OUR fallback would beat
+        # the script's fetch and defeat the point (install-onboard-2).
+        if canonical_prefix:
+            child_env["CCSYNC_CANONICAL_PREFIX"] = canonical_prefix
+        if tree_name:
+            child_env["CCSYNC_TREE_NAME"] = tree_name
 
     try:
         result = run(cmd, timeout=BOOTSTRAP_TIMEOUT_SECONDS, env=child_env,
@@ -2611,12 +2660,21 @@ def ensure_config(
         # out-of-tree on a base rig (see config.example.toml).
         forced["canonical_prefix"] = _toml_string(root)
     else:
-        site = site or {}
-        forced["local_root"] = _toml_string(local_root or default_local_root(platform))
         # The site's own canonical prefix when it publishes one -- every
         # Resolve project in a fleet stores this string, so it is a
-        # deployment-wide decision, not a per-machine one.
-        forced["canonical_prefix"] = _toml_string(site.get("canonical_prefix") or "P:\\")
+        # deployment-wide decision, not a per-machine one. Resolved through
+        # site_canonical_prefix (bug-hunt-2026-09-03 install-onboard-1) so a
+        # failed manifest fetch falls back to the CACHED manifest, exactly
+        # like default_local_root below: reading the key off `site or {}` with
+        # a literal "P:\\" fallback made one wizard run resolve two site
+        # values from two different sources.
+        # `site or None`, not `site`: an empty manifest is "the fetch told us
+        # nothing", not "this site publishes no prefix", and only None makes
+        # the helper read the cache (onboard.py's _site() draws the same
+        # distinction for every other site value).
+        forced["canonical_prefix"] = _toml_string(site_canonical_prefix(site or None))
+        site = site or {}
+        forced["local_root"] = _toml_string(local_root or default_local_root(platform))
         # OWNED WHEN THE SITE SAYS, because the value must match the stanza
         # the bootstrap wrote into rclone.conf and the bootstrap names that
         # stanza from this same manifest key. Neither may guess the other's
@@ -2839,7 +2897,9 @@ def launch_companion(
 
 
 def installer_on_forbidden_drive(site: Optional[dict] = None,
-                                 drive_letter: Optional[str] = None) -> bool:
+                                 drive_letter: Optional[str] = None,
+                                 platform: Optional[str] = None,
+                                 is_mount: Optional[Callable[[str], bool]] = None) -> bool:
     """True when the running installer lives on the tree drive or a UNC share
     -- running it from there locks the file server-side for as long as the
     wizard is open (seen live 2026-07-25: an editor ran onboard.exe off the
@@ -2848,10 +2908,40 @@ def installer_on_forbidden_drive(site: Optional[dict] = None,
 
     The letter is site data (installer-onboard-tools-3, 2026-08-21); the
     historical P is still refused on every site, because that is where the
-    package folder sat on every machine provisioned before it was."""
+    package folder sat on every machine provisioned before it was.
+
+    On darwin the same refusal is a MOUNT test (bug-hunt-2026-09-03
+    install-onboard-4): there is no drive letter and no UNC, the tree is
+    normally /Volumes/<share> over SMB, and the two Windows tests could never
+    fire -- so the platform where the tree is most often a network mount was
+    the one with no guard at all. Anything outside the root filesystem counts:
+    an external SSD is a removable volume the install is about to write a
+    whole tree onto."""
     if not getattr(sys, "frozen", False):
         return False
-    exe = str(sys.executable).upper()
+    exe = str(sys.executable)
+    if _is_mac(platform):
+        # posixpath, not os.path: the darwin branch has to be exercisable
+        # from the Windows dev box like every other one in this module.
+        mount = is_mount or _default_is_mount
+        if exe.startswith("/Volumes/"):
+            return True
+        # Walk up to the volume this path is on. Reading the mount table can
+        # fail (a dead automount hangs statfs); "cannot tell" must not refuse
+        # an install.
+        try:
+            path = posixpath.dirname(exe)
+            while path and path != "/":
+                if mount(path):
+                    return True
+                parent = posixpath.dirname(path)
+                if parent == path:
+                    break
+                path = parent
+        except Exception:
+            return False
+        return False
+    exe = exe.upper()
     letter = (drive_letter or site_drive_letter(site)).upper()
     return (exe.startswith(f"{letter}:") or exe.startswith(f"{DEFAULT_DRIVE_LETTER}:")
             or exe.startswith("\\\\"))

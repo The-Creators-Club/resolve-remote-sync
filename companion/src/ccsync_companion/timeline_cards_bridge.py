@@ -274,10 +274,17 @@ class CardsBridge:
             self._total_held += held
             if held > self._max_held:
                 self._max_held, self._max_name = held, name
-            slow_at = self._slow_logged_at
-            if held >= SLOW_TAKE_SECONDS:
+            # bug-hunt-2026-09-03 comp-resolve-4: the stamp goes on the LOG,
+            # not on the slow take. Stamping every slow take measured the
+            # window against the previous slow take, so a sustained
+            # starvation -- takes closer together than the repeat window,
+            # which is the whole risk phase 2 carries -- logged once and then
+            # went silent for as long as it lasted.
+            say = (held >= SLOW_TAKE_SECONDS
+                   and (time.monotonic() - self._slow_logged_at) >= SLOW_TAKE_REPEAT_SECONDS)
+            if say:
                 self._slow_logged_at = time.monotonic()
-        if held >= SLOW_TAKE_SECONDS and (time.monotonic() - slow_at) >= SLOW_TAKE_REPEAT_SECONDS:
+        if say:
             log.warning(
                 "cards: %s held the Resolve lock for %.2fs -- the watcher and "
                 "the tray queue behind it", name, held)

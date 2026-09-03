@@ -2727,7 +2727,7 @@ def notice(
     sev = str(severity or "warn").strip().lower()
     if sev not in NOTICE_SEVERITIES:
         sev = "warn"
-    cur = conn.execute(
+    conn.execute(
         """INSERT INTO notices
              (kind, severity, subject, body, fix, first_seen, last_seen, cleared_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
@@ -2741,8 +2741,12 @@ def notice(
          stamp, stamp),
     )
     _mark_notice_checked(conn, kind, stamp)
-    if cur.lastrowid:
-        return int(cur.lastrowid)
+    # Never `cur.lastrowid` (bug-hunt-2026-09-03 dash-db-2): SQLite does not
+    # touch last_insert_rowid() on the DO UPDATE path, so on every re-assert
+    # it holds the rowid of some unrelated row inserted earlier on this
+    # connection (a fleet_audit or alert_log id), and it is truthy -- which
+    # made this lookup dead code and the returned id a dismiss target
+    # pointing at the wrong notice.
     row = conn.execute(
         "SELECT id FROM notices WHERE kind=? AND subject=?", (str(kind), str(subject or "")),
     ).fetchone()
@@ -2867,6 +2871,15 @@ def record_invariant_result(
     The delete is what makes the page reflect the present rather than
     everything that has ever been wrong: unlike `notices`, which is a ledger
     with a life and a DISMISS, this table is a picture of the last pass.
+
+    It runs ONLY for a real verdict (ok / broken). bug-hunt-2026-09-03
+    dash-collector-2: `evaluate()` turns an exception into a check_failed
+    Outcome with NO subjects, so an unconditional delete wiped every broken
+    subject of an invariant whose check merely crashed - and the fleet was
+    then mailed "this has cleared" for a tick that is still unshared. A
+    subject kept this way keeps its OLD `checked_at`, so the page's age
+    wording cannot claim a fresh check. The summary row is still written, on
+    every verdict: the page needs the check_failed state stamped.
     """
     stamp = now or utcnow_iso()
     verdict = state if state in INVARIANT_STATES else INVARIANT_CHECK_FAILED
@@ -2887,12 +2900,13 @@ def record_invariant_result(
              checked_at=excluded.checked_at""",
         rows,
     )
-    placeholders = ",".join("?" * len(kept)) or "''"
-    conn.execute(
-        f"""DELETE FROM invariant_results
-             WHERE invariant=? AND subject<>'' AND subject NOT IN ({placeholders})""",
-        (invariant, *kept),
-    )
+    if verdict in (INVARIANT_OK, INVARIANT_BROKEN):
+        placeholders = ",".join("?" * len(kept)) or "''"
+        conn.execute(
+            f"""DELETE FROM invariant_results
+                 WHERE invariant=? AND subject<>'' AND subject NOT IN ({placeholders})""",
+            (invariant, *kept),
+        )
 
 
 def fetch_invariant_results(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
@@ -3222,6 +3236,14 @@ def set_current_package(
     routes (REL-3, 2026-08-28): a recalled build must be un-currentable from
     every door, including the feed's `current` policy re-pointing at a version
     the vendor has since pulled.
+
+    This is NOT the whole gate (bug-hunt-2026-09-03 dash-release-jobs-2): the
+    `requires_dashboard` ordering check (REL-4) lives in
+    `package_store.make_current`, and the REL-1 soak gate and the UX-9 unsigned
+    confirmation in `api.make_current_refusal`. A caller that reaches this
+    function directly bypasses them -- which is exactly how the feed's `current`
+    policy made a build current that the dashboard was forbidden to offer. New
+    callers go through `package_store.make_current`, never here.
 
     `rollout` moves with `is_current` in the same two statements: a build that
     is no longer offered to the fleet is back on the shelf, not current.
@@ -4316,7 +4338,12 @@ def _file_move_cutoff(now: str, max_age_days: int) -> str:
     try:
         stamp = dt.datetime.fromisoformat(now)
     except ValueError:
-        stamp = dt.datetime.now(dt.timezone.utc)
+        # Microseconds dropped (bug-hunt-2026-09-03 dash-db-4): every stored
+        # timestamp comes from utcnow_iso(), which strips them, and the
+        # comparison against this cutoff is lexicographic -- a '.123456'
+        # fraction sorts above the '+00:00' offset it displaces, expiring a
+        # row delivered in the same second one second early.
+        stamp = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     return (stamp - dt.timedelta(days=max_age_days)).isoformat()
 
 
@@ -4747,7 +4774,18 @@ def copy_machine_plan(
     A new computer starts with an EMPTY plan on purpose (the plan doc's §3.2:
     inheritance would silently start a 50 GB download on a laptop nobody
     asked to fill). This is the affordance that makes that bearable -- the
-    admin's "same as the desktop, please" in one click."""
+    admin's "same as the desktop, please" in one click.
+
+    Raises ValueError when the SOURCE is a wired machine (bug-hunt-2026-09-03
+    dash-db-1): a base rig holds no tick, so since that fix its plan reads
+    empty, and copying nothing while answering "ok, 0 projects" is the shape
+    that makes an admin believe the laptop was filled. The target being wired
+    is refused a layer up (api.api_copy_machine_plan, 409)."""
+    if (editor, source) in base_machines(conn):
+        raise ValueError(
+            f"{source!r} is a wired machine: it works directly off the NAS and "
+            "holds no plan, so there is nothing to copy from it"
+        )
     rows = selections_for_machine(conn, editor, source)
     conn.execute(
         "DELETE FROM selections WHERE editor_username=? AND machine=?",
@@ -5341,7 +5379,15 @@ def selections_for_machine(
     old to say which machine is asking, or the collector's one-shot seed from
     pre-existing shares. A machine that has been given a plan of its own is
     never also handed the bucket -- that would make "untick this project on
-    the laptop" impossible to express."""
+    the laptop" impossible to express.
+
+    A WIRED machine syncs nothing at all (CR-28, re-applied to the read side
+    by bug-hunt-2026-09-03 dash-db-1). The tick and copy-plan routes already
+    409 on one, so an own row here is legacy or hand-written; the bucket was
+    the live route in. Under-sharing is the safe direction, so both are
+    dropped rather than filtered."""
+    if (editor, machine) in base_machines(conn):
+        return []
     rows = _selection_rows(conn, editor, machine=machine)
     if rows:
         return rows
@@ -5448,8 +5494,15 @@ def fetch_machine_selections(
     with rows of its own is never handed the bucket") is decided on ALL of a
     machine's rows before the filter applies -- otherwise a laptop holding
     one upload-only tick would inherit every full tick in the bucket the
-    moment a caller asked for full ticks only."""
+    moment a caller asked for full ticks only.
+
+    A WIRED machine never inherits the bucket (bug-hunt-2026-09-03 dash-db-1):
+    CR-28 was enforced on every write path only, so a `machine=''` row was
+    fanned out to a base rig here and the enforce cycle -- which reads exactly
+    this map and applies no mode filter of its own -- offered a Syncthing
+    share to the computer whose tree root IS the NAS share."""
     wanted = set(sync_modes) if sync_modes else None
+    wired = base_machines(conn)
     by_editor_machines: dict[str, list[str]] = {}
     for row in conn.execute("SELECT editor_username, machine FROM machines"):
         by_editor_machines.setdefault(row["editor_username"], []).append(row["machine"])
@@ -5487,6 +5540,8 @@ def fetch_machine_selections(
         for machine in machines:
             if (editor, machine) in has_own:
                 continue          # has a plan of its own; the bucket does not apply
+            if (editor, machine) in wired:
+                continue          # dash-db-1: a base rig holds no tick, by any route
             for slug in slugs:
                 grouped.setdefault(slug, []).append((editor, machine))
     for slug in grouped:

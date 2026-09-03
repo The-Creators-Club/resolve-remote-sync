@@ -310,3 +310,52 @@ def test_only_an_unknown_session_reads_as_session_lost():
     assert cards_ai._says_no_such_session("No conversation found with session ID abc")
     assert not cards_ai._says_no_such_session("Invalid API key")
     assert not cards_ai._says_no_such_session("command not found")
+
+
+# -- status(): unknown is not "no" (CR-121, 2026-09-03) -----------------------
+# Every `start_*` in the cards engine refuses up front on this dict, and the
+# page prints `why` verbatim in the dimmed button's tooltip. The end-to-end
+# cases (a real db, the wizard's snapshot, a stale probe) live in
+# tests/test_ai_providers.py; these two are about the sentence.
+
+@pytest.fixture
+def no_db(monkeypatch):
+    """`_unresolved_why` opens its own connection. Nothing here needs a real
+    one: `provider_states` is the seam being stubbed."""
+    from ccsync_dashboard import db as dbmod
+
+    monkeypatch.setattr(dbmod, "connect",
+                        lambda path: types.SimpleNamespace(close=lambda: None))
+
+
+def refused(monkeypatch, reason="no provider has a working credential"):
+    choice = ai_providers.ProviderChoice(name="", label="", reason=reason)
+    monkeypatch.setattr(cards_ai.Runner, "_choice",
+                        lambda self, probe=True: (choice, reason))
+
+
+def rows_as(monkeypatch, status):
+    monkeypatch.setattr(
+        cards_ai.ai_providers, "provider_states",
+        lambda conn, settings, **kw: [{"name": ai_providers.CLAUDE_CODE,
+                                       "status": status}])
+
+
+def test_an_unchecked_cli_is_not_reported_as_unavailable(tmp_path, monkeypatch, no_db):
+    refused(monkeypatch)
+    rows_as(monkeypatch, ai_providers.ST_UNKNOWN)
+    out = cards_ai.Runner(FakeSettings(tmp_path)).status()
+    assert out["ok"] is False
+    assert "not been checked" in out["why"]
+    assert "Settings -> AI providers" in out["why"]
+
+
+def test_a_site_with_cli_providers_off_keeps_the_resolvers_reason(tmp_path, monkeypatch,
+                                                                  no_db):
+    """"Not checked yet" would be a lie about a site that turned the whole CLI
+    half off: there is nothing to check and the answer is the chain's own."""
+    refused(monkeypatch)
+    rows_as(monkeypatch, ai_providers.ST_DISABLED)
+    out = cards_ai.Runner(FakeSettings(tmp_path)).status()
+    assert out["ok"] is False
+    assert out["why"] == "no provider has a working credential"

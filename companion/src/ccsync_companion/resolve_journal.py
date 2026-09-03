@@ -293,7 +293,8 @@ def allow_automatic(project_name: Any, source: str,
                 log.warning(
                     "resolve journal: %s has already had %d unprompted rewrites "
                     "today, so this one is held (%d held so far) -- this looks "
-                    "like a configuration problem, tray -> Copy diagnostics",
+                    "like a configuration problem, Tray > Settings > COPY "
+                    "DIAGNOSTICS FOR YOUR ADMIN",
                     slug, count, held + 1,
                 )
                 return False
@@ -348,15 +349,34 @@ def _read(path: Path) -> dict[str, Any]:
         return {}
 
 
+def _tmp_path(path: Path) -> Path:
+    """The scratch file `_write` renames into place.
+
+    bug-hunt-2026-09-03 comp-resolve-1: pid + thread id, because a fixed
+    `<file>.json.tmp` is shared by every writer and on Windows the loser of
+    that race gets a PermissionError out of os.replace rather than merely a
+    lost entry. Not swept: `SWEPT_SUFFIXES` matches `*.json`, and a tmp that
+    is left behind is unlinked by the writer that made it.
+    """
+    return path.with_name(f"{path.name}.tmp.{os.getpid()}.{threading.get_ident()}")
+
+
 def _write(path: Path, data: dict[str, Any]) -> None:
     """Whole-file rewrite through a tmp+replace. The file is small (one
     burst) and rewriting it is what keeps it valid JSON after a crash --
     an append-per-line format would need its own reader for half a line."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=1)
-    os.replace(tmp, path)
+    tmp = _tmp_path(path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=1)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def open_session(project_name: Any, *, clock: Callable[[], float] = time.time,
@@ -407,29 +427,41 @@ def record(kind: str, project_name: Any, *, clip_name: str = "",
     if path is None:
         return None
     try:
-        data = _read(path)
-        entries = data.get("entries")
-        if not isinstance(entries, list):
-            entries = []
-        if len(entries) >= MAX_ENTRIES_PER_SESSION:
-            return path
-        entries.append({
-            "ts": _iso_now(),
-            "kind": str(kind),
-            "source": str(source or ""),
-            "clip": str(clip_name or ""),
-            # The clip's ORIGINAL path. Identical to "new" for a relink, but
-            # for a proxy repoint old/new are PROXY paths and this is the only
-            # thing that identifies which clip they belong to on the way back.
-            "clip_path": str(clip_path or new_path or ""),
-            "old": str(old_path or ""),
-            "new": str(new_path or ""),
-        })
-        data["entries"] = entries
-        _write(path, data)
+        # bug-hunt-2026-09-03 comp-resolve-1: the read-append-write is one
+        # critical section. Both callers (replace_clip, link_proxy_media)
+        # record OUTSIDE `_API_LOCK`, so FIX ALL on the tray thread and the
+        # 120 s proxy-relink pass really are inside here at once, and an
+        # unlocked RMW loses whichever entry lost the os.replace race -- an
+        # edit undo_last_relink would then silently not undo.
+        with _lock:
+            data = _read(path)
+            entries = data.get("entries")
+            if not isinstance(entries, list):
+                entries = []
+            if len(entries) >= MAX_ENTRIES_PER_SESSION:
+                return path
+            entries.append({
+                "ts": _iso_now(),
+                "kind": str(kind),
+                "source": str(source or ""),
+                "clip": str(clip_name or ""),
+                # The clip's ORIGINAL path. Identical to "new" for a relink,
+                # but for a proxy repoint old/new are PROXY paths and this is
+                # the only thing that identifies which clip they belong to on
+                # the way back.
+                "clip_path": str(clip_path or new_path or ""),
+                "old": str(old_path or ""),
+                "new": str(new_path or ""),
+            })
+            data["entries"] = entries
+            _write(path, data)
         return path
     except Exception:
-        log.debug("resolve journal: could not record %s", kind, exc_info=True)
+        # An entry that could not be journalled is an edit that cannot be
+        # undone (bug-hunt-2026-09-03 comp-resolve-1): open_session says that
+        # out loud at WARNING, and so must this.
+        log.warning("resolve journal: could not record %s -- that edit will "
+                    "not be undoable", kind, exc_info=True)
         return path
 
 

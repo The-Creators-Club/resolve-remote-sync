@@ -974,7 +974,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # POST /api/v1/jobs (the admin's queue view and submit) stay fully
     # session-gated behind _require_admin, so a leaked fleet token can neither
     # read the queue nor put work on it.
-    _jobs_fleet_re = re.compile(r"^/api/v1/jobs/(claim|\d+/(heartbeat|result))$")
+    #
+    # `machines` joined them on 2026-09-03 (cards-machine-picker): the list of
+    # computers a job may be AIMED at, which the Timeline Cards server reads
+    # to fill its target picker while nobody is signed in on that side either.
+    # A GET, no secret in the answer, and the route itself still runs the full
+    # fleet gate (token AND signed identity) or asks for an admin session.
+    _jobs_fleet_re = re.compile(
+        r"^/api/v1/jobs/(claim|machines|\d+/(heartbeat|result))$")
 
     # The TIMELINE CARDS agent tunnel (TIMELINE-CARDS-INTO-CCSYNC.md phase 2,
     # 2026-08-30). The fourth instance of the same posture, and the one with

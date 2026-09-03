@@ -30,9 +30,16 @@ from musicweb.main import app as music_app
 STATIC = Path(__file__).resolve().parent.parent / 'static'
 
 # A quoted (or url()-wrapped) leading slash onto one of this app's own paths.
-# `/api/...` is the API; `/app.js` and `/style.css` are the two assets served
-# beside the index.
-ROOT_RELATIVE = re.compile(r"""["'`(]/(?:api|media|static)/|["'`(]/(?:app\.js|style\.css)""")
+# `/api/...` is the API; the named files are the assets served beside the index
+# (ingest.js added bug-hunt-2026-09-03 music-4 -- it is the biggest of them and
+# the one most likely to grow a fetch()).
+ROOT_RELATIVE = re.compile(
+    r"""["'`(]/(?:api|media|static)/|["'`(]/(?:app\.js|ingest\.js|style\.css)""")
+
+# Driven off the directory, not off a list (music-4): the guard must cover the
+# fourth asset the day it is written, not the day someone remembers this file.
+SHIPPED_ASSETS = sorted(
+    [p.name for p in STATIC.rglob('*.js')] + ['index.html', 'style.css'])
 
 
 @pytest.fixture()
@@ -82,7 +89,8 @@ def test_media_routes_answer_under_the_prefix(mounted_client):
 
 
 def test_static_assets_are_served_under_the_prefix(mounted_client):
-    for path in ('/music/app.js', '/music/style.css'):
+    for path in ['/music/style.css'] + [
+            '/music/' + n for n in SHIPPED_ASSETS if n.endswith('.js')]:
         assert mounted_client.get(path).status_code == 200, path
 
 
@@ -122,7 +130,7 @@ def test_no_shipped_asset_uses_a_root_relative_app_url():
     """The bug this file exists for. A leading slash resolves against the
     ORIGIN, so under /music these hit the dashboard instead of this app."""
     offenders = []
-    for name in ('app.js', 'index.html', 'style.css'):
+    for name in SHIPPED_ASSETS:
         text = (STATIC / name).read_text(encoding='utf-8')
         for m in ROOT_RELATIVE.finditer(text):
             line = text.count('\n', 0, m.start()) + 1
@@ -131,11 +139,23 @@ def test_no_shipped_asset_uses_a_root_relative_app_url():
         'root-relative app URLs break the /music mount: ' + '; '.join(offenders))
 
 
+def test_the_scan_covers_every_javascript_file_that_is_shipped():
+    """bug-hunt-2026-09-03 music-4. The scan above ran off a hand-written list
+    of three names, and `ingest.js` -- 1108 lines, its own route, and the file
+    most likely to grow a `fetch('/api/...')` -- was not one of them. The list
+    comes off the directory now, so this only has to pin that the directory is
+    what was read."""
+    on_disk = {p.name for p in STATIC.rglob('*.js')}
+    assert 'ingest.js' in on_disk, 'the ingest panel is no longer shipped?'
+    assert on_disk <= set(SHIPPED_ASSETS)
+
+
 def test_nothing_served_to_the_browser_contains_a_root_relative_app_url(mounted_client):
     """Same rule, enforced on the bytes that actually leave the server -- so a
     future templated or generated asset cannot slip past the file scan."""
     offenders = []
-    for path in ('/music/', '/music/app.js', '/music/style.css'):
+    for path in ['/music/', '/music/style.css'] + [
+            '/music/' + n for n in SHIPPED_ASSETS if n.endswith('.js')]:
         body = mounted_client.get(path).text
         for m in ROOT_RELATIVE.finditer(body):
             offenders.append(f'{path} {m.group(0)}')
@@ -148,6 +168,8 @@ def test_the_guard_would_catch_a_reintroduced_api_literal():
     someone is likely to make (`fetch('/api/stats')`)."""
     assert ROOT_RELATIVE.search("""const s = await api('/api/stats');""")
     assert ROOT_RELATIVE.search('<script src="/app.js"></script>')
+    assert ROOT_RELATIVE.search("""await fetch('/api/ingest-batches/limits');""")
+    assert ROOT_RELATIVE.search('<script src="/ingest.js"></script>')
     assert ROOT_RELATIVE.search('<link rel="stylesheet" href="/style.css">')
     assert not ROOT_RELATIVE.search("""const s = await api('api/stats');""")
     assert not ROOT_RELATIVE.search('<script src="app.js"></script>')

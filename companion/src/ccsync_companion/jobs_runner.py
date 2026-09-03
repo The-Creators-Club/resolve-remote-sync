@@ -94,8 +94,12 @@ STATE_READY = "ready"
 STATE_FORCED = "forced"
 
 HTTP_TIMEOUT_SECONDS = 20.0
-# The dashboard's lease is 300 s (db.JOB_LEASE_SECONDS). Beat every 30 so a
-# machine has to miss ten in a row before it is treated as gone.
+# The dashboard's lease is 300 s (db.JOB_LEASE_SECONDS). Beat every 30, so a
+# beat that cannot be DELIVERED costs a tenth of the lease and nothing else:
+# `_heartbeat` treats a transport failure as a blip and keeps working, and the
+# lease running out at the dashboard is the backstop (bug-hunt-2026-09-03
+# comp-ytdl-jobs-1). Only a 410 -- the dashboard saying the job is not ours
+# any more -- stops the work.
 HEARTBEAT_SECONDS = 30.0
 # How much of the pipeline's own output rides back with the result. Enough to
 # carry its summary line and a traceback; nowhere near enough to be a log
@@ -202,6 +206,14 @@ class JobRunner:
         self._volunteer_until_iso: Optional[str] = None
         self._job: Optional[dict[str, Any]] = None
         self._state = STATE_NOTHING_OFFERED
+        # THE WAKE (bug-hunt-2026-09-03 comp-ytdl-jobs-3). The backoff can put
+        # this loop to sleep for IDLE_BACKOFF_MAX_SECONDS, so an offer landing
+        # on the report reply -- including an admin's forced [ RUN NOW ] --
+        # would otherwise wait up to two minutes for a machine that is doing
+        # nothing. `note_report_reply` sets it, `_loop` waits on it beside the
+        # timeout, and `stop()` sets it too so a shutdown is not held up by a
+        # backed-off sleep.
+        self._wake = threading.Event()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -233,6 +245,11 @@ class JobRunner:
             self._queue = depth
             self._cancel = stops[:16]
             self._forced = urgent[:16]
+        if ids or urgent:
+            # Work to claim: wake the loop now rather than at the end of a
+            # backoff sleep (comp-ytdl-jobs-3). A cancel needs no wake -- the
+            # thread that would act on it is already inside the job.
+            self._wake.set()
 
     # -- volunteering (§10, 2026-08-30) -----------------------------------
     def volunteer(self, minutes: Optional[float] = None) -> Optional[str]:
@@ -314,6 +331,16 @@ class JobRunner:
 
         A DEEP queue never lengthens the wait. Backpressure here means "stop
         asking", never "stop working": the machines are what empties it.
+
+        AN ABSENT DEPTH IS THE BASE CADENCE, deliberately: it means a
+        dashboard too old to send one, and a dashboard deployed behind the
+        companions must not read as "nothing to do for two minutes". Until
+        2026-09-03 that was also the shape a dashboard with an EMPTY queue
+        sent (it omitted the block entirely), so the backoff below was
+        unreachable in the fleet -- the dashboard now always sends the full
+        depth, zeros included, to a companion that can run jobs
+        (bug-hunt-2026-09-03 comp-ytdl-jobs-3). The sleep is interruptible
+        (`_wake`), so backing off never delays a new offer.
         """
         base = max(2.0, float(self.poll_seconds))
         with self._lock:
@@ -516,11 +543,29 @@ class JobRunner:
         honest fraction to report (a peaks pass reads its input in one gulp)
         sends none, and the fleet chip shows the job id rather than a machine
         that looks stuck at 0%.
+
+        A TRANSPORT FAILURE IS A BLIP, NOT A VERDICT (bug-hunt-2026-09-03
+        comp-ytdl-jobs-1, and it is CR-31's shape): `default_request` RAISES
+        on a refused connection or a DNS wobble, and this used to let that
+        raise out into `_run_child`'s catch-all, which terminated the child and
+        handed the job back as a retryable failure. One dashboard deploy
+        (stage-verify-swap, ~3 s) therefore threw away every whisper pass in
+        the fleet at once and cooled down the machines that had done the work.
+        A beat that could not be delivered is no evidence the lease is gone,
+        and the lease expiring is already the backstop, so the answer is to
+        keep going. `ytdl_executor.DownloadJob._heartbeat_loop` learned this
+        first.
         """
         body: dict[str, Any] = {"machine": self.machine}
         if progress is not None:
             body["progress"] = max(0.0, min(1.0, float(progress)))
-        status, _parsed = self._call(f"/{int(job_id)}/heartbeat", body)
+        try:
+            status, _parsed = self._call(f"/{int(job_id)}/heartbeat", body)
+        except Exception:                                       # noqa: BLE001
+            log.info("jobs: a heartbeat for job #%s did not get through -- "
+                     "carrying on", job_id)
+            log.debug("jobs: heartbeat transport failure", exc_info=True)
+            return True
         if status == 410:
             log.warning("jobs: job #%s is no longer ours -- stopping", job_id)
             return False
@@ -543,23 +588,30 @@ class JobRunner:
         if self._thread is not None:
             return
         self._stop.clear()
+        self._wake.clear()
         self._thread = threading.Thread(target=self._loop, name="ccsync-jobs",
                                         daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
+        self._wake.set()
         thread, self._thread = self._thread, None
         if thread is not None:
             thread.join(timeout=5.0)
 
     def _loop(self) -> None:
         while not self._stop.is_set():
+            # Cleared BEFORE the tick, so an offer that lands while this tick
+            # is running is still a wake and not a lost one (comp-ytdl-jobs-3).
+            self._wake.clear()
             try:
                 self.tick()
             except Exception:
                 log.exception("jobs: the runner tick failed")
-            self._stop.wait(self.wait_seconds())
+            if self._stop.is_set():
+                break
+            self._wake.wait(self.wait_seconds())
 
     def tick(self) -> Optional[dict[str, Any]]:
         """One pass: claim if allowed, run it, report it. -> the job it ran.
@@ -701,8 +753,23 @@ class JobRunner:
             return ""
 
         def beat() -> None:
+            # A THREAD WHOSE ONLY JOB IS LIVENESS MUST NOT BE KILLABLE BY
+            # ANYTHING IT CALLS (bug-hunt-2026-09-03 comp-ytdl-jobs-2).
+            # `_heartbeat` swallows transport failures itself now, but this
+            # belt stays: a raise here ends the thread permanently, nothing
+            # sets `lease_lost`, `should_stop()` never learns, the encode runs
+            # on with an expired lease, and in a frozen windowed build the
+            # excepthook's traceback goes to a stderr that does not exist. The
+            # loop keeps beating rather than returning, because one bad beat
+            # is not a reason to stop reporting for the rest of the job.
             while not finished.wait(HEARTBEAT_SECONDS):
-                if not self._heartbeat(job_id, latest["fraction"]):
+                try:
+                    alive = self._heartbeat(job_id, latest["fraction"])
+                except Exception:                               # noqa: BLE001
+                    log.debug("jobs: the heartbeat for job #%s raised",
+                              job_id, exc_info=True)
+                    continue
+                if not alive:
                     # Sets the flag rather than killing anything itself: the
                     # thread doing the work is the thread that owns the child
                     # and the .partial, and two threads ending one encode is

@@ -1171,6 +1171,7 @@ write routes, which is the wrong direction).
 | `POST /api/v1/jobs/claim` | `{machine, machine_id?, capabilities, kinds?, ids?}` | `{job, lease_seconds}` or `{job: null, offered: […]}` |
 | `POST /api/v1/jobs/{id}/heartbeat` | `{machine, note?, progress?}` | `{ok, lease_seconds}`, or **410** |
 | `POST /api/v1/jobs/{id}/result` | `{machine, ok, retryable, error, result}` | `{ok, state}`, or **410** |
+| `GET /api/v1/jobs/machines` | -- | `{machines:[…], kinds:[…]}` -- the computers a job can be AIMED at |
 
 The claim is a **compare-and-set** (`db.claim_job`): two machines offered the
 same job both arrive, SQLite serialises the writes, and the loser is told the
@@ -1330,6 +1331,68 @@ that cannot".
 machine whose editor said "go ahead" costs nobody anything, which beats an
 encoder on a machine somebody merely walked away from. Like every other
 signal it is a preference and not a gate.
+
+### The machines a job can be aimed at -- `GET /api/v1/jobs/machines`
+
+Added 2026-09-03 (cards-machine-picker). `target_machine` above has worked end
+to end since dashboard 0.7.23, but nothing published the NAMES, so Timeline
+Cards' intake head shipped a remembered free-text box instead (its
+`docs/STAGED-AND-BINS-PLAN.md` section 8: "the clean v2 is one small
+`GET /api/v1/jobs/machines` on the dashboard"). A target typed wrongly is a
+job addressed to nobody, and the only thing that says so is the receipt's
+`why`.
+
+**Two credentials, because both audiences ask the same question**
+(`api._require_jobs_reader`): a **fleet** caller -- `X-CCSync-Token` plus a
+signed `X-CCSync-Identity`, the same gate as claim/heartbeat/result, and the
+one `app.py`'s `login_gate` carves the suffix out for -- **or an ADMIN
+session**, which is what `MulticamPipeline`'s `cards/fleet_jobs.py` already
+holds (it signs in as an admin to submit). The fleet gate runs first when a
+token is present, so a companion's failure is the fleet routes' 403 and its
+sentence rather than "log in first". A non-admin session is refused: this is
+the fleet's inventory, and the editor pages show a person their own computers
+only. **The cards PAGE in a browser never calls it** -- its own session is not
+necessarily an admin's and its URLs are document-relative under `/cards/` --
+so the cards SERVER reads it and serves the list on its own route.
+
+```json
+{"machines": [
+  {"editor": "alex", "machine": "CREATOR-1", "mode": "base",
+   "online": true, "reported_at": "2026-09-03T09:12:44Z",
+   "jobs_enabled": true, "kinds": [],
+   "capabilities": {"gpu_present": true, "gpu_name": "RTX 4090",
+                    "gpu_vram_gb": 24.0, "nvenc": true, "ffmpeg": true,
+                    "ffprobe": true, "whisper": true, "cpu_count": 16,
+                    "mounts": ["tree", "vault", "media"]},
+   "idle_seconds": 900, "current_job": {"id": 12, "kind": "whisper"}}
+ ],
+ "kinds": ["whisper", "proxy-480p", "audio-extract", "peaks"]}
+```
+
+* The rows are the union of the `machines` registry and `machine_state`, which
+  are the same set on a healthy fleet and are not on a database that predates
+  v23's backfill or one DASH-16 has pruned state from.
+* `online` is **the alerts silent window** (`alerts.SILENT_SECONDS`, 24 h), not
+  the grid's six: this feeds a picker, and a laptop that reported this morning
+  is a sensible thing to aim tonight's transcode at. An unreadable or missing
+  `reported_at` is offline.
+* `kinds` is that machine's own allow-list (`jobs_kinds`), and **empty is every
+  kind** -- `db.machine_allows_kind`'s rule, on this side too. `jobs_enabled`
+  is the separate switch, and a machine that has never reported capabilities
+  reads `false`: `{}` is "unknown", which the scheduler already treats as
+  "offer it nothing that has a requirement".
+* `idle_seconds` keeps idle.py's contract: **null means cannot tell means NOT
+  IDLE**, never 0.
+* `capabilities` is an explicit whitelist of the columns the scheduler filters
+  and ranks on, not the decoded capabilities dict, so a future column cannot
+  join this answer by accident. **No token, no machine id, no Syncthing device
+  id, no path, and not the open Resolve project's name**: this is a list of
+  computers and what they can do.
+* Sorted **online first, then hostname**. A machine nobody has heard from in a
+  day belongs under the ones that will answer.
+* It says nothing about whether a machine may take a job right now. That is a
+  question about a particular job (`GET /jobs/{id}/why`), and a second opinion
+  here could disagree with the first.
 
 ### Submitting from the command line
 

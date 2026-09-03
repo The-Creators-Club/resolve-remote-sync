@@ -737,6 +737,7 @@ def test_reporter_response_feeds_upgrade_manager(tmp_path, monkeypatch):
     import base64
 
     from ccsync_companion import ed25519, release_pubkey
+    from ccsync_companion import upgrade as upgrade_mod
 
     seed = bytes(range(32))
     monkeypatch.setattr(
@@ -744,7 +745,11 @@ def test_reporter_response_feeds_upgrade_manager(tmp_path, monkeypatch):
         (base64.b64encode(ed25519.public_key(seed)).decode("ascii"),),
     )
     record = {
-        "kind": "companion", "platform": "windows", "version": "9.9.9",
+        # platform_key(), not "windows": a record for another platform is
+        # refused since bug-hunt-2026-09-03 comp-core-1, and this suite runs on
+        # the macOS CI runner too.
+        "kind": "companion", "platform": upgrade_mod.platform_key(),
+        "version": "9.9.9",
         "filename": "ccsync-companion-9.9.9.exe", "sha256": "a" * 64,
         "size_bytes": 10, "min_version": "0.0.0",
         "published_at": "2026-08-17T00:00:00Z", "signed_binary": False,
@@ -3994,21 +3999,64 @@ def test_a_held_mutex_with_no_replaces_pid_is_refused_immediately(monkeypatch):
 
 
 def test_a_mutex_outliving_its_dead_predecessor_is_someone_elses(monkeypatch):
-    """The predecessor was already gone before the retry, yet the mutex
-    survived it -- so the holder is a different companion, and waiting out
-    the full timeout would only delay the honest answer."""
+    """The predecessor was gone, and the mutex was STILL held a whole grace
+    period later -- so the holder really is a different companion, and
+    waiting out the full timeout would only delay the honest answer.
+
+    CR-120 (2026-09-03): it takes the grace now, not one confirming retry."""
     from ccsync_companion import app as app_mod
 
     monkeypatch.setattr(app_mod, "_single_instance_token", None)
     mutex = _FakeMutex(predecessor_holds=True)  # held, but not by pid 4242
-    slept: list = []
+    clock = {"now": 0.0}
+
+    def _tick(seconds):
+        clock["now"] += seconds
 
     assert app_mod._acquire_mutex_win32(
         mutex.create, mutex.close, replaces_pid=4242,
-        alive_fn=lambda pid: False, sleep_fn=slept.append,
+        alive_fn=lambda pid: False, clock=lambda: clock["now"], sleep_fn=_tick,
     ) is False
-    assert len(slept) == 1, "it should conclude after a single confirming retry"
+    assert clock["now"] >= app_mod.PREDECESSOR_RELEASE_GRACE_SECONDS
+    assert clock["now"] < app_mod.PREDECESSOR_WAIT_SECONDS, (
+        "the grace must end the wait well before the overall deadline"
+    )
     assert mutex.open_handles == set(), "a probe handle leaked"
+
+
+def test_the_mutex_survives_the_predecessors_teardown_after_its_pid_dies(monkeypatch):
+    """CR-120, the live sequence on the base rig 2026-09-03 16:34: the
+    self-restart after Resolve exited spawned the replacement, the
+    predecessor's pid read dead 1.4s later (Windows sets ExitStatus at the
+    START of termination) but it still held the named mutex while it tore
+    down its lanes -- and the guard called that "a different companion owns
+    it" and exited. The predecessor then finished the shutdown it had
+    already begun, leaving the machine with no companion at all."""
+    from ccsync_companion import app as app_mod
+
+    monkeypatch.setattr(app_mod, "_single_instance_token", None)
+    mutex = _FakeMutex(predecessor_holds=True)
+    clock = {"now": 0.0}
+    polls = {"n": 0}
+    alive_answers = [True, True]  # then dead forever
+
+    def _alive(pid):
+        return alive_answers.pop(0) if alive_answers else False
+
+    def _tick(seconds):
+        clock["now"] += seconds
+        polls["n"] += 1
+        # Handle teardown finishes ~2s after the pid reads dead: well inside
+        # the grace, far outside the 0.25s poll the old code allowed.
+        if polls["n"] >= 10:
+            mutex.predecessor_exits()
+
+    assert app_mod._acquire_mutex_win32(
+        mutex.create, mutex.close, replaces_pid=20040,
+        alive_fn=_alive, clock=lambda: clock["now"], sleep_fn=_tick,
+    ) is True
+    assert mutex.open_handles == {app_mod._single_instance_token}
+    assert app_mod._single_instance_token is not None
 
 
 def test_a_failed_mutex_creation_never_blocks_a_start(monkeypatch):
@@ -5180,6 +5228,67 @@ def test_pid_liveness_falls_back_to_alive_when_it_cannot_tell(monkeypatch):
     monkeypatch.setattr(app_mod.sys, "platform", "win32")
     monkeypatch.setattr(app_mod, "_pid_is_alive_win32", _boom)
     assert app_mod._pid_is_alive(4321) is True
+
+
+@pytest.mark.skipif(os.name != "nt", reason="ctypes.wintypes + a fake kernel32")
+@pytest.mark.parametrize(
+    "waited, exit_code, expected",
+    [
+        # signalled == termination COMPLETE, handles included: dead, whatever
+        # the exit code claims (CR-120, and the historical 259 case).
+        (0x00000000, 259, False),
+        # WAIT_TIMEOUT: still dying. Its handles are still open, so for the
+        # single-instance hand-off it counts as alive even though
+        # GetExitCodeProcess has already been given an exit status.
+        (0x00000102, 0, True),
+        # WAIT_FAILED: fall back to the exit code, as before.
+        (0xFFFFFFFF, 259, True),
+        (0xFFFFFFFF, 0, False),
+    ],
+)
+def test_the_win32_pid_probe_prefers_the_process_object_signal(
+    monkeypatch, waited, exit_code, expected
+):
+    """CR-120: GetExitCodeProcess reports the exit code from the START of
+    termination, so it reads "dead" while the process still holds the
+    single-instance mutex. WaitForSingleObject is the later test."""
+    import ctypes
+
+    from ccsync_companion import app as app_mod
+
+    class _Fn:
+        argtypes = None
+        restype = None
+
+        def __init__(self, fn):
+            self._fn = fn
+
+        def __call__(self, *args):
+            return self._fn(*args)
+
+    class _Kernel32:
+        def __init__(self):
+            self.opened_access = None
+            self.OpenProcess = _Fn(self._open)
+            self.WaitForSingleObject = _Fn(lambda handle, ms: waited)
+            self.GetExitCodeProcess = _Fn(self._exit_code)
+            self.CloseHandle = _Fn(lambda handle: None)
+
+        def _open(self, access, inherit, pid):
+            self.opened_access = access
+            return 77
+
+        def _exit_code(self, handle, out):
+            out._obj.value = exit_code
+            return 1
+
+    fake = _Kernel32()
+    monkeypatch.setattr(ctypes, "WinDLL", lambda name, **kw: fake)
+
+    assert app_mod._pid_is_alive_win32(4321) is expected
+    assert fake.opened_access == (
+        app_mod._PROCESS_QUERY_LIMITED_INFORMATION | app_mod._SYNCHRONIZE
+    ), "WaitForSingleObject on a process handle needs SYNCHRONIZE"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="the win32 probe itself")

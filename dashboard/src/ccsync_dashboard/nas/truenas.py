@@ -118,12 +118,24 @@ class TrueNASClient:
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else None
         auth = None if self.api_key else (self.user, self.password)
         try:
-            return self.session.request(
+            response = self.session.request(
                 method, url, json=json_body, params=params, headers=headers,
                 auth=auth, verify=self.verify_ssl, timeout=self.timeout,
+                allow_redirects=False,
             )
         except requests.RequestException as exc:
             raise TrueNASError(f"{method} {path}: {exc}") from exc
+        # No dashboard call follows a redirect (CLAUDE.md; bug-hunt-2026-09-03
+        # dash-core-2). A 307/308 preserves method and body, and the bodies
+        # here carry a new editor's password; `requests` strips an
+        # Authorization header across a host change but never a body.
+        if 300 <= response.status_code < 400:
+            raise TrueNASError(
+                f"{method} {path}: the NAS answered {response.status_code} redirecting to "
+                f"{response.headers.get('Location', '(no Location)')!r}. Nothing was sent on. "
+                "Point DASH_NAS_BASE_URL at the API address the NAS actually serves"
+            )
+        return response
 
     @staticmethod
     def _json(resp: requests.Response, what: str) -> Any:

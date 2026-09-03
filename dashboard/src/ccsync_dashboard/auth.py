@@ -140,6 +140,14 @@ def _verify_smb(host: str, username: str, password: str, timeout: float = 10.0) 
             pass
 
 
+# The sign-in methods verify_credentials below actually implements. Named
+# once so check_boot_secrets refuses anything else at BOOT rather than at
+# every login (bug-hunt-2026-09-03 dash-core-1); the values are compared
+# against Settings.auth_method, which __post_init__ has stripped and
+# lower-cased.
+AUTH_METHODS = ("smb", "oidc", "local")
+
+
 def verify_credentials(settings: Settings, username: str, password: str) -> bool:
     if not username or not password:
         return False
@@ -732,7 +740,19 @@ def check_boot_secrets(settings: Settings) -> list[str]:
             "its https URL, or leave DASH_COOKIE_SECURE=auto"
         )
     method = str(settings.auth_method or "").strip().lower()
-    if method == "oidc":
+    # bug-hunt-2026-09-03 dash-core-1: a method nobody implements used to boot
+    # clean and then refuse every credential in verify_credentials, one ERROR
+    # line per attempt, contradicted by the INFO line describe_auth wrote at
+    # boot. Settings.__post_init__ now absorbs the case and whitespace
+    # variants, so what reaches here is a genuine typo, and refusing to start
+    # is the fail-closed answer this repo takes everywhere else.
+    if method not in AUTH_METHODS:
+        problems.append(
+            f"DASH_AUTH_METHOD={settings.auth_method!r} is not a sign-in method this "
+            f"dashboard has: it must be one of {', '.join(sorted(AUTH_METHODS))}. "
+            "Left as it is, every password would be refused"
+        )
+    elif method == "oidc":
         problems.extend(check_oidc_settings(settings))
     elif method == "local":
         problems.extend(check_local_settings(settings))

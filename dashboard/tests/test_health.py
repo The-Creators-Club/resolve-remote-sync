@@ -138,6 +138,20 @@ def test_lane_chip_status_stays_the_colour_only_view():
         lane(progress_token_since=stuck_since), NOW) == health.RED
 
 
+def test_lane_chip_status_is_defined_exactly_once():
+    """bug-hunt-2026-09-03 dash-collector-8: the pre-SYS-1 definition sat
+    above the rewrite, shadowed at import, encoding the OLD rule (no stall
+    test) - so it could be maintained to no effect and read as proof the
+    stall is not applied to a lane's dot."""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(health))
+    named = [n for n in tree.body
+             if isinstance(n, ast.FunctionDef) and n.name == "lane_chip_status"]
+    assert len(named) == 1
+
+
 # ----------------------------------------------------------------- SYS-5 disk
 
 def test_the_disk_rule_reads_both_a_percentage_and_a_floor():

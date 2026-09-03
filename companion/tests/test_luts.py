@@ -231,6 +231,41 @@ def test_copy_never_overwrites(tmp_path):
     assert (library / "one.cube").read_text() == "library version"
 
 
+def test_copy_refuses_a_destination_outside_the_library(tmp_path):
+    """bug-hunt-2026-09-03 comp-ui-4: the join honours `..`, and the only
+    producer of dest_rel today happens never to emit one. adopt() takes
+    whatever entries it is handed, and the destination is a Syncthing-shared
+    tree, so a miss here is a file the whole fleet replicates."""
+    library = _library(tmp_path)
+    lut_dir = tmp_path / "resolve-lut"
+    lut_dir.mkdir()
+    (lut_dir / "one.cube").write_text("data")
+    outside = library.parent / "one.cube"
+
+    result = luts.copy_into_library(
+        [{"path": str(lut_dir / "one.cube"), "dest_rel": "../one.cube"}], library
+    )
+
+    assert result["copied"] == 0
+    assert result["errors"] and "outside" in result["errors"][0]
+    assert not outside.exists()
+
+
+def test_copy_still_takes_a_nested_pack_folder(tmp_path):
+    """The containment check must not refuse the ordinary case."""
+    library = _library(tmp_path)
+    lut_dir = tmp_path / "resolve-lut"
+    lut_dir.mkdir()
+    (lut_dir / "one.cube").write_text("data")
+
+    result = luts.copy_into_library(
+        [{"path": str(lut_dir / "one.cube"), "dest_rel": "GR FILM/one.cube"}], library
+    )
+
+    assert result["copied"] == 1
+    assert (library / "GR FILM" / "one.cube").exists()
+
+
 def test_copy_leaves_no_partial_file_visible(tmp_path, monkeypatch):
     """Syncthing is watching this directory: a half-copied LUT must never be
     indexed, which is why the copy lands on .ccsync-tmp first (a name the
@@ -469,3 +504,39 @@ def test_no_repair_while_the_drive_is_still_down(tmp_path):
     reachable["yes"] = True                     # the mapping comes back
     assert manager.repair_stale_index() is True
     assert len(calls) == 1
+
+
+# -- warning cadence (bug-hunt-2026-09-03 comp-ui-3) -------------------------
+
+def test_a_recurring_failure_warns_again_after_the_streak_ends(tmp_path, caplog):
+    """`_warned` used to be a set of statuses cleared only on a successful
+    add, so a transient miss at boot silenced the SAME status for the life of
+    the process: the library could then be unreachable all day with nothing in
+    companion.log about it."""
+    import logging
+
+    m = _manager(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="ccsync.luts"):
+        m._report("no-library", False, "the LUT library has not synced yet")
+        m._report(rp.ALREADY, False, "")          # the streak ends
+        m._report("no-library", False, "the LUT library has not synced yet")
+
+    lines = [r.message for r in caplog.records if r.name == "ccsync.luts"]
+    assert len(lines) == 2, lines
+
+
+def test_the_same_failure_every_cycle_is_logged_hourly_not_every_time(tmp_path, caplog, monkeypatch):
+    import logging
+
+    now = [1000.0]
+    monkeypatch.setattr(luts.time, "monotonic", lambda: now[0])
+    m = _manager(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="ccsync.luts"):
+        for _ in range(5):
+            now[0] += 60.0
+            m._report("no-library", False, "the LUT library has not synced yet")
+        assert len([r for r in caplog.records if r.name == "ccsync.luts"]) == 1
+        now[0] += luts.WARN_RELOG_SECONDS
+        m._report("no-library", False, "the LUT library has not synced yet")
+
+    assert len([r for r in caplog.records if r.name == "ccsync.luts"]) == 2

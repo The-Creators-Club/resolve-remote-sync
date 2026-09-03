@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 
 # Highest schema version this codebase knows how to run against. Bump it, add
 # the file to _MIGRATIONS, and give it a predicate.
-CURRENT_SCHEMA_VERSION = 12
+CURRENT_SCHEMA_VERSION = 13
 
 # "the version this migration produces" -> (filename, already-applied predicate).
 # The predicate must answer "is this migration's effect already in the database?"
@@ -99,6 +99,12 @@ _MIGRATIONS = {
          lambda con: ({'translation', 'enabled'} <= set(_columns(con, 'job_terms'))
                       and {'queue_position', 'auto_terms'} <= set(_columns(con, 'jobs'))
                       and not _index_exists(con, 'idx_jobs_one_active'))),
+    # The two widening signals the job was ACCEPTED under (ytdl-web-2,
+    # bug-hunt-2026-09-03). Two columns in one file, so the predicate asks
+    # about both, the way 007's and 011's do.
+    13: ('013_jobs_created_widening.sql',
+         lambda con: {'created_local', 'created_machine'}
+         <= set(_columns(con, 'jobs'))),
 }
 
 # What made a job. 'search' is a topic Claude expands and the editor reviews;
@@ -558,7 +564,8 @@ def move_in_queue(c, user, job_id, position):
 def create_job(c, created_by, term, term_dir, project_slug, project_label,
                quality='1080p', period=None, max_per_term=15, shot_types=None,
                max_candidates=None, mode=None, term_scope=None, date_from=None,
-               date_to=None, auto_terms=False):
+               date_to=None, auto_terms=False, created_local=True,
+               created_machine=None):
     """A kind='search' job. `shot_types=None` is the mode's preset selection,
     `max_candidates=None` the default candidate ceiling, `mode=None` the
     default search mode ('visuals'), `term_scope=None` the default language
@@ -574,6 +581,12 @@ def create_job(c, created_by, term, term_dir, project_slug, project_label,
     same reason: True skips the term review and searches everything, which is
     the headless path a script takes and never what the SPA sends.
 
+    `created_local` / `created_machine` (ytdl-web-2, bug-hunt-2026-09-03) are
+    the two signals the DESTINATION was widened on when this job was accepted,
+    kept so start_download can re-validate under the same rule instead of the
+    narrow default. The defaults here are projects.resolve_project's own, so a
+    caller that has no opinion writes the pre-widening pair.
+
     ALWAYS `queued`, whether the editor is busy or not: `queued` is where the
     queue waits, and claim_next_job is the one place that decides whose turn it
     is. A handler that started a job itself when the editor looked idle would
@@ -584,15 +597,16 @@ def create_job(c, created_by, term, term_dir, project_slug, project_label,
         cur = c.execute(
             'INSERT INTO jobs(created_by,term,term_dir,project_slug,project_label,'
             'quality,period,max_per_term,max_candidates,mode,shot_types,'
-            'term_scope,date_from,date_to,auto_terms,queue_position,phase,'
-            'created_at,updated_at) '
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)",
+            'term_scope,date_from,date_to,auto_terms,created_local,'
+            'created_machine,queue_position,phase,created_at,updated_at) '
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)",
             (created_by, term, term_dir, project_slug, project_label, quality,
              period, max_per_term, max_candidates_of(max_candidates),
              claude_cli.normalise_mode(mode),
              encode_shot_types(shot_types, mode),
              claude_cli.normalise_term_scope(term_scope),
              date_from or None, date_to or None, 1 if auto_terms else 0,
+             1 if created_local else 0, created_machine or None,
              next_queue_position(c, created_by), ts, ts))
     except sqlite3.IntegrityError:
         # Nothing in the schema refuses a second job any more (migrations/012
@@ -610,7 +624,8 @@ def create_job(c, created_by, term, term_dir, project_slug, project_label,
 
 
 def create_url_job(c, created_by, term, term_dir, project_slug, project_label,
-                   videos, quality='1080p'):
+                   videos, quality='1080p', created_local=True,
+                   created_machine=None):
     """A kind='urls' job AND its videos, in one transaction. -> job id.
 
     `term` and `term_dir` are both EMPTY for every job the API creates now
@@ -634,17 +649,23 @@ def create_url_job(c, created_by, term, term_dir, project_slug, project_label,
 
     It takes a queue_position exactly as a search job does: a paste is a job
     like any other and waits its turn behind whatever the editor has running.
+
+    `created_local` / `created_machine` are stored for the reason create_job
+    stores them (ytdl-web-2, bug-hunt-2026-09-03): a paste's RETRY goes through
+    start_download too, and that re-check must run under the widening this job
+    was accepted with.
     """
     ts = now()
     pending = [v for v in videos if not v.get('duplicate_of')]
     try:
         cur = c.execute(
             'INSERT INTO jobs(created_by,kind,term,term_dir,project_slug,'
-            'project_label,quality,dl_total,queue_position,phase,created_at,'
-            'updated_at) '
-            "VALUES(?,?,?,?,?,?,?,?,?,'queued',?,?)",
+            'project_label,quality,dl_total,created_local,created_machine,'
+            'queue_position,phase,created_at,updated_at) '
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,'queued',?,?)",
             (created_by, KIND_URLS, term, term_dir, project_slug,
              project_label, quality, len(pending),
+             1 if created_local else 0, created_machine or None,
              next_queue_position(c, created_by), ts, ts))
         job_id = cur.lastrowid
         for v in videos:
@@ -904,6 +925,21 @@ def claimed_machine_of(job):
     """
     value = str(_column(job, 'claimed_machine') or '').strip()
     return value or None
+
+
+def created_widening_of(job):
+    """A jobs row -> the (machine, local) the DESTINATION was widened on when
+    this job was accepted, for handing straight to projects.resolve_project.
+
+    Tolerant like every other reader here, and its fallback is deliberately the
+    NARROW pair (no machine, local True): a partial SELECT or a database that
+    migration 013 has not reached must re-validate the way it always has, never
+    more permissively than the row can prove (ytdl-web-2,
+    bug-hunt-2026-09-03).
+    """
+    machine = str(_column(job, 'created_machine') or '').strip() or None
+    local = _column(job, 'created_local')
+    return machine, True if local is None else bool(local)
 
 
 def lease_held_by(job, editor, machine=None):

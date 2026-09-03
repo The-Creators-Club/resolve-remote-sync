@@ -2046,13 +2046,19 @@ def _require_selection_read(request: Request, editor: str,
         if not settings.session_secret:
             return  # cannot mint or check identities at all -- token is all there is
         identity = request.headers.get("x-ccsync-identity", "")
-        id_user = auth.read_identity_token(settings.session_secret, identity)
+        # bug-hunt-2026-09-03 dash-api-1: _ex, so a token minted under a
+        # RETIRED session secret still verifies. DASH-2 gave /report that
+        # drain window and SECRETS.md promises it fleet-wide; a plan a
+        # machine cannot read during a rotation is a machine that never
+        # learns its editor changed it.
+        id_user = auth.read_identity_token_ex(settings, identity)[0]
         if id_user is not None and id_user == editor:
             return  # companion access, proven to be this editor's machine
         raise HTTPException(
             status_code=401,
             detail="X-CCSync-Identity required (and must match the editor) alongside "
-                   "X-CCSync-Token -- sign in from the companion tray",
+                   "X-CCSync-Token -- sign in from the companion tray, or its "
+                   "signing key was retired",
         )
     if auth.can_manage(settings, auth.get_session_user(request), editor):
         return
@@ -2104,13 +2110,16 @@ def _require_selection_untick(request: Request, editor: str,
         if not settings.session_secret:
             return f"companion:{editor}"  # lab carve-out, same as reads
         identity = request.headers.get("x-ccsync-identity", "")
-        id_user = auth.read_identity_token(settings.session_secret, identity)
+        # bug-hunt-2026-09-03 dash-api-1: retired-key identities verify here
+        # too, so the tray's untick-before-delete survives a rotation.
+        id_user = auth.read_identity_token_ex(settings, identity)[0]
         if id_user is not None and id_user == editor:
             return f"companion:{editor}"
         raise HTTPException(
             status_code=401,
             detail="X-CCSync-Identity required (and must match the editor) alongside "
-                   "X-CCSync-Token -- sign in from the companion tray",
+                   "X-CCSync-Token -- sign in from the companion tray, or its "
+                   "signing key was retired",
         )
     return _require_selection_write(request, editor)
 
@@ -2484,10 +2493,17 @@ def move_project_files(settings, conn: sqlite3.Connection, from_slug: str,
     for editor, machine in db.fetch_machine_selections(conn).get(from_slug, []):
         if machine:
             targets.add((editor, machine))
+    # bug-hunt-2026-09-03 dash-api-6: THIS query only. editor_media.rel_path is
+    # written through db.media_rel_key (NFC), and the admin's box carries
+    # whatever bytes they pasted - an NFD spelling off a Mac matched nothing
+    # here, so machines holding the file outside their plan were never told and
+    # re-uploaded it to the old path the next day (CR-90). `src`, `dest` and
+    # the file_moves row stay the raw bytes: there the disk is the truth.
+    media_key = db.media_rel_key(from_rel)
     for row in conn.execute(
         """SELECT DISTINCT editor_username, machine FROM editor_media
             WHERE project_slug=? AND (rel_path=? OR rel_path LIKE ?)""",
-        (from_slug, from_rel, from_rel + "/%"),
+        (from_slug, media_key, media_key + "/%"),
     ):
         targets.add((row["editor_username"], row["machine"]))
     now = db.utcnow_iso()
@@ -2607,8 +2623,16 @@ def undo_file_move(settings, conn: sqlite3.Connection, slug: str, move_id: int,
                             snap.get("reason") or snap.get("detail") or "")
         except Exception:  # noqa: BLE001 - never block the undo over a snapshot
             log.exception("undo of move %s: snapshot attempt failed", move_id)
-    to_dir = move["from_rel"].rsplit("/", 1)[0] if "/" in move["from_rel"] else ""
-    body = FileMoveIn(path=move["to_rel"], to_slug=move["from_slug"], to_path=to_dir)
+    # bug-hunt-2026-09-03 dash-api-2: the FULL original path, not its parent
+    # folder. A move may RENAME (FileMoveIn.to_path is "folder or full path
+    # inside it"), and a folder destination sends move_project_files down its
+    # "keep the file's own name" branch - where "its own name" is the name the
+    # forward move gave it, so the original basename was lost for ever. The
+    # destination cannot exist (it was moved away), so the exact-path branch
+    # restores folder and name alike; if something HAS been recreated there,
+    # the undo now refuses rather than dropping the file beside it.
+    body = FileMoveIn(path=move["to_rel"], to_slug=move["from_slug"],
+                      to_path=move["from_rel"])
     result = move_project_files(settings, conn, move["to_slug"], body, user,
                                 undo_of=move_id)
     # Every computer the ORIGINAL reached, whether or not it syncs the project
@@ -2914,13 +2938,21 @@ def api_remove_project_link(
     return out
 
 
-def _require_admin(request: Request) -> str:
+def _require_admin(request: Request, detail: str = "admins only") -> str:
+    """The admin gate for ~45 routes in this file.
+
+    bug-hunt-2026-09-03 dash-api-5: it was born beside PUT /project-roots and
+    kept that route's sentence ("destination roots are fixed once set") as its
+    refusal for every caller since - so an editor clicking a fleet action was
+    told about a setting they had not touched, which reads as a configuration
+    fault rather than a permission one. The generic sentence is the default
+    now; a route with something more specific to say passes it in."""
     settings = request.app.state.settings
     user = auth.get_session_user(request)
     if user is None:
         raise HTTPException(status_code=401, detail="log in first")
     if not auth.is_admin(settings, user):
-        raise HTTPException(status_code=403, detail="admins only: destination roots are fixed once set")
+        raise HTTPException(status_code=403, detail=detail)
     return user
 
 
@@ -2949,8 +2981,11 @@ def api_set_project_root(
         "SELECT project_slug FROM project_roots WHERE resolve_project=?", (name,)
     ).fetchone()
 
+    # dash-api-5: this route's own sentence, which _require_admin used to
+    # hand to all ~45 of its callers.
+    roots_only = "admins only: destination roots are fixed once set"
     if slug is None:
-        _require_admin(request)
+        _require_admin(request, roots_only)
         db.delete_project_root(conn, name)
     else:
         exists = conn.execute(
@@ -2959,7 +2994,7 @@ def api_set_project_root(
         if exists is None:
             raise HTTPException(status_code=404, detail=f"unknown or inactive project {slug!r}")
         if existing is not None:
-            admin = _require_admin(request)
+            admin = _require_admin(request, roots_only)
             db.admin_set_project_root(conn, name, slug, admin=admin, now=db.utcnow_iso())
         else:
             if not may_first_claim(settings, conn, user, name):
@@ -4263,8 +4298,10 @@ class FleetHaltIn(BaseModel):
     reason and this model did not, so the JSON twin could stop the whole fleet
     with a blank one -- and then nobody's tray said why. min_length applies to
     a HALT only, which is why the check is in the route rather than on the
-    field: releasing a halt needs no reason. `hours` is how long the halt
-    stands before it expires by itself; `extend` is [ KEEP HALTED ]."""
+    field: releasing a halt needs no reason, and neither does extending one
+    (bug-hunt-2026-09-03 dash-api-4 - [ KEEP HALTED ] carries the current
+    halt's reason forward). `hours` is how long the halt stands before it
+    expires by itself; `extend` is [ KEEP HALTED ]."""
     active: bool
     reason: str = Field(default="", max_length=500)
     hours: float | None = Field(default=None, gt=0, le=24 * 30)
@@ -4311,9 +4348,18 @@ def api_set_fleet_halt(
     "something is destroying files and I do not yet know which machine" --
     one switch, one reason, everybody stops."""
     admin = _require_admin(request)
-    if payload.active and len(payload.reason.strip()) < 3:
+    if payload.active and not payload.extend and len(payload.reason.strip()) < 3:
         # UX-8: the same rule the Users page has always applied, on the door
         # that did not apply it. Every editor's tray shows this sentence.
+        #
+        # bug-hunt-2026-09-03 dash-api-4: `extend` is exempt, exactly as
+        # ui.py's htmx twin already has it. [ KEEP HALTED ] carries the
+        # CURRENT halt's reason forward, so demanding a new one made the
+        # operation inexpressible through the JSON door - and the obvious
+        # workaround (resend with a reason) is a FRESH halt, which resets
+        # set_at and makes the banner lie about how long the fleet has been
+        # stopped. db.set_fleet_halt still refuses a blank extend of a halt
+        # that has already expired.
         raise HTTPException(
             status_code=422,
             detail="say why: the reason is shown in every editor's tray "
@@ -4493,7 +4539,16 @@ def api_copy_machine_plan(
             detail=f"{machine!r} is a wired machine: it works directly off the NAS "
                    "and syncs nothing, so a plan cannot be copied onto it",
         )
-    count = db.copy_machine_plan(conn, editor, source, machine, admin, db.utcnow_iso())
+    try:
+        count = db.copy_machine_plan(conn, editor, source, machine, admin,
+                                     db.utcnow_iso())
+    except ValueError as exc:
+        # bug-hunt-2026-09-03 dash-db-1: a WIRED source holds no plan of its
+        # own (it used to inherit the unassigned bucket, which is the bug
+        # being fixed there). db.copy_machine_plan refuses rather than copying
+        # nothing, and a silent empty copy is exactly the answer an admin
+        # would read as "done".
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     conn.commit()
     _nudge_collector(request)
     log.info("%s copied %s's plan from %s to %s (%d project(s))",
@@ -7176,6 +7231,23 @@ class ReportIn(BaseModel):
     # raise was the wrong shape.
 
 
+# The first companion that WAKES on a report reply instead of only noting it
+# (bug-hunt-2026-09-03 dash-api-3). Below it, an always-present queue depth
+# would let a machine back off to IDLE_BACKOFF_MAX_SECONDS with no way to be
+# roused, so the fix is version-gated rather than fleet-wide.
+JOBS_QUEUE_DEPTH_MIN_VERSION = (0, 9, 65)
+
+
+def _wants_idle_queue_depth(companion_version: Any, capabilities: Any) -> bool:
+    """Does this reporter want `commands.jobs.queue` even when the fleet queue
+    is empty? A version that can be roused again, and jobs switched on: a
+    machine with `jobs_enabled = false` runs no jobs thread, so the depth
+    would be an instruction to nobody. An unparseable version reads as OLD."""
+    if db.version_tuple(companion_version) < JOBS_QUEUE_DEPTH_MIN_VERSION:
+        return False
+    return bool(capabilities is None or getattr(capabilities, "jobs_enabled", True))
+
+
 @router.post("/report")
 def api_report(
     payload: ReportIn, request: Request, conn: sqlite3.Connection = Depends(get_conn)
@@ -7777,7 +7849,20 @@ def api_report(
             block["forced"] = offers["forced"]
         if cancels:
             block["cancel"] = cancels
-        if depth["queued"] or depth["running"] or depth["pinned"]:
+        # bug-hunt-2026-09-03 dash-api-3: an EMPTY queue is the one depth a
+        # companion needs, and it was the one we never sent - so
+        # jobs_runner.wait_seconds read "no depth" as "cannot tell" and never
+        # left the base cadence. IDLE_BACKOFF was dead code in the field.
+        #
+        # Only from 0.9.65 up, and only for a machine whose jobs are on. Below
+        # that the companion has no wake event: it would back off to two
+        # minutes and a job submitted onto an idle fleet (an admin's RUN NOW
+        # included) would sit there. Those builds keep today's behaviour
+        # exactly, which for them is the correct fail-open reading.
+        if _wants_idle_queue_depth(payload.companion_version,
+                                   payload.capabilities):
+            block["queue"] = depth
+        elif depth["queued"] or depth["running"] or depth["pinned"]:
             block["queue"] = depth
         if block:
             result["commands"]["jobs"] = block
@@ -7877,12 +7962,16 @@ def api_diagnostics(
             detail="this X-CCSync-Token belongs to a different editor than editor_name",
         )
     identity = request.headers.get("x-ccsync-identity", "")
-    id_user = auth.read_identity_token(settings.session_secret, identity) if identity else None
+    # bug-hunt-2026-09-03 dash-api-1: _ex, or a secret rotation kills the one
+    # artefact SYS-7 exists to deliver exactly during the incident that
+    # prompted it.
+    id_user = auth.read_identity_token_ex(settings, identity)[0] if identity else None
     if settings.session_secret:
         if not identity or id_user is None:
             raise HTTPException(
                 status_code=401,
-                detail="X-CCSync-Identity required -- sign in from the companion tray",
+                detail="X-CCSync-Identity required -- sign in from the companion "
+                       "tray, or its signing key was retired",
             )
         if id_user != editor:
             raise HTTPException(
@@ -7968,7 +8057,22 @@ def _slug_for_rel(conn: sqlite3.Connection, rel: str) -> str:
     `label` has no uniqueness constraint, so the lookup is constrained to
     ACTIVE projects, ordered deterministically, and prefers a row whose
     stored path actually ends in this rel -- otherwise two projects sharing a
-    label (or a deactivated one) yielded an arbitrary slug."""
+    label (or a deactivated one) yielded an arbitrary slug.
+
+    THE REL IS NORMALISED FIRST, for comparison only (comp-core-3, bug hunt
+    2026-09-03; the rule is CR-90 / docs/GOTCHAS.md section 17). A Mac's
+    listdir hands back DECOMPOSED filenames, so a manifest key from an older
+    Mac companion spells `2026/FF5/Français` as c+U+0327 while `projects.label`
+    (walked on the NAS) and every Windows machine spell it composed. The label
+    lookup then missed, the slugify fallback below ran -- and it does not
+    merely fail to match, it invents a DIFFERENT slug, because the combining
+    mark is a separator to its `[^a-z0-9]+` split: `2026-ff5-franc-ais` from
+    the decomposed spelling against `2026-ff5-fran-ais` from the composed one.
+    That is a phantom `editor_media_project` row for a project that does not
+    exist, next to the real project's row, on the fleet grid for ever. Nothing
+    here opens or renames a path -- this rel is only ever compared and then
+    hashed into a slug -- which is exactly the case CR-90 says to normalise."""
+    rel = db.media_rel_key(rel)
     rows = conn.execute(
         "SELECT slug, path FROM projects WHERE label = ? AND active = 1 ORDER BY id",
         (rel,),
@@ -7976,7 +8080,7 @@ def _slug_for_rel(conn: sqlite3.Connection, rel: str) -> str:
     if rows:
         want = rel.strip("/")
         for row in rows:
-            path = str(row["path"] or "").replace("\\", "/").rstrip("/")
+            path = db.media_rel_key(str(row["path"] or "")).replace("\\", "/").rstrip("/")
             if path == want or path.endswith("/" + want):
                 return row["slug"]
         return rows[0]["slug"]
@@ -8238,11 +8342,21 @@ def _require_fleet_caller(request: Request, conn: sqlite3.Connection) -> str:
                     "so no identity can be verified -- refusing")
         raise HTTPException(status_code=403, detail="identity cannot be verified here")
     identity = request.headers.get("x-ccsync-identity", "")
-    editor = auth.read_identity_token(settings.session_secret, identity) if identity else None
+    # bug-hunt-2026-09-03 dash-api-1: _ex, or a rotation strands every job a
+    # machine already holds - it can neither heartbeat nor report it, so the
+    # lease expires and the job is re-queued for ever.
+    editor, retired_key = (
+        auth.read_identity_token_ex(settings, identity) if identity else (None, False))
     if not editor:
         raise HTTPException(
             status_code=403,
-            detail="X-CCSync-Identity required - sign in from the companion tray")
+            detail="X-CCSync-Identity required - sign in from the companion tray, "
+                   "or its signing key was retired")
+    if retired_key:
+        # A rotation drain is visible from more than the report route now: an
+        # operator reading only this log should still see the window closing.
+        log.info("fleet job call from %r carried an identity signed by a RETIRED "
+                 "session key", editor)
     if auth_kind == AUTH_EDITOR and token_editor != editor:
         log.warning("fleet job call refused: the report token is bound to %r but the "
                     "identity header says %r", token_editor, editor)
@@ -8250,6 +8364,29 @@ def _require_fleet_caller(request: Request, conn: sqlite3.Connection) -> str:
             status_code=403,
             detail="this report token belongs to a different editor")
     return str(editor).strip().lower()
+
+
+def _require_jobs_reader(request: Request, conn: sqlite3.Connection) -> str:
+    """Who may READ the fleet's machine list (cards-machine-picker 2026-09-03).
+
+    Both audiences of §6c want the same answer here, so both are let in and
+    neither is widened:
+
+      * a FLEET caller -- `_require_fleet_caller`, the token plus the signed
+        identity, exactly as claim/heartbeat/result. This is the credential
+        the Timeline Cards server tunnels on;
+      * an ADMIN SESSION, because the same list is what fills a picker on a
+        page an admin has open, and every other way of looking at the queue
+        (`GET /jobs`, `/jobs/{id}/why`) is already admin-only.
+
+    A non-admin session is refused: this is the fleet's inventory, and the
+    editor pages deliberately show a person their own computers only. The
+    fleet gate runs FIRST when a token is present so a companion's failure is
+    the fleet routes' 403 and its sentence, never "log in first".
+    """
+    if request.headers.get("x-ccsync-token", ""):
+        return _require_fleet_caller(request, conn)
+    return _require_admin(request)
 
 
 class JobIn(BaseModel):
@@ -8391,6 +8528,102 @@ def api_job_queue(
                     "why_not": (executor.why_not() if executor is not None
                                 else "no executor is configured")},
     }
+
+
+# REGISTERED BEFORE /jobs/{job_id} for the same reason "queue" is: a literal
+# path segment added after the parameterised one is never matched.
+@router.get("/jobs/machines")
+def api_job_machines(
+    request: Request, conn: sqlite3.Connection = Depends(get_conn)
+) -> dict[str, Any]:
+    """The machines a job can be AIMED at (cards-machine-picker 2026-09-03).
+
+    `target_machine` has worked end to end since dashboard 0.7.23, but there
+    was no public list of names to pick from, so Timeline Cards' intake head
+    shipped a remembered free-text box instead
+    (MulticamPipeline docs/STAGED-AND-BINS-PLAN.md section 8: "the clean v2 is
+    one small GET /api/v1/jobs/machines on the dashboard"). A picker that can
+    be typed into wrongly is a job nobody will ever run, and the receipt's
+    `why` is the only place that says so.
+
+    THIS IS A LIST OF COMPUTERS AND WHAT THEY CAN DO, AND NOTHING ELSE: no
+    token, no device id, no path, no Resolve project name. `capabilities` is
+    an explicit whitelist of the columns the scheduler itself filters and
+    ranks on, not the decoded capabilities dict, so a future column cannot
+    join this answer by accident.
+
+    The facts come from `jobs.fleet_facts` -- the same read `why` and the
+    offer path use -- so a machine that shows here as able is able by the
+    same definition the scheduler applies. It deliberately does NOT say
+    whether a machine may take a job right now: that is a question about a
+    particular job (`GET /jobs/{id}/why`), and answering it here would be a
+    second opinion that can disagree with the first.
+    """
+    from . import alerts
+
+    _require_jobs_reader(request, conn)
+    now = db.utcnow_iso()
+    fleet = jobs_mod.fleet_facts(conn)
+    reported = {
+        (row["editor_username"], row["machine"]): str(row["reported_at"] or "")
+        for row in conn.execute(
+            "SELECT editor_username, machine, reported_at FROM machine_state")
+    }
+    # The REGISTRY is the authority on which computers exist (db.machines_of),
+    # and machine_state is where they say anything about themselves. A key in
+    # one and not the other is real in both directions - a registry row whose
+    # state was pruned (DASH-16), and a database old enough to predate v23's
+    # backfill - so the union is listed rather than either table alone.
+    keys = {(m["editor_username"], m["machine"]) for m in db.fetch_machines(conn)}
+    keys |= set(fleet) | set(reported)
+    out: list[dict[str, Any]] = []
+    for editor, machine in keys:
+        facts = fleet.get((editor, machine), {})
+        caps = dict(facts.get("capabilities") or {})
+        at = reported.get((editor, machine), "")
+        try:
+            age = (db.parse_iso(now) - db.parse_iso(at)).total_seconds() if at else None
+        except Exception:
+            # An unreadable timestamp is not evidence the machine is there.
+            age = None
+        held = list(facts.get("live_jobs") or [])
+        out.append({
+            "editor": editor, "machine": machine,
+            "mode": str(facts.get("mode") or "editor"),
+            # alerts.SILENT_SECONDS, not the grid's six hours: this answer
+            # feeds a PICKER, and a laptop that reported this morning is a
+            # sensible thing to aim tonight's transcode at.
+            "online": age is not None and age < alerts.SILENT_SECONDS,
+            "reported_at": at or None,
+            # A machine that has never reported capabilities is not "enabled"
+            # by default here even though the column would say so: {} is
+            # "unknown", which the scheduler already reads as "offer it
+            # nothing that has a requirement".
+            "jobs_enabled": bool(caps.get("jobs_enabled", False)) if caps else False,
+            # EMPTY IS EVERY KIND (db.machine_allows_kind), on this side too.
+            "kinds": list(caps.get("job_kinds") or []),
+            "capabilities": {
+                "gpu_present": bool(caps.get("gpu_present", False)),
+                "gpu_name": str(caps.get("gpu_name") or ""),
+                "gpu_vram_gb": caps.get("gpu_vram_gb"),
+                "nvenc": bool(caps.get("nvenc", False)),
+                "ffmpeg": bool(caps.get("ffmpeg", False)),
+                "ffprobe": bool(caps.get("ffprobe", False)),
+                "whisper": bool(caps.get("whisper", False)),
+                "cpu_count": caps.get("cpu_count"),
+                "mounts": list(caps.get("mounts") or []),
+            },
+            # null means cannot tell means NOT IDLE (idle.py's contract, kept
+            # end to end): never 0, which reads as "free".
+            "idle_seconds": caps.get("idle_seconds"),
+            "current_job": ({"id": held[0]["id"], "kind": held[0]["kind"]}
+                            if held else None),
+        })
+    # Online first, then the hostname, because the picker is read top down and
+    # a machine nobody has heard from in a day belongs under the ones that
+    # will actually answer.
+    out.sort(key=lambda m: (not m["online"], m["machine"].lower(), m["editor"]))
+    return {"machines": out, "kinds": list(db.JOB_KINDS)}
 
 
 @router.get("/jobs/{job_id}")

@@ -78,6 +78,16 @@
     its own, so `label` would rename the whole underlying volume (e.g. all
     of F:) instead.
 
+.PARAMETER CanonicalPrefix
+    The drive-letter prefix this site addresses the tree with (e.g. "P:\").
+    Omitted, it comes from the dashboard's site manifest, then "P:\". The
+    onboarding wizard passes what it fetched, so the config it has already
+    written and the drive this script maps cannot disagree.
+
+.PARAMETER TreeName
+    The tree's own folder name. Omitted, it comes from the site manifest,
+    then "CCSync". Used for the default local root and the Explorer label.
+
 .PARAMETER CompanionExePath
     Where ccsync-companion.exe should live and run from. Defaults to
     %LOCALAPPDATA%\ccsync\bin\ccsync-companion.exe -- the ONE canonical
@@ -154,6 +164,20 @@ param(
 
     [string]$DriveLabel = "",
 
+    # The tree's drive-letter prefix ("P:\") and folder name, normally from
+    # the manifest. They have flags since 2026-09-03 (bug-hunt install-
+    # onboard-2) because the onboarding wizard had already fetched and
+    # written them into config.toml before launching this script, and a
+    # manifest fetch that failed HERE is explicitly non-fatal -- so the two
+    # halves silently disagreed: config.toml said Q:\ and the machine got
+    # P: mapped, share CCSync_P, logon task CCSync-SubstP, none of which the
+    # uninstaller would ever find. Pass the MANIFEST's canonical_prefix, not
+    # config.toml's: a base rig deliberately stores its local root there and
+    # the drive-letter check below refuses that.
+    [string]$CanonicalPrefix = "",
+
+    [string]$TreeName = "",
+
     [string]$CompanionExePath = "$env:LOCALAPPDATA\ccsync\bin\ccsync-companion.exe",
     [string]$CompanionExeSource = "",
     # How long to wait for an open DaVinci Resolve to be quit before setting
@@ -217,6 +241,10 @@ $env:CCSYNC_DASHBOARD_TOKEN = $null
 # INSTALLER_VERSION in installer/macos_bootstrap.sh together -- one installer
 # number covers all three, and build_editor_package.ps1 / tools\release.ps1
 # refuse on drift between any of them.
+# 1.0.39: -CanonicalPrefix / -TreeName, resolved flag-first ahead of this
+# script's own site-manifest fetch, so the onboarding wizard's answer and
+# this script's cannot differ when one of the two fetches fails
+# (bug-hunt-2026-09-03 install-onboard-2).
 # 1.0.30: the commercial-readiness pass (KNOWN_BUGS.md CR-17): every P: /
 # Creators_Club site derives from the manifest's canonical_prefix / tree_name;
 # rclone + Syncthing pinned by version + sha256; the loopback share gets an
@@ -258,7 +286,7 @@ $env:CCSYNC_DASHBOARD_TOKEN = $null
 # 1.0.16: macOS caught up (SSD-aware bootstrap, Resolve Mapped Mount helper,
 # macos_uninstall.sh). Nothing changed on the Windows side; the number is
 # shared, so it moves when either platform's installer does.
-$InstallerVersion = "1.0.38"
+$InstallerVersion = "1.0.39"
 
 # When our stdout is a pipe (onboard.exe captures it), PS 5.1 encodes it with
 # the console OEM codepage -- so the wizard, which decodes UTF-8, would see
@@ -693,7 +721,7 @@ if ($SftpPort -le 0) { $SftpPort = 22 }
 # The tree's own name, used for BOTH neutral fallbacks below so a machine
 # ends up with C:\<tree> and an Explorer label an editor recognises. Nothing
 # tenant-specific survives when the manifest has none: "CCSync" does.
-$TreeName = Get-SiteValue "tree_name"
+if (-not $TreeName) { $TreeName = Get-SiteValue "tree_name" }
 if (-not $TreeName) { $TreeName = "CCSync" }
 
 # THE DRIVE LETTER IS SITE DATA, NOT A CONSTANT (2026-08-17,
@@ -706,13 +734,16 @@ if (-not $TreeName) { $TreeName = "CCSync" }
 # by construction instead of by luck. "P:\" stays the fallback: it is what
 # every existing machine in the field is mapped as, and CLAUDE.md's
 # hardcoded-P: decision is now a default rather than a constant.
-$CanonicalPrefix = Get-SiteValue "canonical_prefix"
+# -CanonicalPrefix wins when the caller has one (the wizard passes what it
+# already fetched, install-onboard-2); the refusal below is unchanged either
+# way, so a bad flag value fails loudly rather than mapping something else.
+if (-not $CanonicalPrefix) { $CanonicalPrefix = Get-SiteValue "canonical_prefix" }
 if (-not $CanonicalPrefix) { $CanonicalPrefix = "P:\" }
 if ((ConvertFrom-CanonicalPrefix -Prefix $CanonicalPrefix) -eq "") {
     # Refuse rather than fall back: a site that publishes a UNC or a POSIX
     # prefix means something this script cannot honour, and quietly mapping
     # P: instead would put the tree behind a letter no clip path mentions.
-    Write-Host "[ccsync] ERROR: the site manifest's canonical_prefix is '$CanonicalPrefix', which is not a drive-letter path." -ForegroundColor Red
+    Write-Host "[ccsync] ERROR: canonical_prefix is '$CanonicalPrefix', which is not a drive-letter path." -ForegroundColor Red
     Write-Host "[ccsync] Windows editors mount the tree as a drive letter; ask your admin to set canonical_prefix to e.g. 'P:\' in site.toml."
     exit 2
 }

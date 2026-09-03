@@ -790,6 +790,16 @@ def run_cycle(
     ctx = Ctx(conn, settings, now, folder_devices=folder_devices,
               snapshot_tasks_fn=snapshot_tasks_fn)
     results = evaluate(ctx)
+    # bug-hunt-2026-09-03 dash-collector-2: what the ledger held BEFORE this
+    # pass, so an invariant whose check could not run keeps its open notices.
+    # `db.record_invariant_result` no longer deletes those subject rows on a
+    # non-verdict, but the keep-list below is the other half: without it
+    # `clear_notices_of_kind` would still close the notice on the very next
+    # pass, and the fleet would be mailed "this has cleared" about a subject
+    # nothing has looked at.
+    stored_broken: dict[str, list[str]] = {}
+    for row in db.broken_invariants(conn):
+        stored_broken.setdefault(str(row["invariant"]), []).append(str(row["subject"]))
     broken_subjects: list[str] = []
     failed_subjects: list[str] = []
     for result in results:
@@ -809,7 +819,14 @@ def run_cycle(
                     body=(f"{inv.consequence} This server checks that "
                           f"{inv.title}, and right now it is not true: {detail}."),
                     fix=inv.fix, now=now)
-        elif result["state"] == db.INVARIANT_CHECK_FAILED:
+        elif result["state"] not in (db.INVARIANT_OK, db.INVARIANT_BROKEN):
+            # A pass that did not reach a verdict (check_failed, or a check
+            # that answered not_checked) has said NOTHING about the subjects
+            # this invariant was already failing on. They stay open, with
+            # their old checked_at.
+            for subject in stored_broken.get(inv.key, ()):
+                broken_subjects.append(f"{inv.key}: {subject}")
+        if result["state"] == db.INVARIANT_CHECK_FAILED:
             failed_subjects.append(inv.key)
             db.notice(
                 conn, "invariant_check_failed", "error", inv.key,

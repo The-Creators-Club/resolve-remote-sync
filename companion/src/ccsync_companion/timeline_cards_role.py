@@ -142,8 +142,22 @@ def load_engine(checkout: str) -> Any:
     return engine_mod, agent_mod
 
 
-def check_contract(engine_mod: Any) -> None:
-    """Does this engine take a bridge? (§7c.)
+def engine_class(engine_mod: Any) -> Any:
+    """The engine class this checkout exports, or None.
+
+    Both spellings are accepted on purpose: §7c is written against
+    `SyncEngine`, and the checkout that exists today calls it `ResolveEngine`
+    (bug-hunt-2026-09-03 comp-resolve-3). One expression, so `check_contract`
+    and `_start` can never disagree about which class was validated -- they
+    did, and the second half died as an AttributeError inside start()'s
+    catch-all, which is the outcome the contract version exists to prevent.
+    """
+    return getattr(engine_mod, "SyncEngine", None) or getattr(
+        engine_mod, "ResolveEngine", None)
+
+
+def check_contract(engine_mod: Any) -> Any:
+    """Does this engine take a bridge? (§7c.) Returns the class it validated.
 
     Two checks, because a version constant is a CLAIM: the constant says
     which contract the other repo thinks it implements, and the signature
@@ -166,8 +180,7 @@ def check_contract(engine_mod: Any) -> None:
             f"this Timeline Cards checkout implements bridge contract "
             f"{version} and this companion speaks {wanted} "
             f"(docs/TIMELINE-CARDS-INTO-CCSYNC.md §7c)", STATE_OLD_ENGINE)
-    engine_cls = getattr(engine_mod, "SyncEngine", None) or getattr(
-        engine_mod, "ResolveEngine", None)
+    engine_cls = engine_class(engine_mod)
     if engine_cls is None:
         raise CardsRoleError(
             "this Timeline Cards checkout has no SyncEngine/ResolveEngine")
@@ -180,6 +193,7 @@ def check_contract(engine_mod: Any) -> None:
             f"{engine_cls.__name__} says it speaks bridge contract {version} "
             f"but takes no `bridge` argument (§7c: SyncEngine(root, bridge=...))",
             STATE_OLD_ENGINE)
+    return engine_cls
 
 
 # ------------------------------------------------------- the standalone agent
@@ -213,7 +227,15 @@ def running_command_lines() -> Optional[list[str]]:
     except Exception:
         log.debug("cards: could not list processes", exc_info=True)
         return None
-    if out.returncode != 0 and not (out.stdout or "").strip():
+    if out.returncode != 0:
+        # bug-hunt-2026-09-03 comp-resolve-6: a listing that failed part way
+        # through (a CIM query interrupted, an access error mid-enumeration)
+        # still carries lines, and a truncated list read as authoritative is
+        # how a running standalone agent goes unseen -- two Resolve clients on
+        # one machine, the exact CR-68 outcome this gate exists to prevent.
+        # Non-zero means "cannot tell", whatever came out on stdout.
+        log.debug("cards: the process listing exited %s -- treating it as "
+                  "unreadable", out.returncode)
         return None
     return [line.strip() for line in (out.stdout or "").splitlines() if line.strip()]
 
@@ -434,7 +456,16 @@ class TimelineCardsRole:
             return False
         bridge = self._bridge or timeline_cards_bridge.CardsBridge(self.cfg)
         self._bridge = bridge
-        engine_cls = getattr(engine_mod, "SyncEngine")
+        engine_cls = engine_class(engine_mod)
+        if engine_cls is None:
+            # bug-hunt-2026-09-03 comp-resolve-3: a bare getattr("SyncEngine")
+            # here contradicted check_contract, which accepts either spelling,
+            # so a checkout exporting only ResolveEngine passed the contract
+            # test and then died as an AttributeError in start()'s catch-all
+            # with a sentence that names nothing.
+            raise CardsRoleError(
+                "this Timeline Cards checkout has no SyncEngine/ResolveEngine",
+                STATE_NO_ENGINE)
         engine = engine_cls(self.vault_root, bridge=bridge)
         engine.start()
         client = make_tunnel_client(agent_mod, self, engine)

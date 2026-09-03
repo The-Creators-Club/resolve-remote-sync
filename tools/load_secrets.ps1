@@ -114,9 +114,11 @@ if ($Save) {
     foreach ($n in $SecretNames) {
         $already = if ($store.ContainsKey($n) -and $store[$n]) { " (set -- Enter keeps it)" } else { "" }
         $secure = Read-Host -Prompt "  $n$already" -AsSecureString
-        $plain = [System.Runtime.InteropServices.Marshal]::PtrToStringUni(
-            [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure))
-        if ([string]::IsNullOrEmpty($plain)) { continue }
+        # Length, not a decrypted copy (bug-hunt-2026-09-03 server-tools-5): the
+        # BSTR round trip this used to do left the NAS admin password in a
+        # session variable, and in a BSTR nothing ever freed, for the life of
+        # the window -- the exact plaintext this script exists to avoid holding.
+        if ($secure.Length -eq 0) { continue }
         # ConvertFrom-SecureString == DPAPI, CurrentUser scope. The plaintext
         # never touches the disk and never enters PSReadLine's history.
         $store[$n] = ConvertFrom-SecureString -SecureString $secure

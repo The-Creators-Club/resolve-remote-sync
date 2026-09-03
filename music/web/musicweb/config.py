@@ -422,3 +422,78 @@ def safe_join(root, rel_path):
 def resolve_path(share, rel_path):
     """(share, rel_path) -> an absolute path under this host's share root."""
     return safe_join(share_root(share), rel_path)
+
+
+# The number of indexed tracks a readiness probe looks for on disk. A sample,
+# not a scan: the share is an SMB/NFS mount and this runs on the request path,
+# and one file present is all the evidence "the library is mounted" needs.
+_READY_SAMPLE = 50
+
+
+def share_root_ready(con=None, share=SHARE):
+    """Is this host actually looking at the library? -> (ok, reason).
+
+    bug-hunt-2026-09-03 music-1/music-3. The library is a BIND MOUNT in every
+    shipped deployment (`{music_library_root}:/music-share`), and an unmounted
+    dataset does not present as an error: it presents as an ordinary EMPTY
+    DIRECTORY. Every existence check underneath then answers the wrong
+    question in the dangerous direction -- `unique_dest` sees no collisions,
+    `_taken_on_disk` calls every name free -- so an ingest is told "queued"
+    while the bytes land under the mountpoint, and a name that belongs to an
+    indexed track is handed out and upserted over. `db.prune_missing` already
+    refuses an empty scan for exactly this reason ("that is a share that is
+    not mounted, not an empty library"); this is the same refusal on the write
+    path, and it is ONE helper because two private notions of "the share looks
+    wrong" would drift.
+
+    Emptiness alone is not the test: a new customer's library legitimately has
+    no files yet. So the evidence is the INDEX -- if it names tracks, at least
+    one of them has to be visible here.
+
+    Fails open where it cannot see: a drive-style canonical prefix is symbolic
+    on a POSIX host (see _join_canonical) and a connection whose schema this
+    cannot read is not evidence of anything.
+    """
+    root = share_root(share)
+    if not isinstance(root, Path):
+        return True, ''
+    try:
+        exists = root.is_dir()
+    except OSError as exc:                                     # noqa: BLE001
+        return False, f'the music library at {root} cannot be read here: {exc}'
+    if not exists:
+        # First run of a fresh deployment: the root has not been created yet
+        # and there is nothing indexed to contradict it, so the caller that
+        # creates it (routes_ingest.queue_one) is allowed to. A root whose
+        # PARENT is missing too is a misconfigured mount, not a first run.
+        if con is not None and root.parent.is_dir() and not library_has_tracks(con):
+            return True, ''
+        return False, (f'the music library is not mounted here (nothing at '
+                       f'{root}). Nothing is written until it is back.')
+    if con is None:
+        return True, ''
+    try:
+        rows = con.execute('SELECT rel_path FROM tracks WHERE rel_path IS NOT NULL '
+                           'ORDER BY id LIMIT ?', (_READY_SAMPLE,)).fetchall()
+    except Exception:                                          # noqa: BLE001
+        return True, ''
+    if not rows:
+        return True, ''
+    for r in rows:
+        try:
+            if safe_join(root, r[0]).exists():
+                return True, ''
+        except (PathTraversalError, UnknownShareError, OSError):
+            continue
+    return False, (f'the music library at {root} is there but empty: none of '
+                   f'the indexed tracks are visible, so this looks like a '
+                   f'share that is not mounted rather than an empty library. '
+                   f'Nothing is written until it is back.')
+
+
+def library_has_tracks(con):
+    try:
+        return con.execute('SELECT 1 FROM tracks LIMIT 1').fetchone() is not None
+    except Exception:                                          # noqa: BLE001
+        # An unreadable schema is not evidence that the library is empty.
+        return True

@@ -339,3 +339,141 @@ def test_start_server_passes_no_creation_flags_off_windows(tmp_path, monkeypatch
     local_vlm.start_server(tmp_path / "llama-server", tmp_path / "w.gguf",
                            tmp_path / "m.gguf", port=1234)
     assert "creationflags" not in seen["kwargs"]
+
+
+# ---------------------------------------------------------------------------
+# the warm-server cache and the start path hold no orphans
+# (bug-hunt-2026-09-03 broll-2 / broll-3)
+# ---------------------------------------------------------------------------
+
+class _RecordingProc:
+    """A llama-server that records the shutdown it is given and honours it."""
+
+    def __init__(self, *, ignores_terminate: bool = False):
+        self.returncode = None
+        self.calls: list[str] = []
+        self._ignores_terminate = ignores_terminate
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.calls.append("terminate")
+        if not self._ignores_terminate:
+            self.returncode = -15
+
+    def wait(self, timeout=None):
+        if self.returncode is None:
+            raise local_vlm.subprocess.TimeoutExpired("llama-server", timeout)
+        return self.returncode
+
+    def kill(self):
+        self.calls.append("kill")
+        self.returncode = -9
+
+
+@pytest.fixture
+def clean_server_cache():
+    local_vlm._servers.clear()
+    yield
+    local_vlm._servers.clear()
+
+
+def test_an_unhealthy_warm_server_is_stopped_before_its_replacement_starts(
+        tmp_path, monkeypatch, clean_server_cache):
+    """broll-2, 2026-09-03. The cache used to overwrite the entry and drop the
+    old handle: a server that is alive but not answering /health kept a whole
+    VLM in VRAM while a second copy loaded beside it, and stop_all_servers()
+    could no longer see it to reap it (the sidecar's stop_server() is exactly
+    that call)."""
+    stale = _RecordingProc()
+    stale_handle = local_vlm.ServerHandle(url="http://127.0.0.1:9999", proc=stale)
+    key = (str(tmp_path / "llama-server"), str(tmp_path / "w.gguf"),
+           str(tmp_path / "m.gguf"), 99, local_vlm.DEFAULT_CTX)
+    local_vlm._servers[key] = stale_handle
+
+    monkeypatch.setattr(local_vlm, "_health", lambda url, *a, **kw: False)
+    fresh = local_vlm.ServerHandle(url="http://127.0.0.1:8888", proc=_RecordingProc())
+    monkeypatch.setattr(local_vlm, "start_server", lambda *a, **kw: fresh)
+
+    handle = local_vlm.get_server(exe=tmp_path / "llama-server", model_path=tmp_path / "w.gguf",
+                                  mmproj_path=tmp_path / "m.gguf")
+
+    assert handle is fresh
+    assert stale.calls[0] == "terminate", "the stale server was left holding the GPU"
+    assert stale.poll() is not None
+
+
+def test_a_slow_warm_server_is_reused_rather_than_replaced(
+        tmp_path, monkeypatch, clean_server_cache):
+    """broll-2's second half: one missed 3 s probe (a resuming machine, GPU
+    contention) must not cost a 10 GB model reload. The first attempt keeps its
+    timeout; only a server that already failed once pays the longer one."""
+    warm = local_vlm.ServerHandle(url="http://127.0.0.1:9999", proc=_RecordingProc())
+    key = (str(tmp_path / "llama-server"), str(tmp_path / "w.gguf"),
+           str(tmp_path / "m.gguf"), 99, local_vlm.DEFAULT_CTX)
+    local_vlm._servers[key] = warm
+
+    seen = []
+
+    def flaky_health(url, timeout=3.0, **kw):
+        seen.append(timeout)
+        return timeout > 3.0
+
+    monkeypatch.setattr(local_vlm, "_health", flaky_health)
+    monkeypatch.setattr(local_vlm, "start_server", lambda *a, **kw: pytest.fail(
+        "a slow but living server was replaced"))
+
+    assert local_vlm.get_server(exe=tmp_path / "llama-server", model_path=tmp_path / "w.gguf",
+                                mmproj_path=tmp_path / "m.gguf") is warm
+    assert seen == [3.0, 15.0]
+
+
+def test_a_server_that_never_loads_is_killed_and_its_log_closed(tmp_path, monkeypatch):
+    """broll-3, 2026-09-03. The load-timeout path called a bare terminate()
+    (a process still mmap-ing a 10 GB model ignores it and keeps the GPU) and
+    leaked the log file object on every raise."""
+    proc = _RecordingProc(ignores_terminate=True)
+    monkeypatch.setattr(local_vlm.subprocess, "Popen", lambda cmd, **kw: proc)
+    monkeypatch.setattr(local_vlm, "_health", lambda url, *a, **kw: False)
+    opened = []
+    real_open = open
+
+    def spy_open(*args, **kwargs):
+        f = real_open(*args, **kwargs)
+        opened.append(f)
+        return f
+
+    monkeypatch.setattr("builtins.open", spy_open)
+    log_path = tmp_path / "llama.log"
+
+    with pytest.raises(local_vlm.LocalVlmError, match="did not become healthy"):
+        local_vlm.start_server(tmp_path / "llama-server", tmp_path / "w.gguf",
+                               tmp_path / "m.gguf", port=1234, load_timeout=0.01,
+                               log_path=log_path)
+
+    assert proc.calls == ["terminate", "kill"], proc.calls
+    assert opened and all(f.closed for f in opened), "the log handle was leaked"
+
+
+def test_a_server_that_exits_early_closes_its_log_too(tmp_path, monkeypatch):
+    """The other raise in start_server: same leak, same finally."""
+    proc = _RecordingProc()
+    proc.returncode = 1
+    monkeypatch.setattr(local_vlm.subprocess, "Popen", lambda cmd, **kw: proc)
+    monkeypatch.setattr(local_vlm, "_health", lambda url, *a, **kw: False)
+    opened = []
+    real_open = open
+
+    def spy_open(*args, **kwargs):
+        f = real_open(*args, **kwargs)
+        opened.append(f)
+        return f
+
+    monkeypatch.setattr("builtins.open", spy_open)
+
+    with pytest.raises(local_vlm.LocalVlmError, match="exited early"):
+        local_vlm.start_server(tmp_path / "llama-server", tmp_path / "w.gguf",
+                               tmp_path / "m.gguf", port=1234,
+                               log_path=tmp_path / "llama.log")
+    assert opened and all(f.closed for f in opened)

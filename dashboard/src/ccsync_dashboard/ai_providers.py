@@ -449,11 +449,27 @@ _probe_cache: dict[str, dict] = {}
 _probe_lock = threading.Lock()
 
 
-def _cached_probe(name: str) -> dict | None:
+def _cached_probe(name: str, *, allow_stale: bool = False) -> dict | None:
+    """The last probe answer, or None.
+
+    `allow_stale=True` returns an EXPIRED entry as well (CR-121, 2026-09-03).
+    The TTL exists so a caller that is allowed to probe re-probes; a caller
+    that must not probe has no such choice, and an hour-old "installed and
+    signed in" is still what the CLI last said. Refreshing it for a page poll
+    is exactly the subscription call `probe=False` exists to avoid.
+    """
     with _probe_lock:
         entry = _probe_cache.get(name)
-        if entry and (time.monotonic() - entry["at"]) < PROBE_TTL_SECONDS:
-            return dict(entry["value"])
+        if entry and (allow_stale
+                      or (time.monotonic() - entry["at"]) < PROBE_TTL_SECONDS):
+            value = dict(entry["value"])
+            if allow_stale:
+                # Only on the stale-tolerant path: `probe_cli`'s answer is a
+                # shape other code compares field by field, and a key that
+                # appears only on a cache hit would be a difference nobody
+                # asked for.
+                value["stale"] = (time.monotonic() - entry["at"]) >= PROBE_TTL_SECONDS
+            return value
     return None
 
 
@@ -633,6 +649,68 @@ def resolve_provider(availability: Mapping[str, bool], preference: str = AUTO) -
     return ProviderChoice("", "", "no provider has a working credential")
 
 
+def unprobed_cli_state(conn: sqlite3.Connection, name: str, settings: Any,
+                       wizard: Mapping[str, Any] | None = None) -> dict:
+    """What this container ALREADY knows about a CLI, spawning nothing.
+
+    -> the `status`/`available`/`detail`/`path`/`version` fields for a row
+    built with `probe=False`.
+
+    CR-121 (2026-09-03). This branch used to be a flat `ST_UNKNOWN` with
+    `available=False`, and availability is a BOOLEAN by the time
+    `resolve_provider` sees it -- so "we did not look" arrived at Timeline
+    Cards as "claude not available on this server", and dimmed translate,
+    semantic search and the section summaries on a site whose Claude Code the
+    wizard had installed and signed in. Unknown is not no.
+
+    Two sources, in order, neither of which costs a subprocess or a token:
+
+    1. THE LAST REAL PROBE, expired or not. It is the strongest evidence there
+       is, and re-running it is the one thing a `probe=False` caller is not
+       allowed to do.
+    2. THE WIZARD'S SNAPSHOT (`cli_tools.setup_snapshot`): two small file
+       reads saying it installed this tool and drove its sign-in. A typed path
+       counts as installed too -- `cli_path` is a stat, and the admin who
+       typed it is telling us about their host.
+
+    Only when neither says anything is the honest answer still ST_UNKNOWN.
+    """
+    out: dict[str, Any] = {"status": ST_UNKNOWN, "available": False,
+                           "detail": "", "path": "", "version": ""}
+    cached = _cached_probe(name, allow_stale=True)
+    if cached is not None:
+        out["path"] = cached.get("path", "")
+        out["version"] = cached.get("version", "")
+    if cached is not None and cached.get("installed") and cached.get("signed_in"):
+        out["status"] = ST_AVAILABLE
+        out["available"] = True
+        out["detail"] = ("signed in when it was last checked"
+                         + (" (not re-checked since)" if cached.get("stale") else ""))
+        return out
+    if wizard is not None:
+        installed = bool(wizard["install"]["installed"]) or bool(
+            cli_path(conn, name, settings))
+        signed_in = (wizard["signin"].get("state") == "signed_in"
+                     or bool(wizard.get("signed_in")))
+        if installed and signed_in:
+            out["status"] = ST_AVAILABLE
+            out["available"] = True
+            out["detail"] = "signed in (wizard); not re-probed"
+            out["path"] = out["path"] or wizard["install"].get("installed_path", "")
+            out["version"] = out["version"] or wizard["install"].get(
+                "installed_version", "")
+            return out
+    if cached is not None and not cached.get("installed"):
+        out["status"] = ST_NOT_INSTALLED
+        out["detail"] = cached.get("detail", "")
+        return out
+    if cached is not None:
+        out["status"] = ST_NOT_SIGNED_IN
+        out["detail"] = cached.get("detail", "")
+        return out
+    return out
+
+
 def provider_states(
     conn: sqlite3.Connection, settings: Any, *, probe: bool = True,
     force: bool = False, only: Sequence[str] | None = None,
@@ -640,8 +718,11 @@ def provider_states(
     """One row per provider, in chain order, for the API and the page.
 
     `probe=False` is for a caller that must not spend a subprocess (or a
-    token) -- it reports a CLI as `unknown` rather than guessing, which the
-    page renders as "test it".
+    token). It answers a CLI from what this container already knows -- the
+    last probe, then the wizard's snapshot (`unprobed_cli_state`) -- and only
+    `unknown` when neither has ever said anything, which the page renders as
+    "test it". Before CR-121 (2026-09-03) it was always `unknown`, and an
+    unknown read as unavailable everywhere downstream.
 
     `only` narrows the rows to those providers, keeping each one's real chain
     RANK. It exists for `resolved()` (ytdl-web-5, 2026-08-21): probing a CLI
@@ -693,6 +774,7 @@ def provider_states(
                 "signin_state": "idle",
                 "signed_in_account": "",
             })
+            wizard = None
             if allow_cli:
                 # The wizard's view of this tool, and it costs no subprocess:
                 # two small file reads and an in-memory session. The page needs
@@ -720,7 +802,14 @@ def provider_states(
                                  "'Allow CLI providers (Claude Code, Codex)' "
                                  "below to enable them")
             elif not probe:
-                row["status"] = ST_UNKNOWN
+                # NOT "no" (CR-121). See unprobed_cli_state: the last probe,
+                # then the wizard's snapshot, then ST_UNKNOWN.
+                known = unprobed_cli_state(conn, name, settings, wizard)
+                row["status"] = known["status"]
+                row["available"] = known["available"]
+                row["detail"] = known["detail"]
+                row["path"] = known["path"]
+                row["version"] = known["version"]
             else:
                 probed = probe_cli(conn, name, force=force, settings=settings)
                 row["path"] = probed["path"]

@@ -46,7 +46,9 @@ import os
 import shutil
 import smtplib
 import sqlite3
+import ssl
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from email.message import EmailMessage
@@ -141,6 +143,13 @@ SETTING_KEYS: dict[str, str] = {
     "alerts_smtp_from": "str",
     "alerts_smtp_to": "str",
     "alerts_smtp_tls": "bool",
+    # bug-hunt-2026-09-03 dash-collector-3: an EXPLICIT opt-out for the site
+    # whose internal relay presents a self-signed certificate. Default on:
+    # the alternative shipped for everyone was an encrypted but
+    # unauthenticated channel that the next statement hands an SMTP password
+    # to. Never a silent fallback on a verification failure - that would look
+    # verified and be worse than the bug it replaced.
+    "alerts_smtp_verify_tls": "bool",
     "alerts_webhook_url": "https",
     "alerts_timezone": "str",
     "alerts_weekly": "bool",
@@ -150,6 +159,7 @@ _DEFAULTS = {
     "alerts_sink": SINK_NONE,
     "alerts_smtp_port": "587",
     "alerts_smtp_tls": "1",
+    "alerts_smtp_verify_tls": "1",
     "alerts_weekly": "1",
 }
 
@@ -214,6 +224,15 @@ def set_settings(
     port must change nothing rather than half-applying (site_store.set_many's
     rule). Unknown keys are refused, not ignored."""
     normalised = {key: _validate(key, raw) for key, raw in values.items()}
+    # bug-hunt-2026-09-03 dash-collector-5: the page renders the webhook URL
+    # MASKED past its origin, so a form submitted with that field untouched
+    # posts the mask back. Treat "the mask of what is stored" as "unchanged"
+    # rather than writing a broken URL over a working one; a real edit never
+    # produces a string with the mask's ellipsis in it (typed URLs are ASCII).
+    if "alerts_webhook_url" in normalised:
+        stored = get_settings(conn).get("alerts_webhook_url") or ""
+        if stored and normalised["alerts_webhook_url"] == mask_url(stored):
+            normalised["alerts_webhook_url"] = stored
     now = db.utcnow_iso()
     for key, value in normalised.items():
         conn.execute(
@@ -300,13 +319,58 @@ def mask(value: str) -> str:
     return f"{value[:3]}…{value[-4:]}"
 
 
+def url_origin(url: str) -> str:
+    """`https://host[:port]` and nothing else (dash-collector-5).
+
+    Every common receiver - Slack `hooks.slack.com/services/T…/B…/…`, Teams,
+    Discord - puts the secret in the PATH, so the path is a bearer credential
+    and the origin is the part it is safe to keep saying out loud.
+    """
+    url = str(url or "").strip()
+    if not url:
+        return ""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return ""
+    if not parts.scheme or not parts.netloc:
+        return ""
+    # netloc, not hostname: a userinfo half would be a credential, and this
+    # value is written to the ledger.
+    host = parts.netloc.rsplit("@", 1)[-1]
+    return f"{parts.scheme}://{host}"
+
+
+def mask_url(url: str) -> str:
+    """The origin, with everything past it replaced (dash-collector-5). The
+    admin can still recognise which receiver is configured; a screenshot, an
+    API response or the Alerts page cannot re-post to it."""
+    url = str(url or "").strip()
+    origin = url_origin(url)
+    if not origin:
+        return mask(url)
+    return origin + "/…" if len(url) > len(origin) else origin
+
+
 def settings_view(conn: sqlite3.Connection, settings: Any) -> dict[str, Any]:
     """What the page and the API may see. THE PASSWORD IS NEVER IN HERE, only
-    whether one is set and where it came from."""
+    whether one is set and where it came from.
+
+    bug-hunt-2026-09-03 dash-collector-5: the webhook URL is a bearer
+    credential too, so it is masked past its origin here. It is still STORED
+    in `site_settings` - moving it to a file under <data>/secrets/ beside the
+    SMTP password, so a database backup is not a working credential either, is
+    an owner decision (a migration plus a second store), not something this
+    fix takes on its own.
+    """
     values = get_settings(conn)
     secret, source = read_password(settings)
+    webhook = values.get("alerts_webhook_url") or ""
+    values["alerts_webhook_url"] = mask_url(webhook)
     return {
         **values,
+        "webhook_url_set": bool(webhook),
+        "webhook_origin": url_origin(webhook),
         "sinks": list(SINKS),
         "password_set": bool(secret),
         "password_source": source,
@@ -1782,7 +1846,20 @@ def compose_weekly(
 
     # 5. Silence has to be PROVABLY checked. Without this list, a clean report
     #    is indistinguishable from a report whose checks all crashed.
-    clean = [k for k in ALERT_KINDS if not by_kind.get(k.kind)]
+    # bug-hunt-2026-09-03 dash-collector-1: a check that CRASHED files its
+    # finding under CHECK_FAILED.kind with the failing kind's name as the
+    # subject, never under its own kind - so testing by_kind alone printed
+    # `ok - <what>` for a kind this report separately lists as unchecked.
+    # `deliver` already subtracts the same subject set; the two halves of the
+    # module have to agree. The denominator stays len(ALERT_KINDS) so the
+    # report keeps stating how many kinds exist.
+    _failed_subjects = {
+        str(f.get("subject") or "") for f in (by_kind.get(CHECK_FAILED.kind) or [])
+    }
+    clean = [
+        k for k in ALERT_KINDS
+        if not by_kind.get(k.kind) and k.kind not in _failed_subjects
+    ]
     lines.append(f"CHECKED AND FOUND NOTHING WRONG ({len(clean)} of "
                  f"{len(ALERT_KINDS)})")
     for kind in clean:
@@ -1848,6 +1925,21 @@ def _smtp_class():
     return smtplib.SMTP
 
 
+def _tls_context(verify: bool) -> ssl.SSLContext:
+    """The context STARTTLS is negotiated with (dash-collector-3).
+
+    Verifying by default. The opt-out is a stored setting an admin chose, so
+    the page can say a site is running unverified; it is never reached by
+    falling back after a verification failure.
+    """
+    if verify:
+        return ssl.create_default_context()
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
+
+
 def _send_smtp(values: Mapping[str, str], password: str,
                subject: str, text: str) -> str:
     host = (values.get("alerts_smtp_host") or "").strip()
@@ -1862,6 +1954,7 @@ def _send_smtp(values: Mapping[str, str], password: str,
     port = int(values.get("alerts_smtp_port") or 587)
     user = (values.get("alerts_smtp_user") or "").strip()
     use_tls = (values.get("alerts_smtp_tls") or "1") == "1"
+    verify_tls = (values.get("alerts_smtp_verify_tls") or "1") == "1"
 
     message = EmailMessage()
     message["Subject"] = subject
@@ -1872,10 +1965,28 @@ def _send_smtp(values: Mapping[str, str], password: str,
     try:
         with _smtp_class()(host, port, timeout=SEND_TIMEOUT_SECONDS) as client:
             if use_tls:
-                client.starttls()
+                # bug-hunt-2026-09-03 dash-collector-3: `starttls()` with no
+                # context builds ssl._create_stdlib_context(), which verifies
+                # NOTHING (check_hostname False, CERT_NONE). Anyone who can
+                # answer on this host and port then receives client.login()
+                # with the stored SMTP password and a body naming every
+                # editor, machine and fault. The webhook path already refuses
+                # a plain-http URL at save AND at send time; the mail path is
+                # held to the same standard.
+                client.starttls(context=_tls_context(verify_tls))
             if user:
                 client.login(user, password)
             client.send_message(message)
+    except ssl.SSLCertVerificationError as exc:
+        # Named, not silently downgraded: a self-signed internal relay is a
+        # readable refusal with a setting to turn off, never an unverified
+        # connection everyone else also gets.
+        raise AlertError(
+            f"the certificate {host} presented could not be verified "
+            f"({str(getattr(exc, 'verify_message', '') or exc)[:120]}). "
+            "If this is your own mail server with its own certificate, turn "
+            "off 'Verify the mail server's certificate' on this page."
+        ) from None
     except smtplib.SMTPAuthenticationError:
         # The server's own message can echo the username; the password can
         # never reach a log or a page from here.
@@ -1920,8 +2031,13 @@ def send(
                 "detail": "no sink configured", "deduped": False}
     try:
         if sink == SINK_WEBHOOK:
-            sent_to = (values.get("alerts_webhook_url") or "").strip()
-            detail = _send_webhook(sent_to, subject, text)
+            url = (values.get("alerts_webhook_url") or "").strip()
+            # bug-hunt-2026-09-03 dash-collector-5: the ORIGIN goes in the
+            # ledger, never the full URL. `alert_log.sent_to` is rendered on
+            # the Alerts page and travels in every database backup, and a
+            # Slack/Teams/Discord URL's path is the credential.
+            sent_to = url_origin(url) or "webhook"
+            detail = _send_webhook(url, subject, text)
         else:
             password, _source = read_password(settings)
             sent_to = _send_smtp(values, password, subject, text)
@@ -2013,10 +2129,27 @@ def _open_subjects(
     conn: sqlite3.Connection, kinds: set[str],
 ) -> list[tuple[str, str]]:
     """Every (kind, subject) currently in an alerted state, for the kinds
-    given. One query over the ledger rather than one per subject."""
-    subjects = {(str(r["kind"]), str(r["subject"]))
-                for r in db.fetch_alerts(conn, limit=500)
-                if str(r["kind"]) in kinds}
+    given. One query over the ledger rather than one per subject.
+
+    bug-hunt-2026-09-03 dash-collector-4: this used to page the most recent
+    500 rows (`db.fetch_alerts`'s hard cap, which a caller cannot widen). A
+    WARN writes ONE row and is then silent for as long as `_is_open` says it
+    is open, so its row ages out of that window while error kinds write one a
+    day - and once it had scrolled out, no `<kind>.ok` was ever recorded, so
+    `_is_open` answered True for ever and that subject's warn was permanently
+    muted. Grouping is recency-independent; `ix_alert_log_kind` covers
+    (kind, subject, id). Raising the cap would only move the cliff.
+    """
+    if not kinds:
+        return []
+    names = sorted(kinds)
+    placeholders = ",".join("?" for _ in names)
+    rows = conn.execute(
+        f"SELECT kind, subject FROM alert_log WHERE kind IN ({placeholders}) "
+        "GROUP BY kind, subject",
+        names,
+    ).fetchall()
+    subjects = {(str(r["kind"]), str(r["subject"])) for r in rows}
     return [(kind, subject) for kind, subject in sorted(subjects)
             if _is_open(conn, kind, subject)]
 

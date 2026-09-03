@@ -1201,7 +1201,9 @@ class PopupDialog:
                 shown = "\n".join(f"✗ {canon.basename(r['file_path'])}: {r['message']}"
                                   for r in failures[:12])
                 if len(failures) > 12:
-                    shown += f"\n… and {len(failures) - 12} more (see tray → Open log)"
+                    # bug-hunt-2026-09-03 comp-ui-2: Open log moved into Settings on
+                    # 2026-08-27; the copy must name a row the tray menu still has.
+                    shown += f"\n… and {len(failures) - 12} more (see Tray > Settings > OPEN LOG)"
                 if any(r.get("placeholder") for r in failures):
                     shown += ("\nThese are online-only cloud files. Make them available "
                               "offline in your cloud drive, then press RETRY FAILED.")

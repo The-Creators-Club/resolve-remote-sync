@@ -86,9 +86,12 @@
 
   function confirmCapacity(sentence) {
     if (!sentence) return true;
-    return window.confirm(sentence + "
-
-Sync it there anyway?");
+    // bug-hunt-2026-09-03 dash-mounts-ui-1: the blank line between the two
+    // sentences was written as two RAW newlines inside this literal, which is
+    // a parse error for the whole file -- and the file is one IIFE, so every
+    // listener in it (a tick, [ ALL ], the wired re-lock) was unregistered
+    // and a click on the matrix wrote nothing, silently. Escaped, always.
+    return window.confirm(sentence + "\n\nSync it there anyway?");
   }
 
   // One write, used by both a single click and the column tools. Marks the

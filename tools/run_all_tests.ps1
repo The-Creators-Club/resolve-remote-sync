@@ -179,7 +179,13 @@ $prevRollbackExit = $LASTEXITCODE
 # with the PowerShell parser rather than dot-sourced.
 $global:LASTEXITCODE = 9999
 powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\installer\tests\Test-ConsoleUser.ps1"
-$installerExit = @($driveMapExit, $licenceExit, $prevRollbackExit, $LASTEXITCODE) |
+$consoleUserExit = $LASTEXITCODE
+# The uninstaller's "is the SMB share actually gone" re-read that gates the
+# firewall block rule (bug-hunt-2026-09-03 install-onboard-3): a failed
+# Remove-SmbShare used to drop the rule with the share still published.
+$global:LASTEXITCODE = 9999
+powershell -NoProfile -ExecutionPolicy Bypass -File "$repo\installer\tests\Test-SmbShareGone.ps1"
+$installerExit = @($driveMapExit, $licenceExit, $prevRollbackExit, $consoleUserExit, $LASTEXITCODE) |
     Where-Object { $_ -ne 0 } | Select-Object -First 1
 if ($null -eq $installerExit) { $installerExit = 0 }
 $results += @{ Name = "installer"; Outcome = $(if ($installerExit -eq 0) { "PASS" } else { "FAIL (exit $installerExit)" }) }

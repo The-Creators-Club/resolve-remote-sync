@@ -124,6 +124,17 @@ def _health(url: str, timeout: float = 3.0, opener: Callable[..., Any] = urlopen
         return False
 
 
+def _health_retried(url: str) -> bool:
+    """A warm server's liveness test: the 3 s probe, then one longer one.
+
+    bug-hunt-2026-09-03 broll-2: killing and reloading a 10 GB model because a
+    busy or resuming machine missed a 3 s deadline is far more expensive than
+    waiting. The first attempt keeps its timeout so the happy path is
+    unchanged; only a server that has already failed once pays the 15 s.
+    """
+    return _health(url) or _health(url, timeout=15.0)
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -166,18 +177,31 @@ def start_server(
         creation["creationflags"] = 0x00000200 | 0x08000000
     proc = subprocess.Popen(cmd, stdout=logf, stderr=subprocess.STDOUT, **creation)
     url = f"http://127.0.0.1:{port}"
-    t0 = time.time()
-    while time.time() - t0 < load_timeout:
-        if proc.poll() is not None:
-            raise LocalVlmError(
-                f"llama-server exited early with code {proc.returncode}"
-                + (f"; see {log_path}" if log_path else ""))
-        if _health(url):
-            return ServerHandle(url=url, proc=proc)
-        time.sleep(1)
-    proc.terminate()
-    raise LocalVlmError(f"llama-server did not become healthy within {load_timeout:.0f}s"
-                        + (f"; see {log_path}" if log_path else ""))
+    # bug-hunt-2026-09-03 broll-3: the log handle was leaked on every path,
+    # including the two raises, and released only by GC. The child keeps its
+    # own inherited handle, so closing ours here does not cut the server's
+    # output; it is the parent's copy that would otherwise accumulate one file
+    # object per start in a long-lived host (the companion's tray app).
+    try:
+        t0 = time.time()
+        while time.time() - t0 < load_timeout:
+            if proc.poll() is not None:
+                raise LocalVlmError(
+                    f"llama-server exited early with code {proc.returncode}"
+                    + (f"; see {log_path}" if log_path else ""))
+            if _health(url):
+                return ServerHandle(url=url, proc=proc)
+            time.sleep(1)
+        # A bare terminate() abandoned a llama-server that was still mmap-ing a
+        # 10 GB model and ignoring SIGTERM: it kept the GPU while the caller was
+        # told it never came up, and the operator's next attempt fought it.
+        # stop() is the escalation that already exists (terminate, wait, kill).
+        ServerHandle(url=url, proc=proc).stop()
+        raise LocalVlmError(f"llama-server did not become healthy within {load_timeout:.0f}s"
+                            + (f"; see {log_path}" if log_path else ""))
+    finally:
+        if log_path:
+            logf.close()
 
 
 # One server per (binary, weights, mmproj, gpu_layers) is kept warm for the
@@ -211,8 +235,17 @@ def get_server(
     with _servers_lock:
         existing = _servers.get(key)
         if existing is not None and existing.proc is not None and existing.proc.poll() is None \
-                and _health(existing.url):
+                and _health_retried(existing.url):
             return existing
+        if existing is not None:
+            # bug-hunt-2026-09-03 broll-2: the replacement used to overwrite
+            # _servers[key] and drop `existing` on the floor. A server that is
+            # alive but merely slow to answer /health then kept a whole VLM
+            # resident while a second copy loaded beside it, and neither
+            # stop_all_servers() nor the sidecar's stop_server() could ever
+            # reach it again (it is no longer in _servers). stop() is a no-op
+            # on an already-exited process and swallows its own errors.
+            existing.stop()
         handle = start_server(
             exe, model_path, mmproj_path, gpu_layers=gpu_layers, ctx=ctx,
             image_min_tokens=image_min_tokens, load_timeout=load_timeout, log_path=log_path,

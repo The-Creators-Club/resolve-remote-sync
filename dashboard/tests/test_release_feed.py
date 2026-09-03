@@ -52,13 +52,17 @@ def sign_record(seed: bytes, record: dict) -> dict:
 
 def make_record(*, kind="companion", platform="windows", version="0.9.0",
                 body=b"feed-exe-bytes", min_version="0.0.0", signed_binary=False,
-                seed=TEST_SEED, filename=None):
+                seed=TEST_SEED, filename=None, requires_dashboard=""):
     filename = filename or f"ccsync-companion-{version}.exe"
     record = {
         "kind": kind, "platform": platform, "version": version, "filename": filename,
         "sha256": hashlib.sha256(body).hexdigest(), "size_bytes": len(body),
         "min_version": min_version, "published_at": PUBLISHED_AT, "signed_binary": signed_binary,
     }
+    # An optional kind-extra field: signed only when present, exactly as
+    # release_trust.record_fields treats it.
+    if requires_dashboard:
+        record["requires_dashboard"] = requires_dashboard
     signed = sign_record(seed, record)
     signed["url"] = f"{FEED_BASE}/{platform}/{filename}"
     signed["notes"] = "test build"
@@ -892,3 +896,129 @@ def test_min_version_equal_to_the_version_is_fine(env, monkeypatch):
                     json={"platform": "windows", "version": "0.9.44"})
     assert r.status_code == 200
     assert dbmod.get_package(conn, "windows", "0.9.44") is not None
+
+
+# ------------------------------------ the ordering gate on the feed's third door
+# bug-hunt-2026-09-03 dash-release-jobs-2 and -3. REL-4 / SYS-13 says a
+# companion build that needs a newer dashboard may be STAGED here and must
+# never be what the fleet is offered. The feed had two ways past that: the
+# already-published branch went straight to db.set_current_package (which
+# checks retraction only), and a fresh one was downloaded in full and then
+# refused outright, so it was re-fetched every check and never staged.
+
+def test_a_staged_build_needing_a_newer_dashboard_is_not_made_current_by_the_feed(
+        env, monkeypatch):
+    client, conn, settings = env
+    record, body = make_record(version="0.9.70", requires_dashboard="99.0.0")
+    channel, sig = make_channel([record], current={"companion/windows": "0.9.70"})
+    patch_opener(monkeypatch, {
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode(), record["url"]: body,
+    })
+    assert client.post("/api/v1/admin/feed/policy",
+                       json={"policy": "stage"}).status_code == 200
+    assert client.post("/api/v1/admin/feed/check").json()["ok"] is True
+    row = dbmod.get_package(conn, "windows", "0.9.70")
+    assert row is not None and not row["is_current"]
+
+    assert client.post("/api/v1/admin/feed/policy",
+                       json={"policy": "current"}).status_code == 200
+    r = client.post("/api/v1/admin/feed/check")
+    assert r.status_code == 200
+    assert r.json()["applied"] == []
+    row = dbmod.get_package(conn, "windows", "0.9.70")
+    assert not row["is_current"]
+
+
+def test_a_blocked_build_is_staged_once_and_not_downloaded_again(env, monkeypatch):
+    client, conn, settings = env
+    assert client.post("/api/v1/admin/feed/policy",
+                       json={"policy": "current"}).status_code == 200
+    record, body = make_record(version="0.9.70", requires_dashboard="99.0.0")
+    channel, sig = make_channel([record], current={"companion/windows": "0.9.70"})
+    opener = patch_opener(monkeypatch, {
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode(), record["url"]: body,
+    })
+    assert client.post("/api/v1/admin/feed/check").json()["ok"] is True
+    row = dbmod.get_package(conn, "windows", "0.9.70")
+    assert row is not None, "the build must be staged, not thrown away"
+    assert not row["is_current"]
+    assert opener.requested.count(record["url"]) == 1
+
+    assert client.post("/api/v1/admin/feed/check").json()["ok"] is True
+    assert opener.requested.count(record["url"]) == 1
+    assert not dbmod.get_package(conn, "windows", "0.9.70")["is_current"]
+
+
+def test_a_build_this_dashboard_can_carry_is_still_made_current_from_the_shelf(
+        env, monkeypatch):
+    """The gate must not swallow the ordinary case: a staged build with no
+    stated requirement is made current when the pointer names it."""
+    client, conn, settings = env
+    record, body = make_record(version="0.9.71")
+    channel, sig = make_channel([record], current={"companion/windows": "0.9.71"})
+    patch_opener(monkeypatch, {
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode(), record["url"]: body,
+    })
+    assert client.post("/api/v1/admin/feed/policy",
+                       json={"policy": "stage"}).status_code == 200
+    assert client.post("/api/v1/admin/feed/check").json()["ok"] is True
+    assert not dbmod.get_package(conn, "windows", "0.9.71")["is_current"]
+    assert client.post("/api/v1/admin/feed/policy",
+                       json={"policy": "current"}).status_code == 200
+    r = client.post("/api/v1/admin/feed/check")
+    assert r.json()["applied"] == ["companion/windows 0.9.71"]
+    assert dbmod.get_package(conn, "windows", "0.9.71")["is_current"]
+
+
+# ------------------------------------------ the socket a 3xx is still holding
+
+class _TrackedHTTPError(urllib.error.HTTPError):
+    """An HTTPError that says whether the walk closed it.
+
+    urllib's own is an OPEN RESPONSE holding a socket, which is the whole
+    point of bug-hunt-2026-09-03 dash-release-jobs-5.
+    """
+
+    def __init__(self, url, location):
+        super().__init__(url, 302, "redirect", {"Location": location}, None)
+        self.closes = 0
+
+    def close(self):
+        self.closes += 1
+
+
+def test_every_redirect_hop_is_closed_on_the_way_past(env, monkeypatch):
+    client, conn, settings = env
+    record, body = make_record()
+    channel, sig = make_channel([record])
+    hop1 = f"{ASSET_HOST}/hop1/channel.json"
+    hop2 = f"{ASSET_HOST}/hop2/channel.json"
+    errors = [_TrackedHTTPError(CHANNEL_URL, hop1), _TrackedHTTPError(hop1, hop2)]
+    patch_opener(monkeypatch, {
+        CHANNEL_URL: errors[0], hop1: errors[1],
+        hop2: json.dumps(channel).encode(), SIG_URL: sig.encode(),
+    })
+    assert client.post("/api/v1/admin/feed/check").json()["ok"] is True
+    assert [e.closes for e in errors] == [1, 1]
+
+
+def test_a_retracted_build_is_still_refused_by_the_shared_gate(env, monkeypatch):
+    """REL-3 through the new door: the retraction check must survive the move
+    from db.set_current_package to package_store.make_current."""
+    client, conn, settings = env
+    record, body = make_record(version="0.9.72")
+    channel, sig = make_channel([record], current={"companion/windows": "0.9.72"})
+    patch_opener(monkeypatch, {
+        CHANNEL_URL: json.dumps(channel).encode(), SIG_URL: sig.encode(), record["url"]: body,
+    })
+    assert client.post("/api/v1/admin/feed/policy",
+                       json={"policy": "stage"}).status_code == 200
+    assert client.post("/api/v1/admin/feed/check").json()["ok"] is True
+    assert dbmod.retract_package(conn, "companion", "windows", "0.9.72",
+                                 "it corrupts proxies", dbmod.utcnow_iso())
+    conn.commit()
+    assert client.post("/api/v1/admin/feed/policy",
+                       json={"policy": "current"}).status_code == 200
+    r = client.post("/api/v1/admin/feed/check")
+    assert r.json()["applied"] == []
+    assert not dbmod.get_package(conn, "windows", "0.9.72")["is_current"]

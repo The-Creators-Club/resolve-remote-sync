@@ -384,3 +384,61 @@ def test_repoint_leaves_the_folder_where_it_is_when_the_drive_is_out(tmp_path):
     mgr.reconcile()
     assert "set_path" not in admin.names()
     assert not gone.exists()
+
+
+# -- comp-sync-4: the re-point pauses, so the same pass must release it --------
+
+
+def _running_folder_at(tmp_path, old_path):
+    return FakeAdmin(
+        folder={"id": SLUG, "paused": False, "path": str(old_path),
+                "ignoreDelete": True},
+        ignores=list(restricted_ignore_lines([SUB])),
+    )
+
+
+def test_a_repointed_folder_is_released_in_the_same_pass(tmp_path):
+    """bug-hunt-2026-09-03 comp-sync-4: _repoint pauses the folder, and the
+    unpause branches used to read the dict fetched BEFORE it -- so a lender
+    that had been running was seen as unpaused and left paused until the next
+    pass noticed. A borrowed subtree stopped syncing for a whole rotation with
+    no line saying why (repath.py unpauses in the same function, deliberately)."""
+    old = tmp_path / "Projects" / "2026" / "FF5" / "Old Name"
+    old.mkdir(parents=True)
+    admin = _running_folder_at(tmp_path, old)
+    mgr = _manager(admin, tmp_path)
+    assert mgr.reconcile() == {SLUG: "repaired"}
+    assert admin.folder["path"] == local_path_for(tmp_path, LENDER)
+    # Paused for the move, then released -- in that order, and after the path.
+    paused = admin.calls.index(("set_paused", SLUG, True))
+    repointed = admin.calls.index(("set_path", SLUG, local_path_for(tmp_path, LENDER)))
+    released = admin.calls.index(("set_paused", SLUG, False))
+    assert paused < repointed < released
+    assert admin.folder["paused"] is False
+
+
+def test_a_repointed_folder_stays_paused_while_the_machine_is_halted(tmp_path):
+    """A halt is a stop, not pacing: the release comp-sync-4 adds must not
+    become a way round it."""
+    old = tmp_path / "Projects" / "2026" / "FF5" / "Old Name"
+    old.mkdir(parents=True)
+    admin = _running_folder_at(tmp_path, old)
+    mgr = _manager(admin, tmp_path, halted=lambda: True)
+    mgr.reconcile()
+    assert ("set_paused", SLUG, False) not in admin.calls
+    assert admin.folder["paused"] is True
+
+
+def test_a_repointed_folder_stays_paused_when_its_ignores_are_unconfirmed(tmp_path):
+    """The tighter rule this module exists for: a lender folder must never go
+    online on the plain project list, re-point or no re-point."""
+    old = tmp_path / "Projects" / "2026" / "FF5" / "Old Name"
+    old.mkdir(parents=True)
+    admin = _running_folder_at(tmp_path, old)
+    def _boom(folder_id):
+        raise RuntimeError("syncthing did not answer")
+
+    admin.get_ignores = _boom
+    mgr = _manager(admin, tmp_path)
+    mgr.reconcile()
+    assert ("set_paused", SLUG, False) not in admin.calls

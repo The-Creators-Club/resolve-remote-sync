@@ -1156,11 +1156,31 @@ const pickerPage = (cap, flag = true) => boot(async (method, url) => {
     return {json: {projects: PROJECTS, projects_available: true, error: null}};
   }
   const b = baseline(method, url); if (b) return b;
+  // Both job creates, so the scenario can read the BODY the SPA posts
+  // (ytdl-web-1): the picker's GET and this POST have to agree about which
+  // computer is asking, and for a release they did not.
+  if (method === 'POST' && (url === 'api/jobs' || url === 'api/jobs/urls')) {
+    return {json: {job_id: 77}};
+  }
+  if (url === 'api/jobs/77') return {json: POLLRES(JOB({id: 77}))};
   return {json: {}};
 });
 
 const projectQuery = h => (h.calls.filter(c => c.url.startsWith('api/projects'))
   .map(c => c.url));
+
+// What SEARCH and GET LINKS actually posted, from one page.
+const jobBodies = async h => {
+  h.get('q').value = 'reef';
+  h.get('project').value = PROJECTS[0].slug;
+  await h.app.runSearch();
+  h.get('urls').value = 'https://youtu.be/JJJJJJJJJJJ';
+  await h.app.runUrls();
+  await flush();
+  const body = u => (h.calls.filter(c => c.method === 'POST' && c.url === u)
+    .map(c => c.body)[0]);
+  return {search: body('api/jobs'), urls: body('api/jobs/urls')};
+};
 
 scenarios['the_picker_says_which_computer_is_asking'] = async () => {
   // A companion that names the machine. Deliberately ok:false -- a tray app
@@ -1177,7 +1197,12 @@ scenarios['the_picker_says_which_computer_is_asking'] = async () => {
   const off = await pickerPage(() => ({json: {ok: true, machine: 'owen-rig'}}), false);
   return {named: projectQuery(named), none: projectQuery(none),
           old: projectQuery(old), off: projectQuery(off),
-          off_loopback: off.calls.filter(c => c.url.startsWith('http://127')).length};
+          off_loopback: off.calls.filter(c => c.url.startsWith('http://127')).length,
+          // ...and what the two job POSTs carried, which is the half that was
+          // missing (ytdl-web-1): a picker offering what the POST then refuses
+          // is a worse page than the empty picker CR-72 set out to fix.
+          named_bodies: await jobBodies(named),
+          none_bodies: await jobBodies(none)};
 };
 
 scenarios['picking_a_project_remembers_it'] = async () => {
@@ -2587,6 +2612,18 @@ def test_the_picker_tells_the_server_which_computer_is_asking(spa):
     assert all('machine=' not in u for u in r['off']), r['off']
     # ...and with the feature off the page did not so much as look at 8899.
     assert r['off_loopback'] == 0, r['off_loopback']
+    # ytdl-web-1 (bug-hunt-2026-09-03): the GET said which computer was asking
+    # and the two job POSTs did not, so at a mixed account's wired rig the
+    # picker offered every active project and SEARCH / GET LINKS then answered
+    # "that project is not one you are syncing". Both payloads carry it now.
+    for body in r['named_bodies'].values():
+        assert body['machine'] == 'owen-rig', body
+    # ...and with no companion the key is ABSENT, never '': the server reads a
+    # missing `machine` as "unknown", and unknown is not wired. An empty string
+    # is a machine name nobody has heard of, which is the same answer today and
+    # a hostname collision away from not being.
+    for body in r['none_bodies'].values():
+        assert 'machine' not in body, body
 
 
 def test_pasting_links_posts_the_whole_form_and_attaches_the_job(spa):

@@ -64,7 +64,8 @@ class FakeDashboard:
         return self.status, dict(self.answer)
 
 
-def a_checkout(tmp_path, *, contract=1, takes_bridge=True, importable=True):
+def a_checkout(tmp_path, *, contract=1, takes_bridge=True, importable=True,
+               class_name="SyncEngine"):
     """A fake MulticamPipeline whose cards package is two tiny modules.
 
     Deliberately NOT the real one: what is under test is the shim's judgement
@@ -86,7 +87,7 @@ def a_checkout(tmp_path, *, contract=1, takes_bridge=True, importable=True):
     version = "" if contract is None else f"BRIDGE_CONTRACT_VERSION = {contract}\n"
     (cards / "resolve_engine.py").write_text(textwrap.dedent(f"""
         {version}
-        class SyncEngine(object):
+        class {class_name}(object):
             {signature}
                 self.root = root
                 self.bridge = getattr(self, 'bridge', None) or locals().get('bridge')
@@ -225,6 +226,33 @@ def test_an_unrelated_python_is_not_an_agent(tmp_path):
         ["python -m pip install ccsync", "C:\\Windows\\explorer.exe"]) is None
 
 
+def test_a_process_listing_that_failed_part_way_is_not_an_answer(monkeypatch):
+    """bug-hunt-2026-09-03 comp-resolve-6. A CIM query that emits lines and
+    then fails is a TRUNCATED list, and reading it as authoritative is how a
+    running standalone agent goes unseen: two Resolve clients on one machine,
+    the CR-68 outcome this gate exists to prevent."""
+    class _Out:
+        returncode = 1
+        stdout = "explorer.exe\npython.exe -m pip\n"
+
+    monkeypatch.setattr(role_mod.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(role_mod.subprocess, "run", lambda *a, **k: _Out())
+    assert role_mod.running_command_lines() is None
+    # ...and "cannot tell" is a refusal, not a clearance.
+    assert role_mod.standalone_agent(role_mod.running_command_lines()) is not None
+
+
+def test_a_process_listing_that_succeeded_is_used(monkeypatch):
+    class _Out:
+        returncode = 0
+        stdout = "python reorder_web.py --agent http://truenas:8800/\n"
+
+    monkeypatch.setattr(role_mod.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(role_mod.subprocess, "run", lambda *a, **k: _Out())
+    lines = role_mod.running_command_lines()
+    assert lines and "reorder_web.py" in lines[0]
+
+
 def test_the_probe_is_cached_rather_than_run_per_tick(tmp_path):
     calls = []
 
@@ -266,6 +294,26 @@ def test_a_declared_contract_without_the_argument_is_refused(tmp_path):
     role = a_role(tmp_path)
     assert role.start() is False
     assert "bridge" in role.status()["detail"]
+
+
+def test_the_engine_may_be_called_resolveengine(tmp_path):
+    """bug-hunt-2026-09-03 comp-resolve-3: check_contract accepts either
+    spelling and _start used to hard-require SyncEngine, so the checkout that
+    exists today (ResolveEngine, the name §7c's own prose uses) passed the
+    contract test and then died as an AttributeError inside start()'s
+    catch-all, under a sentence that named nothing."""
+    a_checkout(tmp_path, class_name="ResolveEngine")
+    role = a_role(tmp_path)
+    assert role.start() is True
+    assert type(role._engine).__name__ == "ResolveEngine"
+    assert role._engine.bridge is not None
+    role.stop()
+
+
+def test_check_contract_hands_back_the_class_it_validated(tmp_path):
+    a_checkout(tmp_path, class_name="ResolveEngine")
+    engine_mod, _agent = role_mod.load_engine(tmp_path / "MulticamPipeline")
+    assert role_mod.check_contract(engine_mod) is engine_mod.ResolveEngine
 
 
 def test_a_checkout_that_does_not_import_is_a_sentence(tmp_path):

@@ -727,3 +727,16 @@ def test_the_upload_plan_names_the_one_file_the_server_named(tmp_path):
     assert plan == {"Slow Burn_2.mp3": (music_ingest.KIND_AUDIO,
                                         str(tmp_path / "Slow Burn.mp3"))}
     assert ing._upload_plan({"outputs": {"audio": "x.mp3"}}) == {}
+
+
+def test_the_music_checkpoint_is_the_same_save():
+    """bug-hunt-2026-09-03 comp-broll-music-1 names music_ingest as well as
+    b-roll, and the answer is that MusicIngestor INHERITS _save: the snapshot
+    that stopped being lost to a thread adding a key is this one. Pinned
+    because a second copy of _save here would bring the defect back with it,
+    and _crunch_item's item["analysis"] = ... is exactly the mutator."""
+    import inspect
+
+    assert music_ingest.MusicIngestor._save is broll_ingest.BrollIngestor._save
+    assert "_snapshot(self._batch)" in inspect.getsource(
+        broll_ingest.BrollIngestor._save)

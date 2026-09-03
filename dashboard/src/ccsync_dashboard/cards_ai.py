@@ -217,6 +217,14 @@ class Runner:
         NEVER PROBES. This is read on every state publish and the CLI probe
         is a real one-token call behind a 600 s cache; a page poll must not
         be the thing that spends a subscription.
+
+        Which is why the unprobed read has to answer from what the container
+        already knows (CR-121, 2026-09-03): every `start_*` in the cards
+        engine refuses up front on this, so an unprobed CLI reported as
+        "unavailable" dimmed translate, semantic search and the summaries on
+        a site whose Claude Code was installed and signed in. A CLI nothing
+        has ever checked is still not-ok, but it says so as "not checked yet"
+        -- the page prints this string verbatim in the button's tooltip.
         """
         try:
             choice, detail = self._choice(probe=False)
@@ -224,11 +232,39 @@ class Runner:
             return {"ok": False, "why": f"the dashboard could not resolve an AI "
                                         f"provider ({type(e).__name__}: {e})"}
         if not choice.ok:
-            return {"ok": False, "why": choice.reason or detail}
+            return {"ok": False, "why": self._unresolved_why(choice.reason or detail)}
         if choice.name not in CLAUDE_PROVIDERS:
             return {"ok": False, "why": f"this site's AI provider is "
                                         f"{choice.label}, not Claude"}
         return {"ok": True, "why": ""}
+
+    def _unresolved_why(self, reason: str) -> str:
+        """The sentence for "status() could not resolve a provider".
+
+        "No provider has a working credential" is the wrong thing to tell an
+        admin whose Claude Code is installed but has never been probed in
+        this process (CR-121): nothing here is allowed to probe, so the
+        honest answer names the button that is. Any failure reading the rows
+        keeps the resolver's own reason -- this is a tooltip, never a place
+        to raise from.
+        """
+        try:
+            from . import db as dbmod
+
+            conn = dbmod.connect(self._settings.db_path)
+            try:
+                rows = ai_providers.provider_states(
+                    conn, self._settings, probe=False,
+                    only=(ai_providers.CLAUDE_CODE,))
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            return reason
+        if any(r["status"] == ai_providers.ST_UNKNOWN for r in rows):
+            return ("Claude Code has not been checked on this server yet. Open "
+                    "Settings -> AI providers and click TEST beside it (or set "
+                    "an ANTHROPIC_API_KEY there).")
+        return reason
 
     # -- the two backends --------------------------------------------------
 

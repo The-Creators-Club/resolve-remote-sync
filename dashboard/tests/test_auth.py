@@ -615,3 +615,70 @@ def test_the_previous_key_list_is_named_at_boot_and_still_held_to_the_floor():
     problems = auth.check_boot_secrets(Settings(
         session_secret="x" * 40, session_secrets_previous=("changeme",)))
     assert any("DASH_SESSION_SECRET_PREVIOUS" in p for p in problems)
+
+
+def test_a_retired_key_identity_works_on_every_companion_route(tmp_path):
+    """bug-hunt-2026-09-03 dash-api-1: DASH-2's drain window was wired to
+    /report alone. Selection reads, the tray's untick-before-delete,
+    diagnostics and the fleet-job routes all verified against the CURRENT
+    secret only, so a rotation left the grid moving while no machine could
+    learn its plan, send a bundle, or heartbeat the job it already held.
+
+    A route added after this one belongs in this list."""
+    from ccsync_dashboard import db as dbmod
+
+    old, new = "old-secret-not-a-real-one", "new-secret-not-a-real-one"
+    token = "companion-token-not-a-real-one"
+    projects = tmp_path / "Projects"
+    projects.mkdir(parents=True)
+    settings = Settings(db_path=str(tmp_path / "rot.db"), session_secret=new,
+                        session_secrets_previous=(old,), report_token=token,
+                        admin_users=frozenset({"owen"}),
+                        projects_dir=str(projects))
+    app = create_app(settings)
+    with TestClient(app) as client:
+        conn = dbmod.connect(settings.db_path)
+        dbmod.upsert_machine_state(conn, "jsmith", "EDIT-PC", None,
+                                   dbmod.utcnow_iso(), mode="editor")
+        conn.commit()
+        # An identity minted BEFORE the rotation, which is every companion in
+        # the fleet until its editor next signs in.
+        retired = {"X-CCSync-Token": token,
+                   "X-CCSync-Identity": auth.make_identity_token(old, "jsmith")}
+
+        assert client.get("/api/v1/selection/jsmith",
+                          headers=retired).status_code == 200
+        # Untick of a project this machine does not have is a no-op, not a
+        # refusal: what is under test is the gate, not the row.
+        assert client.delete("/api/v1/selection/jsmith/2026-ff5-animals",
+                             headers=retired).status_code in (200, 404)
+        assert client.post("/api/v1/diagnostics", headers=retired, json={
+            "editor_name": "jsmith", "machine": "EDIT-PC", "trigger": "button",
+            "text": "identity: signed with the old key"}).status_code == 200
+
+        client.cookies.set(auth.COOKIE_NAME, auth.make_session_cookie(new, "owen"))
+        job_id = client.post("/api/v1/jobs", json={
+            "kind": "whisper",
+            "inputs": {"root": "vault", "rel_path": "Vault/x"}}).json()["job"]["id"]
+        client.cookies.delete(auth.COOKIE_NAME)
+        claim = client.post("/api/v1/jobs/claim", headers=retired, json={
+            "machine": "EDIT-PC",
+            "capabilities": {"whisper": True, "gpu_present": True,
+                             "gpu_vram_gb": 10, "mounts": ["vault"],
+                             "idle_seconds": 900, "cpu_count": 16}})
+        assert claim.status_code == 200, claim.text
+        assert claim.json()["job"]["id"] == job_id
+        assert client.post(f"/api/v1/jobs/{job_id}/heartbeat", headers=retired,
+                           json={"machine": "EDIT-PC"}).status_code == 200
+
+        # A key that was NEVER trusted is still nothing on all four.
+        stranger = {"X-CCSync-Token": token,
+                    "X-CCSync-Identity": auth.make_identity_token("other", "jsmith")}
+        assert client.get("/api/v1/selection/jsmith",
+                          headers=stranger).status_code == 401
+        assert client.post("/api/v1/diagnostics", headers=stranger, json={
+            "editor_name": "jsmith", "machine": "EDIT-PC",
+            "text": "x"}).status_code == 401
+        assert client.post(f"/api/v1/jobs/{job_id}/heartbeat", headers=stranger,
+                           json={"machine": "EDIT-PC"}).status_code == 403
+        conn.close()

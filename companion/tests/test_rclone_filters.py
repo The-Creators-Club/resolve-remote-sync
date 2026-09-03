@@ -36,6 +36,7 @@ from ccsync_companion.sync.rclone_lane import (
     build_filter_rules_up,
     build_up_command,
     parse_json_log,
+    path_matches_lane_a_filter,
     rclone_available,
     reset_rclone_available_cache,
     write_files_from_list,
@@ -1947,3 +1948,70 @@ def test_lane_a_dry_run_skips_a_conversion_in_flight(rclone_binary, tmp_path):
     assert "Youtube/Interview.mp4" in log_text.replace("\\", "/")
     for name in ("editready", "original", "temp", "f137", "failed"):
         assert name not in log_text, name
+
+
+# -- comp-sync-1: express is lane A's OTHER door and must agree with the rules -
+
+# Every family the rule list decides, in both spellings of "would rclone take
+# this": the finished names, the five YT-3 work-file patterns, the AppleDouble
+# sidecar, a Proxy component, and the near-misses that must NOT be caught.
+_LANE_A_EQUIVALENCE_NAMES = [
+    "Interview.mp4",
+    "Interview.MOV",
+    "Interview.editready.mp4",
+    "Interview.original.mp4",
+    "Interview.ORIGINAL.MOV",
+    "Interview.temp.mp4",
+    "Interview.f137.mp4",
+    "Interview.f251.part.mp4",
+    "Interview.mp4.failed",
+    "Interview.failed",
+    "._Interview.mov",
+    "notes.txt",
+    "originals.mp4",          # near-miss: no dot before `original`
+    "Interview.f13.mp4",      # near-miss: two digits, not three
+    "Proxynotreal.mov",       # near-miss: a real original whose name resembles Proxy
+]
+
+
+def test_the_express_predicate_agrees_with_the_lane_a_rules_name_by_name(
+        rclone_binary, tmp_path):
+    """bug-hunt-2026-09-03 comp-sync-1: path_matches_lane_a_filter is the ONLY
+    gate on the express door (build_express_command can carry no filter file),
+    and it claimed equivalence with build_filter_rules_up() while implementing
+    neither YT-3's five work-file rules nor the file-moves exclusions. This
+    pins the claim on both sides at once: the real binary's verdict for each
+    name, against the predicate's."""
+    src = tmp_path / "src" / "Youtube"
+    src.mkdir(parents=True)
+    old = time.time() - 3600  # past --min-age, so nothing is skipped for age
+    for name in _LANE_A_EQUIVALENCE_NAMES:
+        path = src / name
+        path.write_text("some bytes")  # past --min-size 1B
+        os.utime(path, (old, old))
+
+    filter_file = write_filter_file(build_filter_rules_up(), tmp_path / "filter_up.txt")
+    dst = tmp_path / "dst"
+    cmd = build_up_command(rclone_binary, str(tmp_path / "src"), None, str(dst),
+                           filter_file)
+    cmd[3] = str(dst)
+    proc = subprocess.run(cmd + ["--dry-run"], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    log_text = proc.stderr.replace("\\", "/")
+
+    for name in _LANE_A_EQUIVALENCE_NAMES:
+        rclone_takes_it = f"Youtube/{name}" in log_text
+        assert path_matches_lane_a_filter(f"Projects/2026/A/Youtube/{name}") ==             rclone_takes_it, name
+
+
+def test_the_express_predicate_refuses_every_ytdl_work_file_without_a_binary():
+    """The same equivalence in pure Python, so it is checked on a machine with
+    no rclone too (comp-sync-1)."""
+    assert path_matches_lane_a_filter("Projects/A/Youtube/Interview.mp4")
+    for name in ("Interview.editready.mp4", "Interview.original.mp4",
+                 "Interview.temp.mp4", "Interview.f137.mp4",
+                 "Interview.f251.part.mp4", "Interview.mp4.failed"):
+        assert not path_matches_lane_a_filter(f"Projects/A/Youtube/{name}"), name
+    # Near-misses stay uploadable: these are real originals.
+    assert path_matches_lane_a_filter("Projects/A/originals.mp4")
+    assert path_matches_lane_a_filter("Projects/A/Interview.f13.mp4")

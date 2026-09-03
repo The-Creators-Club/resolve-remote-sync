@@ -3216,5 +3216,15 @@ def service_worker() -> Response:
 
 @router.get("/offline")
 def page_offline(request: Request):
-    """What the worker paints when a navigation cannot reach the server."""
-    return _render(request, "offline.html", {})
+    """What the worker paints when a navigation cannot reach the server.
+
+    Rendered as if NOBODY were signed in (bug-hunt-2026-09-03
+    dash-mounts-ui-2). sw.js precaches this page with the session cookie
+    attached and keeps the copy until VERSION changes the cache name, so a
+    normal _render froze one specific editor's name, their "(admin)" drawer
+    and a live CSRF token into a page any later user of that browser sees.
+    _render's context is setdefault, so seeding the three session keys here
+    is the whole fix.
+    """
+    return _render(request, "offline.html",
+                   {"session_user": None, "session_is_admin": False, "csrf_token": ""})

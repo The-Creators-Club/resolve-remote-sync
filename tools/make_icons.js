@@ -1,6 +1,16 @@
-// The dashboard's PWA icons, rasterised from dashboard/static/icons/icon.svg.
+// The dashboard's apple-touch-icon, rasterised from
+// dashboard/static/icons/icon.svg.
 //
 //     node tools/make_icons.js [--check]
+//
+// SCOPE NARROWED 2026-09-03. This script used to draw all five PNGs in
+// static/icons/. The four PWA icons the manifest names are written by
+// tools/gen_icons.py now, from the one brand mark (cc_mark_white.png) that the
+// tray, the popups and the exe icon already share -- the `any` pair with NO
+// ground at all, which is the whole point of that change and is not something
+// a screenshot of a panelled SVG can produce. icon-180.png stays HERE, on
+// purpose: it is the apple-touch-icon, and iOS composites a transparent one
+// onto black, so it is the one icon that still wants icon.svg's panel.
 //
 // Why a node script and not PIL: the dashboard venv has no PIL and this repo
 // does not add a dependency to draw five PNGs once a year (MOBILE_PLAN.md 4 M4,
@@ -11,10 +21,10 @@
 // them when the mark changes, and `--check` re-renders into a temp dir and
 // compares the sizes so CI could notice a stale commit.
 //
-// The mark's paths live in icon.svg only. This script re-embeds them at two
-// scales: `any` is icon.svg as drawn (the mark at 74% of the box, inside a
-// rounded panel), `maskable` is full bleed with the mark at 55% so it clears
-// the 80% safe circle Android crops to.
+// The mark's paths live in icon.svg only. This script re-embeds them at the
+// `any` scale (the mark at 74% of the box, inside a rounded panel); the
+// `maskable` branch below is kept intact so the file still documents that
+// geometry, but nothing in TARGETS asks for it any more.
 const { spawn } = require('child_process');
 const os = require('os'), path = require('path'), fs = require('fs');
 
@@ -29,14 +39,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 let ws, id = 0, chrome = null;
 const pending = new Map();
 
-// name -> [size, purpose]. 180 is the apple-touch-icon (base.html), 192/512
-// are what Chrome's install prompt and the splash screen want.
+// name -> [size, purpose]. 180 is the apple-touch-icon (base.html) and since
+// 2026-09-03 the only file this script owns; 192/512 and the maskable pair are
+// tools/gen_icons.py's. Do not put them back here: two writers for one file is
+// how a mark half-changes.
 const TARGETS = [
   ['icon-180.png', 180, 'any'],
-  ['icon-192.png', 192, 'any'],
-  ['icon-512.png', 512, 'any'],
-  ['icon-192-maskable.png', 192, 'maskable'],
-  ['icon-512-maskable.png', 512, 'maskable'],
 ];
 
 function send(m, p) {

@@ -724,6 +724,23 @@ def _already_terminal(row, reported):
     return {'ok': True, 'state': row['dl_state'], 'duplicate': True}
 
 
+def _refuse_a_name_that_is_not_a_filename(name):
+    """A clip's reported name is a FILENAME or it is a 400 (ytdl-web-3,
+    bug-hunt-2026-09-03).
+
+    Neither of the two directory-shaped names was handled, and they failed in
+    opposite directions. `'..'` reached config.safe_join, whose
+    PathTraversalError nothing catches, so the fleet route answered 500 with a
+    traceback in the dashboard log. `'.'` is worse: safe_join SKIPS it, so the
+    clip was recorded `done` with `filepath` at the term directory and a ledger
+    row whose rel_path ends in '/.' -- a permanent "the fleet already has this"
+    pointing at a folder, and the ledger never cascades (YTDL-15's rule).
+    safe_join's traversal check was never filename validation; this is.
+    """
+    if name in ('', '.', '..') or '/' in name or '\\' in name:
+        raise HTTPException(400, f'{name!r} is not a file name')
+
+
 def _record_done(c, job, row, name, body, host):
     """The `done` half of worker._phase_download, written for a clip that
     landed on somebody else's disk. -> whether this call was the one that
@@ -738,6 +755,7 @@ def _record_done(c, job, row, name, body, host):
     """
     job_id = job['id']
     vid = row['video_id']
+    _refuse_a_name_that_is_not_a_filename(name)
     path = config.safe_join(config.PROJECTS_ROOT, job['project_label'],
                             db.YOUTUBE_DIR, job['term_dir'], name)
     rel = '/'.join(p for p in (db.YOUTUBE_DIR, job['term_dir'], name) if p)

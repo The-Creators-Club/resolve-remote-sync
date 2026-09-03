@@ -1907,10 +1907,20 @@ async function runSearch() {
     // Always one of CANDIDATE_CAPS; the server refuses anything else rather
     // than clamping it, so this must never send the raw DOM value.
     max_candidates: capValue(),
-    // CR-72 follow-up (2026-08-30): the same signal loadProjects() sent to
+    // CR-72 follow-up (2026-08-30): the same signals loadProjects() sent to
     // fill `project_slug`'s options, so resolve_project's server-side check
     // never disagrees with what the picker was shown.
+    //
+    // `machine` was missing until ytdl-web-1 (bug-hunt-2026-09-03), and the
+    // half that was missing is the half that matters at a mixed account's
+    // wired rig: the picker offered every active project and this POST was
+    // then refused with "that project is not one you are syncing", which is a
+    // worse page than the empty picker CR-72 set out to fix. OMITTED, never
+    // '', when the probe found no machine -- the server reads an absent
+    // `machine` as "unknown", and unknown is not wired, which is the
+    // degradation path the whole design rests on.
     local: localWanted(),
+    ...(localMachine ? {machine: localMachine} : {}),
   };
   const launch = async () => {
     const r = await post('api/jobs', payload);
@@ -1968,8 +1978,10 @@ async function runUrls() {
     urls, project_slug: slug,
     quality: $('#quality').value,
     folder: box ? box.value.trim() : '',
-    // CR-72 follow-up: see runSearch's payload.
+    // CR-72 follow-up, and ytdl-web-1's missing `machine`: see runSearch's
+    // payload for both.
     local: localWanted(),
+    ...(localMachine ? {machine: localMachine} : {}),
   };
   const launch = async () => {
     const r = await post('api/jobs/urls', payload);

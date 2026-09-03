@@ -280,7 +280,12 @@ class CardsGate:
     async def __call__(self, scope, receive, send) -> None:
         if scope.get("type") == "http":
             for path in sub_paths(scope):
-                if path in BLOCKED_PATHS:
+                # bug-hunt-2026-09-03 dash-release-jobs-4: the set holds bare
+                # paths, so `/cards/api/restart/` walked straight past an
+                # exact-membership test into a handler that may normalise the
+                # trailing slash itself. The gate is the first of two locks
+                # and it must not be the thinner one.
+                if (path.rstrip("/") or "/") in BLOCKED_PATHS:
                     await _json_response(send, 200, {
                         "error": "this Timeline Cards is part of the dashboard "
                                  "and cannot restart itself -- redeploy the "
@@ -365,6 +370,12 @@ def mount_cards(app: FastAPI, settings: Settings) -> tuple[str, str]:
         runner = cards_ai.make_runner(settings)
         engine = build_engine(project_agent_mod, settings, claude_runner=runner)
         engine.start()
+        # bug-hunt-2026-09-03 dash-release-jobs-1: published BEFORE anything
+        # else can fail, because `stop_engine` is the only shutdown path and
+        # it finds the engine here. Assigned after the wrap, a wrap that
+        # raised left the sweep and the ffmpeg worker running for the life of
+        # the container with nothing holding a reference to them.
+        app.state.cards_engine = engine
     except Exception as e:  # noqa: BLE001
         log.warning("the Timeline Cards engine did not start (%s: %s); the "
                     "dashboard continues without /cards", type(e).__name__, e)
@@ -385,7 +396,6 @@ def mount_cards(app: FastAPI, settings: Settings) -> tuple[str, str]:
         return _detail(ABSENT, f"the WSGI shim did not build "
                                f"({type(e).__name__}: {e})")
 
-    app.state.cards_engine = engine
     app.mount(MOUNT_PATH, CardsGate(asgi))
     log.info("Timeline Cards mounted at %s (root %s, from %s)",
              MOUNT_PATH, root, src)

@@ -602,3 +602,125 @@ def test_the_key_is_never_in_a_query_string(env):
     # The query is simply not read: the stored value came from the body.
     assert resp.status_code == 200
     assert json.loads(resp.text)["providers"][1]["masked"] == "sk-…abcd"
+
+
+# ------------------------------------- an unprobed CLI is not an unavailable one
+# CR-121 (2026-09-03). `probe=False` is the read Timeline Cards' status() makes
+# on every state publish, and it used to answer ST_UNKNOWN + available=False
+# for every CLI. Availability is a boolean by the time `resolve_provider` sees
+# it, so a site whose Claude Code the wizard had installed and signed in was
+# told "no provider has a working credential" and every Claude button on the
+# /cards page was dimmed.
+
+def no_subprocess(monkeypatch):
+    """Any probe at all fails the test rather than quietly costing a call."""
+    def boom(*a, **kw):
+        raise AssertionError("an unprobed read must not spawn a subprocess")
+
+    monkeypatch.setattr(ai_providers, "_run", boom)
+    monkeypatch.setattr(ai_providers.subprocess, "run", boom)
+
+
+def fake_wizard(monkeypatch, *, installed=True, state="signed_in"):
+    """`cli_tools.setup_snapshot` as the page sees it after a SET UP run."""
+    def snapshot(conn, settings, name):
+        return {
+            "tool": name, "supported": True, "unsupported_detail": "",
+            "install": {"installed": installed, "installed_version": "2.1.234",
+                        "installed_path": "/data/tools/claude/bin/claude"},
+            "signin": {"state": state, "account": ""},
+            "signed_in": state == "signed_in",
+        }
+
+    monkeypatch.setattr(ai_providers.cli_tools, "setup_snapshot", snapshot)
+
+
+def test_the_wizards_snapshot_answers_an_unprobed_cli(env, monkeypatch):
+    _client, conn, settings = env
+    enable_cli(conn)
+    no_subprocess(monkeypatch)
+    fake_wizard(monkeypatch)
+    row = {r["name"]: r for r in
+           ai_providers.provider_states(conn, settings, probe=False)}["claude_code"]
+    assert row["status"] == ai_providers.ST_AVAILABLE
+    assert row["available"] is True
+    assert "wizard" in row["detail"] and "not re-probed" in row["detail"]
+    # And with no API key anywhere, that is what the chain resolves to.
+    choice = ai_providers.resolved(conn, settings, probe=False)
+    assert choice.ok and choice.name == "claude_code"
+
+
+def test_a_stale_probe_answers_without_re_probing(env, monkeypatch):
+    _client, conn, settings = env
+    enable_cli(conn)
+    fake_wizard(monkeypatch, installed=False, state="idle")
+    ai_providers._store_probe("claude_code", {
+        "installed": True, "signed_in": True, "path": "/usr/bin/claude",
+        "version": "2.1.234", "detail": ""})
+    # Older than the TTL: the answer is still what the CLI itself said, and
+    # refreshing it is the call `probe=False` exists to avoid.
+    ai_providers._probe_cache["claude_code"]["at"] -= ai_providers.PROBE_TTL_SECONDS * 10
+    no_subprocess(monkeypatch)
+    row = {r["name"]: r for r in
+           ai_providers.provider_states(conn, settings, probe=False)}["claude_code"]
+    assert row["status"] == ai_providers.ST_AVAILABLE
+    assert row["available"] is True
+    assert row["path"] == "/usr/bin/claude"
+    assert "not re-checked" in row["detail"]
+    assert ai_providers.resolved(conn, settings, probe=False).name == "claude_code"
+
+
+def test_nothing_known_is_still_unknown_and_not_available(env, monkeypatch):
+    _client, conn, settings = env
+    enable_cli(conn)
+    no_subprocess(monkeypatch)
+    fake_wizard(monkeypatch, installed=False, state="idle")
+    monkeypatch.setattr(ai_providers.shutil, "which", lambda binary: None)
+    row = {r["name"]: r for r in
+           ai_providers.provider_states(conn, settings, probe=False)}["claude_code"]
+    assert row["status"] == ai_providers.ST_UNKNOWN
+    assert row["available"] is False
+    assert ai_providers.resolved(conn, settings, probe=False).ok is False
+
+
+def test_an_off_site_is_still_disabled_not_guessed(env, monkeypatch):
+    """The feature flag beats every source of evidence: an off site must not
+    even read the wizard's view of somebody's agent binary."""
+    _client, conn, settings = env
+    no_subprocess(monkeypatch)
+    ai_providers._store_probe("claude_code", {
+        "installed": True, "signed_in": True, "path": "/usr/bin/claude",
+        "version": "2.1.234", "detail": ""})
+    row = {r["name"]: r for r in
+           ai_providers.provider_states(conn, settings, probe=False)}["claude_code"]
+    assert row["status"] == ai_providers.ST_DISABLED
+    assert row["available"] is False
+
+
+def test_timeline_cards_status_is_ok_on_a_wizard_signed_in_cli(env, monkeypatch):
+    """The bug as the owner met it: Settings -> AI providers showed Claude Code
+    installed and signed in, and the /cards page said "claude not available on
+    this server"."""
+    from ccsync_dashboard import cards_ai
+
+    _client, conn, settings = env
+    enable_cli(conn)
+    no_subprocess(monkeypatch)
+    fake_wizard(monkeypatch)
+    assert cards_ai.status(settings) == {"ok": True, "why": ""}
+
+
+def test_timeline_cards_status_says_not_checked_rather_than_unavailable(env, monkeypatch):
+    from ccsync_dashboard import cards_ai
+
+    _client, conn, settings = env
+    enable_cli(conn)
+    no_subprocess(monkeypatch)
+    fake_wizard(monkeypatch, installed=False, state="idle")
+    monkeypatch.setattr(ai_providers.shutil, "which", lambda binary: None)
+    out = cards_ai.status(settings)
+    assert out["ok"] is False
+    # The page prints this verbatim in the dimmed button's tooltip, so it has
+    # to name the control that would answer the question.
+    assert "not been checked" in out["why"]
+    assert "Settings -> AI providers" in out["why"]

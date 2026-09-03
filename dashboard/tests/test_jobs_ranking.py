@@ -170,3 +170,39 @@ def test_a_machine_that_lost_on_load_is_told_so_and_not_on_hardware(conn):
     conn.commit()
     lines = {m["machine"]: m for m in jobs_mod.explain(conn, job_id)["machines"]}
     assert lines["busy"]["why_not_first"] == "the first choice is less loaded"
+
+
+# ------------------------------------------------- a clock nobody can read
+
+def test_an_unreadable_created_at_expires_the_grace_window_at_once(conn):
+    """bug-hunt-2026-09-03 dash-release-jobs-6.
+
+    `job_age_seconds` answers RANK_GRACE_SECONDS, not 0, when a timestamp
+    cannot be parsed, and `first_refusal` tests `>= RANK_GRACE_SECONDS`: a job
+    with a broken clock is offered to EVERY capable machine immediately. Zero
+    would make the window never expire, which is the starved queue that looks
+    exactly like a fleet with nothing to do. The docstring used to claim the
+    opposite of what the code does, so this pins the direction.
+    """
+    plain = machine(conn, "cpu-box", dict(MEDIA))
+    encoder = machine(conn, "nvenc-box", dict(MEDIA, nvenc=True))
+    now = dbmod.utcnow_iso()
+    job = {"id": 1, "kind": "proxy-480p", "created_at": "not a timestamp",
+           "requires": {"ffmpeg": True, "ffprobe": True,
+                        "mount": ["media", "vault"]}}
+    assert jobs_mod.job_age_seconds(job, now) == jobs_mod.RANK_GRACE_SECONDS
+    fleet = jobs_mod.fleet_facts(conn)
+    # The one WITHOUT the encoder is the assertion that matters.
+    assert jobs_mod.first_refusal(job, plain, fleet, now) is True
+    assert jobs_mod.first_refusal(job, encoder, fleet, now) is True
+
+
+def test_the_near_media_words_describe_what_the_signal_tests(conn):
+    """The why page's wording promised "the base rig or the dashboard host",
+    and `_signal_true` tests `mode == "base"` and nothing else."""
+    base = machine(conn, "base-rig", dict(MEDIA), mode="base")
+    assert jobs_mod._signal_true("near_media", facts(conn, base), None) is True
+    edit = machine(conn, "edit-pc", dict(MEDIA))
+    assert jobs_mod._signal_true("near_media", facts(conn, edit), None) is False
+    assert "dashboard host" not in jobs_mod.SIGNAL_WORDS["near_media"]
+    assert "base rig" in jobs_mod.SIGNAL_WORDS["near_media"]

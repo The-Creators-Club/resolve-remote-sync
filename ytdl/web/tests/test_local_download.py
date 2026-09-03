@@ -917,6 +917,32 @@ def test_a_done_report_with_no_file_is_recorded_as_a_failure(fleet, con):
     assert db.get_job(con, job['id'])['dl_failed'] == 1
 
 
+def test_a_done_report_naming_a_directory_is_refused_not_recorded(fleet, con):
+    """ytdl-web-3 (bug-hunt-2026-09-03). `filepath_rel` is reduced to its last
+    segment, and two segments are not file names at all.
+
+    '..' reached config.safe_join, whose PathTraversalError nothing catches: a
+    500 and a traceback in the dashboard log. '.' was the worse half --
+    safe_join SKIPS it, so the clip was recorded `done` with `filepath` at the
+    TERM DIRECTORY and a ledger row ending in '/.', a permanent "the fleet
+    already has this" pointing at a folder. Neither is a download that landed,
+    so both are the caller's error to fix (YTDL-15's rule again).
+    """
+    job = _job(con)
+    fleet.post(f'/api/jobs/{job["id"]}/claim', json=_claim_body())
+    url = f'/api/jobs/{job["id"]}/clips/aaaaaaaaaaa/status'
+
+    r = fleet.post(url, json={'state': 'done', 'filepath_rel': '../..'})
+    assert r.status_code == 400, 'a traversal-shaped name is a refusal, not a 500'
+
+    r = fleet.post(url, json={'state': 'done', 'filepath_rel': '.'})
+    assert r.status_code == 400
+    # ...and the ledger is what this protects: nothing was written for either.
+    assert db.ledger_get(con, 'aaaaaaaaaaa') is None
+    assert db.get_video(con, job['id'], 'aaaaaaaaaaa')['dl_state'] == 'pending'
+    assert db.get_job(con, job['id'])['dl_done'] == 0
+
+
 def test_a_repeated_done_post_is_counted_once(fleet, con):
     """ytdl-web-3 (2026-08-21). Since CR-31 the companion's FleetClient
     re-sends any call that RAISED for up to 60 s, and a client-side timeout on

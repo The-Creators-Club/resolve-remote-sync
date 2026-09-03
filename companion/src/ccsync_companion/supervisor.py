@@ -317,8 +317,18 @@ def spawn_for(pid: int, exe: Path, crash_dir: Path, state_dir: Path, *,
               enabled: bool = True, environ: Optional[dict[str, str]] = None,
               spawn: Optional[Callable[..., Any]] = None) -> Optional[Any]:
     """Companion side: start a supervisor for `pid`. Returns the Popen, or
-    None with the reason logged by the caller (frozen win32 builds only -- a
-    source run has nothing to relaunch, and macOS has launchd)."""
+    None with the reason logged by the caller: frozen win32 builds only, and a
+    source run has nothing to relaunch.
+
+    macOS is NOT covered, and the docstring used to claim launchd covered it
+    (bug-hunt-2026-09-03 comp-core-2). It does not: the companion LaunchAgent
+    `installer/macos_bootstrap.sh` writes is RunAtLoad with, deliberately and
+    with a comment saying so, no KeepAlive -- and the installer rewrites any
+    plist that HAS one. So a Mac companion that aborts (the CR-93 shape) stays
+    dead until the next logon, and crash_report.start_supervisor says so at
+    WARNING there. Porting this is not mechanical: decide() is
+    platform-neutral, but DELIBERATE_EXIT_CODES and the 0xFFFFFFFF
+    Stop-Process test are Windows semantics and need POSIX equivalents."""
     environ = os.environ if environ is None else environ
     if not enabled or environ.get(DISABLE_ENV):
         return None

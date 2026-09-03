@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from ccsync_dashboard import VERSION
+from ccsync_dashboard import VERSION, auth
 from ccsync_dashboard.app import create_app, _OPEN_EXACT
 from ccsync_dashboard.settings import Settings
 
@@ -195,6 +195,25 @@ def test_offline_says_nothing_about_this_fleet(client):
     res = client.get("/offline")
     for word in ("syncing", "transfer", "machine"):
         assert word not in res.text.lower().split("</header>")[-1]
+
+
+def test_offline_carries_no_identity_even_when_signed_in(client):
+    """The precache fetch is same-origin WITH the cookie, so this page is
+    frozen as whoever installed the worker (bug-hunt-2026-09-03
+    dash-mounts-ui-2). Asserted over the WHOLE body: the old version of this
+    test split on </header> and so discarded the topbar, which is the only
+    place the name is printed."""
+    client.cookies.set(auth.COOKIE_NAME,
+                       auth.make_session_cookie("test-secret", "owen"))
+    res = client.get("/offline")
+    assert res.status_code == 200
+    assert "[ OFFLINE ]" in res.text
+    assert "owen" not in res.text.lower()
+    assert "(admin)" not in res.text
+    for meta in re.findall(r'<meta[^>]*name="csrf"[^>]*>', res.text):
+        assert re.search(r'content="\s*"', meta), f"a live CSRF token in {meta}"
+    for value in re.findall(r'hx-headers=\'([^\']*)\'', res.text):
+        assert '"X-CSRF-Token": ""' in value, f"a live CSRF token in {value}"
 
 
 # -- pwa.js ----------------------------------------------------------------

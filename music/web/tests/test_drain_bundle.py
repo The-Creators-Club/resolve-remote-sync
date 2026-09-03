@@ -223,8 +223,15 @@ def test_a_re_dropped_upload_gets_a_new_uid_and_is_not_closed_by_the_old_bundle(
 
 
 def test_the_library_wide_rescore_travels_with_the_bundle(nas_and_rig):
-    """Percentiles are library-relative, so retag's output has to come too."""
+    """Percentiles are library-relative, so retag's output has to come too.
+
+    Only while the bundle is the NEWER opinion, which is what the explicit
+    `tagged_at` below now says (bug-hunt-2026-09-03 music-2). The live index
+    re-scores itself on every fleet ingest, so "the bundle wins" is a rule
+    about age, not a rule about bundles; the skip case is the test below.
+    """
     nas, rig, uid, tmp = nas_and_rig
+    db.set_meta(nas, 'tagged_at', '2026-08-17T00:00:00+00:00')
     _analyse(nas, 'old.wav', seed=5)
     _analyse(rig, 'old.wav', seed=5)
     _drain(rig, uid, 'first.wav')
@@ -244,6 +251,42 @@ def test_the_library_wide_rescore_travels_with_the_bundle(nas_and_rig):
         "WHERE tracks.rel_path='old.wav' LIMIT 1").fetchone()['pct']
     assert pct == 11.0
     assert nas.execute('SELECT vec FROM debias').fetchone()['vec'] == _vec(9)
+    assert report['rescore_skipped'] is None
+
+
+def test_a_rescore_older_than_the_live_index_is_refused(nas_and_rig):
+    """bug-hunt-2026-09-03 music-2: one library, two populations.
+
+    Fleet ingest re-scores the LIVE index (rescore.apply_for_track), so an
+    index whose `tagged_at` is newer than the bundle's `created_at` already
+    carries percentiles ranked over a bigger population. Applying the bundle's
+    library-wide half would revert every overlapping track to the pull-time
+    ranking and leave the tracks ingested since on the newer one. The track
+    rows still land: it is only the rescore half that is skipped, and it is
+    named.
+    """
+    nas, rig, uid, tmp = nas_and_rig
+    _analyse(nas, 'old.wav', seed=5)
+    _analyse(rig, 'old.wav', seed=5)
+    _drain(rig, uid, 'first.wav')
+    rig.execute("UPDATE tags SET pct=11.0 WHERE track_id=(SELECT id FROM tracks "
+                "WHERE rel_path='old.wav')")
+    rig.commit()
+
+    bundle = tmp / 'drain.db'
+    drain.export_bundle(rig, [uid], bundle)
+    # the editor's drop landed on the NAS after the pull, and re-scored it
+    db.set_meta(nas, 'tagged_at', '2099-01-01T00:00:00+00:00')
+    nas.commit()
+    report = drain.apply_bundle(nas, bundle)
+
+    assert report['applied'] == [uid]
+    assert report['rescored_tracks'] == 0
+    assert 're-scored' in (report['rescore_skipped'] or '')
+    pct = nas.execute(
+        "SELECT pct FROM tags JOIN tracks ON tracks.id = tags.track_id "
+        "WHERE tracks.rel_path='old.wav' LIMIT 1").fetchone()['pct']
+    assert pct == 88.0, 'the live library was rolled back to the pull-time scores'
 
 
 def test_rescore_skips_tracks_this_index_no_longer_has(nas_and_rig):
@@ -316,6 +359,67 @@ def test_a_failed_apply_leaves_the_index_and_the_journal_untouched(nas_and_rig,
     assert nas.execute('SELECT COUNT(*) c FROM tracks').fetchone()['c'] == 0
     assert nas.execute('SELECT state FROM ingest_queue WHERE uid=?',
                        (uid,)).fetchone()['state'] == db.PENDING
+
+
+def test_a_row_that_fails_the_read_back_leaves_no_track_row(nas_and_rig):
+    """bug-hunt-2026-09-03 music-5: SKIPPED must mean nothing was kept.
+
+    A truncated or hand-edited bundle carries an embedding whose length
+    disagrees with its `dim`. The read-back catches it and the row is reported
+    skipped -- but the INSERT was in the same transaction the loop commits, so
+    the malformed row stayed. `db.load_matrix` np.stack()s every non-null
+    embedding, so ONE row of the wrong width takes every text search and
+    /api/similar down until it is deleted by hand.
+    """
+    nas, rig, uid, tmp = nas_and_rig
+    _, second_uid = _queue(nas, 'second.wav')
+    nas.commit()
+    # the same journal row in the pulled copy, under the same uid
+    rig_qid, _ = _queue(rig, 'second.wav')
+    rig.execute('UPDATE ingest_queue SET uid=? WHERE id=?', (second_uid, rig_qid))
+    _drain(rig, uid, 'first.wav')
+    _drain(rig, second_uid, 'second.wav', seed=8)
+
+    bundle = tmp / 'drain.db'
+    drain.export_bundle(rig, [uid, second_uid], bundle)
+    b = sqlite3.connect(bundle)
+    b.execute("UPDATE bundle_tracks SET embedding=? WHERE rel_path='first.wav'",
+              (_vec(1)[:-4],))                  # one float short of its dim
+    b.commit()
+    b.close()
+
+    report = drain.apply_bundle(nas, bundle)
+
+    assert report['applied'] == [second_uid]
+    assert report['skipped'] == [(uid, 'write not verified')]
+    assert nas.execute("SELECT COUNT(*) c FROM tracks WHERE rel_path='first.wav'"
+                       ).fetchone()['c'] == 0, 'the unverified row was kept'
+    # the good row in the same bundle still landed, whole
+    assert nas.execute("SELECT COUNT(*) c FROM tracks WHERE rel_path='second.wav'"
+                       ).fetchone()['c'] == 1
+    assert nas.execute('SELECT state FROM ingest_queue WHERE uid=?',
+                       (uid,)).fetchone()['state'] == db.PENDING
+
+
+def test_a_row_that_fails_the_read_back_does_not_overwrite_the_live_track(nas_and_rig):
+    """The same rollback, where the live index already had that track."""
+    nas, rig, uid, tmp = nas_and_rig
+    _analyse(nas, 'first.wav', seed=5)
+    _drain(rig, uid, 'first.wav', seed=7)
+
+    bundle = tmp / 'drain.db'
+    drain.export_bundle(rig, [uid], bundle)
+    b = sqlite3.connect(bundle)
+    b.execute('UPDATE bundle_tracks SET embedding=?', (_vec(7)[:-4],))
+    b.commit()
+    b.close()
+
+    drain.apply_bundle(nas, bundle)
+
+    row = nas.execute("SELECT embedding,dim FROM tracks WHERE rel_path='first.wav'"
+                      ).fetchone()
+    assert row['embedding'] == _vec(5), 'the live embedding was replaced by a bad one'
+    assert row['dim'] == DIM
 
 
 def test_inspect_and_apply_from_the_command_line(nas_and_rig, capsys):

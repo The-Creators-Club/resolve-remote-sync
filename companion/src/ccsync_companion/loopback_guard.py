@@ -108,8 +108,12 @@ BUNDLE_SUFFIXES = (
 # a page that is not allowed to talk to this server is not owed a description
 # of the allow-list it failed (COMMERCIAL_READINESS.md L-tier, error detail
 # leaks).
-REFUSED_MESSAGE = ("this request was refused by the CC Sync companion -- see "
-                   "its log (Tray > Open log) for the reason")
+# The tray menu has had no "Open log" item since CR-88's ten-item layout
+# (bug-hunt-2026-09-03 comp-broll-music): the way an editor gets their log to
+# an admin is the Settings window's button, so name that.
+REFUSED_MESSAGE = ("this request was refused by the CC Sync companion - see "
+                   "its log (Tray > Settings > COPY DIAGNOSTICS FOR YOUR "
+                   "ADMIN) for the reason")
 
 
 # -- the loopback token ------------------------------------------------------

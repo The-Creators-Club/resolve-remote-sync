@@ -540,6 +540,26 @@ def _dir_bytes(directory: Any, max_files: int = 200_000) -> int:
     return total
 
 
+def _snapshot(value: Any) -> Any:
+    """A deep copy built from dict()/list(), never copy.deepcopy.
+
+    bug-hunt-2026-09-03 comp-broll-music-1. The mutators of `_batch` and
+    `_staging` (_crunch_item and friends) do NOT hold `_lock` -- they own the
+    item, not the structure -- so anything that walks these dicts in Python
+    BYTECODE, copy.deepcopy exactly as much as json.dumps(indent=2), can be
+    interrupted by another thread adding a key and raise "dictionary changed
+    size during iteration". dict(d) and list(l) are single C calls: they
+    cannot be interrupted, so each node is copied atomically and the walk that
+    follows is over the private copy. Values here are JSON already (str, int,
+    bool, None), so there is nothing else to copy.
+    """
+    if isinstance(value, dict):
+        return {key: _snapshot(item) for key, item in dict(value).items()}
+    if isinstance(value, (list, tuple)):
+        return [_snapshot(item) for item in list(value)]
+    return value
+
+
 class BrollIngestor:
     """One machine's b-roll ingest: staging, the gate, the crunch, the upload.
 
@@ -701,10 +721,20 @@ class BrollIngestor:
         finishes the batch it is on -- it just cannot resume one.
         """
         with self._lock:
+            # A COPY of each, taken here (bug-hunt-2026-09-03
+            # comp-broll-music-1). The snapshot used to hold live references
+            # to these two dicts and was serialised after the lock was
+            # released, and json.dumps with indent= is the PURE-PYTHON
+            # encoder, which yields the GIL mid-iteration: a tick thread doing
+            # item["described"] = True or outputs["proxy"] = ... during the
+            # dump raised "dictionary changed size during iteration", the
+            # broad except below swallowed it, os.replace never ran, and the
+            # checkpoint file silently stopped being written at exactly the
+            # moment there was most to record.
             snapshot = {
                 "version": 1,
-                "batch": self._batch,
-                "staging": self._staging,
+                "batch": _snapshot(self._batch),
+                "staging": _snapshot(self._staging),
                 "picked_roots": list(self._picked_roots),
                 "paused": self._paused,
                 "forced": self._forced,

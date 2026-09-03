@@ -348,11 +348,28 @@ _REPLACES_PID_ENV = "CCSYNC_REPLACES_PID"
 SHUTDOWN_WORST_CASE_SECONDS = 55.0
 PREDECESSOR_WAIT_SECONDS = 90.0
 PREDECESSOR_POLL_SECONDS = 0.25
+# CR-120 (2026-09-03): "the predecessor's pid is gone" is NOT "the predecessor
+# has let go of its handles". Windows sets Process->ExitStatus at the START of
+# termination -- NtTerminateProcess writes it before the threads are torn
+# down, and ExitProcess runs LdrShutdownProcess (every DLL_PROCESS_DETACH)
+# before its final NtTerminateProcess -- so GetExitCodeProcess answers "dead"
+# for tens to hundreds of milliseconds while the process still owns every
+# handle, the single-instance mutex among them. A frozen Python + Tk + ctypes
+# companion tearing down easily exceeds the 0.25s poll. So after the
+# predecessor first reads dead we keep retrying CreateMutexW for this long
+# before concluding the slot belongs to a DIFFERENT companion; the overall
+# PREDECESSOR_WAIT_SECONDS deadline still applies on top.
+PREDECESSOR_RELEASE_GRACE_SECONDS = 15.0
 
 
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+# WaitForSingleObject on a process handle needs SYNCHRONIZE; QUERY_LIMITED
+# alone returns WAIT_FAILED/ERROR_ACCESS_DENIED (CR-120).
+_SYNCHRONIZE = 0x00100000
 _ERROR_ACCESS_DENIED = 5
 _STILL_ACTIVE = 259
+_WAIT_OBJECT_0 = 0x00000000
+_WAIT_FAILED = 0xFFFFFFFF
 
 
 def _pid_is_alive_win32(pid: int) -> bool:
@@ -362,7 +379,16 @@ def _pid_is_alive_win32(pid: int) -> bool:
     KILL the pid it was asked about (with exit code 0), and for a pid that is
     already gone OpenProcess fails and the OSError arm below reads "alive".
     Wrong in both directions. A frozen build reaches this only through the
-    CreateMutexW-unavailable fallback, which is why it went unnoticed."""
+    CreateMutexW-unavailable fallback, which is why it went unnoticed.
+
+    CR-120 (2026-09-03): the exit CODE is the wrong question. It is set at the
+    start of termination, so it reads "dead" while the process still holds its
+    handles (see PREDECESSOR_RELEASE_GRACE_SECONDS). The process OBJECT is
+    signalled only once termination is complete, so WaitForSingleObject(h, 0)
+    is the later, stricter test and is preferred here; GetExitCodeProcess is
+    the fallback for when the wait call itself fails. Signalled means dead
+    whatever the exit code says, which is also how the historical "a process
+    that really exited with 259" case stops reading as alive forever."""
     import ctypes
     from ctypes import wintypes
 
@@ -371,13 +397,23 @@ def _pid_is_alive_win32(pid: int) -> bool:
     kernel32.OpenProcess.restype = wintypes.HANDLE
     kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
     kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
     kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-    handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    handle = kernel32.OpenProcess(
+        _PROCESS_QUERY_LIMITED_INFORMATION | _SYNCHRONIZE, False, pid
+    )
     if not handle:
         # Access denied means it exists and belongs to someone else -- the
         # same answer the posix PermissionError arm gives.
         return ctypes.get_last_error() == _ERROR_ACCESS_DENIED
     try:
+        waited = kernel32.WaitForSingleObject(handle, 0)
+        if waited != _WAIT_FAILED:
+            # Signalled: termination finished, handles included. Anything else
+            # (WAIT_TIMEOUT) is a process that has not finished dying, which
+            # for the mutex hand-off counts as alive.
+            return waited != _WAIT_OBJECT_0
         code = wintypes.DWORD()
         if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
             return True  # can't tell -- assume alive, i.e. fail safe
@@ -513,6 +549,7 @@ def _acquire_mutex_win32(
     sleep_fn: Callable[[float], None] = time.sleep,
     timeout: float = PREDECESSOR_WAIT_SECONDS,
     poll_seconds: float = PREDECESSOR_POLL_SECONDS,
+    release_grace: float = PREDECESSOR_RELEASE_GRACE_SECONDS,
 ) -> bool:
     """R11 (2026-08-12): the named-mutex twin of _acquire_lock_file's
     predecessor wait. The branch used to return False the moment CreateMutexW
@@ -530,7 +567,18 @@ def _acquire_mutex_win32(
     a DEAD process as alive (exit code 259, plus both fail-safe arms), and a
     wait keyed on liveness alone would then sit out the full timeout and
     refuse -- re-creating the mutex each poll takes the slot the moment it is
-    actually free, whatever the probe says."""
+    actually free, whatever the probe says.
+
+    CR-120 (2026-09-03): "dead before the retry, mutex still held" was then
+    read as proof of a foreign holder and refused on the FIRST such retry.
+    It is not proof: a pid reads dead the instant Windows sets its ExitStatus,
+    which is before its handle table is torn down (see
+    PREDECESSOR_RELEASE_GRACE_SECONDS). Live on the base rig at 16:34 on
+    2026-09-03, on the restart-after-Resolve-exits path: the replacement
+    refused 1.4s in, the predecessor completed the shutdown it had already
+    started, and the machine was left with NO companion. So the death only
+    STARTS a grace period now; the refusal needs the slot to still be held
+    when that grace expires."""
     global _single_instance_token
     is_alive = alive_fn if alive_fn is not None else _pid_is_alive
     handle, last_error = try_create()
@@ -551,12 +599,13 @@ def _acquire_mutex_win32(
         "-- waiting up to %.0fs for it to exit", replaces_pid, timeout,
     )
     deadline = clock() + timeout
+    died_at: Optional[float] = None
     while clock() < deadline:
-        # Sampled BEFORE the create attempt: dead before the attempt means
-        # its handles were already gone, so a mutex that still exists is some
-        # OTHER companion's -- while dead-after could just be the predecessor
-        # exiting between the two calls.
+        # Sampled BEFORE the create attempt: dead-after could just be the
+        # predecessor exiting between the two calls, so it says nothing.
         was_alive = is_alive(replaces_pid)
+        if not was_alive and died_at is None:
+            died_at = clock()
         sleep_fn(poll_seconds)
         handle, last_error = try_create()
         if not handle:
@@ -569,12 +618,17 @@ def _acquire_mutex_win32(
             _single_instance_token = handle
             return True
         close_handle(handle)
-        if not was_alive:
-            log.warning(
-                "single-instance: pid %s is gone but the slot is still held "
-                "-- a different companion owns it", replaces_pid,
-            )
-            return False
+        if died_at is not None:
+            held_for = clock() - died_at
+            if held_for >= release_grace:
+                # The grace, not the first dead reading, is what makes this a
+                # foreign holder (CR-120).
+                log.warning(
+                    "single-instance: pid %s has been gone for %.1fs and the slot "
+                    "is still held -- a different companion owns it",
+                    replaces_pid, held_for,
+                )
+                return False
     log.warning(
         "single-instance: the slot is still held %.0fs after the self-upgrade "
         "spawned this build -- treating the holder as a live second instance",
@@ -2636,7 +2690,7 @@ class CompanionApp:
         not stop the watcher cleanly (AUDIT_2 CORE-M2 / COMP-GUARD-5,
         2026-08-14).
 
-        `user_initiated` is Tray -> Advanced -> Scan whole project asking, and
+        `user_initiated` is Tray > Settings > SCAN WHOLE PROJECT asking, and
         it skips the rate limit below (comp-resolve-1, 2026-08-21): the
         limiter exists because nobody consented to the unprompted pass, and
         this is the consent. It is also the only thing that drains a burst
@@ -2691,7 +2745,7 @@ class CompanionApp:
             log.info(
                 "non-canonical relink: holding %d clip(s) -- this project was "
                 "auto-relinked less than %.0f minutes ago and the unprompted path "
-                "is rate-limited. Tray → Advanced → Scan whole project runs it now",
+                "is rate-limited. Tray > Settings > SCAN WHOLE PROJECT runs it now",
                 waiting, resolve_journal.AUTOMATIC_MIN_INTERVAL_SECONDS / 60.0,
             )
             return
@@ -2788,7 +2842,7 @@ class CompanionApp:
             )
 
     def undo_last_relink(self) -> None:
-        """Tray → Advanced → "Undo the last clip-path change CCSync made".
+        """Tray > Settings > UNDO THE LAST CLIP-PATH CHANGE.
 
         The user-facing half of item 9's save point/journal (2026-08-17).
         Resolve's own Undo does not cover a scripted ReplaceClip, so without
@@ -2814,7 +2868,7 @@ class CompanionApp:
         except Exception:
             log.exception("undo of the last relink failed")
             self._notify_tray(
-                "CCSync could not undo the last clip-path change. Tray → Open log, "
+                "CCSync could not undo the last clip-path change. Tray > Settings > OPEN LOG, "
                 "and send it to your admin.", "ccsync-companion: undo failed",
             )
             return
@@ -3052,7 +3106,7 @@ class CompanionApp:
             log.error("scan whole project refused: local_root is misconfigured")
             self._notify_tray(
                 "CCSync's sync folder isn't set up correctly, so it can't tell which media "
-                "is in the wrong place. Tray → Copy diagnostics for your admin.", "ccsync-companion")
+                "is in the wrong place. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.", "ccsync-companion")
             return
         result = resolve_bridge.get_media_pool_items()
         if not result.get("ok"):
@@ -3194,7 +3248,7 @@ class CompanionApp:
         if self.config_problems:
             self._notify_tray(
                 "CCSync isn't fully set up on this machine yet, so nothing can be copied in. "
-                "Tray → Copy diagnostics for your admin.", "ccsync-companion")
+                "Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.", "ccsync-companion")
             return
         if self._root_absent or self._local_root_is_broken():
             # SYNC-6 (2026-08-11): the fourth gate, missing here while both
@@ -3285,7 +3339,7 @@ class CompanionApp:
             )
             self._notify_tray(
                 "CCSync got a project location that points outside your sync folder, so "
-                "nothing was copied or uploaded. Tray → Copy diagnostics for your admin.",
+                "nothing was copied or uploaded. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.",
                 "ccsync-companion",
             )
             return
@@ -3310,7 +3364,7 @@ class CompanionApp:
                             reconcile.get("error"))
                 self._notify_tray(
                     "Couldn't check the server, so nothing was copied or uploaded. "
-                    "Tray → Copy diagnostics for your admin.", "ccsync-companion")
+                    "Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.", "ccsync-companion")
                 return
             if plan["count"] == 0 and (reconcile["uploads"] or {}).get("count", 0) == 0:
                 self._notify_tray("Nothing to copy in: this project is already tidy.",
@@ -3383,7 +3437,7 @@ class CompanionApp:
             self._notify_tray(
                 f"{len(results) - len(failures) - len(skipped)}/{len(results)} copied in"
                 f"{skipped_part}, {len(failures)} failed. "
-                f"Tray → Copy diagnostics for your admin.",
+                f"Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.",
                 "ccsync-companion")
             # SYNC-12 (2026-08-11): this branch fell through to the
             # "Copy & upload finished" toast below, so the editor read the
@@ -4274,7 +4328,7 @@ class CompanionApp:
 
     def removable_projects(self) -> list[dict[str, str]]:
         """[{"slug", "rel"}] of the projects this machine currently syncs --
-        what the tray's "Remove a project from this machine" submenu lists.
+        what the Settings window's [ REMOVE '<project>' ] buttons list.
         Empty on the base rig (its tree IS the server tree), in legacy mode,
         and when no selection is known."""
         if not self._managed or self.selection_client is None:
@@ -4722,7 +4776,7 @@ class CompanionApp:
                       "cannot ask anyone to accept it")
             self._notify_tray(
                 "NOT SYNCING: this build is missing its licence document. "
-                "Tray → Copy diagnostics for your admin.", "ccsync-companion")
+                "Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.", "ccsync-companion")
             # Settled, for _licence_watch's purposes: retrying a packaging
             # fault every minute produces the same ERROR forever and no
             # window. The tray item still reaches this path on request.
@@ -4771,7 +4825,7 @@ class CompanionApp:
                         "machine stays not-syncing")
             self._notify_tray(
                 "NOT SYNCING: the licence agreement was not accepted. "
-                "Tray → Accept the licence agreement…", "ccsync-companion")
+                "Tray > Accept the licence agreement…", "ccsync-companion")
             return
         try:
             eula_mod.record_acceptance()
@@ -5084,7 +5138,7 @@ class CompanionApp:
         if not applied:
             self._notify_tray(
                 f"Update failed. You're still on v{config_mod.VERSION}, nothing is broken. "
-                "Tray → Copy diagnostics for your admin.",
+                "Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.",
                 "ccsync-companion",
             )
             return "failed"
@@ -8371,7 +8425,7 @@ class CompanionApp:
         if leftovers:
             self._notify_tray(
                 f"Found {len(leftovers)} half-copied file(s) from an interrupted copy. "
-                "Nothing was deleted. Tray → Copy diagnostics for your admin.",
+                "Nothing was deleted. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.",
                 "ccsync-companion")
         # ...and the OTHER half of an interrupted FIX ALL: the 0-byte final
         # name it reserved before starting the copy. Unlike the partial above
@@ -8785,7 +8839,12 @@ class CompanionApp:
         if start_record.get("crash_loop") and self._revert_crashing_build():
             # The previous build is back on disk and running; this process is
             # the one that could not stay up. Nothing has been started yet, so
-            # returning IS the shutdown.
+            # returning IS the shutdown -- which means shutdown(), and with it
+            # mark_clean_exit(), never runs. bug-hunt-2026-09-03 comp-core-4:
+            # the run marker was therefore left on disk and the restored build
+            # filed this deliberate rollback as an UncleanExit crash report,
+            # noise beside the real ones.
+            crash_report.mark_clean_exit(self.config)
             return
 
         # A half-configured install is the single most common failure mode and
@@ -8870,7 +8929,7 @@ class CompanionApp:
             if errors:
                 self._notify_tray(
                     "NOT SYNCING: CCSync isn't fully set up on this machine. "
-                    "Tray → Copy diagnostics for your admin.", "ccsync-companion")
+                    "Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN.", "ccsync-companion")
             else:
                 # The licence gate (_start_lanes) is silent apart from the log
                 # and the lane detail, and an editor whose sync simply never

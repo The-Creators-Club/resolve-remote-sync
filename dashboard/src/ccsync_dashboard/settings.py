@@ -618,6 +618,17 @@ class Settings:
                 self.site_indexer_model_tier,
             )
             object.__setattr__(self, "site_indexer_model_tier", "good")
+        # Every consumer of auth_method but ONE normalised it itself
+        # (check_boot_secrets, describe_auth, setup_api, setup_routes, ui),
+        # and the one that did not was verify_credentials -- so
+        # DASH_AUTH_METHOD=SMB, or `local\n` out of a compose heredoc, booted
+        # clean, described itself as a valid method, let the wizard make the
+        # first admin, and then refused every password for ever
+        # (bug-hunt-2026-09-03 dash-core-1). Normalised once, here; a value
+        # that is still not a known method is refused at boot by
+        # auth.check_boot_secrets rather than at every login.
+        object.__setattr__(
+            self, "auth_method", str(self.auth_method or "smb").strip().lower())
 
     def packages_path(self) -> Path:
         return Path(self.packages_dir) if self.packages_dir else Path(self.db_path).parent / "packages"

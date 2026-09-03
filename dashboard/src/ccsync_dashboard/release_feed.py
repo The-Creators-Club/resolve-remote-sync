@@ -214,7 +214,18 @@ def _open_following_https_redirects(url: str, *, timeout: float):
             # _NoRedirect turns a 3xx into an HTTPError; the headers on it are
             # the redirect's own, so this IS the normal redirect path.
             if 300 <= exc.code < 400:
-                current = _redirect_target(current, getattr(exc, "headers", None))
+                headers = getattr(exc, "headers", None)
+                # bug-hunt-2026-09-03 dash-release-jobs-5: an HTTPError IS an
+                # open response holding a socket, so the raising half of this
+                # walk leaked one file descriptor per hop until the GC caught
+                # up. The non-raising 3xx branch below has always closed its
+                # response; these two halves must agree. Closed before the
+                # Location is parsed, because that parse can itself raise.
+                try:
+                    exc.close()
+                except Exception:  # noqa: BLE001 - a hop we are leaving anyway
+                    pass
+                current = _redirect_target(current, headers)
                 continue
             raise FeedError(f"{current} answered HTTP {exc.code}") from exc
         except URLError as exc:
@@ -677,16 +688,41 @@ def _apply_policy(conn, settings, app_state, valid_records: list[dict[str, Any]]
             # this dashboard already holds still has to become current when
             # the channel says it is current.
             if policy == "current" and not existing["is_current"]:
-                if db.set_current_package(conn, platform, version, kind):
-                    conn.commit()
-                    log.info("release feed (current policy) made %s/%s %s current again",
-                             kind, platform, version)
-                    applied.append(f"{kind}/{platform} {version}")
+                # bug-hunt-2026-09-03 dash-release-jobs-2: through
+                # package_store, not db.set_current_package, which checks only
+                # retraction. This was the third door onto `is_current` and the
+                # only one the REL-4 ordering gate did not stand at.
+                try:
+                    package_store.make_current(
+                        conn, settings, platform=platform, version=version, kind=kind)
+                except package_store.PackageStoreError as exc:
+                    conn.rollback()
+                    log.warning("release feed (current policy) did NOT make %s/%s %s "
+                                "current: %s", kind, platform, version, exc.detail)
+                    continue
+                conn.commit()
+                log.info("release feed (current policy) made %s/%s %s current again",
+                         kind, platform, version)
+                applied.append(f"{kind}/{platform} {version}")
             continue
+        # bug-hunt-2026-09-03 dash-release-jobs-3: asked BEFORE the download.
+        # store_verified_package refuses a make_current publish this dashboard
+        # is too old for, after streaming up to 200 MiB into a .part it then
+        # unlinks -- and refuses the whole publish with it, so the build was
+        # re-fetched and re-thrown-away on every check and never reached the
+        # shelf. Staging it is what its own comment says should happen.
+        stage_only = package_store.blocks_on_dashboard_version(
+            kind, record.get("requires_dashboard"))
+        if stage_only:
+            log.info("release feed: staging %s/%s %s WITHOUT making it current - "
+                     "it needs dashboard %s and this dashboard is %s. Update the "
+                     "dashboard, then make it current from the Packages page.",
+                     kind, platform, version, record.get("requires_dashboard"), VERSION)
         try:
             publish_from_feed(
                 conn, settings, app_state, kind=kind, platform=platform, version=version,
-                make_current=(policy == "current"), published_by="release-feed",
+                make_current=(policy == "current" and not stage_only),
+                published_by="release-feed",
             )
         except package_store.PackageStoreError as exc:
             log.warning("release feed auto-publish of %s/%s %s failed: %s",

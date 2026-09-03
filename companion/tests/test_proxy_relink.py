@@ -10,7 +10,7 @@ import logging
 
 import pytest
 
-from ccsync_companion import proxy_relink
+from ccsync_companion import proxy_relink, resolve_bridge
 
 
 @pytest.fixture(autouse=True)
@@ -411,6 +411,56 @@ def test_a_link_that_raises_is_not_remembered_as_a_refusal(caplog):
     assert len(_plan_again(items, stat)) == 1
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert len(warnings) == 1 and "link failed for A001" in warnings[0]
+
+
+def test_a_scripting_error_is_not_remembered_as_a_refusal(caplog):
+    """bug-hunt-2026-09-03 comp-resolve-2. link_proxy_media NEVER raises: it
+    catches its own fusionscript exception and answers
+    reason="scripting_error", so the raising-link_fn test above could not
+    protect a real pass. An editor who quits Resolve halfway through 200 ops
+    used to have every remaining pairing remembered as refused, and a proxy
+    file that was fine never changes its (mtime, size), so those clips stayed
+    skipped until the tray restarted."""
+    stat = _stat_for({GOOD_PROXY: (1000.0, 4096)})
+    items = [item(BRAW, STALE_PROXY, "Offline", name="A001")]
+    ops = _plan_again(items, stat)
+
+    def _gone(mpi, path):
+        return {"ok": False, "reason": "scripting_error",
+                "message": resolve_bridge._SCRIPTING_ERROR_MESSAGE}
+
+    with caplog.at_level(logging.DEBUG, logger="ccsync.proxy_relink"):
+        result = proxy_relink.apply_relinks(ops, _gone, stat)
+
+    assert result["failed"] == 1 and result["failures"] == ["A001"]
+    assert proxy_relink.is_refused(BRAW, GOOD_PROXY, stat) is False
+    assert len(_plan_again(items, stat)) == 1
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    # No "refused by Resolve" summary either: nothing was refused.
+    assert len(warnings) == 1 and "no answer from Resolve" in warnings[0]
+
+
+def test_link_proxy_media_answers_with_a_machine_readable_reason():
+    """The other half of the contract, pinned here because apply_relinks is
+    the only reader (bug-hunt-2026-09-03 comp-resolve-2)."""
+
+    class _Raises:
+        def GetClipProperty(self):
+            return {}
+
+        def LinkProxyMedia(self, path):
+            raise RuntimeError("fusionscript went away")
+
+    class _Declines(_Raises):
+        def LinkProxyMedia(self, path):
+            return False
+
+    assert resolve_bridge.link_proxy_media(
+        _Raises(), "P:/x.mov", journal=False)["reason"] == "scripting_error"
+    assert resolve_bridge.link_proxy_media(
+        _Declines(), "P:/x.mov", journal=False)["reason"] == "refused"
+    assert resolve_bridge.link_proxy_media(
+        None, "P:/x.mov", journal=False)["reason"] == "scripting_error"
 
 
 def test_a_successful_relink_leaves_no_memory_behind():

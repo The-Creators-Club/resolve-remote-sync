@@ -9,6 +9,7 @@ when Resolve refuses to export.
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 
@@ -264,7 +265,10 @@ class TestDailyCap:
                                                 clock=lambda: clock[0])
                 clock[0] += step
         assert "configuration problem" in caplog.text
-        assert "Copy diagnostics" in caplog.text
+        # The wording the tray really uses (bug-hunt-2026-09-03 comp-ui-2):
+        # there is no Copy diagnostics item in the right-click menu, it is a
+        # button inside Settings.
+        assert "Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN" in caplog.text
 
     def test_the_next_day_is_a_new_allowance(self):
         clock = [1_750_000_000.0]
@@ -304,3 +308,56 @@ class TestDailyCap:
                 allowed += 1
             clock[0] += step
         assert allowed == resolve_journal.AUTOMATIC_MAX_PER_DAY
+
+
+class TestConcurrentRecording:
+    """bug-hunt-2026-09-03 comp-resolve-1. FIX ALL (tray thread), the 120 s
+    proxy-relink pass (media-tree thread), the watcher's automatic relink and
+    a b-roll /insert canonicalisation (HTTP thread) all record into the same
+    burst file, and none of them holds the bridge's API lock while they do.
+    An unlocked read-append-write lost all but a handful of the entries -- an
+    edit undo_last_relink would then silently not put back."""
+
+    def test_every_thread_s_entry_survives(self):
+        threads = []
+        errors: list[BaseException] = []
+        start = threading.Barrier(8)
+
+        def worker(n: int) -> None:
+            try:
+                start.wait(10)
+                for i in range(20):
+                    resolve_journal.record(
+                        resolve_journal.KIND_REPLACE_CLIP, "FF5",
+                        clip_name=f"t{n}-{i}", old_path=f"F:/{n}-{i}.mov",
+                        new_path=f"P:/{n}-{i}.mov", source="fix-all",
+                    )
+            except BaseException as exc:                      # pragma: no cover
+                errors.append(exc)
+
+        for n in range(8):
+            thread = threading.Thread(target=worker, args=(n,), daemon=True)
+            threads.append(thread)
+            thread.start()
+        for thread in threads:
+            thread.join(60)
+
+        assert not errors
+        files = resolve_journal.sessions("FF5")
+        assert len(files) == 1
+        names = {e["clip"] for e in resolve_journal.read_session(files[0])["entries"]}
+        assert names == {f"t{n}-{i}" for n in range(8) for i in range(20)}
+
+    def test_the_tmp_file_is_not_shared_between_writers(self, tmp_path):
+        """On Windows the loser of the fixed-name race gets a PermissionError
+        out of os.replace, not merely a lost entry."""
+        first = resolve_journal._tmp_path(tmp_path / "a.json")
+        seen = []
+
+        def other() -> None:
+            seen.append(resolve_journal._tmp_path(tmp_path / "a.json"))
+
+        thread = threading.Thread(target=other)
+        thread.start()
+        thread.join(10)
+        assert seen and seen[0] != first

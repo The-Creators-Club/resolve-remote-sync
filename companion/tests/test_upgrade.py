@@ -58,7 +58,10 @@ def _info(version="9.9.9", body=b"new-exe-bytes", url="/api/v1/companion/package
           min_version="0.0.0", seed=TEST_SEED, sign=True, **overrides):
     record = {
         "kind": "companion",
-        "platform": "windows",
+        # platform_key(), not a literal "windows": since bug-hunt-2026-09-03
+        # comp-core-1 the companion refuses a record for another platform, and
+        # this suite runs on the macOS CI runner too.
+        "platform": upgrade_mod.platform_key(),
         "version": version,
         "filename": f"ccsync-companion-{version}.exe",
         "sha256": hashlib.sha256(body).hexdigest(),
@@ -1643,3 +1646,92 @@ def test_the_dashboard_carries_an_identical_ed25519_copy():
     if not theirs.is_file():
         pytest.skip("no dashboard checkout beside this one")
     assert theirs.read_bytes() == (here / "ed25519.py").read_bytes()
+
+
+# -- kind / platform (bug-hunt-2026-09-03 comp-core-1) ------------------
+#
+# The signature covers `kind` and `platform` precisely so the fleet cannot be
+# handed the onboarding installer as a self-upgrade, or a Mac a Windows exe --
+# but until this pass only the DASHBOARD compared them to anything, and the
+# dashboard is the party the offline key exists to remove from the trust
+# chain. Both kinds are published into the same table by the same key.
+
+
+def test_a_signed_onboard_record_is_never_installed_as_a_companion(tmp_path, caplog):
+    offer = _info(kind="onboard", filename="onboard-9.9.9.exe")
+    mgr = UpgradeManager(_cfg(), http_open=_fake_open(b"new-exe-bytes"),
+                         floor_file=tmp_path / "floor.json")
+    with caplog.at_level("ERROR"):
+        mgr.note_report_response({"upgrade": offer})
+    assert mgr.available is None
+    assert "not a companion build" in caplog.text
+    assert mgr.download_and_verify(offer, tmp_path) is None
+    assert mgr.last_failure == upgrade_mod.ERROR_REFUSED
+    assert _no_download_left(tmp_path)
+
+
+def test_a_signed_record_for_another_platform_is_refused(tmp_path, caplog):
+    other = "macos" if upgrade_mod.platform_key() != "macos" else "windows"
+    offer = _info(platform=other)
+    mgr = UpgradeManager(_cfg(), http_open=_fake_open(b"new-exe-bytes"),
+                         floor_file=tmp_path / "floor.json")
+    with caplog.at_level("ERROR"):
+        mgr.note_report_response({"upgrade": offer})
+    assert mgr.available is None
+    assert other in caplog.text
+    assert mgr.download_and_verify(offer, tmp_path) is None
+    assert _no_download_left(tmp_path)
+
+
+def test_a_foreign_record_does_not_raise_this_machines_floor(tmp_path):
+    """The refusal sits BEFORE note_floor, which is monotonic and persisted:
+    a wrong-kind record must not be able to lock this machine out of the
+    builds below its min_version."""
+    floor_file = tmp_path / "floor.json"
+    mgr = UpgradeManager(_cfg(), http_open=_fake_open(b"new-exe-bytes"),
+                         floor_file=floor_file)
+    mgr.note_report_response(
+        {"upgrade": _info(kind="onboard", version="9.9.9", min_version="9.9.9")})
+    assert upgrade_mod.read_floor(floor_file) == ""
+    # And a genuine companion offer below that min_version is still taken.
+    mgr.note_report_response({"upgrade": _info(version="1.0.0", min_version="0.0.0")})
+    assert mgr.available["version"] == "1.0.0"
+
+
+def test_the_arch_field_is_still_the_dashboards_to_enforce(tmp_path):
+    """Owner decision on comp-core-1: `arch` is a kind-scoped OPTIONAL signed
+    field the dashboard enforces, and a client test would refuse every record
+    published before REL-16 added it. Pinned so re-adding it is a decision."""
+    mgr = UpgradeManager(_cfg(), http_open=_fake_open(b"new-exe-bytes"),
+                         floor_file=tmp_path / "floor.json")
+    mgr.note_report_response({"upgrade": _info(arch="powerpc")})
+    assert mgr.available["version"] == "9.9.9"
+
+
+# -- relative URLs (bug-hunt-2026-09-03 comp-core-5) --------------------
+
+
+def test_a_relative_url_without_a_leading_slash_is_resolved(tmp_path):
+    """same_origin() waves any relative URL through, but only the
+    absolute-path case used to be joined to dashboard_url: a `url` published
+    without its leading slash reached urllib as "unknown url type", was filed
+    as a download failure and burned REL-8's attempt budget."""
+    calls: list = []
+    mgr = UpgradeManager(_cfg(), http_open=_fake_open(b"new-exe-bytes", calls),
+                         floor_file=tmp_path / "floor.json")
+    got = mgr.download_and_verify(
+        _info(url="api/v1/companion/package/windows/9.9.9"), tmp_path)
+    assert got is not None
+    assert calls[0][0] == (
+        "http://100.64.0.1:8480/api/v1/companion/package/windows/9.9.9")
+
+
+def test_a_leading_slash_url_keeps_a_dashboard_path_prefix(tmp_path):
+    """The absolute-path case stays a plain concatenation: a dashboard behind
+    a reverse-proxy mount must keep its prefix, which urljoin would strip."""
+    calls: list = []
+    mgr = UpgradeManager(_cfg(dashboard_url="http://100.64.0.1:8480/ccsync"),
+                         http_open=_fake_open(b"new-exe-bytes", calls),
+                         floor_file=tmp_path / "floor.json")
+    assert mgr.download_and_verify(_info(url="/api/v1/x"), tmp_path) is not None
+    assert calls[0][0] == "http://100.64.0.1:8480/ccsync/api/v1/x"

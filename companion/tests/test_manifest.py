@@ -378,3 +378,53 @@ def test_a_skipped_scan_never_reads_as_the_conflicts_being_gone(tmp_path):
     present["yes"] = False
     cache.refresh_once()
     assert cache.sync_conflicts()["count"] == 1
+
+
+# -- NFC/NFD (bug-hunt-2026-09-03 comp-core-3) ----------------------------
+#
+# CR-90's mechanism one level up: macOS listdir hands back NFD, the
+# dashboard's selection is NFC, and both membership tests used to be exact
+# string tests. The project was reported TWICE -- once rollup-only under the
+# NFD spelling, which the dashboard slugified into a phantom project, both
+# copies eating a slot against MAX_PROJECTS.
+
+
+def _nfd(text):
+    import unicodedata
+
+    return unicodedata.normalize("NFD", text)
+
+
+def _nfc(text):
+    import unicodedata
+
+    return unicodedata.normalize("NFC", text)
+
+
+def test_a_walked_nfd_project_is_not_reported_twice(tmp_path):
+    project_dir = _make_project(tmp_path, "2026", _nfd("Français"), _nfd("Été"))
+    _touch(project_dir / "A001.mov", size=1000)
+    selected = {_nfc("2026/Français/Été")}
+
+    result = manifest_mod.scan_local_manifest(str(tmp_path), selected_rels=selected)
+
+    assert len(result) == 1
+    entry = next(iter(result.values()))
+    assert entry["n_originals"] == 1
+    # The one key reported carries the per-file lists: the NFD copy used to be
+    # rollup-only because `project_rel in selected_rels` was an exact test.
+    assert entry["originals"] is not None
+    assert len(entry["originals"]) == 1
+
+
+def test_prioritise_keeps_a_diacritic_project_the_editor_ticked(tmp_path):
+    """The same fold on the MAX_PROJECTS sort key: an accented project the
+    editor ticked used to sort as unselected and could be the one dropped."""
+    kept, dropped = manifest_mod.prioritize_project_rels(
+        str(tmp_path),
+        [_nfd("2026/Français/Été"), "2026/FF5/Nuclear"],
+        {_nfc("2026/Français/Été")},
+        max_projects=1,
+    )
+    assert kept == [_nfd("2026/Français/Été")]
+    assert dropped == 1

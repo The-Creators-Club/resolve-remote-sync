@@ -343,8 +343,15 @@ def apply_bundle(con, bundle_path, apply_rescore=True):
 
     b = _connect(bundle_path)
     report = {'applied': [], 'skipped': [], 'failed': [], 'rescored_tracks': 0,
-              'bundle': dict(meta)}
+              'rescore_skipped': None, 'bundle': dict(meta)}
     try:
+        # The outer transaction is EXPLICIT (bug-hunt-2026-09-03 music-5).
+        # sqlite3's legacy mode only issues an implicit BEGIN before DML, so
+        # the per-row SAVEPOINT below would otherwise be the outermost one --
+        # and RELEASE of an outermost savepoint COMMITS. Half a bundle would
+        # then survive the rollback that this function promises.
+        if not con.in_transaction:
+            con.execute('BEGIN')
         cols = ','.join(TRACK_COLS)
         placeholders = ','.join('?' * len(TRACK_COLS))
         updates = ','.join(f'{c}=excluded.{c}' for c in TRACK_COLS
@@ -361,6 +368,14 @@ def apply_bundle(con, bundle_path, apply_rescore=True):
             # the commit: the filesystem has no part in this transaction.
             fresh = con.execute('SELECT id FROM tracks WHERE rel_path=?',
                                 (row['rel_path'],)).fetchone() is None
+            # One SAVEPOINT per row (bug-hunt-2026-09-03 music-5). The read-back
+            # below can reject this row, and before this the rejected INSERT
+            # stayed in the transaction the loop goes on to commit: a track with
+            # an embedding of the wrong width is exactly what db.load_matrix
+            # np.stack()s over, so a bundle that reported SKIPPED took every
+            # text search and /api/similar down until the row was deleted by
+            # hand. A row that is not verified now leaves nothing behind.
+            con.execute('SAVEPOINT drain_row')
             con.execute(
                 f'INSERT INTO tracks({cols}) VALUES({placeholders}) '
                 f'ON CONFLICT(rel_path) DO UPDATE SET {updates}',
@@ -372,8 +387,11 @@ def apply_bundle(con, bundle_path, apply_rescore=True):
                 'SELECT id,dim,length(embedding) len FROM tracks WHERE rel_path=?',
                 (row['rel_path'],)).fetchone()
             if live is None or not live['dim'] or live['len'] != live['dim'] * 4:
+                con.execute('ROLLBACK TO drain_row')
+                con.execute('RELEASE drain_row')
                 report['skipped'].append((row['uid'], 'write not verified'))
                 continue
+            con.execute('RELEASE drain_row')
             _apply_children(con, b, live['id'], row['rel_path'])
             con.execute(
                 'UPDATE ingest_queue SET state=?, error=NULL, track_id=?, '
@@ -385,7 +403,10 @@ def apply_bundle(con, bundle_path, apply_rescore=True):
 
         _apply_failures(con, b, report)
 
-        if apply_rescore and meta.get('rescore') == '1':
+        stale = _stale_rescore_reason(con, meta) if apply_rescore else None
+        if stale:
+            report['rescore_skipped'] = stale
+        if apply_rescore and not stale and meta.get('rescore') == '1':
             # Imported HERE, not at module scope, and that is load-bearing:
             # this module's whole point is that it can be run by whatever
             # python3 the NAS host happens to have (`music/web/DEPLOY.md`
@@ -460,6 +481,63 @@ def _reject_reason(con, row):
     if q['content_hash'] and row['content_hash'] and q['content_hash'] != row['content_hash']:
         return 'content_hash changed since the drain -- the file at this path is not what was analysed'
     return None
+
+
+def _stale_rescore_reason(con, meta):
+    """Why the bundle's library-wide scores must NOT be applied, or None.
+
+    bug-hunt-2026-09-03 music-2. The bundle carries the WHOLE library's
+    tags/axes and the whole debias set, percentile-ranked over the population
+    the base rig pulled. That was sound while the rig was the only producer of
+    scores; since 2026-08-18 the live index re-scores itself, because fleet
+    ingest's `write_item_result` calls `rescore.apply_for_track` ->
+    `rescore_library`, which rewrites every track's tags and axes and
+    recomputes debias. Applying an older bundle over that reverts every
+    overlapping track to the pull-time population while the tracks ingested
+    since keep the newer one: one library scored against two populations, with
+    nothing anywhere saying so.
+
+    So the age is compared and the rescore half is SKIPPED, named in the
+    report. The track rows, their windows, their peaks and the journal are
+    unaffected -- those are keyed per row and are the part a drain exists for.
+    The operator's answer is a `retag` on the live index, which is where the
+    newer population already lives.
+
+    Stdlib only, deliberately: this module has to run under whatever python3
+    the NAS host has (DEPLOY.md applies a bundle over SSH), which is also why
+    the fix is not "re-score here" -- `rescore.rescore_library` needs numpy.
+    """
+    if meta.get('rescore') != '1':
+        return None
+    created = str(meta.get('created_at') or '').strip()
+    try:
+        tagged = con.execute("SELECT value FROM meta WHERE key='tagged_at'").fetchone()
+    except sqlite3.DatabaseError:
+        return None
+    tagged = (tagged[0] if tagged else '') or ''
+    if not created or not tagged:
+        # A bundle or an index that cannot say when it was scored is the
+        # pre-2026-09-03 behaviour: apply it, as every operator's runbook says.
+        return None
+    live, pulled = _as_time(tagged), _as_time(created)
+    if live is None or pulled is None or live <= pulled:
+        return None
+    return (f'the live index was re-scored at {tagged}, after this bundle was '
+            f'exported at {created}. Its library-wide tags, axes and debias '
+            f'are ranked over an older population, so applying them would '
+            f'score one library against two. Run a retag on this index '
+            f'instead, or apply with --no-rescore to silence this.')
+
+
+def _as_time(value):
+    """An ISO-8601 stamp as an aware datetime, or None if it is not one."""
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    # Both writers stamp UTC (`_now` here and in rescore.py); a naive value
+    # from an older hand-edited index is read as UTC rather than refused.
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
 def _apply_children(con, b, track_id, rel_path):
@@ -544,6 +622,8 @@ def main(argv=None):
     print(f'applied {len(report["applied"])} track(s) to {db_path}')
     if report['rescored_tracks']:
         print(f'  re-scored {report["rescored_tracks"]} track(s) library-wide')
+    if report.get('rescore_skipped'):
+        print(f'  RESCORE SKIPPED: {report["rescore_skipped"]}')
     if report['failed']:
         # music-3, 2026-08-21: these are the rows the base rig could not
         # analyse. They are now parked HERE too, which is what stops the

@@ -302,6 +302,24 @@ def _make_readable_to_the_fleet(path):
                     'over SMB until it is chmod 664', path, exc)
 
 
+def _create_share_root_on_first_run(c):
+    """mkdir the library root, but only where that cannot mean "not mounted".
+
+    bug-hunt-2026-09-03 music-1. This used to be an unconditional
+    `share_root().mkdir(parents=True, exist_ok=True)`, which is what turned an
+    absent mount into a directory the upload was moved into. Creating the
+    library root is a deployment act; the one case where an ingest may do it is
+    the first ever upload on a fresh deployment -- the mountpoint's parent is
+    there and the index names no tracks to be missing. That is the same case
+    config.share_root_ready() lets through, so the gate and this agree.
+    """
+    root = Path(config.share_root())
+    if root.is_dir():
+        return
+    if root.parent.is_dir() and not config.library_has_tracks(c):
+        root.mkdir(parents=True, exist_ok=True)
+
+
 def queue_one(upload_name, src, c):
     """Validate, de-duplicate, land and enqueue one upload. Never raises.
 
@@ -357,7 +375,7 @@ def queue_one(upload_name, src, c):
             return result
 
         dest = db.unique_dest(staged.name)
-        config.share_root().mkdir(parents=True, exist_ok=True)
+        _create_share_root_on_first_run(c)
         shutil.move(str(staged), str(dest))
         _make_readable_to_the_fleet(dest)
 
@@ -400,10 +418,26 @@ def ingest_files(files: List[UploadFile] = File(...),
     return _ingest_inline(files, *indexer)
 
 
+def _require_share(c):
+    """503 unless this host is really looking at the library. Beside ffmpeg.
+
+    bug-hunt-2026-09-03 music-1. An unmounted bind mount is an empty directory,
+    not an error, so every check below here (unique_dest's collision loop, the
+    move itself) succeeds against nothing and the editor is told "queued" for
+    bytes that landed under the mountpoint. Refused as a whole request for the
+    same reason _require_ffmpeg() refuses one: a deployment fault must not be
+    served as a half-applied ingest.
+    """
+    ok, reason = config.share_root_ready(c)
+    if not ok:
+        raise HTTPException(503, reason)
+
+
 def _ingest_queued(files):
     """No GPU here: land the files and let a base-rig indexer run analyse them."""
     _require_ffmpeg()                      # before anything is written anywhere
     c = con()
+    _require_share(c)
     results = []
     for up in files:
         results.append(queue_one(up.filename, up.file, c))
@@ -422,8 +456,9 @@ def _ingest_inline(files, _ingest, index_music):
     two file reads. ingest_one now asks that instead, so both halves run the
     same duplicate defence off the same index.
     """
-    clap = index().clap                    # reuse the already-loaded model
     c = con()
+    _require_share(c)                      # music-1: the base rig mounts it too
+    clap = index().clap                    # reuse the already-loaded model
     results = []
     for up in files:
         r = _ingest.ingest_one(up.filename, up.file, clap, c)

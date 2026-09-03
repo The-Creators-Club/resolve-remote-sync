@@ -143,6 +143,29 @@ def test_a_slow_take_is_logged_with_its_name(bridge, monkeypatch, caplog):
     assert any("cards.conform" in r.getMessage() for r in caplog.records)
 
 
+def test_a_sustained_starvation_keeps_saying_so(bridge, monkeypatch, caplog):
+    """bug-hunt-2026-09-03 comp-resolve-4: the repeat window used to be
+    stamped on every SLOW TAKE rather than on every log line, so slow takes
+    arriving closer together than the window measured themselves against each
+    other and the warning fired exactly once. One scheduler starving the
+    other is the standing risk of phase 2; it must not go quiet while it
+    lasts."""
+    monkeypatch.setattr(bridge_mod, "SLOW_TAKE_SECONDS", 0.0)
+    monkeypatch.setattr(bridge_mod, "SLOW_TAKE_REPEAT_SECONDS", 60.0)
+    now = [1000.0]
+    monkeypatch.setattr(bridge_mod.time, "monotonic", lambda: now[0])
+    with caplog.at_level("WARNING", logger="ccsync.cards"):
+        # Ten seconds apart, i.e. always closer together than the repeat
+        # window: that is what a starving sweep looks like, and it is exactly
+        # the shape the old stamp could never speak about twice.
+        for _ in range(7):
+            bridge._note_take("cards.sweep", 1.0)
+            now[0] += 10.0
+    said = [r for r in caplog.records if "cards.sweep" in r.getMessage()]
+    # The first take, and the one 60 s after that line was written.
+    assert len(said) == 2
+
+
 # ----------------------------------------------------------------- the edits
 
 def test_an_edit_is_visible_while_it_runs(bridge):

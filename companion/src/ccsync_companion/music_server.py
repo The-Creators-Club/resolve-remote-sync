@@ -30,6 +30,8 @@ import logging
 import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -203,6 +205,77 @@ def call(
         return {"ok": False, "error": out[:400]}
 
 
+# -- the status probes ------------------------------------------------------
+#
+# GET /status and GET /music/status each SPAWN a child (`call` above re-enters
+# this exe as a Resolve worker), and a GET is deliberately exempt from the
+# token and from the Origin rule when no Origin is sent -- a subresource load
+# (<img src>, an iframe) sends none, so any page in any browser can ask for
+# one. Unbounded that is hundreds of copies of the frozen companion at ~80 MB
+# each, all knocking on fuscript's door (CR-68), because an ad frame said so
+# (bug-hunt-2026-09-03 comp-broll-music-3). The answer these routes carry is a
+# yes/no a settings dot draws, so N requests inside a few seconds may share
+# ONE child: fresh answers are served from the slot, and the losers of the
+# race wait for the winner's rather than starting their own.
+
+PROBE_TTL_S = 3.0
+
+
+class _ProbeSlot:
+    __slots__ = ("lock", "deadline", "value")
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.deadline = 0.0
+        self.value: Optional[dict] = None
+
+
+_probe_guard = threading.Lock()
+_probe_slots: dict[Any, _ProbeSlot] = {}
+
+
+def cached_probe(run: Callable[..., dict], action: str,
+                 ttl: Optional[float] = None, **kw: Any) -> dict:
+    """`run(action, **kw)`, at most once per `ttl` seconds and never twice at
+    the same time.
+
+    Keyed on the CALLER as well as the action: a caller that supplied its own
+    probe function must never be handed an answer produced by someone else's
+    (and it is what keeps two tests, each with its own stub, out of each
+    other's results).
+    """
+    ttl = PROBE_TTL_S if ttl is None else ttl
+    key = (run, action)
+    with _probe_guard:
+        slot = _probe_slots.get(key)
+        if slot is None:
+            if len(_probe_slots) > 16:
+                # Production has one key. A long-lived process that somehow
+                # grew more must not accumulate them for ever.
+                now = time.monotonic()
+                for stale_key, stale in list(_probe_slots.items()):
+                    if stale.deadline <= now and not stale.lock.locked():
+                        _probe_slots.pop(stale_key, None)
+            slot = _probe_slots[key] = _ProbeSlot()
+    if slot.value is not None and time.monotonic() < slot.deadline:
+        return slot.value
+    with slot.lock:
+        if slot.value is not None and time.monotonic() < slot.deadline:
+            # The winner filled the slot while this thread queued: the whole
+            # point, N requests costing one child.
+            return slot.value
+        result = run(action, **kw)
+        slot.value = result
+        slot.deadline = time.monotonic() + ttl
+        return result
+
+
+def reset_probe_cache() -> None:
+    """Forget every memoised probe, so the next request spawns a child."""
+    with _probe_guard:
+        _probe_slots.clear()
+
+
 def _decode(raw: Any) -> str:
     if raw is None:
         return ""
@@ -228,7 +301,7 @@ def build_status_response(caller: Optional[Callable[..., dict]] = None) -> tuple
     refreshResolveStatus() already reads.
     """
     run = caller if caller is not None else call
-    return 200, run("status")
+    return 200, cached_probe(run, "status")
 
 
 def build_reveal_response(

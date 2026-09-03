@@ -548,6 +548,30 @@ def test_start_supervisor_respects_the_config_switch(tmp_path, caplog):
     assert any("supervise = false" in r.getMessage() for r in caplog.records)
 
 
-def test_start_supervisor_is_quiet_on_a_source_run(tmp_path, monkeypatch):
+def test_start_supervisor_says_so_on_a_source_run(tmp_path, monkeypatch, caplog):
+    """bug-hunt-2026-09-03 comp-core-2: this used to be a DEBUG line, so no
+    log anywhere said the machine had no relaunch-after-abort net. INFO off
+    darwin: a source run is the developer's own choice."""
+    import logging
+
     monkeypatch.setattr(sys, "frozen", False, raising=False)
-    assert crash_report.start_supervisor(_cfg(tmp_path), spawn=lambda *a: None) is False
+    monkeypatch.setattr(crash_report.sys, "platform", "win32", raising=False)
+    with caplog.at_level(logging.INFO, logger="ccsync.crash"):
+        assert crash_report.start_supervisor(_cfg(tmp_path), spawn=lambda *a: None) is False
+    assert any("nothing relaunches it" in r.getMessage() and r.levelno == logging.INFO
+               for r in caplog.records)
+
+
+def test_a_mac_is_warned_that_nothing_relaunches_it(tmp_path, monkeypatch, caplog):
+    """comp-core-2: supervisor.spawn_for declines on macOS on the strength of
+    launchd, and the companion LaunchAgent deliberately has no KeepAlive -- so
+    a Mac genuinely has no net and its log must say so above DEBUG."""
+    import logging
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(crash_report.sys, "platform", "darwin", raising=False)
+    monkeypatch.setattr(crash_report.supervisor, "spawn_for", lambda *a, **k: None)
+    with caplog.at_level(logging.DEBUG, logger="ccsync.crash"):
+        assert crash_report.start_supervisor(_cfg(tmp_path), spawn=lambda *a: None) is False
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("nothing relaunches it" in r.getMessage() for r in warnings)

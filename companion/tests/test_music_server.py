@@ -27,6 +27,7 @@ import os
 import socket
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -1268,3 +1269,90 @@ def test_the_fetch_command_targets_the_music_library_on_the_nas(tmp_path):
     # ...and the archive default is untouched.
     cmd = broll_fetch.build_fetch_command(cfg, "x/clip.mov", str(tmp_path / "clip.mov"))
     assert cmd[2] == "creators_club_sftp:/mnt/tank/creators_club/Assets/B-roll Archive/x/clip.mov"
+
+
+# ---------------------------------------------------------------------------
+# The status probes are memoised and serialised
+# (bug-hunt-2026-09-03 comp-broll-music-3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _empty_probe_cache():
+    """Every test in this file starts with no memoised probe, and leaves
+    none: the cache is keyed on the caller, but a live_server test and a
+    direct one can share the module's own `call`."""
+    music_server.reset_probe_cache()
+    yield
+    music_server.reset_probe_cache()
+
+
+def test_fifty_concurrent_status_requests_spawn_one_worker(monkeypatch):
+    """A GET needs no Origin and no token (a subresource load sends neither),
+    and each one used to spawn a Resolve worker child: 300 <img> tags on any
+    page an editor had open meant 300 copies of the frozen companion, each
+    living up to 90 s, all knocking on fuscript's door (CR-68). The answer is
+    a yes/no a settings dot draws, so the losers of the race read the
+    winner's."""
+    calls = []
+    started = threading.Event()
+
+    def _slow_call(action, timeout=None, **kw):
+        calls.append(action)
+        started.set()
+        # Long enough that every other thread is queued behind this one.
+        time.sleep(0.3)
+        return {"ok": True, "project": "P", "timeline": "T"}
+
+    monkeypatch.setattr(music_server, "call", _slow_call)
+
+    answers: list = []
+    threads = [threading.Thread(
+        target=lambda: answers.append(music_server.build_status_response()))
+        for _ in range(50)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert started.is_set()
+    assert len(calls) == 1
+    assert len(answers) == 50
+    assert all(body["project"] == "P" for _status, body in answers)
+
+
+def test_a_memoised_status_is_not_a_permanent_one(monkeypatch):
+    """It is a few seconds of de-duplication, not a cache: an editor who opens
+    the project the dot said was missing must see it on the next look."""
+    seen = []
+
+    def _call(action, timeout=None, **kw):
+        seen.append(action)
+        return {"ok": True, "n": len(seen)}
+
+    monkeypatch.setattr(music_server, "call", _call)
+    monkeypatch.setattr(music_server, "PROBE_TTL_S", 0.0)
+
+    assert music_server.build_status_response()[1]["n"] == 1
+    assert music_server.build_status_response()[1]["n"] == 2
+
+
+def test_the_broll_status_probe_shares_the_same_slot(monkeypatch):
+    """/status is the same shape on the same listener and spawns the same
+    child -- it may not be the route that is left uncapped."""
+    calls = []
+
+    def _call(action, timeout=None, **kw):
+        calls.append(action)
+        time.sleep(0.2)
+        return {"resolve_connected": True}
+
+    monkeypatch.setattr(music_server, "call", _call)
+    threads = [threading.Thread(target=lambda: broll_server.build_status_response({}))
+               for _ in range(20)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert calls == [music_worker.BROLL_STATUS_ACTION]

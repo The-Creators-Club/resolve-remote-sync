@@ -356,6 +356,9 @@ def apply_relinks(ops: Iterable[dict[str, Any]], link_fn: Callable[[Any, str], d
     re-offer the same file, and the per-clip line is DEBUG with one WARNING
     summarising the pass -- 200 refused clips used to write 200 WARNINGs every
     120 s (COMP-MEDIA-5, 2026-08-14; R15 fix 4 did the same for the watcher).
+    Only a real refusal is remembered: a result whose `reason` is anything
+    other than "refused" (link_proxy_media's "scripting_error") counts as a
+    failure for this pass and nothing more.
     """
     stat = stat_fn if stat_fn is not None else os.stat
     if resolve_fn is None:
@@ -395,6 +398,23 @@ def apply_relinks(ops: Iterable[dict[str, Any]], link_fn: Callable[[Any, str], d
             log.info(
                 "proxy relink: %s -> %s (was %s)",
                 name, op["new_proxy"], op.get("old_proxy") or "<unlinked>",
+            )
+        elif str((result or {}).get("reason") or "refused") != "refused":
+            # bug-hunt-2026-09-03 comp-resolve-2: link_proxy_media never
+            # raises -- it catches its own fusionscript exception and returns
+            # reason="scripting_error" -- so the `except` above cannot be the
+            # only place that spares a clip. A Resolve that goes away halfway
+            # through a 200-op pass used to be remembered as a permanent
+            # refusal of every remaining pairing, and the proxy file's
+            # (mtime, size) never changes, so those clips stayed skipped until
+            # the tray restarted. A missing reason still counts as a refusal:
+            # that is what the pre-2026-09-03 shape meant.
+            failures.append(name)
+            log.warning(
+                "proxy relink: %s -> %s got no answer from Resolve (%s) -- not "
+                "remembered as a refusal",
+                name, op["new_proxy"],
+                (result or {}).get("message", "no reason given"),
             )
         else:
             failures.append(name)

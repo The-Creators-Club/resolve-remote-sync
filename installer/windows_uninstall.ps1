@@ -262,16 +262,35 @@ else {
     }
 }
 
+# Is the share gone AFTER the removal attempt? Pure, and separate, because
+# it is what the firewall block below is allowed to depend on
+# (bug-hunt-2026-09-03 install-onboard-3): a re-read that could not be done
+# counts as "still published", the same fail-safe direction the unmap re-read
+# above uses. A $null share with $ReadFailed means Get-SmbShare threw, not
+# that there is no share.
+function Test-SmbShareGone {
+    param($ShareAfter, [bool]$ReadFailed)
+    if ($ReadFailed) { return $false }
+    return ($null -eq $ShareAfter)
+}
+
 # the loopback share behind the labelled net-use mapping (needs admin)
 $share = $null
-try { $share = Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue } catch {}
+$shareReadFailed = $false
+try { $share = Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue } catch { $shareReadFailed = $true }
+# What the firewall block reads. It starts as "the share is still there"
+# because every path below that does NOT prove otherwise must keep the rule.
+$sharePublished = $true
 if ($share -and -not $unmapSettled) {
     Write-Skip "keeping SMB share ${ShareName}: $DriveRoot was not unmapped (see above). To finish by hand, run these two, in this order:"
     Write-Host "    net use $DriveRoot /delete /y"
     Write-Host "    Remove-SmbShare -Name $ShareName -Force        (administrator PowerShell)"
 }
 elseif ($share) {
-    if ($DryRun) { Write-Step "[dry-run] would remove SMB share $ShareName" }
+    if ($DryRun) {
+        Write-Step "[dry-run] would remove SMB share $ShareName"
+        $sharePublished = $false
+    }
     else {
         try {
             Remove-SmbShare -Name $ShareName -Force -Confirm:$false -ErrorAction Stop
@@ -280,10 +299,23 @@ elseif ($share) {
         # Targeted command, not "re-run this script elevated": an elevated
         # run of this script sees a DIFFERENT device map than the user's
         # own session, so the unmount above would silently do nothing there.
-        catch { Write-Warn2 "could not remove the share ${ShareName}: $($_.Exception.Message). Harmless leftover. To clear it, open an administrator PowerShell and run:  Remove-SmbShare -Name $ShareName -Force" }
+        catch { Write-Warn2 "could not remove the share ${ShareName}: $($_.Exception.Message). To clear it, open an administrator PowerShell and run:  Remove-SmbShare -Name $ShareName -Force" }
+        # The removal's own success is NOT the signal: it can report success
+        # and leave the share, or throw with the share already gone. Ask the
+        # machine.
+        $shareAfter = $null
+        $afterReadFailed = $false
+        try { $shareAfter = Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue } catch { $afterReadFailed = $true }
+        $sharePublished = -not (Test-SmbShareGone -ShareAfter $shareAfter -ReadFailed $afterReadFailed)
     }
 }
-else { Write-Skip "no SMB share: $ShareName" }
+elseif ($shareReadFailed) {
+    Write-Warn2 "could not read this machine's SMB shares, so '$ShareName' may still be published. Keeping the inbound-SMB block rule; check with:  Get-SmbShare -Name $ShareName"
+}
+else {
+    Write-Skip "no SMB share: $ShareName"
+    $sharePublished = $false
+}
 
 # The inbound-SMB block rule the bootstrap installs alongside that share
 # (2026-08-17, COMMERCIAL_READINESS.md item 15). It goes when the share goes:
@@ -292,9 +324,18 @@ else { Write-Skip "no SMB share: $ShareName" }
 # the share stays (OPS-8, 2026-08-28): the rule is what scopes that share to
 # this machine, so dropping it while the share is still published would widen
 # the exposure of the whole project tree.
+#
+# The gate is "$sharePublished", i.e. the share re-read AFTER the removal
+# attempt, not "we deliberately kept it" (bug-hunt-2026-09-03
+# install-onboard-3). It used to be `$share -and -not $unmapSettled`, so a
+# clean unmap plus a Remove-SmbShare that threw (a handle open on the tree)
+# dropped the machine-wide inbound 139/445 block while the share -- the
+# editor's ENTIRE project tree -- stayed published, on every network that
+# machine ever joins. Nothing re-applies the rule except a re-run of the
+# bootstrap.
 $smbRule = $null
 try { $smbRule = Get-NetFirewallRule -DisplayName $SmbFirewallRuleName -ErrorAction SilentlyContinue } catch {}
-if ($smbRule -and $share -and -not $unmapSettled) {
+if ($smbRule -and $sharePublished) {
     Write-Skip "keeping firewall rule '$SmbFirewallRuleName': it is what keeps the '$ShareName' share reachable only from this machine, and that share is still published."
 }
 elseif ($smbRule) {

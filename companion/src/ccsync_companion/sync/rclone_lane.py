@@ -1668,6 +1668,45 @@ def build_up_command(
     return _append_stats_flags(cmd, stats_interval)
 
 
+def _basename_rule_regex(rule: str) -> "re.Pattern[str]":
+    """One rclone basename filter rule (`- *.f[0-9][0-9][0-9]*.*`) compiled to
+    a case-insensitive regex over a basename.
+
+    Derived from the rule STRINGS rather than hand-written, so
+    path_matches_lane_a_filter cannot drift from the rule list the periodic
+    pass uses -- which is exactly how YT-3's five rules ended up enforced on
+    one lane A door and not the other (bug-hunt-2026-09-03 comp-sync-1).
+    Only the glob subset those rules use is translated: `*` (any run of
+    non-separator characters, possibly empty), `?`, and a `[...]` class.
+    None of them contains a `/`, so rclone matches them against the basename.
+    """
+    body = rule[2:] if rule.startswith(("- ", "+ ")) else rule
+    out = []
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "*":
+            out.append(r"[^/\\]*")
+        elif ch == "?":
+            out.append(r"[^/\\]")
+        elif ch == "[":
+            end = body.find("]", i + 1)
+            if end == -1:
+                out.append(re.escape(ch))
+            else:
+                out.append("[" + body[i + 1:end].replace("\\", "\\\\") + "]")
+                i = end
+        else:
+            out.append(re.escape(ch))
+        i += 1
+    return re.compile("".join(out) + r"\Z", re.IGNORECASE)
+
+
+# Compiled once: this runs on every watchdog event, thousands a minute during
+# a card ingest.
+YTDL_WORK_EXCLUDE_RES = [_basename_rule_regex(rule) for rule in YTDL_WORK_EXCLUDE_RULES]
+
+
 def path_matches_lane_a_filter(path: str) -> bool:
     """Python re-implementation of build_filter_rules_up() + --ignore-case,
     for a single path.
@@ -1684,6 +1723,12 @@ def path_matches_lane_a_filter(path: str) -> bool:
     express is lane A's OTHER door: `._A001.mov` ends in `.mov` and sits in no
     Proxy dir, so without it a Mac's watchdog event would upload the very file
     the periodic pass now refuses (KNOWN_BUGS 12).
+
+    The same is true of YT-3's ytdl work files, which is why they are here
+    too (bug-hunt-2026-09-03 comp-sync-1): `Interview.original.mp4` and
+    `Interview.f137.mp4` sit unchanged on disk for the whole conversion, so
+    they clear the express size-stability and min-age gates easily, and lane
+    A's --ignore-existing makes that first landing the fleet's permanent copy.
     """
     if not path:
         return False
@@ -1691,6 +1736,8 @@ def path_matches_lane_a_filter(path: str) -> bool:
         return False
     parts = [seg for chunk in str(path).split("/") for seg in chunk.split("\\")]
     if parts and parts[-1].startswith("._"):
+        return False
+    if parts and any(rx.match(parts[-1]) for rx in YTDL_WORK_EXCLUDE_RES):
         return False
     return not any(seg.lower() == "proxy" for seg in parts)
 
@@ -4958,6 +5005,49 @@ class RcloneLane(LaneAdapter):
             )
         return ready, deferred
 
+    def _express_drop_moved_away(self, rels: list[str]) -> list[str]:
+        """Drop the paths the server has moved away from (or refused to move)
+        before they reach the --files-from-raw list.
+
+        bug-hunt-2026-09-03 comp-sync-1: `_build_command` keeps those paths
+        out of the PERIODIC run with `- /<rel>` filter rules, and an express
+        run cannot carry a filter file at all (build_express_command), so
+        without this the same file goes back to the NAS at the path the admin
+        just cleared through lane A's other door -- permanently, since
+        --ignore-existing means nothing replaces it. The excludes are asked
+        for relative to local_root (`subpath=None`), which is the space
+        express rels live in. Never raises: a source of excludes that cannot
+        answer must not stop the upload, exactly as in _build_command.
+        """
+        if self.direction != DIRECTION_UP or self.extra_excludes_fn is None:
+            return rels
+        try:
+            excludes = [
+                nfc_key(str(rel)).replace("\\", "/").strip("/").lower()
+                for rel in (self.extra_excludes_fn(None) or [])
+            ]
+        except Exception:
+            log.exception("%s: extra_excludes_fn failed -- excluding nothing", self.name)
+            return rels
+        excludes = [rel for rel in excludes if rel]
+        if not excludes:
+            return rels
+        kept: list[str] = []
+        for rel in rels:
+            key = nfc_key(str(rel)).replace("\\", "/").strip("/").lower()
+            # A file-moves exclusion can name a DIRECTORY (`is_dir`), which is
+            # why the prefix arm is here as well as the equality one.
+            if any(key == ex or key.startswith(ex + "/") for ex in excludes):
+                continue
+            kept.append(rel)
+        dropped = len(rels) - len(kept)
+        if dropped:
+            log.info(
+                "%s: express kept %d path(s) the server moved away from out of this run",
+                self.name, dropped,
+            )
+        return kept
+
     def _express_run(self, rels: list[str]) -> None:
         # Same gate as the periodic pass, for the same reason: express builds
         # a --files-from list of paths RELATIVE TO local_root, so against a
@@ -4976,6 +5066,10 @@ class RcloneLane(LaneAdapter):
         available, msg = rclone_available(self.rclone_path)
         if not available:
             log.warning("%s: express upload skipped -- %s", self.name, msg)
+            return
+
+        rels = self._express_drop_moved_away(rels)
+        if not rels:
             return
 
         self._express_seq += 1

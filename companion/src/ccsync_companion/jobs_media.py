@@ -623,10 +623,15 @@ def _read_pcm(
 ) -> tuple[int, bytes, str]:
     """Run an ffmpeg that writes PCM to stdout, reading it as it comes.
 
-    Chunked rather than `subprocess.run(capture_output=True)` -- which is what
-    `_peaks_make` uses -- so a stop (a fleet halt, a shutdown) is honoured
-    within a chunk instead of within half an hour, and so the caller can
-    heartbeat while an hour of audio decodes.
+    The PCM is drained on its OWN thread and the stop/ceiling checks ride a
+    POLL_SECONDS timer here, which is `_run_ffmpeg`'s shape and now for the
+    same reason (bug-hunt-2026-09-03 comp-ytdl-jobs-4): this loop used to sit
+    in `proc.stdout.read(1 MiB)`, and a BufferedReader returns short only at
+    EOF -- so a child that stopped producing output (a share that went away
+    mid-decode, a device in an uninterruptible wait) parked the job thread for
+    ever, deaf to a cancel, a fleet halt, a shutdown and its own ceiling,
+    while the beater renewed the lease and the dashboard saw a healthy job.
+    A `selectors` loop would not do: it does not work on a Windows pipe.
     """
     spawn = popen or _popen
     try:
@@ -634,42 +639,71 @@ def _read_pcm(
     except Exception as exc:                                    # noqa: BLE001
         raise MediaJobError(f"could not start ffmpeg: {exc}") from exc
     errors: list[str] = []
-    reader = threading.Thread(target=_drain_text, args=(proc.stderr, errors),
-                              name="ccsync-media-stderr", daemon=True)
-    reader.start()
     chunks: list[bytes] = []
+    failure: list[str] = []
+    threads = [
+        threading.Thread(target=_drain_text, args=(proc.stderr, errors),
+                         name="ccsync-media-stderr", daemon=True),
+        threading.Thread(target=_drain_binary,
+                         args=(proc.stdout, chunks, failure),
+                         name="ccsync-media-pcm", daemon=True)]
+    for thread in threads:
+        thread.start()
     started = clock()
     stopped = ""
     timed_out = False
-    try:
-        while True:
-            block = proc.stdout.read(1 << 20)
-            if not block:
-                break
-            chunks.append(block if isinstance(block, bytes)
-                          else block.encode("latin-1"))
-            stopped = (should_stop() if should_stop is not None else "") or ""
-            if stopped:
-                break
-            if (clock() - started) > ceiling:
-                timed_out = True
-                break
-    except Exception as exc:                                    # noqa: BLE001
-        _kill(proc)
-        reader.join(timeout=5.0)
-        raise MediaJobError(f"the decode failed: {exc}") from exc
+    while True:
+        if proc.poll() is not None:
+            break
+        stopped = (should_stop() if should_stop is not None else "") or ""
+        if stopped:
+            break
+        if (clock() - started) > ceiling:
+            timed_out = True
+            break
+        time.sleep(POLL_SECONDS)
     if stopped or timed_out:
         _kill(proc)
-        reader.join(timeout=5.0)
+        for thread in threads:
+            thread.join(timeout=5.0)
         raise MediaJobError(
             stopped or f"ffmpeg did not finish within {int(ceiling)}s")
+    for thread in threads:
+        # The child has exited; the drain still has to reach EOF, or the tail
+        # of the audio is silently missing from the peaks.
+        thread.join(timeout=30.0)
+    if failure:
+        _kill(proc)
+        raise MediaJobError(f"the decode failed: {failure[0]}")
     try:
         proc.wait(timeout=30)
     except Exception:
         _kill(proc)
-    reader.join(timeout=5.0)
     return int(proc.returncode or 0), b"".join(chunks), \
         "\n".join(errors).strip()[-200:]
+
+
+def _drain_binary(stream: Any, sink: list[bytes],
+                  failure: Optional[list[str]] = None) -> None:
+    """Read a binary pipe to EOF. Never raises -- it runs on its own thread,
+    where an exception would go to a stderr a windowed build does not have;
+    the read error is handed back in `failure` for the caller to raise."""
+    try:
+        while True:
+            block = stream.read(1 << 20)
+            if not block:
+                break
+            sink.append(block if isinstance(block, bytes)
+                        else block.encode("latin-1"))
+    except Exception as exc:                                    # noqa: BLE001
+        log.debug("media jobs: pcm reader stopped early", exc_info=True)
+        if failure is not None:
+            failure.append(str(exc))
+    finally:
+        try:
+            stream.close()
+        except Exception:
+            pass
 
 
 # ======================================================================
@@ -785,11 +819,21 @@ class MediaJob:
                 f"another writer on this machine already has "
                 f"{partial.name} -- leaving it to them")
         try:
-            code, err = _run_ffmpeg(
-                audio_copy_cmd(self.ffmpeg_path, source, partial),
-                total_seconds=duration, on_progress=self.on_progress,
-                should_stop=self.should_stop, ceiling=COPY_TIMEOUT_SECONDS,
-                clock=self.clock, popen=self.popen)
+            try:
+                code, err = _run_ffmpeg(
+                    audio_copy_cmd(self.ffmpeg_path, source, partial),
+                    total_seconds=duration, on_progress=self.on_progress,
+                    should_stop=self.should_stop, ceiling=COPY_TIMEOUT_SECONDS,
+                    clock=self.clock, popen=self.popen)
+            except MediaJobError:
+                # bug-hunt-2026-09-03 comp-ytdl-jobs-5: rule 2 says a run that
+                # will not be finished takes its .partial with it, and
+                # _run_ffmpeg raises for a stop (cancel, halt, shutdown, lost
+                # lease), a timeout or a failed spawn. This used to leave a
+                # full-length .m4a.partial that nothing on any machine ever
+                # swept -- _with_partial has always discarded on exactly this.
+                discard(partial)
+                raise
             got: Optional[float] = None
             if code == 0:
                 _codec, got = probe_audio(self.ffmpeg_path, partial)
@@ -892,14 +936,27 @@ class MediaJob:
                 f"another writer on this machine already has {partial.name} "
                 f"-- leaving it to them")
         try:
-            work(partial)
+            try:
+                work(partial)
+            except MediaJobError:
+                discard(partial)
+                raise
+            except Exception as exc:                            # noqa: BLE001
+                discard(partial)
+                raise MediaJobError(str(exc)) from exc
+            # A PUBLISH FAILURE KEEPS THE FILE (bug-hunt-2026-09-03
+            # comp-ytdl-jobs-6). _publish's message tells the admin the
+            # finished file "is still there as <name>.partial"; discarding it
+            # here made that sentence false, and sent whoever read the job row
+            # looking for a file we had just removed. It is also the better of
+            # the two answers on its own terms: an os.replace that failed
+            # (a Windows share holding the target open, a permission change on
+            # the vault) is a transient the next attempt can win, and what is
+            # on disk at that point is FINISHED WORK -- minutes of encode --
+            # not a half-written file rule 2 exists to keep out of the vault.
+            # `already_made` discarding inside _publish is unchanged: there the
+            # file lost the race and is genuinely spare.
             _publish(partial, final, source, already_made)
-        except MediaJobError:
-            discard(partial)
-            raise
-        except Exception as exc:                                # noqa: BLE001
-            discard(partial)
-            raise MediaJobError(str(exc)) from exc
         finally:
             release_partial(partial)
 

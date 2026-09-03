@@ -361,3 +361,50 @@ class TestTheReplacedBuildIsKept:
         line = [ln for ln in UPGRADE.splitlines()
                 if "the new build would not start" in ln][0]
         assert "\u2014" not in line and chr(8212) not in line
+
+
+class TestEveryWorkflowScopesItsToken:
+    """bug-hunt-2026-09-03 server-tools-3. "CI builds (never publishes); this
+    rig signs" was enforced only by what the steps happen to do -- with no
+    `permissions:` block a job holds the repo's DEFAULT workflow permissions,
+    which on the legacy setting is read/write, i.e. enough for one careless
+    step or third-party action to cut a release with the ambient token."""
+
+    WORKFLOWS = ("ci.yml", "release-windows.yml", "release-macos.yml",
+                 "release-dashboard.yml", "android.yml", "image.yml")
+
+    def _text(self, name: str) -> str:
+        return (REPO / ".github" / "workflows" / name).read_text(encoding="utf-8")
+
+    def test_each_workflow_declares_read_only_contents_at_the_top(self):
+        for name in self.WORKFLOWS:
+            text = self._text(name)
+            block = re.search(r"(?m)^permissions:\n((?:  .*\n)+)", text)
+            assert block, f"{name} declares no top-level permissions"
+            assert "contents: read" in block.group(1), name
+
+    def test_no_workflow_grants_itself_contents_write(self):
+        # image.yml legitimately adds packages:/id-token: write (GHCR + cosign
+        # keyless). NOTHING may add contents: write: that is the permission
+        # that creates a release.
+        for name in self.WORKFLOWS:
+            assert "contents: write" not in self._text(name), name
+
+
+class TestLoadSecretsNeverMaterialisesPlaintext:
+    """bug-hunt-2026-09-03 server-tools-5. -Save decrypted each SecureString to
+    a .NET string just to test it for emptiness, leaving the NAS admin password
+    in a session variable (and an unfreed BSTR) for the life of the window --
+    the very thing the script's own header says it avoids."""
+
+    LOAD = (TOOLS / "load_secrets.ps1").read_text(encoding="utf-8")
+    # The -Save branch only. The LOAD branch below it decrypts on purpose:
+    # $env: cannot hold a SecureString, and that plaintext is the point.
+    SAVE = LOAD[LOAD.index("if ($Save) {"):LOAD.index("\n$store = Import-Clixml")]
+
+    def test_the_secure_string_is_never_decrypted_on_the_save_path(self):
+        assert "SecureStringToBSTR" not in self.SAVE
+        assert "PtrToStringUni" not in self.SAVE
+
+    def test_emptiness_is_tested_on_the_secure_string_itself(self):
+        assert "$secure.Length -eq 0" in self.SAVE

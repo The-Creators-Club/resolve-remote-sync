@@ -12,7 +12,9 @@ response.
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import ssl
 import urllib.error
 
 import pytest
@@ -312,3 +314,150 @@ def test_no_secret_reaches_the_alerts_page_or_health(env):
     view = alerts.settings_view(conn, settings)
     assert secret_value not in json.dumps(view)
     assert view["password_set"] is True
+
+
+# --------------------------------------------- bug-hunt-2026-09-03 fix pass
+
+def test_a_crashed_check_is_not_printed_in_the_clean_list(env, monkeypatch):
+    """dash-collector-1: `scan` files a crashed check under check_failed with
+    the failing kind's NAME as its subject, so a clean list computed from
+    by_kind alone printed `ok - <what>` for the very kind the same report
+    lists under COULD NOT BE CHECKED."""
+    _client, conn, settings = env
+    victim = alerts.ALERT_KINDS[0]
+
+    def _boom(_ctx):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(
+        alerts, "ALERT_KINDS",
+        (dataclasses.replace(victim, check=_boom),) + alerts.ALERT_KINDS[1:])
+    _subject, text = alerts.compose_weekly(conn, NOW, settings)
+    assert "COULD NOT BE CHECKED" in text
+    assert victim.kind in text
+    assert f"  ok - {victim.what}" not in text
+    # The denominator still states how many kinds exist.
+    assert f"of {len(alerts.ALERT_KINDS)})" in text
+
+
+class _FakeSMTP:
+    """Stands in for smtplib.SMTP through alerts._smtp_class."""
+
+    seen: dict = {}
+
+    def __init__(self, host, port, timeout=None):
+        type(self).seen = {"host": host, "port": port}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        return False
+
+    def starttls(self, context=None):
+        type(self).seen["context"] = context
+
+    def login(self, user, password):
+        type(self).seen["login"] = user
+
+    def send_message(self, message):
+        type(self).seen["sent"] = True
+
+
+def _configure_smtp(conn, **extra):
+    values = {"alerts_sink": "smtp", "alerts_smtp_host": "mail.example.test",
+              "alerts_smtp_from": "ccsync@example.test",
+              "alerts_smtp_to": "owen@example.test"}
+    values.update(extra)
+    alerts.set_settings(conn, values, "owen")
+    conn.commit()
+
+
+def test_starttls_is_negotiated_with_a_verifying_context(env, monkeypatch):
+    """dash-collector-3: a bare starttls() builds ssl._create_stdlib_context(),
+    which checks neither the certificate nor the hostname - and the next call
+    hands the stored SMTP password to whoever answered."""
+    _client, conn, settings = env
+    _configure_smtp(conn)
+    monkeypatch.setattr(alerts, "_smtp_class", lambda: _FakeSMTP)
+    result = alerts.send(conn, settings, "s", "t", kind="test", dedup=False)
+    assert result["ok"] is True
+    context = _FakeSMTP.seen["context"]
+    assert isinstance(context, ssl.SSLContext)
+    assert context.check_hostname is True
+    assert context.verify_mode == ssl.CERT_REQUIRED
+
+
+def test_the_certificate_check_can_be_turned_off_explicitly(env, monkeypatch):
+    """dash-collector-3's other half: an opt-out an admin chose, never a
+    silent fallback after a verification failure."""
+    _client, conn, settings = env
+    _configure_smtp(conn, alerts_smtp_verify_tls="0")
+    monkeypatch.setattr(alerts, "_smtp_class", lambda: _FakeSMTP)
+    alerts.send(conn, settings, "s", "t", kind="test", dedup=False)
+    context = _FakeSMTP.seen["context"]
+    assert context.check_hostname is False
+    assert context.verify_mode == ssl.CERT_NONE
+
+
+def test_an_unverifiable_certificate_is_a_refusal_naming_the_host(env, monkeypatch):
+    _client, conn, settings = env
+    _configure_smtp(conn)
+
+    class _RefusingSMTP(_FakeSMTP):
+        def starttls(self, context=None):
+            raise ssl.SSLCertVerificationError("self-signed certificate")
+
+    monkeypatch.setattr(alerts, "_smtp_class", lambda: _RefusingSMTP)
+    result = alerts.send(conn, settings, "s", "t", kind="test", dedup=False)
+    assert result["ok"] is False
+    assert "mail.example.test" in result["detail"]
+
+
+def test_an_open_warn_is_still_offered_after_600_newer_rows(env):
+    """dash-collector-4: a WARN writes ONE row and is then silent, so its row
+    aged out of the 500-row window `_open_subjects` used to page - and once it
+    had, no `<kind>.ok` was ever written and that subject's warn was muted for
+    ever."""
+    _client, conn, _settings = env
+    dbmod.record_alert(conn, "folders_unfiltered", "ruskin/RUSKIN-PC", "", True,
+                       "", NOW)
+    for i in range(600):
+        dbmod.record_alert(conn, "crashes", f"ed/M{i}", "", True, "", A_DAY_LATER)
+    conn.commit()
+    assert alerts._is_open(conn, "folders_unfiltered", "ruskin/RUSKIN-PC")
+    offered = alerts._open_subjects(conn, {"folders_unfiltered"})
+    assert ("folders_unfiltered", "ruskin/RUSKIN-PC") in offered
+
+
+def test_only_the_webhook_origin_is_recorded_and_shown(env, monkeypatch):
+    """dash-collector-5: a Slack/Teams/Discord URL's PATH is the credential,
+    and alert_log plus the settings view are read from a backup."""
+    _client, conn, settings = env
+    url = "https://hooks.slack.test/services/T0000/B1111/abcdefSECRETdefgh"
+    _configure_webhook(conn, url)
+    fake = _FakeOpener()
+    monkeypatch.setattr(alerts, "_webhook_opener", lambda: fake)
+    result = alerts.send(conn, settings, "the subject", "the body",
+                         kind="test", dedup=False)
+    assert result["ok"] is True
+    assert fake.calls[0].full_url == url            # the real URL is still used
+    assert result["sent_to"] == "https://hooks.slack.test"
+    rows = [r for r in dbmod.fetch_alerts(conn, limit=50) if r["kind"] == "test"]
+    assert rows and "abcdefSECRETdefgh" not in str(rows[0]["sent_to"])
+
+    view = alerts.settings_view(conn, settings)
+    assert "abcdefSECRETdefgh" not in json.dumps(view)
+    assert view["webhook_origin"] == "https://hooks.slack.test"
+
+
+def test_saving_the_masked_webhook_url_back_keeps_the_stored_one(env):
+    """The page renders the mask, so an untouched field posts the mask back."""
+    _client, conn, settings = env
+    url = "https://hooks.slack.test/services/T0000/B1111/abcdefSECRETdefgh"
+    _configure_webhook(conn, url)
+    view = alerts.settings_view(conn, settings)
+    alerts.set_settings(conn, {"alerts_webhook_url": view["alerts_webhook_url"],
+                               "alerts_smtp_host": "mail.example.test"}, "owen")
+    conn.commit()
+    assert alerts.get_settings(conn)["alerts_webhook_url"] == url

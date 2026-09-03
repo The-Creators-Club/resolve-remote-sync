@@ -47,6 +47,14 @@ on:
         type: boolean
         default: false
 
+# bug-hunt-2026-09-03 server-tools-3: "CI builds, this rig signs" was policy,
+# not permission. With no block here the job holds whatever the repo's default
+# workflow permissions are, which on a legacy setting is read/write - enough
+# for a careless step or a third-party action to cut a release with the ambient
+# token. Nothing here writes: uploading an artifact needs no contents scope.
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: windows-latest

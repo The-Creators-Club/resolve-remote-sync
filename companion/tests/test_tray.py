@@ -573,7 +573,7 @@ def test_tray_callbacks_log_instead_of_dying_silently(caplog):
     with caplog.at_level(logging.ERROR, logger="ccsync.tray"):
         tray_mod._guarded(app, "Consolidate", boom)
     assert any("Consolidate" in r.message for r in caplog.records)
-    assert any("Copy diagnostics" in m for m in app.notified)
+    assert any("COPY DIAGNOSTICS" in m for m in app.notified)
 
 
 def test_icon_stop_actually_stops_the_refresh_loop():
@@ -2430,6 +2430,86 @@ def test_install_youtube_cookies_reports_a_bad_file(tmp_path, monkeypatch):
 
     assert notices and "signed-in" in notices[-1]
     assert not (tmp_path / "out.txt").exists()
+
+
+# tkinter's filedialog/messagebox submodules are imported HERE, at collection
+# time, on purpose: conftest._no_real_tk_windows replaces tkinter.Toplevel with
+# a plain function for the duration of every test, and simpledialog (which
+# filedialog pulls in) does `class Dialog(Toplevel)` at import -> TypeError.
+# The production code imports them inside the function, so without this the
+# Tk branch below cannot be entered at all.
+import tkinter.filedialog  # noqa: E402,F401
+import tkinter.messagebox  # noqa: E402,F401
+
+# -- comp-ui-1: the two YouTube dialogs build their root through ui_dispatch --
+# bug-hunt-2026-09-03. Both used to call tk.Tk() inline on the tray worker
+# thread and only root.destroy(), so ui_dispatch never reclaimed the
+# interpreter (CR-93) and macOS built Tk-Aqua off the main thread. Every other
+# test of these two functions passes the picker=/confirm= seam, which is
+# exactly the branch that was wrong; these drive the Tk branch with dispatch
+# stubbed, so no dialog is ever created. test_tk_interpreter_hygiene.py holds
+# the source-level half (a tk.Tk() must be inside a dispatched function).
+
+
+def _dispatch_spy(monkeypatch):
+    from ccsync_companion import tray
+
+    calls = []
+    monkeypatch.setattr(tray.ui_dispatch, "dispatch",
+                        lambda fn: (calls.append(fn), "")[1])
+    return calls
+
+
+def test_the_cookies_picker_is_built_through_ui_dispatch(tmp_path, monkeypatch):
+    import threading
+
+    from ccsync_companion import tray, ytdl_cookies
+
+    monkeypatch.setattr(ytdl_cookies, "default_cookies_path",
+                        lambda: tmp_path / "out.txt")
+    calls = _dispatch_spy(monkeypatch)
+    app = _FakeApp({})
+    app._popup_active_lock = threading.Lock()
+
+    tray._install_youtube_cookies(app)
+
+    assert len(calls) == 1, "the picker did not go through ui_dispatch.dispatch"
+    assert not app._popup_active_lock.locked(), "the popup lock was not released"
+
+
+def test_the_cookies_picker_stands_down_while_a_window_is_open(monkeypatch):
+    import threading
+
+    from ccsync_companion import tray
+
+    calls = _dispatch_spy(monkeypatch)
+    notices = []
+    app = _FakeApp({})
+    app._notify_tray = lambda msg, title="ccsync-companion": notices.append(msg)
+    app._popup_active_lock = threading.Lock()
+    app._popup_active_lock.acquire()
+
+    tray._install_youtube_cookies(app)
+
+    assert calls == []
+    assert notices and "already open" in notices[-1]
+
+
+def test_the_youtube_terms_dialog_is_built_through_ui_dispatch(monkeypatch):
+    import threading
+
+    from ccsync_companion import tray, ytdl_attestation
+
+    monkeypatch.setattr(ytdl_attestation, "accepted", lambda who: False)
+    calls = _dispatch_spy(monkeypatch)
+    app = _FakeApp({})
+    app.editor_identity = lambda: "alex"
+    app._popup_active_lock = threading.Lock()
+
+    tray._show_youtube_terms_dialog(app)
+
+    assert len(calls) == 1, "the terms dialog did not go through ui_dispatch.dispatch"
+    assert not app._popup_active_lock.locked()
 
 
 # -- CR-22: the licence gate needs a way out that is IN the menu -------------

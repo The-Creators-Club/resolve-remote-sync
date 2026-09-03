@@ -264,7 +264,11 @@ reader would throw away a half-typed form.
 * **`smtp`** - `alerts_smtp_host`, `alerts_smtp_port` (default 587),
   `alerts_smtp_user`, `alerts_smtp_from`, `alerts_smtp_to` (one or more
   addresses, comma or semicolon separated), `alerts_smtp_tls` (STARTTLS,
-  default on). The password is NOT a site setting: `[ SET PASSWORD ]` writes it
+  default on), `alerts_smtp_verify_tls` (default on; since 2026-09-03,
+  bug-hunt dash-collector-3, STARTTLS verifies the relay's certificate and
+  hostname, and a mismatch is a refusal that names the host, never a silent
+  unverified session; off is the one opt-out for a relay with its own
+  certificate). The password is NOT a site setting: `[ SET PASSWORD ]` writes it
   0600 to `<data>/secrets/alerts/smtp_password`, and `DASH_ALERTS_SMTP_PASSWORD`
   in the container's environment overrides the file (env always wins, and the
   page says the value comes from the deployment). It is never in the database,
@@ -273,7 +277,13 @@ reader would throw away a half-typed form.
   the sign-in", never with the server's own text, which can echo the username.
 * **`webhook`** - `alerts_webhook_url`, https only: refused when typed, and
   refused again at send time (a row written by an older build or a restored
-  backup must not put the fleet's state on the wire in the clear). A POST of
+  backup must not put the fleet's state on the wire in the clear). The URL is a
+  bearer credential for most receivers (Slack, Teams, Discord put the secret in
+  the path), so since 2026-09-03 (dash-collector-5) the page and the API show
+  it masked past its origin and `alert_log.sent_to` records the origin only;
+  the stored value itself still lives in `site_settings`, so a database backup
+  still carries it (moving it beside the SMTP password is an owner decision).
+  A POST of
   `{"subject": ..., "text": ...}` as JSON, `User-Agent: ccsync-dashboard-alerts`,
   no redirects followed (`docs/GOTCHAS.md` §12: an alert body names editors,
   machines and what is broken, and a 302 is somebody else choosing where that

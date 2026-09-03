@@ -2769,3 +2769,147 @@ def test_stopping_the_server_stops_the_orchestrator(ingest_server):
     broll_server.stop(srv)
 
     assert ingestor.stopped is True
+
+
+# ---------------------------------------------------------------------------
+# The origin allow-list is CACHED, not frozen at startup
+# (bug-hunt-2026-09-03 comp-broll-music-2)
+# ---------------------------------------------------------------------------
+
+
+def test_a_manifest_that_lands_after_startup_is_picked_up(companion_config,
+                                                          monkeypatch):
+    """app.start() refreshes the site manifest on a BACKGROUND thread and then
+    starts this server synchronously a few statements later, so a manifest
+    whose dashboard_url has just changed lands after the allow-list was built.
+    It used to stay stale for the whole session: every Send-to-Resolve,
+    /music/send and ingest POST from the dashboard the editor is actually
+    looking at answered 403 until the next tray start.
+    """
+    monkeypatch.setattr(broll_server.resolve_bridge, "try_connect", lambda: False)
+    site = {"dashboard_url": ""}
+    monkeypatch.setattr(broll_server.site_mod, "cached_site", lambda: dict(site))
+
+    srv = broll_server.make_server(companion_config, host="127.0.0.1", port=0,
+                                   ccsync_cfg={"dashboard_url": ""})
+    port = srv.server_address[1]
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client = BrollClient(port)
+        moved = "https://nas.example.ts.net"
+        status, _headers, _body = client.get("/status", origin=moved)
+        assert status == 403
+
+        # The re-provision lands, and the TTL passes (the deadline is the
+        # wall clock the fix reads -- 30 s later this is what it holds).
+        site["dashboard_url"] = moved
+        srv._origin_deadline = 0.0
+
+        status, headers, _body = client.get("/status", origin=moved)
+        assert status == 200
+        assert headers.get("Access-Control-Allow-Origin") == moved
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(timeout=5)
+
+
+def test_the_allow_list_is_not_rebuilt_on_every_request(companion_config,
+                                                        monkeypatch):
+    """Building it READS THE SITE MANIFEST OFF DISK, and a request thread is
+    not the place for a file read -- the reason it was computed once in the
+    constructor in the first place."""
+    reads = []
+
+    def _cached_site():
+        reads.append(1)
+        return {"dashboard_url": DASH_ORIGIN}
+
+    monkeypatch.setattr(broll_server.site_mod, "cached_site", _cached_site)
+    srv = broll_server.make_server(companion_config, host="127.0.0.1", port=0,
+                                   ccsync_cfg={"dashboard_url": DASH_ORIGIN})
+    try:
+        built = len(reads)
+        for _ in range(20):
+            assert srv.origin_policy()[0] == srv.allowed_origins
+        assert len(reads) == built
+    finally:
+        srv.server_close()
+
+
+def test_a_site_manifest_that_has_gone_unreadable_keeps_the_last_policy(
+        companion_config, monkeypatch):
+    """A refresh that raises must not empty the allow-list: the dashboard the
+    editor is looking at does not stop being theirs because site.json went
+    missing for a moment."""
+    monkeypatch.setattr(broll_server.site_mod, "cached_site",
+                        lambda: {"dashboard_url": DASH_ORIGIN})
+    srv = broll_server.make_server(companion_config, host="127.0.0.1", port=0,
+                                   ccsync_cfg={"dashboard_url": DASH_ORIGIN})
+    try:
+        held = srv.allowed_origins
+        assert DASH_ORIGIN in held
+
+        def _boom():
+            raise OSError("site.json is gone")
+
+        monkeypatch.setattr(broll_server.site_mod, "cached_site", _boom)
+        srv._origin_deadline = 0.0
+
+        assert srv.origin_policy()[0] == held
+    finally:
+        srv.server_close()
+
+
+# ---------------------------------------------------------------------------
+# A refused POST drains its body (bug-hunt-2026-09-03 comp-broll-music-4)
+# ---------------------------------------------------------------------------
+
+
+def _bare_handler():
+    """A handler with no socket, driven method by method (the pattern
+    test_music_ingest.py uses for _dispatch_get)."""
+    return broll_server.BrollRequestHandler.__new__(broll_server.BrollRequestHandler)
+
+
+def test_a_refused_post_swallows_its_body():
+    """do_PUT has had this since the upload route existed: a refusal that
+    leaves an unread body in the receive buffer makes the CLOSE a reset, and
+    the client loses the 403 that explained what happened -- it sees what a
+    firewall looks like instead. do_POST refused the same way and did not
+    drain, so a 200 KB /broll/ingest/prepare from a stale origin reported "the
+    companion is not running"."""
+    import io as _io
+
+    handler = _bare_handler()
+    body = b"x" * 4096
+    handler.command, handler.path = "POST", "/broll/ingest/prepare"
+    handler.rfile = _io.BytesIO(body)
+    handler.headers = {"Content-Length": str(len(body))}
+    handler._vet_request = lambda: False  # the 403 is already on the wire
+
+    handler.do_POST()
+
+    assert handler.rfile.tell() == len(body)
+
+
+def test_a_post_whose_body_was_read_is_not_waited_for_twice():
+    """The drain subtracts what the route already consumed. Without that
+    accounting the tail read would sit waiting for a second copy of the body
+    that no client is going to send."""
+    import io as _io
+
+    handler = _bare_handler()
+    payload = json.dumps({"items": []}).encode("utf-8")
+    handler.command, handler.path = "POST", "/insert"
+    handler.rfile = _io.BytesIO(payload)
+    handler.headers = {"Content-Length": str(len(payload))}
+    handler._vet_request = lambda: True
+    handler._post_authorised = lambda: True
+    handler._content_type_ok = lambda: True
+    handler._dispatch_post = lambda: handler._read_json_body("message")
+
+    handler.do_POST()
+
+    assert handler._body_consumed == len(payload)

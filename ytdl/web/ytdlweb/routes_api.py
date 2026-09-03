@@ -604,7 +604,11 @@ def create_job(req: NewJob, request: Request):
         max_per_term=max(1, min(50, int(req.max_per_term))),
         shot_types=shot_types, max_candidates=max_candidates,
         mode=mode, term_scope=term_scope, date_from=date_from,
-        date_to=date_to, auto_terms=bool(req.auto_terms))
+        date_to=date_to, auto_terms=bool(req.auto_terms),
+        # The widening this destination was accepted under, carried on the row
+        # so start_download re-checks it under the same rule and not the narrow
+        # default (ytdl-web-2, bug-hunt-2026-09-03).
+        created_local=bool(req.local), created_machine=req.machine)
     worker.nudge()
     return _queued_answer(c, user, job_id)
 
@@ -882,7 +886,11 @@ def create_url_job(req: NewUrlJob, request: Request):
 
     job_id = db.create_url_job(
         c, user, URL_JOB_TERM, term_dir, project['slug'],
-        project['label'], videos, quality=req.quality)
+        project['label'], videos, quality=req.quality,
+        # See create_job: the widening this destination was accepted under,
+        # kept for start_download's re-check (ytdl-web-2,
+        # bug-hunt-2026-09-03).
+        created_local=bool(req.local), created_machine=req.machine)
     worker.nudge()
     # `folder` is the DESTINATION as a human reads it, not a directory name --
     # db.folder_label so it agrees with the badge and the history panel byte
@@ -1213,7 +1221,19 @@ def start_download(job_id: int, request: Request):
     # review for a week -- long enough for the project to be unticked or
     # retired, after which nobody syncs or watches the tree these clips would
     # land in (YTDL-30, 2026-08-11).
-    if projects.resolve_project(user, job['project_slug']) is None:
+    #
+    # Under the widening the JOB was created with, never the narrow default and
+    # never anything this request said (ytdl-web-2, bug-hunt-2026-09-03). With
+    # the defaults it refused every job the CR-72 follow-up had legitimately
+    # accepted -- which, since the fleet ships with local downloads off, is
+    # every job every editor creates -- with a 409 that says the project is "no
+    # longer" one they sync when it never was one and never had to be. The pair
+    # comes off the row because a start_download that believed a client-supplied
+    # local=false would let any editor write into any active project, which is
+    # the one thing this check exists to stop.
+    job_machine, job_local = db.created_widening_of(job)
+    if projects.resolve_project(user, job['project_slug'],
+                                machine=job_machine, local=job_local) is None:
         raise HTTPException(409, {
             'detail': f'{job["project_label"]} is no longer a project you sync, '
                       'so nothing can be downloaded into it. Tick it on the '

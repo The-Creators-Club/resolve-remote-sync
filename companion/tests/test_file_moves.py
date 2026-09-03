@@ -115,7 +115,10 @@ def test_the_ledger_survives_a_restart_and_keeps_the_old_path_out_of_lane_a(tmp_
     assert again.recent_excludes(f"Projects/{DRONE}") == ["B-roll/A001_0512.braw"]
     assert again.recent_excludes(f"projects/{DRONE.lower()}") == ["B-roll/A001_0512.braw"]
     assert again.recent_excludes(f"Projects/{ANIMALS}") == []
-    assert again.recent_excludes(None) == []
+    # A whole-tree run (subpath=None) is the same answer one level up:
+    # relative to local_root, so with the tree's top component on
+    # (bug-hunt-2026-09-03 comp-sync-3).
+    assert again.recent_excludes(None) == [f"Projects/{DRONE}/B-roll/A001_0512.braw"]
     # ...and not longer: the file is no longer there to be re-uploaded.
     clock[0] += file_moves.EXCLUDE_WINDOW_SECONDS + 1
     assert again.recent_excludes(f"Projects/{DRONE}") == []
@@ -418,3 +421,59 @@ def test_every_exclusion_also_gets_the_directory_prune_form():
     assert "- /B-roll/Gone/**" in rules
     # ...and both still come before the includes (first-match-wins).
     assert rules.index("- /B-roll/Gone/**") < rules.index("+ *.mov")
+
+
+# -- comp-sync-3: the run root is a PREFIX, not an equal project rel ----------
+
+
+def test_a_borrowed_subtree_run_still_carries_the_exclusion(tmp_path):
+    """bug-hunt-2026-09-03 comp-sync-3: lane A over a borrowed include runs
+    `Projects/<lender rel>/<sub rel>`, which can never equal a project rel.
+    Demanding equality dropped every exclusion for that run, and lane A --
+    which never deletes -- put the lender's file back at the path the admin
+    had just cleared."""
+    ledger = file_moves.FileMoveLedger(tmp_path / "state", now=lambda: 1000.0)
+    ledger.record(file_moves.parse_command(_cmd()), ok=True, detail="ok")
+    # The borrower syncs `<lender>/B-roll` alone.
+    assert ledger.recent_excludes(f"Projects/{DRONE}/B-roll") == ["A001_0512.braw"]
+    # A parent of the project is a run root too, and a sibling subtree is not.
+    assert ledger.recent_excludes("Projects/2026") == [f"Base Drone/B-roll/A001_0512.braw"]
+    assert ledger.recent_excludes(f"Projects/{DRONE}/Interviews") == []
+    # A run root deeper than the moved file itself excludes nothing.
+    assert ledger.recent_excludes(f"Projects/{DRONE}/B-roll/A001_0512.braw") == []
+
+
+def test_the_run_root_matches_across_the_unicode_boundary(tmp_path):
+    """The same CR-90 hazard SYNC-11 covers for the emitted path, on the
+    matching side: a run root spelled NFD names the NFC project."""
+    import unicodedata
+
+    rel = "2026/Matej Šimalčík"
+    ledger = file_moves.FileMoveLedger(tmp_path / "state", now=lambda: 1000.0)
+    ledger.record(file_moves.parse_command(_cmd(from_project_rel=rel)),
+                  ok=True, detail="ok")
+    nfd_root = "Projects/" + unicodedata.normalize("NFD", rel)
+    assert ledger.recent_excludes(nfd_root) == ["B-roll/A001_0512.braw"]
+
+
+# -- comp-sync-2: the ledger lookup across the Mac/NAS Unicode boundary -------
+
+SEP = "\\" if __import__("os").sep == "\\" else "/"
+
+
+def test_a_moved_file_is_found_under_either_unicode_spelling(tmp_path):
+    """bug-hunt-2026-09-03 comp-sync-2: the ledger records the dashboard's NFC
+    path; the watcher asks about the path Resolve gave it, which on a Mac is
+    NFD. Without folding, RES-10's one-click relink was never offered for any
+    accented name and the clip looked like a mystery offline clip forever."""
+    import unicodedata
+
+    nfc = "D:" + SEP + "CC" + SEP + "Projects" + SEP + "2026" + SEP + "Matej Šimalčík" + SEP + "A002.braw"
+    nfd = unicodedata.normalize("NFD", nfc)
+    assert nfc != nfd
+    ledger = file_moves.FileMoveLedger(tmp_path / "state", now=lambda: 1000.0)
+    new = "D:" + SEP + "CC" + SEP + "Projects" + SEP + "2026" + SEP + "new" + SEP + "A002.braw"
+    ledger.record(file_moves.parse_command(_cmd()), ok=True, detail="moved",
+                  paths=(nfc, new), relink_pending=True)
+    assert ledger.moved_to(nfc)["id"] == 1
+    assert ledger.moved_to(nfd)["id"] == 1

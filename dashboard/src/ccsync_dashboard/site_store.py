@@ -218,12 +218,35 @@ def _validate_model_tier(raw: str) -> str:
     return value
 
 
+# The two csv keys whose items are RELATIVE PATHS under the tree root, which
+# setup_engine._run_storage mkdir's and the collector hands Syncthing as
+# folder paths. bug-hunt-2026-09-03 dash-core-3: only control characters were
+# refused here, so `shared_assets = ["../../etc/ccsync"]` -- typed on Settings
+# or arriving in a pasted site.toml, which is presented as "paste this file"
+# -- created a directory outside the tree. _validate_canonical_prefix has
+# refused `..` since it was written; this is the same rule on the list keys.
+_PATH_LIST_KEYS = ("template_folders", "shared_asset_folders")
+
+
 def _validate_csv(key: str, raw: str) -> str:
+    import re
+
     items = [p.strip() for p in str(raw or "").split(",")]
     items = [p for p in items if p]
     for item in items:
         if any(ord(ch) < 32 for ch in item):
             raise SiteValidationError(key, "must not contain control characters")
+        if key not in _PATH_LIST_KEYS:
+            continue
+        if item[0] in "/\\":
+            raise SiteValidationError(
+                key, f"{item!r} must be a path under the tree root, not an absolute path")
+        if re.match(r"^[A-Za-z]:", item):
+            raise SiteValidationError(
+                key, f"{item!r} must be a path under the tree root, not a drive letter")
+        if ".." in [p for p in re.split(r"[/\\]", item)]:
+            raise SiteValidationError(
+                key, f"{item!r} must stay under the tree root: '..' is not allowed")
     return ",".join(items)
 
 

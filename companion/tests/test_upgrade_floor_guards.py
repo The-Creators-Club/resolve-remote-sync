@@ -41,7 +41,9 @@ def _trust_the_test_key(monkeypatch):
 def _info(version="0.9.99", min_version="0.0.0", body=b"new-exe-bytes"):
     record = {
         "kind": "companion",
-        "platform": "windows",
+        # See test_upgrade.py's _info: a foreign-platform record is refused
+        # since bug-hunt-2026-09-03 comp-core-1, and CI runs this on macOS too.
+        "platform": upgrade_mod.platform_key(),
         "version": version,
         "filename": f"ccsync-companion-{version}.exe",
         "sha256": hashlib.sha256(body).hexdigest(),

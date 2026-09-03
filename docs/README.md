@@ -38,6 +38,7 @@ Index written 2026-08-17 (`COMMERCIAL_READINESS.md` item 13).
 | [`YTDL_RESILIENCE_PLAN.md`](YTDL_RESILIENCE_PLAN.md) | After CR-80: why cookies and pinned player clients keep breaking YouTube downloads, and the fix. WP1-WP7 BUILT in repo 2026-08-26 (CR-83, dashboard 0.7.11 / companion 0.9.52, unshipped); WP8 deliberately not built |
 | [`CLIENT_FOLDERS.md`](CLIENT_FOLDERS.md) | Curated b-roll folders with a link a prospective licensee can open: how to use them, what the client sees, and publishing the one path prefix with Tailscale Funnel |
 | [`DOCKER.md`](DOCKER.md) | The two ways the dashboard container gets its code and its dependencies |
+| [`CARDS_DEPLOY.md`](CARDS_DEPLOY.md) | Refreshing Timeline Cards on the NAS: the one code mount that is another repo's checkout, why a copy without a restart changes nothing, and the rollback |
 | [`CI.md`](CI.md) | What runs on a runner, and what still only runs on the base rig |
 | [`PRODUCT_REPO.md`](PRODUCT_REPO.md) | The customer-facing repo, how it is exported, and what is withheld |
 
@@ -78,6 +79,7 @@ Index written 2026-08-17 (`COMMERCIAL_READINESS.md` item 13).
 |---|---|
 | [`COMMERCIAL_READINESS.md`](COMMERCIAL_READINESS.md) | The 2026-08-17 audit and the ranked list of what must change to sell this to other organisations |
 | [`RESILIENCE_SWEEP_2026-08-28.md`](RESILIENCE_SWEEP_2026-08-28.md) | The ten-agent resilience sweep: 201 findings in `resilience-sweep-2026-08-28/`, fourteen themes, and a ranked, waved build list ("green while dead" is one class; the guard usually exists in one of N places) |
+| [`USABILITY_RESILIENCE_SWEEP_2026-09-03.md`](USABILITY_RESILIENCE_SWEEP_2026-09-03.md) | The fifteen-agent usability + resilience sweep: 297 findings (16 critical) in `usability-resilience-sweep-2026-09-03/`, nine shapes ("computed, then discarded" is the biggest), a one-vocabulary table, and a six-wave build list; nothing built yet |
 | [`SYNOLOGY_PORT_PLAN.md`](SYNOLOGY_PORT_PLAN.md) | The plan behind the second NAS backend |
 | [`BROLL_INGEST_PLAN.md`](BROLL_INGEST_PLAN.md) | Drag-and-drop b-roll ingest: the design, the contracts and what was deviated from |
 | [`MUSIC_INGEST_PLAN.md`](MUSIC_INGEST_PLAN.md) | The same for music, reusing the b-roll machinery, plus what it deliberately does not compute |

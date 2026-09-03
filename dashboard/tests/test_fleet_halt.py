@@ -338,9 +338,9 @@ def test_an_expired_halt_is_released_for_every_reader(env, monkeypatch):
 
 def test_keep_halted_extends_and_carries_the_reason(env, monkeypatch):
     # The real [ KEEP HALTED ] button posts to the Users-page panel route
-    # with no reason field at all (fleet_halt.html), not the JSON twin --
-    # the JSON route requires a reason on every active=True call regardless
-    # of extend (see the seam test below for why that matters).
+    # with no reason field at all (fleet_halt.html). The JSON twin used to
+    # refuse the same call for want of a reason (bug-hunt-2026-09-03
+    # dash-api-4); both doors exempt `extend` now, and the test below pins it.
     client, conn = env
     as_admin(client).post("/api/v1/fleet/halt",
                           json={"active": True, "reason": "restoring the pool"})
@@ -477,12 +477,52 @@ def test_c2_halt_confirm_copy_is_pinned():
             "reach anyone until you release it.") in text
 
 
-def test_the_json_route_always_wants_a_reason_even_with_extend(env):
-    # Unlike the Users-page panel, the JSON twin's reason check runs before
-    # extend is even looked at (FleetHaltIn docstring), so a script cannot
-    # get a blank-reason halt through this door either.
+def test_a_blank_extend_cannot_start_a_halt_through_the_json_route(env):
+    # `extend` is exempt from the reason floor since bug-hunt-2026-09-03
+    # dash-api-4 (the htmx door always was), so what stops a script starting
+    # a blank-reason halt here is db.set_fleet_halt: there is nothing to keep
+    # going. The refusal says so rather than asking for a reason it would not
+    # have used.
     client, _conn = env
     resp = as_admin(client).post(
         "/api/v1/fleet/halt", json={"active": True, "extend": True})
     assert resp.status_code == 422
-    assert "say why" in resp.json()["detail"]
+    assert "no halt to keep going" in resp.json()["detail"]
+    assert dbmod.get_fleet_halt(_conn)["active"] is False
+
+
+def test_keep_halted_needs_no_reason_through_the_json_door(env, monkeypatch):
+    """bug-hunt-2026-09-03 dash-api-4: [ KEEP HALTED ] was inexpressible
+    through the API. `extend` carries the CURRENT halt's reason forward, so
+    demanding a new one 422'd the operation - and the obvious workaround
+    (resend with a reason) is a FRESH halt, which resets set_at and makes the
+    banner report how long since the last click rather than how long the fleet
+    has been stopped."""
+    client, conn = env
+    as_admin(client).post("/api/v1/fleet/halt",
+                          json={"active": True, "reason": "restoring the pool"})
+    first = dbmod.get_fleet_halt(conn)
+    later = (dbmod.parse_iso(first["set_at"]) + dt.timedelta(hours=1)).isoformat()
+    monkeypatch.setattr(dbmod, "utcnow_iso", lambda: later)
+    resp = as_admin(client).post("/api/v1/fleet/halt",
+                                 json={"active": True, "extend": True})
+    assert resp.status_code == 200, resp.text
+    kept = dbmod.get_fleet_halt(conn)
+    assert kept["reason"] == "restoring the pool"
+    assert kept["set_at"] == first["set_at"]        # the same halt, not a new one
+    assert kept["expires_at"] > first["expires_at"]
+    assert kept["extended"] == 1
+    # A halt with no reason and no extend is still refused.
+    assert as_admin(client).post("/api/v1/fleet/halt",
+                                 json={"active": True}).status_code == 422
+
+
+def test_a_non_admin_is_refused_in_words_about_permission(env):
+    """bug-hunt-2026-09-03 dash-api-5: _require_admin gates ~45 routes and
+    told every one of their callers that "destination roots are fixed once
+    set" - a configuration sentence on a permission refusal."""
+    client, _conn = env
+    resp = as_editor(client).post("/api/v1/fleet/halt",
+                                  json={"active": True, "reason": "not mine to set"})
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "admins only"

@@ -409,3 +409,61 @@ def test_the_project_page_has_the_form_and_the_log_for_admins_only(env):
     as_user(client, "leso")
     page = client.get(f"/project/{D_SLUG}").text
     assert "[ MOVE ON THE SERVER AND ON EVERY MACHINE ]" not in page
+
+
+def test_an_undo_restores_the_original_name_when_the_move_renamed_it(env):
+    """bug-hunt-2026-09-03 dash-api-2: a move may RENAME (to_path is a folder
+    OR a full path inside it), and the undo used to rebuild the inverse from
+    the original's PARENT FOLDER alone, so move_project_files dropped the file
+    back under the name the forward move gave it. The original basename was
+    then gone from the tree and from every machine's copy."""
+    client, conn, projects = env
+    as_user(client, "owen")
+    r = client.post(f"/api/v1/projects/{D_SLUG}/move", json={
+        "path": "B-roll/A001_0512.braw", "to_slug": A_SLUG,
+        "to_path": "Interviewees/Pangolin/RENAMED.braw"})
+    assert r.status_code == 200, r.text
+    assert r.json()["to"] == f"{ANIMALS}/Interviewees/Pangolin/RENAMED.braw"
+    move_id = r.json()["move_id"]
+
+    undo = client.post(f"/api/v1/projects/{D_SLUG}/moves/{move_id}/undo")
+    assert undo.status_code == 200, undo.text
+    assert undo.json()["to"] == f"{DRONE}/B-roll/A001_0512.braw"
+    assert (projects / DRONE / "B-roll" / "A001_0512.braw").read_bytes() == b"braw"
+    assert not (projects / DRONE / "B-roll" / "RENAMED.braw").exists()
+
+
+def test_a_folder_undo_still_puts_the_folder_back_under_its_own_name(env):
+    client, conn, projects = env
+    as_user(client, "owen")
+    move_id = client.post(f"/api/v1/projects/{D_SLUG}/move", json={
+        "path": "B-roll", "to_slug": A_SLUG,
+        "to_path": "Interviewees/Pangolin"}).json()["move_id"]
+    undo = client.post(f"/api/v1/projects/{D_SLUG}/moves/{move_id}/undo")
+    assert undo.status_code == 200, undo.text
+    assert (projects / DRONE / "B-roll" / "A001_0512.braw").exists()
+    assert (projects / DRONE / "B-roll" / "Proxy" / "A001_0512.mp4").exists()
+    assert not (projects / ANIMALS / "Interviewees" / "Pangolin" / "B-roll").exists()
+
+
+def test_a_machine_holding_an_nfd_spelling_is_still_told(env):
+    """bug-hunt-2026-09-03 dash-api-6 / CR-90: editor_media.rel_path is stored
+    NFC (db.media_rel_key), so a path the NAS holds decomposed matched no
+    machine and every holder re-uploaded the old path the next day."""
+    import unicodedata
+
+    client, conn, projects = env
+    name = "Simalčík.braw"
+    nfd = unicodedata.normalize("NFD", name)
+    assert nfd != name
+    (projects / DRONE / "B-roll" / nfd).write_bytes(b"nfd")
+    report(client, "leso", "LESO-LAPTOP")
+    dbmod.replace_editor_media(conn, "leso", "LESO-LAPTOP", D_SLUG,
+                               [(f"B-roll/{name}", "original", 3)], dbmod.utcnow_iso())
+    conn.commit()
+
+    as_user(client, "owen")
+    r = client.post(f"/api/v1/projects/{D_SLUG}/move", json={
+        "path": f"B-roll/{nfd}", "to_slug": A_SLUG, "to_path": "Interviewees/Pangolin"})
+    assert r.status_code == 200, r.text
+    assert r.json()["machines"] == [{"editor": "leso", "machine": "LESO-LAPTOP"}]

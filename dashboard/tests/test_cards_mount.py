@@ -348,6 +348,42 @@ def test_the_mount_is_the_last_thing_and_never_raises(tmp_path, fake_src, monkey
     assert "no postgres" in app.state.cards_detail
 
 
+def test_a_wrap_that_fails_stops_the_engine_it_already_started(
+        tmp_path, fake_src, monkeypatch):
+    """bug-hunt-2026-09-03 dash-release-jobs-1.
+
+    The engine is started before the a2wsgi wrap. When the wrap raised, the
+    recovery (`stop_engine`) read an `app.state.cards_engine` that was still
+    None, so the sweep and the ffmpeg worker ran for the life of the container
+    with nothing holding a reference to them.
+    """
+    monkeypatch.delenv("CARDS_SRC", raising=False)
+    from ccsync_dashboard import cards_wsgi
+
+    built = []
+    real_build = cards.build_engine
+
+    def spy(*a, **kw):
+        engine = real_build(*a, **kw)
+        built.append(engine)
+        return engine
+
+    monkeypatch.setattr(cards, "build_engine", spy)
+    monkeypatch.setattr(cards_wsgi, "handler_wsgi",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    app = create_app(make_settings(
+        tmp_path, cards_enabled=True, cards_src=fake_src,
+        cards_vault_root=str(vault)))
+    assert app.state.cards_status == cards.ABSENT
+    assert "boom" in app.state.cards_detail
+    assert len(built) == 1
+    assert built[0].started is True
+    assert built[0].stopped is True
+    assert app.state.cards_engine is None
+
+
 # ------------------------------------------------------------ what it is built with
 
 def test_the_engine_is_built_the_way_server_main_builds_it(mounted):
@@ -409,6 +445,17 @@ def test_a_fleet_token_does_not_open_the_page(mounted):
 def test_restart_never_reaches_the_handler(mounted):
     client, app = mounted
     resp = client.post("/cards/api/restart", json={})
+    assert resp.status_code == 200
+    assert "cannot restart itself" in resp.json()["error"]
+    assert app.state.cards_engine.restarted is False
+
+
+def test_restart_with_a_trailing_slash_is_refused_too(mounted):
+    """bug-hunt-2026-09-03 dash-release-jobs-4: the gate matched the path
+    exactly, so `/api/restart/` walked past it into a handler that may
+    normalise the slash itself."""
+    client, app = mounted
+    resp = client.post("/cards/api/restart/", json={}, follow_redirects=False)
     assert resp.status_code == 200
     assert "cannot restart itself" in resp.json()["error"]
     assert app.state.cards_engine.restarted is False

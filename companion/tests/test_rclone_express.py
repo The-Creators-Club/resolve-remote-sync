@@ -513,6 +513,12 @@ def test_path_filter_predicate_matches_the_lane_a_rule_list():
     assert not path_matches_lane_a_filter("")
     # A name that merely resembles Proxy is still a real original.
     assert path_matches_lane_a_filter("Projects/Proxynotreal.mov")
+    # ...and YT-3's work files, which the rule list has excluded since
+    # 2026-08-28 and this predicate did not (bug-hunt-2026-09-03 comp-sync-1).
+    # The name-by-name equivalence against the real binary is in
+    # test_rclone_filters.py.
+    assert not path_matches_lane_a_filter("Projects/A/Youtube/Interview.original.mp4")
+    assert not path_matches_lane_a_filter("Projects/A/Youtube/Interview.f137.mp4")
 
 
 def test_path_filter_predicate_refuses_macos_appledouble_sidecars():
@@ -1086,3 +1092,79 @@ def test_an_express_batch_is_counted_in_full_not_just_its_tail(tmp_path, monkeyp
     from ccsync_companion.sync import rclone_lane
 
     assert rclone_lane.EXPRESS_STDERR_TAIL_LINES >= 4 * rclone_lane.EXPRESS_DEFAULT_MAX_BATCH
+
+
+# -- comp-sync-1: the file-moves exclusions on the express door ---------------
+
+
+def _moved_away_lane(tmp_path, calls, lists, excludes):
+    lane = _make_lane(tmp_path, popen_factory=_recording_popen(calls, lists=lists))
+    seen: list = []
+
+    def fn(subpath):
+        seen.append(subpath)
+        return list(excludes)
+
+    lane.extra_excludes_fn = fn
+    return lane, seen
+
+
+def test_express_keeps_a_moved_away_path_out_of_its_list(tmp_path):
+    """bug-hunt-2026-09-03 comp-sync-1: _build_command keeps the old path out
+    of the PERIODIC run, and express carries no filter file at all, so without
+    this consult lane A's other door puts the file straight back on the NAS at
+    the path the admin just cleared -- permanently, since --ignore-existing
+    means nothing ever replaces it."""
+    calls: list = []
+    lists: list = []
+    lane, seen = _moved_away_lane(
+        tmp_path, calls, lists, ["Projects/2026/FF5/Alpha/moved.mov"])
+    local = Path(lane.local_root)
+    for rel in ("Projects/2026/FF5/Alpha/moved.mov", "Projects/2026/FF5/Alpha/kept.mov"):
+        lane.notify_path_changed(str(_old_file(local, rel)))
+    _flush_now(lane)
+
+    assert len(calls) == 1
+    entries = sorted(lists[0].split())
+    assert entries == ["Projects/2026/FF5/Alpha/kept.mov"]
+    # Asked for the whole tree: express rels are relative to local_root.
+    assert seen == [None]
+
+
+def test_express_does_not_run_at_all_when_every_path_was_moved_away(tmp_path):
+    calls: list = []
+    lists: list = []
+    lane, _ = _moved_away_lane(
+        tmp_path, calls, lists, ["Projects/2026/FF5/Alpha/moved.mov"])
+    local = Path(lane.local_root)
+    lane.notify_path_changed(str(_old_file(local, "Projects/2026/FF5/Alpha/moved.mov")))
+    _flush_now(lane)
+    assert calls == []
+
+
+def test_express_prunes_a_directory_the_server_moved_away(tmp_path):
+    """A file-moves exclusion CAN name a directory (`is_dir`)."""
+    calls: list = []
+    lists: list = []
+    lane, _ = _moved_away_lane(tmp_path, calls, lists, ["Projects/2026/FF5/Alpha/B-roll"])
+    local = Path(lane.local_root)
+    lane.notify_path_changed(str(_old_file(local, "Projects/2026/FF5/Alpha/B-roll/a.mov")))
+    _flush_now(lane)
+    assert calls == []
+
+
+def test_an_exclusion_source_that_raises_does_not_stop_the_upload(tmp_path):
+    """Same posture as _build_command: excluding nothing beats uploading
+    nothing."""
+    calls: list = []
+    lists: list = []
+    lane = _make_lane(tmp_path, popen_factory=_recording_popen(calls, lists=lists))
+
+    def boom(subpath):
+        raise RuntimeError("the ledger is unreadable")
+
+    lane.extra_excludes_fn = boom
+    local = Path(lane.local_root)
+    lane.notify_path_changed(str(_old_file(local, "Projects/2026/FF5/Alpha/clip.mov")))
+    _flush_now(lane)
+    assert len(calls) == 1

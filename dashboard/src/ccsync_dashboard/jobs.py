@@ -110,8 +110,8 @@ def default_requires(kind: str, inputs: Mapping[str, Any] | None) -> dict[str, A
 #              spare. A machine that only just clears the floor still ranks,
 #              below one that clears it comfortably.
 #   gpu        ...and, failing that, any GPU at all.
-#   near_media the machine NEXT TO THE MEDIA for the cheap I/O-bound kinds:
-#              the base rig or the dashboard host. Nobody sits at it, an
+#   near_media the machine NEXT TO THE MEDIA for the cheap I/O-bound kinds: a
+#              machine whose own mode is `base`. Nobody sits at it, an
 #              audio copy that runs there costs an editor nothing, and the
 #              round trip over SMB is what these two kinds are made of.
 #   volunteering  somebody at that machine clicked "take fleet jobs now"
@@ -137,7 +137,9 @@ SIGNAL_WORDS = {
     "nvenc": "an NVIDIA encoder",
     "gpu_fits": "a GPU with room for this model",
     "gpu": "a GPU",
-    "near_media": "is next to the media (the base rig or the dashboard host)",
+    # bug-hunt-2026-09-03 dash-release-jobs-6: the signal is `mode == "base"`
+    # and nothing else, so it must not promise the dashboard host as well.
+    "near_media": "is a base rig, next to the media",
 }
 
 # How much headroom over a job's stated VRAM floor counts as "it fits". A
@@ -574,10 +576,13 @@ def ranked_machines(
 
 
 def job_age_seconds(job: Mapping[str, Any], now: str) -> float:
-    """How long this job has been waiting. 0 when either timestamp is
-    unreadable -- which makes the grace period expire IMMEDIATELY rather than
-    never, because a preference that outlives a broken clock is a queue that
-    stops."""
+    """How long this job has been waiting. RANK_GRACE_SECONDS when either
+    timestamp is unreadable -- which makes the grace period expire IMMEDIATELY
+    rather than never, because `first_refusal` tests `>= RANK_GRACE_SECONDS`
+    and a preference that outlives a broken clock is a queue that stops.
+    (bug-hunt-2026-09-03 dash-release-jobs-6: this docstring used to say 0,
+    which is the value that would make the window NEVER expire. The code is
+    right; do not "fix" it to match the old sentence.)"""
     try:
         return max(0.0, (db.parse_iso(now)
                          - db.parse_iso(str(job["created_at"]))).total_seconds())

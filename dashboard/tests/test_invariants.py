@@ -503,3 +503,62 @@ def test_the_ledger_survives_a_missing_table(tmp_path):
     assert dbmod.fetch_invariant_results(conn) == {}
     assert dbmod.broken_invariants(conn) == []
     conn.close()
+
+
+# --------------------------------------------- bug-hunt-2026-09-03 fix pass
+
+def _one_invariant(monkeypatch, key: str, check):
+    """The registry reduced to one row, so a pass is a two-call script."""
+    inv = invariants.BY_KEY[key]
+    row = invariants.Invariant(inv.key, inv.number, inv.title, inv.consequence,
+                               inv.fix, check, inv.severity)
+    monkeypatch.setattr(invariants, "INVARIANTS", (row,))
+    monkeypatch.setattr(invariants, "BY_KEY", {row.key: row})
+    return row
+
+
+def test_a_check_that_raises_keeps_the_subjects_it_had_broken(conn, monkeypatch):
+    """dash-collector-2: `evaluate` turns an exception into a check_failed
+    Outcome with NO subjects. An unconditional subject DELETE then wiped the
+    broken rows of an invariant nothing had looked at, `broken_invariants`
+    went empty without raising, and `deliver` mailed every one of those
+    subjects as RECOVERED."""
+    key = "plan_has_share"
+    broken = invariants.Outcome(dbmod.INVARIANT_BROKEN, "one tick is unshared",
+                                [("alex/base", "no share")])
+    _one_invariant(monkeypatch, key, lambda ctx: broken)
+    invariants.run_cycle(conn, _settings(), NOW)
+    assert [r["subject"] for r in dbmod.broken_invariants(conn)] == ["alex/base"]
+    assert [(r["kind"], r["cleared_at"]) for r in dbmod.open_notices(conn)
+            if r["kind"] == "invariant_broken"] == [("invariant_broken", None)]
+
+    def boom(_ctx):
+        raise RuntimeError("transient")
+
+    _one_invariant(monkeypatch, key, boom)
+    invariants.run_cycle(conn, _settings(), LATER)
+    rows = dbmod.broken_invariants(conn)
+    assert [r["subject"] for r in rows] == ["alex/base"]
+    # ...and stamped with the OLD check, so the page cannot claim it was
+    # looked at this pass.
+    assert rows[0]["checked_at"] == NOW
+    still_open = [r["subject"] for r in dbmod.open_notices(conn)
+                  if r["kind"] == "invariant_broken"]
+    assert still_open == [f"{key}: alex/base"]
+    # The summary row IS stamped with the failed verdict: the page needs it.
+    summary = dbmod.fetch_invariant_results(conn)[key]
+    assert summary["state"] == dbmod.INVARIANT_CHECK_FAILED
+
+
+def test_a_verdict_still_deletes_the_subjects_it_did_not_name(conn, monkeypatch):
+    """The picture-of-the-last-pass rule is unchanged for a real verdict."""
+    key = "plan_has_share"
+    _one_invariant(monkeypatch, key, lambda ctx: invariants.Outcome(
+        dbmod.INVARIANT_BROKEN, "unshared", [("alex/base", "no share")]))
+    invariants.run_cycle(conn, _settings(), NOW)
+    _one_invariant(monkeypatch, key, lambda ctx: invariants.Outcome(
+        dbmod.INVARIANT_OK, "all shared"))
+    invariants.run_cycle(conn, _settings(), LATER)
+    assert dbmod.broken_invariants(conn) == []
+    assert [r["subject"] for r in dbmod.open_notices(conn)
+            if r["kind"] == "invariant_broken"] == []

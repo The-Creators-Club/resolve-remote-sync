@@ -975,7 +975,10 @@ class OnboardWizard:
             dashboard_url=self.dashboard_url_var.get().strip(),
             dashboard_token=self.report_token,
             local_root=self.local_root_var.get().strip() or None,
-            site=self.site,
+            # _site(), not self.site: {} after a failed fetch_site must fall
+            # back to the CACHED manifest rather than to the literal default
+            # prefix (bug-hunt-2026-09-03 install-onboard-1).
+            site=self._site(),
         )
         self._append_log(f"config written (mode={role}).")
         if self.identity_token:
@@ -1036,7 +1039,7 @@ class OnboardWizard:
                 local_root=self.local_root_var.get().strip() or None,
                 dashboard_url=self.dashboard_url_var.get(),
                 companion_exe_source=companion_src,
-                site=self.site,
+                site=self._site(),
             )
             self.bootstrap_output = output
             self._append_log(output)

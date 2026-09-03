@@ -104,6 +104,21 @@ CREATE TABLE IF NOT EXISTS jobs (
     -- a restart must resume as the caller submitted it, and there is nobody
     -- watching a script's job to press the button for it.
     auto_terms       INTEGER NOT NULL DEFAULT 0,
+    -- THE TWO WIDENING SIGNALS THIS JOB WAS ACCEPTED UNDER (ytdl-web-2,
+    -- bug-hunt-2026-09-03). `created_local` is the request's `local` (0 = the
+    -- NAS worker fetches, which no machine's sync plan constrains) and
+    -- `created_machine` the hostname the SPA learned from its companion (a
+    -- mixed account's WIRED computer works off the whole tree). Both go into
+    -- projects.resolve_project at create AND again in start_download, which
+    -- re-validates the destination on every write (YTDL-30) and used to re-run
+    -- it with the narrow defaults -- answering "no longer a project you sync"
+    -- for a project that was never ticked and never had to be.
+    -- Read from the JOB and never from the request that presses DOWNLOAD: a
+    -- client-supplied local=0 there would be any editor writing into any
+    -- active project. The defaults are resolve_project's own pre-widening
+    -- values, so a row from migrations/013 re-validates as it always has.
+    created_local    INTEGER NOT NULL DEFAULT 1,
+    created_machine  TEXT,
     -- Carries a machine-readable prefix the SPA maps to ops hint text:
     -- claude_auth: / claude_missing: / claude_timeout: / claude_output: .
     error            TEXT,

@@ -1048,7 +1048,9 @@ def test_classify_copy_failure_names_the_cloud_case_and_the_action():
     msg = fixer.classify_copy_failure(OSError("The cloud operation was unsuccessful"),
                                       placeholder=True)
     assert "Available offline" in msg
-    assert "Scan whole project" in msg
+    # The agreed tray wording since the comp-ui-2 sweep (2026-09-03): the
+    # button lives in the Settings window, not on an Advanced submenu.
+    assert "Tray > Settings > SCAN WHOLE PROJECT" in msg
 
 
 def test_classify_copy_failure_gives_the_os_reason_for_genuine_errors():
@@ -1637,3 +1639,28 @@ def test_fix_clip_reports_a_clip_it_could_not_find_as_a_failure(
     assert result["ok"] is False
     assert "clip.mov" in result["message"]
     assert result["copied_to"]
+
+
+def test_list_project_dirs_folds_the_two_spellings_of_one_project(tmp_path):
+    """bug-hunt-2026-09-03 comp-core-3: the walked source is NFD on a Mac and
+    `extra_rels` (the dashboard's selection) is NFC, and the extras' only
+    membership test is is_dir(), which succeeds on APFS/HFS+ for either
+    spelling -- so one project entered the set twice. The spelling RETURNED is
+    the walked one: callers walk these paths, and there the bytes on disk are
+    the truth."""
+    import unicodedata
+
+    from conftest import write_project_marker
+
+    walked = unicodedata.normalize("NFD", "2026/Français/Été")
+    selected = unicodedata.normalize("NFC", "2026/Français/Été")
+    project_dir = tmp_path / "Projects" / walked.replace("/", os.sep)
+    project_dir.mkdir(parents=True)
+    write_project_marker(project_dir, slug="ete")
+    # NTFS is normalisation-PRESERVING and case-folds nothing else, so the
+    # second spelling has to be materialised here to reproduce what APFS does
+    # for free: one directory that answers is_dir() to either spelling.
+    (tmp_path / "Projects" / selected.replace("/", os.sep)).mkdir(parents=True)
+
+    rels = fixer.list_project_dirs(str(tmp_path), extra_rels=[selected])
+    assert rels == [walked]

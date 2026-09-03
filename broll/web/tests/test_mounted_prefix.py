@@ -20,10 +20,18 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.main import app as broll_app
+from app.main import SHARE_ASSETS, app as broll_app
 from tests.factories import insert_segment, insert_video
 
 STATIC = Path(__file__).resolve().parent.parent / "static"
+
+
+def share_asset_sources() -> set[str]:
+    """The SOURCE files behind /share/assets: main.SHARE_ASSETS minus the
+    images, which carry no URLs (broll-4, 2026-09-03). That mount is the one
+    prefix an operator publishes past the tailnet with a Funnel, so its
+    contents are exactly the files a client viewer loads."""
+    return {n for n in SHARE_ASSETS if n.endswith((".js", ".css", ".html", ".svg"))}
 
 
 @pytest.fixture()
@@ -112,7 +120,11 @@ def test_no_shipped_asset_uses_a_root_relative_app_url():
     absolute and must stay that way — it is a different process, not this app.
     """
     offenders = []
-    for name in ("app.js", "index.html", "style.css", "ingest.js"):
+    # The editors' own three plus every source file behind /share/assets
+    # (broll-4, 2026-09-03): sprite.js belonged to both scans and was in
+    # neither, so nothing pinned the rule for the one script the
+    # hover-scrub runs on both the SPA and the client viewer.
+    for name in sorted(share_asset_sources() | {"app.js", "index.html", "ingest.js"}):
         text = (STATIC / name).read_text(encoding="utf-8")
         for m in re.finditer(r"""["'`(]/(?:api|media|static)/""", text):
             line = text.count("\n", 0, m.start()) + 1
@@ -142,7 +154,7 @@ def test_no_shipped_asset_names_another_absolute_origin():
     """
     allowed = ("http://127.0.0.1:8899", "http://www.w3.org")
     offenders = []
-    for name in ("app.js", "index.html", "style.css", "ingest.js"):
+    for name in sorted(share_asset_sources() | {"app.js", "index.html", "ingest.js"}):
         text = (STATIC / name).read_text(encoding="utf-8")
         for m in re.finditer(r"https?://[\w.:@-]+", text):
             url = m.group(0)

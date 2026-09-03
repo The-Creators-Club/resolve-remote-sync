@@ -121,11 +121,42 @@ def _cmp_key(path: object) -> str:
     than the one-click relink RES-10 built. Windows folds case for us; darwin
     has to be told to. Linux is the one place where case really does
     distinguish two files, so it is left alone. (2026-08-29: found by CI's
-    macOS runner, the only machine here that runs this suite on a Mac.)"""
-    folded = os.path.normcase(os.path.normpath(str(path)))
+    macOS runner, the only machine here that runs this suite on a Mac.)
+
+    bug-hunt-2026-09-03 comp-sync-2: Unicode is folded too (CR-90). The
+    ledger's `old_local` is built from the dashboard's NFC `from_rel`, while
+    the path `moved_to()` is asked about came out of Resolve on a Mac, i.e.
+    NFD -- so `Matej Šimalčík.mov` missed itself and the RES-10 one-click
+    relink was never offered for any accented name. Comparison only, which
+    is the one case CLAUDE.md's rule allows normalising."""
+    folded = os.path.normcase(os.path.normpath(unicodedata.normalize("NFC", str(path))))
     if sys.platform == "darwin":
         folded = folded.lower()
     return folded
+
+
+def _under(full: str, root: str) -> str:
+    """`full` re-expressed relative to the run root `root`, or "" when it is
+    not inside it. Both are `/`-separated tree-relative paths, and the
+    comparison is case- and Unicode-folded for the reasons _cmp_key gives
+    (bug-hunt-2026-09-03 comp-sync-3). An empty root is the whole tree, so
+    the path comes back unchanged."""
+    if not root:
+        return full
+    parts = [p for p in full.split("/") if p]
+    root_parts = [p for p in root.split("/") if p]
+    if len(parts) <= len(root_parts):
+        return ""
+
+    def fold(text: str) -> str:
+        return unicodedata.normalize("NFC", text).lower()
+
+    # Component-wise, not a string prefix: NFC folding changes a name's
+    # LENGTH, so a slice computed from the folded form can cut the raw path
+    # in the wrong place.
+    if [fold(p) for p in parts[:len(root_parts)]] != [fold(p) for p in root_parts]:
+        return ""
+    return "/".join(parts[len(root_parts):])
 
 
 def _same_file(a: Path, b: Path) -> bool:
@@ -333,12 +364,22 @@ class FileMoveLedger:
         failure this whole feature exists to stop (CR-90's lesson, CR-90
         itself being why it went unnoticed: CJK names never warn you). These
         are `-` rules, so the spelling that matches nothing costs nothing.
-        Comparison/matching only: `apply_move` still uses the raw path."""
-        if not subpath:
-            return []
-        wanted = subpath.replace("\\", "/").strip("/")
-        if wanted.lower().startswith(PROJECTS_PREFIX.lower()):
-            wanted = wanted[len(PROJECTS_PREFIX):]
+        Comparison/matching only: `apply_move` still uses the raw path.
+
+        bug-hunt-2026-09-03 comp-sync-3: the run root is matched as a PREFIX
+        of the old path, not as an equal project rel, and what comes back is
+        re-expressed relative to that root. A borrowed subtree runs lane A
+        over `Projects/<lender rel>/<sub rel>`, which can never equal a
+        project rel, so demanding equality dropped every exclusion for that
+        run and lane A -- which never deletes -- put the lender's file back
+        at the path the admin cleared. `subpath=None` (a whole-tree run) is
+        the same shape one level up: the root is local_root itself, so the
+        paths come back with their `Projects/` prefix on."""
+        wanted = str(subpath or "").replace("\\", "/").strip("/")
+        if wanted and not wanted.lower().startswith(PROJECTS_PREFIX.lower()):
+            # A caller that named the run root without the tree's top
+            # component means the same directory the prefixed form does.
+            wanted = PROJECTS_PREFIX + wanted
         cutoff = float(self._now()) - EXCLUDE_WINDOW_SECONDS
         out: list[str] = []
         for e in self._entries:
@@ -351,9 +392,12 @@ class FileMoveLedger:
             unresolved = e.get("state") in (STATE_RETRYABLE, STATE_BLOCKED)
             if not unresolved and float(e.get("at") or 0) < cutoff:
                 continue
-            if str(e.get("from_project_rel", "")).lower() != wanted.lower():
+            project = str(e.get("from_project_rel", "")).replace("\\", "/").strip("/")
+            old = str(e.get("from_rel") or "").replace("\\", "/").strip("/")
+            if not project or not old:
                 continue
-            rel = str(e.get("from_rel") or "")
+            full = f"{PROJECTS_PREFIX}{project}/{old}"
+            rel = _under(full, wanted)
             if not rel:
                 continue
             for spelling in (unicodedata.normalize("NFC", rel),

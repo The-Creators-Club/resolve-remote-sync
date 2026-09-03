@@ -522,7 +522,9 @@ def test_replace_clip_refused_when_path_never_changes(monkeypatch):
     result = resolve_bridge.replace_clip(mpi, r"C:\new.mov")
     assert result["ok"] is False
     assert "wouldn't relink" in result["message"]
-    assert "Scan whole project" in result["message"]
+    # ...and it names where the button IS: the 2026-08-27 menu reduction moved
+    # it into the Settings window (bug-hunt-2026-09-03 comp-ui-2).
+    assert "Tray > Settings > SCAN WHOLE PROJECT" in result["message"]
     assert "ReplaceClip" not in result["message"]
 
 

@@ -27,6 +27,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from . import canon
 from . import resolve_bridge
+from .sync.rclone_lane import nfc_key
 
 log = logging.getLogger("ccsync.fixer")
 
@@ -389,7 +390,16 @@ def list_project_dirs(local_root: str, extra_rels: Iterable[str] = ()) -> list[s
     if not local_root:
         return []
     projects_dir = Path(local_root) / "Projects"
-    rels: set[str] = set()
+    # bug-hunt-2026-09-03 comp-core-3 (CR-90's shape at the project-rel level):
+    # the two sources spell Unicode differently -- os.walk on a Mac hands back
+    # NFD, the dashboard's selection is NFC -- and the extras' only membership
+    # test is is_dir(), which succeeds on APFS/HFS+ for EITHER spelling. A set
+    # of raw strings therefore held one project twice, and the dashboard turned
+    # the two spellings into two slugs: a real project plus a phantom, both
+    # eating a slot against MAX_PROJECTS. Keyed by the folded spelling,
+    # VALUED by the walked one: what is returned is the bytes on disk, because
+    # callers walk these paths.
+    rels: dict[str, str] = {}
 
     try:
         for dirpath, dirnames, filenames in os.walk(projects_dir):
@@ -398,16 +408,18 @@ def list_project_dirs(local_root: str, extra_rels: Iterable[str] = ()) -> list[s
             if rel == Path("."):
                 continue
             if MARKER_FILENAME in filenames:
-                rels.add(rel.as_posix())
+                rels[nfc_key(rel.as_posix())] = rel.as_posix()
                 dirnames[:] = []
     except OSError:
         pass
 
     for extra in extra_rels or ():
         extra = str(extra).strip().strip("/")
-        if extra and (projects_dir / Path(*extra.split("/"))).is_dir():
-            rels.add(extra)
-    return sorted(rels)
+        if not extra or nfc_key(extra) in rels:
+            continue
+        if (projects_dir / Path(*extra.split("/"))).is_dir():
+            rels[nfc_key(extra)] = extra
+    return sorted(rels.values())
 
 
 def pick_project_prefix(
@@ -533,7 +545,7 @@ def is_placeholder(path: str) -> bool:
 PLACEHOLDER_FAILURE_MESSAGE = (
     "Google Drive (or your cloud drive) couldn't download this file. Right-click it "
     "in the Google Drive folder → \"Available offline\", wait for it to finish, then "
-    "run tray → Scan whole project again."
+    "run Tray > Settings > SCAN WHOLE PROJECT again."
 )
 
 
@@ -1184,7 +1196,7 @@ def fix_clip(
             "ok": False,
             "message": (
                 "CCSync doesn't know where your sync folder is (local_root is not set), "
-                "so it won't copy anything. Tray → Copy diagnostics for your admin."
+                "so it won't copy anything. Tray > Settings > COPY DIAGNOSTICS FOR YOUR ADMIN."
             ),
             "copied_to": None,
         }

@@ -1,0 +1,29 @@
+-- v13: jobs.created_local, jobs.created_machine -- the TWO WIDENING SIGNALS
+-- THE JOB WAS ACCEPTED UNDER (bug-hunt-2026-09-03 ytdl-web-2, 2026-09-03).
+--
+-- The CR-72 follow-up widened the destination check on two request-time
+-- signals: `local` (false = the NAS worker fetches, which no machine's sync
+-- plan constrains) and `machine` (a hostname, so a mixed account's WIRED
+-- computer sees the whole tree). Both reached routes_api.create_job /
+-- create_url_job and neither was stored -- so start_download, which
+-- re-validates the destination on every write because a manifest can sit at
+-- review for a week (YTDL-30), re-ran the check with the NARROW defaults and
+-- answered "<project> is no longer a project you sync". A false sentence: the
+-- project was never ticked and never had to be. Since the fleet ships with
+-- YTDL_LOCAL_DOWNLOAD off, `local: false` is what the SPA posts for EVERY
+-- editor, so the DOWNLOAD button at the end of a review, and the RETRY button
+-- on a finished or failed job, were both unreachable for a widened project.
+--
+-- Stored per job for the reason shot_types, max_candidates, mode and
+-- term_scope are: what a later write is allowed to do must be decided by what
+-- the job was CREATED under, not by whatever the client asserts at download
+-- time. That direction is the whole security property here -- a start_download
+-- that trusted a client-supplied local=false would let any editor download
+-- into any active project, which is the one thing this check exists to stop.
+--
+-- ADDITIVE AND INERT. The defaults are the PRE-WIDENING values
+-- (projects.resolve_project's own defaults: local true, no machine), so every
+-- existing row re-validates exactly as it does today and there is no backfill
+-- -- the signals a job was created under cannot be invented after the fact.
+ALTER TABLE jobs ADD COLUMN created_local INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE jobs ADD COLUMN created_machine TEXT;

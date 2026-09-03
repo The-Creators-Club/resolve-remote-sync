@@ -58,8 +58,21 @@
 
   function reloadPanel() {
     return fetch(PARTIAL_URL, {headers: {"HX-Request": "true"}})
-      .then(function (resp) { return resp.text(); })
+      .then(function (resp) {
+        // bug-hunt-2026-09-03 dash-mounts-ui-3, the DASH-4 shape again: we
+        // send HX-Request, so login_gate answers an expired session with a
+        // 200-and-HX-Redirect instead of a 303. Only htmx understands that
+        // header; a plain fetch would swap the LOGIN DOCUMENT into the
+        // packages panel. Reload the page so the browser follows the
+        // redirect and the admin sees the sign-in page, not a nested form.
+        if (!resp.ok || resp.headers.get("HX-Redirect")) {
+          window.location.reload();
+          return null;
+        }
+        return resp.text();
+      })
       .then(function (html) {
+        if (html === null) return;
         var host = panel();
         if (host && host.parentNode) host.outerHTML = html;
       })

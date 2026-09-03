@@ -10223,15 +10223,21 @@ was done. Every finding has a regression test that failed before the change.
 Versions: companion **0.9.65**, dashboard **0.7.28**, installer **1.0.39**,
 plus the **Timeline Cards checkout** the `/cards` mount imports (CR-122..CR-131,
 another repo, not a version of ours).
-**NOTHING IS SHIPPED.** Deploy order, all three steps in this order: **(1) the
-dashboard**, which CR-121 is in and which every mount is served by; **(2) the
-cards checkout refresh on the NAS + a container restart** (`docs/CARDS_DEPLOY.md`
-— Python modules load once, so a copy without a restart changes nothing but the
-page files); **(3) the companions**. The dashboard goes BEFORE the companions
-for its own reasons too (CR-109's rotation fix and CR-108's queue-depth contract
-are gated on the reported companion version, so the old order is safe but
-pointless); broll/web forward only (CR-115 migrates `client_shares.db` to v2,
-and an older build refuses a newer file); ytdl migration 013 (CR-117). Three owner decisions were
+**SHIPPED 2026-09-03**, in the order the fix pass required. **(1) The
+dashboard**: 0.7.28 image-deployed 14:13Z (tag `v0.7.28`, pre-deploy snapshot
+`tank@ccsync-pre-recreate-20260903-220815`), with the **cards checkout
+reshipped in the same run** (previous tree kept as
+`cards-web.old.20260903221017`) - one deploy, so the container restart the
+cards Python modules need came with it. **(2) The companions**: 0.9.65 is
+CURRENT on windows and macos in the studio channel and the base rig is
+upgraded. **(3) onboard 1.0.39** is in the vendor feed for windows and macos.
+The macOS bundle took three CI runs, all of them test-only faults on a runner
+that is not Windows: two of this hunt's own test pairs assumed one
+(`test_upgrade` tampering with its own platform's record, `test_fixer`
+creating an NFC directory on case-preserving APFS), two onboarding
+forbidden-drive tests named no platform at all, and one `test_jobs_resilience`
+timing flake. No product code changed for any of them (commits 88dbcf7,
+bf214ae, a300593). Three owner decisions were
 left as such and are named in the entries: the companion's `arch` check
 (CR-103), the REL-1 soak gate on the feed's `current` policy (CR-113), and
 where the alerts webhook URL is stored (CR-112). One leftover nobody owned:
@@ -10807,6 +10813,9 @@ running other builders' Chromes. **Owed: one clean run on a quiet machine**
 throttled p95 comes back near 300, the `--cpu 4` limit should come back down
 with it. Read the p50 for the trend — a regression here shows there first.
 `docs/PERF-HARNESS.md`, "The two trim thresholds were raised".
+Owner confirmed the wave itself on 2026-09-03: "the latency changes really
+worked well. No lag now dragging around in the timeline". The clean-machine
+run is still owed - a subjective all-clear is not a p95.
 
 ### CR-133 — OPEN: an installed cards page still frames itself in the retired look's colours (owner decision)
 `cards.html`'s `<meta name="theme-color" content="#15171c">` and the Android
@@ -10868,6 +10877,170 @@ and now pin the token; two had timing assumptions the wave broke). One
 class-D flake is the harness, not the page: `test_project_engine.py` dies
 under `--jobs` with `ConnectionAbortedError` because `free_port()` binds port
 0, reads the number and CLOSES the socket before the server binds it again.
+
+
+## Post-deploy pass, 2026-09-03 evening (CR-138..CR-144)
+
+What the shipped 0.7.28 looked like from the operator's chair for an evening:
+the home page's PROBLEMS THE SERVER FOUND panel with real traffic on it, the
+dashboard log under a human clicking while the fleet reported, and the cards
+page open on a real cut list. Seven findings, six of them fixed the same
+evening. Dashboard **0.7.29**; the companion stays **0.9.65** (only its tests
+changed) and the installer stays **1.0.39**. Two of the fixes are in the
+**MulticamPipeline checkout** the `/cards` mount imports, which is another
+repo and carries no version of ours - they reach the page only after a
+checkout refresh AND a container restart (`docs/CARDS_DEPLOY.md`; Python
+modules load once). CR-140 bakes new environment variables into the compose
+file, so it needs a `--recreate`; an image-mode deploy already implies one.
+
+### CR-138 - the proxy-pairs invariant called 44 Sony camera proxies broken - FIXED in repo 2026-09-03 (dashboard 0.7.29)
+`proxy_pairs` reported 44 orphans in `2026-base-drone/.../Proxy/`, all named
+`fx3_*S03.MP4`: Sony cameras write their own low-res proxy beside the original
+with an `S03` suffix on the stem, so the file sat in `Proxy/` next to the
+generated `.mov` we made from the same clip, and its stem `<clip>S03` matched
+no original by construction. Nothing was wrong on disk, and the panel said
+something was, 44 times. Owner: "ignore s03 as an exception, this will happen
+to a lot of users". **Fixed** in `invariants.py`: `CAMERA_PROXY_SUFFIXES =
+("S03",)` and `_proxy_stem_candidates` give a proxy stem a second reading, and
+the pair holds if EITHER the literal stem or the suffix-stripped stem names an
+original. A proxy whose neither stem exists is still broken - the exception
+widens what counts as a match, it does not stop the check. Four tests in
+`test_invariants.py` (a camera proxy pairs, a real orphan still fails, both
+spellings present, the suffix list is data). `docs/SELF_DIAGNOSIS.md` records
+the exception so the next suffix is a one-line addition.
+
+### CR-139 - three alert kinds fired on the studio's own healthy dashboard - FIXED in repo 2026-09-03 (dashboard 0.7.29)
+Three of the forty checks were findings about nothing, which is the way a
+panel like this stops being read.
+
+* **`engine_down` for the base rig.** It syncs nothing by configuration, so
+  "the sync engine is not running" is its normal state. Nothing in the report
+  carries `sync_enabled`, so the fix keys on the machine's ROLE instead:
+  `machine_state.mode == 'base'`, with `db.base_only_editors` as the fallback
+  for a row written before v22. A REMOTE machine reporting `sync_enabled =
+  false` still alerts, deliberately - that one is a problem.
+* **`enforce_plan` for an empty held plan.** The collector records the
+  enforce dry-run view every cycle, including the do-nothing one, and the
+  evaluator read "a plan is held" rather than "a plan differs". It now ignores
+  a row with `n_add == n_remove == 0`.
+* **`soak_failed` for a build nobody runs.** Staged 0.9.63 had failed its soak
+  while 0.9.65 was current; the check now skips a staged row whose version is
+  below current (`db.version_tuple`, so 0.9.9 < 0.9.65 reads correctly - the
+  two-digit-minor rule).
+
+Six tests in `test_alerts.py`, one per branch plus the two deliberate
+non-suppressions.
+
+### CR-140 - `protection_unverifiable` named an environment variable nothing could set - FIXED in repo 2026-09-03 (dashboard 0.7.29)
+The snapshot checks `snapshot_tree` and `snapshot_apps` resolve to
+NOT CHECKED without `DASH_TREE_DATASET` / `DASH_UPDATE_SNAPSHOT_DATASET`, and
+their advice told the operator to set them on the container - but
+`install_dashboard_app.py` had no source for either value, so following the
+advice meant hand-editing a generated compose file that the next deploy
+overwrites. A finding the operator cannot clear is worse than no finding.
+**Fixed**: `[tree] dataset` and `[apps] dataset` in the site manifest, and
+when they are absent the installer DERIVES them on TrueNAS from
+`df --output=source` over the mount point
+(`truenas.resolve_dataset(strict=True)`), which returns blank when it cannot
+tell rather than guessing a name that would send a snapshot to the wrong
+place. Both flow through `compose_config` / `compose_variables` into
+`compose.yaml`, `compose.image.yaml` and the golden compose fixture;
+`docs/CONFIG.md`, `docs/SELF_DIAGNOSIS.md` and `site.example.toml` document
+the keys. The studio's values: tree = `tank/TheCreatorsPool` (hourly, daily
+and weekly tasks all exist), apps = `tank` - flat, with **no snapshot task on
+it**, so the operator still owes either a task on `tank` or a dataset of its
+own for the apps root; the check will now say so instead of shrugging. The
+environment is baked at container create time, so this needs a `--recreate`
+(an image-mode deploy implies one). 13 tests in
+`server/tests/test_protection_datasets.py`.
+
+### CR-141 - `database is locked`, twelve times in 27 minutes, on a dashboard with one human on it - FIXED in repo 2026-09-03 (dashboard 0.7.29)
+Twelve distinct `sqlite3.OperationalError: database is locked` failures in 27
+minutes of live 0.7.28: `api_report`'s `clear_report_refused`, the session
+store's touch, the collector's reconcile `meta_delete`, `/cards/api/state`,
+`/partials/fleet-halt-banner`. Every victim was blocked on its FIRST write,
+which is the tell: they were not slow, they were queued behind someone else.
+The holder is `api_report`, which took ONE transaction per report and inside
+it replaced up to `EDITOR_MEDIA_CAP` (2000) plus `MEDIA_TREE_CAP` (4000) rows
+**per project**, on ZFS, with `synchronous=FULL`. Not a 0.7.28 regression -
+the shape has been there for months; what was new was a human clicking around
+the dashboard while the fleet reported. It is NOT the new invariants pass,
+which does all of its evaluating before its first write. **Fixed**, all in the
+dashboard:
+
+* `api_report` commits after the fleet-state write and again after EACH
+  project's media replace. **A report is no longer atomic**: it is 1+N+M
+  transactions. That is safe because both media tables are a full replace per
+  `(editor, machine, project)` and a half-applied report self-heals on the
+  next one - but it is a contract now: a new write in `api_report` goes ABOVE
+  the first commit, or is idempotent per project.
+* `PRAGMA synchronous=NORMAL` in `db.connect` (WAL already gives us the
+  crash-consistency that matters here).
+* `busy_timeout` 20 s (`BUSY_TIMEOUT_BACKGROUND_MS`) on the collector's and
+  the session store's connections, so a background writer waits instead of
+  raising in a user's face.
+* `notices.run_checks` commits between checks, so a NAS-mount syscall never
+  sits under the write lock.
+* `alerts.deliver` commits around each `send()`. Dormant today with
+  `sink = none`, a landmine the first time a site configures SMTP.
+* INFO logs when a collector poll or a report write exceeds 1 s
+  (`SLOW_POLL_SECONDS` / `SLOW_REPORT_SECONDS`) - during the incident the log
+  could say a write had failed but not which pass was holding the lock.
+
+11 tests in `test_db_write_locks.py`.
+
+### CR-142 - dragging a section in the overview was refused as "a ripple move" on a plain cut list - FIXED in the MulticamPipeline repo 2026-09-03 (cards checkout)
+On a `.cut.md` project, dragging a SECTION in the overview answered "the edit
+did not go through in the project file: sections are re-ordered in a cut list:
+here that would be a ripple move...". The page draws the grip when a FILE is
+open (`state.source`, stamped literally by publish), while `handler.py`'s
+`/api/section_move` gate tested `engine.source != "project"` - the cards'
+PROVENANCE (project / agent / library), which is a different question with an
+overlapping vocabulary. The same wrong test guarded `/api/gap`, `/api/redo`,
+`/api/stage_cat*` and the staged `/api/insert`. **Fixed** with one predicate,
+`handler.serves_cut_list(engine)` (an open project AND a path), used by all
+five. `move_section` itself needed nothing: it was already one revision,
+identity-preserving and undoable. Test in `tests/test_handler.py`.
+Uncommitted in that checkout; reaches the page only after a checkout refresh
+AND a container restart.
+
+### CR-143 - every card in Civil Defence reported `ts_src: srt` - FIXED in the MulticamPipeline repo 2026-09-03 (cards checkout)
+Word-level timing was silently absent from a whole cut list. The library is
+healthy (word tokens present for all seven interviewees); the file was BORN
+that way. NEW FROM CANVAS on the mounted engine ran with no cut list open, and
+`_lib` is bound only in `load()`, so `from_canvas` ran with `db=None`, took
+the `srt_only=True` path, and wrote a header with `timing: srt`, clip fps
+25.0 and no uid. **Fixed**: `new_project` calls `_open_library()` first, and
+when a library is CONFIGURED but unreachable the result carries
+`report["warning"]`, which the page shows in its confirm (`01-state.js`,
+`projNewCanvas`) - a new project silently missing word timing is exactly the
+failure this hides. 7 tests in `tests/test_project_picker.py`. Recovery for
+the file that already exists is a header edit, `timing: srt` -> `timing:
+word`, with the page NOT holding the file; verified on a copy (258 cards came
+back on word timing). Owner has not run it yet. Uncommitted in that checkout.
+
+### CR-144 - NOTE: the base rig's 14 "crashes" are all deliberate kills, and five things are the owner's to close
+Not a defect in code. All 14 crash reports on the base rig are `UncleanExit`
+markers from a companion killed from OUTSIDE: the installer's `Stop-Process`
+during upgrades, the Cards test gate sweeping port 8899, and dev restarts. The
+newest (15:04:49Z) is the interesting one - `windows_upgrade.ps1`'s
+`Stop-Process` landed on the SELF-upgraded instance that had already taken the
+slot 15 seconds earlier, i.e. auto-update and the manual upgrade collided and
+the manual one shot the winner. Nothing was lost and no fix is proposed, but a
+suggestion is left open: a supervisor that could see a deliberate exit code
+would clear the run marker, so the next start files no report at all and the
+count means something again.
+
+Open for the owner, none of them code:
+
+* `machine_has_plan` for `alex/Razer` - tick a project on it, or mark it a
+  base rig (CR-28: a base rig can hold no tick).
+* `release_key_backup` - the offline signing key has no recorded backup.
+* `restore_drill` - never run against a snapshot.
+* `alerts_sink` is `none`, which is what "3 alert(s) could not be delivered"
+  means. Vendor-build default; a studio wants SMTP or a webhook.
+* The 44 `S03` files themselves. Harmless now that CR-138 pairs them;
+  deleting them is optional and buys back a little space.
 
 
 ## Carryover — unchanged from before the 2026-08-11 hunt

@@ -547,7 +547,7 @@ Numbered as SYS-9 numbers them.
 | 7 | `companion_floor` | every computer runs a build new enough for its plan (0.9.3 pushes, 0.9.43 RESUME, 0.9.54 upload-only) | checked |
 | 8 | `versioning_agrees` | `.stversions` retention agrees between NAS-side and editor-side (R5) | **NOT CHECKED, by design** |
 | 9 | `snapshot_schedule` | the customer's data is on a snapshot schedule (SYS-14's standing red line) | checked when the NAS can be asked |
-| 10 | `proxy_pairs` | every `Proxy/<stem>.*` on the server has its original beside it | checked, `warn` |
+| 10 | `proxy_pairs` | every `Proxy/<stem>.*` on the server has its original beside it, a camera proxy suffix (Sony `S03`) allowed for | checked, `warn` |
 
 Three deliberate narrowings, each so the check can be honest rather than
 loud:
@@ -593,6 +593,14 @@ loud:
   signature of a half-finished reorganisation. An original with no proxy is
   the normal state of footage uploaded this morning, so counting it would
   make the check cry wolf every shoot day.
+* **Invariant 10 knows a camera's own proxy** (2026-09-03, owner's call:
+  "this will happen to a lot of users"). Sony XAVC bodies write `<clip>S03.MP4`
+  into the card's `SUB` folder, and editors copy those into `Proxy/` beside
+  the ones we generate, so the stem never matched anything and one drone
+  shoot raised 44 orphans. A proxy whose stem ends in a suffix from
+  `invariants.CAMERA_PROXY_SUFFIXES` is tried a second time with the suffix
+  stripped, case-insensitively; matching under neither stem is still broken,
+  because that is footage really gone.
 
 ### NOT CHECKED is not OK
 
@@ -720,6 +728,10 @@ and the container healthcheck have each made once already.
 | files deleted on the server are kept for a year | every project's live Syncthing folder carries versioning with a `maxAge` |
 | deleted-file copies on editors' computers are within their limit | every reporting machine's `.ccsync-trash` is under 50 GB (the 14-day half of the rule is not reported by any companion, and the line says so) |
 
+Both dataset names come from the site manifest (`[tree] dataset`,
+`[apps] dataset`) or, unset, from the deploy's own lookup on the NAS -
+see "What this deployment has to be given" below (2026-09-03).
+
 Neither dataset name is a Settings field: a container sees `/data` and
 `/projects`, never the pool path behind them, so the pool-side names are
 deployment facts from the environment. **Unset is `[ CANNOT VERIFY ]` naming
@@ -846,7 +858,15 @@ Both are read-only facts about the deployment, not settings an editor sees:
   Projects tree inside it, e.g. `Creators_Club/Projects`. Empty means the
   snapshot root is the tree.
 * `DASH_TREE_DATASET` / `DASH_UPDATE_SNAPSHOT_DATASET` - the two dataset
-  names, shared with the protection panel.
+  names, shared with the protection panel. **The deploy sets both since
+  2026-09-03** (`server/install_dashboard_app.datasets_env`): site.toml
+  `[tree] dataset` / `[apps] dataset` if the manifest names them, otherwise
+  what the deploy's own dataset lookup on the NAS answers for the tree root
+  and the apps root. Where it cannot ask - Synology, a dry run, no SSH - it
+  passes a blank rather than the string-surgery guess, so the line stays
+  CANNOT VERIFY instead of reporting a backup that is missing. Until then
+  the panel told operators to set a variable the deploy had no source for,
+  so `protection_unverifiable` could not be cleared by an operator at all.
 * `DASH_CONTAINER_NAME` - only ever substituted into a printed command.
 
 ### Storage

@@ -351,6 +351,55 @@ def test_every_proxy_paired_is_ok(conn):
     assert invariants._check_proxy_pairs(_ctx(conn)).state == dbmod.INVARIANT_OK
 
 
+def test_a_sony_camera_proxy_beside_its_original_is_ok(conn):
+    """2026-09-03: Sony XAVC bodies write `<clip>S03.MP4` into the card's SUB
+    folder and editors copy those into Proxy/. Stem-for-stem that was 44
+    orphans on one drone shoot."""
+    project_id = dbmod.upsert_project(conn, "ff5", "FF5", "/data/Projects/FF5", NOW)
+    dbmod.replace_nas_media(conn, project_id, [
+        ("Day1/fx3_20260830_1415.MP4", "original", "mp4", 10, 1),
+        ("Day1/Proxy/fx3_20260830_1415.mov", "proxy", "mov", 2, 1),
+        ("Day1/Proxy/fx3_20260830_1415S03.MP4", "proxy", "mp4", 2, 1),
+    ], "sig", 3, NOW)
+    assert invariants._check_proxy_pairs(_ctx(conn)).state == dbmod.INVARIANT_OK
+
+
+def test_a_sony_camera_proxy_with_no_original_is_still_broken(conn):
+    """The exception is a second stem to try, not a blanket ignore: with the
+    footage really gone, both stems miss and the check still says so."""
+    project_id = dbmod.upsert_project(conn, "ff5", "FF5", "/data/Projects/FF5", NOW)
+    dbmod.replace_nas_media(conn, project_id, [
+        ("Day1/A001.mov", "original", "mov", 10, 1),
+        ("Day1/Proxy/A001.mp4", "proxy", "mp4", 2, 1),
+        ("Day1/Proxy/fx3_20260830_1415S03.MP4", "proxy", "mp4", 2, 1),
+    ], "sig", 3, NOW)
+    outcome = invariants._check_proxy_pairs(_ctx(conn))
+    assert outcome.state == dbmod.INVARIANT_BROKEN
+    assert outcome.subjects[0][0] == "ff5/Day1/Proxy/fx3_20260830_1415S03.MP4"
+
+
+def test_an_ordinary_stem_mismatch_is_still_broken(conn):
+    """A near miss that is not a camera suffix stays a finding."""
+    project_id = dbmod.upsert_project(conn, "ff5", "FF5", "/data/Projects/FF5", NOW)
+    dbmod.replace_nas_media(conn, project_id, [
+        ("Day1/A001.mov", "original", "mov", 10, 1),
+        ("Day1/Proxy/A001_v2.mp4", "proxy", "mp4", 2, 1),
+    ], "sig", 2, NOW)
+    outcome = invariants._check_proxy_pairs(_ctx(conn))
+    assert outcome.state == dbmod.INVARIANT_BROKEN
+    assert outcome.subjects[0][0] == "ff5/Day1/Proxy/A001_v2.mp4"
+
+
+def test_the_camera_proxy_suffix_matches_case_insensitively(conn):
+    """Cameras and card copies disagree on case, so `s03` pairs too."""
+    project_id = dbmod.upsert_project(conn, "ff5", "FF5", "/data/Projects/FF5", NOW)
+    dbmod.replace_nas_media(conn, project_id, [
+        ("Day1/C0007.MP4", "original", "mp4", 10, 1),
+        ("Day1/Proxy/C0007s03.mp4", "proxy", "mp4", 2, 1),
+    ], "sig", 2, NOW)
+    assert invariants._check_proxy_pairs(_ctx(conn)).state == dbmod.INVARIANT_OK
+
+
 def test_project_markers_are_not_checked_without_a_tree(conn):
     outcome = invariants._check_project_markers(_ctx(conn))
     assert outcome.state == dbmod.INVARIANT_NOT_CHECKED

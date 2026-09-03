@@ -152,9 +152,11 @@ def test_recovery_message_is_sent_once_and_names_the_clearing(env):
     }), headers=report_headers())
     findings = alerts.scan(conn, settings, NOW)
     alerts.deliver(conn, settings, findings, NOW)
-    # deliver() does not commit (run_cycle does): leaving this open would
-    # hold the write lock across the next client.post() below, which opens
-    # its OWN connection to the same file and would deadlock against it.
+    # deliver() commits around every send() since 2026-09-03 (database is
+    # locked, api_report held the lock), so this is belt and braces now
+    # rather than load-bearing: an open write transaction here would hold the
+    # lock across the next client.post() below, which opens its OWN
+    # connection to the same file.
     conn.commit()
 
     client.post("/api/v1/report", json=payload({
@@ -461,3 +463,96 @@ def test_saving_the_masked_webhook_url_back_keeps_the_stored_one(env):
                                "alerts_smtp_host": "mail.example.test"}, "owen")
     conn.commit()
     assert alerts.get_settings(conn)["alerts_webhook_url"] == url
+
+
+# ------------------------------ 2026-09-03, studio dashboard false alarms
+#
+# Three kinds fired on the live studio dashboard for states that are not
+# problems. Each of these seeds the exact live state and asserts silence,
+# with a companion case asserting the real fault still speaks.
+
+def _base_rig_payload(**extra):
+    body = payload({"syncthing_supervisor": {
+        "down_since": "2026-08-22T12:00:00+00:00", "attempts": 3,
+        "last_error": "no lane C on this machine"}})
+    body["machine"] = "CREATOR-1"
+    body.update(extra)
+    return body
+
+
+def test_a_wired_base_rig_is_never_the_sync_engine_being_down(env):
+    """The base rig runs sync_enabled=false and starts no lanes, so its
+    Syncthing is retired, not down - and the supervisor's incident is never
+    polled clear. Six days of "the sync engine on alex/Creator_1 has been
+    down" about the machine the tree lives on."""
+    client, conn, settings = env
+    client.post("/api/v1/report", json=_base_rig_payload(mode="base"),
+                headers=report_headers())
+    findings = alerts.scan(conn, settings, NOW)
+    assert not any(f["kind"] == "engine_down" for f in findings)
+
+
+def test_an_editors_machine_with_its_engine_down_still_alerts(env):
+    client, conn, settings = env
+    client.post("/api/v1/report", json=_base_rig_payload(mode="editor"),
+                headers=report_headers())
+    findings = alerts.scan(conn, settings, NOW)
+    assert any(f["kind"] == "engine_down" for f in findings)
+
+
+def test_an_empty_enforce_plan_is_not_a_sharing_change_being_held(env):
+    """The collector writes DASH-3's dry-run record every cycle, so the
+    steady state is a plan with nothing in it."""
+    _client, conn, settings = env
+    dbmod.record_enforce_plan(conn, NOW, [])
+    conn.commit()
+    findings = alerts.scan(conn, settings, NOW)
+    assert not any(f["kind"] == "enforce_plan" for f in findings)
+
+
+def test_a_plan_with_something_in_it_is_still_held(env):
+    _client, conn, settings = env
+    dbmod.record_enforce_plan(conn, NOW, [("2026-ff5", {"DEVICE-A"}, set())])
+    conn.commit()
+    findings = alerts.scan(conn, settings, NOW)
+    assert any(f["kind"] == "enforce_plan" for f in findings)
+
+
+def _publish(conn, version, *, rollout, is_current, platform="windows"):
+    conn.execute(
+        "INSERT INTO companion_packages (version, platform, filename, sha256, "
+        "size_bytes, published_at, published_by, is_current, kind, rollout) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (version, platform, f"ccsync-{version}.exe", "0" * 64, 1,
+         NOW, "owen", 1 if is_current else 0, "companion", rollout))
+
+
+def _machine_on(client, version, machine="RUSKIN-PC"):
+    body = payload({"crashes": {"count": 3, "newest": NOW}})
+    body["machine"] = machine
+    body["companion_version"] = version
+    client.post("/api/v1/report", json=body, headers=report_headers())
+
+
+def test_a_staged_build_older_than_current_has_lost_its_trial(env):
+    """0.9.63 (windows) staged with three crashes, a week after 0.9.65 went
+    current. A build that can never be handed to everybody cannot be a
+    warning about handing it to everybody. version_tuple, never a string
+    compare: the companion goes 0.9.9 -> 0.9.10."""
+    client, conn, settings = env
+    _publish(conn, "0.9.63", rollout="staged", is_current=False)
+    _publish(conn, "0.9.65", rollout="current", is_current=True)
+    conn.commit()
+    _machine_on(client, "0.9.63")
+    findings = alerts.scan(conn, settings, NOW)
+    assert not any(f["kind"] == "soak_failed" for f in findings)
+
+
+def test_a_staged_build_newer_than_current_still_fails_its_soak(env):
+    client, conn, settings = env
+    _publish(conn, "0.9.65", rollout="current", is_current=True)
+    _publish(conn, "0.10.0", rollout="staged", is_current=False)
+    conn.commit()
+    _machine_on(client, "0.10.0")
+    findings = alerts.scan(conn, settings, NOW)
+    assert any(f["kind"] == "soak_failed" for f in findings)

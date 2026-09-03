@@ -138,7 +138,13 @@ class SessionStore:
     # ------------------------------------------------------------- plumbing
 
     def _connect(self) -> sqlite3.Connection:
-        return db.connect(self.db_path)
+        # A LONGER busy timeout than a request's own connection gets
+        # (2026-09-03 database is locked, api_report held the lock). The touch
+        # below is one UPDATE of one row, and it runs on every authenticated
+        # request: when it lost the race for the write lock it raised, and a
+        # signed-in admin got a 500 on the fleet grid because somebody's
+        # companion was mid-report. Waiting is the right answer here.
+        return db.connect(self.db_path, busy_ms=db.BUSY_TIMEOUT_BACKGROUND_MS)
 
     def ensure_schema(self, conn: sqlite3.Connection | None = None) -> None:
         own = conn is None

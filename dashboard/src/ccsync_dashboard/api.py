@@ -94,6 +94,13 @@ def token_ok(configured: str, presented: str) -> bool:
         return False
 
 
+# Over this, a report says how long its writes took (2026-09-03 database is
+# locked, api_report held the lock). A normal report is milliseconds; the ones
+# that starve every other writer carry tens of thousands of media rows, and
+# until now nothing in the log said so.
+SLOW_REPORT_SECONDS = 1.0
+
+
 def get_conn(request: Request) -> Iterator[sqlite3.Connection]:
     conn = db.connect(request.app.state.settings.db_path)
     try:
@@ -7268,6 +7275,7 @@ def api_report(
         else:
             raise HTTPException(status_code=401, detail="bad or missing X-CCSync-Token")
     received_at = db.utcnow_iso()
+    write_started = time.monotonic()
     editor = payload.editor_name.strip().lower()
     machine = payload.machine.strip()
 
@@ -7582,6 +7590,23 @@ def api_report(
             received_at,
         )
 
+    # THE REPORT IS NO LONGER ONE TRANSACTION (2026-09-03 database is locked,
+    # api_report held the lock). Everything above is small and bounded, so it
+    # commits here, on its own; each project's media replace below then commits
+    # separately. What that costs: a report is no longer atomic, so a crash
+    # (or a 500 from a later line) can leave the fleet state written and some
+    # projects' media not. That is acceptable because both media tables are a
+    # FULL REPLACE per (editor, machine, project) and the same machine reports
+    # again 60 s later, so the worst case is one cycle of staleness in one
+    # project's file list -- and nothing anywhere reads the two tables as a
+    # pair. What it buys: the old shape held ONE write lock across
+    # replace_editor_media (DELETE + up to 2000 rows) and replace_media_tree
+    # (up to 4000) for EVERY ticked project, tens of thousands of rows per
+    # machine per minute, and every other writer on this database -- the
+    # session touch, the collector's reconcile, the next machine's report --
+    # sat behind it until its 5 s busy timeout ran out and it 500'd.
+    conn.commit()
+
     if payload.local_manifest is not None:
         for rel, m in payload.local_manifest.items():
             slug = _slug_for_rel(conn, rel)
@@ -7595,6 +7620,8 @@ def api_report(
                 files = [(rel_p, "original", size) for rel_p, size in (m.originals or [])]
                 files += [(rel_p, "proxy", size) for rel_p, size in (m.proxies or [])]
                 db.replace_editor_media(conn, editor, machine, slug, files, received_at)
+            # One project, one short lock (see the commit above).
+            conn.commit()
 
     if payload.media_tree is not None:
         # media_tree is keyed by the RESOLVE PROJECT NAME; map it to a slug via
@@ -7607,8 +7634,22 @@ def api_report(
                 continue
             rows = [(c.bin_path, c.clip_name, c.file_path, c.kind, c.present) for c in clips]
             db.replace_media_tree(conn, editor, machine, slug, rows, received_at)
+            # One project, one short lock (see the commit above the manifest
+            # loop). The commit is INSIDE the loop on purpose: a machine with
+            # thirty ticked projects is thirty brief locks, not one long one.
+            conn.commit()
 
+    # Anything the two loops left open, and a no-op when they committed already.
     conn.commit()
+    write_seconds = time.monotonic() - write_started
+    if write_seconds > SLOW_REPORT_SECONDS:
+        # Nothing used to time this, so the log could not say which pass was
+        # holding the write lock when everybody else timed out (2026-09-03
+        # database is locked, api_report held the lock).
+        log.info("report from %s/%s took %.1fs to write (%d project manifests, "
+                 "%d media trees)",
+                 editor, machine, write_seconds,
+                 len(payload.local_manifest or {}), len(payload.media_tree or {}))
     result: dict[str, Any] = {
         "ok": True, "lanes": len(payload.lanes), "received_at": received_at}
     # B6: tell the companion what was dropped so the truncation is visible on

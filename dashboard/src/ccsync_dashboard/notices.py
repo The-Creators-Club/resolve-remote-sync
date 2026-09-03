@@ -122,11 +122,22 @@ def run_checks(
             ran += 1
         except Exception:  # noqa: BLE001 - see the docstring
             log.exception("notice check %s failed; continuing", getattr(check, "__name__", "?"))
+        # ONE COMMIT PER CHECK (2026-09-03 database is locked, api_report held
+        # the lock). Each check does its own syscalls FIRST and its writes
+        # after, so committing here is what keeps a syscall out of an open
+        # write transaction: without it, the first check to write a notice
+        # opened the transaction and _check_tree's is_dir/iterdir on the NAS
+        # mount and _check_dashboard_space's disk_usage then ran inside it,
+        # holding the write lock across storage that can hang. Each check's
+        # findings are independently durable, which is also the right shape
+        # for a pass whose checks are already individually isolated.
+        _commit(conn)
     try:
         _check_pending_devices(conn, stamp, pending_devices)
         ran += 1
     except Exception:  # noqa: BLE001
         log.exception("notice check for pending devices failed; continuing")
+    _commit(conn)
     try:
         _check_plan_without_share(conn, stamp, folder_devices)
         ran += 1
@@ -134,6 +145,16 @@ def run_checks(
         log.exception("notice check for plan without share failed; continuing")
     conn.commit()
     return ran
+
+
+def _commit(conn) -> None:
+    """A commit that cannot end the pass. The caller (the collector cycle)
+    commits again after us, and a failure to write one check's notices must
+    not cost the other seven."""
+    try:
+        conn.commit()
+    except Exception:  # noqa: BLE001 - see the docstring
+        log.exception("could not commit a notice check's findings; continuing")
 
 
 # ------------------------------------------------------ the collector itself

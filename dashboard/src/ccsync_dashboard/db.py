@@ -649,14 +649,37 @@ def clamp_reported_at(
     return client_reported_at, skew, False
 
 
-def connect(path: str | Path) -> sqlite3.Connection:
+# How long a connection waits for the write lock before it gives up with
+# "database is locked" (2026-09-03 database is locked, api_report held the
+# lock). Two values on purpose:
+#
+#   BUSY_TIMEOUT_MS             an ad-hoc request connection. 5 s is the wait
+#                               a person at a page is prepared to sit through.
+#   BUSY_TIMEOUT_BACKGROUND_MS  the collector's long-lived connection and the
+#                               session store's. Nobody is watching those, and
+#                               a slow request beats a 500 on the fleet grid or
+#                               a signed-in admin bounced to the login page.
+BUSY_TIMEOUT_MS = 5000
+BUSY_TIMEOUT_BACKGROUND_MS = 20000
+
+
+def connect(path: str | Path, *, busy_ms: int = BUSY_TIMEOUT_MS) -> sqlite3.Connection:
     # check_same_thread=False: FastAPI may create a request's connection in a
     # threadpool worker but use it from an async handler on the event loop.
     # Each connection still serves exactly one request/thread at a time.
-    conn = sqlite3.connect(str(path), timeout=5.0, check_same_thread=False)
+    conn = sqlite3.connect(str(path), timeout=busy_ms / 1000.0, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute(f"PRAGMA busy_timeout={int(busy_ms)}")
+    # synchronous=NORMAL is the standard setting for WAL, and the fsync it
+    # drops was the single largest latency in a write here: /data is ZFS on
+    # the NAS, where every commit's fsync waits on the pool (2026-09-03
+    # database is locked, api_report held the lock -- the fsync was inside the
+    # lock, so every other writer waited on it too). What it costs: on HOST
+    # power loss the last transactions can be lost. It is NOT weaker against a
+    # container restart or a process death -- the WAL is still there and is
+    # replayed -- and it cannot corrupt the database either way.
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 

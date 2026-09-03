@@ -53,12 +53,14 @@ it stops and names it; that is the enforcement.
 | `homes_parent` | `<pool_root>/homes` | Where editor **home directories** live — the parent, never one editor's home. DSM: `/var/services/homes`. Not cosmetic: sshd's `StrictModes` decides whether an editor's key works at all |
 | `share_name` | — | **R**. The SMB share name |
 | `smb_unc` | — | **R**. The UNC path editors map as `P:`. Served rather than derived — the derivation only works on TrueNAS |
+| `dataset` | *(unset → the deploy asks the NAS)* | TrueNAS only. The ZFS dataset the tree lives in, as `zfs` spells it (`tank/TheCreatorsPool`, no `/mnt`). Reaches the container as `DASH_TREE_DATASET`, which is what the protection panel checks the NAS's snapshot schedule against. Unset, `install_dashboard_app.datasets_env` resolves the tree root on the NAS itself; where it cannot (Synology, dry run, no SSH) the value stays blank and the check reads **CANNOT VERIFY**, never *missing* (2026-09-03) |
 
 ### `[apps]`
 
 | Key | Default | Notes |
 |---|---|---|
 | `root` | — | **R**. Where the dashboard's host tree lives. Everything under `<root>/app` is **replaced as root on every deploy**, so the backend refuses a root that does not match its expected shape |
+| `dataset` | *(unset → the deploy asks the NAS)* | TrueNAS only, same shape as `[tree] dataset`. The dataset `root` is **inside** — usually the pool itself (`tank`), because the app root is normally a plain folder and a task on `tank` does cover files living directly in it. Reaches the container as `DASH_UPDATE_SNAPSHOT_DATASET` (2026-09-03) |
 
 ### `[net]`
 
@@ -279,7 +281,8 @@ Full writeup: [`RELEASE_FEED.md`](RELEASE_FEED.md).
 | `DASH_RELEASE_FEED_URL` | `""` | absolute `https://` URL of `channel.json`. **Empty = the feed is entirely off** — no background thread, no network call, no admin-page section beyond "how to configure it" |
 | `DASH_RELEASE_FEED_POLICY` | `manual` | `manual` \| `stage` \| `current`. An unrecognised value falls back to `manual`, never upward. Editable at runtime (`POST /api/v1/admin/feed/policy`), which overrides this default until cleared |
 | `DASH_RELEASE_FEED_INTERVAL` | `86400` | seconds between background checks (floored at 60s) |
-| `DASH_UPDATE_SNAPSHOT_DATASET` | `""` | TrueNAS dataset to snapshot before the dashboard applies a code update to ITSELF (`ZERO_TOUCH_PLAN.md` WP K). Needed because a container sees `/data`, not the pool path behind it; empty means the snapshot is skipped with that reason and the `/data/backups/<ts>/` database copies are the recovery path. Also needs `DASH_NAS_API_KEY` |
+| `DASH_UPDATE_SNAPSHOT_DATASET` | `""` | TrueNAS dataset to snapshot before the dashboard applies a code update to ITSELF (`ZERO_TOUCH_PLAN.md` WP K), **and** the dataset the protection panel checks the app's own data has a snapshot task for. Needed because a container sees `/data`, not the pool path behind it; empty means the snapshot is skipped with that reason (and the check reads CANNOT VERIFY), with the `/data/backups/<ts>/` database copies as the recovery path. Also needs `DASH_NAS_API_KEY`. **Set by the deploy since 2026-09-03** from `[apps] dataset` or, unset, from its own `zfs`/`df` lookup on the apps root |
+| `DASH_TREE_DATASET` | `""` | The dataset the **project tree** is on, checked the same way (`protection.py`). Set by the deploy from `[tree] dataset` or its own lookup on the tree root. Empty is CANNOT VERIFY, which is what Synology gets permanently: DSM's snapshot schedules have no readable API |
 
 The same feed carries the dashboard's own code (`RELEASE_FEED.md` §2.1a). It
 needs no variable of its own: `DASH_RELEASE_FEED_URL` turns it on and

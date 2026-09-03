@@ -360,6 +360,18 @@ services:
       # advertised. A job naming a root that is not here fails with a
       # sentence, never a guess.
       DASH_JOBS_ROOTS: ""
+      # WHICH DATASETS MUST BE IN A SNAPSHOT TASK (2026-09-03). The
+      # dashboard's protection panel checks the NAS's snapshot schedule
+      # against these two names, and a container sees /projects and /data,
+      # never the pool paths behind them -- so the names are a deployment
+      # fact it has to be told. Blank is a supported state and renders as
+      # CANNOT VERIFY, never as a missing backup. site.toml [tree] dataset /
+      # [apps] dataset name them; on TrueNAS the deploy works them out from
+      # the roots it already has when they are not set. The apps one is
+      # normally the pool root (a plain folder inside `tank` is covered by a
+      # task on `tank`).
+      DASH_TREE_DATASET: ""
+      DASH_UPDATE_SNAPSHOT_DATASET: ""
       # WHICH OPTIONAL FEATURES THIS SITE TURNED ON (2026-08-17,
       # docs/COMMERCIAL_READINESS.md items 2 + 3). BOTH DEFAULT "0", and "0"
       # is what the vendor build ships: the customer decides whether

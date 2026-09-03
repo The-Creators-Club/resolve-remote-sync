@@ -73,6 +73,17 @@ MAX_SUBJECTS = db.INVARIANT_MAX_SUBJECTS
 # `<dir>/<stem>.<ext>`), keyed on the STEM exactly as proxy_scan.py keys it.
 PROXY_DIR = "proxy"
 
+# Camera-written proxies do NOT share their original's stem: the camera
+# appends its own suffix. Sony's XAVC-S / XAVC-HS bodies (FX3, FX30, a7S III,
+# the same scheme on the card's `SUB` folder) write `<clip>S03.MP4` beside
+# `<clip>.MP4`, and editors copy those into Proxy/ alongside the ones we
+# generate. Stem-for-stem that reads as 44 orphaned proxies on one drone
+# shoot (owner, 2026-09-03: "this will happen to a lot of users"), so a proxy
+# whose stem ends in one of these is ALSO tried with the suffix stripped.
+# Data, not a chain of ifs: add a suffix here only with the vendor convention
+# it comes from, because every entry is a stem this check stops asking about.
+CAMERA_PROXY_SUFFIXES = ("S03",)
+
 
 # ------------------------------------------------------------- the outcome
 
@@ -582,6 +593,21 @@ def _check_snapshot_schedule(ctx: Ctx) -> Outcome:
     return ok(f"{len(enabled)} enabled snapshot task(s) on this NAS")
 
 
+def _proxy_stem_candidates(stem: str) -> list[str]:
+    """The stems an original for this proxy could carry: the stem itself,
+    then the same stem with a camera proxy suffix taken off (see
+    `CAMERA_PROXY_SUFFIXES`). The suffix is matched case-insensitively -
+    cameras and card copies disagree on case - but what is left is returned
+    with its own case untouched, because that half is compared against a
+    filename on the server."""
+    candidates = [stem]
+    lowered = stem.lower()
+    for suffix in CAMERA_PROXY_SUFFIXES:
+        if lowered.endswith(suffix.lower()) and len(stem) > len(suffix):
+            candidates.append(stem[:-len(suffix)])
+    return candidates
+
+
 def _check_proxy_pairs(ctx: Ctx) -> Outcome:
     """SYS-9 invariant 10: a proxy has the original it was made from.
 
@@ -594,6 +620,13 @@ def _check_proxy_pairs(ctx: Ctx) -> Outcome:
     Only that direction is checked. An original with no proxy is the NORMAL
     state of freshly uploaded footage, so treating it as a broken invariant
     would make this check cry wolf on every shoot day.
+
+    A camera's OWN proxy does not share the original's stem (2026-09-03):
+    Sony XAVC bodies write `<clip>S03.MP4`, and editors copy those into
+    Proxy/. Those stems are tried a second time with the suffix from
+    `CAMERA_PROXY_SUFFIXES` stripped, case-insensitively. A proxy that
+    matches under NEITHER stem is still broken: that is footage really gone,
+    which is the whole point of the check.
     """
     projects = list(ctx.conn.execute(
         "SELECT id, slug FROM projects WHERE active=1 ORDER BY slug"))
@@ -627,7 +660,9 @@ def _check_proxy_pairs(ctx: Ctx) -> Outcome:
                 continue
             checked += 1
             stem = parts[-1].rsplit(".", 1)[0]
-            if ("/".join(parts[:-2]), stem) not in originals:
+            parent = "/".join(parts[:-2])
+            if not any((parent, candidate) in originals
+                       for candidate in _proxy_stem_candidates(stem)):
                 bad.append((f"{project['slug']}/{rel}",
                             "this proxy has no original beside it on the server"))
     if bad:

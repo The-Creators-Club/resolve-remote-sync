@@ -107,6 +107,12 @@ RETARGET_MIN_MEDIA_RATIO = 0.5
 # (ops-efficiency-5, 2026-08-21). See Collector._completion_call_timeout.
 COMPLETION_CALL_TIMEOUT_SECONDS = 3.0
 
+# Over this, a cycle says how long it took (2026-09-03 database is locked,
+# api_report held the lock). Most passes are milliseconds and the log should
+# stay quiet; the point is to be able to name the pass that was holding the
+# write lock while everything else timed out.
+SLOW_POLL_SECONDS = 1.0
+
 
 class Collector:
     def __init__(
@@ -256,6 +262,17 @@ class Collector:
             "alerts": s.interval_alerts,
         }[kind]
 
+    def _open_conn(self):
+        """The collector's long-lived connection.
+
+        A LONGER busy timeout than a request's (2026-09-03 database is locked,
+        api_report held the lock): nobody is watching this thread, so waiting
+        20 s for a writer ahead of it is free, while giving up at 5 s costs a
+        whole cycle -- and the cycle that gives up is the one that writes the
+        notices saying what is wrong.
+        """
+        return db.connect(self.settings.db_path, busy_ms=db.BUSY_TIMEOUT_BACKGROUND_MS)
+
     def _loop(self) -> None:
         conn = None
         next_due = {k: 0.0 for k in KINDS}
@@ -273,7 +290,7 @@ class Collector:
                     # is reachable only from here -- never ran again for the
                     # life of the process (KNOWN_BUGS DASH-8, 2026-08-11).
                     try:
-                        conn = db.connect(self.settings.db_path)
+                        conn = self._open_conn()
                         db.migrate(conn)
                     except Exception:
                         log.exception("collector could not open %s; retrying in %.0fs",
@@ -431,6 +448,7 @@ class Collector:
 
     def _timed(self, conn, kind: str, fn) -> bool:
         started = self.now_fn()
+        clock_started = time.monotonic()
         try:
             # A runner may return a note (completion's "partial: ...",
             # ops-efficiency-5): it succeeded, and the health panel gets to
@@ -446,6 +464,12 @@ class Collector:
         db.record_poll_run(conn, kind, started, self.now_fn(), True,
                            note if isinstance(note, str) else None)
         conn.commit()
+        elapsed = time.monotonic() - clock_started
+        if elapsed > SLOW_POLL_SECONDS:
+            # Which pass was running is what the log could not say when every
+            # other writer was timing out (2026-09-03 database is locked,
+            # api_report held the lock).
+            log.info("poll %s took %.1fs", kind, elapsed)
         return True
 
     def _run_provision(self, conn) -> None:

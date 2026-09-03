@@ -591,6 +591,15 @@ class Ctx:
         self.halt = db.get_fleet_halt(conn, now)
         self.retracted = db.retracted_packages(conn, kind="companion")
         self.retired_keys = db.retired_key_identities(conn)
+        # Which accounts are wired to the NAS on every machine they own
+        # (CR-28). One fleet-wide read, on the Ctx rule that no check may go
+        # back to the database per machine; the per-machine answer is the
+        # entry's own `mode` and this is only the fallback for a machine that
+        # predates v22 (see _check_engine_down).
+        try:
+            self.base_only: set[str] = db.base_only_editors(conn)
+        except sqlite3.Error:
+            self.base_only = set()
         # Machines a more specific kind has already named, so the catch-all
         # ("red for an hour and we cannot say why") does not repeat them.
         self.named: set[str] = set()
@@ -779,9 +788,40 @@ def _check_clock_skew(ctx: Ctx) -> list[Finding]:
     return out
 
 
+def _is_base_machine(ctx: Ctx, e: Mapping[str, Any]) -> bool:
+    """This computer runs no sync lanes, so it has no sync engine to be down.
+
+    The base rig works straight off the NAS share with `sync_enabled=false`
+    and never starts lane C, so its Syncthing is RETIRED, not down -- but the
+    supervisor recorded the incident the minute the engine went away and
+    nothing ever polls it clear, so the record sits there for ever. The
+    companion stopped saying it in the tray for this exact reason
+    (app._why_not_syncing, syncthing_down, 2026-08-30); the dashboard kept
+    saying it, and told the owner "the sync engine on alex/Creator_1 has been
+    down for 6 days" about the machine the whole tree lives on.
+
+    NOTHING IN THE REPORT SAYS sync_enabled. The companion sends no such
+    field (the only `mode` it reads is its own config, never the payload), so
+    the evidence here is the role the dashboard already holds:
+    `machine_state.mode` per machine (v22, surfaced as entry["mode"]) with
+    db.base_only_editors as the fallback for a machine that reported before
+    v22. A REMOTE machine an editor has set sync_enabled=false on by hand
+    still alerts, and that is accepted: nothing distinguishes it from a
+    machine whose engine really did die, and for an editor's computer the
+    dangerous direction is silence.
+    """
+    if str(e.get("mode") or "").strip().lower() == "base":
+        return True
+    return str(e.get("editor_username") or "") in ctx.base_only
+
+
 def _check_engine_down(ctx: Ctx) -> list[Finding]:
     out = []
     for e in ctx.editors:
+        # 2026-09-03, studio dashboard false alarms: a machine that runs no
+        # lanes has no engine to be down (see _is_base_machine).
+        if _is_base_machine(ctx, e):
+            continue
         g = ctx.guard(e)
         age = _age(g.get("supervisor_down_since"), ctx.now)
         if age is None or age < ENGINE_DOWN_SECONDS:
@@ -1026,6 +1066,20 @@ def _check_deactivation_refusal(ctx: Ctx) -> list[Finding]:
 
 
 def _check_enforce_plan(ctx: Ctx) -> list[Finding]:
+    """2026-09-03, studio dashboard false alarms: an EMPTY plan is not a plan.
+
+    Fixed here rather than at the recording side on purpose.
+    `db.record_enforce_plan` is DASH-3's dry-run view: the collector writes it
+    once per cycle, unconditionally, so the steady state is a real and wanted
+    record of `{"folders": [], "n_add": 0, "n_remove": 0}` that the home page
+    reads to say "the last cycle had nothing to do". Not recording it would
+    make "no plan yet" and "nothing to apply" the same absence. What is wrong
+    is only this check reading "a record exists" as "a change is held", which
+    stood a warn up on a dashboard with nothing whatsoever pending.
+    """
+    plan = ctx.collector.get("enforce_plan")
+    if isinstance(plan, Mapping) and not (plan.get("n_add") or plan.get("n_remove")):
+        return []
     return _collector_alarm(
         ctx, "enforce_plan", "sharing plan held",
         "The server has a sharing change it has worked out but not applied.",
@@ -1287,10 +1341,28 @@ def _check_versions_behind(ctx: Ctx) -> list[Finding]:
 def _check_soak(ctx: Ctx) -> list[Finding]:
     """A staged build whose canary machine crashed or rolled itself back."""
     out = []
+    # 2026-09-03, studio dashboard false alarms: the fleet's current build,
+    # per platform, in ONE query for the whole check (the Ctx rule). A staged
+    # row BELOW it lost its trial long ago -- 0.9.63 (windows) was still
+    # naming ruskin's three crashes a week after 0.9.65 went current, and a
+    # build that can never be handed to everybody cannot be a warning about
+    # handing it to everybody. version_tuple, never a string compare: the
+    # companion goes 0.9.9 -> 0.9.10.
+    current: dict[str, tuple[int, ...]] = {}
+    for row in _rows(ctx.conn,
+                     "SELECT platform, version FROM companion_packages "
+                     "WHERE kind='companion' AND is_current=1"):
+        current[str(row["platform"])] = db.version_tuple(row["version"])
     for r in _rows(ctx.conn,
                    "SELECT platform, version FROM companion_packages "
                    "WHERE kind='companion' AND rollout='staged' "
                    "AND (retracted_at IS NULL OR retracted_at='')"):
+        staged = db.version_tuple(r["version"])
+        live = current.get(str(r["platform"]))
+        # Unparseable on either side is "cannot tell", and cannot-tell keeps
+        # the warning: silence is the direction this module exists to end.
+        if staged and live and staged < live:
+            continue
         try:
             state = db.soak_state(ctx.conn, str(r["platform"]), str(r["version"]),
                                   db.DEFAULT_SOAK_MINUTES, now=ctx.now)
@@ -2079,6 +2151,28 @@ def _is_open(conn: sqlite3.Connection, kind: str, subject: str) -> bool:
         return True
 
 
+def _send_committed(conn: sqlite3.Connection, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    """send(), with the write transaction closed either side of it.
+
+    THE NETWORK CALL MUST NOT SIT UNDER THE WRITE LOCK (2026-09-03 database is
+    locked, api_report held the lock). send() records the attempt in
+    alert_log, so a run of alerts held one open transaction across an SMTP
+    conversation or a webhook POST -- up to SEND_TIMEOUT_SECONDS each, against
+    a host that may simply not answer -- while every other writer on this
+    database waited. Dormant while the sink is `none`, which is the vendor
+    default; it was a landmine for the first site that configured one.
+
+    Committing after each send is also what makes an alert_log row
+    individually durable: the record of "we told somebody" now lands with the
+    telling, not at the end of the cycle.
+    """
+    conn.commit()
+    try:
+        return send(conn, *args, **kwargs)
+    finally:
+        conn.commit()
+
+
 def deliver(
     conn: sqlite3.Connection, settings: Any, findings: list[dict[str, Any]], now: str,
 ) -> dict[str, Any]:
@@ -2099,9 +2193,9 @@ def deliver(
         if was_open and severity != SEV_ERROR:
             continue
         mail_subject, text = compose_alert(kind, subject, _finding_body(finding))
-        result = send(conn, settings, mail_subject, text, kind=kind,
-                      dedup_subject=subject, now=now,
-                      dedup=was_open or severity != SEV_ERROR)
+        result = _send_committed(conn, settings, mail_subject, text, kind=kind,
+                                 dedup_subject=subject, now=now,
+                                 dedup=was_open or severity != SEV_ERROR)
         if result["deduped"]:
             continue
         sent += 1 if result["ok"] else 0
@@ -2117,9 +2211,9 @@ def deliver(
         if (kind, subject) in seen:
             continue
         mail_subject, text = compose_recovered(kind, subject)
-        result = send(conn, settings, mail_subject, text,
-                      kind=kind + RECOVERED_SUFFIX, dedup_subject=subject,
-                      now=now, dedup=False)
+        result = _send_committed(conn, settings, mail_subject, text,
+                                 kind=kind + RECOVERED_SUFFIX, dedup_subject=subject,
+                                 now=now, dedup=False)
         recovered += 1
         failed += 0 if result["ok"] else 1
     return {"sent": sent, "failed": failed, "recovered": recovered}

@@ -857,7 +857,7 @@ class TrueNASBackend:
             return ""
         return p[len("/mnt/"):]
 
-    def resolve_dataset(self, path: str, dry_run: bool) -> str:
+    def resolve_dataset(self, path: str, dry_run: bool, strict: bool = False) -> str:
         """The dataset `path` actually lives in, asked of the NAS.
 
         dataset_of() is only string surgery, and the paths this repo hands
@@ -879,10 +879,22 @@ class TrueNASBackend:
         with nothing behind it under a WARNING nobody had reason to read. The
         deploy path only ever worked because /mnt/<pool>/apps happens to be
         root:root 755.
+
+        `strict` (2026-09-03) is for callers that would rather know nothing
+        than know something wrong: it returns "" wherever this returns the
+        naive string surgery instead of the NAS's own answer. A snapshot
+        caller wants the fallback -- `zfs snapshot` will say so if the guess
+        is not a dataset, loudly, to somebody watching a deploy. The
+        deploy's DASH_TREE_DATASET / DASH_UPDATE_SNAPSHOT_DATASET lookup
+        does not: a guess of `tank/apps/ccsync-dashboard` (a folder, not a
+        dataset) would make the dashboard's protection panel report a
+        MISSING backup on a server that has one, months later, to an owner
+        with no way to tell the two apart. "" there means NOT CHECKED, which
+        is the honest answer.
         """
         naive = self.dataset_of(path)
         if dry_run or not naive:
-            return naive
+            return "" if strict else naive
         rc, out, _err = self.calls.ssh(
             'echo "$SUDO_PW" | sudo -S -p "" '
             f"df --output=source {common.shell_quote(path)} | tail -n 1",
@@ -899,7 +911,7 @@ class TrueNASBackend:
         # device path (/dev/...), or something with whitespace in it.
         if (rc != 0 or not dataset or dataset == "Filesystem"
                 or dataset.startswith("/") or any(c.isspace() for c in dataset)):
-            return naive
+            return "" if strict else naive
         if dataset != naive:
             print(f"{path} is inside dataset {dataset} (not a dataset of its own) "
                   f"-- snapshotting {dataset}")

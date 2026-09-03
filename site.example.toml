@@ -74,6 +74,14 @@ verify_ssl = "0"
 # TrueNAS: /mnt/<pool>/<dataset>.  Synology: /volume<N>/<share>.
 pool_root = "/mnt/tank/YourPool"
 tree_name = "Creators_Club"
+# OPTIONAL, TrueNAS. The ZFS dataset the tree lives in, as `zfs` spells it
+# (no /mnt), so the dashboard can check that a snapshot task actually covers
+# the footage. Unset, the deploy asks the NAS itself (df on the tree root) and
+# passes what it finds; set this only where that answer is wrong, or where the
+# deploy cannot ask (Synology has no ZFS, and the panel says CANNOT VERIFY
+# there forever). Added 2026-09-03: the panel had been telling operators to
+# set DASH_TREE_DATASET on the container, and nothing in the deploy could.
+# dataset = "tank/YourPool"
 # The subdirectory under the tree root that holds projects. Everything else
 # (Assets/Luts, Assets/Stills, Assets/B-roll Archive, Assets/Music) is fixed
 # by the product: the companion, the dashboard and the b-roll/music mounts all
@@ -110,6 +118,14 @@ smb_unc = "\\\\nas\\YourPool\\Creators_Club"   # TrueNAS shares a dataset under 
 #   TrueNAS   /mnt/<pool>/apps/ccsync-dashboard
 #   Synology  /volume<N>/<share>/ccsync
 root = "/mnt/tank/apps/ccsync-dashboard"
+# OPTIONAL, TrueNAS. The ZFS dataset that root is IN -- which is usually the
+# pool itself, because the app root is normally a plain folder rather than a
+# dataset of its own, and a snapshot task on `tank` does cover files living
+# directly in it. The dashboard checks its own data (the fleet database, the
+# published packages) has a point-in-time behind it. Unset, the deploy asks
+# the NAS (2026-09-03); "" leaves the check at CANNOT VERIFY rather than
+# guessing a dataset name that does not exist.
+# dataset = "tank"
 
 [net]
 # Where editors reach the dashboard (check_health.py checks this URL, and it

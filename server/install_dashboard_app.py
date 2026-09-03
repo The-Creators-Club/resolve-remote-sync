@@ -570,6 +570,71 @@ def jobs_env() -> dict:
     return {"DASH_JOBS_ROOTS": ",".join(roots)}
 
 
+def probe_dataset(path: str, dry_run: bool = False) -> str:
+    """Ask the NAS which dataset `path` is in, or "" when it cannot answer.
+
+    The deploy already knows how to do this -- every pre-deploy snapshot
+    resolves a path to a dataset the same way -- and `strict=True` is what
+    keeps a guess out of the answer (backends/truenas.py resolve_dataset).
+
+    "" is a legitimate, common result: a Synology (no ZFS, no such method), a
+    dry run, no SSH credential, or a df that was refused. Everything here
+    fails to "" rather than raising, because a dataset name is a diagnostic
+    and no deploy should stop for one.
+    """
+    if not path:
+        return ""
+    resolve = getattr(backend(), "resolve_dataset", None)
+    if resolve is None:
+        return ""
+    try:
+        return (resolve(path, dry_run, strict=True) or "").strip()
+    except Exception:                                                # noqa: BLE001
+        # A deploy that cannot ssh yet, a backend built for another platform,
+        # anything: the caller wants a string, and NOT CHECKED beats a stall.
+        return ""
+
+
+def datasets_env(tree_root: str = "", host_root: str = "", probe: bool = False,
+                 dry_run: bool = False) -> dict:
+    """Which ZFS dataset holds the footage, and which holds this app's data.
+
+    Added 2026-09-03. The dashboard's protection panel has checked both since
+    the 2026-08-28 resilience sweep, but NOTHING SET THEM: the panel told
+    every operator to "set DASH_TREE_DATASET on the dashboard container" and
+    this script, which builds that container's whole environment from an
+    explicit dict, had no source for either name. `docker inspect` on the
+    live container confirmed it -- the advice could not be followed, so the
+    two lines sat at protection_unverifiable permanently.
+
+    site.toml wins: `[tree] dataset` and `[apps] dataset`, beside the roots
+    they describe. Both are OPTIONAL, because on TrueNAS the deploy can work
+    the answer out itself from the paths it already has (`probe=True`, used
+    by the real deploy; off by default so rendering a compose body never
+    opens an SSH session).
+
+    The apps root is the subtle one. On this fleet it is a plain folder
+    inside the bare `tank` dataset, so the honest answer is "tank" -- and a
+    snapshot task on `tank` really does cover files that live directly in
+    it, so that is a fact rather than a technicality. The dashboard's
+    _covers() then matches it exactly.
+
+    A blank value is the safe failure everywhere: protection.py reads unset
+    as "this server was never told", which renders CANNOT VERIFY. That is
+    what a Synology, a dry run and an unreachable NAS all get, and it is
+    strictly better than a plausible guess that would read as MISSING.
+    """
+    tree = site_value("tree", "dataset").strip()
+    apps = site_value("apps", "dataset").strip()
+    if probe:
+        tree = tree or probe_dataset(tree_root or DEFAULT_CC_ROOT, dry_run)
+        apps = apps or probe_dataset(host_root or DEFAULT_HOST_ROOT, dry_run)
+    return {
+        "DASH_TREE_DATASET": tree,
+        "DASH_UPDATE_SNAPSHOT_DATASET": apps,
+    }
+
+
 def cards_volumes() -> list:
     """The optional pair. The CODE mount is unconditional and lives with the
     others; these two are per-site and absent by default.
@@ -1624,6 +1689,13 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                    # dashboard that was not asked for it must behave exactly
                    # as it did before. Projects site.toml's [timeline_cards].
                    cards_enabled: str = "0", cards_token: str = "",
+                   # Which datasets the protection panel checks the snapshot
+                   # schedule against (2026-09-03, see datasets_env). Blank
+                   # here means "ask site.toml and no further": only main()
+                   # passes the NAS's own answer, because working it out
+                   # costs an SSH round trip and rendering a compose body
+                   # must not.
+                   tree_dataset: str = "", apps_dataset: str = "",
                    # WHERE THE CODE COMES FROM (2026-08-18, docs/DOCKER.md).
                    # "bind" is the default in the SIGNATURE too, not
                    # SITE_STACK_MODE: main() always passes the resolved value,
@@ -1663,6 +1735,14 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
     # said otherwise would run a PO-token sidecar for a feature that is not
     # mounted. Same rule the dashboard's own /api/v1/site applies.
     unblock_on = youtube_unblock == "1" and youtube_download == "1"
+    # site.toml is the floor, an explicitly passed name (main()'s NAS lookup)
+    # wins over it, and "" stays "" -- never overwrite a manifest key with a
+    # blank probe result (2026-09-03).
+    datasets = datasets_env(tree_root, host_root)
+    if tree_dataset:
+        datasets["DASH_TREE_DATASET"] = tree_dataset
+    if apps_dataset:
+        datasets["DASH_UPDATE_SNAPSHOT_DATASET"] = apps_dataset
     # IMAGE MODE (docs/DOCKER.md). `image` stays the stock python base for bind
     # mode; in image mode the container IS the vendor build, and the five code
     # mounts below are dropped because the image carries them as read-only
@@ -1935,6 +2015,11 @@ def compose_config(port: int, host_root: str, gui_url: str, api_key: str, token:
                     **cards_env(cards_enabled, cards_token),
                     # --- the roots a PINNED fleet job is placed against ------
                     **jobs_env(),
+                    # --- which datasets have to be in a snapshot task -------
+                    # Read by ccsync_dashboard/protection.py, which had been
+                    # telling operators to set them by hand since 2026-08-28
+                    # and offering no way to do it (2026-09-03).
+                    **datasets,
                     # --- what GET /api/v1/site serves (see site_env) ---------
                     **site_env(port, tree_root, truenas_host, dashboard_url),
                 },
@@ -2136,6 +2221,12 @@ def compose_variables(port: int = 8480, host_root: str = "", tree_root: str = ""
                       homes_parent: str = "", nas_kind: str = "",
                       dashboard_url: str = "", broll_enabled: str = "1",
                       broll_creators_shares: str = "",
+                      # The protection panel's two dataset names (2026-09-03,
+                      # see datasets_env). Parameters for the same reason
+                      # DASH_BROLL_ENABLED is one: main() passes exactly what
+                      # compose_config was given, so the pasted FILE and the
+                      # POSTed DICT cannot describe different datasets.
+                      tree_dataset: str = "", apps_dataset: str = "",
                       ccsync_image: str = "") -> dict:
     """Every {{NAME}} the compose template takes, defaulted from site.toml."""
     host_root = require_site_value(host_root or DEFAULT_HOST_ROOT, "[apps] root",
@@ -2207,6 +2298,11 @@ def compose_variables(port: int = 8480, host_root: str = "", tree_root: str = ""
         **{k: v for k, v in cards_env("1" if SITE_CARDS_ENABLED else "0").items()
            if k != "DASH_CARDS_TOKEN"},
         **jobs_env(),
+        # Which datasets the protection panel checks (2026-09-03). site.toml
+        # is the floor here too; a name main() got from the NAS wins.
+        **{**datasets_env(tree_root, host_root),
+           **{k: v for k, v in (("DASH_TREE_DATASET", tree_dataset),
+                                ("DASH_UPDATE_SNAPSHOT_DATASET", apps_dataset)) if v}},
         **site,
         "NAS_APPS_ROOT": host_root,
         "NAS_TREE_ROOT": tree_root,
@@ -4989,6 +5085,11 @@ def main():
             return 1
         return 0
 
+    # Which datasets the container should check its snapshot schedule against
+    # (2026-09-03). Asked ONCE, here, where an SSH session already exists: the
+    # answer goes into both the dict TrueNAS POSTs and the file DSM uploads.
+    # Two df calls, and every failure is a blank, so this cannot fail a deploy.
+    datasets = datasets_env(DEFAULT_CC_ROOT, root, probe=True, dry_run=args.dry_run)
     # The create itself is the backend's: a custom_app POST on TrueNAS Apps,
     # `docker compose up -d` over SSH on DSM. Its printed lines -- including
     # the manual-YAML fallback and the SERVER-2 job wait -- moved with it
@@ -5021,6 +5122,8 @@ def main():
         auto_update=auto_update,
         anthropic_api_key=anthropic_api_key,
         cards_enabled=cards_enabled, cards_token=cards_token,
+        tree_dataset=datasets["DASH_TREE_DATASET"],
+        apps_dataset=datasets["DASH_UPDATE_SNAPSHOT_DATASET"],
         mode=mode,
         ccsync_image=ccsync_image,
     )
@@ -5043,6 +5146,10 @@ def main():
                 # container (product-surface-3, 2026-08-21).
                 broll_creators_shares=os.environ.get(
                     "BROLL_CREATORS_SHARES", "").strip(),
+                # ...and the same two dataset names, for the same reason
+                # (2026-09-03).
+                tree_dataset=datasets["DASH_TREE_DATASET"],
+                apps_dataset=datasets["DASH_UPDATE_SNAPSHOT_DATASET"],
             ), template=compose_template_for(mode)),
             STACK_ENV_SECRETS)
         env_file = {

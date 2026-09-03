@@ -1587,6 +1587,18 @@ class CompanionApp:
         # sends them to restart something that is already running.
         self._loopback_state: dict[str, Any] = {
             "bound": False, "port": 0, "error": "", "since": ""}
+        # There are TWO doors to the bind now (start()'s "b-roll server" step
+        # and the media-tree loop's retry), on two threads, and the media-tree
+        # thread is started FIRST -- so on a slow box the retry took the port
+        # a moment before start() reached its own step, start() then hit
+        # EADDRINUSE against ITSELF, wrote None over the live handle and
+        # orphaned a listener nothing could stop: a permanent false "loopback
+        # not bound" naming the retired standalone companion, and a port
+        # shutdown() no longer released. Caught by the macOS CI runner
+        # 2026-09-04 (release-macos run 33788381735); Windows CI and this dev
+        # box lost the race the other way and passed. This lock is what makes
+        # the two doors one door.
+        self._broll_server_lock = threading.Lock()
 
         # Shared LUT library (luts.py): the link manager plus the cached
         # stray scan the tray reads. Built here so stray_lut_count() is safe
@@ -7802,6 +7814,22 @@ class CompanionApp:
         (a stale standalone broll-companion holding 8899 is the expected
         cause and it says so in the log) -- this catch is for the rest.
         """
+        with self._broll_server_lock:
+            if self._broll_server is not None:
+                # The other door already has the port (see
+                # _broll_server_lock). Binding again would fail against our
+                # own listener and the None below would orphan it.
+                self._note_loopback_state()
+                return
+            if self._shutdown_started:
+                # A retry that arrived during teardown must not re-take the
+                # port shutdown() has just released: the self-upgrade
+                # relaunches within seconds and would read it as a squatter.
+                return
+            self._start_broll_server_locked()
+
+    def _start_broll_server_locked(self) -> None:
+        """The bind itself. Caller holds _broll_server_lock."""
         try:
             self._broll_server = broll_server_mod.start(
                 self.config, ytdl_deps=self._ytdl_deps(),
@@ -8841,8 +8869,14 @@ class CompanionApp:
         # relaunches within seconds, and a socket still held by the outgoing
         # process is exactly the bind failure the new one would report as a
         # stale standalone companion.
-        broll_server_mod.stop(self._broll_server)
-        self._broll_server = None
+        # Under the lock: the media-tree loop's retry runs on another thread
+        # and may be inside a bind right now (2026-09-04, see
+        # _broll_server_lock). _shutdown_started is already True, so the
+        # retry that gets the lock after us returns without re-taking the
+        # port we have just released.
+        with self._broll_server_lock:
+            broll_server_mod.stop(self._broll_server)
+            self._broll_server = None
         # Join both Resolve-touching threads (bounded). A self-upgrade used
         # to exit the process while get_media_pool_items() was inside the
         # fusionscript C extension (AUDIT_2 §2-low). Bounded so a wedged

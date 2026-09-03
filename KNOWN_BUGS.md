@@ -11276,6 +11276,8 @@ media-moving operation, it runs on its own path with its own progress window,
 and wiring the confirm to it needs the same live-run registration RES-8 added to
 the fixer. Left for wave 3, named here so the gap is not mistaken for coverage.
 
+
+**Follow-up 2026-09-04 (found by the 0.9.66 CI build, run 33788381735, not by the local gate):** the CMEDIA-3 retry gave the loopback bind a second caller on the media-tree thread, racing `start()`'s own bind; when the retry won (the macOS runner did, this box did not) the second bind hit EADDRINUSE against our own listener and wrote None over the live handle - a listener nothing holds, `loopback.bound = false` for ever, and the "old BRoll Companion is holding 8899" advice naming ourselves. `_broll_server_lock` makes the two doors one; `_start_broll_server` never overwrites a live server and refuses after shutdown began. Test `test_the_retry_and_start_are_one_door_not_two`. The Windows runner's red the same run (test_rclone_express, run 33788378020) was the test helper's 0.1 s debounce timer closing the express window mid-loop on a slow disk; the helper now defaults to 30 s and only `_flush_now()` closes it.
 ### CR-150 - a credential in a polled panel, a wipe with no confirm, and a 600 s download in the event loop - FIXED in repo 2026-09-04 (dashboard 0.7.31, schema v47)
 Wave 1's dashboard UI half:
 

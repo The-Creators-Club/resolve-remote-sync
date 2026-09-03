@@ -312,6 +312,42 @@ def test_app_startup_survives_a_taken_port(tree, inert_resolve, caplog):
         squatter.close()
 
 
+def test_the_retry_and_start_are_one_door_not_two(tree, inert_resolve):
+    """CMEDIA-3 gave the bind a SECOND caller (retry_loopback_bind, from the
+    media-tree loop) and that thread is started BEFORE start() reaches its own
+    b-roll step. When the retry won that race, start()'s attempt bound the
+    port against our own listener, failed, and wrote None over the live
+    handle: `_broll_server is None` with a listener nobody could stop, a
+    permanent false "loopback not bound" blaming the retired standalone
+    companion, and a port shutdown() never released. It cost the macOS CI
+    runner this file's start/shutdown test on 2026-09-04 (release-macos run
+    33788381735) -- the same race, won the other way on Windows.
+    """
+    local_root, _archive = tree
+    port = _free_port()
+    app = _app({"broll_server_port": port, "poll_interval": 0.2}, local_root)
+
+    assert app.retry_loopback_bind() is True   # the media-tree loop's door
+    server = app._broll_server
+    assert server is not None
+    try:
+        app._start_broll_server()              # start()'s door, a moment later
+        assert app._broll_server is server, "the second door must not clobber the first"
+        assert app.loopback_report()["bound"] is True
+        assert app.loopback_report()["error"] == ""
+        status, data = _get(port, "/status")
+        assert status == 200 and data["ok"] is True
+    finally:
+        app.shutdown()
+
+    assert app._broll_server is None
+    # ...and a retry landing after teardown does not re-take the port the
+    # relaunching upgrade is about to want.
+    assert app.retry_loopback_bind() is False
+    assert app._broll_server is None
+    _assert_port_free(port)
+
+
 # ---------------------------------------------------------------------------
 # End-to-end smoke: the real entry point, a fake Resolve, a real socket
 # ---------------------------------------------------------------------------

@@ -113,7 +113,17 @@ def _recording_popen(calls: list, stderr_text: str = DEFAULT_STDERR, returncode:
     return factory
 
 
-def _make_lane(tmp_path, cfg=None, popen_factory=None, direction=DIRECTION_UP, debounce=0.05):
+def _make_lane(tmp_path, cfg=None, popen_factory=None, direction=DIRECTION_UP, debounce=30.0):
+    # The default window is LONG on purpose (2026-09-04, CI run 33788378020):
+    # every test below closes the window by hand with _flush_now(), and a
+    # short debounce means the real threading.Timer can close it FIRST, in
+    # the middle of the notify loop. On this dev box the loop takes ~2 ms and
+    # nothing fires; on a hosted runner the same loop (a file write + utime
+    # each) outruns the 0.1 s floor, the batch is flushed and re-filled, and
+    # the assertions that count one window's worth of paths see a fraction of
+    # it -- test_batch_over_the_cap_is_left_to_the_periodic_pass saw 2 drops
+    # instead of 7, and test_thousands_of_events... is the same shape waiting
+    # to happen. Tests that want the timer to fire pass their own debounce.
     # local_root must EXIST: the lane (periodic AND express) refuses to run
     # against a local_root that is not a directory -- see test_rclone_lane's
     # _make_lane for why that gate is there.

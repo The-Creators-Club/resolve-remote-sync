@@ -463,6 +463,42 @@ def test_the_rollback_command_is_the_same_command_with_the_other_mode(monkeypatc
     assert "'image': 'python:3.12.7-slim'" in transcript
 
 
+def test_bind_mode_ships_the_whole_docs_tree_as_markdown(tmp_path, monkeypatch):
+    """Alex, 2026-09-04: /help is a browser, so the server needs every
+    document, not the guide and the EULA. `.md` only (docs/mobile is a
+    directory of screenshots), symlinks are not followed, and the four
+    top-level documents go into `_root/` -- the name help.py browses them by.
+    """
+    repo = tmp_path / "repo"
+    docs = repo / "docs"
+    (docs / "legal").mkdir(parents=True)
+    (docs / "spikes").mkdir()
+    (docs / "HOW_IT_WORKS.md").write_text("# Guide\n", encoding="utf-8")
+    (docs / "GOTCHAS.md").write_text("# Gotchas\n", encoding="utf-8")
+    (docs / "legal" / "EULA.md").write_text("# Licence\n", encoding="utf-8")
+    (docs / "spikes" / "s1.md").write_text("# S1\n", encoding="utf-8")
+    (docs / "screenshot.png").write_bytes(b"not-a-document")
+    (repo / "KNOWN_BUGS.md").write_text("# Known bugs\n", encoding="utf-8")
+    (repo / "SPEC.md").write_text("# Spec\n", encoding="utf-8")
+    monkeypatch.setattr(ida, "LOCAL_DOCS_DIR", docs)
+    monkeypatch.setattr(ida, "LOCAL_REPO_DIR", repo)
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    ida._stage_docs_tree(staging)
+
+    got = sorted(p.relative_to(staging).as_posix()
+                 for p in staging.rglob("*") if p.is_file())
+    assert got == [
+        "GOTCHAS.md",
+        "HOW_IT_WORKS.md",
+        "_root/KNOWN_BUGS.md",
+        "_root/SPEC.md",
+        "legal/EULA.md",
+        "spikes/s1.md",
+    ]
+
+
 def test_image_mode_still_provisions_ffmpeg_because_the_image_does_not_carry_it(
         monkeypatch, capsys):
     """docs/DOCKER.md, "What image mode does NOT bake in": the static ffmpeg is

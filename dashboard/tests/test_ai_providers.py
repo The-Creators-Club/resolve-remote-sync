@@ -707,7 +707,10 @@ def test_timeline_cards_status_is_ok_on_a_wizard_signed_in_cli(env, monkeypatch)
     enable_cli(conn)
     no_subprocess(monkeypatch)
     fake_wizard(monkeypatch)
-    assert cards_ai.status(settings) == {"ok": True, "why": ""}
+    # `session_cache_ttl` rides along since 2026-09-04 (the corpus cache TTL
+    # the page says out loud); the two keys the page gates on are these.
+    out = cards_ai.status(settings)
+    assert (out["ok"], out["why"]) == (True, "")
 
 
 def test_timeline_cards_status_says_not_checked_rather_than_unavailable(env, monkeypatch):

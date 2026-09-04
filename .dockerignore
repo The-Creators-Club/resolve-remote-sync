@@ -28,14 +28,21 @@ installer
 tools
 server
 docs
-# ...EXCEPT the two documents the running dashboard serves (REL-5, usability
-# sweep 2026-09-04): the licence agreement the first-run wizard makes an admin
-# accept, and the guide /help renders. 172 KB of markdown, and without them an
-# image-mode container shows an empty licence box with a disabled [ ACCEPT ]
-# and ticks the wizard's `eula` task green. A re-inclusion has to come AFTER
+# ...EXCEPT the MARKDOWN under it, which is what the running dashboard serves
+# (REL-5, usability sweep 2026-09-04; widened from two documents to the tree
+# the same day, at the owner's request): the licence agreement the first-run
+# wizard makes an admin accept, and every document /help browses. ~4 MB of
+# text. Without it an image-mode container shows an empty licence box with a
+# disabled [ ACCEPT ], ticks the wizard's `eula` task green, and says help is
+# not installed.
+#
+# `*.md` and nothing else on purpose: docs/mobile alone is a directory of
+# screenshots, and an image is not made of documentation. Both patterns are
+# needed - `**` matches zero directories here, but stating the top level
+# explicitly is cheaper than trusting that. A re-inclusion has to come AFTER
 # the directory that excludes it: the last matching pattern wins.
-!docs/legal
-!docs/HOW_IT_WORKS.md
+!docs/*.md
+!docs/**/*.md
 broll/indexer
 music/indexer
 

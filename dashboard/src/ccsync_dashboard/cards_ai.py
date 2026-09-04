@@ -55,11 +55,25 @@ FIVE DECISIONS, each of which is a whole class of bug or a policy:
    `session is None` is byte for byte the call this module made before §12,
    because that is what the three original features (translate, search,
    summaries) still make.
+
+6. **The corpus stays cached for AN HOUR** (Alex, 2026-09-04). Semantic
+   search across an episode's whole interview corpus is one conversation per
+   episode root, and an editor searches it in bursts over an afternoon, not
+   in one minute. The default ephemeral breakpoint lives 5 minutes, so every
+   search after a coffee re-read tens of thousands of tokens at full price.
+   The breakpoint therefore carries `ttl: "1h"` -- montage sessions benefit
+   from the same change, and the write costs more only when it is actually
+   written. A conversation KEEPS THE TTL IT WAS OPENED UNDER: the stored
+   first message carries its own `cache_control` verbatim, and `cache_ttl`
+   is recorded beside it, so a session opened under 5m is never re-stamped
+   into a second breakpoint half way through. `session_cache_ttl` on
+   `status()` is what the page says out loud.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import json
 import logging
 import os
@@ -112,6 +126,51 @@ SESSION_LOST = "session_lost"
 # and it is the cached block, so dropping it would cost both the context and
 # the cache hit.
 MAX_TURNS = 40
+
+# -- how long the cached corpus lives (decision 6, Alex 2026-09-04) ----------
+#
+# The API's own default is 5 minutes; `1h` is the extended TTL, priced at a
+# higher cache WRITE and the same cache read. It is a plain field on
+# `cache_control` in the pinned SDK (`anthropic==0.122.0`:
+# `types/cache_control_ephemeral_param.py` carries `ttl: Literal["5m", "1h"]`,
+# in the STABLE types, not the beta ones), so no `extended-cache-ttl-2025-04-11`
+# beta header and no `client.beta.*` call is needed here. An SDK old enough to
+# predate the field is detected and downgraded rather than guessed at.
+CACHE_TTL_HOUR = "1h"
+CACHE_TTL_DEFAULT = "5m"
+
+
+@functools.lru_cache(maxsize=1)
+def sdk_cache_ttl() -> str:
+    """`"1h"` if the installed SDK knows the extended TTL, else `"5m"`.
+
+    FAILS OPEN, on purpose: only a positive reading of an SDK whose
+    `CacheControlEphemeralParam` has no `ttl` downgrades. The types are
+    generated TypedDicts and nothing enforces them at runtime, so an SDK this
+    cannot inspect (an import shape that moved, a fake module under test)
+    would pass the field through to an API that has had it for months --
+    whereas silently dropping to 5m is money nobody would ever notice going.
+    """
+    try:
+        from anthropic.types import cache_control_ephemeral_param as mod
+
+        param = mod.CacheControlEphemeralParam
+    except Exception:  # noqa: BLE001 - "cannot tell" is not "not supported"
+        return CACHE_TTL_HOUR
+    fields = getattr(param, "__annotations__", None) or {}
+    if "ttl" in fields:
+        return CACHE_TTL_HOUR
+    log.warning("the installed anthropic SDK has no cache_control ttl; the "
+                "Timeline Cards corpus will be cached for 5 minutes")
+    return CACHE_TTL_DEFAULT
+
+
+def _cache_control(ttl: str) -> dict[str, Any]:
+    """The breakpoint. `5m` is written WITHOUT the field, so the fallback is
+    byte for byte the request this module made before 2026-09-04."""
+    if ttl and ttl != CACHE_TTL_DEFAULT:
+        return {"type": "ephemeral", "ttl": ttl}
+    return {"type": "ephemeral"}
 
 
 class ClaudeError(RuntimeError):
@@ -180,7 +239,11 @@ class Runner:
             convo = self._open_convo(sid, turns, getattr(session, "corpus_hash", ""))
             if convo is None:
                 return _fail(SESSION_LOST, provider=choice.name)
-            convo["messages"].append(_user_message(prompt, first=turns == 0))
+            # The conversation's OWN ttl, never today's: a session opened
+            # under 5m keeps its stored breakpoint (decision 6).
+            ttl = str(convo.get("cache_ttl") or CACHE_TTL_DEFAULT)
+            convo["messages"].append(
+                _user_message(prompt, first=turns == 0, ttl=ttl))
         try:
             if choice.name == ai_providers.ANTHROPIC_API:
                 text = self._sdk(prompt, model, timeout,
@@ -218,6 +281,12 @@ class Runner:
         is a real one-token call behind a 600 s cache; a page poll must not
         be the thing that spends a subscription.
 
+        `session_cache_ttl` ("1h" or "5m") is how long the cached corpus of a
+        session lives on the API path, so the page can say what it got
+        (decision 6, Alex 2026-09-04). On the CLI path the conversation and
+        its caching are Claude Code's own; the string still describes the
+        breakpoint THIS container writes, which is the only one it controls.
+
         Which is why the unprobed read has to answer from what the container
         already knows (CR-121, 2026-09-03): every `start_*` in the cards
         engine refuses up front on this, so an unprobed CLI reported as
@@ -226,17 +295,21 @@ class Runner:
         has ever checked is still not-ok, but it says so as "not checked yet"
         -- the page prints this string verbatim in the button's tooltip.
         """
+        ttl = sdk_cache_ttl()
         try:
             choice, detail = self._choice(probe=False)
         except Exception as e:  # noqa: BLE001
-            return {"ok": False, "why": f"the dashboard could not resolve an AI "
-                                        f"provider ({type(e).__name__}: {e})"}
+            return {"ok": False, "session_cache_ttl": ttl,
+                    "why": f"the dashboard could not resolve an AI "
+                           f"provider ({type(e).__name__}: {e})"}
         if not choice.ok:
-            return {"ok": False, "why": self._unresolved_why(choice.reason or detail)}
+            return {"ok": False, "session_cache_ttl": ttl,
+                    "why": self._unresolved_why(choice.reason or detail)}
         if choice.name not in CLAUDE_PROVIDERS:
-            return {"ok": False, "why": f"this site's AI provider is "
-                                        f"{choice.label}, not Claude"}
-        return {"ok": True, "why": ""}
+            return {"ok": False, "session_cache_ttl": ttl,
+                    "why": f"this site's AI provider is "
+                           f"{choice.label}, not Claude"}
+        return {"ok": True, "why": "", "session_cache_ttl": ttl}
 
     def _unresolved_why(self, reason: str) -> str:
         """The sentence for "status() could not resolve a provider".
@@ -373,8 +446,12 @@ class Runner:
         asked for.
         """
         if turns <= 0:
+            # `cache_ttl` is recorded so a conversation is never MIXED: turn
+            # 0 stamps the breakpoint, every later turn re-sends that stored
+            # message, and this row is what says which TTL it was (decision 6).
             return {"id": sid, "created": _now_iso(), "turns": 0,
-                    "corpus_hash": str(corpus_hash or ""), "messages": []}
+                    "corpus_hash": str(corpus_hash or ""),
+                    "cache_ttl": sdk_cache_ttl(), "messages": []}
         convo = _read_convo(_session_path(self._settings, sid))
         if convo is None:
             log.info("the Timeline Cards montage session %s is not in this "
@@ -477,11 +554,13 @@ def _says_no_such_session(detail: str) -> bool:
                  or "does not exist" in low or "no such session" in low))
 
 
-def _user_message(prompt: str, first: bool) -> dict[str, Any]:
+def _user_message(prompt: str, first: bool,
+                  ttl: str = CACHE_TTL_DEFAULT) -> dict[str, Any]:
     """This turn's user message. Turn 0 is the only one that is worth caching.
 
     A cache breakpoint is billed per write, so it goes on the corpus and
-    nowhere else; every later turn is a sentence.
+    nowhere else; every later turn is a sentence. `ttl` is how long that one
+    write lives -- an hour for a session opened since 2026-09-04.
     """
     if not first:
         return {"role": "user", "content": prompt}
@@ -490,7 +569,7 @@ def _user_message(prompt: str, first: bool) -> dict[str, Any]:
         return {"role": "user", "content": [{"type": "text", "text": prompt}]}
     blocks: list[dict[str, Any]] = [
         {"type": "text", "text": corpus,
-         "cache_control": {"type": "ephemeral"}},
+         "cache_control": _cache_control(ttl)},
     ]
     if instruction:
         blocks.append({"type": "text", "text": instruction})
@@ -606,4 +685,5 @@ def status(settings: Any) -> dict[str, Any]:
     try:
         return make_runner(settings).status()
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "why": f"{type(e).__name__}: {e}"}
+        return {"ok": False, "why": f"{type(e).__name__}: {e}",
+                "session_cache_ttl": CACHE_TTL_DEFAULT}

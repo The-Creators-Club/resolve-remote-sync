@@ -96,15 +96,33 @@ TREES: tuple[tuple[str, str], ...] = (
     # ~124 KB of markdown against a ~10 MB bundle. The bundle root IS the code
     # root, so this lands where setup_engine._find_eula looks: <root>/docs/legal.
     ("docs/legal", "docs/legal"),
+    # ...and the rest of the documentation with it (Alex, 2026-09-04): /help
+    # is a BROWSER now, so an over-the-air dashboard that carried only the
+    # guide would show a one-entry list. MARKDOWN ONLY (MD_ONLY_TREES below):
+    # docs/mobile is a directory of screenshots and a code bundle is not a
+    # photo album. ~4 MB of text against a ~10 MB bundle. `docs/legal` above
+    # stays a line of its own because it is REQUIRED - the EULA is not
+    # optional the way a runbook is - and packing a file twice is harmless
+    # here (collect_files de-duplicates on the bundle path).
+    ("docs", "docs"),
 )
 
-# Single FILES, for the same reason: /help renders exactly one document and
-# copying the whole of docs/ (bug-hunt notes, plans, 60 runbooks) into every
-# customer's container is not what "ship the guide" means (REL-5, and the
-# wave-4 owed item -- help.py's search order already looks in <root>/docs).
+# Trees packed for their markdown and nothing else.
+MD_ONLY_TREES = frozenset({"docs"})
+
+# FILES is the guide, named explicitly so a checkout without it is REFUSED
+# rather than quietly shipping a dashboard whose /help says it is not
+# installed (REL-5).
 FILES: tuple[tuple[str, str], ...] = (
     ("docs/HOW_IT_WORKS.md", "docs/HOW_IT_WORKS.md"),
 )
+
+# The repository's top-level documents, shipped where help.py browses them
+# (help.ROOT_DIR_NAME). BEST EFFORT, unlike FILES: these are our own working
+# documents, one of them may not exist in a given checkout (there is no
+# README.md at the root of this one today), and a missing bug ledger is not a
+# reason to refuse to build a dashboard.
+ROOT_DOCS: tuple[str, ...] = ("README.md", "SPEC.md", "KNOWN_BUGS.md", "CLAUDE.md")
 
 # Directory names dropped wherever they appear. `data` is in here because each
 # sub-app's data root is a MOUNT at runtime (/broll-data, /music-data,
@@ -190,21 +208,42 @@ def iter_tree(source: Path) -> list[Path]:
 def collect_files(repo_root: Path) -> list[tuple[str, Path]]:
     """[(path inside the bundle, path on disk)] for every tree."""
     collected: list[tuple[str, Path]] = []
+    seen: set[str] = set()
     for source_rel, bundle_name in TREES:
         source = repo_root / source_rel
         if not source.is_dir():
             raise BundleError(
                 f"{source_rel} is missing from this checkout -- a bundle without it "
                 f"would boot a dashboard whose {bundle_name} root is empty")
+        md_only = source_rel in MD_ONLY_TREES
         for path in iter_tree(source):
+            if md_only and path.suffix.lower() != ".md":
+                continue
             rel = path.relative_to(source).as_posix()
-            collected.append((f"{bundle_name}/{rel}", path))
+            name = f"{bundle_name}/{rel}"
+            if name in seen:
+                # docs/legal is inside docs/ and is listed separately because
+                # it is required; the same bytes must not be packed twice.
+                continue
+            seen.add(name)
+            collected.append((name, path))
+    for name in ROOT_DOCS:
+        source = repo_root / name
+        if not source.is_file():
+            continue
+        seen.add(f"docs/_root/{name}")
+        collected.append((f"docs/_root/{name}", source))
     for source_rel, bundle_name in FILES:
         source = repo_root / source_rel
         if not source.is_file():
             raise BundleError(
                 f"{source_rel} is missing from this checkout -- a bundle without it "
                 f"is a dashboard whose /help page says it is not installed")
+        if bundle_name in seen:
+            # The docs tree already packed it. The entry stays because it is
+            # the check above that makes an absent guide a build failure.
+            continue
+        seen.add(bundle_name)
         collected.append((bundle_name, source))
     return collected
 

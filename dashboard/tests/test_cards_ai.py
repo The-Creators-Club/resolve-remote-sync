@@ -93,6 +93,10 @@ def sdk(tmp_path, monkeypatch):
                         lambda self, probe=True: (choice, ""))
     monkeypatch.setattr(cards_ai.Runner, "_key",
                         lambda self: "sk-ant-not-a-real-key")
+    # The detector is exercised on its own below; here the TTL is pinned so
+    # every assertion is about the request this module builds.
+    monkeypatch.setattr(cards_ai, "sdk_cache_ttl",
+                        lambda: cards_ai.CACHE_TTL_HOUR)
     runner = cards_ai.Runner(FakeSettings(tmp_path))
     runner._replies = replies
     return runner, calls
@@ -136,7 +140,7 @@ def test_turn_zero_caches_the_corpus_block(sdk):
     assert messages[0]["role"] == "user"
     assert messages[0]["content"] == [
         {"type": "text", "text": CORPUS,
-         "cache_control": {"type": "ephemeral"}},
+         "cache_control": {"type": "ephemeral", "ttl": "1h"}},
         {"type": "text", "text": "describe the montage"},
     ]
 
@@ -149,6 +153,7 @@ def test_turn_zero_stores_the_conversation(sdk):
     assert stored["id"] == "1a2b-3c4d"
     assert stored["turns"] == 1
     assert stored["corpus_hash"] == "sha-1"
+    assert stored["cache_ttl"] == "1h"
     assert stored["created"]
     assert [m["role"] for m in stored["messages"]] == ["user", "assistant"]
     assert stored["messages"][1]["content"] == "an answer"
@@ -174,7 +179,8 @@ def test_turn_one_sends_the_history(sdk):
     assert out["ok"] is True
     messages = calls[1]["messages"]
     assert len(messages) == 3
-    assert messages[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert messages[0]["content"][0]["cache_control"] == {"type": "ephemeral",
+                                                          "ttl": "1h"}
     assert messages[1] == {"role": "assistant", "content": "an answer"}
     assert messages[2] == {"role": "user", "content": "more of the pangolins"}
 
@@ -306,6 +312,18 @@ def test_the_cli_resumes_by_id():
     assert cards_ai._cli_session_args(FakeSession(turns=2)) == ["--resume", "1a2b-3c4d"]
 
 
+def test_the_cli_id_is_stable_across_an_hour_of_calls():
+    """The warm corpus on this path is Claude Code's own conversation, so the
+    only thing this module owes it is the SAME id, turn after turn (decision
+    6, Alex 2026-09-04). A second `--session-id` on turn 7, or a drifting id,
+    would open a new conversation and re-read the corpus at full price."""
+    session = FakeSession(sid="search-9f8e7d")
+    assert cards_ai._cli_session_args(session) == ["--session-id", "search-9f8e7d"]
+    for turn in range(1, 40):
+        session.turns = turn
+        assert cards_ai._cli_session_args(session) == ["--resume", "search-9f8e7d"]
+
+
 def test_only_an_unknown_session_reads_as_session_lost():
     assert cards_ai._says_no_such_session("No conversation found with session ID abc")
     assert not cards_ai._says_no_such_session("Invalid API key")
@@ -359,3 +377,100 @@ def test_a_site_with_cli_providers_off_keeps_the_resolvers_reason(tmp_path, monk
     out = cards_ai.Runner(FakeSettings(tmp_path)).status()
     assert out["ok"] is False
     assert out["why"] == "no provider has a working credential"
+
+
+# -- the one hour TTL (decision 6, Alex 2026-09-04) ---------------------------
+# The corpus block is what an afternoon of semantic searches keeps hitting,
+# and the API's default breakpoint is gone in five minutes.
+
+def test_the_pinned_sdk_takes_an_extended_ttl():
+    """`anthropic==0.122.0` carries `ttl` on the STABLE cache_control param,
+    so no beta header and no `client.beta.*` call. The day a lockfile bump
+    moves it, this says so rather than the bill doing."""
+    param = pytest.importorskip(
+        "anthropic.types.cache_control_ephemeral_param").CacheControlEphemeralParam
+    assert "ttl" in getattr(param, "__annotations__", {})
+
+
+def test_the_detector_downgrades_an_sdk_without_the_field(monkeypatch):
+    class OldParam:
+        __annotations__ = {"type": str}
+
+    fake = types.ModuleType("anthropic.types.cache_control_ephemeral_param")
+    fake.CacheControlEphemeralParam = OldParam
+    anthropic_types = pytest.importorskip("anthropic.types")
+    monkeypatch.setattr(anthropic_types, "cache_control_ephemeral_param", fake)
+    cards_ai.sdk_cache_ttl.cache_clear()
+    try:
+        assert cards_ai.sdk_cache_ttl() == "5m"
+    finally:
+        cards_ai.sdk_cache_ttl.cache_clear()
+
+
+def test_an_sdk_that_cannot_be_read_keeps_the_hour(monkeypatch):
+    """Cannot tell is not "not supported": the field is passed through to an
+    API that has had it for months, and a silent downgrade is money."""
+    real_import = __import__("builtins").__import__
+
+    def boom(name, *args, **kwargs):
+        if "cache_control_ephemeral_param" in name:
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", boom)
+    cards_ai.sdk_cache_ttl.cache_clear()
+    try:
+        assert cards_ai.sdk_cache_ttl() == "1h"
+    finally:
+        cards_ai.sdk_cache_ttl.cache_clear()
+
+
+def test_a_five_minute_fallback_is_todays_breakpoint_exactly():
+    assert cards_ai._cache_control("5m") == {"type": "ephemeral"}
+    assert cards_ai._cache_control("") == {"type": "ephemeral"}
+    assert cards_ai._cache_control("1h") == {"type": "ephemeral", "ttl": "1h"}
+
+
+def test_a_session_opened_under_five_minutes_is_not_mixed(sdk):
+    """A conversation keeps the TTL it was opened under. The stored first
+    message IS the breakpoint, so re-stamping it half way through would be a
+    second cache write and a cold read of the corpus it replaced."""
+    runner, calls = sdk
+    runner.run(MARKED, session=FakeSession())
+    path = store_file(runner)
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    stored["cache_ttl"] = "5m"
+    stored["messages"][0]["content"][0]["cache_control"] = {"type": "ephemeral"}
+    path.write_text(json.dumps(stored), encoding="utf-8")
+
+    runner.run("more of the pangolins", session=FakeSession(turns=1))
+
+    sent = calls[1]["messages"][0]["content"][0]
+    assert sent["cache_control"] == {"type": "ephemeral"}
+    assert json.loads(path.read_text(encoding="utf-8"))["cache_ttl"] == "5m"
+
+
+def test_no_session_still_carries_no_breakpoint(sdk):
+    """Translate, search and summaries without a session are one plain string
+    -- an hour of caching is not a reason to start caching a one-shot call."""
+    runner, calls = sdk
+    runner.run("translate this", model="claude-haiku-4-5-20251001")
+    assert calls[0]["messages"] == [{"role": "user", "content": "translate this"}]
+
+
+def test_status_says_which_ttl_it_got(tmp_path, monkeypatch):
+    choice = ai_providers.ProviderChoice(name=ai_providers.ANTHROPIC_API,
+                                         label="Anthropic API", reason="")
+    monkeypatch.setattr(cards_ai.Runner, "_choice",
+                        lambda self, probe=True: (choice, ""))
+    out = cards_ai.Runner(FakeSettings(tmp_path)).status()
+    assert out["ok"] is True
+    assert out["session_cache_ttl"] in ("1h", "5m")
+
+
+def test_a_refused_status_still_names_the_ttl(tmp_path, monkeypatch, no_db):
+    refused(monkeypatch)
+    rows_as(monkeypatch, ai_providers.ST_DISABLED)
+    out = cards_ai.Runner(FakeSettings(tmp_path)).status()
+    assert out["ok"] is False
+    assert out["session_cache_ttl"] in ("1h", "5m")

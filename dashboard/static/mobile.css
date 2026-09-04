@@ -361,4 +361,29 @@
 }
 
 
+/* =========================== == tab memory == ============================ */
+/* CR-188 (Alex, 2026-09-04): the two properties static/tab_memory.js depends
+   on, written down so a later stylesheet cannot take them away silently. */
+
+/* The restore is an instant jump, never an animation the reader watches: the
+   owner asked for "it should just feel like the page was left where it was".
+   A `scroll-behavior: smooth` added to html later would turn every page load
+   into a visible scroll down the page. Declared here, at the root, so that
+   change is a conflict rather than a surprise. */
+html {
+  scroll-behavior: auto;
+}
+
+/* Scroll anchoring is what keeps the current position when the 15 s fleet
+   poll replaces the grid under the reader (the swap is innerHTML, so the
+   wrapper itself survives and the browser can anchor to it). It is on by
+   default and a single `overflow-anchor: none` anywhere up the tree would
+   turn it off for everything inside, which reads as "the page jumps every
+   fifteen seconds" long after whoever wrote the rule has moved on. */
+.layout,
+.fleet-grid-wrap {
+  overflow-anchor: auto;
+}
+
+
 /* ============================== == end == ================================= */

@@ -124,6 +124,35 @@ def test_a_checkout_with_no_licence_agreement_is_refused(repo, tmp_path):
     assert "HOW_IT_WORKS" in str(exc.value)
 
 
+def test_the_whole_docs_tree_travels_but_only_its_markdown(repo, tmp_path):
+    """Alex, 2026-09-04: /help is a browser, so an over-the-air dashboard has
+    to arrive with every document, not just the guide. Markdown only --
+    docs/mobile is a directory of screenshots and a code bundle is not a
+    photo album -- and the repository's top-level documents land under
+    `docs/_root/`, which is the name help.py browses them by."""
+    (repo / "docs" / "spikes").mkdir()
+    (repo / "docs" / "spikes" / "s1.md").write_text("# S1\n")
+    (repo / "docs" / "GOTCHAS.md").write_text("# Gotchas\n")
+    (repo / "docs" / "mobile.png").write_bytes(b"not-a-document")
+    (repo / "KNOWN_BUGS.md").write_text("# Known bugs\n")
+    (repo / "SPEC.md").write_text("# Spec\n")
+    result = bdb.build(repo, tmp_path / "out", allow_dirty=True, version="9.9.9")
+    manifest, names = read_bundle(result["path"])
+    assert "docs/GOTCHAS.md" in names
+    assert "docs/spikes/s1.md" in names
+    assert "docs/_root/KNOWN_BUGS.md" in names
+    assert "docs/_root/SPEC.md" in names
+    assert "docs/mobile.png" not in names
+    # No README.md at the root of this repository today, and a missing one of
+    # OUR documents is not a reason to refuse to build a dashboard.
+    assert "docs/_root/README.md" not in names
+    # docs/legal is listed twice (once as a required tree, once inside the
+    # docs tree) and must still be packed once.
+    assert names.count("docs/legal/EULA.md") == 1
+    assert names.count("docs/HOW_IT_WORKS.md") == 1
+    assert set(manifest["files_sha256"]) == set(names)
+
+
 def test_templates_and_static_are_in_the_bundle(repo, tmp_path):
     """Not decoration: ui.py resolves TEMPLATES_DIR as parents[2] of the
     package, i.e. the bundle root. A tree without these two renders a 500 on

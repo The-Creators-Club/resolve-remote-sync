@@ -60,13 +60,27 @@ class FakeClock:
         self.now += seconds
 
 
-def a_role(tmp_path, dashboard=None, processes=None, clock=None, **over):
+class LiveThread:
+    """A thread that is alive because the test says so.
+
+    The freshness rules are about TIME, not about scheduling, and asserting
+    them against two real long-poll loops meant the answer depended on
+    whether the runner had got round to starting them yet (release-macos run
+    33854959945: green on Windows, `running != unreachable` on macOS)."""
+
+    def is_alive(self):
+        return True
+
+
+def a_role(tmp_path, dashboard=None, processes=None, clock=None,
+           wall_clock=None, **over):
     return role_mod.TimelineCardsRole(
         a_cfg(tmp_path, **over),
         request_fn=(dashboard or FakeDashboard()).request,
         identity_token_fn=lambda: "signed-identity",
         processes_fn=(processes if processes is not None else (lambda: [])),
         clock=clock or time.monotonic,
+        wall_clock=wall_clock or time.time,
     )
 
 
@@ -86,35 +100,44 @@ def test_a_talking_role_is_running_and_carries_its_last_poll(tmp_path):
     role.stop()
 
 
+def a_role_that_is_up(tmp_path, wall):
+    """A role in the state a healthy one reaches, with NO live loops: the
+    freshness rules are about time, and a test that starts two long-poll
+    threads is a test about the runner's scheduler."""
+    role = a_role(tmp_path, wall_clock=wall)
+    role._state = role_mod.STATE_RUNNING
+    role._detail = "serving the vault"
+    role._threads = [LiveThread(), LiveThread()]
+    role._since = wall.now
+    return role
+
+
 def test_a_role_that_has_not_talked_for_two_long_polls_is_unreachable(tmp_path):
-    a_checkout(tmp_path)
-    role = a_role(tmp_path)
-    role.start()
-    _wait_for(lambda: role.report_block()["last_poll_at"])
-    with role._lock:
-        role._last_poll_at = time.time() - (role_mod.STALE_AFTER_SECONDS + 5)
+    wall = FakeClock()
+    role = a_role_that_is_up(tmp_path, wall)
+    role._note_call(200, "")
+    assert role.report_block()["state"] == role_mod.HEALTH_RUNNING
+    wall.tick(role_mod.STALE_AFTER_SECONDS - 1)
+    assert role.report_block()["state"] == role_mod.HEALTH_RUNNING
+    wall.tick(2)
     block = role.report_block()
     assert block["state"] == role_mod.HEALTH_UNREACHABLE
     assert block["connected"] is False
     assert block["detail"]
-    role.stop()
 
 
 def test_a_start_that_has_not_polled_yet_is_green_only_briefly(tmp_path):
     """A chip that goes amber for the first three seconds of every companion
     restart is a chip nobody believes -- and one that stays green for ever on
     a role that never made a call is the bug."""
-    a_checkout(tmp_path)
-    role = a_role(tmp_path)
-    role.start()
-    with role._lock:
-        role._last_poll_at = None
-        role._since = time.time()
+    wall = FakeClock()
+    role = a_role_that_is_up(tmp_path, wall)
+    assert role._last_poll_at is None
     assert role.report_block()["state"] == role_mod.HEALTH_RUNNING
-    with role._lock:
-        role._since = time.time() - (role_mod.GRACE_SECONDS + 5)
+    wall.tick(role_mod.GRACE_SECONDS - 1)
+    assert role.report_block()["state"] == role_mod.HEALTH_RUNNING
+    wall.tick(2)
     assert role.report_block()["state"] == role_mod.HEALTH_UNREACHABLE
-    role.stop()
 
 
 # --------------------------------------------------- the four kinds of not green

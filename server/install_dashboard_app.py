@@ -297,8 +297,18 @@ BROLL_EXCLUDE_DIRS = EXCLUDE_DIRS | {".git", ".github", "tests", "node_modules"}
 # is syncing" outranks it. The app swap replaces <root>/app wholesale, so this
 # is re-shipped on every deploy by construction.
 LOCAL_DOCS_DIR = Path(__file__).resolve().parents[1] / "docs"
+LOCAL_REPO_DIR = Path(__file__).resolve().parents[1]
 SHIPPED_DOCS = ("HOW_IT_WORKS.md",)
 SHIPPED_DOC_TREES = ("legal",)
+# The WHOLE docs tree since 2026-09-04 (Alex): /help is a browser now, so a
+# bind-mode server that got two documents would show a two-entry list. Only
+# `.md` travels - docs/mobile is a directory of screenshots - and the four
+# top-level documents go into `_root/`, the name help.py browses them by
+# (help.ROOT_DIR_NAME). SHIPPED_DOCS/SHIPPED_DOC_TREES stay the REQUIRED set:
+# the deploy still refuses to claim it shipped docs without the EULA and the
+# guide, and a missing runbook is not a reason to say so.
+SHIPPED_ROOT_DOCS = ("README.md", "SPEC.md", "KNOWN_BUGS.md", "CLAUDE.md")
+SHIPPED_DOC_SUFFIX = ".md"
 
 # --------------------------------------------------------------------------
 # The music app (music/web), mounted in-process at /music
@@ -3908,13 +3918,13 @@ def build_prune_script(target: str, mountinfo_glob: str = "/proc/*/mountinfo") -
 
 
 def ship_dashboard_docs(root: str, dry_run: bool, staging_parent: str) -> bool:
-    """Put docs/HOW_IT_WORKS.md + docs/legal/ into <root>/app/docs (REL-5).
+    """Put the docs/ markdown into <root>/app/docs (REL-5, widened 2026-09-04).
 
-    Assembled into a temporary directory first because the two sources are a
-    FILE and a DIRECTORY in a tree this script does not otherwise ship, and
-    install_tree takes one source root. Returns True when the docs are there;
-    every failure is a printed NOTE and False, never an exception -- see the
-    module comment beside LOCAL_DOCS_DIR.
+    Assembled into a temporary directory first because the sources are a tree
+    this script does not otherwise ship plus four files that live one level
+    ABOVE it, and install_tree takes one source root. Returns True when the
+    docs are there; every failure is a printed NOTE and False, never an
+    exception -- see the module comment beside LOCAL_DOCS_DIR.
     """
     import tempfile
 
@@ -3928,10 +3938,7 @@ def ship_dashboard_docs(root: str, dry_run: bool, staging_parent: str) -> bool:
         return False
     staging_local = tempfile.mkdtemp(prefix="ccsync-docs-")
     try:
-        for name in SHIPPED_DOCS:
-            shutil.copy2(LOCAL_DOCS_DIR / name, Path(staging_local) / name)
-        for name in SHIPPED_DOC_TREES:
-            shutil.copytree(LOCAL_DOCS_DIR / name, Path(staging_local) / name)
+        _stage_docs_tree(Path(staging_local))
         ok = install_tree(root, "app/docs", Path(staging_local), dry_run,
                           staging_slug="ccsync-docs-upload",
                           staging_parent=staging_parent)
@@ -3942,6 +3949,32 @@ def ship_dashboard_docs(root: str, dry_run: bool, staging_parent: str) -> bool:
               "The dashboard is up either way; /setup will say no licence "
               "agreement is included in this build.", file=sys.stderr)
     return ok
+
+
+def _stage_docs_tree(staging: Path) -> None:
+    """Copy every `.md` under docs/ into `staging`, plus the top-level ones.
+
+    `.md` only, and symlinks are not followed: the container serves whatever
+    lands here, so a link into the checkout would be a path outside the tree
+    on the server (help.resolve_document refuses those on the read side too,
+    which is belt and braces on purpose).
+    """
+    for path in sorted(LOCAL_DOCS_DIR.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        if path.suffix.lower() != SHIPPED_DOC_SUFFIX:
+            continue
+        rel = path.relative_to(LOCAL_DOCS_DIR)
+        target = staging / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+    root_dir = staging / "_root"
+    for name in SHIPPED_ROOT_DOCS:
+        source = LOCAL_REPO_DIR / name
+        if not source.is_file():
+            continue
+        root_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, root_dir / name)
 
 
 def install_tree(root: str, target_name: str, source: Path, dry_run: bool,

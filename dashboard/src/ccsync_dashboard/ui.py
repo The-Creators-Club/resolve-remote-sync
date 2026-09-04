@@ -4145,7 +4145,32 @@ def page_help(request: Request):
     Behind the login gate (app.py) and brand-substituted like every other
     page. help.py owns finding the document and turning it into HTML; a
     server with no copy of it gets one sentence, never a 500.
+
+    Still the GUIDE at the bare `/help`, with the browser's index beside it
+    (Alex, 2026-09-04): the topbar's [ ? ], the Settings strip and every
+    `/help#term-...` deep link in the product point here, and they must keep
+    landing on the same document with the same anchors.
     """
-    context = help_page.page_context()
+    return _help_response(request, "")
+
+
+@router.get("/help/{doc_path:path}")
+def page_help_document(doc_path: str, request: Request):
+    """One document from the shipped docs tree, in the same viewer.
+
+    Every check on `doc_path` lives in help.resolve_document, not here: a
+    path from a URL is checked in ONE place or in none of them.
+    """
+    return _help_response(request, doc_path)
+
+
+def _help_response(request: Request, doc_path: str):
+    context = help_page.page_context(doc_path)
     context["nav_current"] = "help"
-    return _render(request, "help.html", context)
+    response = _render(request, "help.html", context)
+    if context.get("help_not_found"):
+        # The page still renders (the index is the useful part of the
+        # answer); the STATUS is what stops a stale link reading as a hit in
+        # a log or a link checker.
+        response.status_code = 404
+    return response

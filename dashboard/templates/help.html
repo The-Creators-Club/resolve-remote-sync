@@ -4,32 +4,62 @@
   <main class="main help-main">
     {% if session_is_admin %}{% include "partials/settings_nav.html" %}{% endif %}
     <div class="detail-head"><h1>[ HELP ]</h1></div>
-    {% if help_missing %}
-      <p class="muted" style="max-width:62ch">{{ help_missing }}</p>
-    {% else %}
-      <p class="muted" style="margin:0.4rem 0 0.9rem; max-width:62ch">
-        How this system works, in plain English: what the pieces are, what you
-        will see day to day, and what to do when something looks wrong. The
-        <a href="#glossary">glossary</a> is what every word on the other pages
-        links back to.
-      </p>
-      {# The contents list is BUILT from the headings (help.render_markdown),
-         not written here: a section added to the document has to appear
-         without anybody remembering this file exists. #}
-      {% if help_toc %}
-      <nav class="help-toc" aria-label="contents">
-        <div class="side-head">[ CONTENTS ]</div>
-        <ul>
-          {% for entry in help_toc %}
-            <li class="help-toc-{{ entry.level }}"><a href="#{{ entry.id }}">{{ entry.text }}</a></li>
-          {% endfor %}
-        </ul>
+    <div class="help-browser">
+      {# The document list. Built from what this server actually SHIPS
+         (help.document_groups), never written out here: a document added to
+         the repository has to appear without anybody remembering this file
+         exists. On a phone it is the block above the document, not a
+         column. #}
+      {% if help_groups %}
+      <nav class="help-files" aria-label="documents">
+        <div class="side-head">[ DOCUMENTS ]</div>
+        {% for group in help_groups %}
+          <div class="help-files-group">{{ group.label }}</div>
+          <ul>
+            {% for entry in group.entries %}
+              <li class="help-file{% if entry.rel == help_current %} help-file-current{% endif %}">
+                <a href="/help/{{ entry.rel | urlencode }}">{{ entry.title }}</a>
+                <span class="muted help-file-name">{{ entry.name }}</span>
+                {% if entry.note %}<span class="help-file-note">{{ entry.note }}</span>{% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        {% endfor %}
       </nav>
       {% endif %}
-      {# `| safe` is safe HERE and only here: help.render_markdown escapes
-         every character of the document before it marks any of it up, and
-         passes no HTML from the document through. #}
-      <article class="help-doc">{{ help_html | safe }}</article>
-    {% endif %}
+      <div class="help-reading">
+        {% if help_missing %}
+          <p class="muted" style="max-width:62ch">{{ help_missing }}</p>
+        {% else %}
+          {% if help_current == 'HOW_IT_WORKS.md' %}
+          <p class="muted" style="margin:0.4rem 0 0.9rem; max-width:62ch">
+            How this system works, in plain English: what the pieces are, what you
+            will see day to day, and what to do when something looks wrong. The
+            <a href="#glossary">glossary</a> is what every word on the other pages
+            links back to.
+          </p>
+          {% else %}
+          <p class="muted help-file-path">{{ help_current }}</p>
+          {% endif %}
+          {# The contents list is BUILT from the headings (help.render_markdown),
+             not written here: a section added to the document has to appear
+             without anybody remembering this file exists. #}
+          {% if help_toc %}
+          <nav class="help-toc" aria-label="contents">
+            <div class="side-head">[ CONTENTS ]</div>
+            <ul>
+              {% for entry in help_toc %}
+                <li class="help-toc-{{ entry.level }}"><a href="#{{ entry.id }}">{{ entry.text }}</a></li>
+              {% endfor %}
+            </ul>
+          </nav>
+          {% endif %}
+          {# `| safe` is safe HERE and only here: help.render_markdown escapes
+             every character of the document before it marks any of it up, and
+             passes no HTML from the document through. #}
+          <article class="help-doc">{{ help_html | safe }}</article>
+        {% endif %}
+      </div>
+    </div>
   </main>
 {% endblock %}

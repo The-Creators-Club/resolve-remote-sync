@@ -96,15 +96,26 @@ COPY dashboard/deploy /app/deploy
 # same reason).
 COPY dashboard/templates /app/templates
 COPY dashboard/static /app/static
-# The two documents the RUNNING dashboard serves (REL-5, usability sweep
-# 2026-09-04). `docs/` is otherwise excluded by .dockerignore, which re-includes
-# exactly these; without them setup_engine's EULA task falls back to "no
-# licence agreement is included in this build" and /help says it is not
-# installed. /app/docs, because both readers resolve it from their own
-# __file__ the way ui.py resolves /app/templates (help._candidates,
-# setup_engine._find_eula).
-COPY docs/legal /app/docs/legal
-COPY docs/HOW_IT_WORKS.md /app/docs/HOW_IT_WORKS.md
+# The documents the RUNNING dashboard serves (REL-5, usability sweep
+# 2026-09-04; widened to the whole tree the same day at the owner's request).
+# `docs/` is excluded wholesale by .dockerignore, which re-includes the
+# MARKDOWN under it and nothing else: without these lines setup_engine's EULA
+# task falls back to "no licence agreement is included in this build" and
+# /help says it is not installed. ~4 MB of text against a ~10 MB context, and
+# no screenshot, no PDF, no binary -- the .dockerignore rule is what keeps
+# docs/mobile's PNGs out.
+#
+# /app/docs, because every reader resolves it from its own __file__ the way
+# ui.py resolves /app/templates (help.document_root, setup_engine._find_eula).
+COPY docs /app/docs
+# The top-level documents (KNOWN_BUGS.md, SPEC.md, CLAUDE.md, and a
+# README.md if one is ever added), under the name help.py browses them by
+# (help.ROOT_DIR_NAME). They are not in docs/, and /app is the application
+# root here, so they get a directory of their own rather than being dropped
+# beside the code. A glob rather than four names because a COPY that names a
+# file the checkout does not have fails the BUILD, and the browser
+# allow-lists what it will serve anyway (help.ROOT_FILES).
+COPY *.md /app/docs/_root/
 COPY broll/web /broll-app
 COPY music/web /music-app
 COPY ytdl/web /ytdl-app

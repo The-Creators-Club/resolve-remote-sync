@@ -368,6 +368,7 @@ class TimelineCardsRole:
         bridge: Any = None,
         machine_name: str = "",
         clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
     ) -> None:
         self.cfg = cfg or {}
         self._request = request_fn
@@ -378,6 +379,13 @@ class TimelineCardsRole:
         self._bridge = bridge
         self._machine_name = machine_name
         self._clock = clock
+        # TWO CLOCKS, ON PURPOSE. `_clock` is monotonic and paces the probe
+        # cache; `_wall` is wall time, because every timestamp here is
+        # REPORTED (the fleet grid renders it) and a monotonic count means
+        # nothing on another machine. A seam rather than `time.time()` inline
+        # so the freshness rules can be tested at fixed times instead of by
+        # racing a CI runner (release-macos run 33854959945, 2026-09-04).
+        self._wall = wall_clock
 
         self.enabled = bool(self.cfg.get("cards_agent", False))
         self._lock = threading.Lock()
@@ -594,7 +602,7 @@ class TimelineCardsRole:
         with self._lock:
             self._engine = engine
             self._client = client
-            self._since = time.time()
+            self._since = self._wall()
             self._threads = [
                 threading.Thread(target=self._loop, args=(client.push_loop, "push"),
                                  name="ccsync-cards-push", daemon=True),
@@ -768,7 +776,7 @@ class TimelineCardsRole:
             self._last_http_status = status
             self._last_error = str(error or "")[:300]
             if status == 200:
-                self._last_poll_at = time.time()
+                self._last_poll_at = self._wall()
 
     def _note_traffic(self, suffix: str, body: Optional[dict], answer: Any) -> None:
         """Keep just enough to answer "is this machine serving the page, and
@@ -778,7 +786,7 @@ class TimelineCardsRole:
             return
         state = body.get("state")
         with self._lock:
-            self._seen = time.time()
+            self._seen = self._wall()
             if isinstance(state, dict):
                 self._timeline = str(state.get("timeline") or "")
                 self._project = str(state.get("project") or "")
@@ -816,7 +824,7 @@ class TimelineCardsRole:
             # been refused is not "still starting".
             return HEALTH_UNREACHABLE, error
         fresh = polled if polled is not None else since
-        age = time.time() - float(fresh or 0.0)
+        age = self._wall() - float(fresh or 0.0)
         # A start counts for GRACE_SECONDS and no longer: after that the only
         # thing that keeps this green is the dashboard answering.
         limit = STALE_AFTER_SECONDS if polled is not None else GRACE_SECONDS

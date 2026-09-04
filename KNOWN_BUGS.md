@@ -14217,6 +14217,208 @@ to an editor now carry the scan, and the only "machine" left in any of them is
 a dict key, a header name, a state code or a log line.
 
 
+## After the sweep: the owner's requests of 2026-09-04 (CR-187..CR-189)
+
+Built the same afternoon the sweep landed, each from one sentence of the
+owner's: every repo markdown document browsable in the help viewer and
+shipped into the image (CR-187); a page remembers where you were when you
+come back to it on a phone (CR-188); the Timeline Cards Claude sessions keep
+their corpus cached for an hour, which the new cross-transcript semantic
+search relies on (CR-189, the search itself lives in the Cards repo).
+Dashboard **0.7.35**, companion **0.9.70** (the companion bump carries only
+the cards-role clock seam the macOS CI runner needed).
+
+### CR-187 - /help rendered one document and the other 123 needed a git checkout to read - FIXED in repo 2026-09-04 (dashboard 0.7.35)
+Alex, 2026-09-04: "I want to be able to see all the project repo .MD files in
+the file browser and open them in the .MD viewer." Wave 4 shipped `/help` as
+ONE rendered document (`docs/HOW_IT_WORKS.md`), and the three shipping paths
+carried exactly that file plus `docs/legal/`. Everything else this repository
+knows - GOTCHAS, SERVER, RELEASE, the sweep reports, the bug ledger - was
+readable only by someone with the checkout, which is the base rig and nobody
+else.
+
+* **`/help` is a BROWSER now.** A left column (a capped block above the
+  document on a phone, `@media (max-width: 900px)`) lists every `.md` this
+  server carries, grouped by the folder it lives in, each entry titled by the
+  document's own first `# ` heading with the filename muted beside it. The
+  guide leads and says what it is ("the customer explainer"): it is the one
+  document written for a customer rather than for us. The list is BUILT from
+  what the server actually shipped (`help.document_groups`), never written out
+  in the template, so a document added to the repository appears without
+  anybody remembering `help.html` exists. `GET /help/<rel>.md` renders one
+  document through the same renderer, `GET /help` is still the guide - the
+  topbar's help link, the Settings strip and every `/help#term-...` deep link
+  in the product point there, and they land on the same document with the same
+  anchors.
+* **What may be served is decided in ONE place** (`help.resolve_document`),
+  and the route has no checks of its own: markdown only, no absolute path, no
+  drive letter, no `..` segment, and the realpath must still be inside the
+  docs root - which is also what refuses a symlink pointing out of the tree.
+  The one deliberate exception is the allow-list `_root/<NAME>` for the four
+  top-level documents (README / SPEC / KNOWN_BUGS / CLAUDE), which are
+  shipped INTO the tree by every deploy path and sit beside it in a dev
+  checkout. A path that fails any of it renders the index and a sentence
+  under a 404: the reader got there by following a link, and a bare 404 tells
+  them nothing.
+* **Links between documents resolve.** Our documents cross-reference each
+  other constantly (`[x](GOTCHAS.md#section-15)`, `../KNOWN_BUGS.md`), and
+  they were written for a tree with `docs/` one level under the repository
+  root. `help.help_href` resolves a relative link in the REPOSITORY's
+  coordinates and maps it back (`docs/X.md` is the browser's `X.md`, a
+  top-level document is `_root/X.md`), fragment preserved - the half of a
+  cross-reference that is silently wrong when it is dropped. A relative link
+  to something that is not a document we serve stays TEXT and carries its
+  path, so the reader is told where the thing is; a `javascript:` or `data:`
+  href is still label-only text.
+* **The tree reaches a server three ways, markdown only in all three.** The
+  image `COPY docs /app/docs` plus `COPY *.md /app/docs/_root/` with
+  `.dockerignore` re-including `docs/*.md` and `docs/**/*.md` and nothing else
+  (a glob for the top-level files because a `COPY` naming a file the checkout
+  does not have fails the BUILD, and there is no `README.md` at this root
+  today); the OTA bundle gains `("docs", "docs")` in `TREES` with an md-only
+  filter and `ROOT_DOCS` best-effort, `docs/legal` staying a required entry of
+  its own and packed once; and bind mode's `ship_dashboard_docs` stages the
+  whole tree through the new `_stage_docs_tree`. `docs/mobile` alone is a
+  directory of screenshots: an image is not a photo album, and the filter is
+  what keeps it out. ~4 MB of text in each case. `help.document_root()` finds
+  it by the same search order `document_path()` already used
+  (`DASH_HELP_DOCS_ROOT`, `DASH_HELP_DOC`'s directory, `<app>/docs`, the
+  checkout beside the package), and a server with none of them still says
+  "Help is not installed on this server" rather than 500ing.
+* **Measured, not assumed:** `KNOWN_BUGS.md` is 14,254 lines / 950 KB and is
+  now one click from every page. The stdlib renderer does it in 30 ms and the
+  whole page (index walk of 124 documents included) in 95 ms on the base rig,
+  so nothing was truncated and nothing needed rewriting; the suite pins a
+  synthetic 13,000-line document under 2 s, which is the bound that catches a
+  renderer that goes quadratic later.
+
+`dashboard/tests/test_help_page.py` (39 tests) covers the grouped index, a
+document rendering, both link-rewrite directions, eight traversal shapes plus
+a symlink, the missing tree, the 404-with-index, and the two routes;
+`tools/tests/test_build_dashboard_bundle.py` and `server/tests/test_image_mode.py`
+cover the two shipping halves.
+
+### CR-188 - switching tabs on the dashboard always reopened the page at the top - FIXED in repo 2026-09-04 (dashboard 0.7.35)
+
+The owner, on his phone (2026-09-04): "when you switch tabs it should remember
+your position from the last time you were in X or Y tab." The dashboard's tabs
+are the topbar destinations (SYNC STATUS, TRANSFERS, B-ROLL, MUSIC, CARDS,
+SETTINGS) and the twelve Settings strip pages, and every one of them is a FULL
+PAGE NAVIGATION: the browser hands back a fresh document, scrolled to the top,
+with every `<details>` at its server-rendered default. So looking something up
+on Packages and coming back to Jobs cost two thumb journeys down a long page,
+every time, on the screen the product is most often read from.
+
+`static/tab_memory.js` (new, loaded by base.html on every dashboard page,
+deferred and after htmx so its `htmx:afterSettle` listener registers on a page
+htmx already owns) records `{y, details, section, t}` under
+`ccsync.tab:<pathname>[?<view keys>]` and puts it back on the next visit.
+
+Four things about it are load bearing:
+
+  * **The panels arrive late.** Half of what makes these pages tall comes from
+    `hx-trigger="load"` fragments, so at DOMContentLoaded the document is often
+    900 px of skeleton and `scrollTo(0, 1800)` clamps silently to the bottom of
+    nothing. The restore waits for the height, retrying on every htmx settle
+    for up to 3 s, and then falls back to the nearest remembered heading rather
+    than to a position the page can no longer hold.
+  * **A deep link wins.** `/#server-notices` and `/admin/users#admin-fleet-halt`
+    are the product's own links (DUI-7): a URL with a fragment means the reader
+    asked for that anchor, not for last time. So does the reader themselves -
+    the first wheel, touch or key abandons a restore that has not landed, and a
+    save is refused while the restore is still pending so a fast switch cannot
+    overwrite the remembered position with 0.
+  * **The dashboard is INSTALLABLE.** `sessionStorage` is the right lifetime
+    for a tab, but the OS kills and relaunches an installed PWA with no
+    warning, so the entry is written to `localStorage` too and read from there
+    when the session copy is gone. The local copy EXPIRES after 8 h: a position
+    from yesterday is not a position. Every storage access is in a try/catch,
+    and a blocked store leaves a page that behaves exactly as it did before.
+  * **`history.scrollRestoration` is untouched**, and a bfcache `pageshow`
+    abandons the restore: back and forward were already right.
+
+Not done, deliberately: no visual cue (the owner's call - it should just feel
+like the page was left where it was), and nothing at all in the three mounted
+SPAs (`/broll`, `/music`, `/ytdl`) or `/cards`, which are single-page, keep
+their own state and never render base.html. The script no-ops on those
+prefixes anyway, in case one of them ever borrows the dashboard's assets.
+
+The 15 s grid poll does not fight it: those swaps are `innerHTML`, so the
+wrapper survives and neither the browser's scroll anchoring nor the reader
+moves. That is now pinned in the suite, and `mobile.css` writes down the two
+CSS properties the script depends on (`scroll-behavior: auto` at the root, so
+a later `smooth` cannot turn every page load into a visible animated scroll;
+`overflow-anchor: auto` on `.layout` / `.fleet-grid-wrap`).
+
+Files: `dashboard/static/tab_memory.js` (new),
+`dashboard/templates/base.html` (the one include),
+`dashboard/static/mobile.css` (a `== tab memory ==` section),
+`dashboard/tests/test_tab_memory.py` (new, 24 tests: the served/included half
+always runs, the behaviour half runs the real file in a `vm` with a DOM,
+storage and clock stub and skips when node is absent),
+`dashboard/tests/test_static_js_syntax.py` (the scripts every page loads are
+named, so a rename is noticed rather than silently unchecked).
+
+### CR-189 - the Timeline Cards corpus fell out of the prompt cache after five minutes, so an afternoon of semantic searches re-read it at full price - FIXED in repo 2026-09-04 (dashboard 0.7.35)
+
+Asked for by Alex, 2026-09-04: semantic search across all of an episode's
+interview transcripts, as "one Claude instance which is spawned and then
+retained for future searches, so the corpus remains cached for AN HOUR, and it
+has running context". The Timeline Cards side implements that as one
+conversation per episode root through the `session=` seam added by §12
+(session id `search:<sha1 of root>`, first turn the whole corpus, later turns
+the query alone). This is the runner's half.
+
+**Cause**: `cards_ai._user_message` put the §12 breakpoint on the corpus block
+as `cache_control: {"type": "ephemeral"}`, which is the API's DEFAULT five
+minute TTL. A montage is worked in one sitting, so five minutes mostly held;
+a search session is not. An editor who searches, watches the clip, talks to
+somebody and searches again is past the TTL on nearly every turn, and each of
+those turns re-reads tens of thousands of tokens of transcript at the full
+input price. Nothing about it looks broken: the answers are right, the page is
+the same, and the only symptom is the bill.
+
+**Fixed**: the breakpoint carries `ttl: "1h"` for every session, montages
+included - a higher cache write, an unchanged cache read, and the write only
+happens when there is something to write.
+
+* The pinned SDK takes it: `anthropic==0.122.0` carries
+  `ttl: Literal["5m", "1h"]` on the STABLE `CacheControlEphemeralParam`, not a
+  beta one, so there is no `extended-cache-ttl-2025-04-11` header to send and
+  no `client.beta.*` call to make. No lockfile change.
+* `cards_ai.sdk_cache_ttl()` reads the installed package and downgrades to
+  `5m` ONLY on a positive reading of an SDK whose param has no `ttl` field. It
+  fails open on anything it cannot inspect, because the types are generated
+  TypedDicts that nothing enforces at runtime: an unreadable SDK passes the
+  field through to an API that has had it for months, whereas a silent
+  downgrade is money nobody would ever notice going. `5m` is written WITHOUT
+  the field, so the fallback request is byte for byte the one this module made
+  before today.
+* A conversation KEEPS THE TTL IT WAS OPENED UNDER. `cache_ttl` is recorded in
+  `<data>/cards_sessions/<id>.json` at turn 0 and the stored first message is
+  re-sent verbatim, so a session opened under 5m is never re-stamped half way
+  through - that would be a second cache write against a prefix that no longer
+  matches, ie a cold read of the very thing it replaced.
+* The CLI path needed nothing: Claude Code owns its own conversation and its
+  own caching, and all this module owes it is the same id turn after turn
+  (`--session-id` on turn 0, `--resume` after). Pinned by a test that walks 40
+  turns of one session. A `session_lost` is still reported once, with no retry.
+* `status()` gained `session_cache_ttl` (`"1h"` or `"5m"`) on every return,
+  including the refusals, so the page can say what it got. `ok` and `why` are
+  unchanged, which is what the engine's `start_*` guards read.
+
+**Touched**: `dashboard/src/ccsync_dashboard/cards_ai.py` (decision 6),
+`dashboard/tests/test_cards_ai.py` (+8 tests, 32 pass),
+`dashboard/tests/test_ai_providers.py` (one exact-dict status assertion
+relaxed to the two keys the page gates on), `docs/TIMELINE-CARDS-INTO-CCSYNC.md`
+§7d.1. `ai_providers.py` untouched: no header was needed.
+
+**Not covered**: nothing here makes the cache HIT observable. The usage
+counters (`cache_creation_input_tokens` / `cache_read_input_tokens`) come back
+on every response and are dropped by `_text_of`; the first time this is
+doubted, that is where the evidence is.
+
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

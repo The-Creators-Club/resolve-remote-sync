@@ -46,6 +46,15 @@
      deferred and after htmx, so htmx's own listeners are registered first. #}
   <script src="/static/htmx_errors.js" defer></script>
   <script src="/static/copy_value.js" defer></script>
+  {# CR-188 (Alex, 2026-09-04): "when you switch tabs it should remember your
+     position from the last time you were in X or Y tab". Every topbar
+     destination and every Settings strip page is a full page navigation, so
+     the scroll position and the open sections were lost on every hop. Its own
+     file rather than a block in htmx_errors.js because it is the only script
+     here that has to reason about the page's HEIGHT over time, and deferred
+     after htmx so its htmx:afterSettle listener is registered on a page htmx
+     already owns. A no-op when storage is blocked. #}
+  <script src="/static/tab_memory.js" defer></script>
   <script>
     // Keep <details data-key> open/closed choices across htmx innerHTML
     // swaps: the bins panel refreshes every 5s and the sidebar every 30s,

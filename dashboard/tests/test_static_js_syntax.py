@@ -40,6 +40,16 @@ def test_there_are_files_to_check():
     assert len(js_files()) >= 5
 
 
+# The files base.html loads on EVERY page: a glob is how they get checked, and
+# this is how a rename or a deletion gets noticed. tab_memory.js joined them
+# with CR-188 (Alex, 2026-09-04).
+ON_EVERY_PAGE = {"htmx_errors.js", "copy_value.js", "pwa.js", "tab_memory.js"}
+
+
+def test_the_scripts_every_page_loads_are_among_them():
+    assert ON_EVERY_PAGE <= {p.name for p in js_files()}
+
+
 def unterminated_string_lines(src: str) -> list[tuple[int, str]]:
     """Line numbers where a ' or " string literal runs past end of line.
 

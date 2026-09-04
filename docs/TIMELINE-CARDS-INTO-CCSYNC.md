@@ -1664,6 +1664,28 @@ turn 0, `--resume <id>` after), because that store is keyed by the id we hand
 it; ours is still what answers "has this id ever existed", and a stderr that
 says the session is unknown maps to the same `session_lost`.
 
+**THE CORPUS IS CACHED FOR AN HOUR** (Alex, 2026-09-04). Semantic search
+across an episode's interview corpus is one conversation per episode root
+(session id `search:<sha1 of root>` on the Timeline Cards side), first turn the
+whole corpus, later turns the query alone, and an editor searches it in bursts
+over an afternoon. The API's default ephemeral breakpoint lives five minutes,
+so every search after a coffee was a full-price re-read. The breakpoint on the
+corpus block therefore carries `cache_control: {"type": "ephemeral", "ttl":
+"1h"}` for every session, montages included: a higher cache write, the same
+cache read, and the write only happens when there is something to write. The
+pinned SDK (`anthropic==0.122.0`) takes `ttl` on the STABLE
+`CacheControlEphemeralParam`, so no `extended-cache-ttl-2025-04-11` beta header
+and no `client.beta.*` call; `cards_ai.sdk_cache_ttl()` reads the installed
+package and downgrades to `5m` only on a positive reading of an SDK without the
+field, because "cannot tell" is not "not supported" and a silent downgrade is
+money nobody notices. A conversation KEEPS THE TTL IT WAS OPENED UNDER
+(`cache_ttl` is recorded in the stored transcript, and turn 0's stored message
+is re-sent verbatim): re-stamping it half way through would be a second cache
+write against a prefix that no longer matches. On the CLI path there is nothing
+to add - Claude Code owns its own caching - beyond what `_cli_session_args`
+already does, which is resume the SAME id turn after turn. `status()` gained
+`session_cache_ttl` (`"1h"` or `"5m"`) so the page can say what it got.
+
 ---
 
 ## 7e. The URL spec for the page (the audit, and it is nearly empty)

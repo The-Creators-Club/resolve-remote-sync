@@ -140,6 +140,50 @@ STATE_IMPORTING = "importing"
 STATE_IDLE = "idle"
 
 
+# CYT-3 (usability sweep 2026-09-03). The importer has always computed a full
+# verdict and handed it to nobody: the tray and the Settings window contain no
+# reference to this module, and the dashboard declared the section, validated
+# it and then read nothing. So the state gets a SENTENCE here, next to the
+# gate that produces it, and both ends render the same words.
+#
+# "" is the honest answer for the states nothing is wrong in: an empty reason
+# is what a surface hides on, and a machine that is simply idle must not carry
+# a line saying so.
+_STATE_REASONS = {
+    STATE_DISABLED: "Filing YouTube clips into Resolve is switched off on this computer.",
+    STATE_DRIVE_ABSENT: "The sync drive is not available, so downloaded clips cannot "
+                        "be filed into Resolve.",
+    STATE_PAUSED: "Syncing is paused, so downloaded clips are waiting to go into Resolve.",
+    STATE_RESOLVE_CLOSED: "Resolve is closed, so downloaded clips are waiting to go "
+                          "into it.",
+    STATE_NO_PROJECT_MATCH: "This Resolve project has no folder on the server yet, so "
+                            "downloaded clips cannot be filed into it. Ask your admin.",
+}
+
+
+def state_reason(state: str, *, pending: int = 0, last_error: str = "",
+                 given_up: int = 0) -> str:
+    """One sentence for `state`, or "" when nothing is in the way.
+
+    The give-up wins when there is one: a clip dropped after
+    youtube_import_max_failures tries is the only shape here that stays
+    broken with the gate wide open, and before this it was one WARNING in a
+    rotating log.
+    """
+    if given_up > 0:
+        clips = "clip" if given_up == 1 else "clips"
+        sentence = (f"{given_up} downloaded {clips} could not be filed into Resolve. "
+                    "CCSync tries them again the next time it starts.")
+        if last_error:
+            sentence += f" Last error: {last_error}"
+        return sentence
+    text = _STATE_REASONS.get(str(state or ""), "")
+    if text and pending > 0:
+        clips = "clip is" if pending == 1 else "clips are"
+        text = f"{pending} downloaded {clips} waiting. " + text
+    return text
+
+
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -218,6 +262,12 @@ class YoutubeImporter:
         self._last_import_at: Optional[str] = None
         self._last_bin = ""
         self._last_error = ""
+        # How many clips this run has given up on entirely (CYT-3). The
+        # per-path attempt counter below is worker-thread state; this is the
+        # published tally, because "the download worked, the clips are in
+        # Youtube/<term>/, they are not in my media pool" was invisible on
+        # both ends.
+        self._given_up = 0
 
         # -- worker-thread-only state.
         # {path: (size, mtime)} from the PREVIOUS scan. A file is settled
@@ -409,15 +459,25 @@ class YoutubeImporter:
         probe or walk anything.
         """
         with self._lock:
-            return {
-                "state": self._state,
-                "pending": self._pending,
+            state = self._state
+            pending = self._pending
+            last_error = self._last_error
+            given_up = self._given_up
+            answer = {
+                "state": state,
+                "pending": pending,
                 "imported_session": self._imported_session,
                 "failed_session": self._failed_session,
                 "last_import_at": self._last_import_at,
                 "last_bin": self._last_bin,
-                "last_error": self._last_error,
+                "last_error": last_error,
+                "given_up": given_up,
             }
+        # OUTSIDE the lock: pure string work, and the lock guards published
+        # state, not formatting.
+        answer["reason"] = state_reason(
+            state, pending=pending, last_error=last_error, given_up=given_up)
+        return answer
 
     # -- lifecycle ---------------------------------------------------------
     def start(self) -> None:
@@ -711,6 +771,8 @@ class YoutubeImporter:
             self._failures[path] = self._failures.get(path, 0) + 1
             attempts, cap = self._failures[path], max(1, self.max_failures)
             if attempts >= cap:
+                with self._lock:
+                    self._given_up += 1
                 log.warning(
                     "youtube import: giving up on %s after %d attempt(s). It will be "
                     "tried again on the next companion restart", path, attempts,

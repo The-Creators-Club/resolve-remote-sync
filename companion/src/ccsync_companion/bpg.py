@@ -663,6 +663,46 @@ class BpgLauncher:
         self._last_launch_at: Optional[float] = None
         self._last_start_press_at: Optional[float] = None
         self._child: Any = None
+        # RES-16 (2026-09-04). The press runs on another thread, and this is
+        # read by a status caller on a third, so it is lock-guarded even
+        # though it is one string.
+        self._status_lock = threading.Lock()
+        self._needs_editor: Optional[str] = None
+        self._launched_for = 0
+
+    # The one thing in this whole module a human has to do, addressed to the
+    # human (RES-16, 2026-09-04). Until now it was a WARNING in companion.log
+    # telling an editor -- who reads no logs -- to click a button, while the
+    # fleet went without BRAW proxies. The log line stays; this is the same
+    # sentence where a tray or a settings window can show it.
+    NEEDS_START_PRESS = (
+        "CCSync opened the Blackmagic Proxy Generator to make proxies, but "
+        "could not press Start. Press Start in its window."
+    )
+
+    def status(self) -> dict[str, Any]:
+        """What this launcher knows, for a status reader. No I/O, no probes.
+
+        `needs_editor` is a sentence for the editor or None: None means there
+        is nothing for them to do, which is the normal state. It is cleared
+        the moment a Start press succeeds, so a window somebody started by
+        hand stops nagging on its own.
+        """
+        with self._status_lock:
+            needs_editor = self._needs_editor
+            launched_for = self._launched_for
+        return {
+            "enabled": bool(self.enabled),
+            "installed": bool(self.command),
+            "autostart": bool(self.autostart),
+            "running": self._child_alive(),
+            "clips": launched_for,
+            "needs_editor": needs_editor,
+        }
+
+    def _set_needs_editor(self, sentence: Optional[str]) -> None:
+        with self._status_lock:
+            self._needs_editor = sentence
 
     def _child_alive(self) -> bool:
         return self._child is not None and self._child.poll() is None
@@ -700,10 +740,13 @@ class BpgLauncher:
         def _press() -> None:
             answer = self._press_start_fn()
             if answer == "pressed":
+                self._set_needs_editor(None)
                 log.info("bpg: pressed Start (%s) -- the queue is running", why)
             elif answer in ("already-running", "not-windows"):
+                self._set_needs_editor(None)
                 log.debug("bpg: no start press needed (%s)", answer)
             else:
+                self._set_needs_editor(self.NEEDS_START_PRESS)
                 # Worth a WARNING: BPG is up, something needs encoding, and
                 # nothing is happening -- which is indistinguishable from the
                 # bug this replaced unless we say so.
@@ -775,6 +818,8 @@ class BpgLauncher:
             self._last_launch_at = now      # don't retry in a tight loop
             return "launch failed"
         self._last_launch_at = now
+        with self._status_lock:
+            self._launched_for = int(needs_resolve)
         # A BPG we just started must not be masked by a process list read
         # before it existed -- the cache is a cost saver, not a state.
         _reset_probe_cache()

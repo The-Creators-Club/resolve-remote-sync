@@ -178,6 +178,19 @@ def reminder(drive: str, summary: str) -> str:
             f"still to go. Plug it back in to finish syncing.")
 
 
+def wedged_reminder(drive: str) -> str:
+    """The reminder for a drive that is PLUGGED IN and not answering
+    (SYNC-120, sweep 2026-09-03).
+
+    Its own sentence, because "still disconnected" sends the editor to check
+    a cable that is fine and leaves the one thing that does fix it unsaid.
+    This is the harder failure of the two: an absent drive is obvious, a
+    wedged one is not, and the editor keeps working in Resolve against it
+    with their footage on one disk for as long as it lasts."""
+    return (f"{drive} is still not answering, so nothing is syncing. Reconnect it "
+            f"or restart this computer.")
+
+
 def interval_seconds(cfg: Optional[dict], default_minutes: float = DEFAULT_REMINDER_MINUTES) -> float:
     """drive_reminder_minutes -> seconds. 0 disables the recurrence (the
     first warning is unconditional); a negative or unreadable value falls
@@ -229,6 +242,13 @@ class DriveReminder:
         self._thread: Optional[threading.Thread] = None
         self._summary: Optional[str] = None
         self._since: Optional[float] = None
+        # SYNC-120: an episode can also be opened by a STATE that persists
+        # rather than by work that was owed. `_sentence` is what remind_now()
+        # says; `_kind` is what may end it. The two are kept apart from
+        # `_summary` on purpose -- the tray renders the summary as "<N> still
+        # to go", and a state has nothing to go.
+        self._sentence: Optional[str] = None
+        self._kind = ""
         self.reminders_sent = 0
 
     # -- what the tray asks --------------------------------------------------
@@ -242,7 +262,7 @@ class DriveReminder:
 
     @property
     def active(self) -> bool:
-        return self._summary is not None
+        return self._sentence is not None
 
     # -- episode control -----------------------------------------------------
 
@@ -258,9 +278,11 @@ class DriveReminder:
             if not summary:
                 return
             with self._lock:
-                if self._summary is not None:
+                if self._sentence is not None:
                     return
                 self._summary = summary
+                self._sentence = reminder(self._drive_phrase(), summary)
+                self._kind = "unfinished"
                 self._since = self._clock()
             self._write_record()
             if announce:
@@ -278,7 +300,17 @@ class DriveReminder:
                 return False
             summary = str(record.get("summary") or "").strip()
             if not summary:
-                return False
+                # A state episode (SYNC-120) has no owed work to name. Carry
+                # it on with the sentence it was opened with, and one
+                # reminder now for the same reason the unfinished branch
+                # below gives one.
+                sentence = str(record.get("sentence") or "").strip()
+                if not sentence:
+                    return False
+                self.begin_state(str(record.get("kind") or "state"), sentence)
+                if self.active:
+                    self.remind_now()
+                return self.active
             log.info("drive reminder: the drive was out with work owed when the "
                      "companion last ran (%s) -- reminders carry on", summary)
             # Not the FIRST warning again (that was shown before the
@@ -294,12 +326,50 @@ class DriveReminder:
             log.exception("drive reminder: could not resume the remembered episode")
             return False
 
+    def begin_state(self, state: str, sentence: str) -> None:
+        """The drive is in a state that will not fix itself, and nothing was
+        owed (SYNC-120). Reminds on the same cadence with `sentence`.
+
+        No first warning: the caller has just sent one (that is the whole
+        reason this arm exists), and a second balloon in the same second
+        would be the thing that teaches an editor to ignore both. An
+        unfinished-work episode always WINS -- it names what is at risk --
+        so this never displaces one.
+        """
+        try:
+            text = str(sentence or "").strip()
+            if not text:
+                return
+            with self._lock:
+                if self._sentence is not None:
+                    return
+                self._sentence = text
+                self._kind = str(state or "state")
+                self._since = self._clock()
+            log.info("drive reminder: %s and nothing was owed -- reminding every "
+                     "%.0f min until it answers", self._kind, self._interval / 60.0)
+            self._write_record()
+            self._start_thread()
+        except Exception:
+            log.exception("drive reminder: could not begin a state episode")
+
+    def end_state_episode(self) -> None:
+        """The state that opened a state episode has changed. Ends it, and
+        ONLY it: an unfinished-work episode outlives every state change,
+        because the work is still owed whatever the drive is doing now."""
+        with self._lock:
+            if self._kind in ("", "unfinished"):
+                return
+        self.clear()
+
     def clear(self) -> None:
         """The drive is back. Stops the reminders and forgets the episode."""
         try:
             with self._lock:
-                had = self._summary
+                had = self._summary or self._sentence
                 self._summary = None
+                self._sentence = None
+                self._kind = ""
                 self._since = None
             self._stop_thread()
             self._delete_record()
@@ -322,10 +392,10 @@ class DriveReminder:
         """One reminder, if an episode is open. Public so a test can drive
         the cadence without a clock; the thread calls this."""
         with self._lock:
-            summary = self._summary
-        if not summary:
+            sentence = self._sentence
+        if not sentence:
             return False
-        self._say(reminder(self._drive_phrase(), summary))
+        self._say(sentence)
         self.reminders_sent += 1
         return True
 
@@ -378,6 +448,11 @@ class DriveReminder:
             self._state_path.parent.mkdir(parents=True, exist_ok=True)
             payload = {
                 "summary": self._summary,
+                # Persisted so a restart with the drive still wedged carries
+                # on saying the same thing (SYNC-120): the episode outlives
+                # the process, which is the case the record exists for.
+                "sentence": self._sentence,
+                "kind": self._kind,
                 "since": self._since,
                 "since_iso": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(self._since or 0)),
             }

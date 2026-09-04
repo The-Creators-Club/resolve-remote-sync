@@ -1362,3 +1362,26 @@ def test_the_broll_status_probe_shares_the_same_slot(monkeypatch):
         thread.join(timeout=10)
 
     assert calls == [music_worker.BROLL_STATUS_ACTION]
+
+
+def test_at_the_download_cap_the_music_route_says_wait_not_error(tmp_path):
+    """CMEDIA-7: an editor who clicked "+ Resolve" on a cue while two camera
+    originals were in flight got a red toast and had to remember to come back.
+    The key is `message` and not `error` BECAUSE nothing failed."""
+    from ccsync_companion import broll_fetch
+
+    cfg = _editor_cfg(tmp_path)
+    mounts = music_server.resolve_music_mounts({}, cfg)
+
+    status, body = music_server.build_send_response(
+        _send_body(), mounts, ccsync_cfg=cfg,
+        fetcher=lambda *a, **k: {"state": broll_fetch.STATE_BUSY,
+                                 "message": broll_fetch.BUSY_MESSAGE,
+                                 "retry_after": 1.5},
+        caller=lambda *a, **k: pytest.fail("nothing is sent while it waits"))
+
+    assert status == 200
+    assert body["ok"] is True and body["state"] == "busy"
+    assert body["retry_after"] == broll_fetch.BUSY_RETRY_AFTER_SECONDS
+    assert "error" not in body
+    assert "already downloading" in body["message"]

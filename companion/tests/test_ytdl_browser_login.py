@@ -465,3 +465,66 @@ def test_an_aged_stale_record_reads_as_unused_not_as_a_fault():
     # A fresh record keeps the old, louder sentence.
     snap["ytdl_cookies_health"]["aged"] = False
     assert "no longer works" in tray._youtube_warning_line(snap)
+
+
+# ---------------------------------------------------------------------------
+# CYT-15: the ten-minute wait says something more than once (2026-09-04)
+# ---------------------------------------------------------------------------
+
+
+def test_progress_is_called_at_least_every_five_seconds(tmp_path, monkeypatch):
+    """One balloon on launch and then silence for up to ten minutes: an editor
+    who got distracted came back to a closed browser window and an expired
+    balloon, with nothing anywhere saying what had happened."""
+    seen = []
+    session = _Session([[_cookie("PREF")]])
+    out, _st = _flow(monkeypatch, tmp_path, session, login_timeout=60.0,
+                     progress=lambda elapsed, remaining, phase:
+                     seen.append((elapsed, remaining, phase)))
+
+    assert not out.ok
+    # The launch line names the browser and the way out.
+    assert "FakeEdge is opening" in seen[0][2]
+    assert "Close the window to cancel" in seen[0][2]
+    waits = [row for row in seen if row[2] == bl.PHASE_WAITING]
+    assert len(waits) >= 60 / bl.PROGRESS_SECONDS - 1
+    # Every one of them carries a clock the tray can put in a balloon, and the
+    # two halves add up to the timeout.
+    for elapsed, remaining, _phase in waits:
+        assert elapsed >= 0 and remaining >= 0
+        assert round(elapsed + remaining, 3) == 60.0
+    assert [row[0] for row in waits] == sorted(row[0] for row in waits)
+
+
+def test_the_timeout_names_the_next_action(tmp_path, monkeypatch):
+    """"nothing saved" told the editor what did not happen and left them with
+    no idea what to do about it."""
+    session = _Session([[_cookie("PREF")]])
+    out, _st = _flow(monkeypatch, tmp_path, session, login_timeout=3.0)
+
+    assert not out.ok
+    assert "did not finish in time" in out.message
+    assert "Settings > YOUTUBE" in out.message
+
+
+def test_a_progress_callback_that_raises_cannot_take_the_sign_in_down(
+        tmp_path, monkeypatch):
+    """It runs on the flow's own thread and the flow owns a browser process."""
+    def boom(*_a):
+        raise RuntimeError("the tray went away")
+
+    session = _Session([[_cookie("PREF")], [_cookie("SID"), _cookie("SAPISID")]])
+    out, st = _flow(monkeypatch, tmp_path, session, progress=boom)
+
+    assert out.ok, out.message
+    assert st["installed"], "the cookies were still written"
+
+
+def test_the_saving_step_is_announced_before_the_write(tmp_path, monkeypatch):
+    seen = []
+    session = _Session([[_cookie("SID"), _cookie("SAPISID")]])
+    out, _st = _flow(monkeypatch, tmp_path, session,
+                     progress=lambda e, r, phase: seen.append(phase))
+
+    assert out.ok, out.message
+    assert seen[-1] == bl.PHASE_SAVING

@@ -386,8 +386,14 @@ class Sequencer:
         self._now = now
         self._clone_tree_fn = clone_tree_fn
         # Editor-side half of server-side project moves (sync/repath.py).
+        # SYNC-102 (sweep 2026-09-03): it keeps an events ledger beside the
+        # other companion state and is handed the SAME relink file_moves
+        # uses, so a project the admin renamed relinks in Resolve instead of
+        # going offline mid-session with nothing anywhere saying why.
         self.repather = repather if repather is not None else ProjectRepather(
-            admin, self.local_root
+            admin, self.local_root,
+            state_dir=self._state_dir_for(cfg),
+            relink_fn=self._relink_moved_project,
         )
 
         self._stop_event = threading.Event()
@@ -491,6 +497,32 @@ class Sequencer:
         # needed instead of a blind sweep over the whole selection (each one
         # makes Syncthing commit its config and restart the folder).
         self._paused_by_us: set[str] = set()
+
+    @staticmethod
+    def _state_dir_for(cfg: dict[str, Any]) -> Optional[Path]:
+        """`~/.ccsync/state` from the config, the same expression app.py
+        uses. None when it cannot be worked out, which is a ledger that
+        keeps its events in memory rather than a sequencer that will not
+        build (this runs inside CompanionApp.__init__, where a raise is a
+        windowed exe vanishing with no tray and no log line)."""
+        try:
+            return config_mod.resolved_log_path(cfg).parent / "state"
+        except Exception:
+            log.debug("sequencer: could not resolve the state directory", exc_info=True)
+            return None
+
+    def _relink_moved_project(self, old_local: str, new_local: str) -> tuple[bool, str]:
+        """The repather's Resolve half (SYNC-102): file_moves' relink, bound
+        to this machine's roots. A directory, always: a repath moves the
+        whole project folder."""
+        from .. import file_moves as file_moves_mod
+
+        return file_moves_mod.relink_moved(
+            old_local, new_local,
+            str(self.cfg.get("local_root", "")),
+            str(self.cfg.get("canonical_prefix", "")),
+            is_dir=True,
+        )
 
     # -- lifecycle -----------------------------------------------------
     def start(self) -> None:
@@ -764,6 +796,157 @@ class Sequencer:
             except Exception:
                 log.debug("sequencer: unconfirmed check failed for %s", slug, exc_info=True)
         return out
+
+    # -- what this computer is doing, per project (SYNC-107) ---------------
+    def project_status(self) -> list[dict]:
+        """One row per project in THIS computer's plan.
+
+        SYNC-107 (sweep 2026-09-03): the only enumeration of the plan an
+        editor could see was the stack of destructive buttons in ADVANCED,
+        so "is FF5 meant to be on this machine, and what is it waiting for?"
+        meant opening the dashboard in a browser -- and an editor on
+        upload-only had no way to learn that their proxies are never coming
+        by design. Every value here was already computed; none of it was
+        readable.
+
+        Each row: {slug, label, mode, state, lanes: {A, B, C}, detail}.
+        `state` is one of "syncing", "waiting", "paused", "blocked", and
+        `detail` is a whole sentence or None. Never raises: this feeds a
+        window, and a window that cannot draw is not worth a stopped
+        sequencer."""
+        with self._lock:
+            state = self._state
+            current = self._current_slug
+            position = self._current_position
+            total = self._current_total
+            queued = set(self._queue_slugs)
+            items = list(self._slug_to_item.values())
+            upload_only = set(self._upload_only_slugs)
+        try:
+            unconfirmed = set(self.unconfirmed_slugs())
+        except Exception:
+            unconfirmed = set()
+        blocked = self._repath_blocked_by_slug()
+        rows: list[dict] = []
+        for item in _sort_by_position(items):
+            slug = str(item.get("slug") or "")
+            if not slug:
+                continue
+            label = str(item.get("label") or item.get("rel_path") or slug)
+            mode = SYNC_MODE_UPLOAD_ONLY if slug in upload_only else SYNC_MODE_FULL
+            detail: Optional[str] = None
+            if slug in blocked:
+                row_state = "blocked"
+                detail = blocked[slug]
+            elif slug in unconfirmed:
+                row_state = "blocked"
+                detail = ("Waiting for its filter list from the server. It starts "
+                          "by itself once that arrives.")
+            elif state in (STATE_PAUSED, STATE_STOPPED):
+                row_state = "paused"
+                detail = "Sync is paused on this computer."
+            elif slug == current:
+                row_state = "syncing"
+                detail = f"Syncing now ({position} of {total})."
+            elif slug in queued:
+                row_state = "waiting"
+                detail = "Waiting its turn."
+            else:
+                row_state = "waiting"
+            if mode == SYNC_MODE_UPLOAD_ONLY and row_state in ("syncing", "waiting"):
+                # The one fact an upload-only editor has no other way to
+                # learn: their proxies are not late, they are not coming
+                # (docs/UPLOAD_ONLY_TICK.md).
+                uploads = "Uploads only. Proxies do not come down for this project."
+                detail = f"{detail} {uploads}" if detail else uploads
+            rows.append({
+                "slug": slug,
+                "label": label,
+                "mode": mode,
+                "state": row_state,
+                "lanes": self._lane_states(row_state, slug == current,
+                                           mode == SYNC_MODE_UPLOAD_ONLY),
+                "detail": detail,
+            })
+        return rows
+
+    def _lane_states(self, row_state: str, is_current: bool,
+                     upload_only: bool) -> dict[str, str]:
+        """The three lanes as they stand FOR THIS PROJECT.
+
+        Only the project whose turn it is has live lanes: lanes A and B run
+        one subtree at a time and lane C is a per-folder poll the lane does
+        not publish per folder, so every other row says "waiting" rather
+        than borrowing another project's colour. "off" is the deliberate
+        one: an upload-only tick has no lane B and no lane C turn at all
+        (docs/UPLOAD_ONLY_TICK.md), which is exactly what the editor cannot
+        find out anywhere else."""
+        if not is_current:
+            waiting = "paused" if row_state == "paused" else "waiting"
+            return {"A": waiting,
+                    "B": "off" if upload_only or not self.lane_b_enabled else waiting,
+                    "C": "off" if upload_only else waiting}
+        return {
+            "A": self._lane_state(self.lane_a),
+            "B": ("off" if upload_only or not self.lane_b_enabled
+                  else self._lane_state(self.lane_b)),
+            "C": "off" if upload_only else "syncing",
+        }
+
+    @staticmethod
+    def _lane_state(lane: Any) -> str:
+        """A lane's own state word, or "unknown" when it cannot answer. A
+        status() that raises must not cost the whole window."""
+        try:
+            return str(getattr(lane.status(), "state", "") or "unknown")
+        except Exception:
+            return "unknown"
+
+    # -- the shared and borrowed folders that failed (SYNC-101) ------------
+    def shared_folder_problems(self) -> list[str]:
+        """One sentence per shared or borrowed folder that is not working on
+        this machine, naming the folder and the reason.
+
+        SYNC-101: both managers used to return an outcome dict this
+        sequencer discarded, so a LUT library the server had never shared
+        with the device produced no tray line, no lane state, no report
+        field and (at the default level) no log line either. Never raises."""
+        out: list[str] = []
+        for manager in (self.shared_folders, self.borrowed_folders):
+            reader = getattr(manager, "problems", None)
+            if reader is None:
+                continue
+            try:
+                out.extend(str(text) for text in (reader() or []))
+            except Exception:
+                log.debug("sequencer: could not read the folder problems", exc_info=True)
+        return out
+
+    # -- server-side project renames (SYNC-102) ----------------------------
+    def repath_events(self) -> list[dict]:
+        """The last few project renames the server made and what this
+        machine did about each: {slug, old, new, at, relinked, note}.
+        Newest last. Never raises."""
+        try:
+            return list(self.repather.ledger.events())
+        except Exception:
+            log.debug("sequencer: could not read the repath events", exc_info=True)
+            return []
+
+    def _repath_blocked_by_slug(self) -> dict[str, str]:
+        """slug -> the sentence for a rename whose move could not be made
+        (SYNC-102). One project quietly not syncing is the thing this makes
+        sayable, so it is read on every project_status()."""
+        blocked: dict[str, str] = {}
+        for event in self.repath_events():
+            slug = str(event.get("slug") or "")
+            if not slug:
+                continue
+            if event.get("moved"):
+                blocked.pop(slug, None)
+            else:
+                blocked[slug] = str(event.get("note") or "")
+        return blocked
 
     def halt_folder_ids(self) -> list[str]:
         """EVERY lane C folder a halt has to pause: the selected projects

@@ -59,6 +59,35 @@ PROXY_EXTENSIONS = (".mov", ".mp4")
 
 PROXY_DIR_NAME = "Proxy"
 
+# -- what the editor is told (RES-3, 2026-09-04) -----------------------------
+#
+# Until now the attach half of the proxy feature had no user-visible surface
+# at all: apply_relinks built "repointed 3 proxy link(s), 12 refused by
+# Resolve" and app.py dropped it, the one sentence that answers "why is my
+# proxy not attached" was a WARNING in a 5 MB-rotating log, and the per-clip
+# reason was DEBUG. These are the same diagnoses in the words an editor can
+# act on; apply_relinks returns them as `why` and per-clip `details`, and the
+# log lines stay exactly where they were for the people who read logs.
+REASON_REFUSED = (
+    "Resolve would not attach this proxy. Usually the proxy's timecode does "
+    "not match the original."
+)
+REASON_NO_ANSWER = (
+    "Resolve did not answer about this clip, so CCSync will try it again."
+)
+REASON_NOT_IN_POOL = (
+    "This clip is not in the project's media pool any more, so there was "
+    "nothing to attach the proxy to."
+)
+# The case that logged nothing at all: the clip already points at this exact
+# proxy file and Resolve still says it is not working, so the file itself is
+# unreadable rather than mis-addressed. Relinking it would change nothing,
+# which is why plan_relinks skips it -- and why nobody could ever find out.
+REASON_UNREADABLE = (
+    "Resolve already points at this proxy and still cannot play it, so the "
+    "proxy file itself is damaged. Delete it and CCSync will make it again."
+)
+
 
 def proxy_is_working(state: Any) -> bool:
     """Whether Resolve's `Proxy` clip property means "attached and usable".
@@ -279,6 +308,7 @@ def plan_relinks(
     exists_fn: Optional[Callable[[str], bool]] = None,
     is_windows: Optional[bool] = None,
     stat_fn: Optional[Callable[[str], Any]] = None,
+    notes: Optional[list[dict[str, Any]]] = None,
 ) -> list[dict[str, Any]]:
     """Decide which clips need their proxy repointed. Pure -- no Resolve calls.
 
@@ -295,6 +325,12 @@ def plan_relinks(
     `stat_fn` is the seam `is_refused` reads the proxy's (mtime, size)
     through, alongside `exists_fn` -- the pass keeps NO Resolve calls and no
     real filesystem in a test.
+
+    `notes`, when a caller passes a list, collects {"clip", "path", "reason"}
+    for the clips this pass DECIDES NOT TO TOUCH and could not otherwise
+    account for -- today the unreadable-proxy case, which logged nothing at
+    all before RES-3. Optional so no existing caller changes; ops are
+    unaffected either way.
     """
     ops: list[dict[str, Any]] = []
     stat = stat_fn if stat_fn is not None else os.stat
@@ -319,6 +355,13 @@ def plan_relinks(
                 # Already pointed here and still not working: the file is
                 # unreadable, not mis-addressed. Relinking would change
                 # nothing, so don't churn the project every 120 s.
+                clip_name = item.get("clip_name") or plat.basename(file_path)
+                if notes is not None:
+                    notes.append({"clip": clip_name, "path": new_proxy,
+                                  "reason": REASON_UNREADABLE})
+                log.debug("proxy relink: %s already points at %s and is still not "
+                          "working -- the proxy file is unreadable",
+                          clip_name, new_proxy)
                 continue
             if is_refused(file_path, new_proxy, stat):
                 # Resolve has already said no to this exact file, and a
@@ -343,14 +386,44 @@ def plan_relinks(
     return ops
 
 
+def _why(relinked: int, refused: list[str], failures: list[str]) -> Optional[str]:
+    """One sentence about the pass for the editor, or None (RES-3).
+
+    None rather than "" for a pass with nothing to say: a status reader that
+    renders whatever it is given must not put an empty line on the tray.
+    """
+    parts: list[str] = []
+    if relinked:
+        parts.append(
+            f"Repointed {relinked} proxy file(s) to the copies in your sync folder."
+        )
+    if refused:
+        parts.append(
+            f"{len(refused)} could not be attached: usually the proxy's timecode "
+            "does not match the original."
+        )
+    other = len(failures) - len(refused)
+    if other > 0:
+        parts.append(f"{other} got no answer from Resolve and will be tried again.")
+    return " ".join(parts) if parts else None
+
+
 def apply_relinks(ops: Iterable[dict[str, Any]], link_fn: Callable[[Any, str], dict[str, Any]],
                   stat_fn: Optional[Callable[[str], Any]] = None,
                   resolve_fn: Optional[Callable[[Any], Any]] = None,
                   ) -> dict[str, Any]:
     """Run the plan through `link_fn` (resolve_bridge.link_proxy_media).
 
-    Returns {"ok", "relinked", "failed", "message", "failures": [...]}. Never
-    raises: one clip Resolve refuses must not stop the rest.
+    Returns {"ok", "relinked", "attached", "failed", "message", "why",
+    "failures": [...], "details": [{"clip", "reason"}]}. Never raises: one
+    clip Resolve refuses must not stop the rest.
+
+    `attached`, `why` and `details` are RES-3 (2026-09-04): the counts were
+    already here and thrown away by the only caller, and the reasons only
+    ever existed as log lines. `attached` is `relinked` under the name a
+    status reader uses; `why` is the one sentence that answers "why is my
+    proxy not attached", or None when there is nothing to say. The old keys
+    stay because a status reader is not the only caller a build may have.
 
     Every refusal is REMEMBERED (note_refusal) so the next pass does not
     re-offer the same file, and the per-clip line is DEBUG with one WARNING
@@ -370,6 +443,7 @@ def apply_relinks(ops: Iterable[dict[str, Any]], link_fn: Callable[[Any, str], d
     relinked = 0
     failures: list[str] = []
     refused: list[str] = []
+    details: list[dict[str, str]] = []
     for op in ops or []:
         name = op.get("clip_name") or "clip"
         # The op carries the uid; the OBJECT is found here, at the native
@@ -383,6 +457,7 @@ def apply_relinks(ops: Iterable[dict[str, Any]], link_fn: Callable[[Any, str], d
                 name, op.get("media_pool_uid", ""),
             )
             failures.append(name)
+            details.append({"clip": name, "reason": REASON_NOT_IN_POOL})
             continue
         try:
             result = link_fn(media_pool_item, op["new_proxy"])
@@ -392,6 +467,7 @@ def apply_relinks(ops: Iterable[dict[str, Any]], link_fn: Callable[[Any, str], d
             # answer. It stays a WARNING for the same reason.
             log.warning("proxy relink: link failed for %s", name, exc_info=True)
             failures.append(name)
+            details.append({"clip": name, "reason": REASON_NO_ANSWER})
             continue
         if result and result.get("ok"):
             relinked += 1
@@ -410,6 +486,7 @@ def apply_relinks(ops: Iterable[dict[str, Any]], link_fn: Callable[[Any, str], d
             # the tray restarted. A missing reason still counts as a refusal:
             # that is what the pre-2026-09-03 shape meant.
             failures.append(name)
+            details.append({"clip": name, "reason": REASON_NO_ANSWER})
             log.warning(
                 "proxy relink: %s -> %s got no answer from Resolve (%s) -- not "
                 "remembered as a refusal",
@@ -419,6 +496,7 @@ def apply_relinks(ops: Iterable[dict[str, Any]], link_fn: Callable[[Any, str], d
         else:
             failures.append(name)
             refused.append(name)
+            details.append({"clip": name, "reason": REASON_REFUSED})
             note_refusal(op, stat)
             log.debug(
                 "proxy relink: Resolve refused %s -> %s (%s)",
@@ -440,7 +518,12 @@ def apply_relinks(ops: Iterable[dict[str, Any]], link_fn: Callable[[Any, str], d
     return {
         "ok": not failures,
         "relinked": relinked,
+        # The same number under the name a status reader asks for. Two keys
+        # rather than a rename: this dict is the whole contract app.py reads.
+        "attached": relinked,
         "failed": len(failures),
         "failures": failures,
+        "details": details,
         "message": message,
+        "why": _why(relinked, refused, failures),
     }

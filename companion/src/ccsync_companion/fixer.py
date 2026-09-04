@@ -510,6 +510,23 @@ TMP_SUFFIX = ".ccsync-tmp"
 # throughput, small enough that a progress bar moves ~4x/second at 33 MB/s.
 COPY_CHUNK_BYTES = 8 * 1024 * 1024
 
+# How much is read between two `should_abort()` polls, and how long one read
+# is allowed to take before the reads get smaller (RES-14, 2026-09-04).
+#
+# A chunk is the unit of cancellation: `fsrc.read()` cannot be interrupted,
+# so CANCEL ALL is honoured no sooner than the read in flight returns. On a
+# Google Drive placeholder hydrating at 222 MB per 10 s (the live incident at
+# copy_with_progress) an 8 MB chunk is ~0.4 s, but a cold placeholder or an
+# SMB share that is thinking blocks for the WHOLE chunk -- and during that
+# block the dialog has already disabled STOP/SKIP/CANCEL and cannot even be
+# closed. 1 MB polls eight times as often for the same bytes, and a read that
+# still takes longer than POLL_MAX_SECONDS halves the next one down to
+# MIN_CHUNK_BYTES, so a link four times slower than the incident's still
+# answers the button inside two seconds.
+POLL_CHUNK_BYTES = 1024 * 1024
+POLL_MAX_SECONDS = 0.5
+MIN_CHUNK_BYTES = 64 * 1024
+
 # Windows file attributes meaning "this file is not really on this disk".
 # Cloud filesystems (Google Drive File Stream, OneDrive Files On-Demand,
 # Dropbox Smart Sync) leave a placeholder and HYDRATE it -- download it --
@@ -593,6 +610,7 @@ def copy_with_progress(
     on_bytes: Optional[Callable[[int, int], None]] = None,
     chunk_size: int = COPY_CHUNK_BYTES,
     should_abort: Optional[Callable[[], bool]] = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> None:
     """shutil.copy2 semantics, but reporting bytes as it goes.
 
@@ -608,9 +626,13 @@ def copy_with_progress(
     cheap and must not raise; exceptions from it are swallowed rather than
     failing a copy that is otherwise fine.
 
-    `should_abort()` is polled ONCE PER CHUNK (and once before the first
-    read). A chunk is 8 MB, so the button the user just clicked responds
-    inside a second on any real link. When it returns True the copy stops and
+    `should_abort()` is polled BEFORE EVERY READ, and a read is at most
+    POLL_CHUNK_BYTES (1 MB) -- shrinking to MIN_CHUNK_BYTES when a read takes
+    longer than POLL_MAX_SECONDS, which is what a cloud placeholder or a
+    stalled share does. `chunk_size` is a CEILING on the read, not the unit
+    of anything else: `on_bytes` still fires once per read, because that
+    callback is how popup's [ SKIP THIS FILE ] reaches this loop at all
+    (RES-14, 2026-09-04). When it returns True the copy stops and
     CopyAborted is raised AFTER both file handles are closed -- raising from
     inside the `with` would leave the caller trying to unlink `dst` while a
     Windows handle to it is still open, which fails with "in use by another
@@ -647,17 +669,34 @@ def copy_with_progress(
     copied = 0
     aborted = False
     report(0)
+    try:
+        read_size = min(POLL_CHUNK_BYTES, max(1, int(chunk_size)))
+    except (TypeError, ValueError):
+        read_size = POLL_CHUNK_BYTES
     with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
         while True:
             if aborting():
                 aborted = True
                 break
-            chunk = fsrc.read(chunk_size)
+            started = clock()
+            chunk = fsrc.read(read_size)
             if not chunk:
                 break
             fdst.write(chunk)
             copied += len(chunk)
+            # ONE REPORT PER READ, as it always was. Not one per `chunk_size`:
+            # popup's [ SKIP THIS FILE ] arrives THROUGH this callback (its
+            # state_fn requests the skip on the first non-zero progress), so
+            # batching the reports would mean a small file finished copying
+            # before the abort predicate was ever asked -- the popup
+            # end-to-end tests pin exactly that (2026-09-04).
             report(copied)
+            # A read that took longer than the poll budget means the source is
+            # hydrating or the share is stalling; ask for less next time so the
+            # cancel the editor already pressed is honoured, not so the copy
+            # goes faster.
+            if clock() - started > POLL_MAX_SECONDS and read_size > MIN_CHUNK_BYTES:
+                read_size = max(MIN_CHUNK_BYTES, read_size // 2)
     if aborted:
         # Handles are closed by now (see above) -- the caller can unlink.
         raise CopyAborted(f"copy of {src} abandoned by the user after {copied} bytes")
@@ -1142,7 +1181,12 @@ def fix_clip(
     callable) overrides the copier entirely, for tests.
 
     `should_abort()` is the [ SKIP THIS FILE ] / [ CANCEL ALL ] predicate,
-    polled per chunk by the default copier. On abort NOTHING is relinked (no
+    polled every 1 MB by the default copier AND between clips in the relink
+    loop (RES-14): a clip cut in 50 places is 50 uninterruptible ReplaceClip
+    calls, and the dialog is disabled and unclosable for all of them. An
+    abort THERE keeps the copy and reports `relinked`/`partial_relink`,
+    because the bytes are on disk and the clips already repointed are
+    correct. On abort during the COPY nothing is relinked (no
     ReplaceClip), BOTH artifacts of the attempt are deleted -- the partial
     `.ccsync-tmp` and the 0-byte O_EXCL name reservation -- and the result
     comes back as {"ok": False, "aborted": True}, i.e. a third outcome that
@@ -1258,6 +1302,19 @@ def fix_clip(
     )
     placeholder = is_placeholder(str(src))
     src_before = sample_source(src)
+
+    def items_aborting() -> bool:
+        """The cancel predicate for the relink loop. Swallows its own
+        exceptions and reads them as "carry on", exactly as the copier does:
+        a misbehaving UI predicate must never abandon work in Resolve."""
+        if should_abort is None:
+            return False
+        try:
+            return bool(should_abort())
+        except Exception:
+            log.debug("fix_clip: abort callback failed", exc_info=True)
+            return False
+
     try:
         copy_fn(src, tmp_path)
         dest_path = reclaim_if_reservation_lost(dest_dir, dest_path, src.name)
@@ -1339,8 +1396,31 @@ def fix_clip(
         }
 
     failures: list[str] = []
+    relinked = 0
     relink_path = canonical_clip_path(dest_path, local_root, canonical_prefix)
     for entry in items:
+        # RES-14 (2026-09-04): between clips, never during one. A ReplaceClip
+        # is a native call that cannot be interrupted, but a clip cut in 50
+        # places is 50 of them, and until now CANCEL ALL was not consulted
+        # once in this loop -- so the dialog sat disabled and unclosable for
+        # the whole batch. The copy has already landed and some clips are
+        # already repointed, so this is not the CopyAborted bargain: nothing
+        # is deleted, and the result says exactly how far it got.
+        if items_aborting():
+            log.info("fix_clip: relinking of %s stopped by the user after %d of %d "
+                     "item(s)", file_path, relinked, len(items))
+            return {
+                "ok": False,
+                "aborted": True,
+                "message": (
+                    f"Stopped by you. {src.name} was copied in and "
+                    f"{relinked} of {len(items)} clip(s) were repointed at the copy. "
+                    "Run FIX ALL again to finish the rest."
+                ),
+                "copied_to": str(dest_path),
+                "relinked": relinked,
+                "partial_relink": True,
+            }
         # Resolved at the moment of the native call, not when the batch was
         # collected (library walk, 2026-08-26): an entry may be an item dict
         # carrying only a uid. A clip that cannot be found is a FAILURE, not
@@ -1355,6 +1435,8 @@ def fix_clip(
         relink_result = replace_clip_fn(media_pool_item, relink_path)
         if not relink_result.get("ok"):
             failures.append(relink_result.get("message", "unknown error"))
+        else:
+            relinked += 1
 
     if failures:
         return {

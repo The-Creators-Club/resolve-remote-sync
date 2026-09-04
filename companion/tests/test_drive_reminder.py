@@ -252,3 +252,68 @@ def test_begin_after_clear_is_a_fresh_episode(tmp_path):
     assert reminder._thread is not None and reminder._thread.is_alive()
     assert threading.active_count() >= 2
     reminder.clear()
+
+
+# --- SYNC-120: a drive that wedges and never answers -------------------------
+#
+# CR-92's reminders are gated on work having been OWED at the moment the drive
+# went. A drive that wedges (ROOT_NOT_ANSWERING) while the machine happens to
+# be up to date got one balloon and then nothing, indefinitely -- the harder
+# of the two failures, because a physically absent drive is obvious and a
+# wedged one is not, and the editor keeps working in Resolve against it.
+
+
+def test_a_state_episode_reminds_with_its_own_sentence(tmp_path):
+    reminder, notes = _reminder(tmp_path)
+    reminder.begin_state("not_answering", dr.wedged_reminder("Your Studio drive"))
+
+    assert reminder.active is True
+    # No first warning: the caller has just sent one, and two balloons in the
+    # same second is what teaches an editor to ignore both.
+    assert notes.sent == []
+    assert reminder.remind_now() is True
+    assert "not answering" in notes.sent[0][0]
+    # ...and NOT as owed work: the tray line reads "<n> still to go" off this.
+    assert reminder.summary is None
+
+
+def test_an_unfinished_episode_is_never_displaced_by_a_state(tmp_path):
+    reminder, notes = _reminder(tmp_path)
+    reminder.begin("2 uploads (2.3 GB left)")
+    reminder.begin_state("not_answering", dr.wedged_reminder("Your Studio drive"))
+    reminder.remind_now()
+    assert "2 uploads" in notes.sent[-1][0]
+    assert reminder.summary == "2 uploads (2.3 GB left)"
+
+
+def test_end_state_episode_only_ends_a_state_one(tmp_path):
+    reminder, _notes = _reminder(tmp_path)
+    reminder.begin("2 uploads (2.3 GB left)")
+    reminder.end_state_episode()
+    assert reminder.active is True, "the work is still owed whatever the drive does"
+
+    reminder.clear()
+    reminder.begin_state("not_answering", "still not answering")
+    reminder.end_state_episode()
+    assert reminder.active is False
+
+
+def test_a_state_episode_survives_a_restart(tmp_path):
+    reminder, _notes = _reminder(tmp_path)
+    reminder.begin_state("not_answering", "still not answering")
+
+    later, notes = _reminder(tmp_path)
+    assert later.resume_remembered() is True
+    assert later.active is True
+    assert notes.sent, "the editor who just restarted is told before anything else"
+    assert "not answering" in notes.sent[0][0]
+
+
+def test_the_drive_coming_back_clears_a_state_episode(tmp_path):
+    reminder, _notes = _reminder(tmp_path)
+    reminder.begin_state("not_answering", "still not answering")
+    reminder.clear()
+    assert reminder.active is False
+    assert reminder.remind_now() is False
+    again, _n = _reminder(tmp_path)
+    assert again.resume_remembered() is False

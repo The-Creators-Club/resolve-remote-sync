@@ -373,8 +373,13 @@ def test_the_batch_list_shows_machine_heartbeat_and_counts(js):
     body = body[:body.index("\n}\n")]
     assert "batch.machine" in body and "no machine yet" in body
     assert "ingestAgo(batch.last_heartbeat_at)" in body
+    # The counters moved into ingestBatchCounts when they were put into words
+    # (BROLL-22, 2026-09-04); the card is still what shows them.
+    assert "ingestBatchCounts(batch)" in body
+    counts = js[js.index("function ingestBatchCounts"):]
+    counts = counts[:counts.index("\n}\n")]
     for counter in ("n_done", "n_items", "n_live", "n_failed", "n_duplicate"):
-        assert counter in body, counter
+        assert counter in counts, counter
 
 
 # --- the companion-absent state ----------------------------------------------

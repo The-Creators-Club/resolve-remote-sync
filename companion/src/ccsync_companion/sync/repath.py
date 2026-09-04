@@ -9,8 +9,10 @@ selection says it should live (local_root/Projects/<rel_path>). A mismatch
 means the project moved server-side -- so move the local directory to match
 and re-point the local folder.
 
-Deliberately STATELESS: the local Syncthing config *is* the persisted
-state. That closes the seeding gap -- a fresh install, an editor offline
+The DECISION is deliberately stateless: the local Syncthing config *is* the
+persisted state. (The events ledger added for SYNC-102 records what happened
+so the editor can be told; nothing in it decides whether to repath.) That
+closes the seeding gap -- a fresh install, an editor offline
 through several moves, or an upgrade from a pre-repath companion all
 converge on first reconcile, because there's no history file to be missing.
 
@@ -24,16 +26,30 @@ rest of sync/.
 from __future__ import annotations
 
 import errno
+import json
 import logging
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .syncthing_admin import SyncthingAdmin
 
 log = logging.getLogger("ccsync.sync.repath")
+
+# SYNC-102 (sweep 2026-09-03). A server-side rename moved the editor's whole
+# project directory with no toast, no tray line, no report field and no
+# Resolve relink, so the project went offline mid-session with nothing
+# anywhere saying why -- while a single-file move (file_moves.py) got all
+# four. These are the state that makes it sayable.
+EVENTS_FILENAME = "repath_events.json"
+EVENTS_MAX = 20
+# How long an applied repath keeps asking to be relinked, matching
+# file_moves.RELINK_WINDOW_SECONDS: the editor may not open that project for
+# weeks, and every clip in it is offline until they do.
+RELINK_WINDOW_SECONDS = 30 * 24 * 3600
 
 # "C:", "c:", "Z:" -- a drive letter as a path SEGMENT, which pathlib and
 # ntpath both treat as re-rooting the join.
@@ -160,16 +176,137 @@ def _item_is_valid(item: dict) -> bool:
     return True
 
 
+class RepathLedger:
+    """The last EVENTS_MAX server-side project moves this machine made, and
+    whether Resolve has been repointed for each (SYNC-102).
+
+    Persisted under `~/.ccsync/state/` for the same reason file_moves' is:
+    "the clips will reconnect next time you open that project" is a promise
+    that has to survive the restart the editor makes in between. A ledger
+    with no state_dir keeps the events in memory only, which is what every
+    test and every bare ProjectRepather gets.
+    """
+
+    def __init__(self, state_dir: Optional[Path | str] = None,
+                 now: Callable[[], float] = time.time) -> None:
+        self._path = Path(state_dir) / EVENTS_FILENAME if state_dir else None
+        self._now = now
+        self._events: list[dict[str, Any]] = []
+        self._load()
+
+    def _load(self) -> None:
+        if self._path is None:
+            return
+        try:
+            data = json.loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        events = data.get("events") if isinstance(data, dict) else None
+        if isinstance(events, list):
+            self._events = [e for e in events if isinstance(e, dict) and e.get("old")]
+
+    def _save(self) -> None:
+        if self._path is None:
+            return
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps({"events": self._events[-EVENTS_MAX:]}, indent=1),
+                           encoding="utf-8")
+            tmp.replace(self._path)
+        except OSError:
+            log.exception("repath: could not write the events ledger")
+
+    def record(self, slug: str, old: str, new: str, note: str,
+               relinked: Optional[bool], moved: bool = True) -> dict[str, Any]:
+        event = {
+            "id": int(float(self._now()) * 1000),
+            "slug": str(slug),
+            "old": str(old),
+            "new": str(new),
+            "at": float(self._now()),
+            "relinked": relinked,
+            "note": str(note)[:512],
+            "moved": bool(moved),
+        }
+        # One row per project per outcome: a folder that cannot be moved is
+        # retried every pass, and twenty identical "could not move" events
+        # would push out the twenty renames the editor actually wants to
+        # read.
+        self._events = [e for e in self._events
+                        if not (e.get("slug") == event["slug"]
+                                and e.get("old") == event["old"]
+                                and e.get("moved") == event["moved"])]
+        self._events.append(event)
+        self._events = self._events[-EVENTS_MAX:]
+        self._save()
+        return event
+
+    def events(self) -> list[dict[str, Any]]:
+        """Newest last, the order they happened in."""
+        return [dict(e) for e in self._events]
+
+    def pending_relinks(self) -> list[dict[str, Any]]:
+        """Applied repaths whose Resolve clips have not been repointed yet:
+        `relinked is None` means "Resolve was not open", which is not an
+        answer to the question (the RES-10 rule, kept identical here)."""
+        cutoff = float(self._now()) - RELINK_WINDOW_SECONDS
+        return [dict(e) for e in self._events
+                if e.get("moved") and e.get("relinked") is None
+                and e.get("old") and e.get("new")
+                and float(e.get("at") or 0) >= cutoff]
+
+    def mark_relinked(self, event_id: Any, relinked: bool, note: str = "") -> None:
+        for event in self._events:
+            if event.get("id") == event_id:
+                event["relinked"] = bool(relinked)
+                if note:
+                    event["note"] = str(note)[:512]
+                self._save()
+                return
+
+
+def moved_note(name: str, relinked: Optional[bool]) -> str:
+    """What the editor is told about a rename that worked. No em dashes."""
+    head = (f"Your admin renamed a project on the server. CC Sync moved your copy "
+            f"to match ({name}).")
+    if relinked:
+        return head + " Resolve was relinked."
+    return head + " Resolve reconnects the clips next time you open that project."
+
+
+def blocked_note(name: str) -> str:
+    """What the editor is told about a rename whose move could not be made.
+
+    The words the finding asked for, and the same ones the Settings line and
+    the dashboard chip carry: this is the one sentence that explains a
+    project quietly not syncing."""
+    return (f"{name} is not syncing because CC Sync could not move its folder. "
+            f"Your files are safe where they are. Close it in Resolve and in "
+            f"Explorer, then it retries by itself.")
+
+
 class ProjectRepather:
     def __init__(
         self,
         admin: SyncthingAdmin,
         local_root: str,
         move_fn: Callable[[str, str], Any] = _default_move,
+        state_dir: Optional[Path | str] = None,
+        relink_fn: Optional[Callable[[str, str], tuple[bool, str]]] = None,
+        now: Callable[[], float] = time.time,
     ) -> None:
         self.admin = admin
         self.local_root = local_root
         self._move = move_fn
+        # SYNC-102: what happened, kept where the tray and the Settings
+        # window can read it. Injectable relink so this module never imports
+        # Resolve for itself -- the sequencer hands in file_moves' relink,
+        # which is the one that takes a save point and writes the undo
+        # journal (CLAUDE.md: every media-pool write goes through
+        # resolve_bridge.replace_clip).
+        self.ledger = RepathLedger(state_dir, now=now)
+        self._relink_fn = relink_fn
 
     def reconcile(self, selection: list[dict]) -> list[str]:
         """Repath every selected project whose local folder points somewhere
@@ -177,6 +314,9 @@ class ProjectRepather:
         were repathed. Never raises; per-project failures are logged and the
         folder is always unpaused again."""
         repathed: list[str] = []
+        # Before anything else: a repath from an earlier pass whose clips
+        # Resolve never answered for (SYNC-102).
+        self.retry_pending_relinks()
         try:
             config = self.admin.get_config() or {}
             folders = {f.get("id"): f for f in config.get("folders", [])}
@@ -217,6 +357,12 @@ class ProjectRepather:
 
             moved = self._move_dir(slug, actual, expected)
             if not moved:
+                # SYNC-102: recorded, not just logged. This branch is the
+                # routine one (Resolve or Explorer holding a handle) and it
+                # leaves ONE project not syncing, silently, until a human
+                # looks -- which is exactly what nothing anywhere said.
+                self.ledger.record(slug, actual, expected, blocked_note(rel),
+                                   relinked=None, moved=False)
                 # DELIBERATELY LEFT PAUSED. Re-pointing after a failed move
                 # aims the local Syncthing folder at a directory that does
                 # not hold the content -- and the structure clone then
@@ -238,11 +384,59 @@ class ProjectRepather:
                 repathed.append(slug)
             except Exception:
                 log.exception("repath: could not re-point folder %s", slug)
+            # The editor's clips still point at the old canonical path
+            # (SYNC-102), so relink them the same way a single-file move
+            # does -- and record the event either way, because "Resolve was
+            # not open" is not "there was nothing to relink" (RES-10).
+            relinked, detail = self._relink(actual, expected)
+            event = self.ledger.record(slug, actual, expected,
+                                       moved_note(rel, relinked), relinked=relinked)
+            log.info("repath: %s -- %s%s", slug, event["note"],
+                     f" ({detail})" if detail else "")
             try:
                 self.admin.set_folder_paused(slug, False)
             except Exception:
                 log.exception("repath: could not unpause folder %s", slug)
         return repathed
+
+    def _relink(self, old_local: str, new_local: str) -> tuple[Optional[bool], str]:
+        """Repoint the open Resolve project's clips. (relinked, detail).
+
+        None means "Resolve did not answer the question" -- closed, or open
+        on another project -- which leaves the event pending so the next
+        reconcile with a project open tries again, exactly as file_moves'
+        pending relinks do. Never raises: a repath that worked must not be
+        reported as failed because Resolve was busy."""
+        if self._relink_fn is None:
+            return None, ""
+        try:
+            matched, text = self._relink_fn(old_local, new_local)
+        except Exception:
+            log.exception("repath: the Resolve relink failed for %s", new_local)
+            return None, ""
+        return (True if matched else None), str(text or "")
+
+    def retry_pending_relinks(self) -> int:
+        """Try again for every applied repath Resolve has not answered for.
+
+        Called at the head of each reconcile, i.e. once per sequencer pass:
+        the editor opens the renamed project some time AFTER the move, and
+        that is the only moment the media pool can be walked. Returns how
+        many were retired. Never raises."""
+        done = 0
+        try:
+            for event in self.ledger.pending_relinks():
+                relinked, detail = self._relink(event.get("old", ""), event.get("new", ""))
+                if relinked:
+                    self.ledger.mark_relinked(
+                        event.get("id"), True,
+                        moved_note(str(event.get("slug") or ""), True))
+                    done += 1
+                    log.info("repath: %s relinked in Resolve after the project changed%s",
+                             event.get("slug"), f" ({detail})" if detail else "")
+        except Exception:
+            log.exception("repath: could not re-run the pending relinks")
+        return done
 
     def _is_contained(self, expected: str) -> bool:
         """Belt to rel_path_is_safe's braces: the computed target must

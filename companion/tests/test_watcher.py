@@ -1238,3 +1238,91 @@ def test_an_early_return_leaves_the_last_real_answer_standing(tmp_path):
     watcher.poll_once()   # Resolve closed
     assert watcher.last_counts["out_of_tree"] == 1
     assert watcher.last_scan_at == first
+
+
+# -- RES-19 (usability sweep 2026-09-03) -------------------------------------
+#
+# Four of the five classifications had a surface; MISSING had none but a DEBUG
+# line, and "Media Offline" is the commonest thing an editor actually notices.
+# And a NON_CANONICAL relink that failed for a transient reason was never
+# offered again for the life of the process, because the latch was add-only.
+
+
+def test_the_missing_clips_are_listed_not_only_counted(tmp_path, downloaded):
+    a = r"P:\Projects\Energy Transition\a.braw"
+    b = r"P:\Projects\Energy Transition\b.braw"
+    items = [make_timeline_item(a), make_timeline_item(b)]
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: _ok_result(*items),
+    )
+
+    watcher.poll_once()
+    listed = watcher.missing_clips()
+    assert [entry["path"] for entry in listed] == [a, b]
+    assert all(entry["name"] for entry in listed)
+
+    # Rebuilt per pass, like _missing_logged: a clip whose media arrives must
+    # leave the list on the pass that sees it.
+    downloaded(a, True)
+    watcher.poll_once()
+    assert [entry["path"] for entry in watcher.missing_clips()] == [b]
+
+
+def test_the_missing_list_is_capped_but_the_count_is_not(tmp_path, downloaded):
+    """A project whose media has not synced down yet has thousands, and this
+    list rides a tray render."""
+    items = [make_timeline_item(rf"P:\Projects\Energy Transition\c{i}.braw")
+             for i in range(60)]
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: _ok_result(*items),
+    )
+    summary = watcher.poll_once()
+    assert summary["missing"] == 60
+    assert len(watcher.missing_clips()) == 50
+
+
+def test_a_refused_non_canonical_relink_is_offered_again(tmp_path):
+    """Only a SUCCESS may latch. Before RES-19 a relink refused because
+    Resolve was busy for a second was never retried until the tray
+    restarted, and nothing anywhere said so."""
+    clip = tmp_path / "root" / "Projects" / "a.mov"
+    clip.parent.mkdir(parents=True)
+    clip.touch()
+    offered = []
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path / "root"),
+        canonical_prefix="P:\\",
+        on_non_canonical=lambda items: offered.extend(items),
+        get_timeline_items=lambda: _ok_result(make_timeline_item(str(clip))),
+    )
+
+    watcher.poll_once()
+    assert len(offered) == 1
+    watcher.poll_once()
+    assert len(offered) == 1, "the latch still holds while nothing has failed"
+
+    watcher.rearm_non_canonical(str(clip), "a.mov")
+    assert watcher.non_canonical_refused() == [
+        {"name": "a.mov", "path": str(clip)}]
+    watcher.poll_once()
+    assert len(offered) == 2
+
+    # A success clears the refusal: the clip's File Path changes, so the key
+    # never comes back anyway.
+    watcher.clear_non_canonical_refusal(str(clip))
+    assert watcher.non_canonical_refused() == []
+
+
+def test_the_bridge_state_is_readable_and_starts_as_cannot_tell(tmp_path):
+    watcher = TimelineWatcher(
+        local_root=str(tmp_path),
+        canonical_prefix="P:\\",
+        get_timeline_items=lambda: _ok_result(),
+    )
+    assert watcher.bridge_is_connected() is None   # not "Resolve is closed"
+    watcher.poll_once()
+    assert watcher.bridge_is_connected() is True

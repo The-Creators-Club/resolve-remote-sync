@@ -211,7 +211,16 @@ def version_at_least(have: Optional[str], want: Optional[str]) -> bool:
 def acceptance_problem(path: Optional[Path] = None) -> Optional[str]:
     """None when this machine may sync, else one sentence saying why not,
     written to be shown to the editor verbatim (identity._http_error_message
-    sets that precedent)."""
+    sets that precedent).
+
+    APP-9 (sweep 2026-09-03): the action named here used to be "re-run the
+    CCSync setup wizard", i.e. download the whole installer again and spend
+    ten minutes on drive mapping and account checks to produce a three-line
+    JSON file -- while the machine was already offering a modal that accepts
+    in one click and starts syncing with no restart. CR-27's lesson was that
+    a parked editor needs the SMALLEST possible action; this copy named the
+    largest one available.
+    """
     if not EULA_VERSION:
         # No document, or one with no marker: cannot verify. Fail open --
         # see the module docstring.
@@ -224,15 +233,15 @@ def acceptance_problem(path: Optional[Path] = None) -> Optional[str]:
     record = read_acceptance(path)
     if not record:
         return ("The CC Sync licence agreement has not been accepted on this machine. "
-                "Re-run the CCSync setup wizard to read and accept it.")
+                "Press [ READ AND ACCEPT THE LICENCE ] in Settings, THIS COMPUTER.")
     accepted = str(record.get("version") or "").strip()
     if not accepted:
         return ("The licence acceptance record on this machine is unreadable. "
-                "Re-run the CCSync setup wizard to accept the agreement again.")
+                "Press [ READ AND ACCEPT THE LICENCE ] in Settings, THIS COMPUTER.")
     if not version_at_least(accepted, EULA_VERSION):
         return (f"The CC Sync licence agreement has been updated (version {EULA_VERSION}; "
-                f"this machine accepted {accepted}). Re-run the CCSync setup wizard to "
-                "read and accept it.")
+                f"this machine accepted {accepted}). Press [ READ AND ACCEPT THE LICENCE ] "
+                "in Settings, THIS COMPUTER.")
     return None
 
 

@@ -194,6 +194,22 @@ def cancel(uid: str, user: str = Depends(require_user),
     return {"ok": True, "state": batch["state"], "cancel_requested": True}
 
 
+@router.post("/{uid}/retry-failed")
+def retry_failed(uid: str, user: str = Depends(require_user),
+                 admin: bool = Depends(is_admin),
+                 conn: sqlite3.Connection = Depends(get_db)) -> dict:
+    """Put the failed clips of this batch back in the queue. Owner or admin.
+
+    BROLL-18, 2026-09-04. A terminal batch is exactly the case this exists for,
+    so `done_with_errors` is not refused here the way the fleet routes refuse
+    it: the batch goes back to `queued` and the next claim resumes it. Nothing
+    is dispatched from this route - the page tells its OWN companion to pick
+    the batch up, because only the editor's machine holds the staged bytes.
+    """
+    batch = _visible_or_404(conn, uid, user, admin)
+    return ingest_batches.retry_failed(conn, batch)
+
+
 @router.post("/{uid}/upload-paused")
 def upload_paused(uid: str, body: UploadPausedIn, user: str = Depends(require_user),
                   admin: bool = Depends(is_admin),

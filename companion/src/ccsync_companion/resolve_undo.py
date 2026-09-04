@@ -45,6 +45,47 @@ LEDGER_MAX_ENTRIES = 100
 # command that retries for ever is a command nobody ever sees the end of.
 RETRY_MAX_SECONDS = 7 * 24 * 3600
 
+# -- what "not yet" looks like in the bridge's own words (RES-4, 2026-09-04) --
+#
+# Classifying a refusal by PROSE was always going to break, and it broke on
+# the commonest state of all: Resolve open at the Project Manager answers
+# "no project open in Resolve", which matched none of the old substrings (no
+# "not", and "project open" is not "is open"), so an undo an admin asked for
+# was recorded FAILED and never offered again -- although the editor opening
+# their project is exactly what clears it. `_SCRIPTING_ERROR_MESSAGE`
+# ("Resolve didn't answer...") failed the same way: "didn't" contains no
+# "not".
+#
+# PARKED is the answer for the subset that is waiting for a HUMAN ACTION we
+# can name: open a project. It is still retried, and the wording tells the
+# admin what will resume it rather than implying CC Sync is stuck.
+PARK_HINTS = (
+    "no project open",
+    "no timeline open",
+    "make sure a project is open",
+    "open that project",
+)
+# Retried, but nobody can be told what to do about it: Resolve went away
+# mid-call, the media pool would not answer.
+RETRY_HINTS = (
+    "is open",
+    "didn't answer",
+    "did not answer",
+)
+PARKED_DETAIL = (
+    "Parked: there is no project open in Resolve on this computer. CCSync "
+    "will put the clip paths back on its own the next time that project is "
+    "open."
+)
+# The state the WIRE carries for a parked undo. The dashboard's
+# ResolveUndoResultIn accepts done/failed/retrying only (api.py, v40), and an
+# unknown value fails validation for the WHOLE report -- so a deployed
+# dashboard would stop hearing about a machine's sync entirely. "retrying" is
+# also true: parked IS retrying, with a reason. `apply_undo(allow_parked=True)`
+# returns the finer word once a dashboard that accepts it is deployed.
+STATE_PARKED = "parked"
+STATE_RETRYING = "retrying"
+
 
 def parse_command(raw: Any) -> Optional[dict[str, Any]]:
     """One `commands.resolve_undo` entry, validated, or None.
@@ -112,10 +153,19 @@ class UndoLedger:
                state: str, attempts: int = 1) -> dict[str, Any]:
         key = str(int(request_id))
         previous = self._entries.get(key) or {}
+        parked = state == STATE_PARKED
+        # A parked undo is an OPEN one: it is stored as "retrying" because
+        # that is the word every reader of this ledger tests for when it
+        # decides whether to ask this machine again (app._apply_resolve_undo),
+        # and a state nobody recognises would retire the command -- the exact
+        # bug RES-4 is about, moved one file along. `parked` keeps the finer
+        # fact for anything that wants to say WHY.
+        stored = STATE_RETRYING if parked else state
         entry = {
-            "ok": bool(ok), "detail": str(detail or "")[:512], "state": state,
-            "attempts": int(previous.get("attempts") or 0) + 1 if state == "retrying"
-                        else int(attempts),
+            "ok": bool(ok), "detail": str(detail or "")[:512], "state": stored,
+            "parked": parked,
+            "attempts": int(previous.get("attempts") or 0) + 1
+                        if stored == STATE_RETRYING else int(attempts),
             "first_at": float(previous.get("first_at") or time.time()),
             "at": time.time(),
         }
@@ -132,13 +182,20 @@ class UndoLedger:
 
 
 def apply_undo(command: dict[str, Any], undo_fn=None,
-               resolver=None) -> tuple[bool, str, str]:
+               resolver=None, allow_parked: bool = False) -> tuple[bool, str, str]:
     """Replay one journal in reverse. Returns (ok, detail, state).
 
     `state` is "done", "failed" or "retrying" -- the same three the dashboard
     records for a file move, with "retrying" meaning "ask me again": Resolve
     is not running, or the project the change was made in is not the one that
     is open. Never raises: this runs on the reporter thread.
+
+    `allow_parked` (RES-4) returns "parked" instead of "retrying" for the
+    subset that is waiting for a named human action -- no project open in
+    Resolve. OFF by default because the value goes on the wire and the
+    deployed dashboard validates it against a three-word Literal; see
+    STATE_PARKED. The DETAIL says parked either way, which is the half an
+    admin reads.
     """
     if resolver is None:
         from . import resolve_journal
@@ -169,9 +226,10 @@ def apply_undo(command: dict[str, Any], undo_fn=None,
     # `failed` here is what would let an admin believe a change had been put
     # back when it had not.
     lowered = message.lower()
+    if any(hint in lowered for hint in PARK_HINTS):
+        return False, PARKED_DETAIL, (STATE_PARKED if allow_parked else STATE_RETRYING)
     if (not message
-            or "open that project" in lowered
-            or "is open" in lowered
+            or any(hint in lowered for hint in RETRY_HINTS)
             or "resolve" in lowered and "not" in lowered):
-        return False, message or "Resolve did not answer on this computer", "retrying"
+        return False, message or "Resolve did not answer on this computer", STATE_RETRYING
     return False, message, "failed"

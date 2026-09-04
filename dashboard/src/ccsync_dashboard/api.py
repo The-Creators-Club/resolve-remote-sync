@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 import re
 import secrets
@@ -805,6 +806,11 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
     # [ WHISPER ] chips. One query for the fleet, like every other map here.
     capabilities = db.fetch_capabilities_map(conn)
     proxies = db.fetch_proxy_coverage_map(conn)
+    # CYT-3 (usability sweep 2026-09-04): clips that came down and never
+    # reached anybody's timeline. One read for the whole grid, like the maps
+    # above it; absent for a machine that has said nothing, which the page
+    # renders as nothing rather than as "fine".
+    youtube_imports = _youtube_import_map(conn)
     # Which machines have an admin's "resume proxy download" still in flight
     # (v26, CR-45), so the button can say "asked" rather than inviting a
     # second click at a machine that has simply not reported yet.
@@ -934,6 +940,11 @@ def build_editors_view(conn: sqlite3.Connection, now: str | None = None) -> dict
         # HH:MM, which is what every other time on this page already is.
         entry["volunteering"] = _volunteering_chip(entry["capabilities"], now)
         entry["proxy"] = proxies.get(key) or {}
+        # `machine.youtube_import` (CYT-3): {state, reason, pending, at}, or
+        # {} for a computer whose companion is too old to say. `state ==
+        # "no-project-match"` is the one an ADMIN can fix and the editor
+        # cannot, which is the reason this is on the fleet page at all.
+        entry["youtube_import"] = youtube_imports.get(key) or {}
         entry["companion_version"] = (
             (machine_versions.get(key) or {}).get("companion_version")
             or entry["companion_version"]
@@ -1818,8 +1829,15 @@ def api_login(payload: LoginIn, request: Request, response: Response) -> dict[st
     username = payload.username.strip().lower()
     # Per-username AND per-IP budget, in SQLite so it survives the restart
     # every deploy performs (auth.login_throttled, 2026-08-17).
-    if auth.login_throttled(request, username):
-        raise HTTPException(status_code=429, detail="too many failed attempts; wait and retry")
+    #
+    # DCORE-8 (2026-09-04): the wait is a number this function ALREADY had and
+    # threw away. It is not a username oracle, because record_login_failure
+    # counts a failure for any username, real or invented, so a made-up name
+    # is throttled identically to a real one.
+    wait = auth.login_throttled(request, username)
+    if wait:
+        raise HTTPException(status_code=429, detail=auth.throttle_message(wait),
+                            headers=auth.throttle_headers(wait))
     verifier = getattr(request.app.state, "credential_verifier", auth.verify_credentials)
     try:
         verified = verifier(settings, username, payload.password)
@@ -1918,8 +1936,13 @@ def api_verify(
     if not settings.session_secret:
         raise HTTPException(status_code=503, detail="identity not configured (DASH_SESSION_SECRET unset)")
     username = payload.username.strip().lower()
-    if auth.login_throttled(request, username):
-        raise HTTPException(status_code=429, detail="too many failed attempts; wait and retry")
+    # DCORE-8: this one is read at a TRAY, by an editor who cannot see a
+    # server log and has nobody to ask -- see api_login for why naming the
+    # wait discloses nothing.
+    wait = auth.login_throttled(request, username)
+    if wait:
+        raise HTTPException(status_code=429, detail=auth.throttle_message(wait),
+                            headers=auth.throttle_headers(wait))
     verifier = getattr(request.app.state, "credential_verifier", auth.verify_credentials)
     try:
         verified = verifier(settings, username, payload.password)
@@ -4347,12 +4370,37 @@ def api_admin_revoke_report_token(
     token_id: str, request: Request, conn: sqlite3.Connection = Depends(get_conn)
 ) -> dict[str, Any]:
     admin = _require_admin(request)
+    # DCORE-14 (usability sweep 2026-09-04): read WHO IS HOLDING IT before the
+    # revoke, because after it there is nothing left to name. Nothing is
+    # refused here -- an admin tidying up old tokens is doing the right thing
+    # -- but "this stops LESO-MBP reporting within a minute and you will have
+    # to hand leso a new token" is the difference between tidying up and
+    # taking somebody off the fleet by accident.
+    holders = db.machines_by_report_token(conn).get(token_id, [])
     revoked = db.revoke_editor_report_token(conn, token_id, revoked_by=admin)
     conn.commit()
     if not revoked:
         raise HTTPException(status_code=404, detail="no such live token")
-    log.info("revoked per-editor report token %s (by %s)", token_id, admin)
-    return {"ok": True, "view": build_report_tokens_view(conn)}
+    named = [f"{m['editor_username']}/{m['machine']}" for m in holders]
+    log.info("revoked per-editor report token %s (by %s); it was last used by %s",
+             token_id, admin, ", ".join(named) or "no machine on record")
+    if named:
+        detail = (f"Revoked. {_names_phrase(named)} was using this token and will "
+                  f"stop reporting within a minute. Give that editor a new token.")
+    else:
+        detail = ("Revoked. No computer's last report used this token, so nothing "
+                  "should stop reporting.")
+    return {"ok": True, "detail": detail, "machines": named,
+            "view": build_report_tokens_view(conn)}
+
+
+def _names_phrase(names: list[str]) -> str:
+    """"A", "A and B", "A, B and 3 more" -- for a sentence, not a list."""
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]} and {names[1]}"
+    return f"{', '.join(names[:2])} and {len(names) - 2} more"
 
 
 def build_report_tokens_view(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -4360,10 +4408,25 @@ def build_report_tokens_view(conn: sqlite3.Connection) -> dict[str, Any]:
 
     `shared_machines` is what tells an operator whether it is safe to set
     DASH_SHARED_REPORT_TOKEN_ENABLED=0 yet -- the machines whose LAST report
-    still authenticated with the one shared fleet token."""
+    still authenticated with the one shared fleet token.
+
+    Each token row carries `machines` (DCORE-14): the computers whose LAST
+    report authenticated with THAT token, from report_auth.token_id (v49).
+    Empty means "no computer's last report used it", which is not the same as
+    "never used" -- last_used_at is the answer to that -- and a fleet whose
+    companions have not reported since the migration shows empty everywhere
+    rather than wrong somewhere.
+    """
     usage = db.count_shared_token_machines(conn)
+    holders = db.machines_by_report_token(conn)
+    tokens = db.fetch_editor_report_tokens(conn)
+    for row in tokens:
+        machines = holders.get(str(row.get("token_id") or ""), [])
+        row["machines"] = machines
+        row["machine_names"] = [
+            f"{m['editor_username']}/{m['machine']}" for m in machines]
     return {
-        "tokens": db.fetch_editor_report_tokens(conn),
+        "tokens": tokens,
         "shared_machines": usage["machines"],
         "shared_count": usage["shared"],
         "editor_count": usage["editor"],
@@ -4463,6 +4526,77 @@ def api_set_fleet_halt(
     return {"ok": True, "halt": state}
 
 
+# A companion reports every 30 s (health.py's freshness comment), and that is
+# the whole delivery mechanism for every one of these buttons: nothing is
+# pushed, the request is PARKED and rides the machine's next report reply.
+COMPANION_REPORT_SECONDS = 30
+# Past this, "on its next report" is not an estimate any more, it is a hope.
+COMMAND_STALE_SECONDS = 24 * 3600
+
+
+def _command_delivery(
+    conn: sqlite3.Connection, editor: str, machine: str, now: str | None = None,
+) -> dict[str, Any]:
+    """What a parked per-machine request will actually do, in words (DCORE-13).
+
+    [ UPDATE NOW ], [ RESUME ] and [ ASK THIS MACHINE WHY ] all answered
+    `{"ok": true}` and their toasts said the click landed. None of them
+    consulted `machine_state.reported_at`, so pushing an update to a laptop
+    that has been shut in a bag for nine days produced exactly the same
+    confirmation as pushing it to a live machine -- and then an admin watched
+    a queued row that was never going to move.
+
+    It WARNS, it does not refuse: a machine that comes back next Tuesday
+    applies the request next Tuesday, which is correct behaviour and a
+    perfectly good reason to press the button. What was missing was being
+    told.
+    """
+    now = now or db.utcnow_iso()
+    row = conn.execute(
+        "SELECT reported_at FROM machine_state WHERE editor_username=? AND machine=?",
+        (editor, machine),
+    ).fetchone()
+    last = (row["reported_at"] if row is not None else None) or None
+    age: float | None = None
+    if last:
+        try:
+            age = db.age_seconds(last, now)
+        except (ValueError, TypeError):
+            age = None
+    if age is None:
+        # No report on record, or one whose timestamp will not parse. NOT
+        # "usually within 30 s": we cannot tell, and saying so is the answer.
+        applies = ("when that computer next reports. Nothing on record says "
+                   "when it last did")
+    elif age >= COMMAND_STALE_SECONDS:
+        applies = (f"when that computer next reports. It was last heard from "
+                   f"{_ago_phrase(age)}, so this may sit for a while")
+    else:
+        applies = (f"on that computer's next report, usually within "
+                   f"{COMPANION_REPORT_SECONDS} s. It was last heard from "
+                   f"{_ago_phrase(age)}")
+    return {
+        "queued_for": f"{editor}/{machine}",
+        "applies": applies,
+        "last_report_at": last,
+        "last_report_age_seconds": age,
+        "stale": bool(age is None or age >= COMMAND_STALE_SECONDS),
+    }
+
+
+def _ago_phrase(seconds: float) -> str:
+    """"12 s ago" / "4 minutes ago" / "9 days ago" -- coarse on purpose: the
+    number an admin acts on is the ORDER of magnitude."""
+    value = max(0.0, float(seconds or 0.0))
+    if value < 90:
+        return f"{int(value)} s ago"
+    if value < 90 * 60:
+        return f"{int(value // 60)} minutes ago"
+    if value < 48 * 3600:
+        return f"{int(value // 3600)} hours ago"
+    return f"{int(value // 86400)} days ago"
+
+
 class PushUpdateIn(BaseModel):
     # Absent = "whatever is current for that machine's platform", which is
     # what the button on the packages page means. An explicit version is
@@ -4502,11 +4636,16 @@ def api_push_machine_update(
                 detail="no current companion package is published for that machine's platform",
             )
         version = current["version"]
+    # DCORE-13: what was already parked, read BEFORE this write overwrites it,
+    # so the answer can say "you were already waiting on this one".
+    pending_before = bool(db.pending_machine_request(conn, editor, machine)["update"])
     if not db.request_machine_update(conn, editor, machine, version, admin, db.utcnow_iso()):
         raise HTTPException(status_code=404, detail=f"no machine {machine!r} for {editor!r}")
     conn.commit()
     log.info("%s asked %s/%s to update to v%s", admin, editor, machine, version)
-    return {"ok": True, "editor": editor, "machine": machine, "version": version}
+    return {"ok": True, "editor": editor, "machine": machine, "version": version,
+            "pending_before": pending_before,
+            **_command_delivery(conn, editor, machine)}
 
 
 @router.delete("/admin/machines/{editor}/{machine}/update")
@@ -4569,11 +4708,15 @@ def api_resume_machine_lane_b(
             detail="that computer's last report does not show proxy download parked, "
                    "so there is nothing to resume. Wait for its next report and try again.",
         )
+    # DCORE-13: read before the write, so a second click can say so.
+    pending_before = db.pending_machine_request(conn, editor, machine)["lane_b_resume"]
     if not db.request_lane_b_resume(conn, editor, machine, admin, db.utcnow_iso()):
         raise HTTPException(status_code=404, detail=f"no machine {machine!r} for {editor!r}")
     conn.commit()
     log.info("%s asked %s/%s to resume proxy download", admin, editor, machine)
-    return {"ok": True, "editor": editor, "machine": machine}
+    return {"ok": True, "editor": editor, "machine": machine,
+            "pending_before": pending_before,
+            **_command_delivery(conn, editor, machine)}
 
 
 @router.delete("/admin/machines/{editor}/{machine}/resume-lane-b")
@@ -4952,6 +5095,15 @@ def _upgrade_info(
         value = _row_str(current, field)
         if value:
             offer[field] = value
+    # ...and the UNSIGNED one (APP-16, 2026-09-04). Additive and outside the
+    # signature, so every companion ever shipped canonicalises this record
+    # exactly as it did yesterday -- a companion picks the fields it verifies
+    # from its OWN list (release_pubkey.record_fields), so an extra key here
+    # cannot change a single byte it hashes. A build too old to read it
+    # simply shows the version, which is today's dialog.
+    notes = _row_str(current, "notes")
+    if notes:
+        offer["notes"] = notes
     return offer
 
 
@@ -5026,6 +5178,10 @@ def build_packages_view(conn: sqlite3.Connection, settings, now: str | None = No
             "arch": _row_str(row, "arch"),
             "git_sha": _row_str(row, "git_sha"),
             "git_dirty": bool(_row_value(row, "git_dirty") or 0),
+            # APP-16: the publisher's own "what changed", "" when none was
+            # given. Every record published before v49 has none, and the
+            # page renders nothing rather than an empty quote.
+            "notes": _row_str(row, "notes"),
             "retracted_at": _row_str(row, "retracted_at"),
             "retracted_reason": _row_str(row, "retracted_reason"),
         }
@@ -5123,13 +5279,40 @@ def build_packages_view(conn: sqlite3.Connection, settings, now: str | None = No
         if row is not None and _arch_matches(_row_str(row, "arch"), mach_arch):
             continue
         arch_gaps.append({"platform": plat, "arch": mach_arch, "machines": count})
+    # REL-16 (usability sweep 2026-09-04): how many machines are running each
+    # published build, on EVERY row rather than only the recalled ones.
+    #
+    # [ ROLL THE FLEET BACK TO x ] was reachable only from a vendor recall,
+    # and the commoner case by far is nobody recalling anything: the owner
+    # ships a build, an editor reports it broken an hour later, and the
+    # recovery was [ MAKE CURRENT ] on the older row plus [ UPDATE NOW ] on
+    # every machine by hand, because a companion refuses to move backwards on
+    # its own. The route was never companion-recall-only; the button was.
+    #
+    # Counted from the fleet view already in hand rather than one query per
+    # row: this builder runs on every Packages page load, and the numbers
+    # must agree with the grid on the same page.
+    running_counts: dict[tuple[str, str], int] = {}
+    for e in editors["editors"]:
+        version = (e.get("companion_version") or "").strip()
+        if version:
+            plat = (e.get("platform") or "windows").strip().lower()
+            running_counts[(plat, version)] = running_counts.get((plat, version), 0) + 1
+    for entry in packages:
+        if entry["kind"] == "companion":
+            entry["machines_running"] = running_counts.get(
+                (entry["platform"], entry["version"]), 0)
+            entry["machines_running_known"] = True
+        else:
+            # PRESENT AND EMPTY, deliberately (REL-16): nothing in a report
+            # says which installer a computer was set up with -- there is no
+            # onboard/installer version on `machine_state` at all -- so 0
+            # here means "we cannot tell", which is why the flag beside it
+            # exists. A page that rendered a bare 0 would be claiming the
+            # fleet is on none of them.
+            entry["machines_running"] = 0
+            entry["machines_running_known"] = False
     retracted = [p for p in packages if p.get("retracted")]
-    # For [ ROLL THE FLEET BACK TO x ]: how many machines are still running a
-    # recalled build, per (platform, version). The recall's whole point is the
-    # machines that already took it.
-    for entry in retracted:
-        entry["machines_running"] = len(
-            db.machines_running_version(conn, entry["platform"], entry["version"]))
     return {"generated_at": now, "packages": packages, "current": current,
             "outdated_machines": outdated,
             "soak_minutes": soak_minutes,
@@ -5209,6 +5392,14 @@ async def api_publish_package(
     # and signing it would cost the overlap release the two above already do.
     git_sha: str = "",
     git_dirty: int = 0,
+    # APP-16 (usability sweep 2026-09-04): one line of "what changed", shown
+    # in the editor's update dialog. UNSIGNED for the REL-13 reason above and
+    # one that is stronger: the signature covers a field list every companion
+    # in the field mirrors, so a record carrying a field an older build's
+    # canonicaliser does not know is REFUSED by that build, with no
+    # over-the-air recovery (REL-7). A sentence an editor reads must never be
+    # able to make a build uninstallable. It decides nothing anywhere.
+    notes: str = "",
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> dict[str, Any]:
     """Publish a companion build: raw exe bytes as the request body (no
@@ -5397,6 +5588,7 @@ async def api_publish_package(
             make_current=bool(make_current), prune=bool(prune), part_path=part,
             requires_dashboard=requires_dashboard.strip(), arch=arch.strip(),
             git_sha=git_sha.strip(), git_dirty=bool(git_dirty),
+            notes=notes,
         )
     except package_store.PackageStoreError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
@@ -5406,7 +5598,7 @@ async def api_publish_package(
               "min_version": min_version,
               "requires_dashboard": requires_dashboard.strip(),
               "arch": arch.strip(), "git_sha": git_sha.strip(),
-              "git_dirty": bool(git_dirty)})
+              "git_dirty": bool(git_dirty), "notes": db.package_notes(notes)})
     conn.commit()
     return {"ok": True, "view": build_packages_view(conn, settings)}
 
@@ -5549,6 +5741,7 @@ def api_set_current_package(
 def roll_fleet_back(
     conn: sqlite3.Connection, *, platform: str, from_version: str,
     to_version: str, admin: str, now: str | None = None,
+    kind: str = "companion",
 ) -> dict[str, Any]:
     """Ask every machine running `from_version` to take `to_version` on its
     next report (REL-3, resilience sweep 2026-08-28).
@@ -5566,11 +5759,25 @@ def roll_fleet_back(
     recalled, is how a recall turns into a fleet with no working companion.
     """
     now = now or db.utcnow_iso()
-    target = db.get_package(conn, platform, to_version, "companion")
+    kind = (kind or "companion").strip().lower() or "companion"
+    if kind != "companion":
+        # REL-16: the route takes a kind so the two doors cannot disagree
+        # about what a rollback IS, but only a companion version is ever
+        # reported by a machine. There is no onboard/installer version
+        # anywhere in a report, so there is no set of machines to ask, and
+        # answering `{"machines": []}` would read as "done, nobody needed
+        # it". Say what is actually true instead.
+        raise HTTPException(
+            status_code=409,
+            detail=(f"a {kind} build cannot be rolled back across the fleet: no computer "
+                    f"reports which {kind} it was set up with, so there is nobody to ask. "
+                    f"Make the older {kind} current instead, and it is what new "
+                    f"installs download."))
+    target = db.get_package(conn, platform, to_version, kind)
     if target is None:
         raise HTTPException(
             status_code=404,
-            detail=f"no published {platform} companion package {to_version} to roll back to")
+            detail=f"no published {platform} {kind} package {to_version} to roll back to")
     if _row_str(target, "retracted_at"):
         raise HTTPException(
             status_code=409,
@@ -5594,24 +5801,38 @@ def roll_fleet_back(
 @router.post("/admin/packages/{platform}/{version}/roll-fleet-back")
 def api_roll_fleet_back(
     platform: str, version: str, request: Request,
-    to: str = "",
+    to: str = "", kind: str = "companion",
     conn: sqlite3.Connection = Depends(get_conn),
 ) -> dict[str, Any]:
     """`version` is the build to get OFF, `?to=` the one to land on (default:
-    whatever is current for that platform)."""
+    whatever is current for that platform).
+
+    NOT recall-only (REL-16, 2026-09-04): the retraction was always the
+    template's condition, never this route's. "Put the fleet back on 0.9.64"
+    after a bad ship nobody recalled is the same fan-out, and it is what an
+    admin reaches for far more often than a vendor recall."""
     admin = _require_admin(request)
     platform = platform.strip().lower()
+    kind = (kind or "companion").strip().lower()
     target = to.strip()
     if not target:
-        current = db.get_current_package(conn, platform, kind="companion")
+        current = db.get_current_package(conn, platform, kind=kind)
         if current is None:
             raise HTTPException(
                 status_code=409,
-                detail="no current companion package is published for that platform, "
+                detail=f"no current {kind} package is published for that platform, "
                        "so there is nothing to roll back to")
         target = current["version"]
+    if target == version:
+        # Otherwise this is a fan-out asking every machine to install the
+        # build it is already running -- a fleet-wide no-op that reads as an
+        # action taken.
+        raise HTTPException(
+            status_code=409,
+            detail=f"{version} is what those computers are already running. Pick the "
+                   f"build to put them BACK on with ?to=.")
     return roll_fleet_back(conn, platform=platform, from_version=version,
-                           to_version=target, admin=admin)
+                           to_version=target, admin=admin, kind=kind)
 
 
 @router.delete("/admin/packages/{platform}/{version}")
@@ -6534,6 +6755,33 @@ class YtdlpIn(_BoundedSectionIn):
     checked_at: str | None = Field(default=None, max_length=64)
 
 
+class YoutubeImportGuardIn(_BoundedSectionIn):
+    """`sync_guard.youtube_import`: clips that came down and never reached
+    Resolve (CYT-3, usability sweep 2026-09-04).
+
+    The importer has computed this for a year and it reached NOBODY: the
+    dashboard declared a top-level `youtube_import` section, validated it and
+    then read nothing, and the tray never mentioned it at all. The failure
+    mode it describes -- "the download worked, the clips are in
+    Youtube/<term>/, they are not in my media pool" -- was invisible on both
+    ends.
+
+    `state` is a plain string, not an enum, for BlockedIn's reason: a newer
+    companion knowing a state this build does not must not 422 its whole
+    report. The ones that exist today are `ok`, `no-project-match`,
+    `resolve-closed`, `drive-absent` and `paused`, and exactly one of them
+    (`no-project-match`) is a per-machine misconfiguration an ADMIN can fix
+    and the editor cannot, which is why this belongs on the fleet page.
+
+    Absent is a companion that has said nothing, which is not "nothing is
+    waiting" and is never rendered as one.
+    """
+    state: str | None = Field(default=None, max_length=32)
+    reason: str | None = Field(default=None, max_length=500)
+    pending: int | None = Field(default=None, ge=0)
+    at: str | None = Field(default=None, max_length=64)
+
+
 class SyncGuardIn(BaseModel):
     """The companion's `sync_guard` section (item 9, 2026-08-17).
 
@@ -6606,6 +6854,11 @@ class SyncGuardIn(BaseModel):
     # in the ignored-sections banner and then dropped, which is the third
     # repeat of SYS-3 and not a home for an alarm.
     ytdlp: YtdlpIn | None = None
+    # CYT-3 (usability sweep 2026-09-04): declared for the same reason
+    # loopback and ytdlp are. An extra is accepted, named in the
+    # ignored-sections banner and then dropped, which is SYS-3 again and not
+    # a home for "8 clips are on this disk and in nobody's timeline".
+    youtube_import: YoutubeImportGuardIn | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -6646,6 +6899,7 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
     staging = guard.ingest_staging
     loopback = guard.loopback
     ytdlp = guard.ytdlp
+    youtube_import = guard.youtube_import
     restart_records = [] if restarts is None else [
         r for r in (restarts.sequencer, restarts.watcher, restarts.media_tree)
         if r is not None
@@ -6792,6 +7046,9 @@ def flatten_sync_guard(guard: "SyncGuardIn | None", now: str) -> dict[str, Any] 
         # in `meta`. None is "this computer said nothing about yt-dlp".
         "ytdlp": (None if ytdlp is None
                   else ytdlp.model_dump(exclude_none=False)),
+        # CYT-3, on exactly the same terms (see _store_youtube_import_state).
+        "youtube_import": (None if youtube_import is None
+                           else youtube_import.model_dump(exclude_none=False)),
     }
 
 
@@ -6863,6 +7120,63 @@ def _store_ytdlp_state(
         db.meta_delete(conn, key)
         return
     db.meta_set_json(conn, key, state)
+
+
+# The `meta` key one computer's YouTube-import verdict is stored under, prefix
+# plus "<editor>/<machine>" (CYT-3). Read by build_editors_view.
+YOUTUBE_IMPORT_META_PREFIX = "youtube_import:"
+
+
+def _store_youtube_import_state(
+    conn: sqlite3.Connection, editor: str, machine: str,
+    guard: Mapping[str, Any] | None,
+) -> None:
+    """`sync_guard.youtube_import` -> `meta` (CYT-3, 2026-09-04).
+
+    `meta` and not four more machine_state columns, for the reason
+    _store_ytdlp_state gives about itself: this is a small opaque verdict
+    with one reader (the fleet view's per-machine block), and a schema number
+    is a shared resource. Promote it to columns the day something wants to
+    ask "which machines are in no-project-match" in SQL.
+
+    The LATCH rule, again: written from any guard-bearing report, and an
+    ABSENT section DELETES the row. A companion that has stopped sending one
+    (the feature was turned off, the importer never started, a downgrade) has
+    stopped knowing, and a stale "8 clips waiting" from March is worse than
+    silence.
+    """
+    if guard is None or not guard.get("at"):
+        return
+    key = f"{YOUTUBE_IMPORT_META_PREFIX}{editor}/{machine}"
+    state = guard.get("youtube_import")
+    if not state:
+        db.meta_delete(conn, key)
+        return
+    db.meta_set_json(conn, key, state)
+
+
+def _youtube_import_map(conn: sqlite3.Connection) -> dict[tuple[str, str], dict[str, Any]]:
+    """(editor, machine) -> that computer's youtube_import block (CYT-3).
+
+    One query for the whole grid, like every other map build_editors_view
+    reads. A key nothing in the fleet view matches (a forgotten computer)
+    simply never renders."""
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    try:
+        rows = conn.execute("SELECT key, value FROM meta WHERE key LIKE ?",
+                            (f"{YOUTUBE_IMPORT_META_PREFIX}%",)).fetchall()
+    except sqlite3.Error:
+        return out
+    for row in rows:
+        who = str(row["key"])[len(YOUTUBE_IMPORT_META_PREFIX):]
+        editor, _, machine = who.partition("/")
+        try:
+            value = json.loads(row["value"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(value, dict):
+            out[(editor, machine)] = value
+    return out
 
 
 # --------------------------------------------------- tolerant report sections
@@ -7007,10 +7321,27 @@ class CardsAgentIn(_ReportSectionIn):
     the same symptom.
     """
     connected: bool = False
+    # A PLAIN STRING, never a Literal (RES-6, usability sweep 2026-09-04): the
+    # role grew `refused` / `credential_refused` / `unreachable` beside
+    # `running` / `stopped`, and a value this build has not heard of must
+    # never 422 a whole report -- lanes, transfers and presence with it. The
+    # renderer treats an unknown state as unknown, which is what it is.
     state: str = Field(default="", max_length=32)
     timeline: str = Field(default="", max_length=255)
     version: int | None = Field(default=None, ge=0)
     since: float | None = Field(default=None, ge=0)
+    # RES-6: the four fields that say WHY it is in that state. `gate_state`
+    # and `detail` are the role's own words (a standalone agent holding the
+    # Resolve client, the feature flag off, a probe that could not answer);
+    # `last_poll_at` and `last_http_status` are the tunnel's -- an agent that
+    # calls itself running and has not polled since Tuesday, or is polling
+    # into a 401, is a blank page on somebody's phone and looked identical to
+    # a healthy one here. All optional and all absent on a companion too old
+    # to send them, which reads as UNKNOWN and never as OK.
+    gate_state: str = Field(default="", max_length=32)
+    detail: str = Field(default="", max_length=255)
+    last_poll_at: str | None = Field(default=None, max_length=64)
+    last_http_status: int | None = Field(default=None, ge=0, le=1000)
 
 
 class CapabilitiesIn(_ReportSectionIn):
@@ -7306,13 +7637,28 @@ class ResolveUndoResultIn(BaseModel):
     contract FileMoveResultIn uses, including `retrying`: an undo refused
     because the wrong project is open in Resolve is going to be tried again,
     and retiring the command on it would leave the wrong paths in place with
-    the admin believing they were put back."""
+    the admin believing they were put back.
+
+    RES-4 (usability sweep 2026-09-04): `parked` is the fourth value and the
+    third non-failure. NO PROJECT IS OPEN is not an attempt that went wrong,
+    it is an attempt that has not happened, and it renders on the panel as
+    itself instead of as a machine that keeps failing. Additive: `retrying`
+    keeps its meaning and its behaviour exactly, because that is what every
+    companion below this wave sends for the same situation (with the reason
+    in `detail` and, from the build that straddles the change, a `parked`
+    flag beside it). An unknown value would 422 the WHOLE report -- lanes,
+    transfers, presence and all -- which is why widening the Literal has to
+    land on the dashboard before the companion sends it."""
     model_config = ConfigDict(extra="ignore")
     id: int
     ok: bool
     detail: str | None = Field(default=None, max_length=512)
-    state: Literal["done", "failed", "retrying"] | None = None
+    state: Literal["done", "failed", "retrying", "parked"] | None = None
     attempts: int | None = Field(default=None, ge=0, le=1000)
+    # The straddle: a companion that cannot yet risk sending state="parked"
+    # sends state="retrying" with this beside it. Read as the truth about
+    # WHY, so both spellings land as one stored state.
+    parked: bool = False
 
 
 class FileMoveResultIn(BaseModel):
@@ -7669,8 +8015,16 @@ def api_report(
     # Which credential this machine used, so an operator can see how far the
     # fleet has moved off the shared token before switching it off (see
     # settings.shared_report_token_enabled and app.py's boot log).
+    #
+    # WHICH per-editor token, not merely which KIND (DCORE-14, 2026-09-04):
+    # `editor_report_tokens.last_used_at` could say when a credential was
+    # last used and never by which computer, so [ REVOKE ] could not name
+    # what it was about to stop. The id is the token's public half
+    # (db.report_token_id); the secret half never leaves the header.
     if auth_kind != AUTH_NONE:
-        db.record_report_auth(conn, editor, machine, auth_kind, received_at)
+        db.record_report_auth(conn, editor, machine, auth_kind, received_at,
+                              token_id=db.report_token_id(token)
+                              if auth_kind == AUTH_EDITOR else "")
     if auth_kind == AUTH_EDITOR:
         db.touch_editor_report_token(conn, token, received_at)
 
@@ -7830,10 +8184,14 @@ def api_report(
     # its yt-dlp sidecar's daily verdict. Same shape and the same latch rule
     # as the four above; both are alarms that until now existed only in one
     # line of that editor's own log.
-    _store_upgrade_refusal(
-        conn, editor, machine, flatten_sync_guard(payload.sync_guard, received_at))
-    _store_ytdlp_state(
-        conn, editor, machine, flatten_sync_guard(payload.sync_guard, received_at))
+    #
+    # CYT-3 joins them (2026-09-04), and the three share ONE flattening: this
+    # runs on every report of every machine, and building the same dict three
+    # times is three times the work on the single worker CR-141 is about.
+    guard_flat = flatten_sync_guard(payload.sync_guard, received_at)
+    _store_upgrade_refusal(conn, editor, machine, guard_flat)
+    _store_ytdlp_state(conn, editor, machine, guard_flat)
+    _store_youtube_import_state(conn, editor, machine, guard_flat)
     # An overridden "Remove from this machine" destroyed a local copy the
     # gate said was not caught up. There is nowhere on the grid for a
     # one-off event, so it goes in the dashboard's log -- which is the only
@@ -7861,12 +8219,16 @@ def api_report(
     # same contract and in the same place, for the same reason: an undo
     # answered in THIS report must not be re-sent in its own reply.
     for undo in payload.resolve_undo_applied or []:
+        # RES-4: the two spellings of "no project was open" collapse to one
+        # stored state here, so the panel has one thing to render and the
+        # companion may move to `state="parked"` at its own pace.
+        undo_state = db.RESOLVE_UNDO_PARKED if undo.parked else undo.state
         if db.mark_resolve_undo_applied(
                 conn, undo.id, editor, machine, undo.ok, undo.detail or "",
-                received_at, state=undo.state, attempts=undo.attempts):
+                received_at, state=undo_state, attempts=undo.attempts):
             (log.info if undo.ok else log.warning)(
                 "%s/%s resolve undo #%s: %s%s", editor, machine, undo.id,
-                "done" if undo.ok else (undo.state or "failed").upper(),
+                "done" if undo.ok else (undo_state or "failed").upper(),
                 f" ({undo.detail})" if undo.detail else "")
     # What this machine holds to undo. A section, so absent keeps whatever was
     # last reported rather than emptying the list an admin is looking at.
@@ -8379,12 +8741,19 @@ def api_admin_ask_why(
     request_lane_b_resume's reasoning: a request that names nothing must read
     as a failure to the admin."""
     admin = _require_admin(request)
-    if not db.request_diagnostics(conn, editor.strip().lower(), machine.strip(),
-                                 admin, db.utcnow_iso()):
+    editor, machine = editor.strip().lower(), machine.strip()
+    # DCORE-13: an ASK is not cleared when the reply goes out (see
+    # db.request_diagnostics) -- it clears when the BUNDLE arrives -- so
+    # "you already asked, and nothing has come back" is a real state this
+    # answer can name instead of looking like a fresh success.
+    pending_before = db.pending_machine_request(conn, editor, machine)["diagnostics"]
+    if not db.request_diagnostics(conn, editor, machine, admin, db.utcnow_iso()):
         raise HTTPException(status_code=404,
                             detail=f"no machine {machine!r} for {editor!r}")
     conn.commit()
-    return {"ok": True}
+    return {"ok": True, "editor": editor, "machine": machine,
+            "pending_before": pending_before,
+            **_command_delivery(conn, editor, machine)}
 
 
 @router.get("/admin/diagnostics")
@@ -8612,8 +8981,34 @@ def api_machine_resolve_journals(
     inbound connection to an editor's PC, so it tells us and we remember."""
     _require_admin(request)
     editor, machine = editor.strip().lower(), machine.strip()
+    requests = db.resolve_undos_for_machine(conn, editor, machine)
+    for row in requests:
+        row["state_sentence"] = _undo_state_sentence(row)
     return {"journals": db.machine_resolve_journals(conn, editor, machine),
-            "requests": db.resolve_undos_for_machine(conn, editor, machine)}
+            "requests": requests}
+
+
+def _undo_state_sentence(row: Mapping[str, Any]) -> str:
+    """One line per undo request, for the machine's recovery panel (RES-4).
+
+    PARKED is the one worth spelling out: the command is still on the books
+    and nothing is wrong, which is the opposite of what "retrying" reads as
+    to an admin looking at a machine whose editor has not opened Resolve
+    today. The companion's own `detail` wins when it sent one -- it knows
+    more about that machine than this sentence does."""
+    state = str(row.get("state") or "").strip().lower()
+    detail = str(row.get("detail") or "").strip()
+    if state == db.RESOLVE_UNDO_PARKED:
+        return detail or ("parked: no project open in Resolve, will resume "
+                          "when one is")
+    if state == db.RESOLVE_UNDO_RETRYING:
+        return detail or "retrying on this computer's next report"
+    if state == "done":
+        return detail or "done"
+    if state == "failed":
+        return detail or "failed"
+    return detail or ("waiting for that computer to report"
+                      if not row.get("applied_at") else "")
 
 
 @router.post("/admin/machines/{editor}/{machine}/resolve-undo")

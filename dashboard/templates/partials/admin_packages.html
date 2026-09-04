@@ -3,7 +3,11 @@
     <span class="muted">companion: what the fleet self-upgrades to. onboard: the full installer served by [ INSTALLER ]. CURRENT is per kind and platform.</span></div>
 
   {% if error %}
-    <div class="banner">▲ {{ error }}</div>
+    {# DUI-6: `error-banner` is what static/htmx_errors.js moves next to the button
+       that caused it. This panel swaps outerHTML, which preserves scroll, so a
+       refusal used to render a screen or two above the click that earned it. An
+       error with no control behind it stays here, which is where it belongs. #}
+    <div class="banner error-banner">▲ {{ error }}</div>
   {% endif %}
 
   {# REL-5 (resilience sweep 2026-08-28): the volume every package below is
@@ -77,7 +81,7 @@
                 (soak {{ p.soak.soak_minutes }} min)
               </div>
               <form class="inline-form" hx-post="/partials/admin/packages/push-one"
-                    hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+                    hx-target="closest .admin-packages-box" hx-swap="outerHTML" hx-indicator="this" hx-disabled-elt="this">
                 <input type="hidden" name="platform" value="{{ p.platform }}">
                 <input type="hidden" name="version" value="{{ p.version }}">
                 <select name="target">
@@ -86,8 +90,12 @@
                     <option value="{{ m.editor_username }}/{{ m.machine }}">{{ m.editor_username }}/{{ m.machine }} ({{ m.companion_version or "?" }})</option>
                   {% endfor %}
                 </select>
+                {# REL-12 (2026-09-03): the form carries hx-indicator, so the
+                   button dims and swaps its label while the request is in
+                   flight. Without it a second click was the natural response
+                   to a button that looks dead for its whole duration. #}
                 <button class="btn tap" type="submit"
-                        title="ask one computer to take this build on its next report">[ PUSH TO ONE COMPUTER ]</button>
+                        title="ask one computer to take this build on its next report"><span class="idle-label">[ PUSH TO ONE COMPUTER ]</span><span class="busy-label">[ ASKING THAT COMPUTER... ]</span></button>
               </form>
             {% endif %}
             {% if not p.is_current and not p.retracted %}
@@ -153,14 +161,19 @@
       <span class="mono-sm">{{ p.kind }} {{ p.version }} {{ p.platform }}</span>
       was withdrawn by the vendor{% if p.retracted_reason %}: {{ p.retracted_reason }}{% endif %}.
       {{ p.machines_running }} computer{{ "s" if p.machines_running != 1 }} {{ "is" if p.machines_running == 1 else "are" }} still running it.
-      {% if p.kind == "companion" and p.machines_running %}
+      {# REL-16 (2026-09-03): the recovery button used to be companion-only,
+         so a recalled build of any other kind that machines are still running
+         had no control at all. The route's own fan-out is unchanged; what was
+         wrong was the condition in front of it. `machines_running` is per
+         kind now (builder D5). #}
+      {% if p.machines_running %}
       <form class="inline-form" hx-post="/partials/admin/packages/roll-fleet-back"
             hx-target="closest .admin-packages-box" hx-swap="outerHTML">
         <input type="hidden" name="platform" value="{{ p.platform }}">
         <input type="hidden" name="from_version" value="{{ p.version }}">
         <select name="to_version">
           {% for q in packages.packages %}
-            {% if q.kind == "companion" and q.platform == p.platform and not q.retracted %}
+            {% if q.kind == p.kind and q.platform == p.platform and not q.retracted %}
               <option value="{{ q.version }}" {% if q.is_current %}selected{% endif %}>{{ q.version }}{% if q.is_current %} (current){% endif %}</option>
             {% endif %}
           {% endfor %}
@@ -285,13 +298,23 @@
       and redeploy to enable one-click updates from here. See docs/RELEASE_FEED.md.
     </div>
   {% else %}
+    {# REL-11 (2026-09-03): "last checked 19 hours ago" with no cadence beside
+       it tells an admin who has just been told a fix is out nothing about
+       whether waiting five minutes would help. The default interval is a DAY.
+       Both figures come from ui._packages_and_feed, which reads the same
+       settings value the poller sleeps on. #}
     <div class="muted">
       feed: <span class="mono-sm">{{ feed.feed_url }}</span>
       · last checked {{ feed.last_checked_at | ago if feed.last_checked_at else "never" }}
+      {% if feed_interval_seconds %}· checks every
+        {%- if feed_interval_seconds >= 3600 %} {{ (feed_interval_seconds / 3600) | round | int }} h{% else %} {{ feed_interval_seconds | eta }}{% endif %}{% endif %}
+      {% if feed_next_check_seconds is not none %}·
+        {{ "next retry in about" if feed.last_error else "next in about" }}
+        {{ feed_next_check_seconds | eta }}{% endif %}
       {% if feed.last_error %}<span class="chip red" title="{{ feed.last_error }}">[ LAST CHECK FAILED ]</span>{% endif %}
     </div>
     <form class="inline-form" hx-post="/partials/admin/feed/check"
-          hx-target="closest .admin-packages-box" hx-swap="outerHTML" style="margin:0.4rem 0">
+          hx-target="closest .admin-packages-box" hx-swap="outerHTML" style="margin:0.4rem 0" hx-indicator="this" hx-disabled-elt="this">
       {# DUI-4 (2026-09-04): a check fetches the vendor's channel over the
          internet, so it is not instant. #}
       <button class="btn tap" type="submit"><span class="idle-label">[ CHECK NOW ]</span><span class="busy-label">[ CHECKING THE FEED... ]</span></button>
@@ -343,7 +366,7 @@
             <td class="muted" data-label="NOTES">{{ p.notes }}</td>
             <td data-label="PUBLISH">
               <form class="inline-form" hx-post="/partials/admin/feed/publish"
-                    hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+                    hx-target="closest .admin-packages-box" hx-swap="outerHTML" hx-indicator="this" hx-disabled-elt="this">
                 <input type="hidden" name="kind" value="{{ p.kind }}">
                 <input type="hidden" name="platform" value="{{ p.platform }}">
                 <input type="hidden" name="version" value="{{ p.version }}">
@@ -355,7 +378,7 @@
             </td>
             <td data-label="PUBLISH + MAKE CURRENT">
               <form class="inline-form" hx-post="/partials/admin/feed/publish"
-                    hx-target="closest .admin-packages-box" hx-swap="outerHTML">
+                    hx-target="closest .admin-packages-box" hx-swap="outerHTML" hx-indicator="this" hx-disabled-elt="this">
                 <input type="hidden" name="kind" value="{{ p.kind }}">
                 <input type="hidden" name="platform" value="{{ p.platform }}">
                 <input type="hidden" name="version" value="{{ p.version }}">

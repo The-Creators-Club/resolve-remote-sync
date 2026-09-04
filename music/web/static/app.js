@@ -36,6 +36,11 @@ const state = {
   bpm: {min: null, max: null},
   dur: {min: null, max: null},
   playing: null,      // track id whose pane is open
+  // MUSIC-9 (2026-09-04): there was no sort control at all, so a cue added a
+  // minute ago sat somewhere alphabetical among 397 rows. `newest` is what an
+  // ingest switches to, because "did my drop land" is the question being asked.
+  sort: 'filename',
+  includeUnknown: false,   // MUSIC-14: show tracks with no bpm/duration anyway
   tracks: [],
   peaks: new Map(),   // id -> Uint8Array
   // Monotonic request token. Search, similar and filter all render into the
@@ -61,8 +66,30 @@ const fmtDur = s => {
 // see tests/test_mounted_prefix.py.
 async function api(path, opts) {
   const r = await fetch(path, opts);
-  if (!r.ok) throw new Error(`${path} -> ${r.status}`);
+  // The status travels with the error (MUSIC-2, 2026-09-04): a 401 is an
+  // expired dashboard session and needs different words from a 503, and
+  // `message` alone cannot tell them apart at the catch site.
+  if (!r.ok) {
+    const err = new Error(`${path} -> ${r.status}`);
+    err.status = r.status;
+    throw err;
+  }
   return r.json();
+}
+
+// MUSIC-2: none of the three query functions had a catch, and every one of
+// them renders into the same list, which was already showing render's empty
+// state and its advice to reword the query. So a text encoder that
+// failed to load, an expired session, a locked database and a genuinely empty
+// answer were one screen, and the advice was wrong in three of the four.
+function failureText(what, e) {
+  if (e && e.status === 401) {
+    return `${what} failed: your session expired. Reload the page to sign in again.`;
+  }
+  const why = e && e.status ? `the server answered ${e.status}`
+                            : (e && e.message) || 'the server could not be reached';
+  return `${what} failed: ${why}. Try again, and if it keeps happening tell your `
+         + 'admin what this line says.';
 }
 
 // Takes a NODE, not markup (MUSIC-15, 2026-08-11): what goes in here is
@@ -79,16 +106,41 @@ function toast(node, ms = 6000) {
 }
 
 // ---------------------------------------------------------------- waveform
+// MUSIC-13 (2026-09-04): a missing waveform drew an empty strip and said
+// nothing, and click-to-seek still worked over it, so it read as "the waveform
+// is broken" rather than "there is no waveform for this one". The container
+// has no indexer to build one, so this is the ordinary state of every track a
+// companion uploaded without peaks. Returns {data, note}: `note` is the
+// sentence the pane shows, and only a REAL answer is cached (a 404/500 body is
+// JSON, and caching it left the track with garbage peaks until a reload -
+// MUSIC-4, 2026-08-11).
+const NO_WAVEFORM =
+  'No waveform yet: this track was added by the fleet and the base rig has not '
+  + 'analysed it. Seeking still works.';
+
 async function loadPeaks(id) {
-  if (state.peaks.has(id)) return state.peaks.get(id);
-  const r = await fetch(`api/peaks/${id}`);
-  // A 404/500 body is JSON, and drawing it as a waveform then CACHING it left
-  // the track with permanent garbage peaks until a reload (MUSIC-4,
-  // 2026-08-11). Nothing but a real answer is remembered.
-  if (!r.ok) return new Uint8Array(0);
+  if (state.peaks.has(id)) return {data: state.peaks.get(id), note: ''};
+  let r;
+  try {
+    r = await fetch(`api/peaks/${id}`);
+  } catch {
+    return {data: new Uint8Array(0),
+            note: 'The waveform could not be loaded: this page lost the server.'};
+  }
+  if (!r.ok) {
+    let why = '';
+    // The route words its own 404 ("no stored waveform and no indexer on this
+    // host to build one", "file missing"), and that reason beats a guess.
+    try { why = (await r.json()).detail || ''; } catch { /* not JSON */ }
+    if (r.status === 404) {
+      return {data: new Uint8Array(0), note: NO_WAVEFORM, detail: why};
+    }
+    return {data: new Uint8Array(0),
+            note: `The waveform could not be loaded (the server answered ${r.status}).`};
+  }
   const buf = new Uint8Array(await r.arrayBuffer());
   state.peaks.set(id, buf);
-  return buf;
+  return {data: buf, note: buf.length ? '' : NO_WAVEFORM};
 }
 
 function drawWave(canvas, peaks, progress) {
@@ -216,9 +268,17 @@ async function openPane(row, t, autoplay) {
   _onResize = () => { if (state.playing === t.id) paint(); };
   window.addEventListener('resize', _onResize);
 
-  peaks = await loadPeaks(t.id).catch(() => new Uint8Array(0));
+  const got = await loadPeaks(t.id).catch(() => ({data: new Uint8Array(0), note: ''}));
   if (state.playing !== t.id) return;        // pane closed while we waited
+  peaks = got.data;
   paint();
+  // MUSIC-13: the caption goes INSIDE the pane, under the strip, so the empty
+  // box has a reason attached to it rather than looking broken.
+  if (got.note) {
+    const cap = el('div', 'wavenote muted', got.note);
+    if (got.detail) cap.title = got.detail;
+    wrap.after(cap);
+  }
 }
 
 function togglePlay(row, t) {
@@ -279,6 +339,22 @@ async function sendToResolve(t, action, btn, msg) {
           : 'track isn’t on this machine yet: syncing it down, then sending…';
         announced = true;
         await new Promise(res => setTimeout(res, 1500));
+        continue;
+      }
+      // "this machine is already downloading as much as it will at once" is a
+      // WAIT, not a refusal, and this loop is the retry the cap relies on
+      // (CMEDIA-7, 2026-09-04). Two shapes are accepted on purpose: the
+      // companion answers {ok:true, state:"busy", retry_after} from the build
+      // that fixed it, and older builds answer ok:false with that sentence in
+      // `error`, so the page keeps waiting on either one.
+      const busyWords = !r.ok && typeof r.error === 'string'
+        && r.error.includes('already downloading');
+      if (r && (r.state === 'busy' || r.state === 'queued' || busyWords)) {
+        msg.className = 'rmsg';
+        msg.textContent = r.message
+          || 'waiting for this computer’s other download to finish, then sending…';
+        const wait = Number(r.retry_after) > 0 ? Number(r.retry_after) * 1000 : 1500;
+        await new Promise(res => setTimeout(res, wait));
         continue;
       }
       break;
@@ -430,14 +506,30 @@ function render(tracks, headline, showMatch,
 }
 
 // ---------------------------------------------------------------- queries
+// One filter object, two verbs (MUSIC-4, 2026-09-04): the rail used to reach
+// the browse route only, so typing a description silently threw away the mood
+// chip, the axis slider and the BPM boxes while the rail went on showing them
+// lit. `SearchReq` now takes the same names, so both callers send this.
+function filterFields() {
+  const f = {};
+  if (state.facet) { f.category = state.facet.category; f.label = state.facet.label; }
+  if (state.axis) { f.axis = state.axis.axis; f.axis_min = state.axis.min; }
+  if (state.bpm.min) f.bpm_min = state.bpm.min;
+  if (state.bpm.max) f.bpm_max = state.bpm.max;
+  if (state.dur.min) f.dur_min = state.dur.min;
+  if (state.dur.max) f.dur_max = state.dur.max;
+  // MUSIC-14: a companion-ingested track has no bpm and no duration, and
+  // `bpm >= 90` is never true of a NULL, so the tempo and length boxes hide
+  // every one of them. Unset filters already match them; this is the opt-in
+  // for the tracks a set filter would drop.
+  if (state.includeUnknown) f.include_unknown = true;
+  return f;
+}
+
 function filterParams() {
   const p = new URLSearchParams();
-  if (state.facet) { p.set('category', state.facet.category); p.set('label', state.facet.label); }
-  if (state.axis) { p.set('axis', state.axis.axis); p.set('axis_min', state.axis.min); }
-  if (state.bpm.min) p.set('bpm_min', state.bpm.min);
-  if (state.bpm.max) p.set('bpm_max', state.bpm.max);
-  if (state.dur.min) p.set('dur_min', state.dur.min);
-  if (state.dur.max) p.set('dur_max', state.dur.max);
+  for (const [k, v] of Object.entries(filterFields())) p.set(k, v);
+  if (state.sort && state.sort !== 'filename') p.set('sort', state.sort);
   return p;
 }
 
@@ -452,11 +544,20 @@ async function loadTracks() {
   if (state.axis) bits.push(`${state.axis.axis} ≥ ${state.axis.min}`);
   if (state.bpm.min || state.bpm.max) bits.push(`${state.bpm.min || 0}–${state.bpm.max || '∞'} bpm`);
   const seq = ++state.seq;
-  const {tracks} = await api('api/tracks?' + filterParams().toString());
+  let answer;
+  try {
+    answer = await api('api/tracks?' + filterParams().toString());
+  } catch (e) {
+    if (seq !== state.seq) return;
+    render([], 'Could not load the library', false,
+           failureText('Loading the library', e));
+    return;
+  }
   if (seq !== state.seq) return;
-  render(tracks, bits.length ? bits.join('  ·  ') : 'All tracks', false,
+  render(answer.tracks, bits.length ? bits.join('  ·  ') : 'All tracks', false,
          bits.length ? 'No tracks match these filters. Clear one and try again.'
                      : 'The library is empty. Drop some music in to get started.');
+  noteUnknownHidden(answer);
 }
 
 async function runSearch(q) {
@@ -465,22 +566,57 @@ async function runSearch(q) {
   render([], 'Searching…', false, 'Searching…');
   const pool = $('#pool').value;
   const seq = ++state.seq;
-  const {tracks} = await api('api/search', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({query: q, k: 60, pool}),
-  });
+  let answer;
+  try {
+    answer = await api('api/search', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(Object.assign({query: q, k: 60, pool}, filterFields())),
+    });
+  } catch (e) {
+    if (seq !== state.seq) return;
+    render([], 'Search failed', false, failureText('The search', e));
+    return;
+  }
   if (seq !== state.seq) return;
-  render(tracks, `“${q}” · ${pool === 'mean' ? 'whole track' : 'any moment'}`, true);
+  render(answer.tracks, `“${q}” · ${pool === 'mean' ? 'whole track' : 'any moment'}`, true);
+  noteUnknownHidden(answer);
 }
 
 async function showSimilar(t) {
   render([], 'Finding similar…', false, 'Finding similar…');
   const seq = ++state.seq;
-  const {tracks} = await api(`api/similar/${t.id}?k=25`);
+  let answer;
+  try {
+    answer = await api(`api/similar/${t.id}?k=25`);
+  } catch (e) {
+    if (seq !== state.seq) return;
+    render([], 'Could not look for similar tracks', false,
+           failureText('The similar lookup', e));
+    return;
+  }
   if (seq !== state.seq) return;
-  render(tracks, `Similar to ${t.filename}`, true,
+  render(answer.tracks, `Similar to ${t.filename}`, true,
          'Nothing in the library sounds like this one yet.');
+}
+
+// MUSIC-14: the ledger has always recorded that fleet-ingested tracks "fall
+// out of" the BPM and duration filters (MUSIC-ING-1: no librosa on an editor's
+// machine, so bpm and duration come up null). The result head is where the
+// editor finds out, with the way back in beside it.
+function noteUnknownHidden(answer) {
+  const n = (answer && answer.unknown_hidden) || 0;
+  if (!n) return;
+  const fields = (answer.unknown_fields || []).map(f => f === 'duration' ? 'length' : f);
+  const head = $('#resulthead');
+  const note = el('span', 'muted',
+    `${n} track${n === 1 ? ' has' : 's have'} no ${fields.join(' or ')} and `
+    + `${n === 1 ? 'is' : 'are'} not shown`);
+  head.appendChild(note);
+  const btn = el('button', 'text-btn', '[ include them ]');
+  btn.title = 'Show tracks the base rig has not analysed yet';
+  btn.onclick = () => { state.includeUnknown = true; syncUnknownToggle(); loadTracks(); };
+  head.appendChild(btn);
 }
 
 function selectFacet(category, label) {
@@ -515,6 +651,24 @@ function paintFacets() {
     sec.appendChild(chips);
     box.appendChild(sec);
   }
+}
+
+// MUSIC-14: the count comes from /api/facets (`_unknown`), so the rail can say
+// how many tracks the tempo and length boxes would drop BEFORE one is typed.
+function syncUnknownToggle() {
+  const box = $('#includeUnknown');
+  if (!box) return;
+  const u = FACETS._unknown || {};
+  const n = Math.max(u.bpm || 0, u.duration || 0);
+  box.checked = state.includeUnknown;
+  const count = $('#unknownCount');
+  if (count) {
+    count.textContent = n
+      ? `${n} track${n === 1 ? '' : 's'} have no BPM or length yet`
+      : 'every track has a BPM and a length';
+  }
+  const row = $('#unknownRow');
+  if (row) row.classList.toggle('hidden', !n);
 }
 
 function paintAxes(axes) {
@@ -643,6 +797,28 @@ async function ingest(files) {
   }
 }
 
+// MUSIC-9 (2026-09-04): a fleet batch reaching `done` left the results list,
+// the facets and the header stats exactly as they were - only the legacy
+// browser-upload path re-rendered - so the answer to "is my album in yet" was
+// to reload the page. ingest.js calls this when a batch turns terminal, with
+// `newest` so the tracks that just landed are at the top instead of somewhere
+// alphabetical. Failures here are not fatal: the list is what matters.
+async function refreshLibrary(newest) {
+  try {
+    paintStats(await api('api/stats'));
+    FACETS = await api('api/facets');
+    paintFacets();
+    paintAxes(FACETS._axes || []);
+    syncUnknownToggle();
+  } catch { /* stale facets beat a blank page */ }
+  if (newest) {
+    state.sort = 'newest';
+    const sel = $('#sort');
+    if (sel) sel.value = 'newest';
+  }
+  await loadTracks();
+}
+
 // The header line. `scores_stale` means a library rescore was deferred or
 // failed (MUSIC-1 / MUSIC-5, 2026-09-04): the tracks are all there and
 // searchable, and some of them have no tags yet. Saying so is the difference
@@ -697,6 +873,7 @@ async function init() {
   FACETS = await api('api/facets');
   paintFacets();
   paintAxes(FACETS._axes || []);
+  syncUnknownToggle();
 
   const ex = $('#examples');
   EXAMPLES.forEach(q => {
@@ -708,14 +885,38 @@ async function init() {
   $('#go').onclick = () => runSearch($('#q').value);
   $('#pool').onchange = () => { if ($('#q').value.trim()) runSearch($('#q').value); };
   $('#q').addEventListener('keydown', e => { if (e.key === 'Enter') runSearch($('#q').value); });
+  // MUSIC-3: the ingest panel used to be reachable ONLY by dragging a file
+  // onto the page, so nothing on screen said music could be added at all - and
+  // an editor whose batch was running yesterday had no way back to it.
+  const add = $('#addMusic');
+  if (add) {
+    add.onclick = () => {
+      if (typeof miOpen === 'function') miOpen();
+      else toast(el('div', 'row bad',
+        'the add-music panel did not load: reload the page and try again'));
+    };
+  }
+  const sort = $('#sort');
+  if (sort) {
+    sort.onchange = () => { state.sort = sort.value; loadTracks(); };
+  }
+  const unknown = $('#includeUnknown');
+  if (unknown) {
+    unknown.onchange = () => {
+      state.includeUnknown = unknown.checked;
+      loadTracks();
+    };
+  }
   $('#clear').onclick = () => {
     $('#q').value = '';
     state.facet = null; state.axis = null;
+    state.includeUnknown = false;
     state.bpm = {min: null, max: null}; state.dur = {min: null, max: null};
     ['bpmMin', 'bpmMax', 'durMin', 'durMax'].forEach(i => { $('#' + i).value = ''; });
     document.querySelectorAll('#axes input[type=range]').forEach(r => {
       r.value = 0; r.parentElement.querySelector('.val').textContent = 'off';
     });
+    syncUnknownToggle();
     paintFacets(); loadTracks();
   };
   $('#applyRange').onclick = () => {

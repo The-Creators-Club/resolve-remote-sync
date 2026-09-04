@@ -1035,6 +1035,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         r"^/broll/api/fleet/ingest/batches/[0-9a-f]{32}/"
         r"(claim|heartbeat|release|items/[0-9a-f]{32}/(status|result|uploaded))$"
     )
+    # BROLL-8 (usability sweep 2026-09-04): the DISCOVERY route, GET only.
+    # A companion cannot claim a batch whose uid it does not know, and until
+    # this landed the only way to learn one was a report reply -- so the
+    # route was added and then 303'd into a login page by this gate, which is
+    # the SYS-3 shape wearing a middleware. Exact, with an optional trailing
+    # slash and nothing else: `/broll/api/fleet/` at large stays closed, the
+    # method is pinned here because a collection path that accepted a POST
+    # would be a second door onto batch creation, and the route itself
+    # verifies the fleet credential and 403s an `?editor=` that is not the
+    # token's own.
+    _broll_fleet_list_re = re.compile(r"^/broll/api/fleet/ingest/batches/?$")
 
     # The MUSIC ingest fleet routes (docs/MUSIC_INGEST_PLAN.md step 2,
     # 2026-08-18). Identical posture and identical shape to the b-roll block
@@ -1134,6 +1145,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # the companion indexing a claimed b-roll ingest batch -- same
             # fleet-token posture again (docs/BROLL_INGEST_PLAN.md §4.2)
             or (_broll_fleet_re.match(path) is not None and _companion_token_ok(request))
+            # ...and the batch list a companion discovers work from (BROLL-8)
+            or (request.method == "GET"
+                and _broll_fleet_list_re.match(path) is not None
+                and _companion_token_ok(request))
             # and the same for a claimed MUSIC ingest batch
             # (docs/MUSIC_INGEST_PLAN.md step 2)
             or (_music_fleet_re.match(path) is not None and _companion_token_ok(request))
@@ -1171,7 +1186,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # <video> srcs are `audio?mp=` and `video?mp=` -- a media element
             # handed a 303 to an HTML login page fails opaquely, which on
             # that page reads as "this clip has no audio".
-            if path.startswith(("/api/", "/broll/api/", "/broll/media/",
+            if path.startswith("/api/"):
+                # DCORE-9 (usability sweep 2026-09-04): this is the dashboard's
+                # OWN API, and the admin page JS that calls it renders `detail`
+                # straight into a toast. "login required" reads as a
+                # permissions bug -- the admin who came back to a tab that sat
+                # in the background overnight saw `could not tick <project>:
+                # login required` and had no reason to think their session had
+                # simply expired. `login` is where a caller should send the
+                # browser; the ?next= is the CALLER's to add, from the page
+                # the person is looking at, because this path is an API URL
+                # and landing somebody on /api/v1/selection/... after they
+                # sign in is not a return. static/assignments.js does exactly
+                # that instead of toasting.
+                #
+                # The mounted apps below keep the old wording deliberately:
+                # their consumers are companions and SPAs of another repo, and
+                # that string is theirs to change, not this finding's.
+                return JSONResponse(
+                    {"detail": "Your sign-in has expired. Sign in again.",
+                     "login": "/login"},
+                    status_code=401)
+            if path.startswith(("/broll/api/", "/broll/media/",
                                 "/music/api/", "/ytdl/api/", "/cards/agent/",
                                 "/cards/api/", "/cards/audio", "/cards/video",
                                 "/cards/peaks")):

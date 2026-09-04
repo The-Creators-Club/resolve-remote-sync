@@ -310,3 +310,88 @@ def test_accept_refuses_the_mkdir_if_the_drive_goes_out_mid_reconcile(tmp_path):
     assert mgr.reconcile()[LUTS_FOLDER_ID] == "error"
     assert [c for c in admin.names() if c == "accept"] == []
     assert not gone.exists()
+
+
+# -- SYNC-101: a failure is kept, not logged once ---------------------------
+
+class _Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+
+def test_a_library_the_server_never_shared_is_kept_as_a_problem(tmp_path):
+    """SYNC-101 (sweep 2026-09-03): `not-offered` used to be a DEBUG line and
+    a discarded dict, so an editor whose LUT library never arrived had
+    nothing anywhere to read."""
+    admin = FakeAdmin(pending={})       # nothing offered to this device
+    mgr = shared_folders.SharedFolderManager(admin, tmp_path, folders=ONLY_LUTS)
+    assert mgr.reconcile()[LUTS_FOLDER_ID] == "not-offered"
+    problems = mgr.problems()
+    assert len(problems) == 1
+    assert "Assets/Luts (LUT library)" in problems[0]
+    assert "Ask your admin" in problems[0]
+    assert "—" not in problems[0]      # no em dash in editor copy
+    assert mgr.problem_entries()[0]["outcome"] == "not-offered"
+
+
+def test_a_kept_problem_is_retried_on_a_backoff_and_clears_on_success(tmp_path):
+    clock = _Clock()
+    admin = FakeAdmin(pending={})
+    mgr = shared_folders.SharedFolderManager(
+        admin, tmp_path, folders=ONLY_LUTS, now=clock)
+    assert mgr.reconcile()[LUTS_FOLDER_ID] == "not-offered"
+    first = len(admin.calls)
+
+    # Straight away: the answer stands, and no second pending-folders read.
+    assert mgr.reconcile()[LUTS_FOLDER_ID] == "not-offered"
+    assert mgr.problems()
+    assert len(admin.calls) == first
+
+    # Past the backoff, and by then the admin has approved the share.
+    clock.t += shared_folders.PROBLEM_RETRY_FIRST_SECONDS + 1
+    admin.pending = {LUTS_FOLDER_ID: {"offeredBy": {"DEVICE-1": {}}}}
+    assert mgr.reconcile()[LUTS_FOLDER_ID] == "accepted"
+    assert mgr.problems() == []
+
+
+def test_a_persistent_problem_reaches_the_log_in_the_editor_s_words(tmp_path, caplog):
+    """Routine before the first provision cycle, permanent afterwards: the
+    third attempt is where DEBUG stops being the right level."""
+    clock = _Clock()
+    admin = FakeAdmin(pending={})
+    mgr = shared_folders.SharedFolderManager(
+        admin, tmp_path, folders=ONLY_LUTS, now=clock)
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            mgr.reconcile()
+            clock.t += shared_folders.PROBLEM_RETRY_MAX_SECONDS
+    assert sum("has not been shared with this computer" in r.message
+               for r in caplog.records) == 1
+
+
+def test_a_folder_that_stays_paused_unfiltered_is_a_problem_not_an_ok(tmp_path):
+    class Unreadable(FakeAdmin):
+        def get_ignores(self, folder_id):
+            raise RuntimeError("syncthing did not answer")
+
+    admin = Unreadable(
+        folder={"id": LUTS_FOLDER_ID, "paused": True,
+                "path": shared_folders.local_path_for(tmp_path, "Assets/Luts")},
+    )
+    mgr = shared_folders.SharedFolderManager(admin, tmp_path, folders=ONLY_LUTS)
+    assert mgr.reconcile()[LUTS_FOLDER_ID] == "unfiltered"
+    assert ("set_paused", LUTS_FOLDER_ID, False) not in admin.calls
+    assert "filter list" in mgr.problems()[0]
+
+
+def test_a_reconcile_that_raises_is_kept_with_its_reason(tmp_path):
+    class Broken(FakeAdmin):
+        def get_folder(self, folder_id):
+            raise RuntimeError("syncthing is down")
+
+    mgr = shared_folders.SharedFolderManager(Broken(), tmp_path, folders=ONLY_LUTS)
+    assert mgr.reconcile()[LUTS_FOLDER_ID] == "error"
+    assert "syncthing is down" in mgr.problems()[0]

@@ -61,6 +61,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -85,6 +86,31 @@ AGENT_WAIT_SECONDS = 25.0
 # How often the standalone-agent probe is re-run while the role is refusing.
 # It shells out, so not per tick.
 PROBE_CACHE_SECONDS = 60.0
+
+# WHAT THE FLEET GRID GOES GREEN ON (RES-6, sweep 2026-09-04). Until this
+# sweep `report_block()["connected"]` was `bool(self._threads)`, and nothing
+# ever cleared that list: a loop that raised, a loop that returned and a
+# machine that had been answered HTTP 401 for hours all rendered exactly like
+# a healthy one. These five words are the whole vocabulary, and only the first
+# is green.
+HEALTH_RUNNING = "running"
+HEALTH_STOPPED = "stopped"
+HEALTH_REFUSED = "refused"
+HEALTH_CREDENTIAL_REFUSED = "credential_refused"
+HEALTH_UNREACHABLE = "unreachable"
+# TWO LONG POLLS. The pull loop's poll returns at AGENT_WAIT_SECONDS at the
+# latest and the push loop posts state at least as often, so a role that has
+# said nothing for two of them is a role that is not talking, whatever its
+# threads think they are doing.
+STALE_AFTER_SECONDS = 2 * AGENT_WAIT_SECONDS
+# A start is not a poll: the loops need a moment to make their first call, and
+# a chip that goes amber for the first three seconds of every companion
+# restart is a chip nobody believes.
+GRACE_SECONDS = 30.0
+# The sentence an editor gets for a revoked or rotated fleet token. It names
+# the ONE thing that fixes it, which is not "wait".
+CREDENTIAL_ADVICE = ("the fleet credential is refused: sign in again from the "
+                     "tray")
 
 
 class CardsRoleError(RuntimeError):
@@ -202,6 +228,41 @@ def check_contract(engine_mod: Any) -> Any:
 # the PC's own `reorder_web.py 8800`, which is the other half of the same rule.
 _AGENT_MARKERS = ("reorder_web.py", "multicam_pipeline")
 
+# The one answer that is neither a sighting nor a clearance. A CONSTANT since
+# RES-7, because `refusal()` gives it its own sentence: rendering "Found: this
+# machine's processes could not be listed" read as if something had been seen.
+PROBE_UNREADABLE = "this machine's processes could not be listed"
+
+
+def describe_process(line: str) -> str:
+    """A process line -> "python.exe (pid 4312): ...reorder_web.py --agent".
+
+    RES-7: the refusal used to name a command line and nothing else, so
+    "stop it" meant "find it yourself". Both probe shapes are handled -- the
+    tab-separated one `running_command_lines` emits now, and the bare command
+    line an older caller or a test passes -- because a probe this module does
+    not own may still be wired in (`processes_fn`).
+    """
+    raw = str(line or "").strip()
+    if not raw:
+        return ""
+    pid = name = ""
+    command = raw
+    if "\t" in raw:
+        pid, _, rest = raw.partition("\t")
+        name, _, command = rest.partition("\t")
+    else:
+        first, _, rest = raw.partition(" ")
+        if first.isdigit() and rest.strip():
+            pid = first
+            name, _, command = rest.strip().partition(" ")
+    pid = pid.strip()
+    name = Path(name.strip()).name if name.strip() else ""
+    command = command.strip() or raw
+    if pid.isdigit() and name:
+        return f"{name} (pid {pid}): {command}"[:300]
+    return raw[:300]
+
 
 def running_command_lines() -> Optional[list[str]]:
     """Every process command line on this machine, or None if we cannot tell.
@@ -209,18 +270,24 @@ def running_command_lines() -> Optional[list[str]]:
     None is NOT "there is nothing running" -- see the fail-closed rule in
     `standalone_agent()`. Windows needs CIM for the command line (tasklist
     does not carry one); macOS has `ps -Ao command`.
+
+    EACH LINE CARRIES `pid<TAB>name<TAB>command line` since the 2026-09-04
+    sweep (RES-7): "stop it and restart the companion" is not advice anybody
+    can act on when the thing to stop is named only by a command line three
+    screens wide. `standalone_agent()` matches on substrings, so a line in the
+    old bare-command-line shape still works and the old refusal still reads.
     """
     system = platform.system()
     try:
         if system == "Windows":
             out = subprocess.run(
                 ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-                 "Get-CimInstance Win32_Process | "
-                 "Select-Object -ExpandProperty CommandLine"],
+                 "Get-CimInstance Win32_Process | ForEach-Object "
+                 "{ \"$($_.ProcessId)`t$($_.Name)`t$($_.CommandLine)\" }"],
                 capture_output=True, text=True, timeout=30,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         elif system == "Darwin":
-            out = subprocess.run(["ps", "-Ao", "command"],
+            out = subprocess.run(["ps", "-Ao", "pid=,comm=,command="],
                                  capture_output=True, text=True, timeout=30)
         else:
             return None
@@ -251,7 +318,7 @@ def standalone_agent(lines: Optional[list[str]]) -> Optional[str]:
     every client on the machine, and the cure is closing Resolve.
     """
     if lines is None:
-        return "this machine's processes could not be listed"
+        return PROBE_UNREADABLE
     for line in lines:
         low = line.lower()
         if not any(marker in low for marker in _AGENT_MARKERS):
@@ -325,6 +392,23 @@ class TimelineCardsRole:
         self._seen: Optional[float] = None
         self._timeline = ""
         self._project = ""
+        # THE EVIDENCE report_block() JUDGES ON (RES-6). `_last_poll_at` is
+        # any successful tunnel call, not only a `state` push: the pull loop
+        # long-polls `pending` and a role whose push loop alone had died would
+        # otherwise look silent. `_last_http_status` is the last answer the
+        # dashboard actually gave, which is how a 401 stops being
+        # indistinguishable from a network that is down.
+        self._last_poll_at: Optional[float] = None
+        self._last_http_status: Optional[int] = None
+        self._last_error = ""
+        # What killed a loop, in its own words, so `stopped` can say why.
+        self._loop_error = ""
+        # The re-evaluation thread (RES-7). It exists only on machines with
+        # `cards_agent` on: a companion with the role off must not shell out
+        # for a process listing every minute for ever.
+        self._stop_ev = threading.Event()
+        self._supervisor: Optional[threading.Thread] = None
+        self._logged_detail = ""
 
     # -- config ---------------------------------------------------------
     @property
@@ -389,15 +473,24 @@ class TimelineCardsRole:
 
     def refusal(self) -> Optional[tuple[str, str]]:
         """(state, sentence) if this machine must not serve the page, else
-        None. Called before the thread starts and never after: a role that
-        is up stays up until stop()."""
+        None.
+
+        RE-ASKED EVERY PROBE_CACHE_SECONDS WHILE THE ROLE IS DOWN (RES-7,
+        sweep 2026-09-04), not once at start. Every one of these refusals is
+        a condition that CLEARS: somebody signs in, somebody closes the
+        standalone agent, a fleet halt expires (24 h by design). Deciding
+        them once per process meant the sentence "sign in from the tray" told
+        an editor to do the one thing that would not help, because only a
+        restart started the role.
+        """
         if not self.enabled:
             return (STATE_DISABLED,
                     "cards_agent is not set in ~/.ccsync/config.toml")
         if not self.dashboard_url or not self._token:
             return (STATE_NO_DASHBOARD,
-                    "this companion has no dashboard to long-poll "
-                    "(sign in from the tray)")
+                    "this companion has no dashboard to long-poll. Sign in "
+                    "from the tray and this computer will pick the page up "
+                    "on its own within a minute")
         if self._halted():
             return (STATE_HALTED,
                     "the fleet is halted, so this machine is not taking work "
@@ -411,17 +504,41 @@ class TimelineCardsRole:
                     "jobs_vault_root is not set, so the engine has no vault "
                     "to read")
         found = self._standalone()
+        if found == PROBE_UNREADABLE:
+            # NOT A SIGHTING. The old sentence rendered this as "Found: this
+            # machine's processes could not be listed", which reads like
+            # something was seen and sent people looking for it (RES-7).
+            return (STATE_STANDALONE_AGENT,
+                    "another Timeline Cards process may be running here and "
+                    "this machine's processes could not be listed, so the "
+                    "companion is not starting the role (CR-68)")
         if found:
             return (STATE_STANDALONE_AGENT,
                     "a Timeline Cards process is already talking to Resolve on "
                     "this machine, so the companion will not be a second one "
-                    "(CR-68). Stop it and restart the companion. Found: "
-                    + found)
+                    "(CR-68). Close the standalone Timeline Cards agent window "
+                    "and this computer will pick the page up on its own within "
+                    "a minute. Found: " + describe_process(found))
         return None
 
     # -- start / stop ----------------------------------------------------
     def start(self) -> bool:
-        """-> did it start. Never raises."""
+        """-> did it start. Never raises.
+
+        A False here is no longer final (RES-7): on a machine with the role
+        switched on, the watchdog keeps asking, so a companion that started
+        before sign-in or beside a standalone agent comes up by itself once
+        the condition clears.
+        """
+        started = False
+        try:
+            started = self._start_guarded()
+        finally:
+            if self.enabled:
+                self._ensure_supervisor()
+        return started
+
+    def _start_guarded(self) -> bool:
         try:
             return self._start()
         except CardsRoleError as exc:
@@ -441,12 +558,17 @@ class TimelineCardsRole:
         if refused is not None:
             state, detail = refused
             self._set(state, detail)
-            # INFO for the ordinary off states, WARNING for the one that means
-            # somebody has to do something.
-            if state == STATE_STANDALONE_AGENT:
-                log.warning("cards: %s", detail)
-            else:
-                log.info("cards: not serving the page here: %s", detail)
+            # ONCE PER SENTENCE, not once per attempt: the watchdog re-asks
+            # every PROBE_CACHE_SECONDS now (RES-7), and a refusal that never
+            # changes must not be a line a minute in companion.log for weeks.
+            if detail != self._logged_detail:
+                self._logged_detail = detail
+                # INFO for the ordinary off states, WARNING for the one that
+                # means somebody has to do something.
+                if state == STATE_STANDALONE_AGENT:
+                    log.warning("cards: %s", detail)
+                else:
+                    log.info("cards: not serving the page here: %s", detail)
             return False
         try:
             engine_mod, agent_mod = self._engine_loader(self.checkout)
@@ -488,19 +610,78 @@ class TimelineCardsRole:
 
     def _loop(self, target: Callable[[], None], which: str) -> None:
         """AgentClient's loops never return; if one does, say so rather than
-        letting a thread die into silence and the page go quiet for ever."""
+        letting a thread die into silence and the page go quiet for ever.
+
+        SAYING SO NOW MEANS SAYING SO IN THE REPORT (RES-6): until this sweep
+        the only trace was a log line on the machine, and `report_block()`
+        went on calling itself connected because `_threads` was still a list
+        of two dead threads."""
         try:
             target()
-        except Exception:
+        except Exception as exc:                                # noqa: BLE001
             log.exception("cards: the %s loop stopped", which)
+            self._note_loop_end(f"the {which} loop stopped: "
+                                f"{type(exc).__name__}: {exc}")
         else:
             log.warning("cards: the %s loop returned -- the page will not "
                         "update until the companion restarts", which)
+            self._note_loop_end(f"the {which} loop returned")
+
+    def _note_loop_end(self, detail: str) -> None:
+        with self._lock:
+            # The FIRST death is the interesting one: the second loop usually
+            # dies of the same cause a moment later, and overwriting would
+            # leave the report naming the symptom rather than the cause.
+            if not self._loop_error:
+                self._loop_error = detail[:300]
+
+    # -- the watchdog (RES-7) ---------------------------------------------
+    def _ensure_supervisor(self) -> None:
+        if self._supervisor is not None and self._supervisor.is_alive():
+            return
+        self._stop_ev.clear()
+        self._supervisor = threading.Thread(target=self._supervise,
+                                            name="ccsync-cards-watch",
+                                            daemon=True)
+        self._supervisor.start()
+
+    def _supervise(self) -> None:
+        """Re-ask the refusal while the role is down, for ever.
+
+        The cadence is PROBE_CACHE_SECONDS because the only expensive question
+        in `refusal()` is the process probe and that is what its cache is
+        sized for -- read per iteration so a test can shorten it.
+        """
+        while not self._stop_ev.wait(float(PROBE_CACHE_SECONDS)):
+            self.supervise_now()
+
+    def supervise_now(self) -> bool:
+        """One re-evaluation. -> is the role running now. Never raises.
+
+        A HALT DOES NOT STOP A ROLE THAT IS UP, deliberately, and RES-7's
+        proposal to make it does not survive `_halted`'s own rule: the edits
+        are synthetic keystroke sequences and one stopped half way through is
+        a timeline nobody asked for. A halt still refuses a START, and it now
+        stops LATCHING the role off for the life of the process once it
+        expires, which was the actual defect.
+        """
+        try:
+            with self._lock:
+                if self._threads:
+                    return True
+            return self._start_guarded()
+        except Exception:                                       # noqa: BLE001
+            log.debug("cards: the watchdog stumbled", exc_info=True)
+            return False
 
     def stop(self) -> None:
         """Let go of Resolve. The loops are daemon threads inside a blocking
         long poll, so this does not join them: what it does is stop this
         object claiming to be the agent, and the process is going away."""
+        # The watchdog goes with it: a stop() that left it running would
+        # start the role again a minute into the shutdown (RES-7).
+        self._stop_ev.set()
+        self._supervisor = None
         with self._lock:
             threads, self._threads = self._threads, []
             self._client = None
@@ -553,16 +734,41 @@ class TimelineCardsRole:
         if request is None:
             from .broll_ingest import default_request
             request = default_request
-        status, parsed = request(method, url, body, self._headers(), float(timeout))
+        try:
+            status, parsed = request(method, url, body, self._headers(),
+                                     float(timeout))
+        except Exception as exc:                                # noqa: BLE001
+            # A TRANSPORT FAILURE IS EVIDENCE TOO (RES-6). The engine's loops
+            # swallow it and back off, which is right for them and is exactly
+            # why this side has to keep the last one: "the dashboard has been
+            # unreachable for an hour" is otherwise invisible everywhere.
+            self._note_call(None, f"{type(exc).__name__}: {exc}")
+            raise
         if status != 200:
             detail = ""
             if isinstance(parsed, dict):
                 detail = str(parsed.get("detail") or "")
-            raise CardsTunnelError(
-                f"the dashboard answered HTTP {status} for {suffix}"
-                + (f": {detail}" if detail else ""))
+            message = (f"the dashboard answered HTTP {status} for {suffix}"
+                       + (f": {detail}" if detail else ""))
+            self._note_call(int(status), message)
+            raise CardsTunnelError(message)
+        self._note_call(200, "")
         self._note_traffic(suffix, body, parsed)
         return parsed if isinstance(parsed, dict) else {}
+
+    def _note_call(self, status: Optional[int], error: str) -> None:
+        """What the dashboard last said, and when it last said 200.
+
+        `_last_poll_at` moves on ANY successful call and not only on a `state`
+        push: the pull loop's long poll is the one that runs even when nothing
+        is happening in Resolve, so a role judged on `state` alone would look
+        silent on a quiet afternoon (RES-6).
+        """
+        with self._lock:
+            self._last_http_status = status
+            self._last_error = str(error or "")[:300]
+            if status == 200:
+                self._last_poll_at = time.time()
 
     def _note_traffic(self, suffix: str, body: Optional[dict], answer: Any) -> None:
         """Keep just enough to answer "is this machine serving the page, and
@@ -582,17 +788,61 @@ class TimelineCardsRole:
         with self._lock:
             self._state, self._detail = state, detail
 
+    def health(self) -> tuple[str, str]:
+        """(one of the five HEALTH_* words, a sentence) -- RES-6.
+
+        The order is the order of severity, and every branch is a DIFFERENT
+        problem with the same old symptom: a thread that has died, a
+        credential that has been refused, a dashboard that cannot be reached,
+        and a machine that was never going to serve the page at all.
+        """
+        with self._lock:
+            gate_state, gate_detail = self._state, self._detail
+            threads = list(self._threads)
+            since, polled = self._since, self._last_poll_at
+            status, error, loop_error = (self._last_http_status,
+                                         self._last_error, self._loop_error)
+        if not threads:
+            return HEALTH_REFUSED, gate_detail
+        alive = [t for t in threads if t.is_alive()]
+        if loop_error or not alive:
+            return HEALTH_STOPPED, (
+                loop_error or "the push and pull loops are no longer running")
+        if status in (401, 403):
+            return HEALTH_CREDENTIAL_REFUSED, CREDENTIAL_ADVICE
+        if polled is None and error:
+            # A call that FAILED is evidence, and the start grace below is
+            # only ever cover for silence: a role whose every call so far has
+            # been refused is not "still starting".
+            return HEALTH_UNREACHABLE, error
+        fresh = polled if polled is not None else since
+        age = time.time() - float(fresh or 0.0)
+        # A start counts for GRACE_SECONDS and no longer: after that the only
+        # thing that keeps this green is the dashboard answering.
+        limit = STALE_AFTER_SECONDS if polled is not None else GRACE_SECONDS
+        if fresh is None or age > limit:
+            return HEALTH_UNREACHABLE, (
+                error or "the dashboard has not answered this computer's "
+                         "Timeline Cards loops")
+        if gate_state != STATE_RUNNING:
+            return HEALTH_STOPPED, gate_detail
+        return HEALTH_RUNNING, gate_detail
+
     def status(self) -> dict[str, Any]:
         """Zero-I/O snapshot for the log and the diagnostics bundle."""
+        health, health_detail = self.health()
         with self._lock:
             state, detail = self._state, self._detail
             running = bool(self._threads)
             since, seen = self._since, self._seen
+            polled, http = self._last_poll_at, self._last_http_status
             timeline, project = self._timeline, self._project
             engine = self._engine
         answer: dict[str, Any] = {
             "state": state, "detail": detail, "running": running,
             "since": since, "last_state_at": seen,
+            "health": health, "health_detail": health_detail,
+            "last_poll_at": polled, "last_http_status": http,
             "timeline": timeline, "project": project,
         }
         try:
@@ -609,19 +859,43 @@ class TimelineCardsRole:
     def report_block(self) -> dict[str, Any]:
         """`capabilities.cards_agent` -- what the fleet grid renders.
 
-        `connected` is about THIS machine's role, not about the cards
-        server: a companion that is holding Resolve open for the page says
-        so, and one that refused says which refusal in `state`. Deliberately
-        four small fields; the sentence lives in the diagnostics bundle.
+        `connected` is about THIS machine's role, not about the cards server.
+        Since RES-6 (sweep 2026-09-04) it is a JUDGEMENT and not a list
+        length: green means the loops are alive AND the dashboard answered
+        one of them within two long polls. A dead loop, a 401 and a dashboard
+        that has gone quiet used to be indistinguishable from a healthy
+        machine here, and the fleet grid is where somebody would have looked.
+
+        `state` is now one of the five HEALTH_* words and `detail` is the
+        sentence that goes with it; the refusal vocabulary moved to
+        `gate_state`, which is still what tells "nobody turned it on" from "a
+        standalone agent is still running there".
         """
         status = self.status()
         return {
-            "connected": bool(status["running"]),
-            "state": status["state"],
+            "connected": status["health"] == HEALTH_RUNNING,
+            "state": status["health"],
+            "detail": status["health_detail"],
+            "gate_state": status["state"],
+            "last_poll_at": _iso(status["last_poll_at"]),
+            "last_http_status": status["last_http_status"],
             "timeline": status["timeline"],
             "version": status["version"],
             "since": status["since"] and round(status["since"], 3),
         }
+
+
+def _iso(when: Optional[float]) -> Optional[str]:
+    """An epoch second -> UTC ISO-8601, or None. The report is JSON and the
+    reader is a page on another machine, so a float here would be a number
+    somebody has to convert with the wrong timezone."""
+    if not when:
+        return None
+    try:
+        return datetime.fromtimestamp(float(when), timezone.utc).replace(
+            microsecond=0).isoformat()
+    except Exception:
+        return None
 
 
 def build(cfg: dict[str, Any], **kwargs: Any) -> Optional["TimelineCardsRole"]:

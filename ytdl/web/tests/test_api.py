@@ -1398,7 +1398,10 @@ def test_the_active_job_route_answers_the_callers_one_live_job(client, con, job)
 
 def test_the_active_job_route_is_null_when_nothing_is_running(client, con, job):
     db.set_phase(con, job['id'], 'done')
-    assert client.get('/api/jobs/active').json() == {'job': None, 'queue': []}
+    # `waiting` joins the pair since YTWEB-8/13: the parked reviews, which
+    # for a done job is also nothing.
+    assert client.get('/api/jobs/active').json() == {
+        'job': None, 'queue': [], 'waiting': []}
 
 
 def test_the_active_job_route_is_per_editor(client, con, job):

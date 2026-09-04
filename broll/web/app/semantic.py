@@ -29,6 +29,7 @@ semantic query actually runs.
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 import sqlite3
 import threading
@@ -58,6 +59,38 @@ DEFAULT_MODEL = os.environ.get(
 # purpose -- app.search filters this down further and RRF only cares about
 # rank order, not the raw count.
 DEFAULT_TOP_K = 200
+
+
+# The three ways meaning-based search can be off, in words an editor can act
+# on (BROLL-10, 2026-09-04). Every one of them used to look identical from the
+# page: an empty grid on every query, for ever, with nothing said. They are
+# shown as the Semantic button's tooltip and in the empty-result message, so
+# they name the server, not a python package the editor could not install.
+REASON_NO_NUMPY = ("Meaning-based search is not available on this server: "
+                   "numpy is missing.")
+REASON_NO_ENCODER = ("Meaning-based search is not available on this server: "
+                     "the query model is not installed.")
+REASON_NO_VECTORS = ("No clips have been prepared for meaning-based search "
+                     "yet, so it can only find nothing.")
+# Hybrid still WORKS without the vector half (it is keyword plus a booster), so
+# it is never disabled; it says what it lost instead.
+NOTE_HYBRID_DEGRADED = ("Keyword only right now: the meaning-based half of "
+                        "this search is not available.")
+
+
+def encoder_installed() -> bool:
+    """Is fastembed importable? Asked WITHOUT importing or constructing it.
+
+    `_load_fastembed_encoder` costs a ~10 s ONNX model load on first call, and
+    this question is asked on every search response, so it must stay a
+    metadata lookup. find_spec can raise (a broken namespace package, a
+    half-installed dist), and an availability probe that raises would 500 the
+    search route it is attached to.
+    """
+    try:
+        return importlib.util.find_spec("fastembed") is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def _load_fastembed_encoder(model_name: str) -> Any | None:
@@ -113,6 +146,26 @@ class SemanticSearch:
         if np is None:
             return False
         return self._count_for_model(conn) > 0
+
+    def availability(self, conn: sqlite3.Connection) -> dict[str, Any]:
+        """`{"available": bool, "reason": str}` -- and WHY, when it is false.
+
+        The three falses are different problems with different owners (a
+        deployment missing a package, an archive nobody has embedded yet), and
+        `available()` collapses them into one bit. BROLL-10, 2026-09-04.
+
+        An encoder already in hand counts as installed however it got here:
+        the suite injects a fake through _load_fastembed_encoder, and an
+        availability probe that called the real fastembed a hard requirement
+        would report the test fixture's own searches as impossible.
+        """
+        if np is None:
+            return {"available": False, "reason": REASON_NO_NUMPY}
+        if self._encoder is None and not encoder_installed():
+            return {"available": False, "reason": REASON_NO_ENCODER}
+        if self._count_for_model(conn) == 0:
+            return {"available": False, "reason": REASON_NO_VECTORS}
+        return {"available": True, "reason": ""}
 
     def _count_for_model(self, conn: sqlite3.Connection) -> int:
         row = conn.execute(
@@ -317,3 +370,27 @@ def get_semantic_search() -> SemanticSearch:
     if _default_instance is None:
         _default_instance = SemanticSearch()
     return _default_instance
+
+
+def mode_availability(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    """What each of the three search modes can do here, for /api/search.
+
+    Keyword is the floor and is always available: FTS ships with SQLite and
+    the archive is indexed by the same pass that put the rows there. Semantic
+    carries the reason it cannot answer. Hybrid stays AVAILABLE when semantic
+    is off (it is keyword plus a booster, and turning it off would leave an
+    editor on a page whose default mode is disabled) and says what it lost.
+
+    Never raises: a probe that 500s the search route would be a worse bug than
+    the silence it exists to end (BROLL-10, 2026-09-04).
+    """
+    try:
+        semantic = get_semantic_search().availability(conn)
+    except Exception:  # pragma: no cover -- see the docstring
+        semantic = {"available": False, "reason": REASON_NO_VECTORS}
+    return {
+        "keyword": {"available": True, "reason": ""},
+        "semantic": semantic,
+        "hybrid": {"available": True,
+                   "reason": "" if semantic["available"] else NOTE_HYBRID_DEGRADED},
+    }

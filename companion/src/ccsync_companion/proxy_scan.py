@@ -270,6 +270,14 @@ def empty_gap() -> dict[str, Any]:
         # "nothing is left", which is exactly what nobody could tell on the
         # 0.6.1 muxer night (COMP-MEDIA-4, 2026-08-14).
         "capped": 0,
+        # RES-10 (2026-09-04): a walk that RAISED used to return this dict
+        # untouched, which is byte-identical to "every clip here has a
+        # proxy". An unreadable project is not a covered one -- the failure
+        # direction this whole feature exists to prevent -- so a scan that
+        # could not finish says so and every caller can tell the two apart.
+        # docs/SELF_DIAGNOSIS.md: an unverified check is NOT CHECKED, never OK.
+        "error": "",
+        "partial": False,
     }
 
 
@@ -332,6 +340,18 @@ def _stat_exists(path: str, stat_fn: Callable[[str], Any]) -> bool:
         return False
 
 
+def _scan_error_text(project_dir: Any, exc: Optional[BaseException] = None) -> str:
+    """What went wrong, in the words the tray and a notice can show (RES-10).
+
+    Names the folder because the answer is nearly always "the drive holding
+    it is not there", and an editor cannot act on "a scan failed".
+    """
+    reason = f" ({exc})" if exc is not None else ""
+    return (f"CCSync could not read {project_dir} to check its proxies{reason}. "
+            "Until it can, nobody knows whether that project's clips have "
+            "proxies.")
+
+
 def scan_project(
     project_dir: Any,
     *,
@@ -377,7 +397,9 @@ def scan_project(
         # os.walk's default onerror is None: an unreadable or vanished
         # directory ends that branch silently, which is exactly the
         # never-raise behaviour manifest.scan_local_manifest relies on.
+        walked = 0
         for dirpath, dirnames, filenames in os.walk(str(project_dir)):
+            walked += 1
             dirnames[:] = [d for d in dirnames if not _is_pruned_dir(d)]
             for filename in filenames:
                 # macOS AppleDouble sidecars keep the original's extension, so
@@ -463,8 +485,23 @@ def scan_project(
             candidates = candidates[:MAX_QUEUE_PER_PROJECT]
         gap["clips"] = candidates
         gap["needs_resolve_dirs"] = sorted(braw_dirs)
-    except Exception:
+        if not walked:
+            # os.walk's onerror is None on purpose (a vanished sub-directory
+            # must not stop the pass), so an unplugged drive or a permission
+            # error at the TOP is not an exception -- it is zero iterations,
+            # which until RES-10 was reported as a fully covered project.
+            log.warning("proxy scan: %s could not be walked at all -- reported "
+                        "as unknown, not as covered", project_dir)
+            gap["error"] = _scan_error_text(project_dir)
+            gap["partial"] = True
+    except Exception as exc:                                          # noqa: BLE001
         log.exception("proxy scan: %s could not be scanned", project_dir)
+        # Whatever the walk had counted before it raised STAYS in the dict:
+        # it is real, it is a floor, and throwing it away would replace one
+        # wrong answer with another. `partial` is what stops a caller reading
+        # those counts as the whole truth (RES-10).
+        gap["error"] = _scan_error_text(project_dir, exc)
+        gap["partial"] = True
     return gap
 
 
@@ -481,6 +518,12 @@ def _empty_totals() -> dict[str, Any]:
         "dropped": 0,
         "needs_resolve_dirs": [],
         "truncated": False,
+        # RES-10: how many projects could not be read, and the first reason.
+        # A sweep with unreadable projects has NOT measured the fleet's
+        # coverage, and "missing: 0" from it means nothing.
+        "unreadable": 0,
+        "error": "",
+        "partial": False,
     }
 
 
@@ -536,6 +579,15 @@ def scan_missing_proxies(
                 # .get, not [key]: a caller holding a gap dict built before
                 # "capped" existed must not take the whole sweep down.
                 totals[key] += int(gap.get(key, 0))
+            if gap.get("error"):
+                # RES-10: counted, and the FIRST reason kept. The totals a
+                # tray line renders are a floor while this is non-zero, and
+                # the sweep says so rather than implying coverage it has not
+                # measured.
+                totals["unreadable"] += 1
+                totals["partial"] = True
+                if not totals["error"]:
+                    totals["error"] = str(gap["error"])
             totals["queued"] += len(gap["clips"])
             totals["truncated"] = totals["truncated"] or bool(gap["truncated"])
             for directory in gap.get("needs_resolve_dirs") or ():
@@ -553,6 +605,9 @@ def scan_missing_proxies(
                      len(watch_dirs), MAX_WATCH_DIRS)
             watch_dirs = watch_dirs[:MAX_WATCH_DIRS]
         totals["needs_resolve_dirs"] = watch_dirs
-    except Exception:
+    except Exception as exc:                                          # noqa: BLE001
         log.exception("proxy scan: the sweep of %r failed", local_root)
+        result["totals"]["partial"] = True
+        if not result["totals"]["error"]:
+            result["totals"]["error"] = _scan_error_text(local_root, exc)
     return result

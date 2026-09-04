@@ -822,3 +822,57 @@ def test_untick_reports_a_refusal_and_asks_once(tmp_path, monkeypatch):
 
     assert not ok and "401" in message
     assert len(seen) == 1
+
+
+# -- SYNC-110: how old is this plan? -----------------------------------------
+#
+# A dashboard that is unreachable falls back to the on-disk cache, and with
+# projects in it the sequencer reports RUNNING and the tray reads exactly like
+# a healthy machine. `fetched_at` had been WRITTEN into that cache since the
+# cache existed and was read back nowhere in the repo, so a machine syncing a
+# week-old plan -- new ticks never arriving, unticks never taking effect --
+# was indistinguishable from a live one.
+
+
+def test_fetched_at_is_none_before_any_fetch(tmp_path):
+    client = SelectionClient(_cfg(), tmp_path, http_get=lambda *a: {"selection": []})
+    assert client.fetched_at() is None
+    # None is "cannot tell", and a caller must not render it as fresh.
+    assert client.plan_age_seconds() is None
+
+
+def test_fetched_at_is_stamped_by_a_live_fetch(tmp_path):
+    client = SelectionClient(
+        _cfg(), tmp_path, http_get=lambda *a: {"selection": _SAMPLE})
+    client.fetch()
+    assert client.fetched_at()
+    assert client.plan_age_seconds() < 5
+
+
+def test_fetched_at_survives_the_restart_and_ages(tmp_path):
+    """The case this exists for: the process restarts with the dashboard
+    still down, so the age has to come off the file, not off this run."""
+    seeding = SelectionClient(
+        _cfg(), tmp_path, http_get=lambda *a: {"selection": _SAMPLE})
+    seeding.fetch()
+
+    def refuse(url, headers, timeout):
+        raise OSError("dashboard unreachable")
+
+    client = SelectionClient(_cfg(), tmp_path, http_get=refuse)
+    assert client.fetch() is None
+    assert client.load_cached() == _SAMPLE      # ...and it keeps syncing
+    stamp = client.fetched_at()
+    assert stamp, "the cached plan must be able to say when it was fetched"
+
+    from datetime import datetime, timezone
+
+    week_later = datetime.now(timezone.utc).timestamp() + 7 * 24 * 3600
+    assert client.plan_age_seconds(now=week_later) > 24 * 3600
+
+
+def test_an_unreadable_cache_says_cannot_tell_not_fresh(tmp_path):
+    (tmp_path / "selection.json").write_text("{not json", encoding="utf-8")
+    client = SelectionClient(_cfg(), tmp_path, http_get=lambda *a: {"selection": []})
+    assert client.fetched_at() is None
+    assert client.plan_age_seconds() is None

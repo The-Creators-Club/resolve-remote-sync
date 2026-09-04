@@ -29,6 +29,7 @@ directions.
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -39,6 +40,21 @@ from .syncthing_admin import (
 )
 
 log = logging.getLogger("ccsync.sync.shared_folders")
+
+# Outcomes that mean this folder is NOT working on this machine. SYNC-101
+# (sweep 2026-09-03): the reconcile has always computed them and the caller
+# has always thrown them away, so an editor whose LUT library never arrived
+# had no tray line, no lane state, no report field and (for `not-offered`)
+# not even a log line at the default level. They are KEPT now, with the
+# reason, until a reconcile succeeds.
+PROBLEM_OUTCOMES = ("not-offered", "unfiltered", "error")
+# A folder in a problem state is retried on a backoff rather than every
+# pass: `not-offered` on a machine the server has not shared the library
+# with is permanent, and a pending-folders GET per pass forever buys
+# nothing. Not "never" either - an admin approving the share must be
+# noticed without a tray restart.
+PROBLEM_RETRY_FIRST_SECONDS = 60.0
+PROBLEM_RETRY_MAX_SECONDS = 1800.0
 
 
 def local_path_for(local_root: Path | str, rel: str) -> str:
@@ -63,6 +79,98 @@ def _is_not_found(exc: BaseException) -> bool:
     return "404" in str(exc)
 
 
+class FolderProblems:
+    """What is wrong with each folder, and when to try it again (SYNC-101).
+
+    Shared by SharedFolderManager and BorrowedFolderManager, which have the
+    same shape of failure: an outcome nobody read, a DEBUG line nobody saw,
+    and a folder that never appears on the editor's machine. A problem is
+    recorded WITH its reason, retried on a widening backoff, and cleared the
+    moment a reconcile of that folder succeeds. In-memory on purpose: the
+    reconcile runs at every sequencer pass and at startup, so a restart
+    re-learns the whole set within one pass.
+    """
+
+    def __init__(self, now: Callable[[], float] = time.monotonic) -> None:
+        self._now = now
+        self._by_id: dict[str, dict[str, Any]] = {}
+
+    def note(self, folder_id: str, name: str, outcome: str,
+             reason: str = "") -> dict[str, Any]:
+        now = float(self._now())
+        previous = self._by_id.get(folder_id) or {}
+        attempts = int(previous.get("attempts") or 0) + 1
+        # Doubling from a minute, capped: the folder is retried while the
+        # editor is still at their desk waiting for it, and roughly twice an
+        # hour once it is clear nobody is about to approve anything.
+        wait = min(PROBLEM_RETRY_FIRST_SECONDS * (2 ** (attempts - 1)),
+                   PROBLEM_RETRY_MAX_SECONDS)
+        entry = {
+            "id": folder_id,
+            "name": name,
+            "outcome": outcome,
+            "reason": str(reason or "")[:200],
+            "since": float(previous.get("since") or now),
+            "attempts": attempts,
+            "next_attempt": now + wait,
+        }
+        self._by_id[folder_id] = entry
+        return entry
+
+    def clear(self, folder_id: str) -> None:
+        self._by_id.pop(folder_id, None)
+
+    def due(self, folder_id: str) -> bool:
+        """Is this folder due for another attempt? Anything with no recorded
+        problem always is."""
+        entry = self._by_id.get(folder_id)
+        if entry is None:
+            return True
+        try:
+            return float(self._now()) >= float(entry.get("next_attempt") or 0.0)
+        except (TypeError, ValueError):
+            return True
+
+    def outcome(self, folder_id: str) -> str:
+        return str((self._by_id.get(folder_id) or {}).get("outcome") or "error")
+
+    def entries(self) -> list[dict[str, Any]]:
+        return [dict(entry) for entry in self._by_id.values()]
+
+    def sentences(self) -> list[str]:
+        return [problem_sentence(entry) for entry in self._by_id.values()]
+
+
+def problem_sentence(entry: dict[str, Any]) -> str:
+    """One sentence an editor can act on, naming the folder and the reason.
+
+    No em dashes and no internal names: this reaches the tray, the Settings
+    window and (through the report) the fleet grid."""
+    name = str(entry.get("name") or entry.get("id") or "A shared folder")
+    outcome = str(entry.get("outcome") or "")
+    if outcome == "not-offered":
+        return (f"{name} has not been shared with this computer yet. "
+                f"Ask your admin to approve it.")
+    if outcome == "unfiltered":
+        return (f"{name} is not syncing yet: CC Sync could not confirm its filter "
+                f"list, and a folder without one must not go online. It keeps trying.")
+    reason = str(entry.get("reason") or "").strip()
+    tail = f": {reason}" if reason else ""
+    return f"{name} could not be set up on this computer{tail}. It keeps trying."
+
+
+def log_persistent_problem(entry: dict[str, Any]) -> None:
+    """Promote a problem that has survived three reconciles to WARNING, with
+    the same words the editor sees (SYNC-101).
+
+    Once, on the third attempt: a `not-offered` folder is routine before the
+    dashboard's first provision cycle reaches this device, which is why the
+    first attempts stay at DEBUG, and permanent afterwards, which is why the
+    log must eventually say so in a sentence a person can act on."""
+    if int(entry.get("attempts") or 0) == 3:
+        log.warning("%s", problem_sentence(entry))
+
+
 class SharedFolderManager:
     """Reconciles this machine's shared asset folders. Never raises: every
     failure is logged and retried on the next call, because none of this is
@@ -75,6 +183,7 @@ class SharedFolderManager:
         folders: Optional[list[tuple[str, str, str]]] = None,
         halted: Optional[Callable[[], bool]] = None,
         root_present_fn: Optional[Callable[[], bool]] = None,
+        now: Callable[[], float] = time.monotonic,
     ) -> None:
         self.admin = admin
         self.local_root = Path(local_root).expanduser()
@@ -102,6 +211,18 @@ class SharedFolderManager:
         # log line rather than one per pass forever. Mirrors reporter.py's
         # once-per-streak convention.
         self._error_logged: set[str] = set()
+        # SYNC-101 (sweep 2026-09-03): the failures themselves, kept for
+        # problems() instead of being logged once and forgotten.
+        self._problems = FolderProblems(now=now)
+
+    def problems(self) -> list[str]:
+        """One sentence per shared folder that is not working on this
+        machine (SYNC-101). Empty when everything reconciled."""
+        return self._problems.sentences()
+
+    def problem_entries(self) -> list[dict[str, Any]]:
+        """The same set as problems(), with the fields a report field needs."""
+        return self._problems.entries()
 
     def folder_ids(self) -> list[str]:
         """The Syncthing folder ids this manager owns.
@@ -161,7 +282,9 @@ class SharedFolderManager:
     def reconcile(self) -> dict[str, str]:
         """Reconcile every shared folder. Returns {folder_id: outcome} where
         outcome is one of "ok", "accepted", "repaired", "not-offered",
-        "error" -- for the log line and the tray, not for control flow.
+        "unfiltered", "error" -- for the log line and the tray, not for
+        control flow. Anything in PROBLEM_OUTCOMES is also KEPT, with its
+        reason, for problems() (SYNC-101).
 
         Returns {} untouched when the sync tree is not present (SYNC-6)."""
         if not self.root_present():
@@ -171,11 +294,24 @@ class SharedFolderManager:
             return {}
         results: dict[str, str] = {}
         for folder_id, rel, label in self.folders:
+            if not self._problems.due(folder_id):
+                # Backing off, not forgetting: the recorded outcome stays the
+                # answer (and stays in problems()) until the next attempt is
+                # due (SYNC-101).
+                results[folder_id] = self._problems.outcome(folder_id)
+                continue
             try:
-                results[folder_id] = self._reconcile_one(folder_id, rel, label)
+                outcome = self._reconcile_one(folder_id, rel, label)
+                results[folder_id] = outcome
                 self._error_logged.discard(folder_id)
+                if outcome in PROBLEM_OUTCOMES:
+                    log_persistent_problem(self._problems.note(folder_id, label, outcome))
+                else:
+                    self._problems.clear(folder_id)
             except Exception as exc:
                 results[folder_id] = "error"
+                log_persistent_problem(
+                    self._problems.note(folder_id, label, "error", str(exc)))
                 if folder_id not in self._error_logged:
                     self._error_logged.add(folder_id)
                     log.warning("shared folder %s: reconcile failed: %s", folder_id, exc)
@@ -253,6 +389,9 @@ class SharedFolderManager:
             log.warning(
                 "shared folder %s stays paused: its .stignore could not be confirmed, and "
                 "an unfiltered sendreceive folder must not go online", folder_id)
+            # SYNC-101: fail-closed is correct and was invisible. The folder
+            # is not syncing, so it is a problem, not an "ok".
+            outcome = "unfiltered"
 
         return outcome
 

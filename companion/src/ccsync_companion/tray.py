@@ -165,6 +165,7 @@ def compute_overall_color(
     statuses: list[LaneStatus],
     app: "CompanionApp | None" = None,
     guard: Optional[dict] = None,
+    resolve_wedged: bool = False,
 ) -> str:
     """red (any lane error) / orange (not syncing, or syncing) / green.
 
@@ -233,6 +234,13 @@ def compute_overall_color(
         if not (blocked_reason in _BLOCKED_BASE_RIG_EXEMPT
                 and app is not None and _is_base_rig(app)):
             return "red" if blocked_reason in _BLOCKED_RED_REASONS else "orange"
+    if resolve_wedged:
+        # RES-22: amber, never green. A fusionscript call that has not
+        # returned for twenty seconds means every Resolve feature on this
+        # machine is doing nothing, and the icon said "everything is fine"
+        # for as long as it lasted. Not red: nothing is broken or lost, and
+        # quitting Resolve clears it.
+        return "orange"
     if any(s.state == STATE_SYNCING for s in statuses):
         return "orange"
     return "green"
@@ -584,11 +592,15 @@ def _format_lane_line(status: LaneStatus, app: "CompanionApp | None" = None) -> 
     paused = False
     problems = False
     root_absent = False
+    problem_detail = ""
+    plan_age = None
     if app is not None:
         try:
             problems = bool(getattr(app, "config_problems", None))
         except Exception:
             pass
+        problem_detail = _config_problem_detail(app)
+        plan_age = _plan_age_seconds(app)
         try:
             paused = bool(app.is_paused())
         except Exception:
@@ -598,13 +610,106 @@ def _format_lane_line(status: LaneStatus, app: "CompanionApp | None" = None) -> 
         except Exception:
             pass
     return _format_lane_line_from(
-        status, paused=paused, problems=problems, root_absent=root_absent
+        status, paused=paused, problems=problems, root_absent=root_absent,
+        problem_detail=problem_detail, plan_age_seconds=plan_age,
     )
+
+
+def _config_problem_detail(app: "CompanionApp") -> str:
+    """The SENTENCE that names the broken setting, or "".
+
+    APP-5 (sweep 2026-09-03): validate_config writes "remote_root is blank --
+    rclone would target the remote's default directory ... Set the absolute
+    NAS path your admin gave you", and every surface on the machine reduced
+    all of it to the nine words "this machine isn't set up yet". Prefers
+    app.config_problem_detail() where the companion has one, else the first
+    entry of config_problems, which every build has had."""
+    getter = getattr(app, "config_problem_detail", None)
+    if callable(getter):
+        try:
+            got = str(getter() or "").strip()
+            if got:
+                return got
+        except Exception:
+            log.exception("config_problem_detail() failed")
+    try:
+        problems = list(getattr(app, "config_problems", None) or [])
+    except Exception:
+        return ""
+    return str(problems[0]).strip() if problems else ""
+
+
+def _plan_age_seconds(app: "CompanionApp") -> Optional[float]:
+    """How old the sync plan this machine is running on is, or None.
+
+    SYNC-110: the cached plan is used verbatim when the dashboard cannot be
+    reached, and a week-old one reads exactly like a live one. `plan_fetched_at`
+    is whatever selection.py wrote - an ISO stamp or an epoch float - and an
+    unparseable one is None ("cannot tell"), never 0 ("fresh")."""
+    stamp = getattr(app, "plan_fetched_at", None)
+    if callable(stamp):
+        try:
+            stamp = stamp()
+        except Exception:
+            log.exception("plan_fetched_at() failed")
+            return None
+    if isinstance(stamp, (int, float)) and not isinstance(stamp, bool):
+        # Epoch seconds as well as an ISO stamp: the cache file has carried
+        # both shapes, and a number that fails an ISO parse would otherwise
+        # read as "cannot tell" forever.
+        return max(0, int(time.time() - float(stamp)))
+    return _stamp_age_seconds(stamp)
+
+
+# SYNC-110: a plan older than this is stated on the lane lines. One poll is
+# minutes, so a day of silence is not a slow tick, it is a dashboard that has
+# stopped answering this machine.
+PLAN_STALE_SECONDS = 24 * 3600
+
+
+def _plan_stale_phrase(plan_age_seconds: Optional[float]) -> str:
+    """" (sync plan from 3 days ago: the dashboard has not answered since)",
+    or "" while the plan is fresh or its age is unknown."""
+    try:
+        age = float(plan_age_seconds)
+    except (TypeError, ValueError):
+        return ""
+    if age < PLAN_STALE_SECONDS:
+        return ""
+    days = max(1, int(age // 86400))
+    return (f" (sync plan from {days} day{'s' if days != 1 else ''} ago: the "
+            f"dashboard has not answered since)")
+
+
+# The prefix app.py's _lane_config_problem_detail puts in front of the
+# validate_config sentence. Stripped here so the lane line reads as one
+# sentence instead of repeating the label's own "NOT SYNCING".
+_LANE_PROBLEM_PREFIX = "NOT SYNCING"
+
+
+def _named_config_problem(detail: str, problem_detail: str) -> str:
+    """The config sentence to show on a lane line, or "" (APP-5).
+
+    Either source will do and both are the same words: app.py writes
+    "NOT SYNCING: this machine isn't fully set up -- <sentence>" into the
+    lane's own detail, and config_problem_detail() hands over <sentence>
+    directly. The `--` is app.py's ASCII separator, not part of the sentence."""
+    named = str(problem_detail or "").strip()
+    if not named:
+        text = str(detail or "").strip()
+        if text.startswith(_LANE_PROBLEM_PREFIX) and "--" in text:
+            named = text.split("--", 1)[1].strip()
+    if not named:
+        return ""
+    # Long by design (each one ends in the fix), but a menu line that runs to
+    # three hundred characters is unreadable in the tray and in Settings alike.
+    return named if len(named) <= 180 else named[:177].rstrip() + "…"
 
 
 def _format_lane_line_from(
     status: LaneStatus, paused: bool, problems: bool, root_absent: bool = False,
-    root_state: Any = "",
+    root_state: Any = "", problem_detail: str = "",
+    plan_age_seconds: Optional[float] = None,
 ) -> str:
     """_format_lane_line with the app state already snapshotted -- what the
     menu build actually uses, so rendering never calls back into app."""
@@ -622,6 +727,14 @@ def _format_lane_line_from(
         # for all of them.
         return f"{label}: PAUSED ({drive_absent_phrase(root_state)})"
     if problems:
+        # APP-5 (sweep 2026-09-03): the sentence that names the key was
+        # written into the lane detail and returned past, so the one surface
+        # an editor opens repeated "isn't set up yet" three times and named
+        # nothing. Half of these an admin fixes over the shoulder in ten
+        # seconds once they know WHICH setting it is.
+        named = _named_config_problem(status.detail, problem_detail)
+        if named:
+            return f"{label}: NOT SYNCING: {named}"
         return f"{label}: NOT SYNCING (this machine isn't set up yet)"
     if paused:
         return f"{label}: PAUSED"
@@ -633,8 +746,12 @@ def _format_lane_line_from(
         return f"{label}: NOT SYNCING (sign in first)"
     if "sync disabled" in detail.lower() or "direct NAS access" in detail:
         return f"{label}: not used on this machine (it works straight off the NAS)"
-    if detail.startswith("NOT SYNCING"):
+    if detail.startswith(_LANE_PROBLEM_PREFIX):
+        named = _named_config_problem(detail, problem_detail)
+        if named:
+            return f"{label}: NOT SYNCING: {named}"
         return f"{label}: NOT SYNCING (this machine isn't set up yet)"
+    stale = _plan_stale_phrase(plan_age_seconds)
     if status.state == STATE_SYNCING:
         # `queued` is set to 0 at the end of every run and incremented by
         # nothing, so the old "syncing (0 queued)" was a counter reading zero
@@ -649,12 +766,15 @@ def _format_lane_line_from(
             parts.append(f"{human_bytes(int(status.speed_bps))}/s")
         if status.eta_seconds:
             parts.append(f"{human_duration(status.eta_seconds)} left")
-        return f"{label}: syncing" + (f" ({' · '.join(parts)})" if parts else "…")
+        return (f"{label}: syncing"
+                + (f" ({' · '.join(parts)})" if parts else "…") + stale)
     if status.state == STATE_PAUSED:
         return f"{label}: PAUSED"
     if status.queued:
-        return f"{label}: {status.queued} item(s) to go"
-    return f"{label}: up to date" + (f" ({detail})" if detail else "")
+        return f"{label}: {status.queued} item(s) to go{stale}"
+    # SYNC-110: "up to date" against a plan nobody has been able to refresh
+    # for a day is the sentence this whole line exists to stop being told.
+    return f"{label}: up to date" + (f" ({detail})" if detail else "") + stale
 
 
 def _open_log(log_path) -> None:
@@ -675,6 +795,36 @@ def _open_log(log_path) -> None:
                            env=resolve_bridge.sanitized_child_env())
     except Exception:
         log.exception("failed to open %s", log_path)
+
+
+def _open_path_or_say_why(app: "CompanionApp", path: str, missing: str) -> bool:
+    """_open_log, with the two silences answered (APP-14, sweep 2026-09-03).
+
+    A blank path logged one WARNING and a failed launch was swallowed by
+    log.exception, so the menu closed and nothing happened - in precisely the
+    two states where the editor is already suspicious. `missing` is what to
+    say when there is no path at all; a path that exists and will not open
+    names itself."""
+    text = str(path or "").strip()
+    if not text:
+        _notify(app, missing)
+        return False
+    try:
+        if not os.path.exists(text):
+            _notify(app, f"CCSync cannot open {text} right now: it is not there. "
+                         "If it is on a drive you unplug, plug it back in.")
+            return False
+    except OSError:
+        # A path we cannot even stat (a dead network mapping) is still worth
+        # handing to the shell: the OS has better error dialogs than we do.
+        pass
+    try:
+        _open_log(text)
+    except Exception:
+        log.exception("failed to open %s", text)
+        _notify(app, f"CCSync could not open {text}.")
+        return False
+    return True
 
 
 def _site_dashboard_url() -> str:
@@ -1029,20 +1179,89 @@ def _youtube_sign_in(app: "CompanionApp", runner: Optional[Any] = None,
         _install_youtube_cookies(app)
         return
     _notify(app, f"{browser.name} is opening. Sign in to YouTube in that window; "
-                 "it closes by itself when you're done")
+                 "it closes by itself when you're done. Close the window to cancel.")
     run = runner or ytdl_browser_login.run
+    _set_ytdl_login(waiting=True, seconds_left=None, phase="opening")
     try:
-        outcome = run(browser=browser)
+        try:
+            outcome = run(browser=browser, progress=_login_progress)
+        except TypeError:
+            # A build of ytdl_browser_login without the progress seam. The
+            # sign-in matters more than the line about it.
+            outcome = run(browser=browser)
     except Exception:  # noqa: BLE001 -- run() never raises, but the seam might
         log.exception("ytdl sign-in: browser flow crashed")
+        _clear_ytdl_login()
         # CYT-4: the cookies item is a Settings row now, not an Advanced
         # submenu entry, and the route is ui_copy's to spell.
         _notify(app, "The sign-in window failed unexpectedly. Try "
                      f"{ui_copy.YOUTUBE_COOKIES} instead.")
         return
+    _clear_ytdl_login()
     if outcome.ok:
         log.info("ytdl sign-in: %d cookies written", outcome.cookies_written)
+        _notify(app, outcome.message)
+        return
+    # CYT-15: ten minutes of silence used to end in a bare "the sign-in did
+    # not finish in time - nothing saved; try again", from a balloon whose
+    # first half had long expired. Say where the second try starts.
+    if "in time" in str(outcome.message or ""):
+        _notify(app, "The sign-in did not finish in time. Nothing was saved: try "
+                     f"again from {ui_copy.YOUTUBE_SIGN_IN}.")
+        return
     _notify(app, outcome.message)
+
+
+# CYT-15: what the browser sign-in is waiting for, for the tray line. Module
+# state and not the app's, because the flow is this module's and a companion
+# whose app grows its own getter (ytdl_login_progress) wins over it in the
+# snapshot. Written from the login worker thread, read from the refresh
+# thread: a whole-dict swap, so a reader never sees half an update.
+_YTDL_LOGIN: Optional[dict] = None
+
+
+def _set_ytdl_login(waiting: bool, seconds_left: Optional[float],
+                    phase: str = "") -> None:
+    global _YTDL_LOGIN
+    _YTDL_LOGIN = {"waiting": bool(waiting), "seconds_left": seconds_left,
+                   "phase": str(phase or "")}
+
+
+def _clear_ytdl_login() -> None:
+    global _YTDL_LOGIN
+    _YTDL_LOGIN = None
+
+
+def _login_progress(*args: Any) -> None:
+    """ytdl_browser_login's `progress` seam, in both of its shapes.
+
+    CYT-15 gives it (elapsed_s, remaining_s, phase); the shape it shipped
+    with is a single message string. Neither may raise into the login flow,
+    so everything here is best effort."""
+    try:
+        if len(args) >= 3:
+            _set_ytdl_login(waiting=True, seconds_left=args[1], phase=str(args[2]))
+            return
+        if len(args) == 1 and isinstance(args[0], str):
+            _set_ytdl_login(waiting=True, seconds_left=None, phase=args[0])
+    except Exception:
+        log.exception("ytdl sign-in: progress callback failed")
+
+
+def ytdl_login_line(state: Optional[dict]) -> Optional[str]:
+    """"Waiting for you to finish signing in in the browser (240 s left)".
+
+    None when no sign-in is in flight, which is what takes the line back out
+    of the menu. A state with no countdown still gets the sentence: the point
+    is that something is waiting on the editor, not the number."""
+    if not isinstance(state, dict) or not state.get("waiting"):
+        return None
+    try:
+        left = int(float(state.get("seconds_left")))
+    except (TypeError, ValueError):
+        left = -1
+    base = "Waiting for you to finish signing in in the browser"
+    return f"{base} ({left} s left)" if left >= 0 else base
 
 
 def _install_youtube_cookies(app: "CompanionApp", picker: Optional[Any] = None) -> None:
@@ -2205,7 +2424,79 @@ def ytdl_download_line(progress: Optional[dict]) -> Optional[str]:
     return f"{line} ({', '.join(bits)})" if bits else line
 
 
-def resolve_bridge_line(state: Optional[dict]) -> Optional[str]:
+# RES-22: how long a fusionscript call may be in flight before the tray stops
+# calling the bridge "connected". A library enumeration on a big project is
+# seconds; twenty of them is a call that is not coming back on its own.
+BRIDGE_WEDGE_SECONDS = 20
+
+
+def resolve_wedge(health: Optional[dict] = None,
+                  activity: Optional[dict] = None) -> dict:
+    """{"seconds": float, "call": str} for a Resolve call that has been in
+    flight too long, else {}.
+
+    Two sources, same answer: resolve_health() carries `wedged_seconds` /
+    `wedged_call` for the report, and resolve_bridge.bridge_activity() is the
+    lock-free record the bridge itself keeps. The health dict wins where it
+    has one; a companion whose app has no such key still gets the line."""
+    for source in (health or {},):
+        try:
+            seconds = float(source.get("wedged_seconds") or 0.0)
+        except (TypeError, ValueError, AttributeError):
+            seconds = 0.0
+        if seconds > BRIDGE_WEDGE_SECONDS:
+            return {"seconds": seconds, "call": str(source.get("wedged_call") or "")}
+    try:
+        seconds = float((activity or {}).get("seconds") or 0.0)
+        call = str((activity or {}).get("call") or "")
+    except (TypeError, ValueError, AttributeError):
+        return {}
+    if seconds > BRIDGE_WEDGE_SECONDS:
+        return {"seconds": seconds, "call": call}
+    return {}
+
+
+def resolve_count_phrases(health: Optional[dict]) -> list[str]:
+    """"3 clips outside the tree", "2 missing", ... for the counts that are
+    NOT zero (RES-5, sweep 2026-09-03).
+
+    resolve_health() has computed these for the report since 2026-08-28 and
+    the editor's own machine showed none of them: an editor with 40 dead
+    links had no number anywhere in the UI. Zero counts are dropped rather
+    than reassured about, and a health dict with no scan behind it has
+    nothing but zeroes anyway (app.resolve_health: last_scan_at is None until
+    a poll completes)."""
+    if not isinstance(health, dict):
+        return []
+
+    def _count(key: str) -> int:
+        try:
+            return max(0, int(health.get(key) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    out: list[str] = []
+    for key, singular, plural in (
+        ("out_of_tree", "1 clip outside the tree", "{n} clips outside the tree"),
+        ("missing", "1 missing", "{n} missing"),
+        ("bad_prefix", "1 on the wrong drive", "{n} on the wrong drive"),
+    ):
+        n = _count(key)
+        if n:
+            out.append(singular if n == 1 else plural.format(n=n))
+    attach = health.get("proxy_attach")
+    if isinstance(attach, dict):
+        try:
+            failed = max(0, int(attach.get("failed") or 0))
+        except (TypeError, ValueError):
+            failed = 0
+        if failed:
+            out.append(f"{failed} prox{'y' if failed == 1 else 'ies'} not attached")
+    return out
+
+
+def resolve_bridge_line(state: Optional[dict], health: Optional[dict] = None,
+                        wedge: Optional[dict] = None) -> Optional[str]:
     """One tray line for "is the Resolve bridge up, and has it EVER been?".
 
     None before anything has asked Resolve (nothing truthful to say yet) and
@@ -2224,7 +2515,22 @@ def resolve_bridge_line(state: Optional[dict]) -> Optional[str]:
     connected = state.get("connected")
     if connected is None:
         return None
+    # RES-22: `connected` is a cached fact from the last COMPLETED enumeration,
+    # so a call wedged against a vanished P: left this line reading "connected"
+    # for twenty minutes while every Resolve feature did nothing. A call that
+    # is still in flight outranks it, whatever the last enumeration decided.
+    stuck = wedge if wedge is not None else resolve_wedge(health)
+    if stuck:
+        seconds = int(float(stuck.get("seconds") or 0))
+        call = str(stuck.get("call") or "")
+        return (f"Resolve: not answering for {seconds} s"
+                + (f" ({call})" if call else ""))
     if connected:
+        # RES-5: the counts the companion has always computed and never shown.
+        # Two at most on the line; the rest are in the tooltip.
+        phrases = resolve_count_phrases(health)
+        if phrases:
+            return "Resolve: connected - " + ", ".join(phrases[:2])
         return "Resolve: connected"
     reason = str(state.get("reason") or "no connection")
     if state.get("ever_connected"):
@@ -2328,8 +2634,18 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     # Resolve from here -- a fusionscript call holds the GIL for its full
     # native duration and the render path is the one place that cannot pay
     # for one (see resolve_bridge.session_state / ui_state.menu_open).
+    # RES-5/RES-22: the counts and the wedge. resolve_health() is a read of
+    # the watcher's last counts and bridge_activity() is lock-free by
+    # construction ("no probe, no I/O, so a tray snapshot may call it"), so
+    # neither breaks the rule above.
+    _get("resolve_health",
+         lambda: (getattr(app, "resolve_health", None) or (lambda: {}))() or {}, {})
+    _get("resolve_wedge",
+         lambda: resolve_wedge(snap.get("resolve_health"),
+                               resolve_bridge.bridge_activity()), {})
     _get("resolve_line", lambda: resolve_bridge_line(
-        (getattr(app, "resolve_bridge_state", None) or resolve_bridge.session_state)()
+        (getattr(app, "resolve_bridge_state", None) or resolve_bridge.session_state)(),
+        health=snap.get("resolve_health"), wedge=snap.get("resolve_wedge"),
     ), None)
     # The YouTube download this machine is running, if any: a dict read
     # under the executor's own lock, no I/O (2026-08-25, the owner: "when it
@@ -2337,6 +2653,12 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     # x/x (xx mb/s)").
     _get("ytdl_line", lambda: ytdl_download_line(
         (getattr(app, "ytdl_progress", None) or ytdl_executor.progress)()
+    ), None)
+    # CYT-15: the browser sign-in this machine is waiting on, if any. The
+    # app's own getter where it has one, else this module's record of the
+    # flow it is running itself.
+    _get("ytdl_login_line", lambda: ytdl_login_line(
+        (getattr(app, "ytdl_login_progress", None) or (lambda: _YTDL_LOGIN))()
     ), None)
     _get("setup_name", lambda: (getattr(app, "setup_project_available", None) or (lambda: None))(), None)
     _get("upgrade_info", lambda: (getattr(app, "upgrade_available", None) or (lambda: None))(), None)
@@ -2377,6 +2699,33 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     # in-memory objects, the trash summary is whatever lane B's last prune
     # cycle measured -- so none of them may stall the render path.
     _get("sync_guard", lambda: (getattr(app, "sync_guard", None) or (lambda: {}))() or {}, {})
+    # APP-5: the sentence validate_config wrote, so the lane lines can name
+    # the setting instead of saying "isn't set up yet" three times.
+    _get("problem_detail", lambda: _config_problem_detail(app), "")
+    # SYNC-110: how old the plan the lanes are running on is.
+    _get("plan_age_seconds", lambda: _plan_age_seconds(app), None)
+    # SYNC-109: the files lane A will never upload, with their two sizes
+    # where the lane knows them. The guard already carries samples; this is
+    # the richer form where a companion has one.
+    _get("skipped_samples",
+         lambda: list((getattr(app, "size_mismatch_samples", None)
+                       or (lambda: []))() or []), [])
+    # CMEDIA-10: WHY each b-roll clip failed. The orchestrator has always
+    # known ("the source file is not on this machine any more"); the editor's
+    # own surfaces reduced all of it to a count and "See the log".
+    _get("broll_failures",
+         lambda: list((getattr(app, "broll_failed_items", None)
+                       or (lambda: []))() or []), [])
+    # CMEDIA-13: the fleet job running on this machine, and whether somebody
+    # else started it while the editor was at the keyboard.
+    _get("jobs_status",
+         lambda: (getattr(app, "jobs_status", None) or (lambda: {}))() or {}, {})
+    # APP-8: the dashboard is refusing this machine's credential. identity
+    # .valid() is a LOCAL check (the token parses and has not expired), so a
+    # revoked token still reads as signed in and the only button offered was
+    # SIGN OUT.
+    _get("credential_rejected",
+         lambda: credential_rejected(snap.get("sync_guard")), False)
     # Whether this machine is currently lent to the fleet, and until when
     # (TIMELINE-CARDS-INTO-CCSYNC.md section 10, 2026-08-30). A zero-I/O read
     # of the runner's own snapshot, like every other line here -- and "" on a
@@ -2389,7 +2738,8 @@ def _tray_snapshot(app: "CompanionApp") -> dict:
     # The guard is already in the snapshot above, and _guard_fingerprint
     # already carries blocked['reason'] -- so APP-1's colour needs no new
     # plumbing and cannot go stale while the menu is open (2026-09-04).
-    snap["color"] = compute_overall_color(statuses, app, snap.get("sync_guard"))
+    snap["color"] = compute_overall_color(statuses, app, snap.get("sync_guard"),
+                                          resolve_wedged=bool(snap.get("resolve_wedge")))
     _get("pulse", lambda: should_pulse(snap["color"], statuses), False)
     return snap
 
@@ -2504,11 +2854,17 @@ def _halt_line(guard: dict) -> Optional[str]:
 
 
 def _trash_line(guard: dict) -> Optional[str]:
-    """"How much is in trash" -- absent below a gigabyte.
+    """"How much is in trash, where, and for how long" -- absent below a
+    gigabyte.
 
     `.ccsync-trash` is where every file lane B removed still lives, and until
     item 9 nothing anywhere said how big it had grown. Under 1 GB it is noise
-    on a menu that already has plenty."""
+    on a menu that already has plenty.
+
+    SYNC-112 (sweep 2026-09-03): it is also the whole recovery story, and the
+    line said neither where the folder IS (Explorer hides a dot-prefixed name
+    by default) nor that prune_trash deletes these copies by age - an editor
+    reading "recoverable" was being told something with a deadline on it."""
     trash = (guard or {}).get("trash") or {}
     try:
         total = int(trash.get("bytes") or 0)
@@ -2516,16 +2872,133 @@ def _trash_line(guard: dict) -> Optional[str]:
         return None
     if total < (1 << 30):
         return None
-    return (f"Recoverable files in .ccsync-trash: {human_bytes(total)} "
-            f"({int(trash.get('count') or 0)} files)")
+    where = str(trash.get("path") or "").strip() or lane_guard_trash_name()
+    try:
+        days = int(float(trash.get("max_age_days")))
+    except (TypeError, ValueError):
+        days = _default_trash_days()
+    return (f"Recoverable files in {where}: {human_bytes(total)} "
+            f"({int(trash.get('count') or 0)} files). Copies older than "
+            f"{days} days are removed automatically")
 
 
-def _skipped_exists_line(guard: dict) -> Optional[str]:
+def lane_guard_trash_name() -> str:
+    """`.ccsync-trash`, from lane_guard rather than spelled again here.
+    Imported lazily: the tray must not drag the sync package in at import
+    time on a companion built without it."""
+    try:
+        from .sync import lane_guard
+
+        return str(lane_guard.TRASH_DIR_NAME)
+    except Exception:
+        return ".ccsync-trash"
+
+
+def _default_trash_days() -> int:
+    try:
+        from .sync import lane_guard
+
+        return int(lane_guard.DEFAULT_TRASH_MAX_AGE_DAYS)
+    except Exception:
+        return 14
+
+
+def trash_folder(app: "CompanionApp") -> str:
+    """Where the recovery copies are, or "" (SYNC-112).
+
+    app.trash_path() where the companion has one; otherwise the same
+    `<local_root>/.ccsync-trash` lane B writes to."""
+    getter = getattr(app, "trash_path", None)
+    if callable(getter):
+        try:
+            got = str(getter() or "").strip()
+            if got:
+                return got
+        except Exception:
+            log.exception("trash_path() failed")
+    try:
+        root = str(getattr(app, "config", {}).get("local_root", "") or "").strip()
+    except Exception:
+        return ""
+    return os.path.join(root, lane_guard_trash_name()) if root else ""
+
+
+def credential_rejected(guard: Optional[dict]) -> bool:
+    """Has the dashboard REFUSED this machine's sign-in (APP-8)?
+
+    The same reporter health `_reporter_line` reads, as a predicate, because
+    the menu and the Settings window both have to offer SIGN IN AGAIN while
+    identity.valid() - a local check on a token the server has revoked -
+    still says the editor is signed in."""
+    health = (guard or {}).get("reporter") or {}
+    if not isinstance(health, dict):
+        return False
+    try:
+        streak = int(health.get("consecutive_failures") or 0)
+    except (TypeError, ValueError):
+        return False
+    return (streak >= REPORTER_FAILURE_STREAK
+            and str(health.get("last_status") or "") in ("HTTP 401", "HTTP 403"))
+
+
+def skipped_exists_samples(guard: Optional[dict],
+                           samples: Optional[list] = None) -> list[dict]:
+    """The skipped files, newest first where anything says which is newest.
+
+    Two shapes, both real: `rclone check --differ` writes plain relative
+    paths (what every build before this sweep carried in
+    sync_guard.skipped_exists.samples) and the richer form is
+    {path, local_size, server_size, [at]} - SYNC-109's two sizes. Normalised
+    to the dict form here so one renderer serves both."""
+    raw = samples if samples else ((guard or {}).get("skipped_exists") or {}).get("samples")
+    out: list[dict] = []
+    for item in list(raw or []):
+        if isinstance(item, dict):
+            path = str(item.get("path") or item.get("name") or "").strip()
+            if not path:
+                continue
+            out.append({"path": path,
+                        "local_size": item.get("local_size"),
+                        "server_size": item.get("server_size"),
+                        "at": item.get("at") or item.get("mtime")})
+        elif isinstance(item, str) and item.strip():
+            out.append({"path": item.strip(), "local_size": None,
+                        "server_size": None, "at": None})
+    # "Newest" only where the lane recorded a time; rclone's own order
+    # otherwise, which is the order the check produced them in.
+    if any(entry.get("at") for entry in out):
+        out.sort(key=lambda entry: str(entry.get("at") or ""), reverse=True)
+    return out
+
+
+def skipped_exists_names(guard: Optional[dict], samples: Optional[list] = None,
+                         limit: int = 3) -> list[str]:
+    """Up to `limit` "A001_C003.mov (yours 4.2 GB, the server's 3.1 GB)"
+    phrases, for the tooltip and the balloons (SYNC-109)."""
+    return [_skipped_phrase(entry)
+            for entry in skipped_exists_samples(guard, samples)[:max(0, limit)]]
+
+
+def _skipped_phrase(entry: dict) -> str:
+    name = os.path.basename(str(entry.get("path") or "").replace("\\", "/"))
+    local = entry.get("local_size")
+    server = entry.get("server_size")
+    if local is None and server is None:
+        return name
+    return (f"{name} (yours {human_bytes(local)}, "
+            f"the server's {human_bytes(server)})")
+
+
+def _skipped_exists_line(guard: dict, samples: Optional[list] = None) -> Optional[str]:
     """Lane A's "same name, already on the server at a different size" count.
 
     The one silent data-loss shape on the upload lane: `copy
     --ignore-existing` will never replace it, so the re-export sits here
-    forever with the lane showing green (item 9)."""
+    forever with the lane showing green (item 9).
+
+    SYNC-109 (sweep 2026-09-03): it named no file and offered no remedy,
+    while the log line beside it named both. The sample and the two sizes are
+    already in the dict; nothing new is computed here."""
     skipped = (guard or {}).get("skipped_exists") or {}
     try:
         count = int(skipped.get("count") or 0)
@@ -2533,9 +3006,12 @@ def _skipped_exists_line(guard: dict) -> Optional[str]:
         return None
     if count <= 0:
         return None
+    names = skipped_exists_names(guard, samples, limit=1)
+    example = f" (e.g. {names[0]})" if names else ""
     return (f"⚠ {count} file{'s' if count != 1 else ''} on the server "
-            f"{'have' if count != 1 else 'has'} the same name but a different size. "
-            "Your newer version will NOT upload")
+            f"{'have' if count != 1 else 'has'} the same name but a different size, "
+            f"so your newer version will NOT upload{example}. Rename yours, or ask "
+            "your admin to remove the server's copy")
 
 
 # A stall older than this is history, not news: the lane has had many
@@ -2659,8 +3135,13 @@ def _reporter_line(guard: dict) -> Optional[str]:
     if status in ("HTTP 401", "HTTP 403"):
         # UX-1: "from this menu" was the old right-click menu; this line is
         # rendered inside the Settings window, where the button also lives.
-        return ("⚠ The dashboard is refusing this computer's reports: your CCSync "
-                f"sign-in was rejected. Sign in again: {ui_copy.SIGN_IN_SETTINGS}")
+        # APP-8 (sweep 2026-09-03): one sentence for the refusal and what it
+        # costs, because the line used to sit beside a [ SIGN OUT ] button
+        # and no way in - identity.valid() is local, so a revoked token
+        # still reads as signed in.
+        return ("⚠ The server rejected this computer's sign-in, so your admin "
+                "cannot see whether you are syncing. Sign in again: "
+                f"{ui_copy.SIGN_IN_SETTINGS}")
     since = reporter_mod.parse_server_time(health.get("last_success_at"))
     if since is None:
         return ("⚠ The dashboard has never accepted a report from this computer. "
@@ -2895,7 +3376,27 @@ def _menu_fingerprint(snap: dict) -> tuple:
         # after the click that started the timer -- UI-3's shape again.
         int(snap.get("jobs_volunteer_minutes") or 0),
         str(snap.get("jobs_volunteer_until") or ""),
+        # The transient state lines added by the 2026-09-03 sweep. COARSE on
+        # purpose, like every counter here: the ytdl line carries a speed and
+        # a percentage that move every tick, and rebuilding the menu under an
+        # editor's cursor twice a second is exactly what _progress_bucket
+        # exists to avoid. What has to move the fingerprint is a line
+        # appearing or disappearing (CYT-1, CYT-14's item with it, CYT-15,
+        # CMEDIA-13, CMEDIA-10) and, for the download, which clip it is on.
+        _ytdl_menu_key(snap.get("ytdl_line")),
+        bool(snap.get("ytdl_login_line")),
+        str(jobs_forced_line(snap.get("jobs_status")) or ""),
+        bool(snap.get("credential_rejected")),
+        # CMEDIA-10: the failure count is what makes the line appear, and the
+        # first item's name is what it says.
+        int((snap.get("broll_ingest") or {}).get("failed") or 0),
     )
+
+
+def _ytdl_menu_key(line: Optional[str]) -> str:
+    """"Downloading YouTube clip 3/12" off the full line: which clip, never
+    the megabytes per second (CYT-1)."""
+    return str(line or "").split(" (")[0]
 
 
 def _guard_fingerprint(guard: Optional[dict]) -> tuple:
@@ -3029,7 +3530,7 @@ def proxy_advisory_lines(proxy_gap: Optional[dict]) -> list[str]:
 
 
 def _ingest_lines(ingest: Optional[dict], label: str = "b-roll",
-                  unit: str = "clip") -> list[str]:
+                  unit: str = "clip", failures: Optional[list] = None) -> list[str]:
     """The indexing lines for one kind, in the plan's words (BROLL 3.3).
 
     `label`/`unit` default to b-roll's words, so the b-roll call is the call
@@ -3075,8 +3576,65 @@ def _ingest_lines(ingest: Optional[dict], label: str = "b-roll",
     elif upload_left:
         lines.append(f"Uploading indexed {label}… {upload_left} {unit}(s) left")
     if failed and total:
-        lines.append(f"{failed} {label} {unit}(s) could not be indexed. See the log")
+        # CMEDIA-10 (sweep 2026-09-03): the orchestrator knows exactly why
+        # each clip failed and puts it on the item; both local surfaces
+        # reduced all of it to a count plus "See the log", so the reason was
+        # readable only in a browser page the editor may have closed hours
+        # ago.
+        lines.append(_ingest_failure_line(
+            failed, label, unit, failures if failures is not None
+            else ingest.get("failures")))
     return lines
+
+
+def _ingest_failure_line(failed: int, label: str, unit: str,
+                         failures: Optional[list]) -> str:
+    """"3 b-roll clip(s) could not be indexed: A001.mov (the source file is
+    not on this machine any more), and 2 more" (CMEDIA-10).
+
+    Falls back to the count-and-the-log sentence when nothing carried the
+    reasons: a build whose orchestrator predates `failures` still says what
+    it always said."""
+    items = [item for item in list(failures or []) if isinstance(item, dict)]
+    head = f"{failed} {label} {unit}(s) could not be indexed"
+    if not items:
+        return f"{head}. See the log"
+    first = items[0]
+    name = os.path.basename(str(first.get("name") or first.get("path") or "").
+                            replace("\\", "/")) or f"one {unit}"
+    reason = str(first.get("error") or "").strip()
+    text = f"{head}: {name}" + (f" ({reason})" if reason else "")
+    more = max(0, int(failed) - 1)
+    return f"{text}, and {more} more" if more else text
+
+
+def jobs_forced_line(jobs: Optional[dict]) -> Optional[str]:
+    """"CCSync is transcoding for the fleet while you work because <reason>",
+    or None (CMEDIA-13, sweep 2026-09-03).
+
+    jobs_runner's STATE_FORCED exists precisely so the tray can explain an
+    admin's --now claim to the person sitting at the machine it slowed down;
+    nothing read it. Only ever rendered while the reason is there: a job this
+    machine took on its own is not something the editor needs told about."""
+    current = (jobs or {}).get("current") if isinstance(jobs, dict) else None
+    if not isinstance(current, dict):
+        return None
+    reason = str(current.get("forced_reason") or "").strip()
+    if not reason:
+        return None
+    verb = _JOB_VERBS.get(str(current.get("kind") or ""), "running a job")
+    return f"CCSync is {verb} for the fleet while you work because {reason}"
+
+
+# The four schedulable kinds (docs/TIMELINE-CARDS-INTO-CCSYNC.md phase 1) in
+# the words an editor would use for what their machine is busy with. An
+# unknown kind gets the neutral phrase rather than a guess.
+_JOB_VERBS = {
+    "whisper": "transcribing",
+    "proxy-480p": "transcoding",
+    "audio-extract": "transcoding",
+    "peaks": "transcoding",
+}
 
 
 def _ingest_fingerprint(ingest: Optional[dict]) -> tuple:
@@ -3292,9 +3850,32 @@ def _tooltip_text(snap: dict) -> str:
     blocked = (snap.get("sync_guard") or {}).get("blocked") or {}
     if isinstance(blocked, dict) and blocked.get("detail"):
         return f"CCSync: {blocked['detail']}"[:127]
+    # SYNC-109: a file that will never upload is not "up to date". Up to
+    # three names, because the editor's next move is to look for them.
+    names = skipped_exists_names(snap.get("sync_guard"),
+                                 snap.get("skipped_samples"), limit=3)
+    if names:
+        return f"CCSync: will not upload {'; '.join(names)}"[:127]
+    # CYT-1: yt-dlp pulling 12 GB used to leave the tooltip reading "up to
+    # date". Above the calm endings, below every state where nothing syncs.
+    if snap.get("ytdl_line"):
+        return f"CCSync: {str(snap['ytdl_line'])[0].lower()}{str(snap['ytdl_line'])[1:]}"[:127]
     # Indexing SECOND, so on a machine doing both the proxy count (the older,
     # more familiar number) is the one that survives the length limit.
-    return _with_ingest_suffix(_with_proxy_suffix("CCSync: up to date", snap), snap)
+    return _with_resolve_suffix(
+        _with_ingest_suffix(_with_proxy_suffix("CCSync: up to date", snap), snap), snap)
+
+
+def _with_resolve_suffix(text: str, snap: dict) -> str:
+    """The Resolve counts the LINE had no room for (RES-5).
+
+    The tray line carries two; anything past them would push the sentence
+    that matters off the end of a menu item, so it lands here. Truncated at
+    the Windows tooltip limit like every other suffix on this path."""
+    extra = resolve_count_phrases(snap.get("resolve_health"))[2:]
+    if not extra:
+        return text
+    return f"{text} · Resolve: {', '.join(extra)}"[:127]
 
 
 # -- shared actions (2026-08-27, the Settings-window split) -----------------
@@ -3310,7 +3891,29 @@ def _tooltip_text(snap: dict) -> str:
 
 
 def action_sync_now(app: "CompanionApp") -> None:
-    _spawn(app, "Sync now", app.sync_now)
+    """The most-clicked item in the menu, which used to acknowledge nothing
+    (APP-6, sweep 2026-09-03).
+
+    On a wired machine it logged "sync_now ignored" and returned; in managed
+    mode it triggered a pass and said nothing either way, so the editor's
+    question after clicking ("did that do anything?") was answered, if at
+    all, by a lane line changing inside a different window seconds later.
+    A companion whose sync_now() still returns None keeps the old silence
+    rather than being given a made-up answer."""
+    def _do() -> None:
+        result = app.sync_now()
+        if not isinstance(result, dict):
+            return
+        if result.get("accepted"):
+            lanes = ", ".join(str(x) for x in (result.get("lanes") or []) if x)
+            _notify(app, f"Sync requested: {lanes}" if lanes
+                    else "Sync requested. Checking the server for changes now.")
+            return
+        reason = str(result.get("reason") or "").strip()
+        _notify(app, f"Not now: {reason}" if reason
+                else "Not now: nothing on this computer needs syncing.")
+
+    _spawn(app, "Sync now", _do)
 
 
 def action_scan_whole_project(app: "CompanionApp") -> None:
@@ -3475,8 +4078,115 @@ def action_copy_diagnostics(app: "CompanionApp") -> None:
 
 
 def action_open_sync_drive(app: "CompanionApp") -> None:
-    _spawn(app, "Open my sync drive",
-           lambda: _open_log(str(app.config.get("local_root", ""))))
+    """APP-14: with a blank local_root (the all-defaults config) this logged
+    one WARNING and returned, and with the drive unplugged the exception was
+    swallowed - the menu closed and nothing happened, in the two states where
+    the editor is already suspicious."""
+    def _do() -> None:
+        root = str(getattr(app, "config", {}).get("local_root", "") or "").strip()
+        if not root:
+            _notify(app, "This computer has no sync drive set up yet: open "
+                         "Settings, THIS COMPUTER.")
+            return
+        _open_path_or_say_why(
+            app, root,
+            "This computer has no sync drive set up yet: open Settings, "
+            "THIS COMPUTER.")
+
+    _spawn(app, "Open my sync drive", _do)
+
+
+def action_open_trash(app: "CompanionApp") -> None:
+    """[ OPEN THE RECOVERY FOLDER ] (SYNC-112, sweep 2026-09-03).
+
+    `.ccsync-trash` is the whole recovery story for anything lane B removed,
+    and the only route to it was an editor typing a dot-prefixed path Explorer
+    hides by default into an address bar, from a balloon that had expired."""
+    def _do() -> None:
+        _open_path_or_say_why(
+            app, trash_folder(app),
+            "CCSync does not know where your sync folder is yet, so there is no "
+            "recovery folder to open. Open Settings, THIS COMPUTER.")
+
+    _spawn(app, "Open the recovery folder", _do)
+
+
+def action_open_skipped_folder(app: "CompanionApp", snap: Optional[dict] = None) -> None:
+    """Open the folder holding the newest file lane A will never upload
+    (SYNC-109). The alarm named no file and offered no action; this is the
+    action."""
+    def _do() -> None:
+        samples = skipped_exists_samples((snap or {}).get("sync_guard")
+                                         or (getattr(app, "sync_guard", None)
+                                             or (lambda: {}))() or {},
+                                         (snap or {}).get("skipped_samples"))
+        if not samples:
+            _notify(app, "Nothing is being skipped on this computer right now.")
+            return
+        root = str(getattr(app, "config", {}).get("local_root", "") or "").strip()
+        rel = str(samples[0].get("path") or "").replace("\\", "/")
+        folder = os.path.dirname(os.path.join(root, *rel.split("/"))) if root else ""
+        _open_path_or_say_why(
+            app, folder,
+            "CCSync does not know where your sync folder is, so it cannot open "
+            f"the folder holding {os.path.basename(rel)}.")
+
+    _spawn(app, "Open the folder it is in", _do)
+
+
+def action_stop_youtube_download(app: "CompanionApp") -> None:
+    """CYT-14: the only way to stop a local download was a browser page on
+    the tailnet ([ DOWNLOAD ON THE SERVER INSTEAD ]). The editor at the
+    machine - about to close the lid, or watching their upload lane starve -
+    had "Quit CCSync", which stops syncing too."""
+    def _do() -> None:
+        stop = getattr(app, "cancel_local_downloads", None)
+        try:
+            stopped = stop() if callable(stop) else ytdl_executor.stop_all()
+        except Exception:
+            log.exception("stopping the local YouTube download failed")
+            _notify(app, "CCSync could not stop the download. "
+                         f"{ui_copy.DIAGNOSTICS}.")
+            return
+        log.info("tray: local YouTube download stopped (%s)", stopped)
+        # The lease then expires and the server picks up what is missing,
+        # which is the documented behaviour for every other hand-back.
+        _notify(app, "Stopped. The server will download the clips this computer "
+                     "did not finish.")
+
+    _spawn(app, "Stop the YouTube download", _do)
+
+
+def action_restart_app(app: "CompanionApp") -> None:
+    """[ Restart CCSync ] (APP-13, sweep 2026-09-03).
+
+    Three separate pieces of copy tell an editor to restart the companion and
+    the button that does it was hidden behind a role change nobody has made.
+    Delegates to the Settings window's own action so there is one restart in
+    the app, imported lazily because settings_window imports this module."""
+    restart = None
+    try:
+        from . import settings_window
+
+        restart = getattr(settings_window, "action_restart_now", None)
+    except Exception:
+        log.exception("tray: the settings restart action was unavailable")
+    if callable(restart):
+        # Deliberately not wrapped: a failure INSIDE it has already been
+        # handled (and possibly already spawned), and retrying here would be
+        # two restarts from one click.
+        restart(app)
+        return
+
+    def _do() -> None:
+        try:
+            upgrade_mod.restart_self(request_shutdown=app.shutdown)
+        except Exception:
+            log.exception("tray: restart_self failed")
+            _notify(app, "CCSync could not restart itself. "
+                         f"{ui_copy.DIAGNOSTICS}.")
+
+    _spawn(app, "Restart CCSync", _do)
 
 
 def action_sign_in(app: "CompanionApp") -> None:
@@ -3589,6 +4299,12 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
     def on_release_halt(icon, item):
         action_release_halt(app)
 
+    def on_stop_youtube(icon, item):
+        action_stop_youtube_download(app)
+
+    def on_restart(icon, item):
+        action_restart_app(app)
+
     dashboard_items = (
         [tray_backend.MenuItem("Open dashboard", on_open_dashboard)]
         if snap["dashboard_url"] else []
@@ -3608,6 +4324,14 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
     identity_items = [tray_backend.MenuItem(snap["identity_label"], None, enabled=False)]
     if not signed_in:
         identity_items.append(tray_backend.MenuItem(sign_in_label, on_sign_in))
+    elif snap.get("credential_rejected"):
+        # APP-8 (sweep 2026-09-03): identity.valid() is a LOCAL check, so a
+        # token the server has revoked still reads as signed in and the only
+        # button anywhere was SIGN OUT. The way back is one click, from the
+        # surface the editor is already looking at.
+        identity_items.append(tray_backend.MenuItem(
+            "► Sign in again (the server rejected this computer's sign-in)",
+            on_sign_in))
 
     # -- the conditional block: blockers and prompts, in one bracketed group
     # (2026-08-27). Each of these used to carry its OWN trailing separator so
@@ -3685,9 +4409,18 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
         if upgrade_info else []
     )
 
+    # CYT-14: present only while a local download is actually running, which
+    # is what keeps it out of the ten-item layout (CR-88) the rest of the
+    # time. Same class as the breaker's RESUME above: an action that exists
+    # because a state does.
+    ytdl_stop_items = (
+        [tray_backend.MenuItem("► Stop the YouTube download", on_stop_youtube)]
+        if snap.get("ytdl_line") else []
+    )
+
     conditional_items = [
         *problem_items, *licence_items, *setup_items, *lut_items,
-        *breaker_items, *halt_release_items, *upgrade_items,
+        *breaker_items, *halt_release_items, *ytdl_stop_items, *upgrade_items,
     ]
 
     # "Use this machine NOW" (section 10, 2026-08-30). The admin's lever is a
@@ -3706,9 +4439,23 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
 
     # One line of sync state plus Resolve's state -- the three lane lines and
     # every advisory line that used to sit here moved to Settings.
+    # The transient state lines beside them (sweep 2026-09-03): a running
+    # YouTube download (CYT-1), a browser sign-in waiting on the editor
+    # (CYT-15), a fleet job somebody else started on this machine
+    # (CMEDIA-13) and the b-roll clips that could not be indexed with the
+    # first reason (CMEDIA-10). Each one self-removes when its state ends,
+    # which is why they are lines and not items.
+    ingest_failure_lines = [
+        text for text in _ingest_lines(snap.get("broll_ingest"),
+                                       failures=snap.get("broll_failures"))
+        if "could not be indexed" in text
+    ]
     state_items = [
         tray_backend.MenuItem(line, None, enabled=False)
-        for line in (_sync_line(snap), snap.get("resolve_line"))
+        for line in (_sync_line(snap), snap.get("resolve_line"),
+                     snap.get("ytdl_line"), snap.get("ytdl_login_line"),
+                     jobs_forced_line(snap.get("jobs_status")),
+                     *ingest_failure_lines)
         if line
     ]
 
@@ -3729,7 +4476,18 @@ def _build_menu(app: "CompanionApp", snap: Optional[dict] = None) -> "tray_backe
         *dashboard_items,
         tray_backend.MenuItem("Settings…", on_open_settings),
         tray_backend.Menu.SEPARATOR,
-        tray_backend.MenuItem("Quit CCSync (stops syncing until you next sign in)", on_quit),
+        # APP-13 (sweep 2026-09-03): three pieces of copy tell an editor to
+        # restart CCSync and none of them could be acted on - the exe is at
+        # %LOCALAPPDATA%\ccsync\bin and on no Start menu they know. Next to
+        # Quit, because that is where a person looks for "start it over".
+        tray_backend.MenuItem("Restart CCSync", on_restart),
+        # ...and the old label was false: identity.json persists, so a
+        # restarted companion syncs with no sign-in at all. What is true is
+        # that the installer's logon entry (HKCU\...\Run on Windows, a
+        # RunAtLoad LaunchAgent on macOS) starts it again at the next login.
+        tray_backend.MenuItem(
+            "Quit CCSync (nothing syncs until you start it again, or log in "
+            "to this computer again)", on_quit),
     )
 
 

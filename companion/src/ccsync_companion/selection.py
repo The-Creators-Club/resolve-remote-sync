@@ -147,6 +147,15 @@ class SelectionClient:
         self._last_response_editor: Optional[str] = None
         # Last payload actually written to disk, for write-only-on-change.
         self._last_written: Optional[dict[str, Any]] = None
+        # SYNC-110 (usability sweep 2026-09-03): WHEN this plan was last
+        # fetched live. `fetched_at` has been written into the cache since
+        # the cache existed and was read back by nothing, so a machine
+        # running a week-old plan behind an unreachable dashboard looked
+        # exactly like a healthy one -- new ticks never arriving and unticks
+        # never taking effect, with the sequencer reporting RUNNING. Wall
+        # clock, not monotonic: it outlives the process, which is the case
+        # this is about.
+        self._fetched_at: Optional[str] = None
 
     @property
     def enabled(self) -> bool:
@@ -236,6 +245,7 @@ class SelectionClient:
         self._last_response = response if isinstance(response, dict) else {"selection": selection}
         self._last_response_at = time.monotonic()
         self._last_response_editor = editor_name
+        self._fetched_at = datetime.now(timezone.utc).isoformat()
         self._write_cache(self._last_response)
         return selection
 
@@ -313,6 +323,43 @@ class SelectionClient:
         if isinstance(selection, list):
             return {"selection": selection}
         return None
+
+    def fetched_at(self) -> Optional[str]:
+        """ISO-8601 UTC of the last SUCCESSFUL plan fetch, or None if this
+        machine has never had one (SYNC-110).
+
+        This run's live stamp when there is one, else the cache's, so the
+        answer survives a restart with the dashboard still down -- which is
+        the shape that matters: the plan being acted on is as old as the file
+        says, not as old as the process. Never raises; a cache that cannot be
+        read is None, i.e. "cannot tell", which a caller must not render as
+        fresh."""
+        if self._fetched_at:
+            return self._fetched_at
+        try:
+            data = json.loads(self._cache_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        stamp = data.get("fetched_at")
+        return str(stamp) if stamp else None
+
+    def plan_age_seconds(self, now: Optional[float] = None) -> Optional[float]:
+        """How old the plan being acted on is, in seconds, or None when that
+        cannot be told (never fetched, unreadable stamp). None is NOT zero:
+        the caller must not read "cannot tell" as "just fetched"."""
+        stamp = self.fetched_at()
+        if not stamp:
+            return None
+        try:
+            when = datetime.fromisoformat(str(stamp))
+        except Exception:
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        current = now if now is not None else datetime.now(timezone.utc).timestamp()
+        return max(0.0, float(current) - when.timestamp())
 
     def load_cached(self) -> Optional[list[dict]]:
         """Tolerant read of the on-disk cache. Never raises -- returns None

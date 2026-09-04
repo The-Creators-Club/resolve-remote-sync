@@ -160,6 +160,194 @@ templates.env.globals["SETTINGS_PAGES"] = SETTINGS_PAGES
 COMPANION_DIAGNOSTICS_PATH = health.COMPANION_DIAGNOSTICS_PATH
 templates.env.globals["COMPANION_DIAGNOSTICS_PATH"] = COMPANION_DIAGNOSTICS_PATH
 
+# WHAT A CHIP MEANS, in one place (DUI-3, usability sweep 2026-09-03). Every
+# chip on the fleet grid carried its whole explanation in `title=`, which a
+# phone cannot show: eighteen labels can stack in one LANES cell and on a
+# touch device the entire explanatory layer of the product's most important
+# page was unreachable. static/htmx_errors.js now opens a sheet on a tap, and
+# the sheet reads the same text the tooltip does -- so the text has to have
+# ONE home, or the two drift and the phone gets the older sentence.
+#
+# Format strings, filled by chip_help(key, **values) from the template: the
+# per-machine numbers are the template's, the prose is this dict's.
+CHIP_HELP: dict[str, str] = {
+    "relayed": (
+        "{n} Syncthing peer(s) connected via a RELAY, not directly: lane C on "
+        "this computer is limited to relay speed (1-5 MB/s), not the link. "
+        "Checked {at}."),
+    "direct": "{n} Syncthing peer(s) connected directly. Checked {at}.",
+    "orphans": (
+        "{bytes} of orphaned rclone .partial files left on the NAS by an "
+        "interrupted lane A. Never deleted automatically; remove them by hand "
+        "to reclaim the space."),
+    "breaker": (
+        "{reason}, tripped {at}. Lane A and lane C are still running; nothing "
+        "was deleted."),
+    "sync_engine_down": (
+        "the Syncthing engine on this computer has been down since {since}"
+        "{extra}"),
+    "clock": (
+        "this computer's clock is {abs} {direction} the server's. Proxy "
+        "download uses a minimum file age, so a clock this far out can make it "
+        "transfer nothing at all while reporting no error. Fix the clock on "
+        "that machine (enable automatic time)."),
+    "crashes": (
+        "{n} background task(s) on this computer have crashed and written a "
+        "report{newest}. The tray stays up and the lanes look normal, so ask "
+        "the editor to open {path} in the companion and send it to you."),
+    "report_refused": (
+        "the last report from this computer was refused {at}: {reason}. "
+        "Nothing below is current. The editor has to click Sign in... on this "
+        "computer's tray."),
+    "update_failed": (
+        "this computer has tried to install {version} {n} time(s) and "
+        "failed{when}{why}. Antivirus quarantine, a proxy mangling the "
+        "download and a full disk all look like this."),
+    "unfiltered": (
+        "{n} Syncthing folder(s) on this computer have no ignore filter "
+        "written{names}. Without it, lane C carries camera originals both "
+        "ways."),
+    "conflicts": (
+        "{n} Syncthing sync-conflict file(s) in this computer's tree. Two "
+        "people saved one project file; nothing was lost, but somebody's edit "
+        "is sitting in a renamed copy."),
+    "out_of_tree": (
+        "the project open on this computer references {n} clip(s) from "
+        "outside the sync tree{bad_prefix}. They will never upload, so the "
+        "timeline opens with red media on every other computer. Scanned "
+        "{at}."),
+    "stray_dirs": (
+        "{n} project folder(s) on this computer's disk are not in the sync "
+        "tree, holding {bytes}. Nothing in them is on the server or visible "
+        "to anybody else."),
+    "disk": (
+        "this computer's sync drive has {free} free of {total}{system}. "
+        "Measured {at}. Proxy download fills a drive file by file, and "
+        ".ccsync-trash cannot prune while the breaker is tripped."),
+    "stalled": (
+        "lane {lane} on this computer made no progress for {seconds} "
+        "second(s) {killed}, {at}. A local drive that stops answering reads "
+        "exactly like this."),
+    "skipped_exists": (
+        "{n} file(s) exist on the NAS under the same name at a different "
+        "size. Lane A is copy --ignore-existing, so this computer's newer "
+        "versions will never upload."),
+    "trash": (
+        "{n} recoverable file(s) in this computer's .ccsync-trash. Pruned "
+        "automatically after 14 days."),
+    "gpu": "{name}{nvenc}{at}",
+    "whisper": (
+        "this computer has the whisper venv and the pipeline checkout the "
+        "transcription jobs need"),
+    "need_proxies": (
+        "{n} clip(s) on this computer have no proxy yet, so nobody else on "
+        "the fleet can see that footage{state}{left}."),
+    "volunteering": (
+        "somebody at {machine} clicked 'take fleet jobs now', so this "
+        "computer is offered work while they use it - until {until} UTC, or "
+        "until they click it off. Nothing else is bypassed: a halt, an update "
+        "or a tripped breaker still refuse."),
+    # RES-6 (2026-09-03): the cards role reported green while its loop was
+    # dead or 401-ing, so `connected` alone is not the question any more. The
+    # companion sends a state and a detail (builder C5, 2026-09-04) and the
+    # chip's colour comes from the state, not from the connection.
+    "cards_running": (
+        "this computer is serving the Timeline Cards page from its own "
+        "Resolve{timeline}{detail}{at}"),
+    "cards_stopped": (
+        "the Timeline Cards role on this computer has STOPPED: the page will "
+        "not update until its companion is restarted.{detail}{at}"),
+    "cards_refused": (
+        "the Timeline Cards role on this computer refused to start."
+        "{detail}{at}"),
+    "cards_credential_refused": (
+        "the Timeline Cards role on this computer is being refused by the "
+        "dashboard (its credential is wrong or expired), so the page it "
+        "serves is stale.{detail}{at}"),
+    "cards_unreachable": (
+        "the Timeline Cards role on this computer cannot reach the "
+        "dashboard, so the page it serves is stale.{detail}{at}"),
+    # CYT-3 (2026-09-03): the clips land on disk and never reach Resolve, and
+    # until now that reached nobody at either end. `no-project-match` is a
+    # per-machine misconfiguration an admin can fix and the editor cannot.
+    "youtube_import": (
+        "{n} YouTube clip(s) downloaded to this computer are waiting to go "
+        "into Resolve{reason}. They are on the disk; nothing is lost. "
+        "Reported {at}."),
+    "youtube_import_gave_up": (
+        "this computer gave up filing {n} downloaded YouTube clip(s) into "
+        "Resolve: {reason}. They stay on the disk under Youtube/ and are "
+        "retried when its companion restarts. Reported {at}."),
+}
+
+
+def chip_help(key: str, **values) -> str:
+    """The sentence behind one chip, filled in. An unknown key and a missing
+    value both answer with something rather than raising: this text is on the
+    page that tells the fleet whether its footage is syncing, and a KeyError
+    from a companion that reported one field fewer must never be why it does
+    not render."""
+    text = CHIP_HELP.get(key)
+    if text is None:
+        return ""
+    try:
+        return text.format(**values)
+    except (KeyError, IndexError, ValueError):
+        return text
+
+
+templates.env.globals["CHIP_HELP"] = CHIP_HELP
+templates.env.globals["chip_help"] = chip_help
+
+
+def safe_to_close(transfers_view: dict | None, editor: str | None) -> dict | None:
+    """"Am I safe to close my laptop", in one line (DUI-19, sweep 2026-09-03).
+
+    The editor's own page was good at what is moving and never composed the
+    one sentence they came for: they had to read a percentage bar, a
+    "12 files, 4.2 GB, ETA 26m" line and a [ GETTING READY ] chip and do the
+    synthesis themselves. Nothing new is measured here - it is the transfers
+    view the panel below already renders.
+
+    UPLOADS are what decides it: a download interrupted by a closed lid
+    resumes, an upload that has not happened yet leaves that footage on one
+    disk. `None` for an admin's fleet-wide view, which has no "this computer".
+    """
+    if not transfers_view or not editor:
+        return None
+    live = [t for t in (transfers_view.get("transfers") or [])
+            if (t.get("editor") or "") == editor]
+    up_live = [t for t in live if t.get("direction") == "up"]
+    down_live = [t for t in live if t.get("direction") != "up"]
+    queues = [q for q in (transfers_view.get("queues") or [])
+              if (q.get("editor") or "") == editor and not q.get("pending")]
+    up_files = sum(int(q.get("n_files") or 0) for q in queues
+                   if q.get("direction") == "up") + len(up_live)
+    up_bytes = sum(int(q.get("bytes") or 0) for q in queues
+                   if q.get("direction") == "up")
+    for t in up_live:
+        total, done = t.get("bytes_total"), t.get("bytes_done")
+        if total is not None and done is not None:
+            up_bytes += max(0, int(total) - int(done))
+    down_files = sum(int(q.get("n_files") or 0) for q in queues
+                     if q.get("direction") != "up") + len(down_live)
+    speed = sum(int(t.get("speed_bps") or 0) for t in up_live)
+    seconds = int(up_bytes / speed) if speed > 1 and up_bytes else None
+    if not up_files:
+        if down_files:
+            sentence = (f"Safe to close: nothing from this computer is waiting to go to "
+                        f"the server. {down_files} file(s) are still coming down and "
+                        f"carry on where they left off next time.")
+        else:
+            sentence = "Safe to close: nothing is transferring."
+        return {"safe": True, "sentence": sentence, "up_files": 0,
+                "up_bytes": 0, "eta_seconds": None}
+    about = f", about {eta(seconds)}" if seconds else ""
+    sentence = (f"Not yet: {up_files} file(s) still uploading from this computer"
+                f" ({human_bytes(up_bytes)}){about}. Leave it running.")
+    return {"safe": False, "sentence": sentence, "up_files": up_files,
+            "up_bytes": up_bytes, "eta_seconds": seconds}
+
 
 def _render(request: Request, name: str, context: dict) -> HTMLResponse:
     settings = request.app.state.settings
@@ -333,6 +521,9 @@ def page_fleet(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
         "scope_admin": scope.admin,
         "nav_current": "fleet",
     }
+    # DUI-19: the editor's own answer to "am I safe to close my laptop",
+    # from the view above rather than a second pass.
+    context["safe_to_close"] = safe_to_close(context["transfers"], scope.editor)
     if queue_editor:
         context.update(_roots_context(
             conn, auth.is_admin(settings, auth.get_session_user(request))
@@ -429,11 +620,15 @@ async def page_login_submit(request: Request):
     elif auth.refuse_plaintext_login(settings, request):
         error = ("this dashboard is configured for https only (DASH_COOKIE_SECURE=1) "
                  "-- use the https URL")
-    elif auth.login_throttled(request, username):
-        # One generic message for every refusal below, including this one: a
-        # throttle that says "wait 4 minutes" for real usernames and "bad
-        # password" for made-up ones is a username oracle.
-        error = _LOGIN_REFUSED
+    elif (throttled_for := auth.login_throttled(request, username)):
+        # DCORE-8 (2026-09-04): the wait is NAMED now. The username-oracle
+        # worry this branch was written with does not apply to it: every
+        # failed sign-in records a failure whether or not the account exists
+        # (auth.record_login_failure is unconditional), so a made-up name is
+        # throttled, and told the same wait, as a real one. What the generic
+        # message still protects is the OUTCOME of a sign-in that was
+        # actually tried -- this page never says which half was wrong.
+        error = auth.throttle_message(throttled_for)
     elif sso and not auth.is_admin(settings, username):
         # Break-glass is for the operator, not a password back door for the
         # fleet. Same generic message, so it does not disclose who is an admin.
@@ -585,8 +780,14 @@ def partial_queue(request: Request, conn: sqlite3.Connection = Depends(get_conn)
     editor = _queue_editor(request)
     if editor is None:
         raise HTTPException(status_code=401, detail="not logged in")
+    # DUI-19: the same sentence the transfers panel carries, on the panel an
+    # editor actually reads. It is built from the transfers view because that
+    # is where "what is still going up" lives; the 10s poll pays for one
+    # editor-scoped build, not a fleet one.
+    transfers = build_transfers_view(conn, editor=editor)
     return _render(request, "partials/queue_section.html", {
         "queue": build_queue_view(conn, editor),
+        "safe_to_close": safe_to_close(transfers, editor),
     })
 
 
@@ -1069,6 +1270,13 @@ def page_project(slug: str, request: Request, conn: sqlite3.Connection = Depends
         "moves": db.file_moves_for_project(conn, slug),
         "move_projects": [dict(r) for r in conn.execute(
             "SELECT slug, label FROM projects WHERE active=1 ORDER BY label")],
+        # DCORE-16 (usability sweep 2026-09-04): the config/enforce cycles
+        # that did not do everything they described. This is the page where
+        # somebody asks why a computer is not getting THIS project, and "a
+        # sharing change is held" was recorded, alerted on, and rendered
+        # nowhere near the question. Empty is the normal state and renders as
+        # nothing.
+        "enforce_notes": db.enforce_notes(conn),
         "scope_admin": scope.admin,
         "tick_editor": tick_editor,
         # A project page is a page OF the fleet grid, so the drawer keeps
@@ -1167,9 +1375,11 @@ def partial_sidebar(request: Request, current: str = "", conn: sqlite3.Connectio
 @router.get("/transfers")
 def page_transfers(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     scope = auth.scope_for(request)
+    transfers = build_transfers_view(conn, editor=scope.editor)
     return _render(request, "transfers.html", {
         **_sidebar_context(request, conn, None),
-        "transfers": build_transfers_view(conn, editor=scope.editor),
+        "transfers": transfers,
+        "safe_to_close": safe_to_close(transfers, scope.editor),
         "scope_admin": scope.admin,
         # Under Settings for an admin, and a top-level drawer entry for an
         # editor -- one value, partials/settings_nav.html decides which
@@ -1181,8 +1391,10 @@ def page_transfers(request: Request, conn: sqlite3.Connection = Depends(get_conn
 @router.get("/partials/transfers")
 def partial_transfers(request: Request, conn: sqlite3.Connection = Depends(get_conn)):
     scope = auth.scope_for(request)
+    transfers = build_transfers_view(conn, editor=scope.editor)
     return _render(request, "partials/transfers.html", {
-        "transfers": build_transfers_view(conn, editor=scope.editor),
+        "transfers": transfers,
+        "safe_to_close": safe_to_close(transfers, scope.editor),
         "scope_admin": scope.admin,
     })
 
@@ -1746,6 +1958,13 @@ def partial_project(slug: str, request: Request, conn: sqlite3.Connection = Depe
         "moves": db.file_moves_for_project(conn, slug),
         "move_projects": [dict(r) for r in conn.execute(
             "SELECT slug, label FROM projects WHERE active=1 ORDER BY label")],
+        # DCORE-16 (usability sweep 2026-09-04): the config/enforce cycles
+        # that did not do everything they described. This is the page where
+        # somebody asks why a computer is not getting THIS project, and "a
+        # sharing change is held" was recorded, alerted on, and rendered
+        # nowhere near the question. Empty is the normal state and renders as
+        # nothing.
+        "enforce_notes": db.enforce_notes(conn),
         "tick_editor": tick_editor,
         # UX-12 / DASH-8 (2026-08-28): the person's computers, so this render
         # carries the same person-level untick confirm and the same
@@ -1828,6 +2047,13 @@ async def partial_project_move(slug: str, request: Request,
         "moves": db.file_moves_for_project(conn, slug),
         "move_projects": [dict(r) for r in conn.execute(
             "SELECT slug, label FROM projects WHERE active=1 ORDER BY label")],
+        # DCORE-16 (usability sweep 2026-09-04): the config/enforce cycles
+        # that did not do everything they described. This is the page where
+        # somebody asks why a computer is not getting THIS project, and "a
+        # sharing change is held" was recorded, alerted on, and rendered
+        # nowhere near the question. Empty is the normal state and renders as
+        # nothing.
+        "enforce_notes": db.enforce_notes(conn),
         "tick_editor": tick_editor,
         "as_qs": _as_qs(request, tick_editor),
         "move_error": error,
@@ -1850,6 +2076,13 @@ def _rendered_project_detail(request, conn, slug: str, *, error=None, done=None)
         "moves": db.file_moves_for_project(conn, slug),
         "move_projects": [dict(r) for r in conn.execute(
             "SELECT slug, label FROM projects WHERE active=1 ORDER BY label")],
+        # DCORE-16 (usability sweep 2026-09-04): the config/enforce cycles
+        # that did not do everything they described. This is the page where
+        # somebody asks why a computer is not getting THIS project, and "a
+        # sharing change is held" was recorded, alerted on, and rendered
+        # nowhere near the question. Empty is the normal state and renders as
+        # nothing.
+        "enforce_notes": db.enforce_notes(conn),
         "tick_editor": tick_editor,
         "as_qs": _as_qs(request, tick_editor),
         "move_error": error,
@@ -2814,13 +3047,43 @@ def page_download_platform(
 # by every route below that re-renders admin_packages.html, so a Check now /
 # Publish / policy change never leaves the packages table and the feed
 # section disagreeing about what is on this dashboard.
+def _feed_next_check_seconds(last_checked_at: str | None, interval: float) -> int | None:
+    """Seconds until the poller's next update check, or None when nothing can
+    be said (REL-11). A check that is already overdue answers 0 rather than a
+    negative: the poller sleeps in whole intervals from process start, so
+    "any moment now" is the honest reading and a countdown that goes backwards
+    is not."""
+    if not last_checked_at:
+        return None
+    try:
+        stamp = db.parse_iso(last_checked_at)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=dt.timezone.utc)
+    elapsed = (dt.datetime.now(dt.timezone.utc) - stamp).total_seconds()
+    return max(0, int(interval - elapsed))
+
+
 def _packages_and_feed(conn, request: Request, error: str | None = None,
                        refused: list | None = None) -> dict:
     settings = request.app.state.settings
+    feed = release_feed.build_feed_view(conn, settings, request.app.state)
+    # REL-11 (2026-09-03): the panel said when it LAST checked and never when
+    # it will check again. The default interval is a DAY, and an admin who has
+    # just been told by the vendor that a fix is out reads "last checked 19
+    # hours ago" and has no way to know whether waiting five minutes would
+    # help. Same arithmetic the poller runs on (release_feed.FeedPoller:
+    # max(POLLER_MIN_INTERVAL, settings.release_feed_interval)).
+    interval = max(release_feed.POLLER_MIN_INTERVAL,
+                   float(getattr(settings, "release_feed_interval", 0) or 86400.0))
     return {
         "packages": build_packages_view(conn, settings),
-        "feed": release_feed.build_feed_view(conn, settings, request.app.state),
+        "feed": feed,
         "nas_kind": getattr(settings, "nas_kind", ""),
+        "feed_interval_seconds": interval,
+        "feed_next_check_seconds": _feed_next_check_seconds(
+            feed.get("last_checked_at"), interval),
         "error": error,
         # What the check REFUSED to take, from the check's own answer rather
         # than the stored view (2026-09-04, with the dashboard-core builder's
@@ -3096,6 +3359,11 @@ def partial_admin_diagnostics(
     return _render(request, "partials/admin_diagnostics.html", {
         "diagnostics": {"bundles": bundles, "editor": editor, "machine": machine},
         "crash_reports": len(notices.crash_files(request.app.state.settings)),
+        # DCORE-16: the same list as the project page's. A machine that is
+        # not getting its shares because an enforce cycle has been half
+        # failing for a week is a fleet-level answer, and this panel is where
+        # an admin looks for one.
+        "enforce_notes": db.enforce_notes(conn),
     })
 
 

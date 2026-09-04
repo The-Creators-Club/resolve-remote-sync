@@ -3034,6 +3034,44 @@ class RcloneLane(LaneAdapter):
         with self._lock:
             return dict(self._size_mismatches) if self._size_mismatches else None
 
+    def size_mismatch_samples(self, limit: int = 20) -> list[dict]:
+        """The files behind the "your newer version will NOT upload" count:
+        [{path, local_size, server_size}], newest scan, capped.
+
+        SYNC-109 (sweep 2026-09-03): the tray line said "3 files on the
+        server have the same name but a different size. Your newer version
+        will NOT upload" and stopped there, while the log line beside it
+        named the first file AND the two fixes. This is the one silent
+        data-loss shape on the upload lane, and the editor was given the
+        alarm without the filename.
+
+        `local_size` is a stat of the copy on THIS machine, which costs
+        nothing; `server_size` is None because `rclone check --differ` prints
+        names only and asking the NAS for sizes would be a second listing
+        per pass for a line that already tells the editor what to do. Never
+        raises."""
+        report = self.size_mismatch_report()
+        if not report:
+            return []
+        subpath = str(report.get("subpath") or "")
+        local_sub = _local_subpath(subpath) if subpath else ""
+        base = Path(self.local_root) / local_sub if local_sub else Path(self.local_root)
+        out: list[dict] = []
+        for name in (report.get("samples") or [])[:max(0, int(limit))]:
+            rel = str(name).strip()
+            if not rel:
+                continue
+            local_size: Optional[int] = None
+            try:
+                # The path is compared nowhere and opened nowhere -- it is
+                # stat'ed and shown, so the bytes the scan reported are used
+                # exactly as they came (CR-90's rule).
+                local_size = (base / Path(*rel.replace("\\", "/").split("/"))).stat().st_size
+            except OSError:
+                local_size = None
+            out.append({"path": rel, "local_size": local_size, "server_size": None})
+        return out
+
     def pending_uploads(self, subpath: Optional[str] = None) -> Optional[dict]:
         """What lane A still owes the NAS for `subpath` -- the gate on
         "Remove from this machine" (item 9). None means "could not tell",

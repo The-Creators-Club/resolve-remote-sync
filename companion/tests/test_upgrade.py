@@ -1841,3 +1841,67 @@ def test_upgrade_report_nulls_the_refusal_when_there_is_none():
 @pytest.mark.parametrize("junk", [None, "", {}, "not-a-dict", 7])
 def test_upgrade_report_survives_junk_in_the_refusal_slot(junk):
     assert upgrade_mod.upgrade_report({}, 1, junk)["refused_version"] is None
+
+
+# ---------------------------------------------------------------------------
+# APP-16: the offer says what changed (2026-09-04)
+# ---------------------------------------------------------------------------
+
+
+def test_a_record_with_no_notes_renders_exactly_as_it_did(monkeypatch):
+    """No deployed dashboard is broken by this: absent notes are today's copy,
+    to the character."""
+    monkeypatch.setattr(upgrade_mod, "_OFFER_NOTES", {})
+    assert upgrade_mod.offer_label("0.5.0", running="0.4.5") == (
+        "Update available \u2192 v0.5.0 (install)")
+    assert upgrade_mod.offer_toast("0.5.0", running="0.4.5") == (
+        "Update available \u2192 v0.5.0. Use the tray menu to install")
+    _title, body, _ok = upgrade_mod.offer_dialog_text("0.5.0", running="0.4.5")
+    assert body == "Update to v0.5.0? The companion will restart itself."
+
+
+def test_the_notes_reach_all_three_surfaces(monkeypatch):
+    monkeypatch.setattr(upgrade_mod, "_OFFER_NOTES", {})
+    notes = "Fixes the tray closing itself on wake.\nAlso: faster lane B."
+
+    assert "Fixes the tray closing itself on wake." in upgrade_mod.offer_label(
+        "0.5.0", running="0.4.5", notes=notes)
+    toast = upgrade_mod.offer_toast("0.5.0", running="0.4.5", notes=notes)
+    assert "What's new: Fixes the tray closing itself on wake." in toast
+    assert "faster lane B" not in toast, "the toast takes the FIRST line"
+    _title, body, _ok = upgrade_mod.offer_dialog_text("0.5.0", running="0.4.5",
+                                                      notes=notes)
+    assert "faster lane B" in body, "the dialog has room for all of it"
+
+
+def test_notes_from_the_record_reach_a_caller_that_only_has_a_version(monkeypatch):
+    """The tray and the settings window call these with a version and nothing
+    else, so the offer remembers its own notes."""
+    monkeypatch.setattr(upgrade_mod, "_OFFER_NOTES", {})
+    upgrade_mod.remember_offer_notes({"version": "0.5.0", "notes": "Two fixes."})
+
+    assert upgrade_mod.offer_label("0.5.0", running="0.4.5").endswith("Two fixes.")
+    assert upgrade_mod.offer_notes("0.4.9") == ""
+
+
+def test_notes_are_trimmed_before_they_reach_a_menu_item(monkeypatch):
+    """A menu item is one line, a NUL truncates a Win32 string, and no amount
+    of publisher text may push the buttons off a dialog."""
+    monkeypatch.setattr(upgrade_mod, "_OFFER_NOTES", {})
+    label = upgrade_mod.offer_label("0.5.0", running="0.4.5",
+                                    notes="a" * 500 + "\x00\r\nsecond")
+    assert "\n" not in label and "\x00" not in label
+    assert label.endswith("...")
+    assert len(label) < 130
+
+
+def test_an_unsigned_notes_key_is_carried_but_never_rewritten():
+    """parse_upgrade may not tidy a field the signature covers -- and a record
+    with no notes must come out of it exactly as before."""
+    record = {"version": "0.5.0", "url": "/x", "sha256": "a" * 64,
+              "notes": "  Two   fixes.  "}
+    out = upgrade_mod.parse_upgrade({"upgrade": record})
+    assert out["notes"] == "  Two   fixes.  "
+    bare = upgrade_mod.parse_upgrade(
+        {"upgrade": {"version": "0.5.0", "url": "/x", "sha256": "a" * 64}})
+    assert "notes" not in bare

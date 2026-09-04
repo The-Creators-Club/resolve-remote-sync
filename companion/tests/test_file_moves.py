@@ -477,3 +477,44 @@ def test_a_moved_file_is_found_under_either_unicode_spelling(tmp_path):
                   paths=(nfc, new), relink_pending=True)
     assert ledger.moved_to(nfc)["id"] == 1
     assert ledger.moved_to(nfd)["id"] == 1
+
+
+# -- SYNC-102: the relink sync/repath.py borrows -----------------------------
+
+def test_relink_moved_repoints_the_pool_through_replace_clip(tmp_path, monkeypatch):
+    """The whole-directory case a server-side project rename needs (SYNC-102,
+    sweep 2026-09-03). Every write still goes through replace_clip, which is
+    what takes the save point and writes the undo journal."""
+    from ccsync_companion import resolve_bridge
+
+    root = _tree(tmp_path)
+    old = str(root / "Projects" / DRONE)
+    new = str(root / "Projects" / "2026" / "Renamed")
+    canonical_old = "P:" + chr(92) + chr(92).join(
+        ["", "Projects"] + DRONE.split("/") + ["B-roll", "A001_0512.braw"])
+    replaced: list[tuple] = []
+    monkeypatch.setattr(resolve_bridge, "get_media_pool_items", lambda: {
+        "ok": True,
+        "items": [{"file_path": canonical_old},
+                  {"file_path": "P:" + chr(92) + "Projects" + chr(92) + "Elsewhere"}],
+    })
+    monkeypatch.setattr(resolve_bridge, "resolve_media_pool_item", lambda item: object())
+    monkeypatch.setattr(resolve_bridge, "replace_clip",
+                        lambda clip, path, source=None: (replaced.append((path, source))
+                                                         or {"ok": True}))
+
+    matched, text = file_moves.relink_moved(old, new, str(root), "P:" + chr(92),
+                                            is_dir=True)
+    assert matched is True and "1 Resolve clip(s) relinked" in text
+    assert len(replaced) == 1
+    assert replaced[0][0].endswith(chr(92).join(["Renamed", "B-roll", "A001_0512.braw"]))
+    assert replaced[0][1] == "file_move"
+
+
+def test_relink_moved_says_so_when_resolve_is_not_open(tmp_path, monkeypatch):
+    from ccsync_companion import resolve_bridge
+
+    monkeypatch.setattr(resolve_bridge, "get_media_pool_items",
+                        lambda: {"ok": False, "message": "not open"})
+    matched, text = file_moves.relink_moved("a", "b", str(tmp_path), "P:" + chr(92))
+    assert matched is False and "not open" in text

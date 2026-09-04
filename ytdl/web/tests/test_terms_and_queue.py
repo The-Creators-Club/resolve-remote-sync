@@ -401,8 +401,8 @@ def test_the_active_route_answers_the_running_job_and_the_queue(client, con):
     assert r['queue'][0]['project_label'] == PROJECTS[1][1]
     # another editor sees none of it
     assert client.get('/api/jobs/active',
-                      headers=_headers(OTHER_USER)).json() == {'job': None,
-                                                               'queue': []}
+                      headers=_headers(OTHER_USER)).json() == {
+        'job': None, 'queue': [], 'waiting': []}
 
 
 def test_the_running_job_is_never_also_a_queue_row(client, con):

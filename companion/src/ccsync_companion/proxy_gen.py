@@ -1067,7 +1067,52 @@ class ProxyGenerator:
                 "generated": self._generated,
                 "failed": self._failed,
                 "history": history,
+                # RES-11: why the numbers above may not move. Flat keys plus
+                # one sentence each, so the tray can render a line without
+                # knowing what a failure cap is.
+                **self._brakes(),
             }
+
+    def _brakes(self) -> dict[str, Any]:
+        """The three reasons the generator can be doing less than it looks
+        (RES-11, 2026-09-04). CALL WITH self._lock HELD: no I/O, no probes.
+
+        `capped`, `low_space` and `truncated` all existed already and all
+        three were readable only in the log: the dashboard could see a
+        low-space machine, the editor sitting AT it could not, and a clip
+        that failed three times was capped for the life of the process with
+        nothing anywhere naming it. A machine reporting "1040 missing, 0
+        queued" and nothing else is the 0.6.1 muxer night (COMP-MEDIA-4).
+
+        `reasons` is keyed by flag so a caller renders whichever it has room
+        for, and every value is one sentence an editor can act on.
+        """
+        capped = int(self._totals.get("capped", 0) or 0)
+        truncated = bool(self._totals.get("truncated", False))
+        low_space = self._low_space or ""
+        reasons: dict[str, str] = {}
+        if capped:
+            reasons["capped"] = (
+                f"{capped} clip(s) failed too many times and CCSync has stopped "
+                "trying them. It will try again if the file changes, or after "
+                "CCSync restarts."
+            )
+        if low_space:
+            reasons["low_space"] = (
+                f"CCSync stopped making proxies: {low_space}. They start again "
+                "on their own once there is room."
+            )
+        if truncated:
+            reasons["truncated"] = (
+                "There are more clips without proxies than CCSync queues at "
+                "once. It will pick up the rest as the queue drains."
+            )
+        return {
+            "capped": capped,
+            "low_space": low_space,
+            "truncated": truncated,
+            "reasons": reasons,
+        }
 
     def _history_snapshot(self, remaining: int = 0) -> dict[str, Any]:
         """The ledger's rollup, or an empty one. Never raises, never blocks:
@@ -1124,6 +1169,10 @@ class ProxyGenerator:
                 # made without a second endpoint.
                 "history": history,
                 "blocked_reason": self._blocked_reason,
+                # RES-11. `low_space` above is the same string this returns;
+                # it is repeated here (harmlessly) so the three brakes and
+                # their sentences travel together for any reader.
+                **self._brakes(),
             }
 
     def block_reason(self) -> Optional[str]:

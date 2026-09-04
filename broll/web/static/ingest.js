@@ -71,6 +71,25 @@ const ING_THUMB_TIMEOUT_MS = 8000;
 // staging dir on the same disk it is about to read from.
 const ING_UPLOAD_CONCURRENCY = 2;
 
+/* BROLL-5 (2026-09-04). A dropped connection used to fail a clip for the life
+   of the page: `item.error` was set once and the pump skipped that item for
+   ever, so a hotel-wifi blip at 95% of a 4 GB file cost the whole 200-clip
+   drop. The companion was built for the opposite - upload_slot answers 409
+   with "the SPA retries a dropped file after a reconnect and must not re-send
+   40 GB it already sent", and the body is written to `<dest>.partial` and
+   renamed only when it arrives whole - so a retry is safe and always was.
+   Three attempts at 2/4/8 seconds, and only for a NETWORK-level failure: an
+   HTTP refusal is the companion's considered answer and repeating it just
+   wastes the wire. */
+const ING_UPLOAD_RETRIES = 3;
+/* Deliberately NOT `xhr.timeout`, which is a ceiling on the whole request:
+   a legitimate 4 GB body over a slow link takes an hour and would be killed
+   by any value low enough to catch a black hole in minutes. This is a STALL
+   watchdog instead - no progress event for two minutes, with bytes still
+   owed, is a connection that has gone away. */
+const ING_UPLOAD_STALL_MS = 120000;
+const ING_UPLOAD_STALL_TICK_MS = 5000;
+
 const ING_LOOPBACK_POLL_MS = 1500;   // the companion's own view (plan §5)
 const ING_SERVER_POLL_MS = 5000;     // the truth after a reload
 const ING_BATCH_LIST_MS = 10000;
@@ -748,14 +767,69 @@ function ingestPumpUploads() {
     if (active >= ING_UPLOAD_CONCURRENCY) break;
     if (item.source !== "upload" || !item.accepted || item.uploaded ||
         item.uploading || !item.include || item.error) continue;
+    // A backoff that has not elapsed yet, not a permanent skip: the item has
+    // no `error` while it waits, which is exactly what makes it eligible
+    // again the moment its turn comes (BROLL-5).
+    if (item.retryAt && item.retryAt > Date.now()) continue;
     active++;
     ingestUploadItem(item);
   }
 }
 
+/** [ retry ] on a failed row, and the button over the list. Clears the failure
+ *  AND the attempt count: this is a human saying "the wifi is back", which the
+ *  three automatic attempts had no way of knowing (BROLL-5). */
+function ingestRetryItem(item) {
+  if (!item || item.uploaded || item.uploading) return;
+  item.error = "";
+  item.retryNote = "";
+  item.retryAt = 0;
+  item.uploadAttempt = 0;
+  item.include = true;
+  ingestUpdateRow(item);
+  ingestPumpUploads();
+}
+
+function ingestRetryAllFailed() {
+  for (const item of ing.items) {
+    if (item.error && item.source === "upload" && item.accepted !== false) {
+      ingestRetryItem(item);
+    }
+  }
+}
+
+/** The end of one upload attempt that did not succeed.
+ *  `retryable` is true only for a network-level failure (the request never got
+ *  an answer): a 4xx/5xx is the companion's decision and repeating it changes
+ *  nothing. BROLL-5. */
+function ingestUploadFailed(item, message, retryable) {
+  const attempt = (item.uploadAttempt || 0) + 1;
+  item.uploadAttempt = attempt;
+  if (retryable && attempt < ING_UPLOAD_RETRIES) {
+    const waitMs = Math.pow(2, attempt) * 1000;
+    item.error = "";
+    item.retryNote =
+      `upload interrupted, retrying (${attempt + 1} of ${ING_UPLOAD_RETRIES})...`;
+    item.retryAt = Date.now() + waitMs;
+    ingestUpdateRow(item);
+    setTimeout(() => {
+      if (ing.staged) ingestPumpUploads();
+    }, waitMs + 100);
+    return;
+  }
+  item.retryNote = "";
+  item.retryAt = 0;
+  item.error = retryable
+    ? `${message} Tried ${attempt} times: press retry when the connection is back.`
+    : message;
+  ingestUpdateRow(item);
+  ingestPumpUploads();
+}
+
 function ingestUploadItem(item) {
   item.uploading = true;
   item.uploadPercent = 0;
+  item.retryNote = "";
   ingestUpdateRow(item);
   const url = item.uploadUrl ||
     `${COMPANION_URL}/broll/ingest/upload/${encodeURIComponent(ing.stagingId)}/` +
@@ -766,14 +840,27 @@ function ingestUploadItem(item) {
   // The CSRF half of the loopback contract (plan §4.1): a custom header forces
   // a preflight, so a hostile page can never stream bytes into staging.
   xhr.setRequestHeader("X-CCSync-Ingest", "1");
+  let lastMoved = Date.now();
+  let stalled = false;
+  const watchdog = setInterval(() => {
+    if (Date.now() - lastMoved < ING_UPLOAD_STALL_MS) return;
+    stalled = true;
+    xhr.abort();  // -> onabort -> the same retry path as a dropped connection
+  }, ING_UPLOAD_STALL_TICK_MS);
   xhr.upload.onprogress = (e) => {
+    lastMoved = Date.now();
     item.uploadPercent = e.lengthComputable ? Math.round((e.loaded / e.total) * 100) : null;
     ingestUpdateRow(item);
   };
-  const done = (ok, message) => {
+  const done = (ok, message, retryable) => {
+    clearInterval(watchdog);
     item.uploading = false;
     item.uploaded = ok;
-    if (!ok) item.error = message;
+    if (!ok) return ingestUploadFailed(item, message, !!retryable);
+    item.uploadAttempt = 0;
+    item.retryNote = "";
+    item.retryAt = 0;
+    item.error = "";
     ingestUpdateRow(item);
     ingestPumpUploads();
   };
@@ -792,7 +879,12 @@ function ingestUploadItem(item) {
     item.uploadPercent = 100;
     done(true, "");
   };
-  xhr.onerror = () => done(false, "upload failed. Is the companion still running?");
+  xhr.onerror = () =>
+    done(false, "upload failed. Is the companion still running?", true);
+  xhr.onabort = () => done(
+    false,
+    stalled ? "the upload stopped moving." : "the upload was stopped.",
+    stalled);
   xhr.send(item.file);
 }
 
@@ -952,11 +1044,25 @@ function ingestRenderPreview() {
 }
 
 function ingestRenderHead() {
+  const head = $("#ingest-preview-head");
   const n = ing.items.length;
   const chosen = ing.items.filter((i) => i.include).length;
-  $("#ingest-preview-head").textContent = n
-    ? `${chosen} of ${n} clip${n === 1 ? "" : "s"} selected`
-    : "";
+  head.innerHTML = "";
+  if (!n) return;
+  head.appendChild(el("span", {
+    text: `${chosen} of ${n} clip${n === 1 ? "" : "s"} selected`,
+  }));
+  // BROLL-5: one press for a whole drop that a dropped connection failed
+  // halfway through. Twelve rows of [ retry ] is not a fix an editor uses.
+  const failed = ing.items.filter(
+    (i) => i.error && i.source === "upload" && i.accepted !== false).length;
+  if (failed && !ing.running) {
+    const all = el("button", { className: "text-btn",
+                               text: `retry all failed (${failed})` });
+    all.type = "button";
+    all.addEventListener("click", ingestRetryAllFailed);
+    head.appendChild(all);
+  }
 }
 
 function ingestBuildRow(item) {
@@ -988,9 +1094,17 @@ function ingestBuildRow(item) {
   const fill = el("div", { className: "ingest-bar-fill" });
   bar.appendChild(fill);
   body.appendChild(bar);
+  // BROLL-5: the way back from a failed upload, in the row that failed. Built
+  // once and hidden, not built on demand, so the pump can reveal it from
+  // ingestUpdateRow without rebuilding the list under the editor.
+  const retry = el("button", { className: "text-btn ingest-row-retry hidden",
+                               text: "retry" });
+  retry.type = "button";
+  retry.addEventListener("click", () => ingestRetryItem(item));
   row.appendChild(body);
+  row.appendChild(retry);
 
-  item.nodes = { row, tick, thumb, meta, bar, fill };
+  item.nodes = { row, tick, thumb, meta, bar, fill, retry };
   ingestUpdateRow(item);
   return row;
 }
@@ -1041,9 +1155,20 @@ function ingestUpdateRow(item) {
   n.meta.textContent = bits.join(" · ");
   n.meta.classList.remove("bad", "warn");
 
+  if (n.retry) {
+    // Only a failed UPLOAD can be retried: a clip the companion refused is not
+    // going to be accepted by asking twice (BROLL-5).
+    const canRetry = !!item.error && item.source === "upload" &&
+                     item.accepted !== false && !ing.running;
+    n.retry.classList.toggle("hidden", !canRetry);
+  }
+
   if (item.accepted === false) {
     n.meta.textContent = item.reason || "the companion refused this clip";
     n.meta.classList.add("bad");
+  } else if (item.retryNote) {
+    n.meta.textContent = item.retryNote;
+    n.meta.classList.add("warn");
   } else if (item.error) {
     n.meta.textContent = item.error;
     n.meta.classList.add("bad");
@@ -1216,7 +1341,8 @@ async function ingestRun() {
     ingestSetNotice(
       e.status === 503
         ? `${e.message} The batch is queued on the server: change the model ` +
-          `and run it again, or another of your machines can pick it up.`
+          `and run it again, or press [ take over on this computer ] on it ` +
+          `from another of your machines.`
         : `The companion did not take the batch: ${e.message}`);
     ingestLoadBatches();
     ingestRenderSummary();
@@ -1251,16 +1377,16 @@ function ingestRenderLive() {
   const batch = ing.batch;
   const lb = (ing.loopback && ing.loopback.batch) || null;
   const head = el("div", { className: "ingest-live-head" });
+  // The same words the batch list and the server use (BROLL-22).
   head.textContent = batch
-    ? `${batch.share} - ${batch.state}${batch.machine ? ` on ${batch.machine}` : ""}`
+    ? `${batch.share} - ${ingestBatchStateText(batch)}`
     : "waiting for the server…";
   box.appendChild(head);
 
   if (batch) {
     box.appendChild(el("div", {
       className: "muted small",
-      text: `${batch.n_done} of ${batch.n_items} done · ${batch.n_live} in the archive · ` +
-            `${batch.n_failed} failed · ${batch.n_duplicate} duplicate` +
+      text: ingestBatchCounts(batch) +
             (batch.last_heartbeat_at ? ` · heartbeat ${ingestAgo(batch.last_heartbeat_at)}` : ""),
     }));
   }
@@ -1449,7 +1575,8 @@ function ingestRenderBatches() {
 
     const head = el("div", { className: "ingest-batch-head" });
     head.appendChild(el("span", { className: "ingest-batch-share", text: batch.share }));
-    head.appendChild(el("span", { className: "ingest-batch-state", text: batch.state }));
+    head.appendChild(el("span", { className: "ingest-batch-state",
+                                  text: ingestBatchStateText(batch) }));
     card.appendChild(head);
 
     const who = [];
@@ -1464,10 +1591,8 @@ function ingestRenderBatches() {
 
     card.appendChild(el("div", {
       className: "muted small",
-      text: `${batch.n_done}/${batch.n_items} done · ${batch.n_live} live · ` +
-            `${batch.n_failed} failed · ${batch.n_duplicate} duplicate` +
-            (batch.upload_paused ? " · uploads paused" : "") +
-            (batch.cancel_requested ? " · cancelling" : ""),
+      text: ingestBatchCounts(batch) +
+            (batch.upload_paused ? " · uploads paused" : ""),
     }));
     if (batch.error) {
       card.appendChild(el("div", { className: "ingest-row-meta bad small", text: batch.error }));
@@ -1479,6 +1604,30 @@ function ingestRenderBatches() {
     toggle.type = "button";
     toggle.addEventListener("click", () => ingestExpand(batch.uid));
     actions.appendChild(toggle);
+    // BROLL-8: a batch whose machine went away had nothing that could pick it
+    // up - a companion only ever acts on a uid this page hands to its own
+    // loopback, and the panel offered `clips` and `cancel`. This is the button
+    // the 503 notice always claimed existed. Only for the editor's own
+    // batches: the admin's "all machines" tab looks at other people's work,
+    // and this machine cannot index from another editor's staging.
+    if (batch.state === "queued" && ing.scope === "mine") {
+      const take = el("button", { className: "text-btn",
+                                  text: "take over on this computer" });
+      take.type = "button";
+      take.addEventListener("click", () => ingestTakeOver(batch.uid));
+      actions.appendChild(take);
+    }
+    // BROLL-18: the way back from `finished, 12 could not be indexed`. Nothing
+    // needs re-uploading while the staged copies survive; when they do not,
+    // the companion says so per clip.
+    if (batch.n_failed > 0 && ing.scope === "mine" &&
+        ["done", "done_with_errors", "failed"].includes(batch.state)) {
+      const again = el("button", { className: "text-btn",
+                                   text: `try the ${batch.n_failed} failed again` });
+      again.type = "button";
+      again.addEventListener("click", () => ingestRetryFailedBatch(batch.uid));
+      actions.appendChild(again);
+    }
     if (!["done", "done_with_errors", "cancelled", "failed"].includes(batch.state)) {
       const stop = el("button", { className: "text-btn", text: "cancel" });
       stop.type = "button";
@@ -1500,6 +1649,87 @@ function ingestRenderBatches() {
     }
     box.appendChild(card);
   }
+}
+
+/** BROLL-8: hand a queued batch to THIS computer's companion.
+ *
+ * The same call `Run` makes, with no staging id: the bytes are either already
+ * staged here from the original drop, or the clips were `path` items indexed
+ * where they lie. The claim is what actually settles possession - it 409s if
+ * another of this editor's machines still holds a live lease - so this button
+ * cannot steal a batch that is genuinely running somewhere. */
+async function ingestTakeOver(uid) {
+  try {
+    await ingestLoopback("POST", "/broll/ingest/run", {
+      batch_uid: uid,
+      staging_id: null,
+      run_mode: ing.runMode,
+      start_now: ing.runMode === "foreground",
+    });
+  } catch (e) {
+    if (e.status === 409) {
+      toast("Another of your computers is still working on this batch.", "warn");
+    } else {
+      ingestSetNotice(`This computer did not take the batch: ${e.message}`);
+    }
+    ingestLoadBatches();
+    return;
+  }
+  ing.batchUid = uid;
+  ing.running = true;
+  ingestSetNotice("");
+  $("#ingest-live").classList.remove("hidden");
+  toast("This computer has taken the batch on.", "success");
+  ingestStartPolling();
+  ingestLoadBatches();
+}
+
+/** BROLL-18: reset the failed clips and get the batch going again.
+ *
+ * The server moves them back to `pending` and the batch back to `queued`
+ * FIRST, because that is the durable half; the loopback call after it is only
+ * so this machine starts within the second. `/broll/ingest/retry` arrived with
+ * companion 0.9.67 - an older build 404s it, and the run call is the fallback
+ * that reaches the same place through the claim. */
+async function ingestRetryFailedBatch(uid) {
+  let answer;
+  try {
+    answer = await fetchJson(
+      `api/ingest-batches/${encodeURIComponent(uid)}/retry-failed`,
+      { method: "POST" });
+  } catch (e) {
+    toast(e.message, "error");
+    return;
+  }
+  if (!answer.retried) {
+    toast("Nothing left to retry in that batch.", "");
+    ingestLoadBatches();
+    return;
+  }
+  try {
+    await ingestLoopback("POST", "/broll/ingest/retry", { items: answer.items || [] });
+  } catch (e) {
+    if (e.status === 404) {
+      try {
+        await ingestLoopback("POST", "/broll/ingest/run", {
+          batch_uid: uid, staging_id: null, run_mode: ing.runMode,
+          start_now: ing.runMode === "foreground",
+        });
+      } catch (e2) {
+        ingestSetNotice(`The clips are queued again, but this computer did not ` +
+                        `pick them up: ${e2.message}`);
+      }
+    } else {
+      ingestSetNotice(`The clips are queued again, but this computer did not ` +
+                      `pick them up: ${e.message}`);
+    }
+  }
+  ing.batchUid = uid;
+  ing.running = true;
+  toast(`${answer.retried} clip${answer.retried === 1 ? "" : "s"} queued again.`,
+        "success");
+  ingestStartPolling();
+  ingestLoadBatches();
 }
 
 async function ingestExpand(uid) {
@@ -1558,6 +1788,51 @@ const ING_GATE_LABELS = {
 function ingGateLabel(gate) {
   return ING_GATE_LABELS[gate] || String(gate || "");
 }
+/* The batch states in an editor's words (BROLL-22, 2026-09-04). MIRRORED
+   character for character by ingest_batches.BATCH_STATE_TEXT, and
+   tests/test_batch_state_words.py fails if the two ever drift: the server
+   renders the same sentence for every other reader, and the page re-renders it
+   here only so the "3h ago" keeps ageing between five-second polls.
+   `queued` beside a machine name is the one this exists for - it used to read
+   as progress, and it means that computer stopped answering. */
+const ING_BATCH_STATE_TEXT = {
+  "queued": "waiting to start",
+  "queued_machine": "waiting: {machine} stopped answering {ago}",
+  "claimed": "starting on {machine}",
+  "running": "indexing on {machine}",
+  "cancelling": "stopping",
+  "done": "finished",
+  "done_with_errors": "finished, {n_failed} could not be indexed",
+  "cancelled": "stopped",
+  "failed": "could not run",
+};
+
+function ingestBatchStateText(batch) {
+  const machine = batch.machine || "that computer";
+  const fill = (template) => template
+    .replace("{machine}", machine)
+    .replace("{ago}", ingestAgo(batch.last_heartbeat_at))
+    .replace("{n_failed}", batch.n_failed);
+  if (batch.cancel_requested &&
+      !["done", "done_with_errors", "cancelled", "failed"].includes(batch.state)) {
+    return ING_BATCH_STATE_TEXT["cancelling"];
+  }
+  if (batch.state === "queued") {
+    return fill(ING_BATCH_STATE_TEXT[batch.machine ? "queued_machine" : "queued"]);
+  }
+  // An unknown state is a server newer than this page: show its token rather
+  // than an empty line, which is the bug this replaces.
+  const template = ING_BATCH_STATE_TEXT[batch.state];
+  return template ? fill(template) : (batch.state_text || String(batch.state || ""));
+}
+
+/** The counters in words, not index jargon: `n_live` means "in the archive and
+ *  searchable", which no editor was ever going to guess (BROLL-22). */
+function ingestBatchCounts(batch) {
+  return `${batch.n_done} of ${batch.n_items} indexed · ${batch.n_live} searchable · ` +
+         `${batch.n_failed} failed · ${batch.n_duplicate} already in the archive`;
+}
+
 function ingTierLabel(tier) {
   return tier === "best" ? "Best" : tier === "good" ? "Good" : String(tier || "");
 }

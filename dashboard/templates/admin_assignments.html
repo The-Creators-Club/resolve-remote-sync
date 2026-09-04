@@ -61,8 +61,16 @@
                       title="companion presence for {{ c.editor }}">&#9679;</span>
                 <span class="muted mono-sm" title="this computer">{{ c.sub }}</span>
                 {% if wired %}
+                {# DUI-20 (usability sweep 2026-09-03): the column said `wired`
+                   and greyed every box, and the one thing it never said was
+                   where the setting lives. Per CR-88 it is that COMPUTER's
+                   own (tray, Settings, THIS COMPUTER), not an admin's, so an
+                   admin who wants that laptop to sync had a dead grid and no
+                   next step. Visible text, not a title: on a phone there is
+                   no hover at all (DUI-3). #}
                 <span class="muted mono-sm"
-                      title="this computer works directly off the NAS tree, so it syncs nothing">wired</span>
+                      title="this computer works directly off the NAS tree, so it syncs nothing. Change it on that computer: tray, Settings, THIS COMPUTER.">wired</span>
+                <span class="muted mono-sm">set on that computer</span>
                 {% else %}
                 <span class="assign-colbtns">
                   <button type="button" class="btn"
@@ -127,9 +135,9 @@
                         enabled so unticking (DELETE, always allowed) can
                         clear it. #}
                      {% if wired and not ticked %}disabled
-                     title="{{ c.sub or c.editor }} is wired to the NAS: it works directly off the tree, so a new sync cannot be ticked here"
+                     title="{{ c.sub or c.editor }} is wired to the NAS: it works directly off the tree, so a new sync cannot be ticked here. Change it on that computer: tray, Settings, THIS COMPUTER."
                      {% elif wired %}
-                     title="{{ c.sub or c.editor }} is wired to the NAS and syncs nothing: untick to clear this stale sync"
+                     title="{{ c.sub or c.editor }} is wired to the NAS and syncs nothing: untick to clear this stale sync. Change it on that computer: tray, Settings, THIS COMPUTER."
                      {% else %}
                      title="sync &quot;{{ p.label }}&quot; to {{ c.sub }}"
                      {% endif %}

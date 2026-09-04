@@ -915,6 +915,11 @@ def publish_from_feed(
         arch=str(record.get("arch") or ""),
         git_sha=str(record.get("git_sha") or ""),
         git_dirty=bool(record.get("git_dirty")),
+        # APP-16 (2026-09-04): the feed has carried `notes` on every record
+        # since publish_feed.py's first version and nothing here read it.
+        # Unsigned, display only, bounded by db.package_notes -- a feed host
+        # cannot make a build unverifiable with it, only wordy.
+        notes=str(record.get("notes") or ""),
         published_by=published_by,
         make_current=make_current,
         # REL-5 (resilience sweep 2026-08-28): prune by default on BOTH

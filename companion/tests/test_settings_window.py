@@ -102,13 +102,16 @@ def test_restart_prompt_appears_only_when_mode_on_disk_differs(tmp_path):
     try:
         app = _FakeApp({"dashboard_url": "", "mode": "editor"}, identity=_FakeIdentity("owen"))
         lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "THIS COMPUTER"))
-        assert not any("RESTART CCSYNC NOW" in l for l in lines)
+        assert not any("takes effect" in l for l in lines)
 
         config_mod.set_value(path, "mode", "base")
         lines2 = _labels(
             _section(build_settings_model(_tray_snapshot(app), app), "THIS COMPUTER"))
-        assert any("RESTART CCSYNC NOW" in l for l in lines2)
         assert any("takes effect" in l for l in lines2)
+        # APP-13 (sweep 2026-09-03): the restart button itself is no longer
+        # what the warning gates -- it is there either way.
+        assert any("RESTART CCSYNC NOW" in l for l in lines)
+        assert any("RESTART CCSYNC NOW" in l for l in lines2)
     finally:
         config_mod.CONFIG_PATH = real_config_path
 
@@ -766,3 +769,370 @@ def test_no_sidecar_manager_is_not_a_warning():
     app = _youtube_app(None)
     lines = _labels(_section(build_settings_model(_tray_snapshot(app), app), "YOUTUBE"))
     assert not any("may start failing" in l for l in lines)
+
+
+# ===========================================================================
+# Wave 3 of the usability sweep 2026-09-03: "the machine says what it knows"
+#
+# Every contract below (sequencer.project_status, app.resolve_health's newer
+# keys, app.jobs_status) is consumed with getattr and stubbed here: an app
+# half that does not carry one must render NOTHING, never an empty section
+# and never a traceback.
+# ===========================================================================
+
+
+def _snap(app, **extra):
+    """A real snapshot with hand-set keys on top -- the guard shapes below
+    are what app.sync_guard() publishes, and _FakeApp has no sync_guard."""
+    snap = dict(_tray_snapshot(app))
+    snap.update(extra)
+    return snap
+
+
+def _plain_app():
+    return _FakeApp({"dashboard_url": "", "ytdl_local_downloads": False},
+                    identity=_FakeIdentity("owen"))
+
+
+def _titles(sections):
+    return [s.title for s in sections]
+
+
+# -- SYNC-107: PROJECTS ON THIS COMPUTER ------------------------------------
+
+
+class _Sequencer:
+    def __init__(self, projects):
+        self._projects = projects
+
+    def project_status(self):
+        return self._projects
+
+
+def test_projects_section_names_the_mode_and_each_lane_in_words():
+    app = _plain_app()
+    app.sequencer = _Sequencer([
+        {"slug": "2026/FF5/Animals", "mode": "full", "state": "syncing",
+         "lanes": {"A": "idle", "B": "syncing", "C": "queued"}, "detail": ""},
+        {"slug": "2026/CCT/Show", "mode": "upload_only", "state": "idle",
+         "lanes": {"A": "idle"},
+         "detail": "Proxies never come down for an upload-only project."},
+    ])
+    lines = _labels(_section(build_settings_model(_snap(app), app),
+                             "PROJECTS ON THIS COMPUTER"))
+    assert any("2026/FF5/Animals - full sync: syncing now" in l for l in lines)
+    assert any("proxies syncing now" in l for l in lines)
+    # The ONLY place "upload only" used to appear was the label of the button
+    # that deletes the project (SYNC-107).
+    assert any("2026/CCT/Show - uploads only (no proxies come down)" in l
+               for l in lines)
+    assert any("Proxies never come down" in l for l in lines)
+
+
+def test_no_ticked_projects_says_where_to_tick_them():
+    app = _plain_app()
+    app.sequencer = _Sequencer([])
+    lines = _labels(_section(build_settings_model(_snap(app), app),
+                             "PROJECTS ON THIS COMPUTER"))
+    assert lines == ["No projects are ticked for this computer yet: tick them "
+                     "on the dashboard"]
+
+
+def test_an_app_without_project_status_draws_no_projects_section():
+    app = _plain_app()
+    assert "PROJECTS ON THIS COMPUTER" not in _titles(
+        build_settings_model(_snap(app), app))
+
+
+def test_a_raising_project_status_costs_the_section_and_nothing_else():
+    class _Boom:
+        def project_status(self):
+            raise RuntimeError("no sequencer today")
+
+    app = _plain_app()
+    app.sequencer = _Boom()
+    titles = _titles(build_settings_model(_snap(app), app))
+    assert "PROJECTS ON THIS COMPUTER" not in titles
+    assert "SYNC LANES" in titles
+
+
+# -- SYNC-118: SYNC LANES is ranked, not a wall -----------------------------
+
+
+def test_advisories_rank_blocking_first_and_info_last():
+    ranked, hidden = sw.rank_advisories([
+        (sw.INFO, "trash is 12 GB"),
+        (sw.WARNING, "one thread restarted"),
+        (sw.BLOCKING, "syncing is stopped"),
+    ])
+    assert hidden == 0
+    assert [l.text for l in ranked] == [
+        "syncing is stopped", "one thread restarted", "trash is 12 GB"]
+    assert [l.style for l in ranked] == ["warning", "normal", "muted"]
+
+
+def test_identical_sentences_collapse_to_one_with_a_count():
+    ranked, _ = sw.rank_advisories([
+        (sw.WARNING, "same sentence"), (sw.BLOCKING, "same sentence"),
+    ])
+    # The higher severity wins: a sentence that blocks sync does not become
+    # advisory because something quieter said it too.
+    assert [(l.text, l.style) for l in ranked] == [("same sentence (x2)", "warning")]
+
+
+def test_more_than_six_advisories_are_capped_with_a_show_all():
+    entries = [(sw.WARNING, "thing %d" % n) for n in range(9)]
+    ranked, hidden = sw.rank_advisories(entries)
+    assert len(ranked) == 6 and hidden == 3
+    shown, hidden_all = sw.rank_advisories(entries, show_all=True)
+    assert len(shown) == 9 and hidden_all == 0
+
+
+def test_the_lanes_section_ranks_a_halt_above_the_trash_size():
+    app = _plain_app()
+    guard = {
+        "halt": {"active": True, "scope": "local", "reason": "an admin asked"},
+        "trash": {"bytes": 12 << 30, "count": 40, "path": ".ccsync-trash",
+                  "max_age_days": 30},
+    }
+    items = _section(build_settings_model(_snap(app, sync_guard=guard), app),
+                     "SYNC LANES").items
+    texts = [i.text for i in items if isinstance(i, Line)]
+    halt = next(i for i, t in enumerate(texts) if "Syncing is STOPPED" in t)
+    trash = next(i for i, t in enumerate(texts) if "Recoverable files" in t)
+    assert halt < trash
+    styles = {i.text: i.style for i in items if isinstance(i, Line)}
+    assert styles[texts[halt]] == "warning"
+    assert styles[texts[trash]] == "muted"
+
+
+def test_show_all_reopens_the_window_with_every_advisory(monkeypatch):
+    app = _plain_app()
+    opened = []
+    monkeypatch.setattr(sw, "show_settings", lambda a: opened.append(a))
+    try:
+        sw.action_show_all_advisories(app, True)
+        assert opened == [app] and sw.advisories_shown_in_full() is True
+        sw.action_show_all_advisories(app, False)
+        assert sw.advisories_shown_in_full() is False
+    finally:
+        sw._show_all_advisories["on"] = False
+
+
+# -- RES-5: the RESOLVE section ---------------------------------------------
+
+
+def _health_app(health):
+    app = _plain_app()
+    app.resolve_health = lambda: health
+    return app
+
+
+def test_resolve_section_names_the_counts_and_offers_the_scan():
+    import time as _time
+
+    app = _health_app({
+        "connected": True, "project_open": "FF5 ROUGH",
+        "out_of_tree": 40, "missing": 3, "bad_prefix": 0,
+        "last_scan_at": _time.time() - 600,
+    })
+    items = _section(build_settings_model(_snap(app), app), "RESOLVE").items
+    lines = [i.text for i in items if isinstance(i, Line)]
+    assert any("Connected to Resolve" in l for l in lines)
+    assert any("Project open: FF5 ROUGH" in l for l in lines)
+    assert any("40 clip(s) are stored outside your synced folder" in l for l in lines)
+    assert any("3 clip(s) in this project are offline" in l for l in lines)
+    assert any("Checked 10 min ago" in l for l in lines)
+    assert "SCAN WHOLE PROJECT" in [i.label for i in items if isinstance(i, Button)]
+
+
+def test_a_count_with_no_scan_behind_it_is_not_rendered():
+    """resolve_health's own rule: with Resolve closed every count is zero and
+    last_scan_at is None, and a zero that means "we have not looked" must not
+    render as "nothing is wrong"."""
+    app = _health_app({"connected": False, "out_of_tree": 12, "last_scan_at": None})
+    lines = [i.text for i in _section(build_settings_model(_snap(app), app),
+                                      "RESOLVE").items if isinstance(i, Line)]
+    assert any("Not connected to Resolve" in l for l in lines)
+    assert not any("stored outside" in l for l in lines)
+
+
+def test_a_wedged_resolve_says_so_only_past_twenty_seconds():
+    app = _health_app({"connected": True, "wedged_seconds": 45,
+                       "wedged_call": "GetCurrentTimeline"})
+    lines = [i.text for i in _section(build_settings_model(_snap(app), app),
+                                      "RESOLVE").items if isinstance(i, Line)]
+    assert any("has not answered GetCurrentTimeline for 45s" in l for l in lines)
+
+    app2 = _health_app({"connected": True, "wedged_seconds": 5,
+                        "wedged_call": "GetCurrentTimeline"})
+    lines2 = [i.text for i in _section(build_settings_model(_snap(app2), app2),
+                                       "RESOLVE").items if isinstance(i, Line)]
+    assert not any("has not answered" in l for l in lines2)
+
+
+def test_resolve_section_reports_proxy_attachment_and_the_gap_reasons():
+    app = _health_app({
+        "connected": True,
+        "proxy_attach": {"attached": 30, "failed": 12,
+                         "why": "Resolve refused the media pool write"},
+        "proxy_gaps": {"low_space": 7, "capped": 0, "truncated": 2},
+        "stills": {"ok": False,
+                   "instruction": "Set the still store to your synced folder"},
+    })
+    lines = [i.text for i in _section(build_settings_model(_snap(app), app),
+                                      "RESOLVE").items if isinstance(i, Line)]
+    assert any("12 could not be attached: Resolve refused" in l for l in lines)
+    assert any("7 proxies skipped: this disk is low on space" in l for l in lines)
+    assert any("2 proxies skipped: the list was too long" in l for l in lines)
+    assert not any("0 proxies skipped" in l for l in lines)
+    assert any("Set the still store" in l for l in lines)
+
+
+def test_undo_last_fix_is_offered_only_when_there_is_something_to_undo():
+    app = _health_app({"connected": True})
+    app.undo_last_fix_available = lambda: True
+    labels = [i.label for i in _section(build_settings_model(_snap(app), app),
+                                        "RESOLVE").items if isinstance(i, Button)]
+    assert "UNDO LAST FIX" in labels
+
+    app.undo_last_fix_available = lambda: False
+    labels2 = [i.label for i in _section(build_settings_model(_snap(app), app),
+                                         "RESOLVE").items if isinstance(i, Button)]
+    assert "UNDO LAST FIX" not in labels2
+
+
+def test_an_app_without_resolve_health_draws_no_resolve_section():
+    app = _plain_app()
+    assert "RESOLVE" not in _titles(build_settings_model(_snap(app), app))
+
+
+# -- CMEDIA-2: the JOBS section ---------------------------------------------
+
+
+def _jobs_app(status):
+    app = _plain_app()
+    app.jobs_status = lambda: status
+    return app
+
+
+def test_jobs_section_shows_the_gate_the_current_job_and_the_last_ten():
+    import time as _time
+
+    app = _jobs_app({
+        "gate": {"taking_work": False, "reason": "you are at the keyboard"},
+        "current": {"id": "j1", "kind": "whisper", "rel_path": "FF5/a.mov",
+                    "started_at": _time.time() - 240, "forced_reason": ""},
+        "recent": [{"id": "j0", "kind": "proxy-480p", "rel_path": "FF5/b.mov",
+                    "outcome": "failed", "error": "ffmpeg exited 1",
+                    "finished_at": _time.time() - 3600}],
+    })
+    items = _section(build_settings_model(_snap(app), app), "JOBS").items
+    lines = [i.text for i in items if isinstance(i, Line)]
+    assert any("Not taking work: you are at the keyboard" in l for l in lines)
+    assert any("whisper on FF5/a.mov (started 4 min ago)" in l for l in lines)
+    assert any("proxy-480p on FF5/b.mov: failed" in l and "ffmpeg exited 1" in l
+               for l in lines)
+    assert "STOP THIS JOB" in [i.label for i in items if isinstance(i, Button)]
+
+
+def test_no_current_job_offers_no_stop_button():
+    app = _jobs_app({"gate": {"taking_work": True}, "current": {}, "recent": []})
+    items = _section(build_settings_model(_snap(app), app), "JOBS").items
+    assert any(i.text == "Taking fleet work" for i in items if isinstance(i, Line))
+    assert not [i for i in items if isinstance(i, Button)]
+
+
+def test_stopping_a_job_that_is_not_running_never_says_it_stopped(monkeypatch):
+    said = []
+    app = _plain_app()
+    app.stop_current_job = lambda: False
+    monkeypatch.setattr(sw.tray_mod, "_spawn", lambda a, label, fn: fn())
+    monkeypatch.setattr(sw.tray_mod, "_notify", lambda a, msg: said.append(msg))
+    sw.action_stop_current_job(app)
+    assert said == ["There is no fleet job running now."]
+
+
+def test_an_app_without_jobs_status_draws_no_jobs_section():
+    app = _plain_app()
+    assert "JOBS" not in _titles(build_settings_model(_snap(app), app))
+
+
+# -- APP-8 / APP-9 / APP-13 --------------------------------------------------
+
+
+def test_a_refused_credential_offers_sign_in_again_even_while_signed_in():
+    app = _plain_app()
+    guard = {"reporter": {"consecutive_failures": 99, "last_status": "HTTP 401"}}
+    items = _section(build_settings_model(_snap(app, sync_guard=guard), app),
+                     "THIS COMPUTER").items
+    labels = [i.label for i in items if isinstance(i, Button)]
+    lines = [i.text for i in items if isinstance(i, Line)]
+    assert "SIGN IN AGAIN…" in labels
+    assert "SIGN OUT" in labels          # still signed in as far as this machine knows
+    assert any("The server rejected this computer's sign-in" in l for l in lines)
+    assert labels.index("SIGN IN AGAIN…") < labels.index("SIGN OUT")
+
+
+def test_a_healthy_reporter_offers_no_sign_in_again():
+    app = _plain_app()
+    guard = {"reporter": {"consecutive_failures": 0, "last_status": "HTTP 200"}}
+    labels = [i.label for i in _section(
+        build_settings_model(_snap(app, sync_guard=guard), app),
+        "THIS COMPUTER").items if isinstance(i, Button)]
+    assert "SIGN IN AGAIN…" not in labels
+
+
+def test_the_licence_line_drops_the_wizard_and_offers_the_one_click():
+    app = _plain_app()
+    guard = {"blocked": {
+        "reason": "licence_pending",
+        "detail": ("The CC Sync licence agreement has not been accepted on this "
+                   "machine. Re-run the CCSync setup wizard to read and accept it."),
+    }}
+    items = _section(build_settings_model(_snap(app, sync_guard=guard), app),
+                     "SYNC LANES").items
+    lines = [i.text for i in items if isinstance(i, Line)]
+    licence = [l for l in lines if "licence agreement" in l]
+    assert licence, "the licence refusal must still be shown"
+    assert not any("setup wizard" in l for l in licence)
+    assert any("Nothing syncs until it is accepted" in l for l in licence)
+    assert "READ AND ACCEPT THE LICENCE" in [i.label for i in items
+                                             if isinstance(i, Button)]
+    # and the blocked summary is not repeated underneath it
+    assert len(licence) == 1
+
+
+def test_accepting_the_licence_prefers_the_apps_own_dialog(monkeypatch):
+    ran = []
+    app = _plain_app()
+    app.open_licence_dialog = lambda: ran.append("dialog")
+    monkeypatch.setattr(sw.tray_mod, "_spawn", lambda a, label, fn: fn())
+    sw.action_accept_licence(app)
+    assert ran == ["dialog"]
+
+
+def test_restart_is_always_offered(monkeypatch):
+    app = _plain_app()
+    labels = [i.label for i in _section(build_settings_model(_snap(app), app),
+                                        "THIS COMPUTER").items
+              if isinstance(i, Button)]
+    assert "RESTART CCSYNC NOW" in labels
+
+    # and it calls the tray's restart action when that builder's half exists
+    ran = []
+    monkeypatch.setattr(sw.tray_mod, "action_restart", lambda a: ran.append(a),
+                        raising=False)
+    sw.action_restart(app)
+    assert ran == [app]
+
+
+def test_age_phrase_reads_in_words():
+    import time as _time
+
+    now = _time.time()
+    assert sw.age_phrase(now - 10, now) == "just now"
+    assert sw.age_phrase(now - 600, now) == "10 min ago"
+    assert sw.age_phrase(now - 7200, now) == "2 h ago"
+    assert sw.age_phrase("", now) == ""
+    assert sw.age_phrase("not a time", now) == ""

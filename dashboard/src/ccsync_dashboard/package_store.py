@@ -153,6 +153,7 @@ def store_verified_package(
     arch: str = "",
     git_sha: str = "",
     git_dirty: bool = False,
+    notes: str = "",
 ) -> None:
     """Verify the release signature over the record the CALLER assembled
     (server-chosen filename, server-counted size, server- or feed-computed
@@ -249,6 +250,12 @@ def store_verified_package(
         min_version=min_version, signed_binary=bool(signed_binary),
         requires_dashboard=requires_dashboard, arch=arch,
         git_sha=str(git_sha or "").strip(), git_dirty=bool(git_dirty),
+        # APP-16 (2026-09-04): NOT added to `record` above, and that is the
+        # whole point -- `notes` is outside the signature, so it is not in
+        # the canonical bytes either door verifies. A "what's new" line that
+        # could make a record unverifiable on an older companion would be a
+        # sentence with the power to strand a machine (REL-7).
+        notes=notes,
     )
     if make_current:
         db.set_current_package(conn, platform, version, kind)

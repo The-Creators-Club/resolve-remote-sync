@@ -1921,3 +1921,37 @@ def test_scan_project_markers_does_not_descend_into_a_project(tmp_path):
 
 def test_scan_project_markers_says_could_not_look_rather_than_none(tmp_path):
     assert rclone_lane.scan_project_markers(tmp_path / "nothing") is None
+
+
+# -- SYNC-109: the alarm names the files ------------------------------------
+
+def test_size_mismatch_samples_name_the_files_and_their_local_size(tmp_path):
+    """SYNC-109 (sweep 2026-09-03): "3 files on the server have the same name
+    but a different size. Your newer version will NOT upload" named nothing
+    and offered nothing, for the one silent data-loss shape on lane A."""
+    lane = _make_lane(tmp_path)
+    project = tmp_path / "local" / "Projects" / "2026" / "CCT" / "Show" / "B-roll"
+    project.mkdir(parents=True)
+    (project / "A001_C003.mov").write_bytes(b"a newer, longer export")
+
+    lane._size_mismatches = {
+        "count": 2, "subpath": "Projects/2026/CCT/Show",
+        "samples": ["B-roll/A001_C003.mov", "B-roll/gone.mov"],
+    }
+    samples = lane.size_mismatch_samples()
+    assert [s["path"] for s in samples] == ["B-roll/A001_C003.mov", "B-roll/gone.mov"]
+    assert samples[0]["local_size"] == len(b"a newer, longer export")
+    # A file the scan named and the disk no longer has is still named: the
+    # editor asked which files, not which files still exist.
+    assert samples[1]["local_size"] is None
+    # `rclone check --differ` prints names only; a second listing per pass is
+    # not worth it for a line that already says what to do.
+    assert all(s["server_size"] is None for s in samples)
+
+
+def test_size_mismatch_samples_are_capped_and_empty_without_a_scan(tmp_path):
+    lane = _make_lane(tmp_path)
+    assert lane.size_mismatch_samples() == []
+    lane._size_mismatches = {"count": 90, "subpath": None,
+                             "samples": [f"f{i}.mov" for i in range(90)]}
+    assert len(lane.size_mismatch_samples()) == 20

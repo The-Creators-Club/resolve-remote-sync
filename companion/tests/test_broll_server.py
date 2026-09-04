@@ -2922,3 +2922,73 @@ def test_a_post_whose_body_was_read_is_not_waited_for_twice():
     handler.do_POST()
 
     assert handler._body_consumed == len(payload)
+
+
+# ---------------------------------------------------------------------------
+# CMEDIA-7 / BROLL-5 (2026-09-04)
+# ---------------------------------------------------------------------------
+
+
+def test_at_the_download_cap_the_answer_is_a_wait_not_a_failure(tmp_path):
+    """The page loops only while the state is downloading, so `ok: false` was
+    a red toast and the end of the attempt: "come back in an hour and click
+    again". Nothing has gone wrong here - the clip is behind this machine's
+    other download."""
+    from ccsync_companion import broll_fetch
+
+    cfg = _editor_cfg(tmp_path)
+    mounts = broll_server.resolve_mounts({}, cfg)
+
+    status, body = broll_server.build_insert_response(
+        _insert_body(), mounts, ccsync_cfg=cfg,
+        fetcher=lambda *a, **k: {"state": broll_fetch.STATE_BUSY,
+                                 "message": broll_fetch.BUSY_MESSAGE,
+                                 "retry_after": 1.5})
+
+    assert status == 200
+    assert body["ok"] is True
+    assert body["state"] == "busy"
+    assert body["retry_after"] == broll_fetch.BUSY_RETRY_AFTER_SECONDS
+    assert "already downloading" in body["message"]
+
+
+def test_the_ingest_retry_route_reaches_the_orchestrator(tmp_path, monkeypatch):
+    """One listener, one dispatcher: /broll/ingest/retry and
+    /music/ingest/retry are the same route, one kind apart."""
+    seen = []
+
+    class _Ingestor:
+        def retry(self, body):
+            seen.append(body)
+            return 200, {"ok": True, "retried": 2}
+
+    class _Deps:
+        ingestor = _Ingestor()
+
+    monkeypatch.setattr(music_server, "call",
+                        lambda action, timeout=None, **kw: {"ok": True})
+    srv = broll_server.make_server({"mounts": {}}, host="127.0.0.1", port=0,
+                                   ccsync_cfg={"dashboard_url": DASH_ORIGIN},
+                                   ingest_deps=_Deps(), music_ingest_deps=_Deps())
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = srv.server_address[1]
+        for prefix in ("/broll", "/music"):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            payload = json.dumps({"staging_id": "s1", "items": ["l1", "l2"]}).encode()
+            conn.request("POST", f"{prefix}/ingest/retry", body=payload,
+                         headers={"Content-Type": "application/json",
+                                  "Content-Length": str(len(payload)),
+                                  loopback_guard.TOKEN_HEADER:
+                                      loopback_guard.read_token() or ""})
+            resp = conn.getresponse()
+            body = json.loads(resp.read())
+            conn.close()
+            assert resp.status == 200
+            assert body == {"ok": True, "retried": 2}
+        assert [b["items"] for b in seen] == [["l1", "l2"], ["l1", "l2"]]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(timeout=5)

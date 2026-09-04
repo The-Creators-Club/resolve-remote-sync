@@ -32,7 +32,7 @@ log = logging.getLogger(__name__)
 
 # Highest schema version this codebase knows how to run against. Bump it, add
 # the file to _MIGRATIONS, and give it a predicate.
-CURRENT_SCHEMA_VERSION = 13
+CURRENT_SCHEMA_VERSION = 14
 
 # "the version this migration produces" -> (filename, already-applied predicate).
 # The predicate must answer "is this migration's effect already in the database?"
@@ -105,6 +105,10 @@ _MIGRATIONS = {
     13: ('013_jobs_created_widening.sql',
          lambda con: {'created_local', 'created_machine'}
          <= set(_columns(con, 'jobs'))),
+    # What the claiming machine said it had room for (YTWEB-9, 2026-09-03).
+    # One column, so the predicate is the same shape 005's and 009's are.
+    14: ('014_jobs_claim_free_bytes.sql',
+         lambda con: 'claim_free_bytes' in _columns(con, 'jobs')),
 }
 
 # What made a job. 'search' is a topic Claude expands and the editor reviews;
@@ -328,6 +332,12 @@ RESUMABLE = ('generating_terms', 'searching', 'enriching', 'filtering')
 # (YTDL-25's 409), and a job parked for a human is not work in flight, so the
 # next search may as well be running while they get to it.
 BUSY = ('generating_terms', 'searching', 'enriching', 'filtering', 'downloading')
+
+# ...and the mirror of it: the two phases that are waiting for a PERSON. Named
+# rather than spelled out at each call site (YTWEB-8/13, 2026-09-03) because
+# three places now ask the same question -- what has this editor left open --
+# and BUSY's own comment already defines the set by exclusion.
+PARKED = ('terms_review', 'ready_for_review')
 
 # Columns the worker and the API are allowed to write through _update(). A
 # whitelist because the column name is interpolated into the SQL string --
@@ -705,14 +715,80 @@ def recent_jobs(c, user, limit=20):
                      'LIMIT ?', (user, int(limit))).fetchall()
 
 
+def parked_jobs(c, user):
+    """The editor's jobs WAITING FOR THEM, oldest first (YTWEB-8/13).
+
+    terms_review and ready_for_review: the two non-terminal phases with no work
+    in flight. Since the queue landed (2026-08-30) a parked review blocks
+    nothing, which is the right trade and also means nothing ever mentions one
+    again -- an editor can accumulate five manifests they curated and never
+    downloaded, discoverable only by reading `phase` in the Recent searches
+    list. This is what the page lists them from.
+    """
+    ph = ','.join('?' * len(PARKED))
+    return c.execute(f'SELECT * FROM jobs WHERE created_by=? AND phase IN ({ph}) '
+                     'ORDER BY id', (user, *PARKED)).fetchall()
+
+
+def fleet_ahead(c, job_id):
+    """How many OTHER editors' jobs the worker takes before this one (YTWEB-1).
+
+    The worker is fleet-serial -- one job at a time for the whole site -- so
+    editor B submitting behind editor A's 20-minute enrich phase waits on
+    something their own numbers cannot see. `queued_behind` counts this
+    editor's own jobs and answered 0 for exactly that case, so the page said
+    nothing at all: a bar parked at `queued`, an empty ticker, and no sentence
+    anywhere about what the wait was.
+
+    Counted, never stored, off the same candidate set claim_next_job picks
+    from and in the same order. A job that is not in that set (its own editor
+    has something busy, so it is not startable yet) is BEHIND ALL of them:
+    the honest answer there is every other editor's candidate, not zero.
+    """
+    row = c.execute('SELECT created_by FROM jobs WHERE id=?', (job_id,)).fetchone()
+    if row is None:
+        return 0
+    mine = row['created_by']
+    busy = ','.join('?' * len(BUSY))
+    rows = c.execute(
+        f'SELECT j.id AS id, j.created_by AS created_by FROM jobs AS j '
+        f'WHERE (j.phase IN ({busy}) OR '
+        "  (j.phase='queued' AND NOT EXISTS ("
+        '     SELECT 1 FROM jobs AS b WHERE b.created_by=j.created_by '
+        f'       AND b.phase IN ({busy})))) '
+        "AND NOT (j.download_mode='local' AND j.lease_expires_at IS NOT NULL "
+        '          AND j.lease_expires_at > ?) '
+        "ORDER BY (CASE WHEN j.phase='queued' THEN 1 ELSE 0 END), "
+        "         (CASE WHEN j.phase='queued' THEN j.queue_position ELSE 0 END), "
+        '         j.id', (*BUSY, *BUSY, now())).fetchall()
+    ahead = []
+    for r in rows:
+        if r['id'] == job_id:
+            break
+        ahead.append(r)
+    return sum(1 for r in ahead if r['created_by'] != mine)
+
+
 def active_job(c, user):
     """The job this editor's page should be attached to, or None.
 
-    Their oldest non-terminal job that is NOT waiting in the queue -- the one
-    being worked on, or parked at terms_review / ready_for_review for them to
-    look at. Both of those count as active: each holds something the editor has
-    not dealt with yet, and a page that showed them nothing is a page that lost
+    Their non-terminal job that is NOT waiting in the queue -- the one being
+    worked on, or parked at terms_review / ready_for_review for them to look
+    at. Both of those count as active: each holds something the editor has not
+    dealt with yet, and a page that showed them nothing is a page that lost
     their search.
+
+    WHAT IS MOVING BEATS WHAT IS PARKED (YTWEB-8, 2026-09-03). This used to be
+    "oldest first" flat, written when an editor could only have one such job.
+    The queue then deliberately let a second search START while an older one
+    sat at ready_for_review, and during a session it never showed: runSearch
+    attaches to the new job by id. On a RELOAD, a second tab or the next
+    morning the page attached to the week-old parked review -- full green bar,
+    review grid -- and the job that was actually downloading appeared nowhere
+    on the page. The queue panel could not show it either; it lists `queued`
+    only. Parked jobs are not lost by this: they are listed by name now
+    (parked_jobs above), which is the affordance a thing waiting for a person
+    wanted all along.
 
     The head of the queue is the fallback, so a page that loads in the second
     between "the job was created" and "the worker claimed it" still attaches to
@@ -725,9 +801,17 @@ def active_job(c, user):
     still the same one.
     """
     ph = ','.join('?' * len(TERMINAL))
+    busy = ','.join('?' * len(BUSY))
     row = c.execute(
         f"SELECT * FROM jobs WHERE created_by=? AND phase NOT IN ({ph}) "
-        "AND phase != 'queued' ORDER BY id LIMIT 1", (user, *TERMINAL)).fetchone()
+        "AND phase != 'queued' "
+        # Work in flight first (oldest, though the queue means there is only
+        # ever one), then the NEWEST parked job: among things waiting for a
+        # person, the one they were last looking at is the one the page is
+        # about, and the others are named in the waiting list now.
+        f'ORDER BY (CASE WHEN phase IN ({busy}) THEN 0 ELSE 1 END), '
+        f'         (CASE WHEN phase IN ({busy}) THEN id ELSE -id END) LIMIT 1',
+        (user, *TERMINAL, *BUSY, *BUSY)).fetchone()
     if row is not None:
         return row
     return c.execute("SELECT * FROM jobs WHERE created_by=? AND phase='queued' "
@@ -986,7 +1070,8 @@ def is_leaseholder(job, editor, at=None):
     return lease_active(job, at) and lease_held_by(job, editor)
 
 
-def claim_download(c, job_id, editor, lease_seconds, at=None, machine=None):
+def claim_download(c, job_id, editor, lease_seconds, at=None, machine=None,
+                   free_bytes=None):
     """Take (or refresh) the lease. -> did it happen.
 
     THE compare-and-set. Everything that decides the answer is in the WHERE
@@ -1017,9 +1102,19 @@ def claim_download(c, job_id, editor, lease_seconds, at=None, machine=None):
     A won claim WRITES `machine` as given, NULL included: the column records
     what the current holder said it is, and a claim that cannot say leaves
     "unknown" behind rather than a stale id belonging to somebody else's run.
+
+    `free_bytes` is evidence and never a condition (YTWEB-9, 2026-09-03): the
+    machine that knows what a clip costs is the one that declines, and this is
+    the number the page had no other way to learn. COALESCE, not a plain
+    assignment, so a companion that does not send the field refreshes a lease
+    without blanking what the last claim reported.
     """
     at = at or now()
     machine = str(machine or '').strip() or None
+    try:
+        free = None if free_bytes is None else int(free_bytes)
+    except (TypeError, ValueError):
+        free = None                    # a claim is never refused over a note
     # Built here rather than as one SQL string with an `IS NULL` test on a
     # bound parameter: the two cases are different RULES (per-computer against
     # per-person), and reading which one a call gets should not require
@@ -1031,13 +1126,15 @@ def claim_download(c, job_id, editor, lease_seconds, at=None, machine=None):
         refresh_args = [editor, machine]
     cur = c.execute(
         f"UPDATE jobs SET download_mode='{MODE_LOCAL}', claimed_by=?, "
-        'claimed_machine=?, lease_expires_at=?, updated_at=? '
+        'claimed_machine=?, claim_free_bytes=COALESCE(?, claim_free_bytes), '
+        'lease_expires_at=?, updated_at=? '
         "WHERE id=? AND phase='downloading' "
         f"AND (mode_lock IS NULL OR mode_lock<>'{MODE_SERVER}') "
         'AND COALESCE(cancel_requested,0)=0 '
         f"AND (download_mode<>'{MODE_LOCAL}' OR {refresh} "
         '     OR lease_expires_at IS NULL OR lease_expires_at<=?)',
-        [editor, machine, _future(lease_seconds), at, job_id, *refresh_args, at])
+        [editor, machine, free, _future(lease_seconds), at, job_id,
+         *refresh_args, at])
     c.commit()
     return bool(cur.rowcount)
 
@@ -1488,6 +1585,23 @@ def mark_pending(c, job_id):
     return cur.rowcount
 
 
+def selected_for_download(c, job_id):
+    """The rows a mark_pending() right now would queue. Reads nothing else.
+
+    ITS WHERE CLAUSE IS mark_pending's, and the two must stay identical: this
+    is what the free-space refusal sizes (YTWEB-9, 2026-09-03), and an estimate
+    taken over a different set of clips than the one about to be fetched is a
+    number that would be wrong in the direction that lets a full disk through.
+    Asked BEFORE mark_pending on purpose, so a refusal leaves the job exactly
+    as it found it rather than parked at ready_for_review with pending rows.
+    """
+    return c.execute(
+        'SELECT * FROM job_videos WHERE job_id=? '
+        'AND selected=1 AND duplicate=0 AND meta_error IS NULL '
+        "AND dl_state IN ('none','failed','skipped','pending') ORDER BY id",
+        (job_id,)).fetchall()
+
+
 def pending_videos(c, job_id):
     return c.execute("SELECT * FROM job_videos WHERE job_id=? AND dl_state='pending' "
                      'ORDER BY id', (job_id,)).fetchall()
@@ -1813,6 +1927,37 @@ def reveal_path(row):
         # in the history -- it just has no folder to offer to open.
         return None
     return f'{label}/{rel}'
+
+
+def video_reveal_path(job, video):
+    """A MANIFEST row -> the clip's path under the Projects root, or None.
+
+    The same shape reveal_path() derives from a ledger row, from the two things
+    a manifest row and its job actually carry: the destination is the job's
+    (project_label + Youtube/<term_dir>) and only the FILENAME comes off the
+    video, because `filepath` is absolute on whichever machine fetched it -- the
+    NAS's mount for a server download, an editor's own drive for a local one --
+    and neither absolute path means anything to the companion being asked to
+    open a folder.
+
+    YTWEB-11 (2026-09-03): the DOWNLOADS list watched 41 rows go green and then
+    had no way to open one. The reveal machinery was all written and worked from
+    the history panel alone, so the last step of the flow this page exists for
+    ("find the file in my project") was a scroll past two panels into a
+    fleet-wide ledger to find your own rows in it.
+
+    None for a row with no file yet: pending, failed, or skipped as a duplicate
+    (that clip is somewhere, but not at a path this job wrote).
+    """
+    # Split by hand rather than with os.path: the path was written on some
+    # OTHER machine, so the separator is whatever THAT one uses and this one's
+    # rules are the wrong ones to read it with.
+    name = str(video['filepath'] or '').replace('\\', '/').rstrip('/').rsplit('/', 1)[-1]
+    label = str(job['project_label'] or '').replace('\\', '/').strip('/')
+    if not name or not label:
+        return None
+    parts = [label, YOUTUBE_DIR, str(job['term_dir'] or '').strip('/'), name]
+    return '/'.join(p for p in parts if p)
 
 
 def download_dict(row):

@@ -166,6 +166,15 @@ ITEM_DUPLICATE = "duplicate"
 ITEM_CANCELLED = "cancelled"
 ITEM_SKIPPED = "skipped"
 ITEM_FINISHED = frozenset({ITEM_LIVE, ITEM_DUPLICATE, ITEM_CANCELLED, ITEM_SKIPPED})
+# Music's fifth ending (`music_ingest.ITEM_QUEUED_FOR_BASE_RIG`), named here
+# because every counter in this class has to be able to see it (CMEDIA-4,
+# 2026-09-04): it is finished as far as THIS machine's ledger goes, it is not
+# done, it is not failed, and its FILE is the whole point -- "the audio is
+# still on this computer" is the contract, so the counters that reach zero and
+# the pruner that deletes staging both have to know about it. b-roll never
+# produces one; a string, not an import, because the dependency runs the other
+# way (music_ingest imports this module).
+ITEM_QUEUED = "queued_for_base_rig"
 
 # Staging item states, which are NOT the server's: they describe a file on its
 # way INTO staging, before any batch exists.
@@ -1012,6 +1021,7 @@ class BrollIngestor:
             eta = self._eta
         done = sum(1 for i in items if i.get("stage") == ITEM_LIVE)
         failed = sum(1 for i in items if i.get("stage") == ITEM_FAILED)
+        queued = sum(1 for i in items if i.get("stage") == ITEM_QUEUED)
         total = len(items)
         settings = batch.get("settings") or {}
         uploads = self._upload_snapshot()
@@ -1025,6 +1035,12 @@ class BrollIngestor:
             "gate": state,
             "done": done,
             "failed": failed,
+            # CMEDIA-4: neither done nor failed, and counted so the ETA's
+            # remainder can reach zero and the window can stop saying "8 of 10"
+            # for ever. Always present, always an int; zero for b-roll.
+            "queued_for_base_rig": queued,
+            "queued_names": [str(i.get("name") or "") for i in items
+                             if i.get("stage") == ITEM_QUEUED][:20],
             "total": total,
             "clip": str(current.get("name") or ""),
             "stage": str(current.get("stage") or ""),
@@ -1041,8 +1057,15 @@ class BrollIngestor:
             "model_download_eta": download.get("eta_seconds"),
             "model_note": model_note,
             "warning": warning,
+            # CMEDIA-10: the reason each item failed exists on the item and
+            # reached nobody -- the tray said "3 clip(s) could not be indexed.
+            # See the log" and the log is the one place an editor will not
+            # look. Capped: this rides the tray's refresh thread.
+            "failed_items": [{"name": str(i.get("name") or ""),
+                              "error": str(i.get("error") or "")}
+                             for i in items if i.get("stage") == ITEM_FAILED][:20],
             "paused": bool(paused),
-            "eta_seconds": eta.eta_seconds(max(total - done - failed, 0)),
+            "eta_seconds": eta.eta_seconds(max(total - done - failed - queued, 0)),
             "at": _iso_now(),
         }
 
@@ -1116,7 +1139,8 @@ class BrollIngestor:
         snap = self.status()
         if snap["gate"] not in (STATE_RUNNING, STATE_NO_MODEL):
             return None
-        left = max(snap["total"] - snap["done"] - snap["failed"], 0)
+        left = max(snap["total"] - snap["done"] - snap["failed"]
+                   - snap["queued_for_base_rig"], 0)
         if snap["gate"] == STATE_NO_MODEL:
             return f"still downloading the {self.kind.label} indexing model"
         return (f"still indexing {self.kind.label} "
@@ -1138,6 +1162,15 @@ class BrollIngestor:
         if snap["gate"] in (STATE_USER_ACTIVE, STATE_RESOLVE_OPEN):
             actions.append("start_now")
         note = snap["warning"] or _gate_note(snap["gate"])
+        queued = int(snap["queued_for_base_rig"] or 0)
+        if queued:
+            # CMEDIA-4: the window used to sit at "8 of 10" with a bar that
+            # never filled, because these two are finished here and counted
+            # nowhere. Named rather than folded into `done`: the file is still
+            # on this computer and that is the whole point of the state.
+            held = (f"{queued} {self.kind.unit}(s) need the base rig to finish. "
+                    f"They are still on this computer.")
+            note = f"{note} {held}" if note else held
         return popup.ProgressModel(
             title=self.kind.window_title,
             phase=snap["gate"],
@@ -1153,7 +1186,8 @@ class BrollIngestor:
             note=note,
             unit=self.kind.unit,
             actions=tuple(actions),
-            finished=bool(snap["total"]) and snap["done"] + snap["failed"] >= snap["total"],
+            finished=bool(snap["total"]) and (snap["done"] + snap["failed"]
+                                              + queued) >= snap["total"],
         )
 
     # -- tray/loopback actions --------------------------------------------
@@ -1468,6 +1502,62 @@ class BrollIngestor:
                      "probe": entry.get("probe"), "state": entry.get("state"),
                      "error": entry.get("error") or "", **result}
 
+    def retry(self, body: dict) -> tuple[int, dict]:
+        """POST /<kind>/ingest/retry: put failed staged files back in the queue.
+
+        BROLL-5 (2026-09-04). A network-level upload failure set `item.error`
+        in the page for the life of that page, and the pump skipped that clip
+        for ever: a hotel-wifi blip at 95% of a 4 GB file permanently failed
+        one clip of a 200-clip drop, and the only route back was clearing the
+        whole drop and re-dropping it. The companion was built for the
+        opposite -- `upload_slot` answers 409 "already staged" and
+        `_stream_body_to` renames only on a complete body -- so a retry has
+        always been safe; there was simply nothing that asked for one.
+
+        Body: {"staging_id": "...", "items": ["local_id", ...]}. No items
+        means every failed one in that drop; no staging_id means every drop.
+        Answers {"ok": true, "retried": n}: a retry of something that is not
+        failed is a no-op, not an error, because two clicks must mean what one
+        click meant.
+        """
+        staging_id = str(body.get("staging_id") or "").strip()
+        raw = body.get("items")
+        wanted = {str(x).strip() for x in raw
+                  if isinstance(x, (str, int)) and str(x).strip()}             if isinstance(raw, list) else set()
+        if staging_id and not _safe_id(staging_id):
+            return 400, {"ok": False, "message": "that is not a staging id"}
+        retried: list[tuple[str, dict]] = []
+        with self._lock:
+            for sid, staging in (self._staging or {}).items():
+                if staging_id and sid != staging_id:
+                    continue
+                for local_id, entry in ((staging or {}).get("items") or {}).items():
+                    if wanted and str(local_id) not in wanted:
+                        continue
+                    if entry.get("state") != STAGED_FAILED and not entry.get("error"):
+                        continue
+                    entry["state"] = STAGED_WAITING
+                    entry["error"] = ""
+                    retried.append((sid, entry))
+        for _sid, entry in retried:
+            # The half-body the failed attempt left. `_stream_body_to` writes
+            # `<dest>.partial` and renames only on a complete body, so this is
+            # the only litter there can be -- and leaving it would make the
+            # next attempt's rename land on top of a stale file.
+            path = str(entry.get("path") or "")
+            if path and entry.get("source") == "upload":
+                _unlink(Path(path + ".partial"))
+        if retried:
+            self._save()
+            # Re-probe anything indexed WHERE IT IS: those never come back
+            # through note_upload, so without this pass a re-tried path item
+            # would sit `waiting` for ever.
+            for sid in {sid for sid, _e in retried}:
+                self._start_prepare_worker(sid)
+            self.log.info("re-queued %d failed %s(s)", len(retried),
+                          self.kind.unit)
+        return 200, {"ok": True, "retried": len(retried)}
+
     def progress(self, staging_id: Optional[str] = None) -> dict[str, Any]:
         """What the SPA polls every 1.5 s: the staging half and the batch half
         in one answer. Zero I/O -- everything here is already in memory."""
@@ -1476,6 +1566,11 @@ class BrollIngestor:
             items = list((staging.get("items") or {}).values())
         snap = self.status()
         return {
+            # Mirrored at the top level as well as inside `batch` (2026-09-04):
+            # the loopback's contract for this field is `progress().failed_items`
+            # and the page reads its batch counters out of `batch`. Twenty small
+            # dicts is a cheap way to make sure neither reader misses it.
+            "failed_items": snap["failed_items"],
             "staging": {
                 "id": staging_id or "",
                 "items": [{"local_id": i.get("local_id"), "state": i.get("state"),
@@ -1490,6 +1585,12 @@ class BrollIngestor:
                 "forced": snap["run_mode"] == RUN_MODE_FOREGROUND,
                 "paused": snap["paused"], "upload_paused": snap["upload_paused"],
                 "done": snap["done"], "failed": snap["failed"], "total": snap["total"],
+                # CMEDIA-4 / CMEDIA-10: what is neither done nor failed, and
+                # why the failures failed. The page had a count and a "see the
+                # log" for both.
+                "queued_for_base_rig": snap["queued_for_base_rig"],
+                "queued_names": snap["queued_names"],
+                "failed_items": snap["failed_items"],
                 "warning": snap["warning"],
                 "eta_seconds": snap["eta_seconds"],
                 "current": {"name": snap["clip"], "stage": snap["stage"],
@@ -2737,6 +2838,14 @@ class BrollIngestor:
         self._set_current(item.get("name") or "", stage, percent)
         with self._lock:
             batch = self._batch
+        if stage == ITEM_QUEUED and batch:
+            # AT THE MOMENT it happens, not only when the batch ends
+            # (CMEDIA-4): a batch that is cancelled, or whose lease is taken
+            # back, never reaches _note_staging_ended's held list, and the file
+            # this state exists to protect would then be pruned like any other
+            # leftover.
+            self._hold_staging(str(batch.get("staging_id") or ""),
+                               str(item.get("name") or ""))
         if not batch:
             return
         batch["state"] = "running"
@@ -2849,11 +2958,39 @@ class BrollIngestor:
         staging_id = str((batch or {}).get("staging_id") or "")
         if not staging_id:
             return
+        # What this drop is still holding for the base rig (CMEDIA-4): the
+        # batch is about to be forgotten, and after that nothing on this
+        # machine remembers that one of these files is the ONLY copy of an
+        # unindexed track. Written on the staging entry, which is what the
+        # pruner reads and what survives a restart.
+        held = [str(i.get("name") or "") for i in (batch or {}).get("items") or []
+                if i.get("stage") == ITEM_QUEUED]
         with self._lock:
             entry = self._staging.get(staging_id)
             if not isinstance(entry, dict) or entry.get("ended_at"):
                 return
             entry["ended_at"] = _iso_now()
+            if held:
+                entry["held_for_base_rig"] = held[:200]
+
+    def _hold_staging(self, staging_id: str, name: str) -> None:
+        """Mark a staging drop as holding a file only the base rig can finish.
+
+        Never raises and never grows without bound: this is bookkeeping on the
+        crunch thread, and the list is only ever read to decide "do not delete"
+        and to name a few of them.
+        """
+        if not staging_id:
+            return
+        with self._lock:
+            entry = self._staging.get(staging_id)
+            if not isinstance(entry, dict):
+                return
+            held = list(entry.get("held_for_base_rig") or [])
+            if name and name not in held and len(held) < 200:
+                held.append(name)
+            entry["held_for_base_rig"] = held
+        self._save()
 
     def _staging_entries(self) -> list[tuple[str, dict]]:
         with self._lock:
@@ -2893,7 +3030,18 @@ class BrollIngestor:
         cutoff = time.time() - age_days * 86400.0
         removed, freed = 0, 0
         gone: list[str] = []
+        held_back: list[str] = []
         for sid, entry in self._staging_entries():
+            held = [str(n) for n in (entry.get("held_for_base_rig") or []) if n]
+            if held:
+                # CMEDIA-4: "it is still on this machine" is the whole contract
+                # of `queued_for_base_rig`, and the retention sweep (and the
+                # tray's CLEAR FINISHED STAGING, which is this with
+                # max_age_days=0) would delete the only copy of a track nobody
+                # has indexed yet. Kept, named, and reported to the caller so a
+                # button can say what it did not do.
+                held_back.extend(held)
+                continue
             ended = str(entry.get("ended_at") or "")
             if not ended:
                 # Never run (or ended before this field existed): fall back to
@@ -2923,7 +3071,11 @@ class BrollIngestor:
             self._save()
             self.log.info("removed %d finished staging folder(s), %.1f GB",
                           removed, freed / 1e9)
-        return {"removed": removed, "bytes": freed}
+        if held_back:
+            self.log.info("kept %d staged file(s) the base rig still has to "
+                          "finish: %s", len(held_back), ", ".join(held_back[:5]))
+        return {"removed": removed, "bytes": freed,
+                "held": len(held_back), "held_names": held_back[:20]}
 
     def _path_refusal(self, path: str) -> str:
         """Why this machine may not index a picked path in place, or "".

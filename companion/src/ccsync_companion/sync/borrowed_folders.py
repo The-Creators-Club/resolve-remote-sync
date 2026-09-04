@@ -33,9 +33,15 @@ stay (the tray's remove flow is the only thing that deletes local copies).
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .shared_folders import (
+    PROBLEM_OUTCOMES,
+    FolderProblems,
+    log_persistent_problem,
+)
 from .syncthing_admin import is_restricted, restricted_ignore_lines
 
 log = logging.getLogger("ccsync.sync.borrowed_folders")
@@ -68,6 +74,7 @@ class BorrowedFolderManager:
         halted: Optional[Callable[[], bool]] = None,
         move_dir: Optional[Callable[[str, str], None]] = None,
         root_present_fn: Optional[Callable[[], bool]] = None,
+        now: Callable[[], float] = time.monotonic,
     ) -> None:
         self.admin = admin
         self.local_root = Path(local_root).expanduser()
@@ -87,6 +94,18 @@ class BorrowedFolderManager:
         # at it.
         self._root_present_fn = root_present_fn
         self._error_logged: set[str] = set()
+        # SYNC-101 (sweep 2026-09-03): a borrowed subtree that never appears
+        # is the same silence the LUT library had. Same keeper, same
+        # backoff, same sentences.
+        self._problems = FolderProblems(now=now)
+
+    def problems(self) -> list[str]:
+        """One sentence per borrowed folder that is not working on this
+        machine (SYNC-101)."""
+        return self._problems.sentences()
+
+    def problem_entries(self) -> list[dict[str, Any]]:
+        return self._problems.entries()
 
     def folder_ids(self) -> list[str]:
         try:
@@ -149,16 +168,39 @@ class BorrowedFolderManager:
             return {}
         results: dict[str, str] = {}
         for slug, rec in lenders.items():
+            name = str((rec or {}).get("rel") or slug)
+            if not self._problems.due(str(slug)):
+                # Backing off, not forgetting (SYNC-101): the recorded
+                # outcome is still the answer and still in problems().
+                results[slug] = self._problems.outcome(str(slug))
+                continue
             try:
-                results[slug] = self._reconcile_one(str(slug), rec)
+                outcome = self._reconcile_one(str(slug), rec)
+                results[slug] = outcome
                 self._error_logged.discard(slug)
+                if outcome in PROBLEM_OUTCOMES or outcome == "invalid":
+                    log_persistent_problem(self._problems.note(
+                        str(slug), name, outcome,
+                        "the server's description of it is incomplete"
+                        if outcome == "invalid" else ""))
+                else:
+                    self._problems.clear(str(slug))
             except Exception as exc:
                 results[slug] = "error"
+                log_persistent_problem(
+                    self._problems.note(str(slug), name, "error", str(exc)))
                 if slug not in self._error_logged:
                     self._error_logged.add(slug)
                     log.warning("borrowed folder %s: reconcile failed: %s", slug, exc)
                 else:
                     log.debug("borrowed folder %s: reconcile failed: %s", slug, exc)
+        # A lender nobody borrows from any more is not a problem any more
+        # (SYNC-101): its sentence would otherwise sit in the tray for the
+        # rest of the process's life.
+        live = {str(s) for s in lenders}
+        for entry in self._problems.entries():
+            if str(entry.get("id")) not in live:
+                self._problems.clear(str(entry.get("id")))
         self._drop_unborrowed(set(lenders))
         return results
 
@@ -225,6 +267,8 @@ class BorrowedFolderManager:
             log.warning(
                 "borrowed folder %s stays paused: its restricted .stignore could not be "
                 "confirmed, and the lender's whole folder must not go online here", slug)
+            # SYNC-101: correct, fail-closed, and previously invisible.
+            outcome = "unfiltered"
         return outcome
 
     def _repoint(self, slug: str, old_path: str, want_path: str, rel: str) -> bool:

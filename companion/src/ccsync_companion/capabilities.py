@@ -242,6 +242,7 @@ def build(
     resolve_project_fn: Optional[Callable[[], Optional[str]]] = None,
     cards_agent_fn: Optional[Callable[[], dict[str, Any]]] = None,
     volunteer_until_fn: Optional[Callable[[], Optional[str]]] = None,
+    jobs_gate_fn: Optional[Callable[[], dict[str, Any]]] = None,
     use_cache: bool = True,
 ) -> dict[str, Any]:
     """The `capabilities` report section. Never raises.
@@ -271,6 +272,12 @@ def build(
             # so. Served from a 60 s cache it would be a lever that does
             # nothing for a minute.
             answer["volunteer_until"] = _volunteer_until(volunteer_until_fn)
+            # ...and the runner's gate (CMEDIA-12), for the plainest reason
+            # of all: it is the answer to "why is this machine taking no
+            # work", and a cached one says why it took no work a minute ago.
+            gate = _jobs_gate(jobs_gate_fn)
+            if gate:
+                answer["jobs_gate"] = gate
             return answer
 
     cfg = cfg or {}
@@ -313,7 +320,33 @@ def build(
     # AFTER the cache is stored, like the three above: a deadline frozen into
     # the cache would outlive the window it describes.
     section["volunteer_until"] = _volunteer_until(volunteer_until_fn)
+    gate = _jobs_gate(jobs_gate_fn)
+    if gate:
+        section["jobs_gate"] = gate
     return section
+
+
+def _jobs_gate(
+    jobs_gate_fn: Optional[Callable[[], dict[str, Any]]],
+) -> dict[str, Any]:
+    """{"taking_work", "reason"} from the job runner, or {} (CMEDIA-12).
+
+    ABSENT, not a guess, when there is no runner or it cannot answer: a
+    dashboard reading `taking_work: false` off a machine that never said so
+    would explain a scheduling decision with a fact nobody stated. An older
+    companion sends nothing here, which means exactly the same thing.
+    """
+    if jobs_gate_fn is None:
+        return {}
+    try:
+        answer = jobs_gate_fn() or {}
+    except Exception:
+        log.debug("capabilities: jobs_gate_fn failed", exc_info=True)
+        return {}
+    if not isinstance(answer, dict) or "reason" not in answer:
+        return {}
+    return {"taking_work": bool(answer.get("taking_work")),
+            "reason": str(answer.get("reason") or "")}
 
 
 def _volunteer_until(
@@ -348,12 +381,24 @@ def _idle_seconds(idle_probe: Any) -> Optional[float]:
 def _cards_block(fn: Optional[Callable[[], dict[str, Any]]]) -> dict[str, Any]:
     """Is this machine serving the Timeline Cards page from its Resolve?
 
-    (TIMELINE-CARDS-INTO-CCSYNC.md phase 2.) Four small fields, from the
-    role's own status -- no scripting call, no process probe, nothing that
-    could make a 30 s capabilities tick expensive. `connected` false with a
-    `state` is the interesting case: it names the refusal, which is the
-    difference between "nobody turned it on" and "a standalone agent is
-    still running there".
+    (TIMELINE-CARDS-INTO-CCSYNC.md phase 2.) Small fields, from the role's
+    own status -- no scripting call, no process probe, nothing that could
+    make a 30 s capabilities tick expensive. `connected` false with a `state`
+    is the interesting case: it names the refusal, which is the difference
+    between "nobody turned it on" and "a standalone agent is still running
+    there".
+
+    RES-6 (sweep 2026-09-04) added four fields to the role's answer --
+    `detail`, `gate_state`, `last_poll_at`, `last_http_status` -- and this
+    filter was a hard five-key allow-list, so a health verdict, a 401 and a
+    dashboard that had gone quiet reached the wire as one word. The extras
+    are passed through when the role SENDS them and OMITTED otherwise: a
+    None-filled key from a role that never said anything is a claim, and the
+    dashboard stores what it declares either way.
+
+    The default block (no role) keeps `state: "disabled"` -- the five-key
+    shape a companion older than RES-6 sends, and what the dashboard's
+    cards-capability tests read.
     """
     block: dict[str, Any] = {"connected": False, "state": "disabled",
                              "timeline": "", "version": 0, "since": None}
@@ -365,6 +410,9 @@ def _cards_block(fn: Optional[Callable[[], dict[str, Any]]]) -> dict[str, Any]:
         log.debug("capabilities: cards_agent_fn failed", exc_info=True)
         return block
     block.update({k: answer.get(k, block[k]) for k in block})
+    for key in ("detail", "gate_state", "last_poll_at", "last_http_status"):
+        if key in answer:
+            block[key] = answer[key]
     return block
 
 

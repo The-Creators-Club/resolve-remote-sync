@@ -368,16 +368,27 @@ def test_the_cards_report_block_the_role_builds_parses_here(env, tmp_path):
                                       processes_fn=lambda: [])
     section = caps_mod.build({"local_root": str(tmp_path)}, use_cache=False,
                              cards_agent_fn=role.report_block)
-    assert set(section["cards_agent"]) == {"connected", "state", "timeline",
-                                           "version", "since"}
+    # The v44 five and RES-6's four (2026-09-04). Pinned as an EXACT set in
+    # both directions on purpose: a key the role stops sending is a chip that
+    # goes blank, and a key the report model does not declare is dropped
+    # silently by pydantic -- the `ffprobe` lesson, which is why this test
+    # exists at all.
+    assert set(section["cards_agent"]) == {
+        "connected", "state", "timeline", "version", "since",
+        "gate_state", "detail", "last_poll_at", "last_http_status"}
     r = client.post("/api/v1/report", json={
         "editor_name": "jsmith", "machine": "EDIT-PC", "lanes": [],
         "reported_at": dbmod.utcnow_iso(), "capabilities": section,
     }, headers=hdr())
     assert r.status_code == 200, r.text
     stored = dbmod.machine_capabilities(conn, "jsmith", "EDIT-PC")["cards_agent"]
+    assert set(stored) == set(section["cards_agent"])
     for key, value in section["cards_agent"].items():
         if value is None:
+            # "" and None are the companion's two spellings of "nothing to
+            # say" (RES-6) and the dashboard stores both as NULL, so the only
+            # thing to assert here is that the key exists and says nothing.
+            assert not stored[key], f"cards_agent.{key} invented an answer"
             continue
         assert stored[key] == value, f"cards_agent.{key} did not survive the report"
 

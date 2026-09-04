@@ -24,6 +24,13 @@
   The NAS figures below are the last good ones, from before this started.
   <span class="muted">checked {{ project.nas_media.walked_at | ago }}</span></div>
 {% endif %}
+{# DCORE-16 (resilience sweep 2026-09-03): a share this project's plan asked
+   for that the enforce cycle could not apply. Without it the page shows the
+   tick and nothing else: the tick is the intention, and a held share is the
+   difference between the intention and what Syncthing actually carries. #}
+{% for n in (enforce_notes | default([])) %}
+<div class="banner">▲ Sharing change held: {{ n.note }} ({{ n.at | ago }})</div>
+{% endfor %}
 {% set pickers = selected_by.get(project.slug, []) if selected_by is defined else [] %}
 {% set modes = selected_modes.get(project.slug, {}) if selected_modes is defined else {} %}
 {# UX-17 (usability sweep 2026-09-03): these chips read [ UP ] and

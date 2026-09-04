@@ -18,6 +18,7 @@ import urllib.error
 import pytest
 
 from ccsync_companion import reporter as reporter_mod
+from ccsync_companion import ui_copy
 from ccsync_companion.reporter import DashboardReporter
 from ccsync_companion.tray import (
     REPORTER_FAILURE_STREAK,
@@ -333,8 +334,12 @@ def test_the_reporter_line_names_a_rejected_credential_differently():
     guard = _guard(reporter={"consecutive_failures": 40, "last_status": "HTTP 401",
                              "last_success_at": reporter_mod._iso_utc(time.time())})
     line = _reporter_line(guard)
-    assert "sign-in was rejected" in line
-    assert "Sign in again" in line
+    # APP-8 (sweep 2026-09-03) reworded this into one sentence: the refusal,
+    # what it costs, and where the way back is - the line used to render
+    # beside a [ SIGN OUT ] button and no [ SIGN IN ] anywhere.
+    assert "rejected this computer's sign-in" in line
+    assert "Sign in again" in line and ui_copy.SIGN_IN_SETTINGS in line
+    assert "—" not in line
 
 
 def test_the_reporter_line_says_never_when_nothing_was_ever_accepted():

@@ -56,6 +56,29 @@ BATCH_STATES = ("queued", "claimed", "running", "done", "done_with_errors",
 # against it answers 410 (see routes_fleet._leaseholder_or_410).
 BATCH_TERMINAL = frozenset({"done", "done_with_errors", "cancelled", "failed"})
 
+# The same seven states in an editor's words (BROLL-22, 2026-09-04). The raw
+# enum was what both the panel and the fleet grid printed, and `queued` beside
+# a machine name and a three-hour-old heartbeat reads as progress when it in
+# fact means "that computer stopped answering and nothing is happening". These
+# templates are mirrored character for character by ING_BATCH_STATE_TEXT in
+# static/ingest.js -- one wording, two renderers, pinned by
+# tests/test_batch_state_words.py, because the page needs a fresher `ago` than
+# a five-second poll can carry and the server needs the words for every other
+# reader.
+BATCH_STATE_TEXT = {
+    "queued": "waiting to start",
+    # queued WITH a machine: expire_stale_leases leaves the name in place on
+    # purpose, and this is the sentence that was supposed to use it.
+    "queued_machine": "waiting: {machine} stopped answering {ago}",
+    "claimed": "starting on {machine}",
+    "running": "indexing on {machine}",
+    "cancelling": "stopping",
+    "done": "finished",
+    "done_with_errors": "finished, {n_failed} could not be indexed",
+    "cancelled": "stopped",
+    "failed": "could not run",
+}
+
 # The one legal route through a clip, in order. `stage_percent` re-posts of the
 # SAME state are allowed (that is how progress is reported); going backwards is
 # not, or a late-arriving retry of an earlier POST would un-index a clip that
@@ -319,6 +342,46 @@ def list_items(conn: sqlite3.Connection, batch_uid: str) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def ago_text(iso: str | None, now: datetime | None = None) -> str:
+    """"40s ago" / "12m ago" / "3h ago", or "never". Mirrors ingest.js's
+    ingestAgo, thresholds included, so the two renderers of BATCH_STATE_TEXT
+    cannot describe the same heartbeat differently (BROLL-22)."""
+    then = _parse_iso(iso)
+    if then is None:
+        return "never"
+    reference = now or datetime.now(timezone.utc)
+    seconds = max(0, int((reference - then).total_seconds()))
+    if seconds < 90:
+        return f"{seconds}s ago"
+    if seconds < 5400:
+        return f"{round(seconds / 60)}m ago"
+    return f"{round(seconds / 3600)}h ago"
+
+
+def batch_state_text(batch: sqlite3.Row | dict, now: datetime | None = None) -> str:
+    """The batch's state as a sentence (BROLL-22).
+
+    A pending cancel outranks the state it is cancelling: the row still says
+    `running` for one more heartbeat, and "indexing on EDIT-01" is not what is
+    happening to a batch somebody just stopped.
+    """
+    state = batch["state"]
+    machine = batch["machine"] or "that computer"
+    if batch["cancel_requested"] and state not in BATCH_TERMINAL:
+        return BATCH_STATE_TEXT["cancelling"]
+    if state == "queued":
+        if not batch["machine"]:
+            return BATCH_STATE_TEXT["queued"]
+        return BATCH_STATE_TEXT["queued_machine"].format(
+            machine=machine, ago=ago_text(batch["last_heartbeat_at"], now))
+    template = BATCH_STATE_TEXT.get(state)
+    if template is None:
+        # An unknown state is a deployment newer than this renderer. Show the
+        # token rather than nothing: a blank line is the bug this fixes.
+        return str(state)
+    return template.format(machine=machine, n_failed=batch["n_failed"])
+
+
 def batch_public(batch: sqlite3.Row) -> dict:
     """One batch as both APIs report it. Scalars only: this is polled every few
     seconds by the SPA and rides the fleet grid, and a nested blob here becomes
@@ -327,6 +390,10 @@ def batch_public(batch: sqlite3.Row) -> dict:
     out["settings"] = load_settings(batch)
     out["cancel_requested"] = bool(batch["cancel_requested"])
     out["upload_paused"] = bool(batch["upload_paused"])
+    # Still a scalar, and the words every reader that is not the ingest panel
+    # gets for free (BROLL-22). The panel re-derives it so its "3h ago" ages
+    # between polls, against the same table.
+    out["state_text"] = batch_state_text(batch)
     return out
 
 
@@ -467,6 +534,60 @@ def create_batch(conn: sqlite3.Connection, *, editor: str, share: str,
     log.info("b-roll ingest: %s queued batch %s (%d clips, share %r)",
              editor, uid, len(items), share)
     return uid
+
+
+def retry_failed(conn: sqlite3.Connection, batch: sqlite3.Row) -> dict:
+    """Put this batch's failed clips back in the queue. Returns what it did.
+
+    BROLL-18, 2026-09-04: `done_with_errors - 12 failed` used to be the end of
+    the road, and the only way back was to read twelve names off the screen and
+    drop those files again - which, because the first attempt already minted
+    their `videos` rows, then read as duplicates.
+
+    Three deliberate limits:
+
+      * only `failed` items move. `live`/`duplicate`/`cancelled` are terminal
+        for a reason (_check_transition), and a clip already in the archive
+        that somebody has cut with must not be re-indexed underneath them.
+      * the items' `video_id`, archive_dir and archive_stem STAY. The name is
+        already allocated and the row already exists; claim skips an item that
+        has one, so a retry re-uses the slot rather than allocating `_2`.
+      * nothing is dispatched here. The batch goes back to `queued` and a
+        companion claims it, exactly as a new batch is claimed - the browser
+        never carries a work order (plan §1).
+
+    A batch with nothing failed is answered, not refused: two clicks on the
+    same button must not raise at an editor.
+    """
+    now = now_iso()
+    with conn:
+        item_uids = [r["uid"] for r in conn.execute(
+            "SELECT uid FROM ingest_items WHERE batch_uid = ? AND state = 'failed' "
+            "ORDER BY ord, uid", (batch["uid"],))]
+        conn.execute(
+            "UPDATE ingest_items SET state = 'pending', stage_percent = NULL, "
+            "error = NULL, updated_at = ? WHERE batch_uid = ? AND state = 'failed'",
+            (now, batch["uid"]),
+        )
+        retried = len(item_uids)
+        if retried:
+            conn.execute(
+                "UPDATE ingest_batches SET state = 'queued', error = NULL, "
+                "finished_at = NULL, cancel_requested = 0, cancel_by = NULL, "
+                "lease_expires_at = NULL, current_item_uid = NULL, updated_at = ? "
+                "WHERE uid = ?",
+                (now, batch["uid"]),
+            )
+        counts = _recount(conn, batch["uid"])
+    if retried:
+        log.info("b-roll ingest: batch %s retrying %d failed clip(s)",
+                 batch["uid"], retried)
+    fresh = get_batch(conn, batch["uid"])
+    # `items` are the uids that moved, in batch order: that is the body the
+    # companion's `/broll/ingest/retry` takes, so the page can hand them
+    # straight on without a second read.
+    return {"ok": True, "retried": retried, "state": fresh["state"],
+            "items": item_uids, **counts}
 
 
 def cancel(conn: sqlite3.Connection, uid: str, by: str) -> None:

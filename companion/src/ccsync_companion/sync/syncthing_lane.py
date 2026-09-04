@@ -195,6 +195,7 @@ class SyncthingLane(LaneAdapter):
         expected_folder_ids_fn: Optional[Callable[[], list[str]]] = None,
         supervisor: Optional[Any] = None,
         unfiltered_folders_fn: Optional[Callable[[], list[str]]] = None,
+        shared_folder_problems_fn: Optional[Callable[[], list[str]]] = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._configured_api_key = api_key
@@ -216,6 +217,13 @@ class SyncthingLane(LaneAdapter):
         # synced nothing, indefinitely. Optional and duck-typed, like the
         # supervisor: a lane built without one behaves exactly as before.
         self.unfiltered_folders_fn = unfiltered_folders_fn
+        # SYNC-101 (sweep 2026-09-03): the shared asset libraries and the
+        # borrowed lender folders are lane C folders that no selection names,
+        # so a library the server never shared with this device failed
+        # forever with nothing to show for it. Optional and duck-typed like
+        # the two above (Sequencer.shared_folder_problems); a lane built
+        # without one behaves exactly as before.
+        self.shared_folder_problems_fn = shared_folder_problems_fn
         # SYNC-17 (2026-08-18): this poll is the only thread in the companion
         # that knows whether 127.0.0.1:8384 answered, so it is where the
         # supervisor is driven from (sync/syncthing_supervisor.py). Optional,
@@ -394,6 +402,17 @@ class SyncthingLane(LaneAdapter):
         if not relayed:
             return ""
         return f"{RELAYED_DETAIL} ({len(relayed)} device(s) via relay)"
+
+    def shared_folder_problems(self) -> list[str]:
+        """Sentences for the shared/borrowed folders that are not working
+        here (SYNC-101). Never raises."""
+        if self.shared_folder_problems_fn is None:
+            return []
+        try:
+            return [str(text) for text in (self.shared_folder_problems_fn() or []) if text]
+        except Exception:
+            log.debug("shared_folder_problems_fn failed", exc_info=True)
+            return []
 
     @staticmethod
     def _with_path_detail(detail: str, path_detail: str) -> str:
@@ -708,6 +727,12 @@ class SyncthingLane(LaneAdapter):
                 name=self.name, state=STATE_IDLE, queued=0,
                 last_sync=datetime.now(timezone.utc), detail=path_detail,
             )
+        # SYNC-101: additive, and deliberately in `detail` rather than in
+        # the state -- a LUT library nobody shared is not a reason to call
+        # the lane that IS syncing the editor's projects broken.
+        problems = self.shared_folder_problems()
+        if problems:
+            status.detail = self._with_path_detail(problems[0], status.detail)
         self._set_status(status)
         return status
 

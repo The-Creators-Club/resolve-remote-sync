@@ -1,0 +1,17 @@
+{# WHAT THIS CHIP MEANS (DUI-3, usability sweep 2026-09-03).
+
+   The one sheet the whole site shares, filled by static/htmx_errors.js from
+   the tapped chip's own explanation. In base.html and NOT inside the fleet
+   grid on purpose: the grid replaces itself every 15 s, and a sheet living
+   inside it would be swapped shut under whoever was reading it.
+
+   Empty and `hidden` until something is tapped, so it costs a healthy page
+   nothing. `role="dialog"` without a focus trap: it is a sentence and a
+   close button, and the tap that opened it can dismiss it anywhere. #}
+<div id="chip-sheet" class="chip-sheet" role="dialog" aria-live="polite" hidden>
+  <div class="chip-sheet-inner">
+    <div class="chip-sheet-label mono-sm"></div>
+    <div class="chip-sheet-text"></div>
+    <div class="muted mono-sm">tap anywhere to close</div>
+  </div>
+</div>

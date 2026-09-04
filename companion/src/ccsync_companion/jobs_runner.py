@@ -62,6 +62,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import threading
@@ -75,9 +76,10 @@ from . import job_paths, jobs_media
 
 log = logging.getLogger("ccsync.jobs")
 
-# Gate states, in the order _gate() asks them. The tray does not render these
-# yet; the diagnostics bundle and the log do, and they are what "why is this
-# machine not taking any work" is answered with.
+# Gate states, in the order _gate() asks them. The diagnostics bundle, the log
+# and -- since the 2026-09-04 sweep (CMEDIA-12) -- `status()["gate"]` render
+# these, which is what "why is this machine not taking any work" is answered
+# with on the machine itself.
 STATE_DISABLED = "disabled"
 STATE_NO_DASHBOARD = "no_dashboard"
 STATE_HALTED = "halted"
@@ -92,6 +94,55 @@ STATE_READY = "ready"
 # the tray and the diagnostics can say why work started with somebody at the
 # keyboard, instead of looking like the idle gate had failed.
 STATE_FORCED = "forced"
+
+# THE GATE IN WORDS (CMEDIA-12, sweep 2026-09-04). One sentence per state, in
+# the second person, because the reader is the editor whose machine is quietly
+# doing nothing (or quietly doing something). `taking_work` is "is anything
+# here stopping this computer", NOT "is a job running": a machine nobody has
+# offered work to is taking work, it just has none.
+#
+# The dashboard's own reasons (a per-machine cooldown after a failure, the
+# per-kind fleet cap) never reach this side -- they show up here as an empty
+# offer list, which is why the nothing-offered sentence says who is quiet
+# rather than claiming the queue is empty.
+GATE_SENTENCES: dict[str, tuple[bool, str]] = {
+    STATE_DISABLED: (
+        False, "Fleet jobs are switched off on this computer."),
+    STATE_NO_DASHBOARD: (
+        False, "This computer is not signed in to the dashboard, so the fleet "
+               "has no way to give it work."),
+    STATE_HALTED: (
+        False, "The fleet is halted, so this computer is not taking work of "
+               "any kind."),
+    STATE_NO_CAPABILITY: (
+        False, "This computer is not set up for any of the kinds of work the "
+               "fleet queues."),
+    STATE_USER_ACTIVE: (
+        False, "Somebody is at this computer, so it is not taking fleet work."),
+    STATE_RESOLVE_OPEN: (
+        False, "Resolve is open here, so this computer is not taking fleet "
+               "work."),
+    STATE_RUNNING: (True, "This computer is running a fleet job."),
+    STATE_FORCED: (
+        True, "Your admin asked this computer to run a fleet job now."),
+    STATE_READY: (True, "This computer is ready for fleet work."),
+    STATE_NOTHING_OFFERED: (
+        True, "This computer is ready for fleet work. The dashboard has not "
+              "offered it any."),
+}
+# What `current["forced_reason"]` says (CMEDIA-13). The state existed from
+# phase 1 precisely so somebody could be told why work started with them at
+# the keyboard, and until this sweep nothing read it.
+FORCED_BY_ADMIN = ("Your admin asked this computer to run this job now, "
+                   "without waiting for you to step away.")
+FORCED_BY_VOLUNTEER = ("You lent this computer to the fleet, so it took this "
+                       "job while you are here.")
+
+# The last few jobs this machine ran, so the answer to "what did my computer
+# do for the team" survives a restart (CMEDIA-2). proxy_history.py's posture
+# in one small file: bookkeeping bolted onto the work, never able to fail it.
+RECENT_FILENAME = "jobs_recent.json"
+RECENT_MAX = 10
 
 HTTP_TIMEOUT_SECONDS = 20.0
 # The dashboard's lease is 300 s (db.JOB_LEASE_SECONDS). Beat every 30, so a
@@ -162,6 +213,7 @@ class JobRunner:
         runner_fn: Optional[Callable[..., Any]] = None,
         clock: Callable[[], float] = time.monotonic,
         notify: Optional[Callable[[str], None]] = None,
+        recent_path: Optional[Path] = None,
     ) -> None:
         self.cfg = cfg or {}
         self._request = request_fn
@@ -205,7 +257,22 @@ class JobRunner:
         self._volunteer_until: Optional[float] = None
         self._volunteer_until_iso: Optional[str] = None
         self._job: Optional[dict[str, Any]] = None
+        # What the tray and Settings show while a job runs (CMEDIA-2/13): the
+        # id, the kind, the file in this editor's own words, when it started
+        # and -- when it started with them present -- who asked for that.
+        self._current: Optional[dict[str, Any]] = None
         self._state = STATE_NOTHING_OFFERED
+        # The extra clause the no-capability sentence needs. Recorded where the
+        # capabilities are already in hand, because status() must stay zero-I/O
+        # (it is called from the tray's refresh thread).
+        self._gate_note = ""
+        # Written at every result and read at construction, so "what has this
+        # machine run" outlives a restart (CMEDIA-2). Derived from the log path
+        # rather than passed in: app.py builds this runner and nothing else
+        # knows where its state dir is.
+        self._recent_path = (Path(recent_path) if recent_path is not None
+                             else _default_recent_path(self.cfg))
+        self._recent: list[dict[str, Any]] = _load_recent(self._recent_path)
         # THE WAKE (bug-hunt-2026-09-03 comp-ytdl-jobs-3). The backoff can put
         # this loop to sleep for IDLE_BACKOFF_MAX_SECONDS, so an offer landing
         # on the report reply -- including an admin's forced [ RUN NOW ] --
@@ -309,15 +376,64 @@ class JobRunner:
 
     def status(self) -> dict[str, Any]:
         """Zero-I/O snapshot for the log, the diagnostics bundle and the
-        tray."""
+        tray.
+
+        ZERO-I/O IS A REQUIREMENT, not a description: the tray's refresh thread
+        calls this, and on the win32 backend any I/O here stalls the message
+        loop (the right-click freeze of 2026-07-26). So `gate` is the verdict
+        the LAST tick reached, never a fresh evaluation -- which is also the
+        honest thing to report, because it is the verdict the claim was made
+        under (CMEDIA-12).
+        """
         with self._lock:
             job = dict(self._job) if self._job else None
+            current = dict(self._current) if self._current else None
             volunteer = (self._volunteer_until_iso
                          if self._volunteering_locked() else None)
-            return {"state": self._state, "offered": list(self._offered),
-                    "queue": dict(self._queue),
-                    "volunteer_until": volunteer, "forced": list(self._forced),
-                    "job": {"id": job["id"], "kind": job["kind"]} if job else None}
+            state, note = self._state, self._gate_note
+            recent = [dict(item) for item in self._recent]
+        taking, sentence = GATE_SENTENCES.get(
+            state, (False, "This computer is not taking fleet work."))
+        if note:
+            sentence = f"{sentence} {note}"
+        if state == STATE_USER_ACTIVE:
+            sentence = (f"{sentence} It waits for "
+                        f"{_minutes(self.idle_seconds)} of quiet.")
+        return {"state": state, "offered": list(self._offered),
+                "queue": dict(self._queue),
+                "volunteer_until": volunteer, "forced": list(self._forced),
+                "gate": {"taking_work": bool(taking), "reason": sentence},
+                "current": current,
+                "recent": recent,
+                "job": {"id": job["id"], "kind": job["kind"]} if job else None}
+
+    def stop_current(self) -> bool:
+        """The person at this machine stopping the job it is running for the
+        fleet (CMEDIA-2). -> was there a job to stop.
+
+        THE ADMIN'S CANCEL PATH, REUSED WHOLE. The id goes on the same
+        `_cancel` list `commands.jobs.cancel` fills, so the thread that owns
+        the child and the `.partial` is the thread that ends them -- exactly
+        one place terminates a job, and it is the one that has been tested
+        against a half-written proxy reaching the vault. The result goes back
+        as cancelled and NOT retryable (CANCELLED_ERROR), because another
+        machine picking up work a person just stopped is the one outcome
+        nobody asked for.
+
+        Returns as soon as the stop is REQUESTED: the child gets up to a
+        heartbeat slice to die, and a button that blocks the tray for five
+        seconds is a button that looks broken.
+        """
+        with self._lock:
+            job = dict(self._job) if self._job else None
+            if job is None:
+                return False
+            job_id = int(job["id"])
+            if job_id not in self._cancel:
+                self._cancel.append(job_id)
+                del self._cancel[:-16]
+        log.warning("jobs: the person at this machine stopped job #%s", job_id)
+        return True
 
     def wait_seconds(self) -> float:
         """How long to sleep before the next tick -- THE BACKOFF (phase 4).
@@ -452,7 +568,20 @@ class JobRunner:
         if holding:
             return STATE_RUNNING
         if not self.runnable_kinds():
+            # WHICH of the two no-capability shapes this is (CMEDIA-12): a
+            # machine with no ffmpeg and no whisper venv needs a set-up, a
+            # machine whose owner narrowed `[jobs] kinds` to something it
+            # cannot do needs a config line changed, and the states are one.
+            # Recorded here because the capabilities are already in hand and
+            # status() may do no I/O.
+            allowed = [str(k) for k in (self._capabilities().get("job_kinds") or [])]
+            self._gate_note = (
+                f"It is set to take only: {', '.join(allowed)}."
+                if allowed else
+                "There is no whisper set-up here, and no ffmpeg for the "
+                "media jobs.")
             return STATE_NO_CAPABILITY
+        self._gate_note = ""
         # THE TWO GATES A PERSON CAN OPEN (§10, 2026-08-30), and only these
         # two: what comes above is capability and safety, and neither a
         # volunteer nor an admin's `--now` is allowed past those.
@@ -573,6 +702,10 @@ class JobRunner:
 
     def _post_result(self, job_id: int, ok: bool, error: str = "",
                      result: Optional[dict] = None, retryable: bool = True) -> None:
+        # RECORDED BEFORE IT IS SENT (CMEDIA-2): a result the dashboard never
+        # received is exactly the case where the editor's own machine is the
+        # only place that can say what happened.
+        self._note_finished(job_id, ok, error)
         try:
             self._call(f"/{int(job_id)}/result",
                        {"machine": self.machine, "ok": bool(ok),
@@ -582,6 +715,33 @@ class JobRunner:
             # The lease expires on its own, so a lost result costs one retry
             # rather than a stuck job. Never fatal to the loop.
             log.exception("jobs: could not post the result of job #%s", job_id)
+
+    def _note_finished(self, job_id: int, ok: bool, error: str) -> None:
+        """One line in the ledger the editor reads (CMEDIA-2). Never raises:
+        this is bookkeeping bolted onto the work, and a state dir that cannot
+        be written must not fail a transcode that succeeded."""
+        try:
+            with self._lock:
+                current = dict(self._current) if self._current else {}
+                if int(current.get("id") or 0) != int(job_id):
+                    current = {}
+                entry = {
+                    "id": int(job_id),
+                    "kind": str(current.get("kind") or ""),
+                    "rel_path": str(current.get("rel_path") or ""),
+                    # The three words the panel renders. `cancelled` is its own
+                    # outcome and not a failure: somebody chose it.
+                    "outcome": ("cancelled" if str(error) == CANCELLED_ERROR
+                                else "done" if ok else "failed"),
+                    "error": "" if ok else str(error or "")[:300],
+                    "finished_at": _now_iso(),
+                }
+                self._recent.insert(0, entry)
+                del self._recent[RECENT_MAX:]
+                snapshot = [dict(item) for item in self._recent]
+            _save_recent(self._recent_path, snapshot)
+        except Exception:
+            log.debug("jobs: could not record the finished job", exc_info=True)
 
     # -- the loop --------------------------------------------------------
     def start(self) -> None:
@@ -636,14 +796,29 @@ class JobRunner:
                 self._state = STATE_NOTHING_OFFERED
                 self._offered = []
             return None
+        volunteering = self.volunteering
         with self._lock:
             self._job = job
             self._state = STATE_FORCED if forced_claim else STATE_RUNNING
+            # THE JOB IN THE EDITOR'S OWN TERMS (CMEDIA-2/13). `rel_path` and
+            # not the resolved path: the vault is a drive letter here and a
+            # mount there, and the relative half is the half that reads the
+            # same everywhere (§4.1).
+            self._current = {
+                "id": int(job["id"]),
+                "kind": str(job.get("kind") or ""),
+                "rel_path": str((job.get("inputs") or {}).get("rel_path") or ""),
+                "started_at": _now_iso(),
+                "forced_reason": (FORCED_BY_ADMIN if forced_claim
+                                  else FORCED_BY_VOLUNTEER if volunteering
+                                  else None),
+            }
         try:
             self._execute(job)
         finally:
             with self._lock:
                 self._job = None
+                self._current = None
                 self._state = STATE_NOTHING_OFFERED
         return job
 
@@ -967,6 +1142,76 @@ class JobRunner:
                 self._heartbeat(job_id, 1.0)
             return True, output, ""
         return False, output, f"pipeline.py transcribe exited {code}"
+
+
+def _now_iso() -> str:
+    """UTC, to the second. The tray renders it as "4 min ago"; the file has to
+    stay readable a week later on another machine's clock."""
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _minutes(seconds: Any) -> str:
+    """"5 minutes" / "30 seconds" -- the idle floor as a person says it."""
+    try:
+        value = float(seconds or 0)
+    except (TypeError, ValueError):
+        return "a few minutes"
+    if value >= 120:
+        return f"{value / 60:.0f} minutes"
+    if value >= 60:
+        return "a minute"
+    return f"{value:.0f} seconds"
+
+
+def _default_recent_path(cfg: dict[str, Any]) -> Optional[Path]:
+    """`~/.ccsync/state/jobs_recent.json`, beside every other latch the
+    companion keeps across restarts. None when even that cannot be worked out,
+    which leaves the ledger in memory rather than failing the runner.
+
+    A cfg with NO `log_path` gets None rather than the packaged default: a
+    loaded config always carries one (config.DEFAULTS fills it), so the only
+    callers without one are harnesses, and a suite must not write into the
+    state dir of whoever is running it."""
+    if not str((cfg or {}).get("log_path") or "").strip():
+        return None
+    try:
+        return config_mod.resolved_log_path(cfg or {}).parent / "state" / RECENT_FILENAME
+    except Exception:
+        log.debug("jobs: no state dir for the recent-jobs ledger", exc_info=True)
+        return None
+
+
+def _load_recent(path: Optional[Path]) -> list[dict[str, Any]]:
+    """Never raises, and never lets a corrupt file be why the runner will not
+    build: an unreadable ledger is an empty one."""
+    if path is None:
+        return []
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return []
+    except Exception:
+        log.debug("jobs: the recent-jobs ledger could not be read", exc_info=True)
+        return []
+    items = data.get("jobs") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return []
+    return [dict(item) for item in items if isinstance(item, dict)][:RECENT_MAX]
+
+
+def _save_recent(path: Optional[Path], items: list[dict[str, Any]]) -> None:
+    """Whole-file rewrite through a temp name, proxy_totals.json's shape: the
+    file is tiny and a half-written one would be read at the next start."""
+    if path is None:
+        return
+    try:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"jobs": items}, indent=2), encoding="utf-8")
+        os.replace(tmp, target)
+    except Exception:
+        log.debug("jobs: could not write %s", path, exc_info=True)
 
 
 def whisper_progress(line: str, state: dict[str, Any]) -> Optional[float]:

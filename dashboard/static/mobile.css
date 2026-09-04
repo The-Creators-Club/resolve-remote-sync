@@ -210,6 +210,27 @@
 
 
 
+/* ---- DUI-3: a chip a thumb can ask (usability sweep 2026-09-03)
+
+   On a coarse pointer there is no hover, so `title=` is not an explanation,
+   it is a secret. Every chip is tappable here and the answer arrives in the
+   shared sheet (partials/chip_sheet.html, filled by static/htmx_errors.js
+   from ui.CHIP_HELP). The sheet clears the project rail's own sheet handle,
+   which is fixed to the same edge. */
+@media (pointer: coarse) {
+  .chip[title],
+  [data-chip-detail] {
+    cursor: pointer;
+    min-height: var(--tap);
+    display: inline-flex;
+    align-items: center;
+  }
+  .chip-sheet {
+    bottom: calc(var(--tap) + var(--safe-b));
+    box-shadow: 0 -10px 30px rgba(255, 33, 64, 0.22);
+  }
+}
+
 /* ================================ == admin == ============================ */
 /* M3: every /admin page and its partials (MOBILE_PLAN.md M3). */
 

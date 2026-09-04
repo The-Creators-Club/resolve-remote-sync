@@ -25,6 +25,7 @@ import threading
 import time
 import urllib.request
 from datetime import date
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from fastapi import APIRouter, HTTPException, Request
@@ -734,7 +735,26 @@ def _queued_answer(c, user, job_id):
         behind += 1
     return {'job_id': job_id, 'phase': fresh['phase'],
             'queue_position': fresh['queue_position'],
-            'queued_behind': behind}
+            'queued_behind': behind,
+            **_queue_wait(c, job_id)}
+
+
+def _queue_wait(c, job_id):
+    """The half of the wait `queued_behind` cannot see (YTWEB-1, 2026-09-03).
+
+    The worker is fleet-serial, so the job a second editor is really waiting
+    on is usually somebody else's -- and every number this app reported was
+    counted per editor. Editor B submitting behind editor A's 20-minute enrich
+    phase got `queued_behind: 0`, a silent toast (announceQueued returns on 0),
+    a bar parked in the `queued` span and an empty ticker: nothing anywhere
+    said what the wait was or that there was one.
+
+    `worker_alive` rides along because it is the other answer to the same
+    question -- a queue nothing is draining looks exactly like a queue with
+    something big at the front of it, and the difference is the whole point.
+    """
+    return {'fleet_ahead': db.fleet_ahead(c, job_id),
+            'worker_alive': worker.is_alive()}
 
 
 def _one_job_409(running):
@@ -1046,8 +1066,22 @@ def active_job(request: Request):
     # [ UP ] on the thing that is already running.
     if row is not None:
         queue = [q for q in queue if q['id'] != row['id']]
+    # ...AND WHAT IS WAITING FOR THE EDITOR THEMSELVES (YTWEB-8/13,
+    # 2026-09-03). db.active_job now prefers a job that is MOVING over one
+    # parked for review, which is what a page reloaded the next morning should
+    # be about -- and the parked ones must not become invisible in exchange.
+    # They are a named list with two buttons rather than an implicit
+    # attachment, which is what a thing waiting for a person wanted all along:
+    # nothing nags about a curated manifest nobody downloaded, so five of them
+    # can accumulate discoverable only by reading `phase` in Recent searches.
+    # The attached job is not also listed here, for renderQueue's reason: one
+    # job on screen twice, offering to open what is already open.
+    parked = [j for j in db.parked_jobs(c, user)
+              if row is None or j['id'] != row['id']]
+    waiting = [db.queue_dict(j, i) for i, j in enumerate(parked, start=1)]
     return {'job': db.job_dict(row) if row is not None else None,
-            'queue': queue}
+            'queue': queue,
+            'waiting': waiting}
 
 
 # --------------------------------------------------------- download history
@@ -1099,7 +1133,18 @@ def get_job(job_id: int, request: Request):
     c = con()
     job = _job_or_404(c, job_id, user)
     hits = db.term_hit_counts(c, job_id)
+    # WHAT A QUEUED JOB IS WAITING ON (YTWEB-1, 2026-09-03), on the poll and
+    # not only on the create answer: a toast is gone in seven seconds and the
+    # page that reloads onto a job still at `queued` has to be able to say the
+    # same sentence. Two small counts, and only for the one phase that has a
+    # wait to explain -- every other phase has counters of its own and nothing
+    # to add.
+    wait = {}
+    if job['phase'] == 'queued':
+        wait = {'queued_behind': _queued_answer(c, user, job_id)['queued_behind'],
+                'fleet_ahead': db.fleet_ahead(c, job_id)}
     return {
+        **wait,
         # Every term, ticked or not, with its bracketed translation: this is
         # what the term review renders, and it is the same list the ticker's
         # "N terms (x en / y zh)" has always been built from (db.term_dict).
@@ -1120,9 +1165,19 @@ def manifest(job_id: int, request: Request):
     job = _job_or_404(c, job_id, user)
     tids = db.term_ids_by_video(c, job_id)
     hits = db.term_hit_counts(c, job_id)
+    # `reveal_path` on every row that has a file (YTWEB-11, 2026-09-03): it is
+    # what makes a finished DOWNLOADS row clickable through the same companion
+    # loopback the history panel has always used. Derived here from the JOB's
+    # destination and the row's filename -- never from `filepath`, which is
+    # absolute on whichever machine fetched the clip.
+    videos = []
+    for v in db.videos(c, job_id):
+        d = db.video_dict(v, tids.get(v['video_id']))
+        d['reveal_path'] = db.video_reveal_path(job, v)
+        videos.append(d)
     return {
         'job': db.job_dict(job),
-        'videos': [db.video_dict(v, tids.get(v['video_id'])) for v in db.videos(c, job_id)],
+        'videos': videos,
         'terms': [db.term_dict(t, hits.get(t['id'], 0))
                   for t in db.terms(c, job_id)],
         'counts': db.counts(c, job_id),
@@ -1271,6 +1326,133 @@ def select_bulk(job_id: int, req: BulkSelect, request: Request):
     return {'ok': True, 'changed': n, 'counts': db.counts(c, job_id)}
 
 
+# ------------------------------------------------------------- free space
+# YTWEB-9 (2026-09-03). Nothing anywhere checked whether the clips would fit:
+# the editor's only proxy before pressing DOWNLOAD was a DURATION ("8h 10m of
+# footage"), and 40 clips of 12 minutes at 1080p is 15-40 GB. On a full NAS the
+# failure arrived as N opaque per-clip errors and a note whose advice was "Fix
+# the cause, then press RETRY".
+#
+# Bytes per second of video, per quality rung. A TABLE and not a measurement:
+# what an estimate is for here is the order of magnitude, and yt-dlp cannot
+# know a file's size before it picks a format anyway. Deliberately generous
+# where it matters -- an estimate that is too small is the one that lets a full
+# disk through. The SPA carries the same table (app.js BYTES_PER_SECOND) for
+# the line under the review grid; the two are duplicated on purpose rather than
+# served, because a page that had to ask the server how big its selection is
+# would print nothing at all when the round trip failed.
+BYTES_PER_SECOND = {
+    '480p': 350_000,
+    '720p': 625_000,
+    '1080p': 1_000_000,
+    '1440p': 2_000_000,
+    '2160p': 4_400_000,
+    # 'best' is 2160p or above and can be anything; the biggest rung is the
+    # only safe reading of it.
+    'best': 4_400_000,
+}
+
+# What a job needs free when nothing can be estimated: a manifest whose rows
+# carry no duration (a paste, every time -- its rows are created from links
+# with no metadata fetch behind them). Small enough not to refuse an ordinary
+# download on a nearly-full disk, big enough that a disk with less than this
+# on it is a disk nothing should start writing to.
+UNKNOWN_ESTIMATE_FLOOR = 2 * 1000 ** 3
+
+# The headroom rule: refuse below TWICE the estimate. A download writes the
+# format streams, then merges them, and the edit-ready conversion writes a
+# second whole file beside the first before the swap -- so "the size of the
+# clips" is never the peak.
+FREE_SPACE_FACTOR = 2
+
+
+def estimated_bytes(rows, quality):
+    """Roughly how much disk `rows` will take at `quality`. 0 = cannot tell."""
+    rate = BYTES_PER_SECOND.get(str(quality or ''), BYTES_PER_SECOND['1080p'])
+    secs = 0
+    for r in rows:
+        try:
+            secs += max(0, int(r['duration'] or 0))
+        except (TypeError, ValueError, IndexError, KeyError):
+            continue
+    return secs * rate
+
+
+_FREE_TTL = 60
+_free_cache = {}
+_free_lock = threading.Lock()
+
+
+def free_bytes_at(path, now=None):
+    """`shutil.disk_usage(path).free`, cached 60 s. None when it cannot be read.
+
+    Cached because this is asked on the DOWNLOAD press and the press is not
+    the only caller a later change will add; a stat per request against a NAS
+    mount that has gone away is a request that hangs, not one that answers.
+
+    Walks UP to the nearest existing ancestor: the destination folder is
+    created by the download phase, so at the moment of this check it usually
+    does not exist yet and the filesystem being asked about is the same one
+    either way. None (an unreadable path, a vanished mount) FAILS OPEN -- a
+    check that cannot see the disk must not be the thing that refuses a
+    download.
+    """
+    p = Path(path)
+    key = str(p)
+    now = time.time() if now is None else now
+    with _free_lock:
+        hit = _free_cache.get(key)
+        if hit is not None and now - hit[0] < _FREE_TTL:
+            return hit[1]
+    free = None
+    probe = p
+    for _ in range(8):
+        try:
+            free = shutil.disk_usage(probe).free
+            break
+        except (OSError, ValueError):
+            if probe.parent == probe:
+                break
+            probe = probe.parent
+    with _free_lock:
+        _free_cache[key] = (now, free)
+    return free
+
+
+def _gb(n):
+    """Bytes as an editor reads them. Whole GB, and never '0 GB' for a real
+    number: a refusal that says the disk has 0 GB free reads as a bug."""
+    gb = float(n) / 1000 ** 3
+    return f'{gb:.1f} GB' if gb < 10 else f'{round(gb)} GB'
+
+
+def _refuse_if_full(rows, job, outdir):
+    """Raise the 409 that names the path and the two numbers, or return None.
+
+    Fails OPEN on anything it cannot measure. The point is to turn "N opaque
+    per-clip errors" into one sentence before a byte is fetched, not to become
+    a new way for a download to be impossible.
+    """
+    free = free_bytes_at(outdir)
+    if free is None:
+        return None
+    estimate = estimated_bytes(rows, job['quality'])
+    need = (estimate * FREE_SPACE_FACTOR) if estimate else UNKNOWN_ESTIMATE_FLOOR
+    if free >= need:
+        return None
+    where = f'{job["project_label"]}/{db.YOUTUBE_DIR}'
+    if job['term_dir']:
+        where = f'{where}/{job["term_dir"]}'
+    size = (f'these {len(rows)} clips need about {_gb(estimate)}'
+            if estimate else 'this download needs room to work in')
+    raise HTTPException(409, {
+        'detail': (f'there is only {_gb(free)} free where these clips go '
+                   f'({where}), and {size}, so nothing was started. '
+                   f'Free some space and press DOWNLOAD again.'),
+        'phase': job['phase'], 'reason': 'disk_full',
+        'free_bytes': int(free), 'estimate_bytes': int(estimate)})
+
+
 @router.post('/api/jobs/{job_id}/download')
 def start_download(job_id: int, request: Request):
     """Hand the editor's selection to the worker.
@@ -1344,6 +1526,22 @@ def start_download(job_id: int, request: Request):
                       'so nothing can be downloaded into it. Tick it on the '
                       'dashboard again, or start a new search.',
             'phase': job['phase']})
+
+    # WILL IT FIT (YTWEB-9, 2026-09-03). Before mark_pending, so a refusal
+    # leaves the job exactly as it found it: db.selected_for_download reads the
+    # same rows that UPDATE is about to claim, and the two predicates must stay
+    # identical or this sizes a different download than the one it guards.
+    selection = db.selected_for_download(c, job_id)
+    if selection:
+        try:
+            outdir = config.safe_join(config.PROJECTS_ROOT, job['project_label'],
+                                      db.YOUTUBE_DIR, job['term_dir'])
+        except config.PathTraversalError:
+            # The download phase builds the same path and refuses the same
+            # label; this check is not the place that gets to say so.
+            outdir = None
+        if outdir is not None:
+            _refuse_if_full(selection, job, outdir)
 
     n = db.mark_pending(c, job_id)
     if not n:

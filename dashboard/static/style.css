@@ -1765,3 +1765,47 @@ input[type="range"]:disabled {
   cursor: pointer;
 }
 /* ===== END sweep 2026-09-04 =============================================== */
+
+/* ===== BEGIN sweep wave 3 2026-09-04: chips that explain themselves ======= */
+/* DUI-3: every chip on the fleet grid carried its cause and its next action
+   in `title=` alone, and a touch device has no hover -- so on the page whose
+   whole reason for being opened on a phone is "is anything red", eighteen
+   labels in one cell were mute. static/htmx_errors.js opens this sheet with
+   the chip's own explanation; the prose lives in ui.CHIP_HELP so the tooltip
+   and the sheet cannot drift. Fixed to the bottom like .stale-banner, for the
+   same reason: what a reader needs is where their thumb already is. */
+.chip-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 70;
+  background: var(--panel);
+  border-top: 1px solid var(--red);
+  padding: 0.7rem 0.9rem calc(0.7rem + var(--safe-b, 0px));
+  max-height: 60vh;
+  overflow: auto;
+}
+.chip-sheet[hidden] { display: none; }
+.chip-sheet-label { color: var(--red); }
+.chip-sheet-text { margin: 0.35rem 0; }
+/* Keyboard users get the same sheet (htmx_errors.js gives every chip a
+   tabindex), so the focus ring has to land somewhere visible. */
+.chip[title], [data-chip-detail] { cursor: help; }
+
+/* DUI-6: the refusal, moved next to the control that caused it. The panels
+   still render their banner at the top -- that is right for an error with no
+   button behind it -- and htmx_errors.js relocates the ones that have one. */
+.banner.form-error {
+  margin: 0.3rem 0;
+  display: block;
+}
+
+/* REL-12: the four long buttons on Packages carry hx-indicator="this", which
+   puts .htmx-request on the FORM rather than on the button inside it. The
+   DUI-4 rules above dim the button; this is what stops a second submit
+   reaching the select beside it. */
+form.htmx-request select,
+form.htmx-request input { pointer-events: none; }
+/* ===== END sweep wave 3 2026-09-04 ======================================== */
+

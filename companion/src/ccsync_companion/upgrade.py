@@ -1046,6 +1046,15 @@ def parse_upgrade(resp: Any) -> Optional[dict[str, Any]]:
         "signature": str(info.get("signature") or "").strip(),
         "pubkey_id": str(info.get("pubkey_id") or "").strip(),
     })
+    # "What changed", when the publisher wrote any (APP-16, 2026-09-04). Read
+    # DEFENSIVELY and only when the loop above did not already carry it: if
+    # `notes` is a signed field for this kind it is in `out` verbatim already,
+    # and re-writing it with a tidied copy would break the signature it is part
+    # of. When it is not signed it is display-only text from the dashboard we
+    # are already trusting for the offer itself; it decides nothing, and it is
+    # trimmed at render time, never here.
+    if "notes" not in out and isinstance(info.get("notes"), str):
+        out["notes"] = info["notes"]
     return out
 
 
@@ -1129,58 +1138,154 @@ def compare_to_running(version: Any, running: Optional[str] = None) -> str:
         return VERSION_UNKNOWN
 
 
-def offer_label(version: Any, running: Optional[str] = None) -> str:
+# "What changed", at the length each surface can carry (APP-16, 2026-09-04).
+# An editor asked to interrupt their work for a build identified only by a
+# number has no way to judge it, so the rational move is to ignore the offer --
+# which is the fleet behaviour [ UPDATE NOW ] and auto_update were added to
+# work around. A record with no notes renders exactly as it did before.
+NOTES_LABEL_CHARS = 48
+NOTES_TOAST_CHARS = 90
+NOTES_DIALOG_CHARS = 1200
+# version -> notes, from the last offer this process saw. The tray and the
+# settings window call the three helpers below with a VERSION and nothing
+# else, so without this the notes would need a change in every caller. Tiny
+# and bounded: there is one offer at a time.
+_OFFER_NOTES: dict[str, str] = {}
+_OFFER_NOTES_LOCK = threading.Lock()
+
+
+def remember_offer_notes(info: Any) -> None:
+    """Record an offer's release notes for the wording helpers. Never raises."""
+    try:
+        version = str((info or {}).get("version") or "").strip()
+        notes = clean_notes((info or {}).get("notes"), NOTES_DIALOG_CHARS)
+        if not version:
+            return
+        with _OFFER_NOTES_LOCK:
+            if not notes:
+                _OFFER_NOTES.pop(version, None)
+                return
+            if len(_OFFER_NOTES) > 8:
+                _OFFER_NOTES.clear()
+            _OFFER_NOTES[version] = notes
+    except Exception:
+        log.debug("remember_offer_notes failed", exc_info=True)
+
+
+def offer_notes(version: Any) -> str:
+    with _OFFER_NOTES_LOCK:
+        return _OFFER_NOTES.get(str(version or "").strip(), "")
+
+
+def clean_notes(notes: Any, limit: int) -> str:
+    """Publisher-written text, made safe to put in a menu item or a dialog.
+
+    Control characters out (a menu item is one line, and a NUL in a Win32
+    string truncates it), whitespace collapsed per line, and a hard cap: the
+    notes come from a record this machine did not author, and no amount of
+    them may push the buttons off a dialog.
+    """
+    try:
+        text = notes if isinstance(notes, str) else ""
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        lines = [" ".join(line.split()) for line in text.split("\n")]
+        out = "\n".join(line for line in lines if line).strip()
+        out = "".join(c for c in out if c == "\n" or c.isprintable())
+        if len(out) > limit:
+            out = out[:limit].rstrip() + "..."
+        return out
+    except Exception:
+        log.debug("clean_notes failed", exc_info=True)
+        return ""
+
+
+def notes_first_line(notes: Any, limit: int) -> str:
+    text = clean_notes(notes, limit if limit > 0 else NOTES_TOAST_CHARS)
+    return text.split("\n", 1)[0].strip()
+
+
+def _notes_for(version: Any, notes: Any) -> Any:
+    """The caller's notes, or the ones the last offer carried."""
+    return notes if notes is not None else offer_notes(version)
+
+
+def offer_label(version: Any, running: Optional[str] = None,
+                notes: Any = None) -> str:
     """The tray menu item for an available build. The word "update" appears
-    ONLY when the offered build really is newer."""
+    ONLY when the offered build really is newer.
+
+    `notes` defaults to whatever the last offer carried (APP-16); an offer
+    without any renders exactly as it did before.
+    """
     order = compare_to_running(version, running)
     if order == VERSION_NEWER:
-        return f"Update available → v{version} (install)"
-    if order == VERSION_OLDER:
-        return f"Roll back to v{version} (older build, install)"
-    return f"Switch to v{version} (install)"
+        label = f"Update available → v{version} (install)"
+    elif order == VERSION_OLDER:
+        label = f"Roll back to v{version} (older build, install)"
+    else:
+        label = f"Switch to v{version} (install)"
+    line = notes_first_line(_notes_for(version, notes), NOTES_LABEL_CHARS)
+    return f"{label} - {line}" if line else label
 
 
-def offer_toast(version: Any, running: Optional[str] = None) -> str:
+def offer_toast(version: Any, running: Optional[str] = None,
+                notes: Any = None) -> str:
     """The tray balloon raised once when a new offer appears (app.py's
-    on_available). Same three cases as offer_label."""
+    on_available). Same three cases as offer_label, plus the first line of the
+    release notes when the record carried any (APP-16)."""
     order = compare_to_running(version, running)
     current = config_mod.VERSION if running is None else running
     if order == VERSION_NEWER:
-        return f"Update available → v{version}. Use the tray menu to install"
-    if order == VERSION_OLDER:
-        return (f"Roll back to v{version} offered. That is OLDER than the v{current} "
-                f"you are running. Only install it if your admin asked you to.")
-    return f"Switch to v{version}. Use the tray menu to install"
+        toast = f"Update available → v{version}. Use the tray menu to install"
+    elif order == VERSION_OLDER:
+        toast = (f"Roll back to v{version} offered. That is OLDER than the v{current} "
+                 f"you are running. Only install it if your admin asked you to.")
+    else:
+        toast = f"Switch to v{version}. Use the tray menu to install"
+    line = notes_first_line(_notes_for(version, notes), NOTES_TOAST_CHARS)
+    if not line:
+        return toast
+    return f"{toast.rstrip('.')}. What's new: {line}"
 
 
-def offer_dialog_text(version: Any, running: Optional[str] = None) -> tuple[str, str, str]:
+def offer_dialog_text(version: Any, running: Optional[str] = None,
+                      notes: Any = None) -> tuple[str, str, str]:
     """(title, body, ok-button label) for the confirmation dialog, so the
     LAST thing shown before the swap agrees with the menu item that opened
-    it."""
+    it.
+
+    The release notes go in FULL here (APP-16): this is the one surface with
+    room for them, and it is the moment the editor is deciding.
+    """
     from . import site as site_mod
 
     order = compare_to_running(version, running)
     current = config_mod.VERSION if running is None else running
     if order == VERSION_OLDER:
-        return (
+        title, body, ok = (
             site_mod.notify_title("roll back"),
             f"Roll back to v{version}? That is OLDER than the v{current} on this "
             f"machine. You would LOSE whatever v{current} fixed. The companion "
             f"will restart itself.",
             "ROLL BACK",
         )
-    if order == VERSION_NEWER:
-        return (
+    elif order == VERSION_NEWER:
+        title, body, ok = (
             site_mod.notify_title("update"),
             f"Update to v{version}? The companion will restart itself.",
             "UPDATE",
         )
-    return (
-        site_mod.notify_title("switch build"),
-        f"Switch to v{version}? You are running v{current}. The companion will "
-        f"restart itself.",
-        "SWITCH",
-    )
+    else:
+        title, body, ok = (
+            site_mod.notify_title("switch build"),
+            f"Switch to v{version}? You are running v{current}. The companion "
+            f"will restart itself.",
+            "SWITCH",
+        )
+    written = clean_notes(_notes_for(version, notes), NOTES_DIALOG_CHARS)
+    if written:
+        body = f"{body}\n\nWhat is new in v{version}:\n{written}"
+    return title, body, ok
 
 
 class UpgradeManager:
@@ -1399,6 +1504,12 @@ class UpgradeManager:
                 self._log_refusal(info.get("version"), reason)
                 info = None
         newly: Optional[dict[str, Any]] = None
+        if info is not None:
+            # APP-16: the wording helpers are called with a VERSION and
+            # nothing else, from the tray and the settings window, so the
+            # notes are remembered here rather than threaded through five
+            # call sites in three files.
+            remember_offer_notes(info)
         with self._lock:
             if info is not None:
                 if self._available is None or self._available["version"] != info["version"]:

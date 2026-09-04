@@ -11,7 +11,9 @@ from app import config
 from app.db import get_db
 # Import the name, not the module: the route function below is itself called
 # `search` and would shadow a module import.
-from app.search import BROWSE_PREDICATE, UNCATEGORISED, creators_shares, search_videos
+from app.search import (BROWSE_PREDICATE, UNCATEGORISED, count_in_scope,
+                        creators_shares, search_videos)
+from app.semantic import mode_availability
 
 router = APIRouter(prefix="/api")
 
@@ -91,7 +93,20 @@ def search(
         shoot=shoot,
         path=path,
     )
-    return {"results": results, "total": total}
+    # Two things the page cannot work out for itself, both about an EMPTY grid
+    # (BROLL-9 / BROLL-10, 2026-09-04). `mode_available` says which of the
+    # three modes can answer at all and why not, so the buttons stop offering
+    # a mode that returns nothing on every query for ever; `scope_total` says
+    # how many clips the filters left to search, so "nothing matched" can name
+    # what it searched. scope_total is computed only when there is a query and
+    # it found nothing -- every other search pays for neither.
+    out: dict = {"results": results, "total": total,
+                 "mode_available": mode_availability(conn)}
+    if q.strip() and not results:
+        out["scope_total"] = count_in_scope(
+            conn, category=category, flags=flags, collection=collection,
+            shoot=shoot, path=path)
+    return out
 
 
 @router.get("/videos/{video_id}")

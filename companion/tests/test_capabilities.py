@@ -326,3 +326,83 @@ def test_a_volunteer_getter_that_throws_costs_nothing(tmp_path):
                              use_cache=False)
     assert section["volunteer_until"] is None
     assert "whisper" in section
+
+
+# ------------------------------------------- the machine's own jobs verdict
+#
+# CMEDIA-12 (usability sweep 2026-09-03): `GET /api/v1/jobs/<id>/why`
+# reconstructs a machine's eligibility from the hardware here. The RUNNER's
+# actual verdict went only into a diagnostics bundle somebody has to ask an
+# editor to copy -- and the two can disagree (a stale offer, a volunteer
+# window that expired between the report and the claim).
+
+
+def test_the_jobs_gate_rides_the_section(tmp_path):
+    section = caps_mod.build(
+        cfg(tmp_path),
+        jobs_gate_fn=lambda: {"taking_work": False, "reason": "user_active"},
+        use_cache=False)
+    assert section["jobs_gate"] == {"taking_work": False, "reason": "user_active"}
+
+
+def test_no_gate_is_ABSENT_not_guessed(tmp_path):
+    """What an older companion sends, and what a runner that cannot answer
+    sends: nothing. `taking_work: false` off a machine that never said so
+    would explain a scheduling decision with a fact nobody stated."""
+    assert "jobs_gate" not in caps_mod.build(cfg(tmp_path), use_cache=False)
+    assert "jobs_gate" not in caps_mod.build(
+        cfg(tmp_path), jobs_gate_fn=lambda: {}, use_cache=False)
+
+
+def test_a_gate_getter_that_throws_costs_nothing(tmp_path):
+    def boom():
+        raise RuntimeError("the runner is mid-shutdown")
+
+    section = caps_mod.build(cfg(tmp_path), jobs_gate_fn=boom, use_cache=False)
+    assert "jobs_gate" not in section
+    assert "whisper" in section
+
+
+def test_the_jobs_gate_is_never_served_from_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(caps_mod, "_gpu", lambda: {})
+    monkeypatch.setattr(caps_mod, "_nvenc", lambda cfg: False)
+    monkeypatch.setattr(caps_mod, "_ffmpeg", lambda cfg: False)
+    c = cfg(tmp_path)
+    first = caps_mod.build(c, jobs_gate_fn=lambda: {"taking_work": True,
+                                                   "reason": "ready"})
+    second = caps_mod.build(c, jobs_gate_fn=lambda: {"taking_work": False,
+                                                    "reason": "user_active"})
+    assert first["jobs_gate"]["reason"] == "ready"
+    assert second["jobs_gate"]["reason"] == "user_active"
+
+
+# ------------------------------------------------------- the cards block
+
+def test_the_cards_block_passes_the_health_fields_through(tmp_path):
+    """RES-6: the role answers with `detail`, `gate_state`, `last_poll_at`
+    and `last_http_status`, and this filter was a hard five-key allow-list --
+    so a health verdict, a 401 and a dashboard that had gone quiet all
+    reached the wire as one word."""
+    section = caps_mod.build(
+        cfg(tmp_path),
+        cards_agent_fn=lambda: {
+            "connected": False, "state": "credential_refused",
+            "detail": "the dashboard refused this machine's fleet token",
+            "gate_state": "running", "last_poll_at": "2026-09-04T08:00:00+00:00",
+            "last_http_status": 401, "timeline": "", "version": 0, "since": None,
+        },
+        use_cache=False)
+    cards = section["cards_agent"]
+    assert cards["state"] == "credential_refused"
+    assert cards["last_http_status"] == 401
+    assert cards["detail"].startswith("the dashboard refused")
+    assert cards["gate_state"] == "running"
+
+
+def test_a_role_that_says_nothing_extra_fills_nothing_in(tmp_path):
+    """A None-filled key from a role that never said anything is a claim.
+    The five-key default is also exactly what a companion older than RES-6
+    sends."""
+    section = caps_mod.build(cfg(tmp_path), use_cache=False)
+    assert section["cards_agent"] == {"connected": False, "state": "disabled",
+                                      "timeline": "", "version": 0, "since": None}

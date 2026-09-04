@@ -12,7 +12,10 @@
        paths refuse it too; this is the half the editor can see. #}
     <input type="checkbox" class="proj-check"
            {% if toggle_editor_base %}disabled
-             title="{{ toggle_editor }} is a base rig: it works directly off the NAS and syncs nothing"
+             {# DUI-20: which setting made this box grey, and whose it is
+                (CR-88: the computer's own, tray then Settings then THIS
+                COMPUTER). Without it a greyed rail is a dead end. #}
+             title="{{ toggle_editor }} is a base rig: it works directly off the NAS and syncs nothing. Change it on that computer: tray, Settings, THIS COMPUTER."
            {% else %}
              title="sync this project to every computer {{ toggle_editor }} uses. Per-computer plans live on Settings, Assignments."
              hx-post="/partials/selection/{{ toggle_editor }}/{{ p.slug }}/toggle?view=sidebar{{ '&slug_page=' ~ current_slug if current_slug }}{{ as_qs }}"

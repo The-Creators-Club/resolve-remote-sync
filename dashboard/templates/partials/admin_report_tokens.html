@@ -17,7 +17,11 @@
       shared fleet token every companion holds today.</span></div>
 
   {% if error %}
-    <div class="banner">▲ {{ error }}</div>
+    {# DUI-6: `error-banner` is what static/htmx_errors.js moves next to the button
+       that caused it. This panel swaps outerHTML, which preserves scroll, so a
+       refusal used to render a screen or two above the click that earned it. An
+       error with no control behind it stays here, which is where it belongs. #}
+    <div class="banner error-banner">▲ {{ error }}</div>
   {% endif %}
 
   {% if report_tokens.shared_machines %}

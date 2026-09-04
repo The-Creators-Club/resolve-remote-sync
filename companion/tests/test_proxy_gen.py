@@ -2288,3 +2288,40 @@ class TestProxyDryRun:
         assert gen.encode_once(_clip(src)) == proxy_gen.RESULT_SKIPPED
         assert encodes == []
         assert not (src.parent / "Proxy").exists()
+
+
+# -- the three brakes reach the editor, not just the log (RES-11, 2026-09-04) --
+
+
+def test_gap_and_coverage_carry_capped_low_space_and_truncated(tmp_path):
+    """The dashboard could see a low-space machine; the editor sitting AT it
+    could not, and a clip capped after three failures had no key anywhere
+    naming it. A machine that reports 1040 missing and 0 queued and says
+    nothing else is the 0.6.1 muxer night (COMP-MEDIA-4)."""
+    gen = _make_gen(tmp_path)
+    totals = proxy_scan._empty_totals()
+    totals.update({"missing": 1040, "capped": 3, "truncated": True})
+    gen._scan_fn = lambda *a, **k: {"projects": {}, "totals": totals}
+    gen.scan_once()
+    gen._low_space = r"only 4.1 GB free on the drive holding F:\Creators_Club"
+
+    for view in (gen.gap(), gen.coverage()):
+        assert view["capped"] == 3
+        assert view["truncated"] is True
+        assert view["low_space"].startswith("only 4.1 GB free")
+        reasons = view["reasons"]
+        assert set(reasons) == {"capped", "low_space", "truncated"}
+        assert "3 clip(s) failed too many times" in reasons["capped"]
+        assert "4.1 GB free" in reasons["low_space"]
+        assert "more clips without proxies" in reasons["truncated"]
+        # Owner's rule 2026-08-18: no em dash in anything an editor reads.
+        assert all("\u2014" not in sentence for sentence in reasons.values())
+
+
+def test_a_generator_with_nothing_wrong_offers_no_reasons(tmp_path):
+    """`reasons` is what a tray renders, so an idle healthy machine must give
+    it nothing to render."""
+    gen = _make_gen(tmp_path)
+    gap = gen.gap()
+    assert gap["reasons"] == {}
+    assert gap["capped"] == 0 and gap["truncated"] is False and gap["low_space"] == ""

@@ -1119,6 +1119,27 @@ Example of it doing its job (base rig, 2026-07-25, before this build landed):
 
 ---
 
+## Saying what changed (`--notes` / `-Notes`)
+
+A build is offered to an editor as a version number and nothing else, so the
+rational move is to ignore the dialog (APP-16, usability sweep 2026-09-04).
+Pass one line of what changed and it is stored on the package record, returned
+in the upgrade offer and shown in that dialog: `tools\ship.cmd -Notes "proxy
+downloads resume by themselves after a drive comes back"`, `python
+tools\publish_latest.py --notes "..."` (it rides `publish_feed.py --notes`,
+which the feed record has always carried), or `--notes` straight on
+`tools/sign_release.py`. `ship.ps1` passes it to both artefacts through
+`CCSYNC_RELEASE_NOTES`, which `sign_release.py` reads when no `--notes` is
+given -- that is how it reaches the PUT that `build_editor_package.ps1`
+makes. The note is **UNSIGNED and advisory**, exactly like `git_sha`: the
+release signature covers a fixed field list that every companion in the field
+mirrors, and a record carrying a field an older build's canonicaliser does not
+know is refused by that build with no over-the-air recovery, so a sentence an
+editor reads must never be able to make a build uninstallable. Absent is the
+old dialog, word for word.
+
+---
+
 ## The provenance manifest
 
 `tools/release.ps1` writes `companion/dist/ccsync-release.json`:

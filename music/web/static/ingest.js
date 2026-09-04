@@ -54,6 +54,12 @@ const MI_UPLOAD_CONCURRENCY = 2;
 const MI_LOOPBACK_POLL_MS = 1500;   // the companion's own view
 const MI_SERVER_POLL_MS = 5000;     // the truth after a reload
 const MI_BATCH_LIST_MS = 10000;
+const MI_QUEUE_POLL_MS = 15000;     // the base rig's queue (MUSIC-7)
+
+/* A batch in one of these is over. The list existed twice as a literal before
+   MUSIC-9 (2026-09-04) needed a third reader: the transition INTO one of them
+   is what refreshes the library the editor is looking at. */
+const MI_TERMINAL_STATES = ['done', 'done_with_errors', 'cancelled', 'failed'];
 
 /* The one place this file says "the companion is not answering". Repeated
    verbatim from the /music/send path's lesson: a rejected fetch is NOT proof
@@ -146,7 +152,10 @@ const mi = {
   expandedItems: [],
   precheckKey: '',
   running: false,
-  timers: {loopback: null, server: null, list: null, prepare: null, precheck: null},
+  queue: null,        // GET api/ingest/queue, or null (MUSIC-7)
+  seenStates: {},     // batch uid -> the last state this page saw it in
+  timers: {loopback: null, server: null, list: null, queue: null,
+           prepare: null, precheck: null},
 };
 
 /* ---------------------------------------------------------------------- */
@@ -593,8 +602,10 @@ function miStartPolling() {
   mi.timers.loopback = setInterval(miPollLoopback, MI_LOOPBACK_POLL_MS);
   mi.timers.server = setInterval(miPollServer, MI_SERVER_POLL_MS);
   mi.timers.list = setInterval(miLoadBatches, MI_BATCH_LIST_MS);
+  mi.timers.queue = setInterval(miLoadQueue, MI_QUEUE_POLL_MS);
   miPollLoopback();
   miPollServer();
+  miLoadQueue();
 }
 
 function miStopPolling() {
@@ -642,13 +653,88 @@ async function miPollServer() {
     mi.batchItems = answer.items || [];
     // The server is the truth after a reload - when it says the batch is over,
     // the live view stops claiming otherwise even if the companion is silent.
-    if (['done', 'done_with_errors', 'cancelled', 'failed'].includes(mi.batch.state)) {
+    if (MI_TERMINAL_STATES.includes(mi.batch.state)) {
       mi.running = false;
     }
+    miNoteBatchState(mi.batch);
   } catch {
     /* transient - the batch list poll will catch up */
   }
   miRenderLive();
+}
+
+/* MUSIC-9 (2026-09-04): nothing in this file touched the library view, so a
+   batch reaching `done` left the results list, the facets and the header stats
+   exactly as they were and the only way to see the new tracks was to reload
+   the page. The refresh fires on the TRANSITION into a terminal state, never
+   on first sight of one: a page opened on last week's finished batches must
+   not re-render the list under the editor. */
+function miNoteBatchState(batch) {
+  if (!batch || !batch.uid) return;
+  const was = mi.seenStates[batch.uid];
+  mi.seenStates[batch.uid] = batch.state;
+  if (!was || was === batch.state) return;
+  if (MI_TERMINAL_STATES.includes(was) || !MI_TERMINAL_STATES.includes(batch.state)) return;
+  miAfterBatch(batch);
+}
+
+function miAfterBatch(batch) {
+  miLoadQueue();
+  toast(el('div', 'row', `Ingest ${miWords(MI_BATCH_WORDS, batch.state)}: `
+                         + 'the library below is refreshed, newest first.'));
+  // `refreshLibrary` lives in app.js, which always loads first - the guard is
+  // for a stale index.html that has one script and not the other.
+  if (typeof refreshLibrary === 'function') refreshLibrary(true);
+}
+
+/* ---------------------------------------------------------------------- */
+/* The base rig's queue (MUSIC-7)                                          */
+/* ---------------------------------------------------------------------- */
+
+/** `GET api/ingest/queue` has always carried the counts, the pending rows and
+ *  every parked failure's reason, and until 2026-09-04 nothing in the browser
+ *  read it: a queued upload that cannot be analysed is parked, never retried,
+ *  so the reason existed only in the log of whichever indexer run hit it. */
+async function miLoadQueue() {
+  if (!mi.open) return;
+  try {
+    mi.queue = await miApi('api/ingest/queue');
+  } catch {
+    return;                     // transient: the next tick asks again
+  }
+  miRenderQueue();
+}
+
+function miRenderQueue() {
+  const box = $('#mi-queue');
+  if (!box) return;             // stale index.html
+  const body = $('#mi-queue-body');
+  const q = mi.queue || {};
+  const counts = q.counts || {};
+  const pending = q.pending || [];
+  const failed = q.failed || [];
+  box.classList.toggle('hidden', !counts.pending && !counts.failed);
+  body.innerHTML = '';
+  if (counts.pending) {
+    body.appendChild(el('div', 'row',
+      `Waiting for the base rig: ${counts.pending} track`
+      + `${counts.pending === 1 ? '' : 's'}. They are in the library already and `
+      + 'are not searchable until the base rig indexes them.'));
+    for (const row of pending.slice(0, 20)) {
+      body.appendChild(el('div', 'mi-row-meta', `◷ ${row.orig_name || row.rel_path}`));
+    }
+  }
+  if (counts.failed) {
+    body.appendChild(el('div', 'row bad',
+      `${counts.failed} could not be analysed. Nothing retries these on their `
+      + 'own: fix the file and drop it again.'));
+    for (const row of failed.slice(0, 20)) {
+      // orig_name and error carry a filename and raw ffmpeg stderr, neither
+      // filtered for HTML (MUSIC-15) - el() sets textContent, never innerHTML.
+      body.appendChild(el('div', 'mi-row-meta bad',
+        `✕ ${row.orig_name || row.rel_path} - ${row.error || 'no reason recorded'}`));
+    }
+  }
 }
 
 /* ---------------------------------------------------------------------- */
@@ -723,6 +809,10 @@ function miRenderPreview() {
   const box = $('#mi-preview');
   box.innerHTML = '';
   $('#mi-stage').classList.toggle('hidden', !mi.items.length);
+  // MUSIC-3: the panel opens from a button now, not only from a drop, so the
+  // empty case has to say what it takes and what happens next.
+  const hint = $('#mi-drop-empty');
+  if (hint) hint.classList.toggle('hidden', !!mi.items.length);
   for (const item of mi.items) {
     item.nodes = null;
     box.appendChild(miBuildRow(item));
@@ -971,8 +1061,7 @@ function miRenderLive() {
 
   const paused = !!(batch && batch.upload_paused) || !!(lb && lb.upload_paused);
   $('#mi-pause-upload').textContent = paused ? 'Resume uploads' : 'Pause uploads';
-  const over = batch && ['done', 'done_with_errors', 'cancelled', 'failed']
-    .includes(batch.state);
+  const over = batch && MI_TERMINAL_STATES.includes(batch.state);
   for (const id of ['#mi-pause', '#mi-resume', '#mi-start-now',
                     '#mi-pause-upload', '#mi-cancel']) {
     $(id).disabled = !!over;
@@ -1068,6 +1157,9 @@ async function miLoadBatches() {
   try {
     const answer = await miApi(`api/ingest-batches?scope=${mi.scope}`);
     mi.batches = answer.batches || [];
+    // MUSIC-9: the list poll sees a batch this page is not "running" itself,
+    // which is the common case after a reload.
+    for (const b of mi.batches) miNoteBatchState(b);
   } catch (e) {
     if (e.status === 403 && mi.scope === 'all') {
       mi.scope = 'mine';
@@ -1137,7 +1229,7 @@ function miRenderBatches() {
     toggle.type = 'button';
     toggle.addEventListener('click', () => miExpand(batch.uid));
     actions.appendChild(toggle);
-    if (!['done', 'done_with_errors', 'cancelled', 'failed'].includes(batch.state)) {
+    if (!MI_TERMINAL_STATES.includes(batch.state)) {
       const stop = el('button', 'text-btn', 'cancel');
       stop.type = 'button';
       stop.addEventListener('click', () => miCancelUid(batch.uid));

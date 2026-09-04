@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from ccsync_companion.sync import borrowed_folders
+from ccsync_companion.sync import borrowed_folders, shared_folders
 from ccsync_companion.sync.borrowed_folders import BorrowedFolderManager, local_path_for
 from ccsync_companion.sync.syncthing_admin import (
     STIGNORE_LINES,
@@ -442,3 +442,67 @@ def test_a_repointed_folder_stays_paused_when_its_ignores_are_unconfirmed(tmp_pa
     mgr = _manager(admin, tmp_path)
     mgr.reconcile()
     assert ("set_paused", SLUG, False) not in admin.calls
+
+
+# -- SYNC-101: the borrowed half of "kept, not logged once" -----------------
+
+def test_a_lender_the_server_never_shared_is_kept_as_a_problem(tmp_path):
+    """The borrowed subtree that never appears is the same silence the LUT
+    library had (SYNC-101, sweep 2026-09-03)."""
+    admin = FakeAdmin(pending={})
+    mgr = _manager(admin, tmp_path)
+    assert mgr.reconcile() == {SLUG: "not-offered"}
+    problems = mgr.problems()
+    assert len(problems) == 1
+    assert LENDER in problems[0] and "Ask your admin" in problems[0]
+    assert "—" not in problems[0]
+
+
+def test_a_borrowed_problem_backs_off_and_clears(tmp_path):
+    ticks = [1000.0]
+
+    def now():
+        return ticks[0]
+
+    admin = FakeAdmin(pending={})
+    mgr = BorrowedFolderManager(
+        admin, tmp_path, lenders_fn=_lenders,
+        selected_slugs_fn=lambda: ["s-selected"], now=now)
+    assert mgr.reconcile() == {SLUG: "not-offered"}
+    calls = len(admin.calls)
+    assert mgr.reconcile() == {SLUG: "not-offered"}     # backing off
+    assert len(admin.calls) == calls
+
+    ticks[0] += shared_folders.PROBLEM_RETRY_FIRST_SECONDS + 1
+    admin.pending = {SLUG: {"offeredBy": {"DEVICE-1": {}}}}
+    assert mgr.reconcile() == {SLUG: "accepted"}
+    assert mgr.problems() == []
+
+
+def test_a_lender_nobody_borrows_any_more_stops_being_a_problem(tmp_path):
+    admin = FakeAdmin(pending={})
+    lenders = {"live": dict(_lenders())}
+
+    mgr = BorrowedFolderManager(
+        admin, tmp_path, lenders_fn=lambda: lenders["live"],
+        selected_slugs_fn=lambda: ["s-selected"])
+    mgr.reconcile()
+    assert mgr.problems()
+    lenders["live"] = {}
+    mgr.reconcile()
+    assert mgr.problems() == []
+
+
+def test_a_repointed_lender_that_stays_paused_is_a_problem(tmp_path):
+    """Fail-closed is right and was invisible: the subtree is not syncing."""
+    old = tmp_path / "Projects" / "2026" / "FF5" / "Old Name"
+    old.mkdir(parents=True)
+    admin = _running_folder_at(tmp_path, old)
+
+    def _boom(folder_id):
+        raise RuntimeError("syncthing did not answer")
+
+    admin.get_ignores = _boom
+    mgr = _manager(admin, tmp_path)
+    assert mgr.reconcile() == {SLUG: "unfiltered"}
+    assert "filter list" in mgr.problems()[0]

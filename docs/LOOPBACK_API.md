@@ -10,8 +10,8 @@ it, because a second process holding that port breaks the tray (CLAUDE.md):
 |---|---|
 | `GET /status`, `POST /insert` | the b-roll library's "Send to Resolve" |
 | `GET /music/status`, `POST /music/send`, `POST /music/reveal` | the music library's |
-| `POST /ytdl/reveal`, `POST /ytdl/fetch`, `GET /ytdl/capabilities`, `POST /ytdl/download`, `GET /ytdl/progress` | the YouTube downloader page's |
-| `GET /broll/ingest/capabilities`, `POST /broll/ingest/{pick,prepare,run,control}`, `PUT /broll/ingest/upload/{staging_id}/{local_id}`, `GET /broll/ingest/{progress,thumb}` | b-roll ingest — drag clips onto the b-roll page and **this machine** indexes them (2026-08-18, `BROLL_INGEST_PLAN.md` §4.1) |
+| `POST /ytdl/reveal`, `POST /ytdl/fetch`, `GET /ytdl/capabilities`, `POST /ytdl/download`, `GET /ytdl/progress`, `POST /ytdl/cancel` | the YouTube downloader page's |
+| `GET /broll/ingest/capabilities`, `POST /broll/ingest/{pick,prepare,run,control,retry}`, `PUT /broll/ingest/upload/{staging_id}/{local_id}`, `GET /broll/ingest/{progress,thumb}` | b-roll ingest — drag clips onto the b-roll page and **this machine** indexes them (2026-08-18, `BROLL_INGEST_PLAN.md` §4.1) |
 | the same eight under `/music/ingest/…` | music ingest: the same routes, one kind parameter apart (2026-08-18, `MUSIC_INGEST_PLAN.md` step 3) |
 
 ## What was wrong
@@ -162,6 +162,71 @@ On top of those:
   reason, the offending Origin and the allow-list are log lines. A caller this
   server has just declined to talk to is not owed a description of the check it
   failed.
+
+## The bodies the pages are coded against
+
+Added by wave 3 of the usability + resilience sweep (2026-09-04, companion
+0.9.68). Everything here is additive: a page that has not been updated sees
+what it saw before.
+
+**`GET /ytdl/progress[?job_id=N]`** answers a LIST, always (CYT-2). It used to
+answer the executor's flat mirror dict, which nothing in the SPA ever fetched,
+so a 40-minute download showed the word `downloading` and no numbers for its
+whole life:
+
+```json
+{"jobs": [{"job_id": 7, "title": "gulf coast", "phase": "downloading",
+           "percent": 38.4, "speed": "4.2 MB/s", "eta_seconds": 96,
+           "file": null, "handed_back_reason": null,
+           "clip": "aaaaaaaaaaa", "done": 2, "failed": 0, "total": 12,
+           "running": true}]}
+```
+
+`percent`, `speed` and `eta_seconds` are the CLIP in flight (an average over
+clips that differ tenfold in length is a countdown that goes backwards);
+`done`/`total` are the job, so the page can draw "clip 3 of 12". `phase` is
+`downloading` / `converting` while it runs, then `finished`, `cancelled` or
+`handed_back`. Every field is `null` when it is not known, never `0`. The list
+is empty when this machine has nothing to say, and holds at most one job (one
+download at a time, `ytdl_executor._GUARD`). The flat dict lives on as
+`ytdl_executor.progress()`, which is what the tray line reads.
+
+**`handed_back_reason`** (CYT-11) is the sentence for the seven whole-job
+refusals that used to be one `log.warning` and a lease left to expire: a
+template or sidecar skew, a quality only the server names, a destination this
+machine cannot resolve or create, an unmounted tree, not enough free space,
+the identical-failure breaker, and the everyday one - the editor downloaded
+into a project this computer does not sync. It survives the job, so a page
+that polls after the 202 learns why the badge is about to flip.
+
+**`POST /ytdl/cancel`** `{"job_id": 7}` or `{"all": true}` (CYT-14) stops the
+download running on this machine: the child is killed, its partials go with
+it, the lease expires and the server downloads what is missing - the same
+ending every other hand-back here has. Always `200`:
+`{"ok": true, "stopped": 1, "message": "Stopped. ..."}`. `stopped: 0` means
+nothing was running, which is not an error: a second click must mean what the
+first one meant.
+
+**"This machine is already downloading"** is a WAITING state now (CMEDIA-7).
+`POST /insert` and `POST /music/send` answer
+`{"ok": true, "state": "busy", "retry_after": 1.5, "message": "..."}` at
+`broll_fetch`'s two-download cap, where they used to answer `ok: false`. The
+cap was always designed around the page's own 1.5 s re-POST being the retry -
+but the page loops only while the state is `downloading`, so every `ok: false`
+was toasted red and the loop returned.
+
+**`POST /broll/ingest/retry`** (and `/music/ingest/retry`) `{"staging_id":
+"...", "items": ["local_id", ...]}` puts failed staged files back in the queue
+(BROLL-5): the item's error is cleared, its half-written `.partial` is
+removed, and the page's pump picks it up. No `items` means every failed one in
+that drop. Answers `{"ok": true, "retried": n}`; retrying something that is
+not failed is a no-op, not an error.
+
+**`GET /{broll,music}/ingest/progress`** carries two more keys (CMEDIA-4,
+CMEDIA-10): `batch.queued_for_base_rig` (an item the base rig has to finish -
+neither done nor failed, and its file stays on this machine, so the staging
+pruner refuses to delete that drop) and `failed_items: [{name, error}]`, the
+first 20, mirrored at the top level of the same body.
 
 ## Operating it
 

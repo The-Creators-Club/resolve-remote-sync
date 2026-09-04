@@ -274,3 +274,62 @@ def test_a_malformed_command_is_ignored_and_the_rest_survive(tmp_path, monkeypat
     app._apply_resolve_undo(reply)
 
     assert [a["id"] for a in app._resolve_undo_results()] == [7]
+
+
+# -- RES-4 (2026-09-04): Resolve at the Project Manager is not a failure ------
+
+
+def test_no_project_open_parks_the_undo_instead_of_failing_it():
+    """The commonest state of all: Resolve open at the Project Manager, or
+    between projects. It matched none of the old prose tests, so an undo an
+    admin asked for was recorded FAILED and never offered again -- although
+    the editor opening their project is exactly what clears it."""
+    _write_journal()
+    ok, detail, state = resolve_undo.apply_undo(
+        resolve_undo.parse_command(_command()),
+        undo_fn=lambda **_kw: {"ok": False, "message": "no project open in Resolve"})
+
+    assert not ok
+    assert state == resolve_undo.STATE_RETRYING, "it must still be offered again"
+    assert "Parked" in detail and "no project open in Resolve" in detail
+    assert "as soon as that project is open" in detail or "next time that project is open" in detail
+    assert "—" not in detail
+
+
+def test_the_scripting_error_message_is_a_retry_too():
+    """"Resolve didn't answer. Make sure a project is open, then try again."
+    is explicitly transient, and "didn't" contains no "not"."""
+    _write_journal()
+    from ccsync_companion import resolve_bridge
+
+    ok, _detail, state = resolve_undo.apply_undo(
+        resolve_undo.parse_command(_command()),
+        undo_fn=lambda **_kw: {"ok": False,
+                               "message": resolve_bridge._SCRIPTING_ERROR_MESSAGE})
+    assert not ok and state != "failed"
+
+
+def test_the_finer_word_is_available_but_off_the_wire_by_default():
+    """`parked` is the honest state and the dashboard's ResolveUndoResultIn
+    accepts done/failed/retrying only (v40): an unknown value fails
+    validation for the WHOLE report, so the wire keeps "retrying" until a
+    dashboard that knows the word is deployed."""
+    _write_journal()
+    _, _detail, state = resolve_undo.apply_undo(
+        resolve_undo.parse_command(_command()), allow_parked=True,
+        undo_fn=lambda **_kw: {"ok": False, "message": "no timeline open in Resolve"})
+    assert state == resolve_undo.STATE_PARKED
+
+
+def test_a_parked_undo_is_stored_as_an_open_one(tmp_path):
+    """The ledger is what decides whether this machine is asked again, and
+    it tests for "retrying" -- so a state nobody recognises would retire the
+    command: RES-4's own bug, moved one file along."""
+    ledger = resolve_undo.UndoLedger(tmp_path)
+    entry = ledger.record(7, False, resolve_undo.PARKED_DETAIL,
+                          resolve_undo.STATE_PARKED)
+    assert entry["state"] == resolve_undo.STATE_RETRYING
+    assert entry["parked"] is True
+    entry = ledger.record(7, False, resolve_undo.PARKED_DETAIL,
+                          resolve_undo.STATE_PARKED)
+    assert entry["attempts"] == 2

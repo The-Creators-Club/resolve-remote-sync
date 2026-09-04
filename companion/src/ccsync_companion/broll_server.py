@@ -762,6 +762,17 @@ def build_insert_response(
             )
             return 200, {"ok": False, "state": "downloading",
                          "message": message, "progress": progress}
+        if state == broll_fetch.STATE_BUSY:
+            # ok TRUE, deliberately (CMEDIA-7, 2026-09-04): nothing has gone
+            # wrong, the clip is simply behind this machine's other download,
+            # and the page's poll loop must keep polling rather than toast a
+            # red failure and stop. `state` is what a page acts on; the older
+            # pages that only understand ok:false/true see a success with
+            # nothing inserted yet and poll on, which is the same behaviour.
+            return 200, {"ok": True, "state": "busy",
+                         "retry_after": broll_fetch.BUSY_RETRY_AFTER_SECONDS,
+                         "message": fetch.get("message")
+                         or broll_fetch.BUSY_MESSAGE}
         if state != broll_fetch.STATE_DONE:
             return 200, {
                 "ok": False,
@@ -1771,7 +1782,7 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
             return True
 
         ingestor = self._ingestor(kind)
-        if suffix in ("/prepare", "/run", "/control"):
+        if suffix in ("/prepare", "/run", "/control", "/retry"):
             body = self._read_json_body("message")
             if body is _REFUSED:
                 return True
@@ -1781,7 +1792,13 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
             if ingestor is None:
                 self._no_ingestor(kind)
                 return True
-            if suffix == "/prepare":
+            if suffix == "/retry":
+                # BROLL-5 (2026-09-04): the page's own pump gives up on a clip
+                # the moment an upload fails at the network level, and the
+                # companion has always been safe to re-send to. `items` is a
+                # list of local ids from THIS drop and nothing else is read.
+                status, result = ingestor.retry(body)
+            elif suffix == "/prepare":
                 status, result = ingestor.prepare(body)
             elif suffix == "/run":
                 # `batch_uid`, `staging_id` and `run_mode` and NOTHING ELSE
@@ -1857,12 +1874,22 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
             # answer is whatever this machine is doing, which is what a page
             # that has just dispatched wants. Unparseable = None, never a 400 --
             # this endpoint is a mirror the SPA may ignore entirely.
+            #
+            # `{"jobs": [...]}` since CYT-2 (2026-09-04), where the flat dict
+            # used to be: the page renders rows, and a machine with nothing to
+            # say has to answer the same SHAPE as one with a job, or every
+            # consumer needs two code paths. The flat dict lives on as
+            # ytdl_executor.progress(), which is what the tray line reads.
             raw = (parse_qs(parsed.query).get("job_id") or [""])[0]
             try:
                 job_id = int(raw) if raw else None
             except (TypeError, ValueError):
                 job_id = None
-            self._send_json(200, ytdl_executor.progress(job_id))
+            answer = ytdl_executor.snapshot()
+            if job_id is not None:
+                answer = {"jobs": [row for row in answer.get("jobs") or []
+                                   if row.get("job_id") == job_id]}
+            self._send_json(200, answer)
         else:
             self._send_json(404, {"ok": False, "message": f"not found: {path}"})
 
@@ -1944,6 +1971,30 @@ class BrollRequestHandler(BaseHTTPRequestHandler):
             status, result = ytdl_executor.start(body.get("job_id"),
                                                  self._ytdl_deps())
             self._send_json(status, result)
+        elif path == "/ytdl/cancel":
+            # CYT-14 (2026-09-04). `job_id` (or `all`) and nothing else, on the
+            # same origin/token guard every other POST here has: this only ever
+            # stops work this machine started, so the worst a caller who got
+            # past the guard can do is what the editor could do at the tray.
+            # Not a failure when nothing was running -- a second click, or a
+            # click that lost a race with the last clip, is not an error, and
+            # `stopped` is what tells the two apart.
+            body = self._read_json_body("message")
+            if body is _REFUSED:
+                return
+            if body is None or not isinstance(body, dict):
+                self._send_json(400, {"ok": False, "message": "invalid JSON body"})
+                return
+            if body.get("all"):
+                stopped = ytdl_executor.cancel_all()
+            else:
+                stopped = 1 if ytdl_executor.cancel_job(body.get("job_id")) else 0
+            self._send_json(200, {
+                "ok": True, "stopped": int(stopped),
+                "message": ("Stopped. The server will download the clips this "
+                            "computer did not finish.") if stopped else
+                           "There was no download running on this computer.",
+            })
         elif path == "/insert":
             body = self._read_json_body("message")
             if body is _REFUSED:

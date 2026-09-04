@@ -78,6 +78,200 @@ class Section:
     items: list  # list[Line | Button]
 
 
+# -- SYNC-118: an advisory has a RANK ---------------------------------------
+#
+# Every `_*_line` producer used to be appended with style="warning", in source
+# order, so a machine having a bad week showed a dozen equally loud red lines
+# with the one sentence that matters at the bottom, next to "Recoverable files
+# in .ccsync-trash: 12 GB", which is not a problem at all. The severity here is
+# a property of the PRODUCER, not of the text: only the producer knows whether
+# its sentence means "nothing is syncing" or "here is a number".
+BLOCKING = "blocking"
+WARNING = "warning"
+INFO = "info"
+_SEVERITY_ORDER = (BLOCKING, WARNING, INFO)
+# The three colours the renderer has. Red is reserved for the tier that means
+# work is not reaching the server.
+_SEVERITY_STYLE = {BLOCKING: "warning", WARNING: "normal", INFO: "muted"}
+# How many advisories are drawn before the rest go behind [ SHOW ALL ].
+_ADVISORY_CAP = 6
+
+# Toggled by [ SHOW ALL ] / [ SHOW FEWER ]. Module level rather than an
+# attribute of the window because build_settings_model is pure and the window
+# rebuilds it from a fresh snapshot every two seconds -- a flag on the widget
+# tree would be forgotten twice a second.
+_show_all_advisories = {"on": False}
+
+
+def advisories_shown_in_full() -> bool:
+    return bool(_show_all_advisories["on"])
+
+
+def action_show_all_advisories(app: "CompanionApp", show: bool) -> None:
+    """[ SHOW ALL ] / [ SHOW FEWER ] (SYNC-118).
+
+    Reopens the window: every button here closes it first (see the module
+    docstring's one rule), and a toggle that left the editor looking at a
+    closed window would be a button that appears to do nothing."""
+    _show_all_advisories["on"] = bool(show)
+    show_settings(app)
+
+
+def collapse_advisories(entries: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Identical sentences become one with a count (SYNC-118).
+
+    Two producers can legitimately say the same thing (the blocked summary
+    repeats a lane line often enough that _BLOCKED_REASONS_WITH_THEIR_OWN_LINE
+    exists), and the same sentence twice reads as two problems. The highest
+    severity wins: a sentence that blocks sync does not become advisory
+    because something quieter said it too."""
+    order: list[str] = []
+    seen: dict[str, list] = {}
+    for severity, text in entries:
+        if not text:
+            continue
+        if text not in seen:
+            order.append(text)
+            seen[text] = [severity, 0]
+        seen[text][1] += 1
+        if _SEVERITY_ORDER.index(severity) < _SEVERITY_ORDER.index(seen[text][0]):
+            seen[text][0] = severity
+    out: list[tuple[str, str]] = []
+    for text in order:
+        severity, count = seen[text]
+        out.append((severity, text if count < 2 else f"{text} (x{count})"))
+    return out
+
+
+def rank_advisories(entries: list[tuple[str, str]], show_all: bool = False):
+    """(lines, hidden) -- ranked, collapsed and capped (SYNC-118).
+
+    Stable within a tier: the source order of the producers is itself an
+    ordering somebody chose (the blocked summary is deliberately last), and
+    re-sorting inside a tier would lose it."""
+    collapsed = collapse_advisories(entries)
+    ranked = [e for severity in _SEVERITY_ORDER for e in collapsed if e[0] == severity]
+    hidden = 0
+    if not show_all and len(ranked) > _ADVISORY_CAP:
+        hidden = len(ranked) - _ADVISORY_CAP
+        ranked = ranked[:_ADVISORY_CAP]
+    return ([Line(text, style=_SEVERITY_STYLE.get(severity, "normal"))
+             for severity, text in ranked], hidden)
+
+
+def _lane_advisories(guard: dict, skip_blocked: bool = False) -> list[tuple[str, str]]:
+    """Every `_*_line` producer, tagged (SYNC-118).
+
+    BLOCKING is the strict test "nothing, or one whole lane, is reaching the
+    server while this is true". A rejected credential is blocking because the
+    machine is dark on the fleet grid; a clock skew is, because lane B
+    transfers nothing; recoverable trash never is.
+
+    `skip_blocked` drops the blocked SUMMARY when the caller has already
+    rendered that same sentence with a button under it (APP-9's licence
+    line) -- the same reason _BLOCKED_REASONS_WITH_THEIR_OWN_LINE exists."""
+    producers = (
+        (BLOCKING, tray_mod._halt_line),
+        (BLOCKING, tray_mod._breaker_line),
+        (WARNING, tray_mod._skipped_exists_line),
+        (BLOCKING, tray_mod._unfiltered_line),
+        (WARNING, tray_mod._conflicts_line),
+        (BLOCKING, tray_mod._reporter_line),
+        (BLOCKING, tray_mod._clock_skew_line),
+        (INFO, tray_mod._ignored_line),
+        (WARNING, tray_mod._crashes_line),
+        (WARNING, tray_mod._restarts_line),
+        (WARNING, tray_mod._upgrade_line),
+        (WARNING, tray_mod._reverted_line),
+        (BLOCKING, tray_mod._stalled_line),
+        (BLOCKING, tray_mod._disk_line),
+        (BLOCKING, tray_mod._blocked_line),
+        (INFO, tray_mod._trash_line),
+    )
+    out: list[tuple[str, str]] = []
+    for severity, producer in producers:
+        if skip_blocked and producer is tray_mod._blocked_line:
+            continue
+        try:
+            text = producer(guard)
+        except Exception:
+            # One broken producer must not cost the editor the other fifteen.
+            log.exception("settings: the %s advisory failed", getattr(
+                producer, "__name__", producer))
+            continue
+        if text:
+            out.append((severity, text))
+    return out
+
+
+def _licence_advisory(guard: dict) -> str:
+    """The licence-refused sentence with the wizard instruction removed
+    (APP-9, sweep 2026-09-03).
+
+    eula.acceptance_problem() ends all three of its sentences with "Re-run the
+    CCSync setup wizard to read and accept it" -- the largest action available
+    -- while this window can accept it in one click. The log keeps the
+    original wording; the editor is given the button instead."""
+    blocked = (guard or {}).get("blocked") or {}
+    if not isinstance(blocked, dict) or blocked.get("reason") != "licence_pending":
+        return ""
+    detail = str(blocked.get("detail") or "").strip()
+    if not detail:
+        return ""
+    kept = [s for s in detail.split(". ") if "setup wizard" not in s.lower()]
+    sentence = ". ".join(p.strip().rstrip(".") for p in kept if p.strip())
+    return f"⚠ {sentence}. Nothing syncs until it is accepted." if sentence else ""
+
+
+def action_accept_licence(app: "CompanionApp") -> None:
+    """[ READ AND ACCEPT THE LICENCE ] (APP-9). app.open_licence_dialog is
+    the newer entry point; the tray action is what shipped before it."""
+    opener = getattr(app, "open_licence_dialog", None)
+    if callable(opener):
+        tray_mod._spawn(app, "Accept the licence agreement", opener)
+        return
+    tray_mod.action_accept_licence(app)
+
+
+def _credential_refused(guard: dict) -> bool:
+    """The dashboard is rejecting this computer's sign-in (APP-8).
+
+    identity.valid() is a purely LOCAL check, so a token the server has
+    revoked still reads as signed in and the window offered [ SIGN OUT ] and
+    nothing else. The reporter's own last status is the only thing on this
+    machine that knows better."""
+    health = (guard or {}).get("reporter") or {}
+    if not isinstance(health, dict):
+        return False
+    try:
+        streak = int(health.get("consecutive_failures") or 0)
+    except (TypeError, ValueError):
+        return False
+    if streak < tray_mod.REPORTER_FAILURE_STREAK:
+        return False
+    return str(health.get("last_status") or "") in ("HTTP 401", "HTTP 403")
+
+
+def action_sign_in_again(app: "CompanionApp") -> None:
+    """[ SIGN IN AGAIN ] (APP-8). app.sign_in_again() when the app carries it,
+    otherwise the sign-in dialog, which already overwrites the identity."""
+    again = getattr(app, "sign_in_again", None)
+    if callable(again):
+        tray_mod._spawn(app, "Sign in again", again)
+        return
+    tray_mod.action_sign_in(app)
+
+
+def action_restart(app: "CompanionApp") -> None:
+    """[ RESTART CCSYNC NOW ] (APP-13). The tray's own restart action when it
+    exists, so the menu and this window are the same code path."""
+    restart = getattr(tray_mod, "action_restart", None)
+    if callable(restart):
+        restart(app)
+        return
+    action_restart_now(app)
+
+
 def _ignored_folders(app: "CompanionApp") -> list[dict]:
     """The persisted "always leave this folder alone" entries (RES-12).
 
@@ -319,6 +513,303 @@ def action_clear_ingest_staging(app: "CompanionApp") -> None:
     tray_mod._spawn(app, "Clear finished staging", _do)
 
 
+def _epoch(value) -> float:
+    """Seconds since the epoch from an epoch number or an ISO timestamp, or
+    0.0 when the value is neither. Never raises: a timestamp CCSync cannot
+    read must cost the phrase, not the section."""
+    if value in (None, ""):
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        pass
+    try:
+        from datetime import datetime, timezone
+
+        text = str(value).strip().replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except Exception:
+        return 0.0
+
+
+def age_phrase(value, now: float = 0.0) -> str:
+    """"4 min ago" / "2 h ago" / "just now", or "" for a time we cannot
+    read. Used for last_scan_at (RES-5) and a job's start (CMEDIA-2)."""
+    stamp = _epoch(value)
+    if not stamp:
+        return ""
+    seconds = max(0.0, (now or time.time()) - stamp)
+    if seconds < 90:
+        return "just now"
+    if seconds < 5400:
+        return f"{int(seconds // 60)} min ago"
+    if seconds < 172800:
+        return f"{int(seconds // 3600)} h ago"
+    return f"{int(seconds // 86400)} days ago"
+
+
+_LANE_WORDS = {
+    "idle": "up to date",
+    "syncing": "syncing now",
+    "queued": "waiting its turn",
+    "paused": "paused",
+    "error": "there is a problem",
+    "off": "not synced to this computer",
+    "skipped": "not synced to this computer",
+}
+_LANE_TITLES = (("A", "uploads"), ("B", "proxies"), ("C", "shared files"))
+
+
+def _lane_words(state) -> str:
+    key = str(state or "").strip().lower()
+    return _LANE_WORDS.get(key, key or "not known")
+
+
+def _projects_section(app: "CompanionApp") -> list:
+    """PROJECTS ON THIS COMPUTER (SYNC-107, sweep 2026-09-03).
+
+    The only enumeration of this machine's plan used to be the stack of
+    REMOVE buttons in ADVANCED, which is also the sole place the words
+    "upload only" appeared to an editor: inside the label of the button that
+    deletes the project. Consumed through getattr because the sequencer
+    grew project_status() in the same wave; an app without it renders no
+    section at all rather than an empty one."""
+    sequencer = getattr(app, "sequencer", None)
+    reader = getattr(sequencer, "project_status", None)
+    if not callable(reader):
+        return []
+    try:
+        projects = list(reader() or [])
+    except Exception:
+        log.exception("settings: could not read this computer's project list")
+        return []
+    if not projects:
+        return [Line("No projects are ticked for this computer yet: tick them on "
+                     "the dashboard")]
+    items: list = []
+    for project in projects:
+        if not isinstance(project, dict):
+            continue
+        slug = str(project.get("slug") or "").strip() or "a project"
+        mode = "uploads only (no proxies come down)" \
+            if str(project.get("mode") or "").strip().lower() == "upload_only" \
+            else "full sync"
+        state = str(project.get("state") or "").strip()
+        head = f"{slug} - {mode}"
+        if state:
+            head += f": {_lane_words(state)}"
+        items.append(Line(head))
+        lanes = project.get("lanes") or {}
+        if isinstance(lanes, dict):
+            parts = [f"{title} {_lane_words(lanes[key])}"
+                     for key, title in _LANE_TITLES if lanes.get(key)]
+            if parts:
+                items.append(Line("  " + ", ".join(parts), style="muted"))
+        detail = str(project.get("detail") or "").strip()
+        if detail:
+            items.append(Line(f"  {detail}", style="muted"))
+    return items
+
+
+def _resolve_section(app: "CompanionApp", guard: dict) -> list:
+    """RESOLVE (RES-5, sweep 2026-09-03).
+
+    Every number here was already computed each poll and rendered only into a
+    diagnostics bundle nobody opens unprompted: an editor with 40 dead links
+    and 12 unattachable proxies had no number anywhere in the UI. `health`
+    may be the older shape (counts only), so every key is optional and an
+    absent one renders nothing."""
+    reader = getattr(app, "resolve_health", None)
+    health = None
+    if callable(reader):
+        try:
+            health = reader()
+        except Exception:
+            log.exception("settings: could not read the Resolve health")
+            health = None
+    if not isinstance(health, dict):
+        health = (guard or {}).get("resolve_health")
+    if not isinstance(health, dict) or not health:
+        return []
+
+    items: list = []
+    connected = health.get("connected")
+    if connected is False:
+        items.append(Line("Not connected to Resolve right now", style="warning"))
+    elif connected is True:
+        items.append(Line("Connected to Resolve"))
+    try:
+        wedged = float(health.get("wedged_seconds") or 0)
+    except (TypeError, ValueError):
+        wedged = 0.0
+    if wedged > 20:
+        call = str(health.get("wedged_call") or "a call")
+        items.append(Line(
+            f"Resolve has not answered {call} for {int(wedged)}s. Nothing is "
+            "wrong with your sync; Resolve itself is busy", style="warning"))
+    project = health.get("project_open") or health.get("open_project")
+    if project:
+        items.append(Line(f"Project open: {project}"))
+    elif health.get("project_open") is False:
+        items.append(Line("No project is open in Resolve"))
+
+    scanned = age_phrase(health.get("last_scan_at"))
+    counts = (
+        ("out_of_tree", "{n} clip(s) are stored outside your synced folder, so "
+                        "nothing is backing them up"),
+        ("missing", "{n} clip(s) in this project are offline"),
+        ("bad_prefix", "{n} clip(s) point at a drive letter this computer does "
+                       "not have"),
+        ("non_canonical_refused", "{n} clip(s) were left alone: their path is "
+                                  "not one CCSync may rewrite"),
+    )
+    offered_scan = False
+    for key, template in counts:
+        try:
+            count = int(health.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        # A zero with no scan behind it means "we have not looked", never
+        # "nothing is wrong" (resolve_health's own docstring) -- so the
+        # counts are shown only alongside a scan time.
+        if not count or not scanned:
+            continue
+        items.append(Line(template.format(n=count), style="warning"))
+        if not offered_scan:
+            items.append(Button("SCAN WHOLE PROJECT",
+                                lambda: tray_mod.action_scan_whole_project(app)))
+            offered_scan = True
+
+    attach = health.get("proxy_attach") or {}
+    if isinstance(attach, dict) and (attach.get("attached") or attach.get("failed")):
+        line = (f"Proxies attached to clips: {int(attach.get('attached') or 0)}")
+        failed = int(attach.get("failed") or 0)
+        if failed:
+            why = str(attach.get("why") or "").strip()
+            line += f", {failed} could not be attached" + (f": {why}" if why else "")
+        items.append(Line(line, style="warning" if failed else "normal"))
+    gaps = health.get("proxy_gaps") or {}
+    if isinstance(gaps, dict):
+        for key, phrase in (("low_space", "this disk is low on space"),
+                            ("capped", "this machine's proxy limit was reached"),
+                            ("truncated", "the list was too long to finish")):
+            try:
+                count = int(gaps.get(key) or 0)
+            except (TypeError, ValueError):
+                continue
+            if count:
+                items.append(Line(f"{count} proxies skipped: {phrase}", style="warning"))
+    stills = health.get("stills") or {}
+    if isinstance(stills, dict) and stills.get("instruction"):
+        items.append(Line(str(stills["instruction"]),
+                          style="normal" if stills.get("ok") else "warning"))
+    if scanned:
+        items.append(Line(f"Checked {scanned}", style="muted"))
+
+    undo = getattr(app, "undo_last_fix_available", None)
+    try:
+        can_undo = bool(undo()) if callable(undo) else False
+    except Exception:
+        log.exception("settings: could not tell whether the last fix can be undone")
+        can_undo = False
+    if can_undo:
+        items.append(Button("UNDO LAST FIX", lambda: action_undo_last_fix(app)))
+    return items
+
+
+def action_undo_last_fix(app: "CompanionApp") -> None:
+    """[ UNDO LAST FIX ] (RES-5/RES-13). app.undo_last_fix() when the app
+    carries it; the ADVANCED button's action is what shipped before it."""
+    undo = getattr(app, "undo_last_fix", None)
+    if callable(undo):
+        tray_mod._spawn(app, "Undo the last fix", undo)
+        return
+    tray_mod.action_undo_last_relink(app)
+
+
+def action_stop_current_job(app: "CompanionApp") -> None:
+    """[ STOP THIS JOB ] (CMEDIA-2). The same should_stop path an admin's
+    cancel uses: the child is killed and the result posted as cancelled, not
+    retryable. False means there was nothing to stop, which must not render
+    as "stopped"."""
+    def _do() -> None:
+        stopper = getattr(app, "stop_current_job", None)
+        if not callable(stopper):
+            tray_mod._notify(app, "This build cannot stop a fleet job.")
+            return
+        try:
+            stopped = stopper()
+        except Exception:
+            log.exception("settings: could not stop the running fleet job")
+            tray_mod._notify(app, f"CCSync could not stop that job. {ui_copy.DIAGNOSTICS}.")
+            return
+        tray_mod._notify(
+            app, "Stopping the fleet job. It goes back to the queue for another "
+                 "computer." if stopped else "There is no fleet job running now.")
+    tray_mod._spawn(app, "Stop the fleet job", _do)
+
+
+def _jobs_section(app: "CompanionApp") -> list:
+    """JOBS (CMEDIA-2, sweep 2026-09-03).
+
+    The tray offered exactly one job control and no way to see, stop or
+    review the work this machine does for everybody else."""
+    reader = getattr(app, "jobs_status", None)
+    if not callable(reader):
+        return []
+    try:
+        status = reader()
+    except Exception:
+        log.exception("settings: could not read the fleet job status")
+        return []
+    if not isinstance(status, dict) or not status:
+        return []
+
+    items: list = []
+    gate = status.get("gate") or {}
+    if isinstance(gate, dict) and gate:
+        if gate.get("taking_work"):
+            items.append(Line("Taking fleet work"))
+        else:
+            reason = str(gate.get("reason") or "").strip()
+            items.append(Line("Not taking work" + (f": {reason}" if reason else "")))
+
+    current = status.get("current") or {}
+    if isinstance(current, dict) and current.get("id"):
+        kind = str(current.get("kind") or "a job")
+        rel = str(current.get("rel_path") or "").strip()
+        started = age_phrase(current.get("started_at"))
+        line = f"Running a fleet job for the team: {kind}"
+        if rel:
+            line += f" on {rel}"
+        if started:
+            line += f" (started {started})"
+        items.append(Line(line))
+        forced = str(current.get("forced_reason") or "").strip()
+        if forced:
+            items.append(Line(f"  {forced}", style="muted"))
+        items.append(Button("STOP THIS JOB", lambda: action_stop_current_job(app)))
+
+    recent = status.get("recent") or []
+    if isinstance(recent, list):
+        for entry in [e for e in recent if isinstance(e, dict)][:10]:
+            kind = str(entry.get("kind") or "job")
+            rel = str(entry.get("rel_path") or "").strip()
+            outcome = str(entry.get("outcome") or "").strip() or "finished"
+            finished = age_phrase(entry.get("finished_at"))
+            line = f"  {kind}" + (f" on {rel}" if rel else "") + f": {outcome}"
+            if finished:
+                line += f", {finished}"
+            error = str(entry.get("error") or "").strip()
+            if error:
+                line += f" ({error})"
+            items.append(Line(line, style="muted"))
+    return items
+
+
 def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
     """Pure: snapshot + app -> the sections the window renders. No tkinter."""
     sections: list[Section] = []
@@ -345,12 +836,24 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
             "The role above was changed and takes effect when CCSync next "
             "starts.", style="warning",
         ))
-        computer_items.append(Button("RESTART CCSYNC NOW", lambda: action_restart_now(app)))
     computer_items.append(Line(str(snap.get("identity_label", ""))))
+    guard = snap.get("sync_guard") or {}
+    if _credential_refused(guard):
+        # APP-8: identity.valid() is local, so a revoked token still reads as
+        # signed in and this section offered SIGN OUT and nothing else. The
+        # editor's correct move is to sign in again, and nothing said so.
+        computer_items.append(Line(
+            "⚠ The server rejected this computer's sign-in, so your admin "
+            "cannot see whether you are syncing.", style="warning"))
+        computer_items.append(Button("SIGN IN AGAIN…", lambda: action_sign_in_again(app)))
     if snap.get("signed_in"):
         computer_items.append(Button("SIGN OUT", lambda: tray_mod.action_sign_out(app)))
     else:
         computer_items.append(Button("SIGN IN…", lambda: tray_mod.action_sign_in(app)))
+    # APP-13: unconditional. Three separate pieces of copy tell an editor to
+    # restart the companion, and the button that does it used to appear only
+    # after a role change nobody has made.
+    computer_items.append(Button("RESTART CCSYNC NOW", lambda: action_restart(app)))
     sections.append(Section("THIS COMPUTER", computer_items))
 
     # -- [ SYNC LANES ] -------------------------------------------------------
@@ -368,38 +871,28 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
     for text in (snap.get("sequencer_line"), snap.get("current_project_line")):
         if text:
             lane_items.append(Line(text))
-    guard = snap.get("sync_guard") or {}
-    for text in (tray_mod._halt_line(guard), tray_mod._breaker_line(guard),
-                 tray_mod._skipped_exists_line(guard),
-                 # SYNC-5 / UX-7 (resilience sweep 2026-08-28): both read the
-                 # same sync_guard the four above do.
-                 tray_mod._unfiltered_line(guard), tray_mod._conflicts_line(guard),
-                 # APP-1 / APP-13 / APP-6 (resilience sweep 2026-08-28): the
-                 # three states that used to be visible NOWHERE on the
-                 # machine they were happening on. Above the trash line
-                 # because each one is something that has stopped working.
-                 tray_mod._reporter_line(guard), tray_mod._clock_skew_line(guard),
-                 # APP-2 / UX-4 (same sweep): the clips the editor dismissed,
-                 # which were visible in no artefact anybody ever sees.
-                 tray_mod._ignored_line(guard),
-                 tray_mod._crashes_line(guard),
-                 # SYS-2 (same sweep): the watchdog restarting one thread over
-                 # and over is a self-healing machine that still needs a human.
-                 tray_mod._restarts_line(guard),
-                 # REL-8 / APP-5 (same sweep): the update this computer has
-                 # given up on, and the build it rolled itself back off.
-                 tray_mod._upgrade_line(guard), tray_mod._reverted_line(guard),
-                 # SYNC-1 (same sweep, CR-91): a wedged rclone the companion
-                 # had to kill. The machine it happened ON said nothing at
-                 # all about it before this line existed.
-                 tray_mod._stalled_line(guard),
-                 # SYS-5/SYNC-7 then SYNC-15 (same sweep): the free-space
-                 # park, then the ONE ordered sentence the fleet grid shows
-                 # for this machine -- last, because it summarises the rest.
-                 tray_mod._disk_line(guard), tray_mod._blocked_line(guard),
-                 tray_mod._trash_line(guard)):
-        if text:
-            lane_items.append(Line(text, style="warning"))
+    # APP-9: the licence refusal, with its own action, ABOVE the ranked
+    # advisories -- one click here is what the sentence used to send the
+    # editor back through an installer wizard for.
+    licence_text = _licence_advisory(guard)
+    if licence_text:
+        lane_items.append(Line(licence_text, style="warning"))
+        lane_items.append(Button("READ AND ACCEPT THE LICENCE",
+                                 lambda: action_accept_licence(app)))
+    # SYNC-118: ranked, collapsed and capped. The producers and their order
+    # inside a tier are unchanged; what is new is that the halt is above the
+    # size of the recoverable trash instead of beside it.
+    advisories = _lane_advisories(guard, skip_blocked=bool(licence_text))
+    show_all = advisories_shown_in_full()
+    ranked, hidden = rank_advisories(advisories, show_all)
+    lane_items.extend(ranked)
+    if hidden:
+        lane_items.append(Line(f"and {hidden} more", style="muted"))
+        lane_items.append(Button("SHOW ALL",
+                                 lambda: action_show_all_advisories(app, True)))
+    elif show_all and len(advisories) > _ADVISORY_CAP:
+        lane_items.append(Button("SHOW FEWER",
+                                 lambda: action_show_all_advisories(app, False)))
     if snap.get("root_unfinished"):
         # CR-92: the drive went out with work owed. The balloon says it
         # every half hour; this is where it stays readable in between.
@@ -548,6 +1041,20 @@ def build_settings_model(snap: dict, app: "CompanionApp") -> list[Section]:
                 "Use an exported cookies.txt…",
                 lambda: tray_mod.action_youtube_cookies_file(app)))
         sections.append(Section("YOUTUBE", yt_items))
+
+    # -- [ PROJECTS ] / [ RESOLVE ] / [ JOBS ] ------------------------------
+    # Wave 3 of the 2026-09-03 sweep: the machine already knew every fact in
+    # these three sections. Each renders only when its producer exists, so a
+    # build whose app half is older simply does not draw it.
+    project_items = _projects_section(app)
+    if project_items:
+        sections.append(Section("PROJECTS ON THIS COMPUTER", project_items))
+    resolve_items = _resolve_section(app, guard)
+    if resolve_items:
+        sections.append(Section("RESOLVE", resolve_items))
+    job_items = _jobs_section(app)
+    if job_items:
+        sections.append(Section("JOBS", job_items))
 
     # -- [ ADVANCED ] -------------------------------------------------------
     advanced_items: list = [

@@ -494,6 +494,15 @@ def build_send_response(
             )
             return 200, {"ok": False, "state": "downloading",
                          "error": message, "progress": progress}
+        if state == broll_fetch.STATE_BUSY:
+            # broll_server's shape, in this route's words (CMEDIA-7): the key
+            # is "message" and not "error" BECAUSE nothing failed -- an error
+            # key here is what made the music page toast red and stop polling
+            # while two b-roll originals were in flight.
+            return 200, {"ok": True, "state": "busy",
+                         "retry_after": broll_fetch.BUSY_RETRY_AFTER_SECONDS,
+                         "message": fetch.get("message")
+                         or broll_fetch.BUSY_MESSAGE}
         if state != broll_fetch.STATE_DONE:
             return 200, {
                 "ok": False,

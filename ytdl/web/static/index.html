@@ -129,6 +129,11 @@
            sent a key for, so a dashboard that predates WP5 paints exactly the
            strip it painted before. -->
       <span id="healthytdlp" class="rstatus hidden"></span>
+      <!-- ...and a fifth (YTWEB-3, 2026-09-03): whether this server has a
+           JavaScript runtime at all. Measured since YTDL-24 cost a week and
+           rendered nowhere until now. Only ever filled when the answer is
+           "missing", which is the only state anyone can act on. -->
+      <span id="healthjs" class="rstatus hidden"></span>
       <span id="healthpot" class="rstatus hidden"></span>
       <span id="healthdl" class="rstatus hidden"></span>
       <span id="healthcanary" class="rstatus hidden"></span>
@@ -283,6 +288,13 @@
       <span id="dlmode" class="dlmode hidden"></span>
       <button id="dlserver" class="text-btn hidden"
               title="Hand this job back to the NAS: it downloads whatever your machine has not finished. For a tethered or hotel-wifi machine, or one you are about to close.">[ DOWNLOAD ON THE SERVER INSTEAD ]</button>
+      <!-- STOP THE MACHINE THAT IS ACTUALLY DOWNLOADING (CYT-2, 2026-09-03).
+           Only ever shown while THIS computer's companion holds the job: it
+           posts to the loopback, so it can stop nothing else, and a companion
+           too old to answer /ytdl/progress never gets it drawn. [ CANCEL ]
+           beside it is the server-side one and stays what it was. -->
+      <button id="dlstop" class="text-btn hidden"
+              title="Ask the CC Sync companion on this machine to stop the clip it is downloading. The job itself stays; the server picks up what is missing.">[ STOP ]</button>
       <button id="cancel2" class="text-btn">[ CANCEL ]</button>
     </div>
     <div class="bar"><div id="dlfill" class="barfill"></div></div>
@@ -306,6 +318,19 @@
        what it is behind. Hidden when it is empty: an empty list is a row of
        furniture saying nothing. One job per editor RUNS; the rest wait here in
        order, and each row can be cancelled or moved. -->
+  <!-- WHAT IS WAITING FOR THE EDITOR (YTWEB-8/13, 2026-09-03). Above the
+       queue, because a queue is waiting on the server and this is waiting on
+       the person reading the page. Since the queue landed, a parked review
+       blocks nothing - the right trade, and it also means nothing ever
+       mentions one again, so an editor can accumulate five manifests they
+       curated and never downloaded. It is also where a reloaded page finds
+       the search it is no longer attached to: db.active_job prefers the job
+       that is MOVING now, and these are named rather than implied. -->
+  <section id="waiting" class="panel hidden">
+    <h2>Waiting for you</h2>
+    <div id="waitinglist" class="queuelist muted"></div>
+  </section>
+
   <section id="queue" class="panel hidden">
     <h2>Queue</h2>
     <div id="queuelist" class="queuelist muted"></div>

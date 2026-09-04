@@ -148,6 +148,14 @@ CREATE TABLE IF NOT EXISTS jobs (
     -- and reads as today's per-editor behaviour, never as "some other
     -- machine".
     claimed_machine  TEXT,
+    -- ...and HOW MUCH ROOM that machine said it had when it claimed
+    -- (migrations/014, YTWEB-9, 2026-09-03). Recorded, never enforced: the
+    -- free-space decision belongs to the machine that knows what a clip costs
+    -- and what else is on that disk, and the companion declines its own claim.
+    -- What it is FOR is the page, which had no disk-space signal of any kind
+    -- and offered a duration as the proxy for 40 GB. NULL is a claimant that
+    -- did not say, which is every companion older than the field.
+    claim_free_bytes INTEGER,
     -- ISO-8601 UTC (db.now()), compared as a STRING -- see migrations/007.
     -- Expiry is what makes a vanished laptop recoverable: the worker takes the
     -- job back and downloads only what is missing.

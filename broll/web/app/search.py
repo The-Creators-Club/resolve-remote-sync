@@ -1352,3 +1352,35 @@ def search_videos(
             }
         )
     return results, total
+
+
+def count_in_scope(
+    conn: sqlite3.Connection,
+    *,
+    category: str | None = None,
+    flags: str | None = None,
+    collection: str | None = None,
+    shoot: str | None = None,
+    path: str | None = None,
+) -> int:
+    """How many clips a search under these filters even looked at.
+
+    The honest half of "nothing matched": an empty grid is the same picture
+    whether the archive holds four clips or forty thousand, and whether the
+    folder filter narrowed it to eleven (BROLL-9, 2026-09-04). Composed from
+    the same clause builders search_videos uses, in the same order, so the
+    number cannot describe a different scope than the one that was searched.
+
+    Called only when a query returned nothing, so it costs a COUNT on the
+    empty-result path and nothing on every other search.
+    """
+    cat_clause, cat_params = build_category_clause(category)
+    coll_clause, coll_params = build_collection_clause(collection, conn)
+    shoot_clause, shoot_params = build_shoot_clause(shoot)
+    path_clause, path_params = build_path_clause(path)
+    flags_clause, flags_params = build_flags_exclude_clause(flags)
+    where = (BROWSE_PREDICATE + cat_clause + coll_clause + shoot_clause
+             + path_clause + flags_clause)
+    params = [*cat_params, *coll_params, *shoot_params, *path_params, *flags_params]
+    return conn.execute(
+        f"SELECT COUNT(*) FROM videos v WHERE {where}", params).fetchone()[0]

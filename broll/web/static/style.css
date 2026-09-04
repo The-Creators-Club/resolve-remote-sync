@@ -548,6 +548,46 @@ a.brand:hover { color: var(--red-hot); }
 /* Heading separating keyword results from semantic-only "Related" ones
    (see app/search.py's module docstring on mode="hybrid") -- spans the full
    grid width rather than occupying one card's column. */
+/* The honest empty answer (BROLL-9, 2026-09-04). Spans the whole grid: an
+   auto-fill column would put a sentence in a 240px card slot and hyphenate it.
+   The head is the sentence, the scope lines are the numbers, the levers are
+   the controls that are actually on this page. */
+.results-empty {
+  grid-column: 1 / -1;
+  border: 1px solid var(--red-dim);
+  background: var(--panel);
+  padding: 14px 16px;
+  max-width: 620px;
+}
+.results-empty-head { font-size: 13px; color: var(--text); margin-bottom: 6px; }
+.results-empty-scope { font-size: 11.5px; margin-bottom: 4px; }
+.results-empty-scope.muted { color: var(--muted); }
+.results-empty-scope.bad { color: var(--danger); }
+.results-empty-levers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 10px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* A search in flight (BROLL-23). The stale grid stays legible and stops being
+   claimed as the answer; `Searching...` in the meta line is the wording, this
+   is only the dimming. */
+.results-grid.searching { opacity: 0.5; }
+.meta-searching { margin-left: 10px; color: var(--amber); }
+
+/* A mode this server cannot run (BROLL-10). Never hidden: the button carries
+   the reason as its title, and a control that vanishes teaches nothing. */
+.mode-btn:disabled,
+.mode-btn.mode-unavailable {
+  color: var(--muted);
+  cursor: not-allowed;
+  text-shadow: none;
+}
+.mode-btn:disabled:hover { color: var(--muted); text-shadow: none; }
+
 .results-related-heading {
   grid-column: 1 / -1;
   font-size: 10.5px;
@@ -1280,6 +1320,9 @@ input[type="radio"]:checked::after {
 .ingest-row-meta { font-size: 11px; color: var(--muted); word-break: break-word; }
 .ingest-row-meta.bad { color: var(--danger); }
 .ingest-row-meta.warn { color: var(--amber); }
+
+/* BROLL-5: the way back from a failed upload, in the row that failed. */
+.ingest-row-retry { flex: 0 0 auto; align-self: center; font-size: 11px; }
 
 .ingest-bar { height: 3px; background: var(--border); margin-top: 3px; }
 .ingest-bar-fill { height: 100%; background: var(--red); width: 0; }

@@ -740,3 +740,57 @@ def test_the_music_checkpoint_is_the_same_save():
     assert music_ingest.MusicIngestor._save is broll_ingest.BrollIngestor._save
     assert "_snapshot(self._batch)" in inspect.getsource(
         broll_ingest.BrollIngestor._save)
+
+
+# ---------------------------------------------------------------------------
+# CMEDIA-4: a track waiting for the base rig is counted, and is NOT deleted
+# ---------------------------------------------------------------------------
+
+
+def _queued_batch(tmp_path):
+    sidecar = FakeSidecar()
+    sidecar.raise_on_embed = music_clap_sidecar.ModelUnavailable(
+        "the music indexing model is not downloaded on this machine yet")
+    return _run_one(tmp_path, sidecar=sidecar)
+
+
+def test_a_queued_track_is_counted_and_the_window_can_finish(tmp_path):
+    """It was in the kind's finished set and in NEITHER counter: the tray said
+    "8 of 10" for ever, the ETA divided by a remainder that never reached zero,
+    and the progress window's `finished` never became true."""
+    ing = make_ingestor(tmp_path)
+    # Mid-batch, which is when this is visible: one track embedded, one left
+    # for the base rig, one still to go.
+    ing._batch = {"uid": "b" * 32, "state": "running", "items": [
+        {"uid": "i1", "name": "one.wav", "stage": broll_ingest.ITEM_LIVE},
+        {"uid": "i2", "name": "Slow Burn.ogg",
+         "stage": music_ingest.ITEM_QUEUED_FOR_BASE_RIG,
+         "error": "the music indexing model is not downloaded"},
+    ]}
+
+    snap = ing.status()
+    assert snap["queued_for_base_rig"] == 1
+    assert (snap["done"], snap["failed"]) == (1, 0)
+    assert snap["queued_names"] == ["Slow Burn.ogg"]
+
+    model = ing.progress_model()
+    assert model.finished is True
+    assert "need the base rig to finish" in model.note
+    assert ing.progress()["batch"]["queued_for_base_rig"] == 1
+
+
+def test_the_pruner_never_deletes_a_drop_the_base_rig_still_needs(tmp_path):
+    """"It is still on this computer" is the whole contract of the state, and
+    CLEAR FINISHED STAGING is prune_staging(0) -- immediate, no confirmation."""
+    ing, _server, _sidecar, _queue, _batch = _queued_batch(tmp_path)
+    (staging_id, entry), = list(ing._staging.items())
+    assert entry["held_for_base_rig"] == ["Slow Burn.ogg"]
+    directory = Path(entry["dir"])
+    assert directory.is_dir()
+
+    answer = ing.prune_staging(0)
+
+    assert answer["removed"] == 0
+    assert answer["held"] == 1 and answer["held_names"] == ["Slow Burn.ogg"]
+    assert directory.is_dir()
+    assert staging_id in ing._staging

@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 <#
 .SYNOPSIS
     One command to ship everything: deploy the dashboard, publish the
@@ -160,7 +160,21 @@ param(
     # for the case where the studio build IS the release. Needs `gh` and the
     # release key, same as publish_latest.
     [switch]$PublishFeed,
-    [string]$FeedRepo = "The-Creators-Club/ccsync-releases"
+    [string]$FeedRepo = "The-Creators-Club/ccsync-releases",
+    # APP-16 (usability sweep 2026-09-04): one line of WHAT CHANGED, shown in
+    # the editor's update dialog beside the version number. An editor asked to
+    # interrupt their work for a number they cannot interpret rationally
+    # ignores it, which is the fleet behaviour [ UPDATE NOW ] and auto_update
+    # were added to work around.
+    #
+    # It reaches the PUT into this dashboard through the environment rather
+    # than a parameter, because the PUT is made by build_editor_package.ps1
+    # via tools\sign_release.py, and sign_release reads CCSYNC_RELEASE_NOTES
+    # when no --notes is passed (the same shape CCSYNC_EMIT_KIND_EXTRAS
+    # already uses). The vendor feed gets it as a real --notes below.
+    # UNSIGNED either way: a sentence must never be able to make a build
+    # unverifiable on an older companion.
+    [string]$Notes = ""
 )
 
 # "Continue", not "Stop": the deploy script prints an SSH host-key WARNING to
@@ -168,6 +182,12 @@ param(
 # NativeCommandError (see GOTCHAS.md section 2). Success is judged by exit
 # codes below.
 $ErrorActionPreference = "Continue"
+
+if ($Notes) {
+    # Read by tools\sign_release.py for BOTH artefacts, so the note the
+    # dashboard stores is the one the feed publishes.
+    $env:CCSYNC_RELEASE_NOTES = ($Notes -replace "\s+", " ").Trim()
+}
 
 function Write-Step { param([string]$m) Write-Host "[ship] $m" }
 function Write-Fail { param([string]$m) Write-Host "[ship] FAILED: $m" -ForegroundColor Red }
@@ -784,6 +804,7 @@ if ($PublishFeed) {
         $feedArgs = @("tools\publish_feed.py", "--kind", $item.Kind, "--artifact", $artifactPath,
                       "--feed-dir", $feedDir, "--github-repo", $FeedRepo,
                       "--make-current", "--github-upload")
+        if ($env:CCSYNC_RELEASE_NOTES) { $feedArgs += @("--notes", $env:CCSYNC_RELEASE_NOTES) }
         if ($item.Manifest) { $feedArgs += @("--manifest", (Join-Path $RepoRoot $item.Manifest)) }
         else { $feedArgs += @("--platform", "windows", "--version", $item.Version) }
         python @feedArgs

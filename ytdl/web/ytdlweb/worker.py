@@ -670,7 +670,13 @@ def _phase_enrich(c, job):
 # job whose phase is not 'failed' -- which is exactly how the SPA tells a
 # warning from a failure, and it keeps the ops instruction accurate (a
 # logged-out CLI and an unparseable reply need different fixes).
-DEGRADED_NOTE = 'relevance filter unavailable -- showing all results unfiltered'
+# YTWEB-7 (2026-09-03): reworded, and the double hyphen is gone with it.
+# What the editor has to know is not that a filter was unavailable but
+# that the manifest below them is UNFILTERED - every one of 300
+# candidates arrives ticked as relevant, which is the one fact that
+# changes what they do next. The em-dash scan does not catch '--'.
+DEGRADED_NOTE = ('the relevance filter could not run, so every result '
+                 'below is shown unfiltered')
 
 
 def _phase_filter(c, job):
@@ -1342,6 +1348,19 @@ def identical_failure_note(n, error):
     if 'requested format is not available' in low:
         version = _yt_dlp_version()
         where = f' (this server is on yt-dlp {version})' if version else ''
+        # ...unless it is the OTHER cause, which this note never named
+        # (YTWEB-3, 2026-09-03). Without deno or node on PATH yt-dlp cannot run
+        # YouTube's player JS and EVERY clip fails exactly this way -- YTDL-24,
+        # a week of misdiagnosis, and the note that reached the editor sent
+        # them to a yt-dlp update that would have changed nothing. One import,
+        # no subprocess, and it is only asked once a streak has already formed.
+        from ytdlweb import routes_api
+        if routes_api._js_runtime_state() == 'missing':
+            return (f'{n} clips in a row came back with no usable format, and '
+                    f'this server has no JavaScript runtime (deno or node) '
+                    f'installed, which is what makes YouTube refuse every '
+                    f'format. An admin has to add one on the server; nothing '
+                    f'about these videos is wrong. See ytdl/web/DEPLOY.md.')
         return (f'{n} clips in a row came back with no usable format, so the '
                 f'download stopped instead of trying the rest. That is what a '
                 f'YouTube client change looks like{where}, not a problem with '

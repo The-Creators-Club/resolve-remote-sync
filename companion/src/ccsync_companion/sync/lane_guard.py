@@ -876,6 +876,85 @@ def trash_entries(local_root: str) -> list[tuple[Path, float, int]]:
     return out
 
 
+# SYNC-112 (sweep 2026-09-03): the recovery folder is the whole "nothing was
+# deleted" story and there was no way to open it -- the toast pasted a raw
+# path into a balloon and asked the editor to navigate by hand to a
+# dot-prefixed directory Explorer hides by default, and the retention line
+# never mentioned that these copies expire. This is the read the button and
+# the line are built from. Cached because it is a full walk of up to 50 GB
+# of files and the window that shows it redraws.
+TRASH_SUMMARY_CACHE_SECONDS = 60.0
+_trash_summary_cache: dict[str, tuple[float, Optional[dict[str, Any]]]] = {}
+_trash_summary_lock = threading.Lock()
+
+
+def trash_summary(local_root: str, max_age_days: float = DEFAULT_TRASH_MAX_AGE_DAYS,
+                  now: Optional[float] = None,
+                  max_entries: int = 50000) -> Optional[dict[str, Any]]:
+    """{path, count, bytes, oldest, retention_days} for `.ccsync-trash`, or
+    None when the walk could not be made.
+
+    `oldest` is the epoch of the oldest BATCH (its directory name, which is
+    `_backup_dir`'s own record of when it was made, falling back to its
+    mtime) -- the batch is the unit of recovery and of retention, so it is
+    also the unit of "how long have I got". One walk, cached for
+    TRASH_SUMMARY_CACHE_SECONDS per root. Never raises."""
+    key = str(local_root)
+    stamp = time.time() if now is None else float(now)
+    with _trash_summary_lock:
+        cached = _trash_summary_cache.get(key)
+        if cached is not None and (stamp - cached[0]) < TRASH_SUMMARY_CACHE_SECONDS:
+            return dict(cached[1]) if cached[1] else None
+    summary = _walk_trash(key, max_age_days, max_entries)
+    with _trash_summary_lock:
+        _trash_summary_cache[key] = (stamp, summary)
+    return dict(summary) if summary else None
+
+
+def _walk_trash(local_root: str, max_age_days: float,
+                max_entries: int) -> Optional[dict[str, Any]]:
+    base = Path(local_root) / TRASH_DIR_NAME
+    summary: dict[str, Any] = {
+        "path": str(base), "count": 0, "bytes": 0, "oldest": None,
+        "retention_days": float(max_age_days),
+    }
+    if not base.is_dir():
+        return summary
+    count = 0
+    total = 0
+    oldest: Optional[float] = None
+    try:
+        for dirpath, _dirnames, filenames in os.walk(base):
+            batch = Path(dirpath)
+            if batch.parent == base:
+                stamp = batch_stamp(batch.name)
+                if stamp is None:
+                    try:
+                        stamp = batch.stat().st_mtime
+                    except OSError:
+                        stamp = None
+                if stamp is not None:
+                    oldest = stamp if oldest is None else min(oldest, stamp)
+            for name in filenames:
+                if count >= max_entries:
+                    summary["truncated"] = True
+                    break
+                count += 1
+                try:
+                    total += os.path.getsize(os.path.join(dirpath, name))
+                except OSError:
+                    pass
+            if summary.get("truncated"):
+                break
+    except OSError as exc:
+        log.debug("trash summary failed for %s: %s", base, exc)
+        return None
+    summary["count"] = count
+    summary["bytes"] = total
+    summary["oldest"] = oldest
+    return summary
+
+
 def prune_trash(
     local_root: str,
     max_age_days: float = DEFAULT_TRASH_MAX_AGE_DAYS,
@@ -955,6 +1034,11 @@ def prune_trash(
                     removed_bytes += size
                     total -= size
                     free += size
+    if removed:
+        # The cached summary describes a folder that no longer looks like
+        # that (SYNC-112).
+        with _trash_summary_lock:
+            _trash_summary_cache.pop(str(local_root), None)
     return {
         "removed": removed,
         "removed_bytes": removed_bytes,

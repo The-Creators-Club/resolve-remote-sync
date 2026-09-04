@@ -9,7 +9,11 @@
    naming a computer that had been renamed or forgotten, so the proxies it
    was meant to restart stayed stopped. #}
 {% if error is defined and error %}
-<div class="banner">▲ {{ error }}</div>
+{# DUI-6: `error-banner` is what static/htmx_errors.js moves next to the button
+   that caused it. This panel swaps outerHTML, which preserves scroll, so a
+   refusal used to render a screen or two above the click that earned it. An
+   error with no control behind it stays here, which is where it belongs. #}
+<div class="banner error-banner">▲ {{ error }}</div>
 {% endif %}
 
 <div class="cards">
@@ -181,12 +185,12 @@
         {# Transport health (B17): the companion computes this every heavy
            tick and the server used to drop it, so a lane C riding the public
            relay pool at 1-5 MB/s looked identical to a merely slow editor. #}
-        {% if e.transport.relayed %}<span class="chip amber" title="{{ e.transport.relayed }} Syncthing peer(s) connected via a RELAY, not directly: lane C on this computer is limited to relay speed (1-5 MB/s), not the link. Checked {{ e.transport.at | ago }}.">[ RELAYED: {{ e.transport.relayed }} ]</span>
-        {% elif e.transport.direct %}<span class="chip lane green" title="{{ e.transport.direct }} Syncthing peer(s) connected directly. Checked {{ e.transport.at | ago }}.">direct:{{ e.transport.direct }}</span>{% endif %}
-        {% if e.transport.orphan_partials %}<span class="chip amber" title="{{ e.transport.orphan_partial_bytes | human_bytes }} of orphaned rclone .partial files left on the NAS by an interrupted lane A. Never deleted automatically; remove them by hand to reclaim the space.">[ ORPHANS: {{ e.transport.orphan_partials }} ]</span>{% endif %}
+        {% if e.transport.relayed %}<span class="chip amber" title="{{ chip_help('relayed', n=e.transport.relayed, at=e.transport.at | ago) }}">[ RELAYED: {{ e.transport.relayed }} ]</span>
+        {% elif e.transport.direct %}<span class="chip lane green" title="{{ chip_help('direct', n=e.transport.direct, at=e.transport.at | ago) }}">direct:{{ e.transport.direct }}</span>{% endif %}
+        {% if e.transport.orphan_partials %}<span class="chip amber" title="{{ chip_help('orphans', bytes=e.transport.orphan_partial_bytes | human_bytes) }}">[ ORPHANS: {{ e.transport.orphan_partials }} ]</span>{% endif %}
         {# The safety latches, first among the chips: they outrank every
            transport diagnostic beside them (item 9). #}
-        {% if e.guard.breaker_tripped %}<span class="chip red" title="{{ e.guard.breaker_reason }}, tripped {{ e.guard.breaker_at | ago }}. Lane A and lane C are still running; nothing was deleted.">[ PROXY DOWNLOAD STOPPED ]</span>
+        {% if e.guard.breaker_tripped %}<span class="chip red" title="{{ chip_help('breaker', reason=e.guard.breaker_reason, at=e.guard.breaker_at | ago) }}">[ PROXY DOWNLOAD STOPPED ]</span>
           {# CR-45: only the editor's own tray could clear this, so a remote
              machine stayed parked until its owner was next at the keyboard.
              The companion does exactly what the tray click does. #}
@@ -201,50 +205,50 @@
            MANY TRIES: the difference between "he rebooted" and "that machine
            has needed a human since Tuesday". Beside the lane chips on
            purpose, because it is the same lane. #}
-        {% if e.guard.supervisor_down_since %}<span class="chip red" title="the Syncthing engine on this computer has been down since {{ e.guard.supervisor_down_since }}{% if e.guard.supervisor_attempts %}; {{ e.guard.supervisor_attempts }} automatic restart attempt(s) have failed{% endif %}{% if e.guard.supervisor_supervising is not none and not e.guard.supervisor_supervising %}; automatic restarts are switched off or suppressed on this machine, so nothing is trying{% endif %}{% if e.guard.supervisor_last_error %}. Last error: {{ e.guard.supervisor_last_error }}{% endif %}">[ SYNC ENGINE DOWN {{ e.guard.supervisor_down_since | ago }}{% if e.guard.supervisor_attempts %}, {{ e.guard.supervisor_attempts }} RESTART{{ "S" if e.guard.supervisor_attempts != 1 }} FAILED{% endif %} ]</span>{% endif %}
+        {% if e.guard.supervisor_down_since %}{% set engine_extra = (("; " ~ e.guard.supervisor_attempts ~ " automatic restart attempt(s) have failed") if e.guard.supervisor_attempts else "") ~ ("; automatic restarts are switched off or suppressed on this machine, so nothing is trying" if (e.guard.supervisor_supervising is not none and not e.guard.supervisor_supervising) else "") ~ ((". Last error: " ~ e.guard.supervisor_last_error) if e.guard.supervisor_last_error else "") %}<span class="chip red" title="{{ chip_help('sync_engine_down', since=e.guard.supervisor_down_since, extra=engine_extra) }}">[ SYNC ENGINE DOWN {{ e.guard.supervisor_down_since | ago }}{% if e.guard.supervisor_attempts %}, {{ e.guard.supervisor_attempts }} RESTART{{ "S" if e.guard.supervisor_attempts != 1 }} FAILED{% endif %} ]</span>{% endif %}
         {# SYS-4 / APP-13: nothing anywhere measured this. A slow clock makes
            lane B exclude every file on the NAS (rclone --min-age reads their
            age as negative), transfer nothing, exit 0 and report green. #}
-        {% if e.guard.clock_skew_dir %}<span class="chip red" title="this computer's clock is {{ e.guard.clock_skew_abs | eta }} {{ "ahead of" if e.guard.clock_skew_dir == "AHEAD" else "behind" }} the server's. Proxy download uses a minimum file age, so a clock this far out can make it transfer nothing at all while reporting no error. Fix the clock on that machine (enable automatic time).">[ CLOCK {{ e.guard.clock_skew_abs | eta }} {{ e.guard.clock_skew_dir }} ]</span>{% endif %}
+        {% if e.guard.clock_skew_dir %}<span class="chip red" title="{{ chip_help('clock', abs=e.guard.clock_skew_abs | eta, direction=("ahead of" if e.guard.clock_skew_dir == "AHEAD" else "behind")) }}">[ CLOCK {{ e.guard.clock_skew_abs | eta }} {{ e.guard.clock_skew_dir }} ]</span>{% endif %}
         {# APP-6: crash_report.py writes these and its own docstring names
            "the tray stayed up with a dead lane" as the failure to fix.
            CR-88 route sweep (2026-09-03): Copy diagnostics is not a tray menu
            item any more, so the path comes from one constant. #}
-        {% if e.guard.crash_count %}<span class="chip amber" title="{{ e.guard.crash_count }} background task(s) on this computer have crashed and written a report{% if e.guard.crash_newest %} (newest: {{ e.guard.crash_newest }}){% endif %}. The tray stays up and the lanes look normal, so ask the editor to open {{ COMPANION_DIAGNOSTICS_PATH }} in the companion and send it to you.">[ CRASHES: {{ e.guard.crash_count }} ]</span>{% endif %}
+        {% if e.guard.crash_count %}<span class="chip amber" title="{{ chip_help('crashes', n=e.guard.crash_count, newest=((" (newest: " ~ e.guard.crash_newest ~ ")") if e.guard.crash_newest else ""), path=COMPANION_DIAGNOSTICS_PATH) }}">[ CRASHES: {{ e.guard.crash_count }} ]</span>{% endif %}
         {# DASH-2: this computer is talking to us and we are refusing it. On the
            row as well as in the banner, because the fix is on THAT machine. #}
-        {% if e.guard.report_refused_at %}<span class="chip red" title="the last report from this computer was refused {{ e.guard.report_refused_at | ago }}: {{ e.guard.report_refused_reason }}. Nothing below is current. The editor has to click Sign in... on this computer's tray.">[ BEING REFUSED: SIGN IN ON ITS TRAY ]</span>{% endif %}
+        {% if e.guard.report_refused_at %}<span class="chip red" title="{{ chip_help('report_refused', at=e.guard.report_refused_at | ago, reason=e.guard.report_refused_reason) }}">[ BEING REFUSED: SIGN IN ON ITS TRAY ]</span>{% endif %}
         {# REL-8: a machine that cannot take a build used to retry for ever
            with nobody told. The count is what separates "has not seen the push
            yet" from "has failed this build eight times". #}
-        {% if e.guard.upgrade_attempts %}<span class="chip red" title="this computer has tried to install {{ e.guard.upgrade_version or "an update" }} {{ e.guard.upgrade_attempts }} time(s) and failed{% if e.guard.upgrade_last_attempt_at %}, last {{ e.guard.upgrade_last_attempt_at | ago }}{% endif %}{% if e.guard.upgrade_last_error %}: {{ e.guard.upgrade_last_error }}{% endif %}. Antivirus quarantine, a proxy mangling the download and a full disk all look like this.">[ UPDATE FAILED x{{ e.guard.upgrade_attempts }} ]</span>{% endif %}
+        {% if e.guard.upgrade_attempts %}<span class="chip red" title="{{ chip_help('update_failed', version=(e.guard.upgrade_version or "an update"), n=e.guard.upgrade_attempts, when=((", last " ~ (e.guard.upgrade_last_attempt_at | ago)) if e.guard.upgrade_last_attempt_at else ""), why=((": " ~ e.guard.upgrade_last_error) if e.guard.upgrade_last_error else "")) }}">[ UPDATE FAILED x{{ e.guard.upgrade_attempts }} ]</span>{% endif %}
         {# APP-5: the crash-loop guard put this machine back on its previous
            build. The chip goes when the machine is running something at or
            above what it fell back from, so it needs no clearing. #}
         {% if e.guard.upgrade_reverted_from %}<span class="chip amber" title="this computer installed {{ e.guard.upgrade_reverted_from }}, could not start it, and put itself back on {{ e.companion_version }}. That build should not be made current for the fleet.">[ REVERTED FROM {{ e.guard.upgrade_reverted_from }} ]</span>{% endif %}
-        {% if e.guard.folders_unfiltered %}<span class="chip amber" title="{{ e.guard.folders_unfiltered }} Syncthing folder(s) on this computer have no ignore filter written{% if e.guard.folders_unfiltered_names %}: {{ e.guard.folders_unfiltered_names }}{% endif %}. Without it, lane C carries camera originals both ways.">[ UNFILTERED FOLDERS: {{ e.guard.folders_unfiltered }} ]</span>{% endif %}
-        {% if e.guard.sync_conflicts %}<span class="chip amber" title="{{ e.guard.sync_conflicts }} Syncthing sync-conflict file(s) in this computer's tree. Two people saved one project file; nothing was lost, but somebody's edit is sitting in a renamed copy.">[ CONFLICTS: {{ e.guard.sync_conflicts }} ]</span>{% endif %}
+        {% if e.guard.folders_unfiltered %}<span class="chip amber" title="{{ chip_help('unfiltered', n=e.guard.folders_unfiltered, names=((": " ~ e.guard.folders_unfiltered_names) if e.guard.folders_unfiltered_names else "")) }}">[ UNFILTERED FOLDERS: {{ e.guard.folders_unfiltered }} ]</span>{% endif %}
+        {% if e.guard.sync_conflicts %}<span class="chip amber" title="{{ chip_help('conflicts', n=e.guard.sync_conflicts) }}">[ CONFLICTS: {{ e.guard.sync_conflicts }} ]</span>{% endif %}
         {# v38 (wave 4's ingest contract, resilience sweep 2026-08-28): footage
            that is on ONE computer and nowhere else. Every one of these looks
            like a perfectly green machine on every other signal here, because
            as far as the lanes are concerned there is nothing to move. Amber
            rather than red: nothing is broken, something is unprotected. #}
-        {% if e.guard.resolve_out_of_tree %}<span class="chip amber" title="the project open on this computer references {{ e.guard.resolve_out_of_tree }} clip(s) from outside the sync tree{% if e.guard.resolve_bad_prefix %}, {{ e.guard.resolve_bad_prefix }} of them under the wrong drive letter{% endif %}. They will never upload, so the timeline opens with red media on every other computer. Scanned {{ e.guard.resolve_last_scan_at | ago }}.">[ {{ e.guard.resolve_out_of_tree }} CLIPS OUTSIDE THE TREE ]</span>{% endif %}
-        {% if e.guard.stray_projects_count %}<span class="chip amber" title="{{ e.guard.stray_projects_count }} project folder(s) on this computer's disk are not in the sync tree, holding {{ e.guard.stray_projects_bytes | human_bytes }}. Nothing in them is on the server or visible to anybody else.">[ {{ e.guard.stray_projects_count }} STRAY PROJECT DIRS ]</span>{% endif %}
+        {% if e.guard.resolve_out_of_tree %}<span class="chip amber" title="{{ chip_help('out_of_tree', n=e.guard.resolve_out_of_tree, bad_prefix=((", " ~ e.guard.resolve_bad_prefix ~ " of them under the wrong drive letter") if e.guard.resolve_bad_prefix else ""), at=e.guard.resolve_last_scan_at | ago) }}">[ {{ e.guard.resolve_out_of_tree }} CLIPS OUTSIDE THE TREE ]</span>{% endif %}
+        {% if e.guard.stray_projects_count %}<span class="chip amber" title="{{ chip_help('stray_dirs', n=e.guard.stray_projects_count, bytes=e.guard.stray_projects_bytes | human_bytes) }}">[ {{ e.guard.stray_projects_count }} STRAY PROJECT DIRS ]</span>{% endif %}
         {% if e.guard.moved_project_dirs_count %}<span class="chip amber" title="{{ e.guard.moved_project_dirs_count }} project folder(s) on this computer are not where the tree expects them. Syncing for those projects looks busy and moves nothing. Move it back, or use MOVE ON THE SERVER AND ON EVERY MACHINE on the project page.">[ PROJECT FOLDER MOVED ]</span>{% endif %}
         {% if e.guard.ingest_staging_bytes %}<span class="chip amber" title="{{ e.guard.ingest_staging_bytes | human_bytes }} of footage is in this computer's drop folder and has not been filed into a project yet. It is on one disk.">[ INGEST STAGING {{ e.guard.ingest_staging_bytes | human_bytes }} ]</span>{% endif %}
         {# SYS-5 (resilience sweep 2026-08-28): a full drive used to show as
            red dots with no cause, and "why?" had no answer on any page. No
            chip at all for a machine that has not reported a disk section:
            "could not check" must never render as a green reassurance. #}
-        {% if e.guard.disk_percent is not none and e.guard.disk_status != "green" %}<span class="chip {{ e.guard.disk_status }}" title="this computer's sync drive has {{ e.guard.disk_root_free_bytes | human_bytes }} free of {{ e.guard.disk_root_total_bytes | human_bytes }}{% if e.guard.disk_system_free_bytes is not none %}; its system drive has {{ e.guard.disk_system_free_bytes | human_bytes }} free{% endif %}. Measured {{ e.guard.disk_at | ago }}. Proxy download fills a drive file by file, and .ccsync-trash cannot prune while the breaker is tripped.">[ DISK {{ "%.0f" | format(e.guard.disk_percent) }}% ]</span>{% endif %}
+        {% if e.guard.disk_percent is not none and e.guard.disk_status != "green" %}<span class="chip {{ e.guard.disk_status }}" title="{{ chip_help('disk', free=e.guard.disk_root_free_bytes | human_bytes, total=e.guard.disk_root_total_bytes | human_bytes, system=(("; its system drive has " ~ (e.guard.disk_system_free_bytes | human_bytes) ~ " free") if e.guard.disk_system_free_bytes is not none else ""), at=e.guard.disk_at | ago) }}">[ DISK {{ "%.0f" | format(e.guard.disk_percent) }}% ]</span>{% endif %}
         {# SYNC-1 / SYS-17: the stall the COMPANION found and killed, which is
            the machine that had the evidence. The server's own detector is the
            lane chip beside it. #}
-        {% if e.guard.stalled_lane %}<span class="chip red" title="lane {{ e.guard.stalled_lane }} on this computer made no progress for {{ e.guard.stalled_seconds }} second(s){% if e.guard.stalled_killed %} and was killed{% else %} and was reported without being killed{% endif %}, {{ e.guard.stalled_at | ago }}. A local drive that stops answering reads exactly like this.">[ STALLED {{ e.guard.stalled_lane | upper }}{{ ", KILLED" if e.guard.stalled_killed }} ]</span>{% endif %}
+        {% if e.guard.stalled_lane %}<span class="chip red" title="{{ chip_help('stalled', lane=e.guard.stalled_lane, seconds=e.guard.stalled_seconds, killed=("and was killed" if e.guard.stalled_killed else "and was reported without being killed"), at=e.guard.stalled_at | ago) }}">[ STALLED {{ e.guard.stalled_lane | upper }}{{ ", KILLED" if e.guard.stalled_killed }} ]</span>{% endif %}
         {% if e.guard.halt_active %}<span class="chip red" title="{{ e.guard.halt_reason }}">[ SYNC HALTED{{ " (FLEET)" if e.guard.halt_scope == "fleet" }} ]</span>{% endif %}
-        {% if e.guard.skipped_exists %}<span class="chip amber" title="{{ e.guard.skipped_exists }} file(s) exist on the NAS under the same name at a different size. Lane A is copy --ignore-existing, so this computer's newer versions will never upload.">[ WON'T UPLOAD: {{ e.guard.skipped_exists }} ]</span>{% endif %}
-        {% if e.guard.trash_bytes and e.guard.trash_bytes > 5000000000 %}<span class="chip amber" title="{{ e.guard.trash_count }} recoverable file(s) in this computer's .ccsync-trash. Pruned automatically after 14 days.">[ TRASH: {{ e.guard.trash_bytes | human_bytes }} ]</span>{% endif %}
+        {% if e.guard.skipped_exists %}<span class="chip amber" title="{{ chip_help('skipped_exists', n=e.guard.skipped_exists) }}">[ WON'T UPLOAD: {{ e.guard.skipped_exists }} ]</span>{% endif %}
+        {% if e.guard.trash_bytes and e.guard.trash_bytes > 5000000000 %}<span class="chip amber" title="{{ chip_help('trash', n=e.guard.trash_count) }}">[ TRASH: {{ e.guard.trash_bytes | human_bytes }} ]</span>{% endif %}
         {# B-roll ingest (BROLL_INGEST_PLAN.md §3.2, 2026-08-18): which
            computers are crunching a batch and how far along they are. The
            WARNING chip is separate and shows even when nothing is running --
@@ -264,8 +268,8 @@
            question an admin has to be able to answer while the queue is
            empty, and until now the GPU probe's answer never left the
            machine it ran on. #}
-        {% if e.capabilities.gpu_present %}<span class="chip" title="{{ e.capabilities.gpu_name or "an NVIDIA GPU" }}{% if e.capabilities.nvenc %}, with nvenc{% endif %}{% if e.capabilities.at %} · reported {{ e.capabilities.at | ago }}{% endif %}">[ GPU{% if e.capabilities.gpu_vram_gb %} {{ e.capabilities.gpu_vram_gb | round | int }}G{% endif %} ]</span>{% endif %}
-        {% if e.capabilities.whisper %}<span class="chip" title="this computer has the whisper venv and the pipeline checkout the transcription jobs need">[ WHISPER ]</span>{% endif %}
+        {% if e.capabilities.gpu_present %}<span class="chip" title="{{ chip_help('gpu', name=(e.capabilities.gpu_name or "an NVIDIA GPU"), nvenc=(", with nvenc" if e.capabilities.nvenc else ""), at=((" - reported " ~ (e.capabilities.at | ago)) if e.capabilities.at else "")) }}">[ GPU{% if e.capabilities.gpu_vram_gb %} {{ e.capabilities.gpu_vram_gb | round | int }}G{% endif %} ]</span>{% endif %}
+        {% if e.capabilities.whisper %}<span class="chip" title="{{ chip_help('whisper') }}">[ WHISPER ]</span>{% endif %}
         {# THE TIMELINE CARDS PAGE, served from this computer's Resolve
            (TIMELINE-CARDS-INTO-CCSYNC.md phase 2, 2026-08-30). Green because
            it is a live connection, not a capability: this is the one machine
@@ -274,7 +278,57 @@
            REFUSED the role shows nothing here -- the refusal is in the
            diagnostics bundle, because "cards_agent is not set" is true of
            every computer and would be a chip on all of them. #}
-        {% if e.capabilities.cards_agent and e.capabilities.cards_agent.connected %}<span class="chip green" title="this computer is serving the Timeline Cards page from its own Resolve{% if e.capabilities.cards_agent.timeline %} - {{ e.capabilities.cards_agent.timeline }}{% endif %}{% if e.capabilities.at %} · reported {{ e.capabilities.at | ago }}{% endif %}">[ CARDS{% if e.capabilities.cards_agent.timeline %}: {{ e.capabilities.cards_agent.timeline }}{% endif %}{% if e.capabilities.cards_agent.version %} v{{ e.capabilities.cards_agent.version }}{% endif %} ]</span>{% endif %}
+        {# RES-6 (2026-09-03): `connected` alone kept this chip GREEN while the
+           role's loop was dead or had been 401-ing for hours - two daemon
+           threads, no watchdog, and nothing that stopped advancing was in the
+           report. The companion sends a STATE now (builder C5, 2026-09-04):
+           running / stopped / refused / credential_refused / unreachable,
+           with the exception's own text in `detail`. Colour comes from the
+           state; a build that predates it still reports `connected` and
+           reads as running, so an old companion renders exactly as before. #}
+        {% if e.capabilities.cards_agent %}
+          {% set ca = e.capabilities.cards_agent %}
+          {% set cstate = (ca.state | default("", true)) or ("running" if ca.connected else "") %}
+          {# The FIVE health words only (C5, 2026-09-04). The companion's
+             default block for a machine with no cards role at all is
+             `state: "disabled"`, kept for compatibility, and most machines in
+             a fleet are that: a chip on every one of them is noise on the
+             page whose job is "is anything red". No state and no connection
+             is the same answer. #}
+          {% if cstate in ("running", "stopped", "refused", "credential_refused", "unreachable") %}
+            {% set ccolour = {"running": "green", "refused": "amber", "unreachable": "amber",
+                              "stopped": "red", "credential_refused": "red"}[cstate] %}
+            {% set clabel = {"running": "CARDS", "stopped": "CARDS STOPPED",
+                             "refused": "CARDS REFUSED", "credential_refused": "CARDS SIGNED OUT",
+                             "unreachable": "CARDS OFFLINE"}[cstate] %}
+            {% set cat = ca.last_poll_at | default(none, true) or e.capabilities.at %}
+            {# `detail` is the exception's own text; `gate_state` is the older
+               refusal vocabulary and is what an older companion has instead,
+               so it is the fallback rather than a second line. The HTTP status
+               is only ever interesting on a credential refusal. #}
+            {% set cdetail = (ca.detail | default("", true)) or (ca.gate_state | default("", true)) %}
+            {% if ca.last_http_status is defined and ca.last_http_status and cstate == "credential_refused" %}{% set cdetail = cdetail ~ " (HTTP " ~ ca.last_http_status ~ ")" %}{% endif %}
+            <span class="chip {{ ccolour }}" title="{{ chip_help('cards_' ~ cstate,
+                    timeline=((" - " ~ ca.timeline) if ca.timeline else ""),
+                    detail=((" " ~ cdetail) if cdetail else ""),
+                    at=((" - last talked " ~ (cat | ago)) if cat else "")) }}">[ {{ clabel }}{% if cstate == "running" and ca.timeline %}: {{ ca.timeline }}{% endif %}{% if ca.version %} v{{ ca.version }}{% endif %} ]</span>
+          {% endif %}
+        {% endif %}
+        {# CYT-3 (2026-09-03): the clips downloaded, landed on disk, and never
+           reached Resolve - and the importer's whole status reached NOBODY at
+           either end. `no-project-match` is a per-machine misconfiguration an
+           admin can fix and the editor cannot, which is why it belongs on
+           this grid. Rendered from `machine.youtube_import` (builder D5's
+           flattening); a companion that does not send the section renders
+           nothing at all. #}
+        {% if e.youtube_import is defined and e.youtube_import %}
+          {% set yt = e.youtube_import %}
+          {% if yt.pending %}<span class="chip amber" title="{{ chip_help('youtube_import', n=yt.pending,
+                  reason=((" (" ~ yt.reason ~ ")") if yt.reason else ""),
+                  at=(yt.at | ago) if yt.at else "at an unknown time") }}">[ YOUTUBE CLIPS WAITING FOR RESOLVE: {{ yt.pending }} ]</span>
+          {% elif yt.reason and yt.state and yt.state not in ("ok", "idle") %}<span class="chip amber" title="{{ chip_help('youtube_import_gave_up', n=yt.pending or 0, reason=yt.reason,
+                  at=(yt.at | ago) if yt.at else "at an unknown time") }}">[ YOUTUBE IMPORT GAVE UP ]</span>{% endif %}
+        {% endif %}
         {# A LINK since phase 4 (2026-08-30): the chip is where an admin
    notices a job, and the jobs page is where they can see why it is stuck and
    stop it. The other chips stay spans -- they are facts, not places.
@@ -292,7 +346,7 @@
            it. Next to the job chip, because the two answer one question
            together: what is this machine doing for the fleet, and why is it
            allowed to. #}
-        {% if e.volunteering.active %}<span class="chip green" title="somebody at {{ e.machine }} clicked 'take fleet jobs now', so this computer is offered work while they use it - until {{ e.volunteering.until }} UTC, or until they click it off. Nothing else is bypassed: a halt, an update or a tripped breaker still refuse.">[ VOLUNTEERING until {{ e.volunteering.until }} ]</span>{% endif %}
+        {% if e.volunteering.active %}<span class="chip green" title="{{ chip_help('volunteering', machine=e.machine, until=e.volunteering.until) }}">[ VOLUNTEERING until {{ e.volunteering.until }} ]</span>{% endif %}
         {% if e.job.id %}<a class="chip green" href="/admin/jobs" title="job #{{ e.job.id }} ({{ e.job.kind }}, {{ e.job.state }}){% if e.job.rel_path %} - {{ e.job.rel_path }}{% endif %}{% if e.job.at %} · last heartbeat {{ e.job.at | ago }}{% endif %}{% if e.job.lease_expires_at %} · lease until {{ e.job.lease_expires_at }}{% endif %}">[ {{ e.job.label or e.job.kind | upper }}: {% if e.job.percent is not none %}{{ e.job.percent }}%{% else %}JOB {{ e.job.id }}{% endif %} ]</a>{% endif %}
         {# Music ingest (MUSIC_INGEST_PLAN.md step 3, 2026-08-18). Its OWN
            chip beside b-roll's rather than one shared one: music needs no GPU,
@@ -302,7 +356,7 @@
            the CPU. #}
         {% if e.music_ingest.active %}<span class="chip {{ "amber" if e.music_ingest.warning else "green" }}" title="music batch {{ e.music_ingest.batch[:8] if e.music_ingest.batch else "?" }}{% if e.music_ingest.track %} - {{ e.music_ingest.track }}{% endif %}{% if e.music_ingest.state %} ({{ e.music_ingest.state }}{% if e.music_ingest.gate %}: {{ e.music_ingest.gate }}{% endif %}){% endif %}{% if e.music_ingest.percent %} · {{ e.music_ingest.percent }}% of this track{% endif %}{% if e.music_ingest.failed %} · {{ e.music_ingest.failed }} failed{% endif %} · reported {{ e.music_ingest.at | ago }}">[ INDEXING MUSIC: {{ e.music_ingest.done }}/{{ e.music_ingest.total }} ]</span>{% endif %}
         {% if e.music_ingest.warning %}<span class="chip amber" title="{{ e.music_ingest.warning }}">[ MUSIC MODEL ]</span>{% endif %}
-        {% if e.proxy.missing %}<span class="chip amber" title="{{ e.proxy.missing }} clip(s) on this computer have no proxy yet, so nobody else on the fleet can see that footage{% if e.proxy.state %} (proxy generator: {{ e.proxy.state }}){% endif %}{% if e.proxy.left %}; {{ e.proxy.left }} queued to encode{% endif %}.">[ {{ e.proxy.missing }} NEED PROXIES ]</span>{% endif %}
+        {% if e.proxy.missing %}<span class="chip amber" title="{{ chip_help('need_proxies', n=e.proxy.missing, state=((" (proxy generator: " ~ e.proxy.state ~ ")") if e.proxy.state else ""), left=(("; " ~ e.proxy.left ~ " queued to encode") if e.proxy.left else "")) }}">[ {{ e.proxy.missing }} NEED PROXIES ]</span>{% endif %}
         {# SYS-7: the bundle that answers the question, without an inbound
            connection to an editor's PC and without asking a non-technical
            person to click anything on the machine that is broken. The request

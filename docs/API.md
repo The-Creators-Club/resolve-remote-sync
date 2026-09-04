@@ -330,6 +330,37 @@ as stale. `stale` is `action == "stale"` alone, i.e. a binary past its shelf
 life that could not update itself; `failed` (no usable binary at all) is a
 different alarm.
 
+`sync_guard.youtube_import` (CYT-3, 2026-09-04) is the clips that were
+downloaded and never reached Resolve: `state`, `reason`, `pending`, `at`.
+
+```json
+"youtube_import": {
+  "state": "no-project-match",
+  "reason": "8 downloaded clips are waiting. This Resolve project has no folder on the server yet, so downloaded clips cannot be filed into it. Ask your admin.",
+  "pending": 8,
+  "at": "2026-09-04T08:12:01Z"
+}
+```
+
+**Absent when there is nothing to say** - no pending clips and no reason - which
+is how "every downloaded clip is in the media pool" is spelled and what clears
+the chip. `state` is the importer's gate answer (`disabled` / `drive-absent` /
+`paused` / `resolve-closed` / `no-project-match` / `nothing-to-do` /
+`waiting-settle` / `importing` / `idle`) and `reason` is the same verdict as a
+sentence, including the give-up ("3 downloaded clips could not be filed into
+Resolve"), so both ends render the same words. It is deliberately a **second**
+carrier of the same facts as the top-level `youtube_import` section: that
+section is declared, validated and read by nothing, and `no-project-match` is a
+per-machine misconfiguration an admin can fix and the editor cannot.
+
+The `capabilities` section carries `jobs_gate` (CMEDIA-12, 2026-09-04):
+`{"taking_work": false, "reason": "user_active"}` - the job runner's OWN
+verdict, rendered by `GET /api/v1/jobs/<id>/why` beside the dashboard's
+reconstruction of it. **Absent** from a companion too old to send one, and
+absent rather than guessed when the runner cannot answer: the two can disagree
+(a stale offer, a volunteer window that expired between the report and the
+claim) and nothing showed it before.
+
 Oversized sections are **sliced to the ceiling, not rejected** — a 422 used to
 take the whole machine off the fleet grid. What was dropped comes back in
 `truncated` and is logged on both sides. The three diagnostic sections above go

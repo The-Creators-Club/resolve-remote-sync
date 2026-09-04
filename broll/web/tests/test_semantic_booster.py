@@ -217,7 +217,13 @@ def test_semantic_booster_does_not_reorder_confident_keyword_results(
 
     order_after = [row["video"]["id"] for row in body_after["results"]]
     assert order_after == order_before
-    assert body_after == body_before, (
+    # The RESULT half, not the whole envelope: `mode_available` is meant to
+    # differ here, because that is the fact BROLL-10 added (2026-09-04) -- one
+    # of these two responses comes from a server that can run meaning-based
+    # search and the other from one that cannot, and the page has to be able to
+    # tell. Nothing an editor sees in the grid may move.
+    assert {k: body_after[k] for k in ("results", "total")} == \
+           {k: body_before[k] for k in ("results", "total")}, (
         "semantic being available must not change a query's output at all "
         "when every semantically-similar video was already found by keyword"
     )

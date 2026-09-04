@@ -18,6 +18,7 @@ try/except so one bad poll never kills the supervised thread.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -32,6 +33,11 @@ from .paths import (
 )
 
 log = logging.getLogger("ccsync.watcher")
+
+# How many MISSING clips a surface is handed (RES-19). The COUNT is
+# last_counts["missing"] and is exact; this list is evidence, and a project
+# whose media has not arrived yet has thousands of them.
+MAX_MISSING_REPORTED = 50
 
 
 def _norm_key(path: str) -> str:
@@ -179,6 +185,21 @@ class TimelineWatcher:
         # below. None = startup, i.e. the first poll always announces itself.
         self._bridge_connected: Optional[bool] = None
         self._bridge_reason: str = ""
+        # RES-19 (usability sweep 2026-09-03). Two holes, one cause: the
+        # watcher knew and nobody could ask.
+        #
+        #  * MISSING was a DEBUG line and a count. "Media Offline" is the
+        #    thing an editor actually notices, so the PATHS are kept here
+        #    (bounded, rebuilt from each full pass like _missing_logged) for
+        #    app.resolve_health() to render.
+        #  * _offered_non_canonical is add-only, so a relink refused for a
+        #    transient reason (Resolve busy, the file locked for a second)
+        #    was never offered again for the life of the process. The relink
+        #    caller now calls rearm_non_canonical() on a failure -- only a
+        #    SUCCESS may latch -- and the refusal is kept here so a surface
+        #    can name it.
+        self._missing_items: list[dict[str, str]] = []
+        self._non_canonical_refused: dict[str, dict[str, str]] = {}
 
     def poll_once(self) -> dict[str, Any]:
         """Run one poll cycle. Returns a small summary dict; never raises."""
@@ -246,6 +267,10 @@ class TimelineWatcher:
         # it is both the pass summary's N and the next value of
         # _missing_logged -- see the log-flood note in __init__.
         missing_now: set[str] = set()
+        # The same clips as `missing_now`, in the spelling a person reads, and
+        # capped: a project whose media has not synced down yet has thousands
+        # (see the log-flood note in __init__), and this rides a tray render.
+        missing_items: list[dict[str, str]] = []
         new_missing = 0
         resolve_project_name = result.get("project_name", "")
         # Did anything under the canonical prefix classify as healthy this
@@ -329,6 +354,11 @@ class TimelineWatcher:
                         log.exception("on_foreign callback failed")
             elif cls == MISSING:
                 missing_now.add(key)
+                if len(missing_items) < MAX_MISSING_REPORTED:
+                    missing_items.append({
+                        "name": str(item.get("clip_name") or os.path.basename(path) or path),
+                        "path": path,
+                    })
                 if key not in self._missing_logged:
                     new_missing += 1
                     log.debug("clip path missing on disk, not under local_root/prefix: %s", path)
@@ -358,6 +388,9 @@ class TimelineWatcher:
         # early return above leaves the previous pass's set alone, so a
         # disconnected bridge does not replay every path on reconnect.
         self._missing_logged = missing_now
+        # Same rebuild-per-pass rule, for the same reason: a clip whose media
+        # has arrived must leave the list on the pass that sees it (RES-19).
+        self._missing_items = missing_items
 
         if prefix_healthy and not prefix_broken and self._warned_mapping:
             # The mapping is working again. Warning once per PROCESS lifetime
@@ -402,6 +435,54 @@ class TimelineWatcher:
             "out_of_tree_total": total_out_of_tree,
             "bad_prefix": total_bad_prefix,
         }
+
+    def bridge_is_connected(self) -> Optional[bool]:
+        """Whether the last poll reached Resolve. None until the first poll
+        has run, and that is load-bearing: "we have not looked" must not
+        render as "Resolve is closed" (the same rule last_scan_at obeys)."""
+        return self._bridge_connected
+
+    # -- what the last pass saw, for a surface to render (RES-19) ----------
+    def missing_clips(self) -> list[dict[str, str]]:
+        """[{"name", "path"}] for the clips whose media is not on this
+        computer, as of the last FULL pass. Capped at MAX_MISSING_REPORTED;
+        `last_counts["missing"]` is the true count. A copy, because the
+        caller is the tray/report thread and this list is replaced wholesale
+        by the poll thread."""
+        return [dict(entry) for entry in self._missing_items]
+
+    def non_canonical_refused(self) -> list[dict[str, str]]:
+        """[{"name", "path"}] for the in-tree clips whose relink to the
+        canonical spelling Resolve refused. Copies, same reason as above."""
+        return [dict(entry) for entry in self._non_canonical_refused.values()]
+
+    def rearm_non_canonical(self, path: str, name: str = "") -> None:
+        """This path's relink FAILED: offer it again (RES-19).
+
+        `_offered_non_canonical` was add-only, so a relink refused for a
+        transient reason -- Resolve busy, the file locked for a second -- was
+        never retried for the life of the process, and the only way back was
+        a restart nobody knew to do. Only a SUCCESS may latch a path now: a
+        success rewrites the clip's File Path, so the key never comes back
+        anyway. The unprompted burst is still rate-limited by
+        resolve_journal.allow_automatic in app._handle_non_canonical, which
+        is what stops this becoming a retry every 3 s.
+        """
+        text = str(path or "")
+        if not text:
+            return
+        key = _norm_key(text)
+        self._offered_non_canonical.discard(key)
+        self._non_canonical_refused[key] = {
+            "name": str(name or os.path.basename(text) or text),
+            "path": text,
+        }
+
+    def clear_non_canonical_refusal(self, path: str) -> None:
+        """This path relinked. Drop any refusal recorded against it."""
+        text = str(path or "")
+        if text:
+            self._non_canonical_refused.pop(_norm_key(text), None)
 
     def _note_scan(self, out_of_tree: int, bad_prefix: int, missing: int) -> None:
         """Publish the poll's totals for `app.resolve_health()` (UX-4).

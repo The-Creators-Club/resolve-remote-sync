@@ -1623,6 +1623,44 @@ ALTER TABLE machine_state ADD COLUMN upgrade_refused_reason TEXT;
 ALTER TABLE machine_state ADD COLUMN upgrade_refused_at TEXT;
 """
 
+# v49: WHAT'S NEW, AND WHICH COMPUTER THAT TOKEN IS HOLDING (APP-16 /
+# DCORE-14, usability sweep 2026-09-04).
+#
+# `notes` is the one-line "what changed" a publisher may attach to a build.
+# UNSIGNED and stored beside the record rather than inside it, deliberately:
+# the release signature covers a fixed field list that every companion in the
+# field mirrors (release_trust.RECORD_FIELDS / OPTIONAL_KIND_EXTRA_FIELDS),
+# and a record carrying a field an older build's canonicaliser does not know
+# is REFUSED by that build with no over-the-air recovery (REL-7, and the
+# overlap-release rule sign_release.py spells out for requires_dashboard).
+# A sentence an editor reads in the update dialog must never be able to make
+# a build uninstallable, so it rides outside the signature exactly as
+# `git_sha` does. It is display-only: nothing anywhere decides anything from
+# it.
+#
+# `report_auth.token_id` is which per-editor credential that computer's LAST
+# report actually authenticated with. `editor_report_tokens.last_used_at`
+# already said WHEN a token was used and could never say BY WHICH COMPUTER --
+# one editor can own two machines and hold one token -- so [ REVOKE ] could
+# not name what it was about to stop reporting. Empty for the shared token
+# and for every row written before this migration: unknown, never "none".
+#
+# The four `cap_cards_*` columns are RES-6 (same sweep): `cap_cards_state`
+# alone could say a cards agent was not running and never why. `gate_state`
+# and `detail` are the role's own words for the refusal, `last_poll_at` and
+# `last_http_status` are the tunnel's -- an agent that is "running" and has
+# not polled since Tuesday, or is polling into a 401, is exactly the machine
+# whose phone shows a blank page with nothing on the fleet grid to explain
+# it. All NULL is a companion too old to say, which must never render as OK.
+SCHEMA_V49 = """
+ALTER TABLE companion_packages ADD COLUMN notes TEXT NOT NULL DEFAULT '';
+ALTER TABLE report_auth ADD COLUMN token_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE machine_state ADD COLUMN cap_cards_gate_state TEXT;
+ALTER TABLE machine_state ADD COLUMN cap_cards_detail TEXT;
+ALTER TABLE machine_state ADD COLUMN cap_cards_last_poll_at TEXT;
+ALTER TABLE machine_state ADD COLUMN cap_cards_http_status INTEGER;
+"""
+
 _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     (1, None),
     (2, SCHEMA_V2),
@@ -1737,6 +1775,11 @@ _MIGRATION_STEPS: list[tuple[int, str | None]] = [
     # 48: the rollout clock and the refused offer (REL-6 / REL-3, usability
     # sweep 2026-09-04). One step, and gapless like every one before it.
     (48, SCHEMA_V48),
+    # 49: the package note and the token's computers (APP-16 / DCORE-14,
+    # usability sweep 2026-09-04). One step, and gapless like every one
+    # before it: two unrelated columns, but a schema number is a shared
+    # resource and a wave that takes one number per finding runs out of them.
+    (49, SCHEMA_V49),
 ]
 
 SCHEMA_VERSION = _MIGRATION_STEPS[-1][0]
@@ -1920,6 +1963,17 @@ def looks_like_editor_report_token(token: str) -> bool:
     return bool(_REPORT_TOKEN_RE.match(str(token or "")))
 
 
+def report_token_id(token: str) -> str:
+    """The PUBLIC half of a cce1 token, "" for anything else (DCORE-14).
+
+    The id is not a secret (it is on the Users page already); the 48-hex
+    second group is, and nothing outside this module ever needs it. Callers
+    that want to record which credential a report used ask for this rather
+    than slicing the string themselves."""
+    match = _REPORT_TOKEN_RE.match(str(token or ""))
+    return match.group(1) if match else ""
+
+
 def _hash_report_secret(secret: str) -> str:
     return hashlib.sha256(secret.encode("utf-8")).hexdigest()
 
@@ -2030,23 +2084,59 @@ def revoke_editor_report_token(
 
 def record_report_auth(
     conn: sqlite3.Connection, editor: str, machine: str, auth_kind: str,
-    now: str | None = None
+    now: str | None = None, token_id: str = "",
 ) -> None:
     """Which credential this machine's last report used. Migration telemetry.
 
     See count_shared_token_machines: the answer to "is it safe to turn
     DASH_SHARED_REPORT_TOKEN_ENABLED off yet" has to come from the fleet, not
-    from an operator's memory of who they handed tokens to."""
+    from an operator's memory of who they handed tokens to.
+
+    `token_id` (v49, DCORE-14) is WHICH per-editor token, so [ REVOKE ] can
+    name the computers it is about to stop. Empty for the shared token, which
+    identifies nobody by construction."""
     name = str(editor or "").strip().lower()
     if not name or auth_kind not in ("shared", "editor"):
         return
     conn.execute(
-        "INSERT INTO report_auth (editor_username, machine, auth_kind, at) "
-        "VALUES (?, ?, ?, ?) "
+        "INSERT INTO report_auth (editor_username, machine, auth_kind, at, token_id) "
+        "VALUES (?, ?, ?, ?, ?) "
         "ON CONFLICT(editor_username, machine) DO UPDATE SET "
-        "auth_kind = excluded.auth_kind, at = excluded.at",
-        (name, str(machine or ""), auth_kind, now or utcnow_iso()),
+        "auth_kind = excluded.auth_kind, at = excluded.at, "
+        "token_id = excluded.token_id",
+        (name, str(machine or ""), auth_kind, now or utcnow_iso(),
+         str(token_id or "")),
     )
+
+
+def machines_by_report_token(conn: sqlite3.Connection) -> dict[str, list[dict[str, Any]]]:
+    """token_id -> the computers whose LAST report used it (DCORE-14).
+
+    What [ REVOKE ] needs in front of it: revoking a token that a MacBook is
+    holding stops that machine reporting within a minute, and the only cure
+    is handing its editor a new one by hand. Nothing here refuses anything --
+    the point is to say it before the click, not to guard the click.
+
+    Tolerates a database that predates `report_auth` or its v49 column (an
+    older dashboard.db mid-redeploy) by answering nothing at all, which
+    renders as "we cannot tell which" rather than as "none".
+    """
+    out: dict[str, list[dict[str, Any]]] = {}
+    try:
+        rows = conn.execute(
+            "SELECT editor_username, machine, at, token_id FROM report_auth "
+            "WHERE auth_kind = 'editor' AND token_id <> '' "
+            "ORDER BY editor_username, machine"
+        ).fetchall()
+    except sqlite3.Error:
+        return out
+    for row in rows:
+        out.setdefault(str(row["token_id"]), []).append({
+            "editor_username": row["editor_username"],
+            "machine": row["machine"],
+            "at": row["at"],
+        })
+    return out
 
 
 def count_shared_token_machines(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -3332,6 +3422,49 @@ def collector_alarms(conn: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+# The two cycles that decide what is SHARED with whom. A note from either is
+# the difference between "the sharing you asked for is live" and "some of it
+# is held", which is the whole of DCORE-16.
+ENFORCE_NOTE_KINDS = ("config", "enforce")
+
+
+def enforce_notes(
+    conn: sqlite3.Connection, limit: int = 5, kinds: Iterable[str] = ENFORCE_NOTE_KINDS,
+) -> list[dict[str, Any]]:
+    """The recent config/enforce cycles that did NOT do everything they
+    described, newest first (DCORE-16, usability sweep 2026-09-04).
+
+    `poll_runs.error` carries a note on a SUCCESSFUL run too (collector_health
+    says why), and until now the only place any of them was rendered was the
+    collector health panel on the settings page -- so "applied 9 of 40;
+    syncthing refused the rest", "refused 12 share removal(s)" and "skipped:
+    empty myID" were invisible on the two pages where somebody is asking why
+    a computer is not getting a project: the project page and the fleet
+    diagnostics.
+
+    A clean cycle has no note and appears nowhere here: an empty list means
+    "nothing held", which is what the pages render as silence.
+    """
+    kinds = tuple(kinds)
+    if not kinds:
+        return []
+    placeholders = ",".join("?" for _ in kinds)
+    rows = conn.execute(
+        f"""SELECT kind, ok, started_at, finished_at, error FROM poll_runs
+             WHERE kind IN ({placeholders})
+               AND error IS NOT NULL AND TRIM(error) <> ''
+             ORDER BY id DESC LIMIT ?""",
+        (*kinds, max(1, int(limit))),
+    ).fetchall()
+    return [
+        {"at": r["finished_at"] or r["started_at"],
+         "kind": r["kind"],
+         "ok": bool(r["ok"]),
+         "note": str(r["error"]).strip()}
+        for r in rows
+    ]
+
+
 def collector_health(conn: sqlite3.Connection, now: str | None = None) -> dict[str, Any]:
     """Per-kind last poll WITH its note, plus the alarms (DASH-14).
 
@@ -3380,6 +3513,7 @@ def insert_companion_package(
     git_sha: str = "",
     git_dirty: bool = False,
     staged_at: str = "",
+    notes: str = "",
 ) -> None:
     # `now` is the SIGNER's published_at, not the server's clock: it is one of
     # the fields the release signature covers, so storing anything else would
@@ -3391,17 +3525,37 @@ def insert_companion_package(
     # place that hands it to the fleet. `staged_at` is the server's clock and
     # not `now`, because it starts a SOAK -- a signer's published_at hours in
     # the past would hand a fresh build a soak it never served.
+    #
+    # `notes` (v49, APP-16) is UNSIGNED: see SCHEMA_V49 for why a "what's new"
+    # line must never be able to make a build unverifiable on a machine
+    # running an older canonicaliser. Bounded here rather than at the route,
+    # because both publish doors (the human PUT and the feed) come through
+    # this one insert and a dialog on somebody's tray is what renders it.
     conn.execute(
         """INSERT INTO companion_packages
              (kind, version, platform, filename, sha256, size_bytes, published_at,
               published_by, signature, pubkey_id, min_version, signed_binary,
-              rollout, staged_at, requires_dashboard, arch, git_sha, git_dirty)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'staged', ?, ?, ?, ?, ?)""",
+              rollout, staged_at, requires_dashboard, arch, git_sha, git_dirty, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'staged', ?, ?, ?, ?, ?, ?)""",
         (kind, version, platform, filename, sha256, size_bytes, now, published_by,
          signature, pubkey_id, min_version, 1 if signed_binary else 0,
          staged_at or utcnow_iso(), requires_dashboard, arch, git_sha,
-         1 if git_dirty else 0),
+         1 if git_dirty else 0, package_notes(notes)),
     )
+
+
+# One line, and a line an editor reads on their own screen: long enough for a
+# real sentence, short enough that the update dialog stays a dialog.
+MAX_PACKAGE_NOTES_CHARS = 300
+
+
+def package_notes(notes: str | None) -> str:
+    """A publisher's "what's new" line, bounded and single-line (APP-16).
+
+    Newlines are folded rather than rejected: the value comes from a release
+    script's `--notes`, and a stray one must cost a space, not a publish."""
+    text = " ".join(str(notes or "").split())
+    return text[:MAX_PACKAGE_NOTES_CHARS]
 
 
 def fetch_companion_packages(
@@ -4031,6 +4185,35 @@ def machines_by_machine_id(
            ORDER BY last_seen DESC, machine ASC""",
         (editor, machine_id),
     )]
+
+
+def pending_machine_request(
+    conn: sqlite3.Connection, editor: str, machine: str
+) -> dict[str, Any]:
+    """The three parked per-machine requests this computer already has
+    outstanding (DCORE-13, usability sweep 2026-09-04).
+
+    Read BEFORE the write that overwrites one, so an admin clicking a second
+    time can be told they are re-arming a request that has been waiting since
+    Tuesday rather than being congratulated twice on the same click. An
+    unknown machine answers all-empty, exactly like a known one with nothing
+    parked: the ROUTES are what refuse an unknown machine (404), and they do
+    it on the write's own rowcount."""
+    row = conn.execute(
+        """SELECT update_requested_version, update_requested_at,
+                  lane_b_resume_requested_at, diagnostics_requested_at
+             FROM machines WHERE editor_username=? AND machine=?""",
+        (editor, machine),
+    ).fetchone()
+    if row is None:
+        return {"update": "", "update_at": None,
+                "lane_b_resume": False, "diagnostics": False}
+    return {
+        "update": str(row["update_requested_version"] or ""),
+        "update_at": row["update_requested_at"],
+        "lane_b_resume": bool(row["lane_b_resume_requested_at"]),
+        "diagnostics": bool(row["diagnostics_requested_at"]),
+    }
 
 
 def request_machine_update(
@@ -4983,6 +5166,16 @@ def _days_between(then: str | None, now: str) -> float:
 
 RESOLVE_UNDO_COMMAND_LIMIT = 4
 RESOLVE_UNDO_RETRYING = "retrying"
+# RES-4 (usability sweep 2026-09-04): a THIRD answer that is not a failure.
+# "retrying" means the companion tried and something got in the way; PARKED
+# means it did not try at all, because no project is open in Resolve, and it
+# will as soon as one is. Both keep the command on the books -- the
+# difference is what an admin reads on the panel, where "retrying" for a
+# machine whose editor simply has not opened Resolve today looks like
+# something that is going wrong.
+RESOLVE_UNDO_PARKED = "parked"
+# The states that record an attempt WITHOUT retiring the command.
+RESOLVE_UNDO_OPEN_STATES = (RESOLVE_UNDO_RETRYING, RESOLVE_UNDO_PARKED)
 # What one machine reports about its own journals. Capped here because it is
 # client-supplied and lands in a column: an editor who relinks daily holds 60
 # days of them (resolve_journal.RETENTION_DAYS), and an admin picking one only
@@ -5056,8 +5249,14 @@ def mark_resolve_undo_applied(
     same way mark_file_move_applied does: "Resolve is not open" and "another
     project is open" are both states that clear themselves, and retiring the
     command on one of them would leave the wrong paths in place with the
-    admin believing they had been undone."""
-    if state == RESOLVE_UNDO_RETRYING:
+    admin believing they had been undone.
+
+    `state='parked'` (RES-4, 2026-09-04) is the same non-retiring write with
+    an honest label: the companion did not attempt anything because no
+    project is open. A companion too old to say `parked` sends `retrying`
+    with the reason in `detail`, which is why this is additive and not a
+    rename."""
+    if state in RESOLVE_UNDO_OPEN_STATES:
         cur = conn.execute(
             """UPDATE resolve_undo_requests SET state=?, attempts=?, detail=?
                 WHERE id=? AND editor_username=? AND machine=? AND applied_at IS NULL""",
@@ -8967,7 +9166,9 @@ def store_machine_capabilities(
              cap_load=?, cap_resolve_running=?, cap_resolve_project=?,
              cap_jobs_enabled=?, cap_job_kinds=?, cap_volunteer_until=?,
              cap_cards_connected=?, cap_cards_state=?,
-             cap_cards_timeline=?, cap_cards_version=?, cap_cards_since=?
+             cap_cards_timeline=?, cap_cards_version=?, cap_cards_since=?,
+             cap_cards_gate_state=?, cap_cards_detail=?,
+             cap_cards_last_poll_at=?, cap_cards_http_status=?
             WHERE editor_username=? AND machine=?""",
         (now,
          int(bool(caps.get("gpu_present"))),
@@ -9012,6 +9213,16 @@ def store_machine_capabilities(
          str((cards or {}).get("timeline") or "")[:255],
          _as_int((cards or {}).get("version")),
          _as_float((cards or {}).get("since")),
+         # RES-6 (2026-09-04): why it is in the state it is in. NULL rather
+         # than "" when the companion did not say, so the grid can tell "this
+         # build cannot answer" from "it answered with nothing".
+         (str((cards or {}).get("gate_state"))[:32]
+          if (cards or {}).get("gate_state") else None),
+         (str((cards or {}).get("detail"))[:255]
+          if (cards or {}).get("detail") else None),
+         (str((cards or {}).get("last_poll_at"))[:64]
+          if (cards or {}).get("last_poll_at") else None),
+         _as_int((cards or {}).get("last_http_status")),
          str(editor), str(machine)),
     )
 
@@ -9054,11 +9265,18 @@ def _capabilities_of(row: sqlite3.Row | None) -> dict[str, Any]:
                     "project": row["cap_resolve_project"] or ""},
         # v44. `state` is meaningful with `connected` false and is the whole
         # value of the row: it names the refusal.
+        # RES-6 (2026-09-04): the four fields beside `state` that say WHY.
+        # None/"" is "this companion did not say", never "fine": a build too
+        # old to send them renders as unknown on the grid.
         "cards_agent": {"connected": bool(row["cap_cards_connected"]),
                         "state": row["cap_cards_state"] or "",
                         "timeline": row["cap_cards_timeline"] or "",
                         "version": row["cap_cards_version"] or 0,
-                        "since": row["cap_cards_since"]},
+                        "since": row["cap_cards_since"],
+                        "gate_state": _row_value(row, "cap_cards_gate_state") or "",
+                        "detail": _row_value(row, "cap_cards_detail") or "",
+                        "last_poll_at": _row_value(row, "cap_cards_last_poll_at"),
+                        "last_http_status": _row_value(row, "cap_cards_http_status")},
     }
 
 
@@ -9068,7 +9286,9 @@ _CAPABILITY_COLUMNS = """cap_at, cap_gpu_present, cap_gpu_name, cap_gpu_vram_gb,
        cap_resolve_running, cap_resolve_project, cap_jobs_enabled,
        cap_job_kinds, cap_volunteer_until,
        cap_cards_connected, cap_cards_state, cap_cards_timeline,
-       cap_cards_version, cap_cards_since"""
+       cap_cards_version, cap_cards_since,
+       cap_cards_gate_state, cap_cards_detail, cap_cards_last_poll_at,
+       cap_cards_http_status"""
 
 
 # A machine's allow-list is a handful of names; sixteen is already more kinds

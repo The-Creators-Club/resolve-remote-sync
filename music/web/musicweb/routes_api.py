@@ -89,16 +89,51 @@ def facets():
     r = con().execute('SELECT MIN(bpm) lo, MAX(bpm) hi FROM tracks '
                       'WHERE bpm IS NOT NULL').fetchone()
     out['_bpm'] = {'min': r['lo'], 'max': r['hi']}
+    # MUSIC-14 (2026-09-04): a track ingested through the companion has no bpm
+    # and no duration of its own (KNOWN_BUGS MUSIC-ING-1: no librosa on an
+    # editor's machine), and `t.bpm >= 90` is never true of NULL. The counts go
+    # out with the facets so the rail can say how many tracks a tempo or length
+    # filter would drop, instead of the fleet's uploads vanishing in silence.
+    u = con().execute(
+        'SELECT SUM(bpm IS NULL) b, SUM(duration IS NULL) d FROM tracks').fetchone()
+    out['_unknown'] = {'bpm': u['b'] or 0, 'duration': u['d'] or 0}
     return out
 
 
-@router.get('/api/tracks')
-def tracks(category: str = '', label: str = '', bpm_min: float = 0,
-           bpm_max: float = 0, dur_min: float = 0, dur_max: float = 0,
-           axis: str = '', axis_min: float = 0, axis_max: float = 100,
-           sort: str = 'filename', limit: int = 500):
-    where, params = [], []
-    join = ''
+# ---------------------------------------------------------------- filtering
+# One filter builder for browse AND for text search (MUSIC-4, 2026-09-04). The
+# rail used to apply to `/api/tracks` only, so typing a description threw away
+# the mood chip, the axis slider and the BPM boxes while still showing them lit
+# -- the page asserted filters that were not in the query. Both callers now
+# build the same JOINs and the same WHERE from this one place.
+def _range(col, lo, hi, include_unknown):
+    """`col` between lo and hi, either bound optional. Returns (sql, params).
+
+    `include_unknown` widens the clause to `OR col IS NULL` rather than
+    dropping it: an editor who asks for the unknowns still wants the range
+    honoured for the tracks that HAVE a value.
+    """
+    parts, params = [], []
+    if lo:
+        parts.append(f'{col} >= ?'); params.append(lo)
+    if hi:
+        parts.append(f'{col} <= ?'); params.append(hi)
+    if not parts:
+        return '', []
+    sql = ' AND '.join(parts)
+    if include_unknown:
+        return f'(({sql}) OR {col} IS NULL)', params
+    return (f'({sql})' if len(parts) > 1 else sql), params
+
+
+def _filters(category='', label='', axis='', axis_min=0, axis_max=100,
+             bpm_min=0, bpm_max=0, dur_min=0, dur_max=0, include_unknown=False):
+    """(join, where, params, unknown_cols) for the tracks table aliased `t`.
+
+    `unknown_cols` names the columns a range filter is active on, which is what
+    the "N tracks have no BPM" count is asked about.
+    """
+    join, where, params, unknown_cols = '', [], [], []
     if category and label:
         join = 'JOIN tags g ON g.track_id = t.id AND g.category=? AND g.label=?'
         params += [category, label]
@@ -107,14 +142,50 @@ def tracks(category: str = '', label: str = '', bpm_min: float = 0,
         params.append(axis)
         where.append('x.pct BETWEEN ? AND ?')
         params += [axis_min, axis_max]
-    if bpm_min:
-        where.append('t.bpm >= ?'); params.append(bpm_min)
-    if bpm_max:
-        where.append('t.bpm <= ?'); params.append(bpm_max)
-    if dur_min:
-        where.append('t.duration >= ?'); params.append(dur_min)
-    if dur_max:
-        where.append('t.duration <= ?'); params.append(dur_max)
+    for col, lo, hi in (('t.bpm', bpm_min, bpm_max),
+                        ('t.duration', dur_min, dur_max)):
+        sql, ps = _range(col, lo, hi, include_unknown)
+        if sql:
+            where.append(sql)
+            params += ps
+            unknown_cols.append(col)
+    return join, where, params, unknown_cols
+
+
+def _unknown_hidden(join, category, label, axis, axis_min, axis_max,
+                    unknown_cols, ids=None):
+    """How many tracks a tempo/length filter is dropping only for a NULL.
+
+    Counted against the rest of the filter (and, for a search, against that
+    search's own hits), so the number is about the list the editor is looking
+    at and not about the whole library (MUSIC-14).
+    """
+    if not unknown_cols:
+        return 0
+    where, params = [], []
+    if category and label:
+        params += [category, label]
+    if axis:
+        params.append(axis)
+        where.append('x.pct BETWEEN ? AND ?')
+        params += [axis_min, axis_max]
+    where.append('(' + ' OR '.join(f'{c} IS NULL' for c in unknown_cols) + ')')
+    if ids is not None:
+        where.append('t.id IN (%s)' % ','.join('?' * len(ids)))
+        params += list(ids)
+    sql = f'SELECT COUNT(*) v FROM tracks t {join} WHERE ' + ' AND '.join(where)
+    return con().execute(sql, params).fetchone()['v']
+
+
+@router.get('/api/tracks')
+def tracks(category: str = '', label: str = '', bpm_min: float = 0,
+           bpm_max: float = 0, dur_min: float = 0, dur_max: float = 0,
+           axis: str = '', axis_min: float = 0, axis_max: float = 100,
+           sort: str = 'filename', limit: int = 500,
+           include_unknown: bool = False):
+    join, where, params, unknown_cols = _filters(
+        category, label, axis, axis_min, axis_max,
+        bpm_min, bpm_max, dur_min, dur_max, include_unknown)
 
     order = {'filename': 't.filename', 'bpm': 't.bpm', 'duration': 't.duration',
              'newest': 't.analyzed_at DESC'}.get(sort, 't.filename')
@@ -125,14 +196,32 @@ def tracks(category: str = '', label: str = '', bpm_min: float = 0,
     if where:
         sql += ' WHERE ' + ' AND '.join(where)
     sql += f' ORDER BY {order} LIMIT ?'
-    params.append(limit)
-    return {'tracks': hydrate(con().execute(sql, params).fetchall())}
+    rows = con().execute(sql, params + [limit]).fetchall()
+    hidden = 0 if include_unknown else _unknown_hidden(
+        join, category, label, axis, axis_min, axis_max, unknown_cols)
+    return {'tracks': hydrate(rows),
+            # The rail renders these two, so a filter never hides work the
+            # fleet did without saying so (MUSIC-14).
+            'unknown_hidden': hidden,
+            'unknown_fields': [c.split('.')[-1] for c in unknown_cols]}
 
 
 class SearchReq(BaseModel):
     query: str
     k: int = 60
     pool: str = 'max'          # 'max' = any moment, 'mean' = whole track
+    # The left rail, carried into the search (MUSIC-4). Same names and same
+    # defaults as /api/tracks' query parameters: one contract, two verbs.
+    category: str = ''
+    label: str = ''
+    axis: str = ''
+    axis_min: float = 0
+    axis_max: float = 100
+    bpm_min: float = 0
+    bpm_max: float = 0
+    dur_min: float = 0
+    dur_max: float = 0
+    include_unknown: bool = False
 
 
 @router.post('/api/search')
@@ -144,13 +233,26 @@ def search(req: SearchReq):
     if not hits:
         return {'tracks': []}
     by = {h['id']: h for h in hits}
+    join, where, params, unknown_cols = _filters(
+        req.category, req.label, req.axis, req.axis_min, req.axis_max,
+        req.bpm_min, req.bpm_max, req.dur_min, req.dur_max, req.include_unknown)
     ph = ','.join('?' * len(by))
-    rows = hydrate(con().execute(
-        f'SELECT {TRACK_COLS} FROM tracks WHERE id IN ({ph})', list(by)).fetchall())
+    # The hits are already an id set, so the rail is one more clause on the
+    # hydrate query rather than a second ranking pass: CLAP decides the order,
+    # the filters decide the membership. The id set goes LAST because the
+    # placeholders bind in text order and the JOINs carry their own.
+    sql = f'SELECT {TRACK_COLS_T} FROM tracks t {join} WHERE '
+    sql += ' AND '.join(where + [f't.id IN ({ph})'])
+    rows = hydrate(con().execute(sql, params + list(by)).fetchall())
     for r in rows:
         r['match'] = by[r['id']]['match']
     rows.sort(key=lambda r: -r['match'])
-    return {'tracks': rows, 'query': q}
+    hidden = 0 if req.include_unknown else _unknown_hidden(
+        join, req.category, req.label, req.axis, req.axis_min, req.axis_max,
+        unknown_cols, ids=list(by))
+    return {'tracks': rows, 'query': q,
+            'unknown_hidden': hidden,
+            'unknown_fields': [c.split('.')[-1] for c in unknown_cols]}
 
 
 @router.get('/api/similar/{track_id}')

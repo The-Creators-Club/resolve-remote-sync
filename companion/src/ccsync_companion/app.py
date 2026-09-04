@@ -1453,6 +1453,23 @@ class CompanionApp:
         self._disk_snapshot: dict[str, Any] = {}
         self._disk_snapshot_at = 0.0
         self._blocked_since: dict[str, str] = {}
+        # -- three answers this process computed and threw away (wave 3 of
+        # the usability sweep, 2026-09-04). Each is the RETURN VALUE of
+        # something that already ran on a background loop, kept here so a
+        # surface can ask. Empty dict = "we have not looked", never "fine":
+        # the readers below render the difference.
+        #
+        #   RES-3  the proxy ATTACH half. apply_relinks builds "repointed 3
+        #          proxy link(s), 12 refused by Resolve" and the caller
+        #          dropped it, so "why is my proxy not attached" was
+        #          unanswerable by any human.
+        #   RES-17 stills.check()'s "add it by hand" instruction, logged once
+        #          per process and read by nobody.
+        #   CYT-15 what ytdl_browser_login is waiting for, so a ten-minute
+        #          block is not one balloon and silence.
+        self._proxy_attach: dict[str, Any] = {}
+        self._stills_state: dict[str, Any] = {}
+        self._ytdl_login_progress: dict[str, Any] = {}
         # -- the sync engine's own supervisor (SYNC-17, 2026-08-18) ---------
         # Built here, beside the latches, for the same reason they are: its
         # incident state has to be in hand before lane C's first poll, or a
@@ -2104,6 +2121,18 @@ class CompanionApp:
                 (lambda: self.sequencer.unconfirmed_slugs() if self.sequencer else [])
                 if self._managed else None
             ),
+            # SYNC-101 (sweep 2026-09-03): the shared LUT library and every
+            # borrowed folder failed SILENTLY, for ever -- reconcile() built
+            # an outcome per folder "for the log line and the tray", the
+            # sequencer discarded the dict, and the `not-offered` branch (the
+            # server has not shared the library with this device) logged at
+            # DEBUG. Late-bound like the two above, and getattr because the
+            # lane is built before the sequencer exists.
+            shared_folder_problems_fn=(
+                (lambda: (getattr(self.sequencer, "shared_folder_problems", list)()
+                          if self.sequencer else []))
+                if self._managed else None
+            ),
             # SYNC-17 (2026-08-18): the poll that discovers "the API did not
             # answer" is also the thing that restarts the daemon and the
             # thing that must never then report idle. One object, one
@@ -2234,6 +2263,13 @@ class CompanionApp:
         try:
             if str(state) != self._root_state:
                 self._root_state_since = datetime.now(timezone.utc).isoformat()
+                # SYNC-120: a state episode belongs to the state that opened
+                # it. A wedged drive that is then unplugged with nothing owed
+                # is back to the calm one-liner, and must not keep reminding
+                # about a state it is no longer in. An unfinished-work
+                # episode is untouched by this (end_state_episode refuses).
+                if str(state) != root_guard_mod.ROOT_NOT_ANSWERING:
+                    self._drive_reminder.end_state_episode()
             self._root_state = str(state)
             # Judged before the pause below, and before _root_absent flips
             # (nothing here reads it, but the order is the point).
@@ -2264,6 +2300,20 @@ class CompanionApp:
                             f"Sync paused: {site_mod.drive_phrase(capitalised=True)} is "
                             "not answering - reconnect it or restart this computer.",
                             site_mod.notify_title(),
+                        )
+                        # SYNC-120 (sweep 2026-09-03): and then KEEP saying
+                        # so. CR-92's reminders were gated on work having
+                        # been owed at the moment the drive went, so a drive
+                        # that wedges while the machine happens to be up to
+                        # date got one balloon and silence -- with the editor
+                        # working in Resolve against a wedged mount and their
+                        # footage on one disk for as long as it lasts. The
+                        # episode file already existed; only the trigger is
+                        # new.
+                        self._drive_reminder.begin_state(
+                            state,
+                            drive_reminder_mod.wedged_reminder(
+                                site_mod.drive_phrase(capitalised=True)),
                         )
                     elif state == root_guard_mod.ROOT_MISPLACED:
                         # SYNC-105 (sweep 2026-09-04): the drive is plugged
@@ -2865,8 +2915,17 @@ class CompanionApp:
                 mpi, str(target), tries=1, source="auto-canonical")
             if result.get("ok"):
                 fixed += 1
+                self._note_non_canonical_result(path, "", ok=True)
                 log.info("relinked non-canonical clip %s -> %s", path, target)
             else:
+                # RES-19: only a SUCCESS latches. The watcher offered each
+                # path once per PROCESS, so a relink refused for a transient
+                # reason (Resolve busy, the file locked for a second) was
+                # never tried again until the tray restarted, and nothing
+                # said so. Re-armed here, with the unprompted burst still
+                # rate-limited by resolve_journal.allow_automatic.
+                self._note_non_canonical_result(
+                    path, item.get("clip_name") or "", ok=False)
                 log.warning(
                     "could not relink non-canonical clip %s -> %s: %s",
                     path, target, result.get("message"),
@@ -2877,6 +2936,26 @@ class CompanionApp:
                 "so they stay online for every editor.",
                 site_mod.notify_title(),
             )
+
+    def _note_non_canonical_result(self, path: str, name: str, *, ok: bool) -> None:
+        """Tell the watcher how a canonical relink went (RES-19).
+
+        The watcher latched every path it OFFERED, so a relink refused for a
+        transient reason was never offered again for the life of the process.
+        Only a success may latch now. Never raises: this is bookkeeping on
+        the relink thread, and a failure here must not stop the batch.
+        """
+        try:
+            if ok:
+                clear = getattr(self.watcher, "clear_non_canonical_refusal", None)
+                if clear is not None:
+                    clear(path)
+                return
+            rearm = getattr(self.watcher, "rearm_non_canonical", None)
+            if rearm is not None:
+                rearm(path, name)
+        except Exception:
+            log.exception("could not record the non-canonical relink result")
 
     def undo_last_relink(self) -> None:
         """Tray > Settings > UNDO THE LAST CLIP-PATH CHANGE.
@@ -4016,11 +4095,19 @@ class CompanionApp:
                 log.info("proxy relink: rate-limited for this project -- %d op(s) "
                          "left for the next pass", len(ops))
                 return
-            proxy_relink.apply_relinks(
+            summary = proxy_relink.apply_relinks(
                 ops,
                 lambda mpi, path: resolve_bridge.link_proxy_media(
                     mpi, path, source="auto-proxy-relink"),
             )
+            # RES-3 (usability sweep 2026-09-03): KEPT. This return value was
+            # dropped here, and with it the only answer anyone had to "why is
+            # my proxy not attached?" -- the generate half has a tray line, a
+            # window, a toast and a history file; the attach half had a
+            # WARNING in a 5 MB rotating log and a per-clip reason at DEBUG.
+            self._note_proxy_attach(summary)
+            if summary:
+                log.info("proxy relink: %s", summary.get("message") or "nothing to do")
         except Exception:
             log.exception("proxy relink pass failed")
 
@@ -4375,10 +4462,29 @@ class CompanionApp:
         wrong". The reader shows the counts only alongside a scan time.
         """
         counts = getattr(self.watcher, "last_counts", None) or {}
+        wedge = self._bridge_wedge()
         return {
             "out_of_tree": int(counts.get("out_of_tree") or 0),
             "bad_prefix": int(counts.get("bad_prefix") or 0),
             "missing": int(counts.get("missing") or 0),
+            # -- wave 3 (2026-09-04). Everything below was already known to
+            # this process and reachable from nowhere. Each is None/empty
+            # when its producer is absent or has not answered, never a
+            # reassuring zero: `connected` is None until the first poll,
+            # `proxy_attach` is empty until a pass has run, and a reader
+            # shows a count only beside the scan time that earned it.
+            "connected": self._bridge_connected_now(),
+            "project_open": getattr(self.watcher, "last_resolve_project", None),
+            "wedged_seconds": wedge.get("seconds"),
+            "wedged_call": wedge.get("call"),
+            # RES-19: the MISSING clips themselves ("Media Offline" is the
+            # thing an editor actually notices, and it was one DEBUG line).
+            "missing_clips": self._watcher_list("missing_clips"),
+            "non_canonical_refused": self._watcher_list("non_canonical_refused"),
+            # RES-3 / RES-11 / RES-17.
+            "proxy_attach": dict(self._proxy_attach),
+            "proxy_gaps": self.proxy_gaps(),
+            "stills": self.stills_state(),
             "ignored_this_session": self.ignore_tracker.session_count(),
             "ignored_folders": self.ignore_tracker.folder_count(),
             # Not in the reported contract (the dashboard drops what it does
@@ -4388,6 +4494,554 @@ class CompanionApp:
             "last_scan_at": getattr(self.watcher, "last_scan_at", None),
             "open_project": getattr(self.watcher, "last_resolve_project", None),
         }
+
+    # -- what this machine knows, for whoever asks (wave 3, 2026-09-04) ---
+    #
+    # Every function below is a READER. The rule for all of them, without
+    # exception, is: it exists, it never raises, and an absent producer is
+    # None or empty rather than an error or a guess. The renderers (the tray,
+    # the Settings window) and the report call these on their own threads,
+    # so nothing here may probe, walk or block -- the same contract
+    # proxy_gen.gap() has carried since it was written.
+    #
+    # They are readers and not new state because the machine ALREADY KNEW all
+    # of this: the sweep of 2026-09-03 found each fact computed, logged at
+    # DEBUG or dropped on the floor, and no way for the person at the
+    # keyboard to ask for it.
+    #
+    # getattr(...) against the producers on purpose: the modules these
+    # delegate to are owned by other parts of the app and some of these keys
+    # arrive with a later build. A missing producer must cost the LINE, never
+    # the window it is in.
+
+    def _bridge_connected_now(self):
+        try:
+            getter = getattr(self.watcher, "bridge_is_connected", None)
+            return getter() if getter is not None else None
+        except Exception:
+            log.exception("resolve_health: bridge state read failed")
+            return None
+
+    def _bridge_wedge(self) -> dict[str, Any]:
+        """The fusionscript call in flight and how long it has been, or {}.
+
+        Cached facts only (resolve_bridge.bridge_activity): the one thread
+        that knows a call is wedged is the one that cannot say so."""
+        try:
+            return dict(resolve_bridge.bridge_activity() or {})
+        except Exception:
+            log.exception("resolve_health: bridge activity read failed")
+            return {}
+
+    def _watcher_list(self, name: str) -> list[dict[str, str]]:
+        try:
+            getter = getattr(self.watcher, name, None)
+            return list(getter() or []) if getter is not None else []
+        except Exception:
+            log.exception("resolve_health: %s() failed", name)
+            return []
+
+    def _note_proxy_attach(self, summary: Optional[dict[str, Any]]) -> None:
+        """Keep the last attach pass's verdict (RES-3). Never raises."""
+        try:
+            if not summary:
+                return
+            failures = list(summary.get("failures") or [])
+            failed = int(summary.get("failed") or 0)
+            why = ""
+            if failed:
+                first = failures[0] if failures else ""
+                why = (f"Resolve would not attach {failed} proxy file(s)"
+                       + (f" (first: {first})" if first else "")
+                       + ". A timecode that does not match the original is the "
+                         "usual cause.")
+            self._proxy_attach = {
+                "attached": int(summary.get("relinked") or 0),
+                "failed": failed,
+                "why": why,
+                "at": datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception:
+            log.exception("could not record the proxy attach summary")
+
+    def _note_stills(self, result: Optional[dict[str, Any]]) -> None:
+        """Keep stills.check()'s verdict (RES-17). Never raises."""
+        try:
+            if not result:
+                return
+            status = str(result.get("status") or "")
+            self._stills_state = {
+                # "nothing to do" is: switched off, already pointing at the
+                # shared folder, or just pointed at it. Everything else is a
+                # state a person has to be told about, and one of them
+                # ("add it by hand") cannot be actioned by any code at all.
+                "ok": status in ("disabled", resolve_prefs_mod.ALREADY,
+                                 resolve_prefs_mod.OK),
+                "status": status,
+                "instruction": str(result.get("message") or ""),
+                "path": str(result.get("path") or ""),
+            }
+        except Exception:
+            log.exception("could not record the stills check result")
+
+    def stills_state(self) -> dict[str, Any]:
+        """{"ok", "status", "instruction", "path"} from the last stills
+        check, or {} if none has run this process (RES-17)."""
+        return dict(self._stills_state)
+
+    def proxy_gaps(self) -> dict[str, Any]:
+        """{"capped", "low_space", "truncated"} from the proxy generator's
+        coverage (RES-11). Empty when there is no generator.
+
+        The three facts a machine that has quietly stopped making proxies
+        knows and could not say: clips that gave up after repeated failures,
+        a disk too full to encode onto, and a queue that hit its per-project
+        cap."""
+        try:
+            generator = getattr(self, "proxy_generator", None)
+            if generator is None:
+                return {}
+            coverage = dict(generator.coverage() or {})
+        except Exception:
+            log.exception("proxy coverage read failed")
+            return {}
+        return {
+            "capped": coverage.get("capped", 0),
+            "low_space": coverage.get("low_space", ""),
+            "truncated": bool(coverage.get("truncated", False)),
+        }
+
+    # -- "sync now" says what it did (APP-6) -------------------------------
+    def sync_now_result(self) -> dict[str, Any]:
+        """What clicking "Sync now" will actually do, and why not.
+
+        {"accepted", "reason", "lanes"}. The menu item raised no toast on any
+        path: on a wired machine it logged "sync_now ignored" and returned,
+        still in the menu and still clickable, and in managed mode nothing
+        said whether a pass started, was already running, or had nothing to
+        run. `reason` is the sentence to show; `lanes` is what will run.
+        """
+        lanes: list[str] = []
+        try:
+            lanes = [str(getattr(lane, "name", "") or "") for lane in self.lanes]
+        except Exception:
+            log.exception("sync_now: could not list the lanes")
+        if not self._sync_enabled:
+            return {"accepted": False, "lanes": [],
+                    "reason": "This computer works straight off the server, so "
+                              "there is nothing to sync."}
+        if self._managed and self.sequencer is not None:
+            entries = None
+            try:
+                if self.selection_client is not None:
+                    entries, _source = self.selection_client.get()
+            except Exception:
+                log.exception("sync_now: selection read failed")
+                entries = None
+            if entries is not None and not entries:
+                return {"accepted": False, "lanes": [],
+                        "reason": "Nothing is ticked for this computer, so there "
+                                  "is nothing to sync."}
+        return {"accepted": True, "lanes": lanes,
+                "reason": "Checking the server for changes now."}
+
+    # -- the recovery folder (SYNC-112) ------------------------------------
+    def trash_path(self) -> Optional[str]:
+        """`<local_root>/.ccsync-trash`, or None when there is no local_root
+        or the folder has never been made. What [ OPEN THE RECOVERY FOLDER ]
+        opens: Explorer hides a dot-prefixed folder by default, so "copy
+        anything you still need back out of there" was an instruction with no
+        way to follow it."""
+        try:
+            root = str(self.config.get("local_root", "") or "").strip()
+            if not root:
+                return None
+            path = Path(root) / lane_guard.TRASH_DIR_NAME
+            return str(path) if path.is_dir() else None
+        except Exception:
+            log.exception("trash_path() failed")
+            return None
+
+    def trash_summary(self) -> Optional[dict[str, Any]]:
+        """{"path", "count", "bytes", "oldest", "retention_days"} for the
+        recovery folder, or None when there is nothing in it.
+
+        `retention_days` is the half the editor was never told: prune_trash
+        deletes batches by age and by size, and the line that reported the
+        size never mentioned that the copies expire."""
+        path = self.trash_path()
+        if not path:
+            return None
+        try:
+            root = str(self.config.get("local_root", "") or "")
+            summarise = getattr(lane_guard, "trash_summary", None)
+            if summarise is not None:
+                summary = dict(summarise(root) or {})
+                if not summary:
+                    return None
+                summary.setdefault("path", path)
+                return summary
+            entries = lane_guard.trash_entries(root)
+            if not entries:
+                return None
+            total = sum(int(size or 0) for _dir, _mtime, size in entries)
+            oldest = min((mtime for _dir, mtime, _size in entries if mtime), default=0.0)
+            return {
+                "path": path,
+                "count": len(entries),
+                "bytes": total,
+                "oldest": (datetime.fromtimestamp(oldest, timezone.utc).isoformat()
+                           if oldest else None),
+                "retention_days": lane_guard.DEFAULT_TRASH_MAX_AGE_DAYS,
+            }
+        except Exception:
+            log.exception("trash_summary() failed")
+            return None
+
+    # -- the sentence that names the broken setting (APP-5) ----------------
+    def config_problem_detail(self) -> Optional[str]:
+        """The one sentence validate_config wrote about this machine's worst
+        config problem, or None when there is none.
+
+        _lane_config_problem_detail has built it into the lane detail since
+        DEL-3 and every renderer reduced `config_problems` to a bool, so
+        "remote_root is blank ... set the absolute NAS path your admin gave
+        you" reached no surface on the machine at all. Half of these an admin
+        fixes over the shoulder in ten seconds once they know which key it
+        is."""
+        try:
+            if not self.config_problems:
+                return None
+            return self._lane_config_problem_detail()
+        except Exception:
+            log.exception("config_problem_detail() failed")
+            return None
+
+    def config_problem_details(self) -> list[str]:
+        """Every problem, worst first, capped at three: what a WHAT IS NOT
+        SET UP heading lists (APP-5)."""
+        try:
+            return [str(problem) for problem in list(self.config_problems or [])[:3]]
+        except Exception:
+            log.exception("config_problem_details() failed")
+            return []
+
+    # -- how old the plan is (SYNC-110) ------------------------------------
+    @property
+    def plan_fetched_at(self) -> Optional[str]:
+        """When this machine last got its sync plan from the dashboard, ISO
+        UTC, or None if it never has / cannot tell. A dashboard that has been
+        unreachable for a week leaves the companion syncing a week-old plan
+        that looks exactly like a live one."""
+        try:
+            client = self.selection_client
+            getter = getattr(client, "fetched_at", None) if client is not None else None
+            return getter() if getter is not None else None
+        except Exception:
+            log.exception("plan_fetched_at read failed")
+            return None
+
+    def plan_age_seconds(self) -> Optional[float]:
+        """How old that plan is, or None for "cannot tell" -- which a caller
+        must not render as fresh."""
+        try:
+            client = self.selection_client
+            getter = getattr(client, "plan_age_seconds", None) if client is not None else None
+            return getter() if getter is not None else None
+        except Exception:
+            log.exception("plan_age_seconds read failed")
+            return None
+
+    # -- YouTube (CYT-3 / CYT-14 / CYT-15) ---------------------------------
+    def youtube_import_state(self) -> dict[str, Any]:
+        """{"state", "reason", "pending", "at"} for the clips that were
+        downloaded and have not reached Resolve. `reason` is "" when nothing
+        is in the way."""
+        try:
+            status = self.youtube_import_status() or {}
+        except Exception:
+            log.exception("youtube_import_state() failed")
+            return {"state": "", "reason": "", "pending": 0, "at": None}
+        return {
+            "state": str(status.get("state") or ""),
+            "reason": str(status.get("reason") or ""),
+            "pending": int(status.get("pending") or 0),
+            "at": status.get("last_import_at"),
+        }
+
+    def ytdl_login_progress(self) -> Optional[dict[str, Any]]:
+        """{"waiting", "seconds_left"} while a YouTube browser sign-in is
+        running, else None (CYT-15).
+
+        The sign-in blocks for up to ten minutes behind one balloon; the
+        `progress` seam existed and nothing passed it."""
+        try:
+            state = dict(self._ytdl_login_progress)
+        except Exception:
+            log.exception("ytdl_login_progress() failed")
+            return None
+        return state or None
+
+    def note_ytdl_login_progress(self, message: str,
+                                 seconds_left: Optional[float] = None) -> None:
+        """What the browser sign-in is waiting for. Called from the login
+        flow's `progress` callback; clearing it is `message=""`."""
+        try:
+            text = str(message or "").strip()
+            if not text:
+                self._ytdl_login_progress = {}
+                return
+            self._ytdl_login_progress = {
+                "waiting": text,
+                "seconds_left": (float(seconds_left)
+                                 if seconds_left is not None else None),
+                "at": datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception:
+            log.exception("could not record the YouTube sign-in progress")
+
+    def cancel_local_downloads(self) -> int:
+        """Stop any YouTube download running ON THIS MACHINE. Returns how
+        many were stopped (CYT-14).
+
+        The lease then expires and the server picks up what this computer did
+        not finish, which is what every other hand-back does. The only escape
+        hatch before this was in the browser page, which needs the page open
+        and the tailnet up."""
+        try:
+            stopper = (getattr(ytdl_executor_mod, "cancel_all", None)
+                       or getattr(ytdl_executor_mod, "stop_all", None))
+            if stopper is None:
+                return 0
+            return int(stopper() or 0)
+        except Exception:
+            log.exception("cancel_local_downloads() failed")
+            return 0
+
+    # -- the upload lane's silent data-loss shape (SYNC-109) ---------------
+    def size_mismatch_samples(self) -> list[dict[str, Any]]:
+        """[{"path", "local_size", "server_size"}] for files that exist on
+        the server at a different size, so this machine's newer version will
+        NOT upload. Empty when there are none or lane A cannot say.
+
+        The tray line has always been the alarm with neither the filename nor
+        the remedy; the log line beside it names both."""
+        try:
+            lane = getattr(self, "_lane_a", None)
+            getter = getattr(lane, "size_mismatch_samples", None)
+            if getter is not None:
+                return [dict(entry) for entry in (getter() or [])][:5]
+            report = getattr(lane, "size_mismatch_report", lambda: None)() or {}
+            out: list[dict[str, Any]] = []
+            for sample in (report.get("samples") or [])[:5]:
+                if isinstance(sample, dict):
+                    out.append(dict(sample))
+                else:
+                    # The pre-wave-3 shape: a bare path, which is still the
+                    # half of the sentence that matters most.
+                    out.append({"path": str(sample), "local_size": None,
+                                "server_size": None})
+            return out
+        except Exception:
+            log.exception("size_mismatch_samples() failed")
+            return []
+
+    # -- shared folders and server-side renames (SYNC-101 / SYNC-102) ------
+    def shared_folder_problems(self) -> list[str]:
+        """One sentence per shared/borrowed folder that is not working on
+        this machine (the LUT library is the common one). Empty when they are
+        all fine, and empty is also what a sequencer too old to answer gives
+        -- which is why nothing here treats empty as proof."""
+        try:
+            getter = getattr(self.sequencer, "shared_folder_problems", None)
+            if getter is None:
+                return []
+            return [str(problem) for problem in (getter() or [])][:10]
+        except Exception:
+            log.exception("shared_folder_problems() failed")
+            return []
+
+    def repath_events(self) -> list[dict[str, Any]]:
+        """[{"old", "new", "at", "relinked"}] for projects an admin renamed
+        on the server, whose folder this machine moved to match (SYNC-102).
+
+        The largest un-announced event in the product: the editor's project
+        directory moves under them and every clip in the open Resolve project
+        still points at the old canonical path."""
+        try:
+            getter = getattr(self.sequencer, "repath_events", None)
+            if getter is None:
+                return []
+            return [dict(event) for event in (getter() or [])][:10]
+        except Exception:
+            log.exception("repath_events() failed")
+            return []
+
+    # -- b-roll ingest (CMEDIA-10) -----------------------------------------
+    def broll_failed_items(self) -> list[dict[str, str]]:
+        """[{"name", "error"}] for the clips this machine could not index.
+
+        The orchestrator knows exactly why each one failed and puts it on the
+        item; the two local surfaces reduced all of it to a count and "See
+        the log"."""
+        try:
+            getter = getattr(getattr(self, "broll_ingestor", None), "progress", None)
+            if getter is None:
+                return []
+            failed = (getter() or {}).get("failed_items") or []
+            out: list[dict[str, str]] = []
+            for item in failed[:5]:
+                if not isinstance(item, dict):
+                    continue
+                out.append({
+                    "name": str(item.get("name") or item.get("path") or "a clip"),
+                    "error": str(item.get("error") or ""),
+                })
+            return out
+        except Exception:
+            log.exception("broll_failed_items() failed")
+            return []
+
+    # -- fleet jobs (CMEDIA-2 / 12 / 13) -----------------------------------
+    def jobs_status(self) -> dict[str, Any]:
+        """The job runner's own snapshot, or {} when there is no runner.
+
+        The runner has always known why this machine is taking no work
+        (`user_active`, `resolve_open`, `no_capability`, `nothing_offered`,
+        `forced`) and wrote it only into a diagnostics bundle somebody has to
+        ask an editor to copy."""
+        try:
+            getter = getattr(getattr(self, "job_runner", None), "status", None)
+            if getter is None:
+                return {}
+            return dict(getter() or {})
+        except Exception:
+            log.exception("jobs_status() failed")
+            return {}
+
+    def jobs_gate(self) -> dict[str, Any]:
+        """{"taking_work", "reason"} -- the machine's own answer to "why am I
+        taking no work", in the runner's words (CMEDIA-12).
+
+        Reported in the capabilities section so `GET /api/v1/jobs/<id>/why`
+        can print it beside the dashboard's own reasoning: the two can
+        genuinely disagree (a stale offer, a volunteer window that expired
+        between the report and the claim) and nothing would have shown it."""
+        status = self.jobs_status()
+        if not status:
+            return {}
+        state = str(status.get("state") or "")
+        # `nothing_offered` is an OPEN gate with an empty queue, and reading
+        # it as a refusal is exactly the "quietly assigns nothing looks like
+        # a fleet with nothing to do" confusion the why endpoint exists for.
+        taking = state in (jobs_runner_mod.STATE_READY,
+                           jobs_runner_mod.STATE_RUNNING,
+                           jobs_runner_mod.STATE_FORCED,
+                           jobs_runner_mod.STATE_NOTHING_OFFERED)
+        gate = status.get("gate")
+        if isinstance(gate, dict) and "taking_work" in gate:
+            # The runner's OWN verdict when it has one (it reached it at the
+            # tick the claim was made under); the mapping above is the answer
+            # for a runner that predates `gate`.
+            taking = bool(gate.get("taking_work"))
+        # `reason` stays the STATE, not the runner's sentence: this rides the
+        # capabilities section, and `why` prints "this machine says:
+        # user_active" beside the dashboard's own reasoning. The sentence is
+        # a tray line and belongs on the tray.
+        return {"taking_work": taking, "reason": state}
+
+    def stop_current_job(self) -> bool:
+        """Stop the fleet job this machine is running, if any. True when
+        something was stopped (CMEDIA-2/13).
+
+        The same `should_stop` path an admin's cancel uses, so the result is
+        posted as cancelled and not retryable. The volunteer toggle only ever
+        closed the gate for the NEXT claim; a job already running was not
+        stoppable from the machine running it."""
+        try:
+            stopper = getattr(getattr(self, "job_runner", None), "stop_current", None)
+            if stopper is None:
+                return False
+            return bool(stopper())
+        except Exception:
+            log.exception("stop_current_job() failed")
+            return False
+
+    # -- undo (RES-13) ------------------------------------------------------
+    def undo_last_fix_summary(self) -> str:
+        """"158 clip path(s) in "FF4 ROUGH", 14:22" for the button label, or
+        "" when there is nothing to undo. Read-only: it describes the journal
+        undo_last_fix() would replay, and never touches it."""
+        try:
+            project = resolve_bridge.current_project_name()
+            summary = resolve_journal.describe_latest(project) if project else ""
+            return summary or resolve_journal.describe_latest() or ""
+        except Exception:
+            log.exception("undo_last_fix_summary() failed")
+            return ""
+
+    def undo_last_fix_available(self) -> bool:
+        """Is there a clip-path change to undo? FIX ALL rewrites paths in the
+        editor's project database and the window simply closes; the undo is
+        two levels deep in a window and named neither the project nor the
+        count."""
+        return bool(self.undo_last_fix_summary())
+
+    def undo_last_fix(self) -> None:
+        """Undo the last clip-path change CCSync made. The existing
+        undo_last_relink(), named for the button an editor presses."""
+        self.undo_last_relink()
+
+    # -- the two things a parked editor needs (APP-8 / APP-9) --------------
+    def open_licence_dialog(self) -> None:
+        """Show the licence agreement again, however many times it is asked
+        for. The machine has always had a modal that accepts in one click and
+        starts syncing with no restart, while telling the editor in two
+        places to re-run an installer wizard (APP-9)."""
+        try:
+            self.prompt_licence_acceptance(force=True)
+        except Exception:
+            log.exception("open_licence_dialog() failed")
+
+    def sign_in_again(self) -> None:
+        """Re-run the sign-in while already signed in (APP-8).
+
+        identity.valid() is a purely LOCAL check -- the token parses and has
+        not expired -- so a credential the server has REVOKED still reads as
+        signed in, and the only button beside the warning was SIGN OUT.
+        Signing in overwrites the identity, so this is the whole remedy."""
+        try:
+            from . import tray as tray_mod
+
+            dialog = getattr(tray_mod, "_show_sign_in_dialog", None)
+            if dialog is None:
+                log.warning("sign_in_again: this build has no sign-in dialog")
+                return
+            dialog(self)
+        except Exception:
+            log.exception("sign_in_again() failed")
+
+    def restart_self(self) -> bool:
+        """Restart the companion. The alias, NOT a second restart: this is
+        upgrade.restart_self (the self-upgrade's spawn/hand-off machinery
+        without the download), the one settings_window's [ RESTART NOW ] and
+        the stale-bridge recovery already use. False = nothing happened and
+        this instance keeps running (a source run, a failed spawn, a
+        replacement that died inside the takeover grace, or work in flight
+        that a restart would kill)."""
+        try:
+            blocker = self._standing_down_would_kill_work()
+            if blocker:
+                log.info("restart refused: %s", blocker)
+                return False
+        except Exception:
+            log.exception("restart_self: stand-down check failed")
+            return False
+        try:
+            return bool(upgrade_mod.restart_self(request_shutdown=self.shutdown))
+        except Exception:
+            log.exception("restart_self() failed")
+            return False
 
     def swap_p_to_local(self) -> tuple[bool, str]:
         from . import drive_swap
@@ -5428,6 +6082,14 @@ class CompanionApp:
                 volunteer_until_fn=(
                     (lambda: self.job_runner.volunteer_until_iso)
                     if getattr(self, "job_runner", None) is not None else None),
+                # CMEDIA-12 (usability sweep 2026-09-03): this machine's OWN
+                # verdict on why it is taking no work, beside the hardware
+                # the dashboard reconstructs eligibility from. The two can
+                # disagree -- a stale offer, a volunteer window that expired
+                # between the report and the claim -- and nothing showed it.
+                # Live, like the three above: a gate served from a 60 s cache
+                # is an observation about a minute ago.
+                jobs_gate_fn=self.jobs_gate,
             )
         except Exception:
             log.exception("could not build the capabilities section")
@@ -5625,6 +6287,21 @@ class CompanionApp:
             guard["loopback"] = self.loopback_report()
         except Exception:
             log.exception("loopback report failed")
+        try:
+            # CYT-3 (usability sweep 2026-09-03): the clips that were
+            # downloaded and never reached Resolve, with the importer's own
+            # reason. ONLY when there is something to say -- an absent key is
+            # how "every downloaded clip is in the media pool" is spelled,
+            # and it is what clears the chip. The top-level `youtube_import`
+            # section still rides every report; this is the guard's half, so
+            # the fleet grid can raise `no-project-match` (a per-machine
+            # misconfiguration an admin can fix and the editor cannot)
+            # without parsing a state machine.
+            youtube = self.youtube_import_state()
+            if youtube.get("reason") or youtube.get("pending"):
+                guard["youtube_import"] = youtube
+        except Exception:
+            log.exception("youtube_import_state() failed")
         try:
             # SYNC-2: the root guard's answer as a plain string, so the grid
             # can tell "the drive is out" from "the drive is wedged" without
@@ -7566,21 +8243,36 @@ class CompanionApp:
             mapped.append(copy)
         return mapped
 
-    def sync_now(self) -> None:
-        if not self._sync_enabled:
-            log.info("sync_now ignored: sync_enabled=false on this machine")
-            return
+    def sync_now(self) -> dict[str, Any]:
+        """Run a pass now, and SAY WHAT HAPPENED (APP-6, sweep 2026-09-03).
+
+        Returns {"accepted", "reason", "lanes"} -- what will run and why not.
+        This is the most-clicked item in the menu and it acknowledged
+        nothing: on a wired machine it logged "sync_now ignored" and
+        returned, still in the menu and still clickable, and in managed mode
+        whether a pass started, was already running, or was refused for want
+        of a tick arrived, if at all, as a lane line change some seconds
+        later inside a different window. The return value is additive -- the
+        old callers ignored it, and still may."""
+        verdict = self.sync_now_result()
+        if not verdict.get("accepted"):
+            log.info("sync_now: %s", verdict.get("reason"))
+            return verdict
         if self._managed and self.sequencer is not None:
             try:
                 self.sequencer.trigger_pass_now()
             except Exception:
                 log.exception("sync_now: sequencer trigger failed")
-            return
+                return {"accepted": False, "lanes": [],
+                        "reason": "CCSync could not start a sync pass. "
+                                  f"{ui_copy.OPEN_LOG}."}
+            return verdict
         for lane in self.lanes:
             try:
                 lane.run_once()
             except Exception:
                 log.exception("sync_now: lane %s failed", getattr(lane, "name", lane))
+        return verdict
 
     def is_paused(self) -> bool:
         return self._paused
@@ -8083,7 +8775,11 @@ class CompanionApp:
                 # constraint, so the two reconciles land in the same window
                 # rather than racing each other for it.
                 if self._stills is not None:
-                    self._stills.check()
+                    # RES-17: READ, not discarded. check() returns the one
+                    # instruction no code can act on ("add <root> as a media
+                    # storage location by hand"), and it used to be logged
+                    # once per process and seen by nobody.
+                    self._note_stills(self._stills.check())
             except Exception:
                 log.debug("stills: periodic check failed", exc_info=True)
             try:
@@ -8167,7 +8863,33 @@ class CompanionApp:
             "ingest", "INDEXING B-ROLL",
             "Your clips are indexed on this machine and uploaded to the archive. "
             "Closing this window does not stop it.",
-            self.broll_ingestor.progress_model, self._ingest_window_action)
+            self._broll_progress_model, self._ingest_window_action)
+
+    def _broll_progress_model(self) -> Any:
+        """The ingestor's own model, with the failure REASONS attached
+        (CMEDIA-10, sweep 2026-09-03).
+
+        The orchestrator knows exactly why each clip failed ("the source file
+        is not on this machine any more", a tier refusal) and puts it on the
+        item; this window reduced all of it to a count and "See the log", and
+        the only place the reason could be read was a browser page the editor
+        may have closed hours ago. Attached HERE rather than reaching into
+        the ingestor's own builder: `failed_items` arrives with a later build
+        of that module, and a model without it must still draw.
+        """
+        model = self.broll_ingestor.progress_model()
+        try:
+            if not getattr(model, "failures", ()):
+                failed = (self.broll_ingestor.progress() or {}).get("failed_items") or []
+                model.failures = [
+                    {"name": str((item or {}).get("name") or ""),
+                     "error": str((item or {}).get("error") or "")}
+                    for item in failed[:5] if isinstance(item, dict)
+                ]
+        except Exception:
+            log.debug("b-roll progress: could not attach the failure reasons",
+                      exc_info=True)
+        return model
 
     def show_music_ingest_progress(self) -> None:
         """Tray action / automatic on a batch start: the music window."""

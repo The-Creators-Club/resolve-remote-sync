@@ -65,7 +65,7 @@ class FakeDashboard:
 
 
 def a_checkout(tmp_path, *, contract=1, takes_bridge=True, importable=True,
-               class_name="SyncEngine"):
+               class_name="SyncEngine", loops_raise=False):
     """A fake MulticamPipeline whose cards package is two tiny modules.
 
     Deliberately NOT the real one: what is under test is the shim's judgement
@@ -97,7 +97,18 @@ def a_checkout(tmp_path, *, contract=1, takes_bridge=True, importable=True,
             def start(self):
                 self.started = True
         """), encoding="utf-8")
+    # THE LOOPS DO NOT RETURN, because the real AgentClient's do not: since
+    # RES-6 (sweep 2026-09-04) a loop that returns is a REPORTABLE FAULT
+    # (health "stopped"), so a fake that ran once and exited would make every
+    # healthy-role test in this file assert a dead one. `loops_raise` is the
+    # other half, for the tests that want the fault.
+    body = ('raise RuntimeError("resolve went away")' if loops_raise
+            else 'STOP.wait(30)')
     (cards / "agent.py").write_text(textwrap.dedent("""
+        import threading
+
+        STOP = threading.Event()
+
         class AgentClient(object):
             def __init__(self, server, token, engine, name=None):
                 self.url, self.token, self.eng, self.name = server, token, engine, name
@@ -107,14 +118,25 @@ def a_checkout(tmp_path, *, contract=1, takes_bridge=True, importable=True,
                 raise NotImplementedError
 
             def push_loop(self):
-                self.pushed.append(self._req("/agent/state", {
-                    "token": self.token, "name": self.name,
-                    "state": {"timeline": "E1", "project": "FF5"}}, 90))
+                # The real AgentClient treats every exception as "the network
+                # is down" and backs off; a fake that died on one would make
+                # every tunnel fault in this suite look like a dead thread.
+                try:
+                    self.pushed.append(self._req("/agent/state", {
+                        "token": self.token, "name": self.name,
+                        "state": {"timeline": "E1", "project": "FF5"}}, 90))
+                except Exception:
+                    pass
+                __AFTER__
 
             def pull_loop(self):
-                self._req("/agent/pending?wait=25&token=%s" % self.token,
-                          None, 45)
-        """), encoding="utf-8")
+                try:
+                    self._req("/agent/pending?wait=25&token=" + str(self.token),
+                              None, 45)
+                except Exception:
+                    pass
+                __AFTER__
+        """).replace("__AFTER__", body), encoding="utf-8")
     return root
 
 
@@ -128,6 +150,10 @@ def _forget_the_fake_package():
     """
     before = list(sys.path)
     yield
+    agent = sys.modules.get("multicam_pipeline.cards.agent")
+    if agent is not None and hasattr(agent, "STOP"):
+        # Let the fake loops end with the test that started them.
+        agent.STOP.set()
     for name in [n for n in sys.modules if n.startswith("multicam_pipeline")]:
         sys.modules.pop(name, None)
     sys.path[:] = before
@@ -462,7 +488,10 @@ def test_the_report_block_of_a_refusing_machine_names_the_refusal(tmp_path):
     role = a_role(tmp_path, cards_agent=False)
     role.start()
     block = role.report_block()
-    assert block == {"connected": False, "state": role_mod.STATE_DISABLED,
+    assert block == {"connected": False, "state": role_mod.HEALTH_REFUSED,
+                     "detail": "cards_agent is not set in ~/.ccsync/config.toml",
+                     "gate_state": role_mod.STATE_DISABLED,
+                     "last_poll_at": None, "last_http_status": None,
                      "timeline": "", "version": 0, "since": None}
 
 

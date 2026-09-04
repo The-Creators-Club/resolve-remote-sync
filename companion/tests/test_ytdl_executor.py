@@ -1642,7 +1642,8 @@ def test_progress_mirrors_the_running_job_then_the_last_one(tmp_path, ytdlp):
     assert ex.progress(7) == {"job_id": 7, "running": False, "clip": None,
                               "done": 0, "failed": 0, "total": 0,
                               "bytes_done": None, "bytes_total": None,
-                              "speed_bps": None}
+                              "speed_bps": None, "title": None, "file": None,
+                              "cancelled": False, "handed_back_reason": None}
     ex.start(7, deps)
     _join_current()
 
@@ -1962,13 +1963,168 @@ def test_the_download_route_ignores_everything_but_the_job_id(live_server, tmp_p
 
 
 def test_progress_over_http(live_server):
+    """CYT-2: a LIST, always. The flat dict this used to answer is what nothing
+    in the SPA ever fetched, and "no job" must not be a different shape from
+    "one job" or every consumer needs two code paths."""
     client, _fleet, _deps = live_server
     status, body = client.get("/ytdl/progress?job_id=7")
     assert status == 200
-    assert set(body) == {"job_id", "running", "clip", "done", "failed", "total",
-                         "bytes_done", "bytes_total", "speed_bps"}
+    assert body == {"jobs": []}
     # A junk job id is not a 400: this endpoint is a mirror the SPA may ignore.
     assert client.get("/ytdl/progress?job_id=abc")[0] == 200
+
+
+def test_progress_over_http_carries_the_row_the_page_renders(live_server):
+    client, _fleet, _deps = live_server
+    status, _body = client.post_json("/ytdl/download", {"job_id": 7})
+    assert status == 202
+    _join_current()
+
+    status, body = client.get("/ytdl/progress")
+    assert status == 200
+    (row,) = body["jobs"]
+    assert set(row) >= {"job_id", "title", "phase", "percent", "speed",
+                        "eta_seconds", "file", "handed_back_reason"}
+    assert row["job_id"] == 7 and row["phase"] == "finished"
+    assert row["handed_back_reason"] is None
+    assert (row["done"], row["total"]) == (1, 1)
+    # ...and asking for somebody else's job id gets no rows, not ours.
+    assert client.get("/ytdl/progress?job_id=999")[1] == {"jobs": []}
+
+
+# ---------------------------------------------------------------------------
+# CYT-2 / CYT-11 / CYT-14 -- the machine says what it knows (2026-09-04)
+# ---------------------------------------------------------------------------
+
+
+def test_a_row_reads_the_clip_in_flight_not_an_average(tmp_path):
+    """percent/speed/eta are the CLIP: clips of one search differ tenfold in
+    length, and an average over them is a countdown that goes backwards."""
+    row = ex.progress_row({"job_id": 7, "running": True, "clip": VID1,
+                           "done": 2, "failed": 0, "total": 12,
+                           "bytes_done": 384, "bytes_total": 1000,
+                           "speed_bps": 4_200_000, "phase": "downloading",
+                           "title": TERM, "file": None, "cancelled": False,
+                           "handed_back_reason": None})
+    assert row["percent"] == 38.4
+    assert row["speed"] == "4.2 MB/s"
+    assert row["eta_seconds"] == 0  # 616 bytes at 4.2 MB/s
+    assert (row["done"], row["total"], row["title"]) == (2, 12, TERM)
+    assert row["phase"] == "downloading"
+
+
+def test_a_row_says_unknown_with_none_never_with_zero():
+    """0% at 0 B/s reads as "nothing is happening"; the truth in the first
+    seconds is "nobody has said yet"."""
+    row = ex.progress_row({"job_id": 7, "running": True, "total": 3})
+    assert row["percent"] is None
+    assert row["speed"] is None
+    assert row["eta_seconds"] is None
+    assert row["phase"] == "starting"
+
+
+def test_a_handed_back_job_says_why_in_the_row():
+    row = ex.progress_row({"job_id": 7, "running": False, "total": 3,
+                           "handed_back_reason": "This computer does not sync X."})
+    assert row["phase"] == "handed_back"
+    assert row["handed_back_reason"] == "This computer does not sync X."
+    cancelled = ex.progress_row({"job_id": 7, "running": False,
+                                 "cancelled": True,
+                                 "handed_back_reason": "You stopped it."})
+    assert cancelled["phase"] == "cancelled"
+
+
+def test_a_project_this_machine_does_not_sync_says_so_and_names_it(tmp_path, ytdlp):
+    """CYT-11: the everyday hand-back. It was one log.warning, and the page
+    kept saying "downloading on your machine" until the reclaim, minutes
+    later, with no reason attached."""
+    fleet = FakeFleet(manifest_for())
+    deps = make_deps(tmp_path, fleet=fleet, ytdlp=ytdlp, selection=[
+        {"slug": "other", "label": "2026/other/thing",
+         "rel_path": "2026/other/thing", "active": True}])
+
+    run_job(deps)
+
+    (row,) = ex.snapshot()["jobs"]
+    assert row["phase"] == "handed_back"
+    assert LABEL in row["handed_back_reason"]
+    assert "does not sync" in row["handed_back_reason"]
+    # Nothing was downloaded and nothing was posted: the lease expires and the
+    # server picks the job up, which is the documented ending.
+    assert fleet.state_sequence == []
+
+
+def test_a_quality_only_the_server_can_name_is_handed_back_with_a_reason(
+        tmp_path, ytdlp):
+    fleet = FakeFleet(manifest_for(quality="2160p"))
+    deps = make_deps(tmp_path, fleet=fleet, ytdlp=ytdlp)
+
+    run_job(deps)
+
+    (row,) = ex.snapshot()["jobs"]
+    assert row["phase"] == "handed_back"
+    assert "2160p" in row["handed_back_reason"]
+    assert "server" in row["handed_back_reason"]
+
+
+def test_a_naming_template_skew_is_handed_back_with_a_reason(tmp_path, ytdlp):
+    manifest = manifest_for()
+    manifest["template_version"] = ytdl_common.TEMPLATE_VERSION + 99
+    deps = make_deps(tmp_path, fleet=FakeFleet(manifest), ytdlp=ytdlp)
+
+    run_job(deps)
+
+    (row,) = ex.snapshot()["jobs"]
+    assert row["phase"] == "handed_back"
+    assert "companion" in row["handed_back_reason"]
+
+
+def test_cancel_job_stops_the_download_and_says_who_stopped_it(tmp_path, ytdlp):
+    """CYT-14: the editor at the machine had only "Quit CCSync", which stops
+    syncing too."""
+    assert ex.cancel_job(7) is False          # nothing running: not an error
+
+    job = ex.DownloadJob(7, make_deps(tmp_path, ytdlp=ytdlp))
+    ex._CURRENT = job
+    try:
+        assert ex.cancel_job(999) is False    # somebody else's job id
+        assert ex.cancel_job(7) is True
+        assert job._stop.is_set()
+        snap = job.snapshot()
+        assert snap["cancelled"] is True
+        assert "You stopped this download" in snap["handed_back_reason"]
+    finally:
+        ex._CURRENT = None
+
+
+def test_cancel_over_http_answers_200_either_way(live_server):
+    client, _fleet, _deps = live_server
+    status, body = client.post_json("/ytdl/cancel", {"job_id": 7})
+    assert status == 200
+    assert body == {"ok": True, "stopped": 0,
+                    "message": "There was no download running on this computer."}
+
+    status, _body = client.post_json("/ytdl/download", {"job_id": 7})
+    assert status == 202
+    _join_current()
+    status, body = client.post_json("/ytdl/cancel", {"all": True})
+    assert status == 200 and body["ok"] is True
+
+
+def test_the_cancel_route_needs_the_same_guard_as_every_other_post(live_server):
+    """One listener, one rule (loopback_guard.py): a page that is not the
+    dashboard cannot stop this editor's download either."""
+    client, _fleet, _deps = live_server
+    conn = http.client.HTTPConnection("127.0.0.1", client.port, timeout=5)
+    payload = json.dumps({"all": True}).encode()
+    conn.request("POST", "/ytdl/cancel", body=payload,
+                 headers={"Content-Type": "application/json",
+                          "Origin": "https://evil.example.com",
+                          "Content-Length": str(len(payload))})
+    resp = conn.getresponse()
+    resp.read()
+    conn.close()
+    assert resp.status == 403
 
 
 def test_a_malformed_download_body_is_400_not_a_dead_request(live_server):

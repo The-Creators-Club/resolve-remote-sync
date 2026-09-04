@@ -65,7 +65,10 @@ def test_the_migration_is_there(tmp_path):
     assert dbmod.SCHEMA_VERSION >= 44
     cols = {r[1] for r in conn.execute("PRAGMA table_info(machine_state)")}
     assert {"cap_cards_connected", "cap_cards_state", "cap_cards_timeline",
-            "cap_cards_version", "cap_cards_since"} <= cols
+            "cap_cards_version", "cap_cards_since",
+            # RES-6 (v49, usability sweep 2026-09-04): why it is in that state.
+            "cap_cards_gate_state", "cap_cards_detail",
+            "cap_cards_last_poll_at", "cap_cards_http_status"} <= cols
     conn.close()
 
 
@@ -73,8 +76,64 @@ def test_the_columns_land(env):
     client, conn = env
     assert report(client, SERVING).status_code == 200
     cards = dbmod.machine_capabilities(conn, "jsmith", "EDIT-PC")["cards_agent"]
+    # The v44 five, unchanged, plus RES-6's four (usability sweep
+    # 2026-09-04). A companion too old to send the four is what SERVING is,
+    # and it must read as NOTHING TO SAY -- never as a healthy agent, and
+    # never as a missing key the grid has to guard.
     assert cards == {"connected": True, "state": "running", "timeline": "E1",
-                     "version": 5, "since": 1756500000.0}
+                     "version": 5, "since": 1756500000.0,
+                     "gate_state": "", "detail": "",
+                     "last_poll_at": None, "last_http_status": None}
+
+
+def test_the_reason_lands_beside_the_state(env):
+    """RES-6: `state` alone could say the agent was not running and never why.
+
+    An agent that calls itself running and is polling into a 401 is a blank
+    page on somebody's phone, and it looked identical here to a healthy one.
+    """
+    client, conn = env
+    assert report(client, {"cards_agent": {
+        "connected": False, "state": "credential_refused",
+        "gate_state": "refused", "detail": "the tunnel answered 401",
+        "last_poll_at": "2026-09-04T12:00:00+00:00",
+        "last_http_status": 401}}).status_code == 200
+    cards = dbmod.machine_capabilities(conn, "jsmith", "EDIT-PC")["cards_agent"]
+    assert cards["state"] == "credential_refused"
+    assert cards["gate_state"] == "refused"
+    assert cards["detail"] == "the tunnel answered 401"
+    assert cards["last_poll_at"] == "2026-09-04T12:00:00+00:00"
+    assert cards["last_http_status"] == 401
+
+
+def test_a_state_this_build_has_not_heard_of_is_not_a_422(env):
+    """RES-6 kept `state` a plain string on purpose. The role's vocabulary
+    grew from two words to five in one release; a Literal would have made the
+    next one 422 a whole report -- lanes, transfers and presence with it."""
+    client, conn = env
+    assert report(client, {"cards_agent": {
+        "connected": False, "state": "a-word-from-the-future"}}).status_code == 200
+    cards = dbmod.machine_capabilities(conn, "jsmith", "EDIT-PC")["cards_agent"]
+    assert cards["state"] == "a-word-from-the-future"
+
+
+def test_an_empty_reason_is_stored_as_nothing_said(env):
+    """The companion fills its block with "" / None when it has nothing to
+    say, and the two must not become two different answers on the grid: the
+    columns take NULL, and the decoder hands back "" / None either way."""
+    client, conn = env
+    report(client, {"cards_agent": {"connected": True, "state": "running",
+                                    "gate_state": "", "detail": "",
+                                    "last_poll_at": None,
+                                    "last_http_status": None}})
+    row = conn.execute(
+        "SELECT cap_cards_gate_state, cap_cards_detail, cap_cards_last_poll_at, "
+        "       cap_cards_http_status FROM machine_state "
+        " WHERE editor_username='jsmith' AND machine='EDIT-PC'").fetchone()
+    assert tuple(row) == (None, None, None, None)
+    cards = dbmod.machine_capabilities(conn, "jsmith", "EDIT-PC")["cards_agent"]
+    assert cards["gate_state"] == "" and cards["detail"] == ""
+    assert cards["last_poll_at"] is None and cards["last_http_status"] is None
 
 
 def test_a_machine_that_stopped_serving_says_so(env):

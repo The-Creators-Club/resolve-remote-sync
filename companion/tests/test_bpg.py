@@ -605,3 +605,51 @@ def test_a_configured_path_is_launched_with_the_pg_flag(tmp_path):
     exe = tmp_path / "Resolve.exe"
     exe.write_text("", encoding="utf-8")
     assert bpg.find_bpg_command(str(exe)) == [str(exe), "-pg"]
+
+
+# -- the one instruction, addressed to the editor (RES-16, 2026-09-04) --------
+
+
+def test_a_failed_start_press_becomes_a_sentence_for_the_editor():
+    """The companion opens a Resolve window on somebody's machine while they
+    are away and then asks a LOG to press the button. The editor coming back
+    to that window had nothing to read."""
+    launcher, spawned = make_launcher(press=lambda: "no-window")
+
+    assert launcher.status()["needs_editor"] is None
+    launcher.maybe_launch(**READY)
+
+    status = launcher.status()
+    assert status["needs_editor"] == bpg.BpgLauncher.NEEDS_START_PRESS
+    assert "Press Start in its window" in status["needs_editor"]
+    # Owner's rule 2026-08-18: no em dash in anything an editor reads.
+    assert "—" not in status["needs_editor"]
+    assert status["clips"] == 6 and status["running"] is True
+
+
+def test_a_start_press_that_works_leaves_nothing_for_the_editor_to_do():
+    launcher, _ = make_launcher(press=lambda: "pressed")
+    launcher.maybe_launch(**READY)
+    assert launcher.status()["needs_editor"] is None
+
+
+def test_the_editor_pressing_start_themselves_clears_the_sentence():
+    """Cleared by the NEXT press attempt answering "already-running": the
+    editor started it by hand, so the nag stops on its own."""
+    answers = ["no-window", "already-running"]
+    launcher, _ = make_launcher(press=lambda: answers.pop(0),
+                                clock=lambda: 1000.0)
+    launcher.maybe_launch(**READY)
+    assert launcher.status()["needs_editor"] is not None
+
+    launcher._last_start_press_at = None      # past the poke cooldown
+    launcher._press_start("the editor may have done it")
+    assert launcher.status()["needs_editor"] is None
+
+
+def test_a_mac_never_asks_anyone_to_press_start():
+    """press_start answers "not-windows" on every Mac: there is no UI
+    automation there and nothing an editor could be told to do about it."""
+    launcher, _ = make_launcher(press=lambda: "not-windows")
+    launcher.maybe_launch(**READY)
+    assert launcher.status()["needs_editor"] is None

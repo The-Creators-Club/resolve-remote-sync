@@ -39,6 +39,12 @@
     </div>
     <button id="go" class="primary-btn">SEARCH</button>
     <button id="clear" class="text-btn">clear</button>
+    <!-- MUSIC-3 (2026-09-04): the ingest panel was reachable only by dragging
+         a file onto the page, so nothing said music could be added, and a
+         batch you started yesterday could not be looked at, cancelled or read
+         for failures without dropping another file first. -->
+    <button id="addMusic" class="primary-btn"
+            title="Add music to the library, and see the batches already running">[ ADD MUSIC ]</button>
     <span id="rstatus" class="rstatus" title="DaVinci Resolve connection">Resolve · off</span>
     <span id="stats" class="stats muted"></span>
   </div>
@@ -69,11 +75,33 @@
         <input id="durMax" type="number" placeholder="max" min="0">
       </div>
       <button id="applyRange" class="apply-btn">apply</button>
+      <!-- MUSIC-14 (2026-09-04): a track the fleet ingested has no BPM and no
+           length of its own (KNOWN_BUGS MUSIC-ING-1), and `bpm >= 90` is never
+           true of a null - so a tempo filter dropped every one of them with
+           nothing on screen saying so. -->
+      <label id="unknownRow" class="unknown-row hidden">
+        <input id="includeUnknown" type="checkbox">
+        <span>Include tracks with no BPM or length
+          <span id="unknownCount" class="muted"></span>
+        </span>
+      </label>
     </section>
     <div id="facets"></div>
   </aside>
 
   <main id="results">
+    <!-- MUSIC-9 (2026-09-04): there was no sort control at all, so a cue added
+         a minute ago sat somewhere alphabetical among hundreds of rows. An
+         ingest that finishes switches this to newest by itself. -->
+    <div class="sortrow">
+      <label for="sort" class="muted">Sort</label>
+      <select id="sort" title="How the list below is ordered">
+        <option value="filename">filename</option>
+        <option value="newest">newest</option>
+        <option value="bpm">bpm</option>
+        <option value="duration">length</option>
+      </select>
+    </div>
     <div id="resulthead" class="resulthead"></div>
     <div id="list" class="list"></div>
   </main>
@@ -126,6 +154,24 @@
         Files chosen this way are analysed where they are - they are not copied
         into the browser first.
       </div>
+      <!-- MUSIC-3: with nothing staged the panel said nothing about what it
+           takes or what happens next, so an editor who opened it from the new
+           button had no way to tell it was ready. Hidden the moment there are
+           items to look at instead. -->
+      <div id="mi-drop-empty" class="muted">
+        Nothing staged yet. Audio only: wav, mp3, flac, aac, m4a, aiff, opus.
+        A folder brings everything audio inside it. Duplicates are spotted
+        before anything uploads.
+      </div>
+    </div>
+
+    <!-- MUSIC-7 (2026-09-04): GET /api/ingest/queue has returned counts,
+         pending and per-failure reasons since the queue was built, and nothing
+         in the browser read it - so a parked upload's reason existed only in
+         the log of whichever indexer run happened to hit it. -->
+    <div id="mi-queue" class="mi-queue hidden">
+      <h3>Waiting for the base rig</h3>
+      <div id="mi-queue-body"></div>
     </div>
 
     <div id="mi-stage" class="hidden">

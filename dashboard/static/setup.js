@@ -36,12 +36,40 @@
     });
   }
 
-  function showError(message) {
-    var el = document.getElementById("setup-error");
+  // DUI-6 (usability sweep 2026-09-03). Two faults, one fix. The banner is at
+  // the very top of a page whose checklist is at the bottom, so a refusal
+  // from [ DO IT ] on the last row was announced off screen; and
+  // showError(null) had NO CALL SITE, so a transient failure stayed on the
+  // page through every subsequent success. `anchor` is the element that was
+  // clicked: the message goes into a slot inside that step, and everything
+  // else clears first, every time.
+  function clearErrors() {
+    var top = document.getElementById("setup-error");
+    if (top) { top.style.display = "none"; top.textContent = ""; }
+    document.querySelectorAll(".setup-step-error").forEach(function (el) {
+      if (el.parentNode) el.parentNode.removeChild(el);
+    });
+  }
+
+  function errorSlot(anchor) {
+    var host = anchor && anchor.closest
+      ? (anchor.closest("form") || anchor.closest("tr") || anchor.closest("section"))
+      : null;
+    if (!host) return null;
+    var slot = document.createElement("div");
+    slot.className = "banner error-banner form-error setup-step-error";
+    host.appendChild(slot);
+    return slot;
+  }
+
+  function showError(message, anchor) {
+    clearErrors();
+    if (!message) return;
+    var el = errorSlot(anchor) || document.getElementById("setup-error");
     if (!el) return;
-    if (!message) { el.style.display = "none"; el.textContent = ""; return; }
     el.style.display = "";
     el.textContent = "\u25B2 " + message;
+    if (el.scrollIntoView) el.scrollIntoView({block: "center"});
   }
 
   // -------------------------------------------------------------- EULA
@@ -62,10 +90,13 @@
     if (acceptBtn) {
       acceptBtn.addEventListener("click", function () {
         api("/api/v1/setup/eula", {method: "POST"}).then(function (state) {
+          clearErrors();
           document.getElementById("setup-eula-status").textContent =
             "accepted (" + state.detail + ")";
           refreshTasks();
-        }).catch(function (err) { showError("could not accept the EULA: " + err.message); });
+        }).catch(function (err) {
+          showError("could not accept the EULA: " + err.message, acceptBtn);
+        });
       });
     }
   });
@@ -109,7 +140,9 @@
           // it (see the module docstring above).
           window.location.reload();
         })
-        .catch(function (err) { showError("could not create the admin account: " + err.message); });
+        .catch(function (err) {
+          showError("could not create the admin account: " + err.message, form);
+        });
     });
   }
 
@@ -133,10 +166,11 @@
       Object.keys(values).forEach(function (k) { if (!values[k]) delete values[k]; });
       api("/api/v1/admin/site", {method: "PUT", body: JSON.stringify({values: values})})
         .then(function () {
+          clearErrors();
           document.getElementById("setup-studio-status").textContent = "saved";
           refreshTasks();
         })
-        .catch(function (err) { showError("could not save: " + err.message); });
+        .catch(function (err) { showError("could not save: " + err.message, form); });
     });
   });
 
@@ -157,10 +191,13 @@
       };
       api("/api/v1/setup/alerts", {method: "POST", body: JSON.stringify(payload)})
         .then(function (state) {
+          clearErrors();
           status.textContent = state.detail || state.status;
           refreshTasks();
         })
-        .catch(function (err) { showError("could not save a destination: " + err.message); });
+        .catch(function (err) {
+          showError("could not save a destination: " + err.message, form);
+        });
     });
     var testBtn = document.getElementById("setup-alerts-test");
     if (testBtn) {
@@ -169,12 +206,15 @@
         status.textContent = "sending...";
         api("/api/v1/setup/alerts/test", {method: "POST"})
           .then(function (result) {
+            clearErrors();
             status.textContent = result.ok
               ? ("test sent to " + (result.sent_to || "the destination you set") + ".")
               : ("the test could not be sent: " + result.detail);
             refreshTasks();
           })
-          .catch(function (err) { showError("could not send a test: " + err.message); })
+          .catch(function (err) {
+            showError("could not send a test: " + err.message, testBtn);
+          })
           .finally(function () { testBtn.disabled = false; });
       });
     }
@@ -209,16 +249,16 @@
         renderDoneLinks(tr, data.outstanding_for_done || []);
       }
       var actions = tr.querySelector(".task-actions");
-      actions.appendChild(actionButton("CHECK", function () { return taskAction(task.id, "check"); }));
+      actions.appendChild(actionButton("CHECK", function (btn) { return taskAction(task.id, "check", btn); }));
       if (task.can_run) {
         actions.appendChild(actionButton(task.run_label || "DO IT",
-                                         function () { return taskAction(task.id, "run"); }));
+                                         function (btn) { return taskAction(task.id, "run", btn); }));
       }
       if (task.optional && task.status !== "skipped") {
         // A step Done waits for is skipped on purpose or not at all, so its
         // button says what pressing it means (SYS-18).
         actions.appendChild(actionButton(task.gate ? "SKIP - I understand" : "SKIP",
-                                         function () { return taskAction(task.id, "skip"); }));
+                                         function (btn) { return taskAction(task.id, "skip", btn); }));
       }
       tbody.appendChild(tr);
     });
@@ -247,15 +287,17 @@
     btn.style.marginRight = "0.3rem";
     btn.addEventListener("click", function () {
       btn.disabled = true;
-      onClick().finally(function () { btn.disabled = false; });
+      onClick(btn).finally(function () { btn.disabled = false; });
     });
     return btn;
   }
 
-  function taskAction(id, action) {
+  function taskAction(id, action, anchor) {
     return api("/api/v1/setup/tasks/" + encodeURIComponent(id) + "/" + action, {method: "POST"})
-      .then(function () { return refreshTasks(); })
-      .catch(function (err) { showError("could not " + action + " " + id + ": " + err.message); });
+      .then(function () { clearErrors(); return refreshTasks(); })
+      .catch(function (err) {
+        showError("could not " + action + " " + id + ": " + err.message, anchor);
+      });
   }
 
   function refreshTasks() {

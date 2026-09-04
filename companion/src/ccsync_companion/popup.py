@@ -202,6 +202,47 @@ def summarize_fix_results(
     return head
 
 
+# Where the undo lives, in the words the window that holds it uses (RES-5
+# put it in the RESOLVE section; before that it was two levels deep in
+# ADVANCED and named neither project nor count).
+UNDO_POINTER = "To undo: Settings, RESOLVE, [ UNDO LAST FIX ]"
+
+
+def fix_copied_bytes(rows: list[dict[str, Any]], results: list[dict[str, Any]]) -> int:
+    """Bytes actually copied in: the SOURCE size of every row that succeeded.
+
+    The source is still there (FIX ALL copies, it never moves), and a failed
+    or skipped attempt has had both its artifacts deleted by fixer.fix_clip,
+    so only the successes may be counted."""
+    ok = {str(r.get("file_path") or "") for r in results if r.get("ok")}
+    return sum(_safe_size(str(row.get("file_path") or ""))
+               for row in rows if str(row.get("file_path") or "") in ok)
+
+
+def fix_summary_text(results: list[dict[str, Any]], batch_size: int,
+                     copied_bytes: int = 0) -> str:
+    """The end-of-run sentence (RES-13, sweep 2026-09-03).
+
+    158 clips were copied and their paths rewritten in the editor's project
+    database and the window simply closed: no count, no size, and no mention
+    anywhere in the flow that the change can be undone. Pure, so the wording
+    is testable without Tk."""
+    fixed = sum(1 for r in results if r.get("ok"))
+    failures = [r for r in results if not r.get("ok") and not r.get("aborted")]
+    parts = [f"Fixed {fixed} of {batch_size}"]
+    if copied_bytes:
+        parts.append(f"copied {copied_bytes / 1e9:.1f} GB")
+    if failures:
+        # The FIRST reason, not a count of reasons: an editor reading
+        # "3 could not be fixed" learns nothing they can act on.
+        reason = str(failures[0].get("message") or "").strip() or "no reason given"
+        parts.append(f"{len(failures)} could not be fixed: {reason}")
+    text = ", ".join(parts)
+    if fixed:
+        text += f"\n{UNDO_POINTER}"
+    return text
+
+
 def _relink_entry(item: dict[str, Any]) -> Any:
     """What to carry through a batch so the relink can still be made.
 
@@ -1338,6 +1379,11 @@ class PopupDialog:
                 blocks.append(shown)
             if not failures and not aborted:
                 blocks.append("Nothing was moved or deleted.")
+            if any(r.get("ok") for r in results):
+                # RES-13: a partial run changed the project database too, and
+                # the window that stays open to retry never said the change
+                # could be taken back.
+                blocks.append(UNDO_POINTER)
             self.status_label.config(text="\n".join([head + ":"] + blocks))
             if failures:
                 log.warning("fix all: %d/%d failed", len(failures), len(results))
@@ -1801,7 +1847,7 @@ class ProgressModel:
                  item_percent: Optional[int] = None, done: int = 0, total: int = 0,
                  failed: int = 0, eta_seconds: Optional[float] = None,
                  note: str = "", actions: Any = (), finished: bool = False,
-                 unit: str = "clip") -> None:
+                 unit: str = "clip", failures: Any = ()) -> None:
         self.title = title
         self.phase = phase
         self.headline = headline
@@ -1821,6 +1867,31 @@ class ProgressModel:
         # since "12 of 40 clips" over an album is the kind of wrong that makes
         # an editor doubt the rest of the window.
         self.unit = str(unit or "clip")
+        # CMEDIA-10 (sweep 2026-09-03): the orchestrator knows exactly why
+        # each clip failed ("the source file is not on this machine any
+        # more", a tier refusal) and put it on the item; the editor's two
+        # local surfaces reduced all of it to a count and "See the log".
+        # Copied, not referenced: this object is built on the producer's
+        # thread and read on the Tk thread.
+        self.failures = [
+            {"name": str((f or {}).get("name") or ""),
+             "error": str((f or {}).get("error") or "")}
+            for f in (failures or ()) if isinstance(f, dict)
+        ]
+
+    FAILURES_SHOWN = 5
+
+    def failure_lines(self) -> list[str]:
+        """The named failures, capped, with "and N more" for the rest."""
+        lines = [f"✗ {f['name']}: {f['error']}" if f["error"] else f"✗ {f['name']}"
+                 for f in self.failures[:self.FAILURES_SHOWN]]
+        extra = len(self.failures) - self.FAILURES_SHOWN
+        if extra > 0:
+            lines.append(f"and {extra} more")
+        return lines
+
+    def failures_block(self) -> str:
+        return "\n".join(self.failure_lines())
 
     def overall_line(self) -> str:
         """"12 of 40 clips · 1 failed"."""
@@ -1895,6 +1966,7 @@ class WorkProgressWindow:
         self._headline_label = self._headline_bar = None
         self._item_label = self._item_bar = None
         self._overall_label = self._overall_bar = self._note_label = None
+        self._failures_label = None
 
     # -- lifecycle ---------------------------------------------------------
     def is_open(self) -> bool:
@@ -2005,6 +2077,13 @@ class WorkProgressWindow:
                                         justify="left", wraplength=560)
             self._note_label.pack(anchor="w", fill="x", pady=(0, 6))
 
+            # CMEDIA-10: named failures, in red, under the bars -- the way the
+            # fixer dialog has always listed its own.
+            self._failures_label = tk.Label(root, text="", bg=theme.BG, fg=theme.RED,
+                                            font=theme.mono(9), anchor="w",
+                                            justify="left", wraplength=560)
+            self._failures_label.pack(anchor="w", fill="x", pady=(0, 6))
+
             bar = tk.Frame(root, bg=theme.BG)
             bar.pack(anchor="w", pady=(4, 0))
             for name, label, primary in (
@@ -2047,7 +2126,8 @@ class WorkProgressWindow:
         window thread. Runs ON that thread (see _build_and_show)."""
         self._buttons = {}
         for name in ("_headline_label", "_headline_bar", "_item_label", "_item_bar",
-                     "_overall_label", "_overall_bar", "_note_label"):
+                     "_overall_label", "_overall_bar", "_note_label",
+                     "_failures_label"):
             try:
                 setattr(self, name, None)
             except Exception:
@@ -2115,6 +2195,9 @@ class WorkProgressWindow:
         self._overall_bar["value"] = (
             int(1000 * min(model.done, model.total) / model.total) if model.total else 0)
         self._note_label.config(text=model.note or model.phase)
+        if self._failures_label is not None:
+            self._failures_label.config(text=model.failures_block()
+                                        if hasattr(model, "failures_block") else "")
         for name, button in self._buttons.items():
             try:
                 button.config(state=("normal" if name in model.actions else "disabled"))
@@ -2185,6 +2268,43 @@ def confirm_dialog(title: str, body: str, ok_label: str = "PROCEED") -> bool:
     return result["ok"]
 
 
+def notice_dialog(title: str, body: str, ok_label: str = "OK") -> None:
+    """One-button themed notice. Same shape as confirm_dialog -- one Tk root
+    through ui_dispatch, every Tk object a LOCAL of the frame (so nothing
+    outlives the building thread, CR-93) -- and any failure is a log line,
+    never an exception into the caller: a message the editor did not get is
+    worse than nothing only if it also breaks what produced it."""
+    try:
+        import tkinter as tk
+
+        from . import theme
+    except Exception as exc:
+        log.warning("notice dialog unavailable (%s): %s", exc, body)
+        return
+
+    def _build_and_show() -> None:
+        root = tk.Tk()
+        root.title(title)
+        theme.apply_window_icon(tk, root)
+        root.attributes("-topmost", True)
+        root.configure(bg=theme.BG, padx=18, pady=14)
+        tk.Label(root, text=f"► {title}", bg=theme.BG, fg=theme.RED,
+                 font=theme.mono(12, bold=True), justify="left", anchor="w").pack(anchor="w")
+        tk.Label(root, text=theme.RULE, bg=theme.BG, fg=theme.RED_DIM).pack(anchor="w")
+        tk.Label(root, text=body, bg=theme.BG, fg=theme.TEXT, font=theme.mono(10),
+                 justify="left", anchor="w").pack(anchor="w", pady=(6, 12))
+        btn_bar = tk.Frame(root, bg=theme.BG)
+        btn_bar.pack(anchor="e")
+        theme.neon_button(tk, btn_bar, ok_label, root.destroy, primary=True).pack(side="left")
+        root.protocol("WM_DELETE_WINDOW", root.destroy)
+        ui_dispatch.run_dialog(root)
+
+    try:
+        ui_dispatch.dispatch(_build_and_show)
+    except Exception as exc:
+        log.warning("notice dialog failed (%s): %s", exc, body)
+
+
 def show_popup(
     out_of_tree_items: list[dict[str, Any]],
     local_root: str,
@@ -2203,8 +2323,24 @@ def show_popup(
     # Construction AND mainloop on one thread: the caller's on Windows, the
     # main one on macOS (ui_dispatch). PopupDialog.__init__ builds the root,
     # so both halves have to be inside the same dispatched call.
+    # RES-13: the run's own summary. _fix_done calls on_done ONLY on a fully
+    # successful batch (a batch with failures keeps the window open and says
+    # so there), and it does so just before destroying the window -- so the
+    # summary is shown AFTER the dispatch returns, never from inside it: two
+    # Tk roots alive at once in this process is the CORE-H8 hazard.
+    summary = {"text": ""}
+
+    def _on_done(results: list[dict[str, Any]]) -> None:
+        try:
+            if results:
+                summary["text"] = fix_summary_text(
+                    results, len(rows), fix_copied_bytes(rows, results))
+        except Exception:
+            log.exception("fix all: could not build the run summary")
+
     def _build_and_show() -> None:
-        dialog = PopupDialog(rows, local_root, ignore_tracker, editor_name=editor_name,
+        dialog = PopupDialog(rows, local_root, ignore_tracker, on_done=_on_done,
+                             editor_name=editor_name,
                              canonical_prefix=canonical_prefix)
         dialog.show()
 
@@ -2235,6 +2371,14 @@ def show_popup(
             perform_ignore_all(rows, ignore_tracker, how="headless")
         except Exception:
             log.exception("fallback: could not record the skipped clips")
+        return
+    # Outside the try on purpose: a failure here must not reach the fallback
+    # above, which auto-skips the whole batch (RES-13).
+    if summary["text"]:
+        try:
+            notice_dialog(site_mod.notify_title("media copied in"), summary["text"])
+        except Exception:
+            log.exception("fix all: could not show the run summary")
 
 
 def licence_dialog(title: str, intro: str, document: str,

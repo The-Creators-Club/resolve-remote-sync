@@ -254,6 +254,13 @@ const state = {
                        // the companion about downloads and shows no executor
                        // badge (docs/YTDL_LOCAL_DOWNLOAD.md §10, phase 1)
   manifest: null,      // {videos, terms, counts}
+  lastDownload: null,  // the last {job, r} renderDownloads drew, so the
+                       // loopback's own 2 s progress poll can redraw the same
+                       // line without a second round trip to the server (CYT-2)
+  localLive: null,     // what THIS machine's companion says about the job on
+                       // screen: percent/speed/eta for the clip in flight, or
+                       // null for every other case (no companion, an older one
+                       // that 404s the route, a server-side download)
   termFilter: null,    // job_terms.id, or null for "everything"
   terms: [],           // the attached job's terms, as the last poll gave them
   termsOn: null,       // the ticked ids at the term review, held in the BROWSER
@@ -261,6 +268,10 @@ const state = {
                        // set is posted once, when SEARCH WITH THESE is pressed.
                        // null means "this page has not been shown a term review
                        // yet", which is different from "everything unticked"
+  waiting: [],         // ...and the ones waiting for the EDITOR: the parked
+                       // reviews, off the same api/jobs/active answer
+                       // (YTWEB-8/13). Empty for a server without the key,
+                       // which renders as the panel's own hidden state.
   queue: [],           // the editor's waiting jobs, newest answer from
                        // api/jobs/active
   showFiltered: false,
@@ -414,9 +425,21 @@ function sessionExpired() {
             + 'running on the server.', true);
 }
 
+// YTWEB-7 (2026-09-03): the REST OF THE ERROR survives, in front of the hint.
+// This used to return the hint alone, and the one message that carries
+// anything past its prefix is the degraded-filter warning the worker writes on
+// a job that has NOT failed: the editor was shown "This deployment has no
+// working AI provider credential..." and was never told that the manifest
+// below them is unfiltered, which is the fact that changes what they do next
+// (every one of 300 candidates arrives ticked as relevant).
 function hintFor(err) {
   if (!err) return null;
-  for (const [prefix, hint] of HINTS) if (err.startsWith(prefix)) return hint;
+  for (const [prefix, hint] of HINTS) {
+    if (err.startsWith(prefix)) {
+      const rest = err.slice(prefix.length).trim();
+      return rest ? `${rest}. ${hint}` : hint;
+    }
+  }
   return err;
 }
 
@@ -482,6 +505,19 @@ function renderEvidence(h) {
          h.yt_dlp_age_detail == null || !h.yt_dlp_age_detail
            ? 'the yt-dlp this server is actually running'
            : String(h.yt_dlp_age_detail));
+
+  // IS THERE A JAVASCRIPT RUNTIME (YTWEB-3, 2026-09-03). The server has
+  // measured this since YTDL-24 -- a week of misdiagnosis, because without
+  // deno or node on PATH yt-dlp cannot run YouTube's player JS and every clip
+  // fails "Requested format is not available", which reads as YouTube
+  // flakiness one video at a time -- shipped it on api/health, and no line of
+  // this file read it. Only the bad state gets a pip: a runtime that is there
+  // is not news, and the strip is already four pips wide.
+  const js = h.js_runtime == null ? '' : String(h.js_runtime);
+  setPip('#healthjs', js === 'missing' ? 'no JS runtime' : '', 'off',
+         'this server has no JavaScript runtime (deno or node), which is what '
+         + 'yt-dlp needs to resolve YouTube formats. Every download fails '
+         + 'until an admin adds one. See ytdl/web/DEPLOY.md.');
 
   // The PO-token sidecar, as an ANSWER and not as a configured URL: CR-73 sat
   // undetected for days behind a sidecar that was configured and unreachable.
@@ -627,6 +663,12 @@ async function loadHealth() {
   } else if (h.yt_dlp !== 'ok') {
     setBanner('health', 'yt-dlp is not installed in this container, so searching '
               + 'and downloading will both fail. See ytdl/web/DEPLOY.md.', true);
+  } else if (h.js_runtime === 'missing') {
+    // Read strictly, like every other WP5 key: only the word 'missing' says
+    // this, so a server that predates the field says nothing (YTWEB-3).
+    setBanner('health', 'this server has no JavaScript runtime (deno or node), '
+              + 'so YouTube will refuse every format and downloads will fail '
+              + 'until an admin adds one. See ytdl/web/DEPLOY.md.', true);
   } else {
     setBanner('health', null);
   }
@@ -1138,6 +1180,12 @@ async function attach(jobId) {
   state.attachToken++;
   state.jobId = jobId;
   state.manifest = null;              // job A's videos must not render as B's
+  // ...and neither may job A's loopback line or its last download render
+  // (CYT-2): the companion answers about whatever IT is downloading, which is
+  // not necessarily the job this page has just been pointed at.
+  state.lastDownload = null;
+  state.localLive = null;
+  ensureLocalProgress(null);
   state.termFilter = null;
   state.phase = null;                 // job B's phases are not job A's
   state.terms = [];
@@ -1236,6 +1284,9 @@ function detach() {
   state.attachToken++;                // orphan any poll response still in flight
   state.jobId = null;
   state.manifest = null;
+  state.lastDownload = null;
+  state.localLive = null;
+  ensureLocalProgress(null);
   state.phase = null;
   state.terms = [];
   state.termsOn = null;
@@ -1245,6 +1296,33 @@ function detach() {
   $('#progress').classList.add('hidden');
   $('#downloads').classList.add('hidden');
   $('#review').classList.add('hidden');
+}
+
+// WHAT A QUEUED JOB IS WAITING ON (YTWEB-1, 2026-09-03).
+//
+// The worker is fleet-serial - one job at a time for every editor on the site
+// - and every number this page had was counted per editor. So the second
+// editor of the morning, queued behind somebody else's 20-minute enrich phase,
+// got a silent toast (announceQueued returns on 0), a bar parked in the
+// `queued` span, the word 'queued', and an EMPTY ticker: every other bit in
+// there is gated on a counter a queued job does not have yet. Nothing on the
+// page said what the wait was, or that there was one.
+//
+// `worker_alive === false` is answered first and separately because it is the
+// other reading of the same picture: a queue nothing is draining looks exactly
+// like a queue with something big at the front of it. The banner slot says it
+// too; this says it where the editor is looking.
+function queuedWait(r) {
+  if (r && r.worker_alive === false) {
+    return 'waiting to start: the downloader on the server is not running';
+  }
+  const mine = Number((r && r.queued_behind) || 0);
+  const fleet = Number((r && r.fleet_ahead) || 0);
+  const total = mine + fleet;
+  if (!total) return 'waiting to start: you are next';
+  const whose = fleet
+    ? ` (${plural(fleet, 'from another editor', 'from other editors')})` : '';
+  return `waiting to start: ${plural(total, 'job', 'jobs')} ahead of it${whose}`;
 }
 
 // ---------------------------------------------------------------- progress
@@ -1302,6 +1380,7 @@ function renderProgress(job, r) {
   if (job.enrich_total) bits.push(`metadata ${job.enrich_done}/${job.enrich_total}`);
   const last = (r.terms || []).filter(t => t.searched).slice(-1)[0];
   if (last && job.phase === 'searching') bits.push(`latest: ${last.term} → ${last.hits} hits`);
+  if (job.phase === 'queued') bits.push(queuedWait(r));
   if (job.phase === 'failed') bits.push(job.error || 'failed');
   $('#ticker').textContent = bits.join(' · ');
   $('#cancel').classList.toggle('hidden', !!job.terminal);
@@ -1473,7 +1552,52 @@ async function loadQueue() {
   try { r = await api('api/jobs/active'); }
   catch { return; }                    // a blip, or a server without the route
   state.queue = r.queue || [];
+  // The parked half of the same answer (YTWEB-8/13). A server that predates
+  // the key sends none, which renders as the empty list this panel starts as.
+  state.waiting = r.waiting || [];
   renderQueue();
+  renderWaiting();
+}
+
+// SEARCHES WAITING FOR THIS EDITOR (YTWEB-8/13, 2026-09-03).
+//
+// Two defects, one list. The page attaches to what is MOVING now (db.active_
+// job), so the week-old parked review it used to open on has to be reachable
+// by name - and a parked review that blocks nothing is a review nothing ever
+// mentions, so five of them can pile up holding nothing but the editor's own
+// curation work. [ RESUME ] attaches to it, which is what "open it" means on
+// this page; [ CANCEL ] is the same cancel the review header offers, here
+// because deciding to throw one away should not require opening it first.
+function renderWaiting() {
+  const box = $('#waitinglist');
+  const w = state.waiting || [];
+  $('#waiting').classList.toggle('hidden', !w.length);
+  box.innerHTML = '';
+  // A line in the header's slot as well, because the panel is below the fold
+  // on a page mid-search. Its own banner key, so it cannot erase the health,
+  // worker or job lines (YTDL-11/12/37's rule).
+  setBanner('parked', w.length
+    ? `${plural(w.length, 'search is', 'searches are')} waiting for your review`
+    : null);
+  w.forEach(j => {
+    const row = el('div', 'queuerow');
+    row.appendChild(el('span', 'qpos', String(j.position)));
+    row.appendChild(el('span', 'qterm', j.kind === 'urls'
+      ? 'pasted links' : j.term));
+    row.appendChild(el('span', 'qproject muted', j.project_label));
+    // WHICH review it is waiting at: the terms, or the manifest. Different
+    // decisions, and a job at terms_review has not spent a search yet.
+    row.appendChild(el('span', 'qproject muted', j.phase === 'terms_review'
+      ? 'waiting at the term review' : 'waiting for review'));
+    row.appendChild(el('span', 'grow'));
+    const open = el('button', 'text-btn', '[ RESUME ]');
+    open.onclick = () => attach(j.id);
+    const cancel = el('button', 'text-btn', '[ CANCEL ]');
+    cancel.onclick = () => cancelQueued(j.id);
+    row.appendChild(open);
+    row.appendChild(cancel);
+    box.appendChild(row);
+  });
 }
 
 function renderQueue() {
@@ -1566,11 +1690,36 @@ function renderDownloads(job, r) {
   $('#dlfill').style.width = pct + '%';
   $('#dlfill').classList.toggle('done', job.phase === 'done');
   $('#dlphase').textContent = PHASE_LABEL[job.phase] || job.phase;
+  // The counter, then whatever else is TRUE right now: what this editor's own
+  // machine is doing with the clip in flight (CYT-2), how much room the
+  // machine holding the claim said it had (YTWEB-9), and - once the job is
+  // finished - where the clips went and that a row opens it (YTWEB-11).
   $('#dlticker').textContent =
-    `${job.dl_done || 0}/${total} downloaded` + (job.dl_failed ? ` · ${job.dl_failed} failed` : '');
+    [`${job.dl_done || 0}/${total} downloaded`,
+     job.dl_failed ? `${job.dl_failed} failed` : '',
+     localProgressLine(job), freeNote(job), landedLine(job)]
+      .filter(Boolean).join(' · ');
+  // The last thing this page is for is "find the file in my project", and it
+  // needs the manifest for the row's own path.
+  state.lastDownload = {job, r};
   $('#cancel2').classList.toggle('hidden', !!job.terminal);
   // WHOSE machine is fetching these clips, off this tick's payload (§9).
   renderMode(job);
+  // ...and, when the answer is THIS machine, what it is doing right now
+  // (CYT-2). Kept out of renderMode deliberately: that function is derived
+  // from the poll payload and nothing else, which is what makes the badge flip
+  // on a reclaim the page never asked for.
+  ensureLocalProgress(job);
+  // [ STOP ] is drawn only once this machine's companion has actually
+  // ANSWERED about this job: a button that posts to a loopback nothing is
+  // listening on is a button that does nothing, and a companion too old for
+  // these routes is the common case for weeks after a feature ships.
+  const stop = $('#dlstop');
+  if (stop) {
+    stop.classList.toggle('hidden',
+      !(job.phase === 'downloading' && job.download_mode === 'local'
+        && state.localDownload && state.localLive));
+  }
 
   const list = $('#dllist');
   list.innerHTML = '';
@@ -1616,8 +1765,29 @@ function renderDownloads(job, r) {
       st = v.dl_state;                   // 'pending', 'done', 'downloading'
     }
     row.appendChild(el('span', 'st', st));
+    // YTWEB-11 (2026-09-03): a clip that LANDED opens its folder from here,
+    // through the same reveal() the history panel has always used. Until this
+    // the editor watched 41 rows go green and then had to scroll past the
+    // queue and Recent searches into a fleet-wide ledger to find their own
+    // rows in it and click one. `reveal_path` rides on the manifest row now;
+    // a row from a build that sent none is left exactly as it was.
+    if (v.dl_state === 'done' && v.reveal_path) {
+      row.title = 'open this clip\'s folder on this machine';
+      row.onclick = () => reveal(v);
+    }
     list.appendChild(row);
   });
+}
+
+// "12 clips landed in Foo/Youtube/bar. Click a row to open the folder."
+// Only on a finished job: while it is downloading the rows are still moving
+// and the instruction would point at rows that cannot answer it yet.
+function landedLine(job) {
+  if (job.phase !== 'done' || !(job.dl_done > 0)) return '';
+  const where = [job.project_label, 'Youtube', job.term_dir]
+    .filter(Boolean).join('/');
+  return `${plural(job.dl_done, 'clip', 'clips')} landed in ${where}. `
+    + 'Click a row to open the folder';
 }
 
 // ---------------------------------------------------------------- manifest
@@ -1690,6 +1860,40 @@ function visibleVideos(termFilter = state.termFilter) {
   });
 }
 
+// Bytes per second of video, per quality rung (YTWEB-9, 2026-09-03). The SAME
+// table routes_api.BYTES_PER_SECOND holds, duplicated on purpose rather than
+// fetched: a page that had to ask the server how big its own selection is
+// would print nothing whenever that round trip failed, and the number is an
+// order of magnitude, not a measurement. An unknown rung reads as 1080p, which
+// is what every search on this page defaults to.
+const BYTES_PER_SECOND = {
+  '480p': 350000, '720p': 625000, '1080p': 1000000,
+  '1440p': 2000000, '2160p': 4400000, best: 4400000,
+};
+
+const fmtGB = bytes => {
+  const gb = bytes / 1e9;
+  return gb < 10 ? `${gb.toFixed(1)} GB` : `${Math.round(gb)} GB`;
+};
+
+// 'roughly 22 GB', or '' when there is nothing to size. A paste has no
+// durations at all (its rows are links, never enriched), and a made-up number
+// there would be worse than the silence this page has always had.
+function sizeEstimate(secs, quality) {
+  const rate = BYTES_PER_SECOND[quality] || BYTES_PER_SECOND['1080p'];
+  const bytes = Math.max(0, Number(secs) || 0) * rate;
+  return bytes ? `roughly ${fmtGB(bytes)}` : '';
+}
+
+// What the machine that last claimed this job said it had free. Reported at
+// claim time and stored on the row, so it is as old as the claim - which is
+// why it names the machine rather than reading as a live gauge.
+function freeNote(job) {
+  const free = job && job.claim_free_bytes;
+  if (free == null || !(Number(free) > 0)) return '';
+  return `${fmtGB(Number(free))} free on the download machine`;
+}
+
 function renderGrid() {
   const m = state.manifest;
   const c = m.counts;
@@ -1715,10 +1919,17 @@ function renderGrid() {
 
   const sel = m.videos.filter(v => v.selected && !v.duplicate);
   const secs = sel.reduce((a, v) => a + (v.duration || 0), 0);
-  // Count AND total duration: the only disk-space proxy an editor has, and the
-  // destination is the Projects pool that ops watches.
+  // Count, total duration AND ROUGHLY HOW MUCH DISK (YTWEB-9, 2026-09-03).
+  // A duration was the only disk-space proxy an editor had before pressing
+  // DOWNLOAD, and 40 clips of 12 minutes at 1080p is 15-40 GB that this line
+  // never mentioned. The free-space number beside it is what the machine
+  // holding the last claim on this job reported it had (claim_free_bytes);
+  // absent for a job no companion has claimed, which is every server download.
   $('#gridfoot').textContent =
-    `${sel.length} selected · ${fmtTotal(secs)} of footage · into ${m.job.project_label}/Youtube/${m.job.term_dir}`;
+    [`${sel.length} selected`, `${fmtTotal(secs)} of footage`,
+     sizeEstimate(secs, m.job.quality), freeNote(m.job),
+     `into ${m.job.project_label}/Youtube/${m.job.term_dir}`]
+      .filter(Boolean).join(' · ');
   // The same two numbers in the panel HEADER, which survives a collapse: what
   // is in there and how much of it is picked is the whole reason to unfold it
   // again (2026-08-11).
@@ -1852,10 +2063,19 @@ async function bulk(selected) {
 // refused (2026-08-30). Silent at the front of the line, which is every first
 // search of the day: a toast saying "queued behind 0" would be noise on the
 // one case that needs no explanation.
+//
+// ...and since YTWEB-1 (2026-09-03) it speaks for the WHOLE fleet, not only
+// for this editor's own jobs: the worker is serial across the site, so the
+// most common queue there is - one editor behind another - was the one case
+// that produced `queued_behind: 0` and therefore no toast at all.
 function announceQueued(r) {
-  const n = (r && r.queued_behind) || 0;
+  const mine = Number((r && r.queued_behind) || 0);
+  const fleet = Number((r && r.fleet_ahead) || 0);
+  const n = mine + fleet;
   if (!n) return;
-  toast(`queued behind ${plural(n, 'job', 'jobs')}: it starts when they finish`);
+  toast(`queued behind ${plural(n, 'job', 'jobs')}`
+        + (fleet ? `, ${fleet} of them from other editors` : '')
+        + ': it starts when they finish');
   loadQueue();
 }
 
@@ -1956,9 +2176,15 @@ async function runSearch() {
       // has lost sight of -- including a forgotten manifest from last week.
       // Loud, red and specific: a quiet amber "showing it below" over a
       // four-day-old review read as "SEARCH does nothing" (owner, 2026-08-18).
-      toast(`A previous search is still open below (job #${e.info.job_id}). ` +
-            `Finish its review or press [ CANCEL SEARCH ] on it, then search ` +
-            `again. (${e.message})`, true, 15000);
+      // YTWEB-13 (2026-09-03): the refusal NAMES the parked search and hands
+      // over the button, rather than describing where to find one. The list
+      // it belongs to is re-read at the same time, so [ CANCEL ] for it is on
+      // screen too - the same two controls, in the place they live.
+      toast(`A previous search is still open (job #${e.info.job_id}). ` +
+            `Finish its review or cancel it, then search again. ` +
+            `(${e.message})`, true, 15000,
+            {label: '[ RESUME IT ]', run: () => attach(e.info.job_id)});
+      loadQueue();
       $('#progress').classList.remove('hidden');
       await attach(e.info.job_id);
     } else {
@@ -2376,6 +2602,132 @@ async function lockToServer() {
   }
 }
 
+// ------------------------------------------ what YOUR machine is doing (CYT-2)
+//
+// The executor has kept per-clip bytes/percent/speed on the loopback since the
+// feature shipped -- its own docstring says "this exists so the SPA can show
+// something in the first seconds" -- and no line of this file ever fetched it.
+// During a 40-minute 1080p clip the page showed the server's row state, i.e.
+// the word `downloading`, with no percent and no rate, for the whole job.
+//
+// Same rules as every other loopback call here: gated on the feature flag and
+// the job being local, one second of budget, and EVERY failure degrades to the
+// page as it is today. A 404 is a companion older than the route and turns the
+// whole thing off for the session rather than asking again every two seconds.
+const LOCAL_PROGRESS_MS = 2000;
+let localProgressTimer = null;
+let localProgressBusy = false;
+let localProgressOff = false;
+
+function ensureLocalProgress(job) {
+  const want = state.localDownload && !localProgressOff && job
+    && job.download_mode === 'local' && job.phase === 'downloading';
+  if (!want) {
+    if (localProgressTimer) clearTimeout(localProgressTimer);
+    localProgressTimer = null;
+    state.localLive = null;
+    return;
+  }
+  // One chain, however many times a render asks for it: renderMode runs on
+  // every poll tick and a second chain would be a second fetch every 2 s.
+  if (localProgressTimer || localProgressBusy) return;
+  pollLocalProgress(job.id);
+}
+
+async function pollLocalProgress(jobId) {
+  localProgressTimer = null;
+  localProgressBusy = true;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), PROBE_MS);
+  let body = null;
+  try {
+    const res = await fetch(`${COMPANION_URL}/ytdl/progress`, {signal: ctl.signal});
+    if (res.status === 404) {
+      // A companion that predates the route. Nothing to say about it: the
+      // clips are arriving and the row state is what it always was.
+      localProgressOff = true;
+      state.localLive = null;
+      localProgressBusy = false;
+      return;
+    }
+    if (res.ok) body = await res.json();
+  } catch { /* not answering, or the 1 s budget ran out: try again in 2 s */ }
+  finally { clearTimeout(timer); }
+  const jobs = (body && Array.isArray(body.jobs)) ? body.jobs : [];
+  const mine = jobs.filter(j => String(j.job_id) === String(jobId))[0] || null;
+  state.localLive = mine;
+  localProgressBusy = false;
+  // Re-render off the LAST poll response rather than asking the server again:
+  // this is the same job, and only the loopback's half of the line changed.
+  const lastly = state.lastDownload;
+  if (lastly && lastly.job && lastly.job.id === jobId
+      && state.jobId === jobId) {
+    renderDownloads(lastly.job, lastly.r);
+  }
+  if (state.jobId === jobId && !localProgressOff) {
+    localProgressTimer = setTimeout(() => pollLocalProgress(jobId), LOCAL_PROGRESS_MS);
+  }
+}
+
+// A speed the companion reported. It may be a number of bytes per second or a
+// string yt-dlp already formatted; both are things that end up in this field,
+// and neither is worth a round of parsing.
+function fmtSpeed(speed) {
+  if (speed == null || speed === '') return '';
+  const n = Number(speed);
+  if (isFinite(n) && n > 0) return `${(n / 1e6).toFixed(1)} MB/s`;
+  return String(speed);
+}
+
+// 'clip 3/12 · 38% at 4.2 MB/s · 2:10 left', or '' when this machine is not
+// the one downloading. A converting clip says so by name: a ten-minute
+// re-encode with a bar that stopped moving reads as a stall (CR-79's phase).
+function localProgressLine(job) {
+  const p = state.localLive;
+  if (!p || job.download_mode !== 'local') return '';
+  const clip = job.dl_total
+    ? `clip ${Math.min(job.dl_total, (job.dl_done || 0) + 1)}/${job.dl_total}` : '';
+  if (String(p.phase || '') === 'converting') {
+    return [clip, 'converting to H.264 on your machine'].filter(Boolean).join(' · ');
+  }
+  const pct = p.percent == null ? '' : `${Math.round(Number(p.percent) || 0)}%`;
+  const speed = fmtSpeed(p.speed);
+  const eta = p.eta_seconds == null ? '' : `${fmtDur(Number(p.eta_seconds))} left`;
+  const moving = [pct && speed ? `${pct} at ${speed}` : (pct || speed), eta]
+    .filter(Boolean).join(' · ');
+  return [clip, moving].filter(Boolean).join(' · ');
+}
+
+// [ STOP ]: ask THIS machine's companion to stop the clip it is on. The job
+// itself is untouched -- the server picks up whatever is missing, which is the
+// same thing that happens when a laptop is closed -- so this is deliberately
+// not [ CANCEL ], which ends the job for everybody.
+async function stopLocalDownload() {
+  const jobId = state.jobId;
+  if (!jobId) return;
+  const btn = $('#dlstop');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch(`${COMPANION_URL}/ytdl/cancel`, {
+      method: 'POST',
+      headers: {'content-type': 'application/json'},
+      body: JSON.stringify({job_id: jobId}),
+    });
+    if (res.status === 404) {
+      toast('this companion is too old to be asked to stop. Use [ CANCEL ] to '
+            + 'end the job, or [ DOWNLOAD ON THE SERVER INSTEAD ].', true, 12000);
+    } else if (res.ok) {
+      toast('asking your machine to stop: the clip it is on ends now and the '
+            + 'server picks up the rest');
+    } else {
+      toast(`your machine would not stop it (HTTP ${res.status})`, true);
+    }
+  } catch {
+    toast('the CC Sync companion is not answering on this machine', true);
+  }
+  if (btn) btn.disabled = false;
+}
+
 async function loadRecent() {
   let r;
   try {
@@ -2752,6 +3104,7 @@ async function init() {
   $('#cancel2').onclick = cancelJob;
   $('#discard').onclick = discardReview;
   $('#dlserver').onclick = lockToServer;
+  $('#dlstop').onclick = stopLocalDownload;
   $('#dlretry').onclick = retryFailed;
   $('#termsall').onclick = () => setAllTerms(true);
   $('#termsnone').onclick = () => setAllTerms(false);

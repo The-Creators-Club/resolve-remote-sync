@@ -316,10 +316,12 @@ class ClaimIn(BaseModel):
     # nothing (COMP-BROLL-10). Empty = a companion that does not declare, which
     # is answered exactly as it was before this field existed.
     scope_qualities: list[str] = []
-    # Recorded and logged, not enforced: the free-space decision belongs to the
+    # Recorded and SHOWN, not enforced: the free-space decision belongs to the
     # machine that knows what a clip costs and what else is on that disk, and
     # the companion declines its own claim (plan §7, the 0.7.x free-space
-    # lesson). Here it is evidence for "why did that editor stop claiming".
+    # lesson). Here it is evidence for "why did that editor stop claiming" --
+    # and since YTWEB-9 (2026-09-03) it lands on the job row instead of only in
+    # a log line, because the page had no disk-space signal of any kind.
     free_bytes: int | None = None
 
 
@@ -477,8 +479,13 @@ def claim(job_id: int, body: ClaimIn,
     # 2026-08-21). It narrows the refresh rule from the person to the computer;
     # an empty one is an older companion and keeps the per-editor behaviour.
     machine = str(body.machine_id or '').strip()
+    # `free_bytes` rides into the row with the claim (YTWEB-9, 2026-09-03).
+    # Still not a condition -- the machine that knows what a clip costs is the
+    # one that declines -- but it stops being a log line nobody greps: the page
+    # prints it as "N GB free on the download machine", which is the only
+    # disk-space signal an editor pressing DOWNLOAD has ever had.
     if not db.claim_download(c, job_id, editor, config.LEASE_SECONDS,
-                             machine=machine):
+                             machine=machine, free_bytes=body.free_bytes):
         # The CAS refused. Re-read rather than guess why: between the checks
         # above and the UPDATE, another companion's claim can land.
         fresh = db.get_job(c, job_id)

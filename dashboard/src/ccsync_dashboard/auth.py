@@ -248,6 +248,39 @@ def login_throttled(request: Request | None, username: str,
     return store.throttled(username, client_ip(request), now=now)
 
 
+def throttle_wait_phrase(seconds: float) -> str:
+    """"a minute" / "6 minutes" / "about an hour" for a wait in seconds.
+
+    DCORE-8 (usability sweep 2026-09-04): the backoff doubles from 60 s to an
+    hour, and both sign-in routes threw the number away and answered "too
+    many failed attempts; wait and retry". A person told to wait, with no
+    idea whether it is one minute or sixty, retries -- which is the one thing
+    that does not help, and on the IP budget it extends the lockout for
+    everyone else behind the same address.
+
+    Rounded UP to the whole minute: telling somebody 3 minutes when 3 min 40 s
+    are left buys one more failed attempt and one more doubling."""
+    remaining = max(0.0, float(seconds or 0.0))
+    if remaining >= 45 * 60:
+        return "about an hour"
+    minutes = int(remaining // 60) + (1 if remaining % 60 else 0)
+    if minutes <= 1:
+        return "a minute"
+    return f"{minutes} minutes"
+
+
+def throttle_message(seconds: float) -> str:
+    """The sentence every throttled sign-in surface says (DCORE-8)."""
+    return f"Too many sign-in attempts. Try again in {throttle_wait_phrase(seconds)}."
+
+
+def throttle_headers(seconds: float) -> dict[str, str]:
+    """`Retry-After`, in whole seconds and never below 1: a client that reads
+    the header must not be told to retry immediately while the budget still
+    refuses it."""
+    return {"Retry-After": str(max(1, int(float(seconds or 0.0) + 0.5)))}
+
+
 def record_login_failure(request: Request | None, username: str,
                          now: str | None = None) -> None:
     store = session_store(request)

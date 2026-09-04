@@ -8,6 +8,14 @@
 <div class="queue-box">
   <div class="side-head">[ SYNC QUEUE: {{ queue.editor | upper }} ]
     <span class="muted">one project at a time, top to bottom</span></div>
+  {# DUI-19 (usability sweep 2026-09-03): "am I safe to close my laptop",
+     answered above the queue rather than left as a sum for the editor to do
+     from a bar, an ETA and a chip. Same sentence the transfers panel carries
+     (ui.safe_to_close), so the two can never disagree; nothing here is
+     measured twice. #}
+  {% if safe_to_close is defined and safe_to_close %}
+  <div class="{{ 'muted' if safe_to_close.safe else 'amber-text' }}">{{ safe_to_close.sentence }}</div>
+  {% endif %}
   {% if queue.queue %}
     {# Stacks on a phone (MOBILE_PLAN.md M2, 2026-08-30): one queued project
        becomes a card of labelled rows, with [ UNTICK ] as its own thumb row. #}

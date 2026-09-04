@@ -298,6 +298,14 @@ def main() -> int:
                          "refused by default (release-pipeline-7)")
     ap.add_argument("--min-version", default=None,
                     help="downgrade floor to stamp into the record")
+    # APP-16 (usability sweep 2026-09-04): the "what changed" line the
+    # editor's update dialog shows. UNSIGNED (see sign_release.py --notes),
+    # so it is safe on a fleet of any age; it just rides publish_feed.py's
+    # existing --notes, which has been on the record shape since the feed's
+    # first version and had no way in from here.
+    ap.add_argument("--notes", default="",
+                    help="one line of what changed, shown to editors in the update "
+                         "dialog (unsigned advisory)")
     ap.add_argument("--allow-key-rotation", action="store_true",
                     help="publish even though the signing key is not baked into the build "
                          "that is CURRENT for that platform. Every machine on the current "
@@ -320,6 +328,8 @@ def main() -> int:
     already = {(p.get("kind", ""), p.get("platform", ""), p.get("version", ""))
                for p in channel.get("packages", [])}
     extra = ["--min-version", args.min_version] if args.min_version else []
+    if args.notes.strip():
+        extra += ["--notes", " ".join(args.notes.split())[:300]]
     if args.make_current:
         extra.append("--make-current")
     if args.allow_key_rotation:

@@ -311,6 +311,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--git-sha", default="",
                     help="short commit the artifact was built from. UNSIGNED provenance, "
                          "passed through to the publish (REL-13)")
+    # APP-16 (usability sweep 2026-09-04): one line of "what changed", shown
+    # in the editor's update dialog. UNSIGNED, exactly like the git pair
+    # below it: the signature covers a field list every companion in the
+    # field mirrors, and a record carrying a field an older canonicaliser
+    # does not know is REFUSED by that build with no over-the-air recovery
+    # (the overlap-release rule this file already applies to
+    # requires_dashboard/arch). A sentence must never be able to strand a
+    # machine. CCSYNC_RELEASE_NOTES is the environment route, so a caller
+    # that shells this script without owning its argv (ship.ps1 ->
+    # build_editor_package.ps1) can still set it.
+    ap.add_argument("--notes", default="",
+                    help="one line of what changed, shown in the editor's update "
+                         "dialog. UNSIGNED advisory (APP-16); "
+                         "$CCSYNC_RELEASE_NOTES is read when this is absent")
     ap.add_argument("--git-dirty", default="", choices=("", "0", "1"),
                     help="1 when the build came from an uncommitted tree. UNSIGNED "
                          "provenance (REL-13)")
@@ -426,14 +440,18 @@ def main(argv: list[str] | None = None) -> int:
     out = dict(record)
     out["signature"] = signature
     out["pubkey_id"] = key_id
+    notes = " ".join(
+        (args.notes or os.environ.get("CCSYNC_RELEASE_NOTES", "")).split())[:300]
     out["query"] = query_suffix(
         record, signature, key_id,
         provenance={"git_sha": args.git_sha.strip(),
-                    "git_dirty": args.git_dirty.strip()})
+                    "git_dirty": args.git_dirty.strip(),
+                    "notes": notes})
     # Echoed OUTSIDE the record so the caller can render them without having
     # to know which fields the signature happens to cover this release.
     out["git_sha"] = args.git_sha.strip()
     out["git_dirty"] = args.git_dirty.strip()
+    out["notes"] = notes
     text = json.dumps(out, indent=2, sort_keys=True)
     if args.out:
         Path(args.out).write_text(text + "\n", encoding="utf-8")

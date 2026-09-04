@@ -1455,22 +1455,66 @@ class Collector:
             db.clear_enforce_refusal(conn)
         conn.commit()
 
+        return self._enforce_loop(plans, skip_removals, note)
+
+    def _enforce_loop(
+        self, plans, skip_removals: bool, note: str | None = None,
+    ) -> str | None:
+        """Apply the plan folder by folder. -> this cycle's note.
+
+        Its own method so the failure isolation below is testable without a
+        whole Syncthing config: the property that matters is "one folder
+        Syncthing refuses does not cost the other 39 their cycle", and the
+        note is how anybody finds out.
+        """
+        # DCORE-16 (usability sweep 2026-09-04): ONE FOLDER AT A TIME.
+        #
+        # This loop used to let an exception out on folder 10 of 40: `_timed`
+        # recorded the cycle as failed, the 30 folders after it were never
+        # attempted, and the plan persisted above still described all 40 --
+        # so the `enforce_plan` alert said "held" for shares that had in fact
+        # been applied and said nothing at all about the ones that had not.
+        # One folder Syncthing will not accept cost the rest of the fleet its
+        # cycle, every cycle, for as long as it was broken.
+        #
+        # Now each folder carries its own failure, the counts go into this
+        # cycle's NOTE (which is what the collector health panel, the project
+        # page and the fleet diagnostics render), and the pass still finishes
+        # the other 39. The first failure's own words ride along: "syncthing
+        # refused the rest" with no reason is a second thing to go and find
+        # out.
+        applied = 0
+        attempted = 0
+        failures: list[str] = []
         for slug, desired, actual in plans:
             if skip_removals:
                 desired = desired | actual
                 if desired == actual:
                     continue
-            live = self.client.get_folder(slug)
-            existing = {d["deviceID"]: d for d in live.get("devices", [])}
-            live["devices"] = (
-                [entry for device_id, entry in existing.items() if device_id in desired]
-                + [{"deviceID": device_id, "introducedBy": ""}
-                   for device_id in sorted(desired - set(existing))]
-            )
-            self.client.put_folder(slug, live)
+            attempted += 1
+            try:
+                live = self.client.get_folder(slug)
+                existing = {d["deviceID"]: d for d in live.get("devices", [])}
+                live["devices"] = (
+                    [entry for device_id, entry in existing.items() if device_id in desired]
+                    + [{"deviceID": device_id, "introducedBy": ""}
+                       for device_id in sorted(desired - set(existing))]
+                )
+                self.client.put_folder(slug, live)
+            except Exception as exc:  # noqa: BLE001 -- one folder is not the cycle
+                failures.append(f"{slug}: {exc}")
+                log.error("could not enforce shares on %s: %s -- the other folders in "
+                          "this cycle still ran", slug, exc)
+                continue
+            applied += 1
             added = sorted(desired - actual)
             removed = sorted(actual - desired)
             log.info("enforced shares on %s: +%s -%s", slug, added or "[]", removed or "[]")
+        if failures:
+            first = failures[0]
+            partial = (f"applied {applied} of {attempted} folder(s); syncthing refused "
+                       f"the rest ({first})")
+            note = f"{note}; {partial}" if note else partial
         return note
 
     def _run_inventory(self, conn) -> str | None:

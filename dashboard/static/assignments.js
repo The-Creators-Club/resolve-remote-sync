@@ -39,6 +39,30 @@
     }, 4000);
   }
 
+  // DCORE-9 (usability sweep 2026-09-04): an EXPIRED SESSION is not an error
+  // to toast. htmx's own polls handle expiry (HX-Redirect), but they only run
+  // while the tab is visible -- so an admin coming back to a tab that sat in
+  // the background overnight got the checkbox flipped back and `could not
+  // tick <project>: login required`, which reads as a permissions bug. Every
+  // fetch on this page routes its rejection through here first: a 401 sends
+  // the browser to the login page with THIS page as ?next=, so signing in
+  // lands back on the grid they were ticking.
+  function signedOut(err) {
+    if (!err || err.status !== 401) return false;
+    window.location.href = (err.login || "/login") + "?next="
+      + encodeURIComponent(window.location.pathname + window.location.search);
+    return true;
+  }
+
+  // The rejection every fetch below throws: `detail` for a human, `status`
+  // and `login` for signedOut().
+  function httpError(resp, body) {
+    var err = new Error((body && body.detail) || ("HTTP " + resp.status));
+    err.status = resp.status;
+    err.login = body && body.login;
+    return err;
+  }
+
   // What a cell is called, for a message a human reads. DUI-5: every toast on
   // this page named the EDITOR ("could not update jsmith") in a grid where the
   // editor is a whole column and the thing that failed is one cell.
@@ -128,7 +152,7 @@
     }).then(function (resp) {
       if (!resp.ok) {
         return resp.json().catch(function () { return {}; }).then(function (body) {
-          throw new Error(body.detail || ("HTTP " + resp.status));
+          throw httpError(resp, body);
         });
       }
       return resp.json();
@@ -183,6 +207,7 @@
       }).catch(function (err) {
         box.checked = !wanted;   // rollback: the browser already flipped it
         setUpmode(upBox, upWas);
+        if (signedOut(err)) return;
         toast("could not tick " + cellLabel(box) + ": " + err.message, "err");
       });
       return;
@@ -198,6 +223,7 @@
       writeCell(box, true, on ? "upload_only" : "full").catch(function (err) {
         setUpmode(box, !on);
         if (mainBox) mainBox.checked = mainWas;
+        if (signedOut(err)) return;
         toast("could not set upload-only for " + cellLabel(box) + ": " + err.message, "err");
       });
     }
@@ -274,8 +300,10 @@
     }
     var i = 0;
     var failed = [];
+    var stoppedByAuth = false;
     if (btn) { btn.dataset.running = "1"; runProgress(btn, 0, boxes.length); }
     (function next() {
+      if (stoppedByAuth) { runDone(btn); return; }
       // DUI-5: [ STOP ]. The button becomes its own stop control while the
       // run is going, and the flag is checked HERE rather than mid-write, so
       // a stop never leaves a request half made.
@@ -304,8 +332,12 @@
       // upload-only cell is already checked, so [ ALL ] skips it (the filter
       // above) and [ NONE ] unticks it like any other.
       if (!wanted) setUpmode(siblingBox(box, "matrix-upmode"), false);
-      writeCell(box, wanted, "full").catch(function () {
+      writeCell(box, wanted, "full").catch(function (err) {
         box.checked = !wanted;
+        // DCORE-9: a signed-out column run stops HERE. Grinding through
+        // another 39 writes that will all 401 leaves the grid half applied
+        // and the admin looking at a pile of failures with one cause.
+        if (signedOut(err)) { stoppedByAuth = true; return; }
         failed.push(box.dataset.projectLabel || box.dataset.slug);
       }).then(next);
     })();
@@ -389,7 +421,7 @@
     }).then(function (resp) {
       if (!resp.ok) {
         return resp.json().catch(function () { return {}; }).then(function (body) {
-          throw new Error(body.detail || ("HTTP " + resp.status));
+          throw httpError(resp, body);
         });
       }
       return resp.json();
@@ -402,6 +434,7 @@
     }).catch(function (err) {
       sel.disabled = false;
       sel.value = "";
+      if (signedOut(err)) return;
       toast("could not copy the plan: " + err.message, "err");
     });
   });

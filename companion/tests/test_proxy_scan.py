@@ -409,9 +409,19 @@ def test_a_skip_predicate_that_raises_does_not_skip(tmp_path):
 # -- scan_project: never raises ------------------------------------------------
 
 
-def test_a_missing_project_dir_is_an_empty_gap(tmp_path):
+def test_a_missing_project_dir_is_unknown_not_covered(tmp_path):
+    """RES-10: a project that cannot be walked used to return the zeroed gap,
+    which is byte-identical to "every clip here has a proxy"."""
     gap = _scan(tmp_path / "nope")
-    assert gap == proxy_scan.empty_gap()
+    assert gap["partial"] is True
+    assert "could not read" in gap["error"]
+    assert gap["missing"] == 0 and gap["clips"] == []
+    # Everything else is still the empty gap: the counts are a floor, not a
+    # verdict, and nothing invented a number to fill the hole.
+    assert {k: v for k, v in gap.items() if k not in ("error", "partial")} == {
+        k: v for k, v in proxy_scan.empty_gap().items()
+        if k not in ("error", "partial")
+    }
 
 
 def test_a_stat_that_raises_skips_the_file(tmp_path):
@@ -517,3 +527,49 @@ def test_one_unreadable_project_does_not_stop_the_sweep(tmp_path):
     result = proxy_scan.scan_missing_proxies(str(tmp_path), stat_fn=flaky)
     assert result["projects"]["2026/FF5/Nuclear"]["missing"] == 0
     assert result["projects"]["2026/FF5/Solar"]["missing"] == 1
+
+
+# -- a scan that could not finish is UNKNOWN, never covered (RES-10) ----------
+
+
+def test_a_walk_that_raises_reports_the_gap_as_partial(tmp_path, monkeypatch):
+    """The failure direction the whole feature exists to prevent: an odd
+    path, a permission error or a share going away used to be logged and then
+    returned as the zeroed gap, which reads as "every clip has a proxy"."""
+    project = _make_project(tmp_path)
+    _clip(project / "A001.mov")
+
+    def _boom(path):
+        raise OSError("the share went away")
+
+    monkeypatch.setattr(proxy_scan, "_one_per_proxy_name", _boom)
+
+    gap = _scan(project)
+    assert gap["partial"] is True
+    assert str(project) in gap["error"]
+    assert "could not read" in gap["error"]
+    # What it had counted before it raised is kept: it is a floor, and a
+    # caller can tell a floor from a verdict by `partial`.
+    assert gap["missing"] == 1
+
+
+def test_the_sweep_counts_unreadable_projects_and_names_the_first(tmp_path,
+                                                                  monkeypatch):
+    _make_project(tmp_path, project="Nuclear")
+    _make_project(tmp_path, series="FF4", project="Solar")
+
+    def _unreadable(project_dir, **kwargs):
+        gap = proxy_scan.empty_gap()
+        gap["error"] = "CC Sync could not read %s to check its proxies." % project_dir
+        gap["partial"] = True
+        return gap
+
+    monkeypatch.setattr(proxy_scan, "scan_project", _unreadable)
+
+    totals = proxy_scan.scan_missing_proxies(str(tmp_path))["totals"]
+    assert totals["unreadable"] == 2
+    assert totals["partial"] is True
+    assert "could not read" in totals["error"]
+    # "missing: 0" from a sweep that read nothing is not coverage, and the
+    # two keys above are the only thing that says so.
+    assert totals["missing"] == 0

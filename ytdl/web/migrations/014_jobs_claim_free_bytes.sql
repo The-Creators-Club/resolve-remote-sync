@@ -1,0 +1,21 @@
+-- v14: jobs.claim_free_bytes -- HOW MUCH ROOM THE DOWNLOADING MACHINE SAID IT
+-- HAD (YTWEB-9, usability + resilience sweep 2026-09-03).
+--
+-- The companion has sent `free_bytes` on every claim since the requester-first
+-- feature shipped, and routes_fleet wrote it into a log line and nowhere else.
+-- So the one number that answers "will these 40 clips fit" existed, was
+-- measured on the machine that knows, and reached no editor and no page: a
+-- full disk arrived as N opaque per-clip errors and an "Fix the cause, then
+-- press RETRY" note.
+--
+-- Stored on the JOB rather than on a machine row because that is the shape the
+-- claim has: possession is per job and it expires, so the number is evidence
+-- about the run that is happening now, not a fact about a computer. It is
+-- still ADVISORY at both ends -- the companion declines its own claim on space
+-- (plan §7) and the server's own refusal reads the server's disk -- and
+-- nothing anywhere is refused on the strength of this column.
+--
+-- ADDITIVE AND INERT. NULL is "the claimant did not say", which is every row
+-- written before this and every companion that does not send the field, and
+-- the SPA prints nothing at all for it.
+ALTER TABLE jobs ADD COLUMN claim_free_bytes INTEGER;

@@ -65,6 +65,14 @@ const state = {
   offset: 0,
   total: 0,
   lastResults: [],
+  // What /api/search says each mode can do here, and why not (BROLL-10):
+  // {keyword|semantic|hybrid: {available, reason}}. Null until the first
+  // response, so a page that has not searched yet disables nothing.
+  modeAvailable: null,
+  // How many clips the filters left to search, from the response of a search
+  // that found none (BROLL-9). Null when it was not asked for.
+  scopeTotal: null,
+  searching: false,
   detail: null, // {video, segments, transcript, themes, quality_flags}
   detailHits: [], // search hits carried into the detail view (yellow seekbar bands)
   detailSeekTo: null, // seconds the detail view was opened at (kept in the URL)
@@ -620,20 +628,86 @@ async function runSearch() {
   params.set("limit", state.limit);
   params.set("offset", state.offset);
 
+  // BROLL-23: the grid keeps the PREVIOUS query's results until the new ones
+  // land, and a semantic query costs a model load plus a scan over Tailscale.
+  // For those seconds the editor was looking at the wrong footage with nothing
+  // to say it was stale, and retyped. Cleared by the winning token only, on
+  // every outcome, so a superseded response cannot switch the spinner off
+  // under a search that is still running.
+  setSearching(true);
   let data;
   try {
     data = await fetchJson(`api/search?${params.toString()}`);
   } catch (e) {
     if (token !== searchToken) return;
+    setSearching(false);
     toast(`Search failed: ${e.message}`, "error");
     return;
   }
   if (token !== searchToken) return; // a newer search is already authoritative
+  setSearching(false);
 
   state.total = data.total;
   state.lastResults = data.results;
+  state.modeAvailable = data.mode_available || state.modeAvailable;
+  state.scopeTotal = typeof data.scope_total === "number" ? data.scope_total : null;
+  if (applyModeAvailability()) {
+    // The mode this ran in cannot answer on this server. The results in hand
+    // are that mode's empty answer, so re-ask in the one that works rather
+    // than painting them (hybrid is always available, so this hops once).
+    runSearch();
+    return;
+  }
   renderGrid(data.results);
   renderPager();
+}
+
+/** The in-flight indicator (BROLL-23). aria-busy as well as the class: the
+ *  grid is the live region an editor's screen reader is on. */
+function setSearching(on) {
+  state.searching = !!on;
+  const grid = $("#results-grid");
+  if (!grid) return;
+  grid.classList.toggle("searching", state.searching);
+  grid.setAttribute("aria-busy", state.searching ? "true" : "false");
+  const meta = $("#results-meta");
+  if (state.searching && meta) {
+    const note = el("span", { className: "meta-searching", text: "Searching..." });
+    meta.appendChild(note);
+  } else if (meta) {
+    for (const node of meta.querySelectorAll(".meta-searching")) node.remove();
+  }
+}
+
+/** BROLL-10: a mode that cannot answer says so on its own button instead of
+ *  returning an empty grid on every query for ever. Hybrid is never disabled
+ *  (it is keyword plus a booster), it just carries what it lost as a title. */
+function applyModeAvailability() {
+  const modes = state.modeAvailable;
+  if (!modes) return false;
+  const container = $("#mode-toggles");
+  if (!container) return false;
+  for (const btn of container.querySelectorAll(".mode-btn")) {
+    const info = modes[btn.dataset.mode];
+    if (!info) continue;
+    btn.disabled = info.available === false;
+    btn.classList.toggle("mode-unavailable", info.available === false);
+    if (info.reason) btn.title = info.reason;
+    else btn.removeAttribute("title");
+  }
+  // The page defaults to hybrid and remembers a mode in the URL, so an editor
+  // can arrive in a mode this server cannot run. Fall back rather than leave
+  // them typing into a search that answers nothing.
+  const current = modes[state.mode];
+  if (current && current.available === false) {
+    state.mode = "hybrid";
+    for (const btn of container.querySelectorAll(".mode-btn")) {
+      btn.classList.toggle("active", btn.dataset.mode === state.mode);
+    }
+    toast(`${current.reason} Searching by keyword instead.`, "warn");
+    return true;
+  }
+  return false;
 }
 
 function renderPager() {
@@ -651,6 +725,11 @@ function renderGrid(results) {
   grid.innerHTML = "";
   renderResultsMeta();
 
+  if (!results.length) {
+    grid.appendChild(buildEmptyState());
+    return;
+  }
+
   // Semantic-only rows ("match": "semantic" -- surfaced only by the vector
   // side, never a keyword result -- see app/search.py's module docstring)
   // are grouped after every keyword result, under a "Related" heading, so
@@ -665,6 +744,102 @@ function renderGrid(results) {
     }
     grid.appendChild(buildCard(row));
   }
+}
+
+/** Where the search just looked, in the words the sidebar uses. */
+function scopeLabel() {
+  const names = [];
+  if (state.collection) {
+    const root = state.tree.find((r) => r.collection === state.collection);
+    names.push(root ? root.label : state.collection);
+  }
+  if (state.category) names.push(treeLabel(state.category));
+  if (state.path) {
+    const [share, prefix] = state.path.split("::");
+    names.push(prefix ? `${share}/${prefix}` : share);
+  }
+  return names.length ? names.join(" / ") : "the whole archive";
+}
+
+/** BROLL-9: "nothing matched" said out loud, with the levers that are actually
+ *  on this page.
+ *
+ *  An empty grid, a meta line reading `search: "wedding ceremony"` and a pager
+ *  reading `0-0 of 0` is the same picture as a request that failed to paint,
+ *  and search.py's whole keyword-first design exists to produce this answer
+ *  honestly. Each lever is offered only when that filter is actually on, so
+ *  the list never suggests turning off something that is already off. */
+function buildEmptyState() {
+  const box = el("div", { className: "results-empty" });
+  const semantic = (state.modeAvailable && state.modeAvailable.semantic) || null;
+
+  if (!state.q) {
+    box.appendChild(el("div", {
+      className: "results-empty-head",
+      text: `There are no clips in ${scopeLabel()}.`,
+    }));
+  } else {
+    box.appendChild(el("div", {
+      className: "results-empty-head",
+      text: `Nothing matched "${state.q}" in ${scopeLabel()}.`,
+    }));
+    if (typeof state.scopeTotal === "number") {
+      box.appendChild(el("div", {
+        className: "results-empty-scope muted",
+        text: state.scopeTotal === 1
+          ? "1 clip was searched."
+          : `${state.scopeTotal} clips were searched.`,
+      }));
+    }
+    box.appendChild(el("div", {
+      className: "results-empty-scope muted",
+      text: "Try fewer words, or switch to Semantic search, which finds " +
+            "meaning rather than words.",
+    }));
+  }
+
+  // BROLL-10: the one case where "nothing matched" is not about the query.
+  if (state.mode !== "keyword" && semantic && semantic.available === false) {
+    box.appendChild(el("div", {
+      className: "results-empty-scope bad",
+      text: semantic.reason,
+    }));
+  }
+
+  const levers = el("div", { className: "results-empty-levers" });
+  if (state.mode !== "semantic" && semantic && semantic.available !== false) {
+    levers.appendChild(metaLink("switch to Semantic search", () => {
+      state.mode = "semantic";
+      for (const b of $("#mode-toggles").querySelectorAll(".mode-btn")) {
+        b.classList.toggle("active", b.dataset.mode === state.mode);
+      }
+      jumpToSearch(() => {});
+    }));
+  }
+  if (state.collection || state.category || state.path) {
+    levers.appendChild(metaLink("clear the folder filter", () => jumpToSearch(() => {
+      state.collection = "";
+      state.category = "";
+      state.path = "";
+    })));
+  }
+  if (state.hiddenFlags.size) {
+    levers.appendChild(metaLink("stop hiding flagged clips", () => {
+      for (const input of $("#flag-toggles").querySelectorAll("input")) {
+        input.checked = false;
+      }
+      jumpToSearch(() => state.hiddenFlags.clear());
+    }));
+  }
+  if (!state.fuzzy) {
+    levers.appendChild(metaLink("turn fuzzy matching back on", () => {
+      const box2 = $("#fuzzy-checkbox");
+      if (box2) box2.checked = true;
+      jumpToSearch(() => { state.fuzzy = true; });
+    }));
+  }
+  if (levers.childNodes.length) box.appendChild(levers);
+  return box;
 }
 
 function buildCard(row) {
@@ -1520,6 +1695,11 @@ async function sendToResolve(mode = "append") {
   if (btn) btn.disabled = true;
   if (otherBtn) otherBtn.disabled = true;
   let announcedSync = false;
+  let announcedBusy = false;
+  // A cap on the QUEUE wait only (CMEDIA-7): waiting for another download's
+  // slot is worth minutes, and a wait with no end is the shape of the bug
+  // above it. The sync poll's own dead end is BROLL-17.
+  const busyUntil = Date.now() + 15 * 60 * 1000;
   try {
     for (;;) {
       let res;
@@ -1560,6 +1740,33 @@ async function sendToResolve(mode = "append") {
         }
         if (btn) btn.textContent = syncProgressLabel(body.progress);
         await new Promise((r) => setTimeout(r, 1500));
+        continue;
+      }
+
+      // CMEDIA-7 (2026-09-04): this machine's download cap is a QUEUE, not a
+      // refusal. The companion's own comment said "the web UI re-POSTs every
+      // 1.5 s anyway, so busy IS the retry mechanism" - and this loop only
+      // ever polled on `downloading`, so a red toast was the whole answer and
+      // the editor had to remember to come back in an hour. Both shapes are
+      // accepted: `{ok: true, state: "busy", retry_after}` from companion
+      // 0.9.67+, and the older `{ok: false}` whose message is the only way to
+      // tell it from a real failure.
+      const busyNow = res.ok && body && body.state === "busy";
+      const busyOld = !!(body && body.ok === false && body.message &&
+                         /already downloading/i.test(body.message));
+      if (busyNow || busyOld) {
+        if (Date.now() > busyUntil) {
+          toast("This computer has been busy with other downloads for a while. " +
+                "Try again when they have finished.", "warn");
+          return;
+        }
+        if (!announcedBusy) {
+          announcedBusy = true;
+          toast("Waiting for this computer's other downloads to finish.", "");
+        }
+        if (btn) btn.textContent = "WAITING…";
+        const wait = Math.max(1, Number(body && body.retry_after) || 1.5);
+        await new Promise((r) => setTimeout(r, wait * 1000));
         continue;
       }
 

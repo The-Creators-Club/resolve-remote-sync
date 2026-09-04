@@ -12132,6 +12132,1090 @@ direction - an absent section is "that computer has not said", never "it is
 fine".
 
 
+## Usability + resilience sweep, wave 3: the machine says what it knows (CR-165..CR-176, 2026-09-04)
+
+`docs/USABILITY_RESILIENCE_SWEEP_2026-09-03.md` section 5, wave 3: the
+shape-A findings, "return it, put it on the report, render it". Seventy-five
+findings across sync, Resolve, YouTube, media, dashboard and companion, every
+one a fact the machine already computed and never showed. Twelve Opus
+builders, partitioned by FILE (tray; settings window + popup; app.py and its
+producers; sync/; proxies + fixer + Resolve; cards role + jobs runner;
+YouTube + ingest on the companion; ytdl web; music web; b-roll web; dashboard
+templates + static; dashboard API + auth), each consuming the others'
+contracts through getattr fallbacks so a partial landing renders nothing
+rather than erroring. Waves 4 and 5 stay in the plan.
+
+Dashboard **0.7.33**, companion **0.9.68**, ytdl migration 014
+(`jobs.claim_free_bytes`). Dashboard first, as always: 0.9.68 reports
+`sync_guard.youtube_import`, `capabilities.jobs_gate` and the cards role's
+health words, and only 0.7.33 stores them.
+
+Deferred inside the wave, for the next pass: `_describe_no_selection`'s stale
+plan sentence (the tray line has it, the sequencer's does not); the DUI-3
+five-chip cap and legend; `roll_fleet_back` for non-companion kinds; the
+per-clip proxy-refusal log line staying DEBUG on purpose; a halt not stopping
+a cards role already up (by design); `/ytdl/fetch` still classifying busy as
+failed (one-line `STATE_BUSY` branch in `ytdl_server.build_fetch_response`).
+
+### CR-165 - the tray knew the filename, the folder, the count, the reason and the countdown, and rendered none of them - FIXED in repo 2026-09-04 (companion 0.9.68)
+Wave 3's tray half (SYNC-109, SYNC-110, SYNC-112, RES-5, RES-22, CYT-1,
+CYT-14, CYT-15, CMEDIA-10, CMEDIA-13, APP-5, APP-6, APP-8, APP-13, APP-14).
+Every fact below was already computed on the editor's own machine and shown
+only in a log, a report field, or a browser page they had closed:
+
+* **The one silent data-loss shape on lane A now names its file.**
+  `_skipped_exists_line` said "3 files on the server have the same name but a
+  different size. Your newer version will NOT upload" and stopped; the log
+  line beside it named the file AND the two fixes. It now reads
+  "... so your newer version will NOT upload (e.g. A001_C003.mov: yours
+  3.9 GB, the server's 2.9 GB). Rename yours, or ask your admin to remove the
+  server's copy", the tooltip lists up to three, and
+  `action_open_skipped_folder` opens the folder the newest one is in.
+  `skipped_exists_samples` normalises BOTH shapes: `rclone check --differ`'s
+  plain relative paths (every build to date) and the richer
+  `{path, local_size, server_size, at}`.
+* **`.ccsync-trash` is the recovery story and had no door.** `_trash_line`
+  names the folder, the count, the size and the retention ("Copies older than
+  14 days are removed automatically" - `prune_trash` deletes by age and
+  nothing anywhere said so), and `action_open_trash` opens it, with a balloon
+  naming the path when it cannot. `trash_folder()` prefers `app.trash_path()`
+  and falls back to `<local_root>/.ccsync-trash`.
+* **"Resolve: connected" while a call has been wedged for twenty minutes is
+  over** (RES-22). `resolve_bridge_line` reads `resolve_health()`'s
+  `wedged_seconds`/`wedged_call`, falling back to `resolve_bridge
+  .bridge_activity()` - lock-free by construction and, until now, with no
+  status reader at all - and past `BRIDGE_WEDGE_SECONDS` (20) renders
+  "Resolve: not answering for 300 s (ImportMedia)". The icon is **amber**
+  there, never green: `connected` is a cached fact from the last COMPLETED
+  enumeration, so it stayed true for as long as the wedge lasted.
+* **The counts reach the editor** (RES-5): the two largest non-zero of
+  out-of-tree / missing / wrong-drive / proxies-not-attached go on the Resolve
+  line ("Resolve: connected - 3 clips outside the tree, 2 missing"), the rest
+  in the tooltip. An editor with 40 dead links had no number anywhere.
+* **A running YouTube download is visible from the tray** (CYT-1): the line
+  `ytdl_download_line` has always built is in the menu and the tooltip, and
+  goes away with the download. Its menu fingerprint is the CLIP ("Downloading
+  YouTube clip 3/12"), never the speed or the percentage - a rebuild per tick
+  is a menu destroyed under an editor's cursor.
+* **...and can be stopped from the machine doing it** (CYT-14):
+  "► Stop the YouTube download", present only while one runs, calls
+  `app.cancel_local_downloads()` (falling back to `ytdl_executor.stop_all`)
+  and answers "Stopped. The server will download the clips this computer did
+  not finish." - the lease expires and the server picks up the rest, the
+  documented hand-back for everything else.
+* **The browser sign-in counts down** (CYT-15): `_youtube_sign_in` passes a
+  `progress` callback that takes BOTH shapes - `(elapsed, remaining, phase)`
+  and the single message string it shipped with - so the tray line reads
+  "Waiting for you to finish signing in in the browser (570 s left)"; the
+  opening balloon says "Close the window to cancel."; and a timeout says
+  "Nothing was saved: try again from Tray > Settings > Sign in to YouTube."
+* **A failed b-roll clip says why** (CMEDIA-10): "3 b-roll clip(s) could not
+  be indexed: A001_C003.mov (the source file is not on this machine any
+  more), and 2 more". Without `failures` the old count-and-the-log sentence
+  stands.
+* **A forced fleet job explains itself** (CMEDIA-13): `jobs_forced_line`
+  renders `STATE_FORCED`'s own reason - "CCSync is transcribing for the fleet
+  while you work because ..." - which is what that state was added for.
+* **The lane lines name the broken setting** (APP-5): `validate_config`'s
+  sentence was written into the lane detail and returned past, so all three
+  lines said "NOT SYNCING (this machine isn't set up yet)" and the key was
+  reachable only through a diagnostics blob. Capped at 180 characters.
+* **"Sync now" acknowledges** (APP-6): "Sync requested: originals up, proxies
+  down" / "Not now: <reason>" from `app.sync_now()`'s dict. A companion whose
+  `sync_now` returns None keeps the old silence rather than being given a
+  made-up answer.
+* **A revoked credential offers the way back** (APP-8): `identity.valid()` is
+  a LOCAL check, so a token the server has revoked still reads as signed in
+  and the only button anywhere was SIGN OUT. `credential_rejected(guard)` puts
+  "► Sign in again (the server rejected this computer's sign-in)" in the menu
+  while signed in, and `_reporter_line` says the refusal in one sentence.
+* **Restart is a menu item** (APP-13), next to Quit, delegating to the one
+  restart the app has (`settings_window.action_restart_now` ->
+  `upgrade.restart_self`). Quit's label was false - `identity.json` persists,
+  so a restarted companion syncs with no sign-in - and now reads "Quit CCSync
+  (nothing syncs until you start it again, or log in to this computer again)",
+  which is what the installers' logon entries do (HKCU\...\Run on Windows, a
+  RunAtLoad LaunchAgent with no KeepAlive on macOS).
+* **"Open my sync drive" says why when it does nothing** (APP-14): a blank
+  `local_root` sends the editor to Settings > THIS COMPUTER; a path that is
+  not there names itself. Same helper (`_open_path_or_say_why`) behind
+  `action_open_trash` and `action_open_skipped_folder`.
+* **A day-old sync plan says so** (SYNC-110): "up to date (sync plan from 3
+  days ago: the dashboard has not answered since)". `plan_fetched_at` was
+  written by selection.py and read by nothing, so a machine running a
+  week-old cached plan looked exactly like a healthy one.
+
+New `action_*` (settings_window's buttons call these): `action_open_trash`,
+`action_open_skipped_folder(app, snap=None)`, `action_stop_youtube_download`,
+`action_restart_app`. New predicates for the same window:
+`credential_rejected(guard)`, `skipped_exists_names(guard, samples, limit)`,
+`trash_folder(app)`, `resolve_count_phrases(health)`, `resolve_wedge(...)`,
+`jobs_forced_line(jobs)`, `ytdl_login_line(state)`.
+
+Every app getter is read through `getattr`, wrapped by `_tray_snapshot`, and
+absent means one line fewer, never a placeholder and never a raise: this
+lands beside C2's `app.py` work and must be green with or without it.
+
+### CR-166 - the Settings window knew this computer's projects, its Resolve and its fleet work, and drew none of it - FIXED in repo 2026-09-04 (companion 0.9.68)
+Wave 3 of the usability + resilience sweep, the tray/window half (SYNC-107,
+SYNC-118, RES-5, RES-13, CMEDIA-2, CMEDIA-10, APP-8, APP-9, APP-13). Nothing
+here computes a new fact: every value was already in a snapshot, a health dict
+or a result list, and was being thrown into a diagnostics bundle nobody opens
+unprompted.
+
+* **PROJECTS ON THIS COMPUTER** (SYNC-107) lists `sequencer.project_status()`:
+  slug, the MODE in words (`full sync` / `uploads only (no proxies come
+  down)`), each lane's state in words and the detail sentence when there is
+  one. The only enumeration of this machine's plan used to be the stack of
+  REMOVE buttons in ADVANCED, which was also the sole place an editor ever saw
+  the words "upload only": inside the label of the button that deletes the
+  project. An empty plan says "No projects are ticked for this computer yet:
+  tick them on the dashboard" rather than nothing at all.
+* **SYNC LANES is ranked** (SYNC-118). The sixteen `_*_line` producers were
+  every one appended with `style="warning"` in source order, so a machine
+  having a bad week showed a dozen equally loud red lines with the one
+  sentence that matters at the bottom, next to "Recoverable files in
+  .ccsync-trash: 12 GB", which is not a problem at all. Each producer now
+  carries a severity (`blocking` / `warning` / `info`, red / plain / muted);
+  identical sentences collapse to one with a count and the HIGHER severity
+  wins; six lines are drawn, the rest sit behind "and N more" + [ SHOW ALL ].
+  The toggle reopens the window, because every button in this window closes it
+  first (the module's one rule) and a toggle that left the editor looking at a
+  closed window is a button that appears to do nothing.
+* **RESOLVE** (RES-5): connection, the wedged sentence past 20 s, the open
+  project, each non-zero count with [ SCAN WHOLE PROJECT ] beside it, the
+  proxy-attach summary with its reason, the proxy-gap reasons ("7 proxies
+  skipped: this disk is low on space"), the stills instruction, "Checked 10
+  min ago" and [ UNDO LAST FIX ]. A count is shown ONLY alongside a scan time:
+  with Resolve closed every count is zero, and a zero that means "we have not
+  looked" must not render as "nothing is wrong" (`resolve_health`'s own rule).
+* **FIX ALL ends with a summary** (RES-13). 158 clips were copied and their
+  paths rewritten in the editor's project database and the window simply
+  closed. `show_popup` now passes an `on_done`, and after the dispatch returns
+  - never from inside it, two Tk roots alive at once is the CORE-H8 hazard -
+  a one-button notice says "Fixed N of M, copied X GB, K could not be fixed:
+  <first reason>" and "To undo: Settings, RESOLVE, [ UNDO LAST FIX ]". A
+  partial run, which keeps its window open to retry, gets the same undo
+  pointer in the status block. The summary call sits OUTSIDE the try whose
+  except branch auto-skips the whole batch on a headless machine.
+* **JOBS** (CMEDIA-2): the gate in words ("Taking fleet work" / "Not taking
+  work: you are at the keyboard"), the running job with kind, file and start
+  time, [ STOP THIS JOB ], and the last ten with outcome and error. The tray
+  offered exactly one job control and no way to see, stop or review the work
+  this machine does for everybody else. "There is no fleet job running now" is
+  what a stop with nothing to stop says: a `False` must never render as
+  "stopped".
+* **Failed clips are NAMED** (CMEDIA-10): `ProgressModel` carries
+  `failures=[{name, error}]` and the ingest window draws the first five plus
+  "and N more" under the bars, the way the fixer dialog has always listed its
+  own. The reason was on the item all along and the editor's local surfaces
+  reduced it to a count plus "See the log".
+* **A refused credential offers the way back** (APP-8): `identity.valid()` is
+  a purely LOCAL check, so a token the server has revoked still reads as
+  signed in and THIS COMPUTER offered [ SIGN OUT ] and nothing else. When the
+  reporter's last status is 401/403 past the failure streak, the section says
+  "The server rejected this computer's sign-in, so your admin cannot see
+  whether you are syncing" and puts [ SIGN IN AGAIN… ] ABOVE [ SIGN OUT ].
+* **The licence refusal names the click that exists here** (APP-9): the
+  rendered sentence drops `eula.acceptance_problem()`'s "Re-run the CCSync
+  setup wizard to read and accept it" and is followed by [ READ AND ACCEPT THE
+  LICENCE ], which is the modal that accepts in one click and starts syncing
+  without a restart. `eula.py`'s three sentences are UNCHANGED: they are what
+  the log and the report carry.
+* **[ RESTART CCSYNC NOW ] is unconditional** (APP-13). Three separate pieces
+  of copy tell an editor to restart the companion and the button that does it
+  appeared only after a role change nobody has made.
+
+Every one of the three new sections is drawn only when its producer exists
+(`getattr`, then a dict test), so a companion whose app half is older draws
+nothing rather than an empty section or a traceback; a producer that raises
+costs its own section and nothing else.
+
+### CR-167 - the machine knew every one of these and could not be asked - FIXED in repo 2026-09-04 (companion 0.9.68)
+
+Wave 3's producer half (APP-5/-6/-8/-9, SYNC-101/-102/-109/-110/-112/-120,
+RES-3/-11/-13/-17/-19, CYT-3/-14/-15, CMEDIA-2/-10/-12/-13). Not one of these
+is a new measurement: each fact was already computed on a background loop and
+then logged at DEBUG, reduced to a bool, or dropped on the floor between a
+`return` and the caller. The work was returning it and putting it on the
+report, so the tray (C1) and the Settings window (C1b) had something exact to
+render and the dashboard something exact to parse.
+
+* **One contract on the app object**, and every function in it obeys the same
+  three rules: it exists, it never raises, and an absent producer is None or
+  empty rather than a guess. `sync_now()` (now returns
+  `{accepted, reason, lanes}` - additive; the old callers ignored it and still
+  may), `sync_now_result()`, `trash_path()`, `trash_summary()`,
+  `config_problem_detail()` / `config_problem_details()`, `plan_fetched_at` /
+  `plan_age_seconds()`, `youtube_import_state()`, `ytdl_login_progress()` /
+  `note_ytdl_login_progress()`, `cancel_local_downloads()`,
+  `size_mismatch_samples()`, `shared_folder_problems()`, `repath_events()`,
+  `broll_failed_items()`, `jobs_status()` / `jobs_gate()` /
+  `stop_current_job()`, `undo_last_fix_available()` / `undo_last_fix()` /
+  `undo_last_fix_summary()`, `open_licence_dialog()`, `sign_in_again()`,
+  `restart_self()`, `proxy_gaps()`, `stills_state()`. Every delegation is a
+  `getattr` against its producer: a missing producer costs the LINE, never the
+  window it is in - and these windows are opened because something is already
+  wrong.
+* **`resolve_health()` grew the seven things "why is my footage offline"
+  actually needs** and kept every key it had: `connected` (None until the
+  first poll, because "we have not looked" is not "Resolve is closed"),
+  `project_open`, `wedged_seconds`/`wedged_call` (`resolve_bridge`'s cached
+  in-flight call - the one thread that knows a call is wedged is the one that
+  cannot say so), `missing_clips`, `non_canonical_refused`, `proxy_attach`,
+  `proxy_gaps`, `stills`.
+* **RES-3**: `apply_relinks`' verdict is KEPT. "repointed 3 proxy link(s), 12
+  refused by Resolve" was built and thrown away at the call site, so the whole
+  attach half of proxies had no surface at all: the generate half has a tray
+  line, a window, a toast and a history file, and "why is my proxy not
+  attached?" was unanswerable by any human. `proxy_attach.why` names the count,
+  the first clip and the usual cause (a timecode that does not match the
+  original).
+* **RES-17**: `stills.check()`'s return is read. Its "Resolve's preference
+  files are not in the expected shape - add `<root>` as a media storage
+  location by hand" cannot be actioned by any code, and was logged once per
+  process and seen by nobody.
+* **RES-19**: MISSING clips are LISTED, not only counted (capped at 50; the
+  count stays exact), and `_offered_non_canonical` is re-armed on a FAILED
+  relink - only a success may latch, because a success rewrites the clip's
+  File Path and the key never comes back anyway. A relink refused because
+  Resolve was busy for a second was otherwise never retried for the life of
+  the process, and a restart was the only way back.
+* **SYNC-110**: `selection.py` reads `fetched_at` back. It had been written
+  into the cache since the cache existed and read by nothing in the repo, so a
+  machine syncing a week-old plan behind an unreachable dashboard - new ticks
+  never arriving, unticks never taking effect - looked exactly like a healthy
+  one. `plan_age_seconds()` returns None for "cannot tell", which a caller
+  must not render as fresh.
+* **SYNC-120**: a drive that stays `not_answering` opens a `drive_reminder`
+  episode too. CR-92's reminders were gated on work having been OWED at the
+  moment the drive went, so a drive that WEDGES while the machine is up to
+  date got one balloon and then silence, indefinitely - the harder of the two
+  failures, because an absent drive is obvious and a wedged one is not. Its
+  own sentence (`wedged_reminder`), no second balloon at the start, no
+  "N still to go" in the tray (nothing is owed), and it ends by itself when
+  the state changes. An unfinished-work episode is never displaced by one.
+* **CYT-3**: `youtube_import.status()` carries `reason` (the gate state as a
+  sentence) and `given_up`, and the report carries
+  **`sync_guard.youtube_import {state, reason, pending, at}`** - absent when
+  there is nothing to say, which is what clears the chip.
+  `docs/API.md` documents it beside the other guard sections.
+* **CMEDIA-12**: the `capabilities` section carries
+  **`jobs_gate {taking_work, reason}`** - the runner's own verdict, in its own
+  vocabulary, so `GET /api/v1/jobs/<id>/why` can print "this machine says:
+  user_active" beside the dashboard's reconstruction of it. Absent, never
+  guessed, from a companion too old to send one.
+* **RES-6 follow-through**: `capabilities._cards_block` was a hard five-key
+  allow-list, so the cards role's new `detail` / `gate_state` /
+  `last_poll_at` / `last_http_status` never reached the wire. Passed through
+  when the role sends them, omitted otherwise; the no-role default keeps the
+  five-key `state: "disabled"` shape the dashboard's tests read.
+* **SYNC-101 wiring**: lane C is built with
+  `shared_folder_problems_fn=self.sequencer.shared_folder_problems`, so the
+  shared LUT library failing on a machine finally reaches a lane detail
+  instead of a DEBUG line whose own comment called it permanent.
+* **CMEDIA-10 wiring**: the b-roll progress window is fed `failures`
+  (`progress()['failed_items']`, first five) so the reasons the orchestrator
+  already put on each item are drawn under the bars, instead of a count and
+  "See the log".
+* **APP-9**: `eula.py`'s three refusals name the ONE-CLICK action - "Press
+  [ READ AND ACCEPT THE LICENCE ] in Settings, THIS COMPUTER" - not "re-run
+  the CCSync setup wizard", which meant downloading the whole installer again
+  to produce a three-line JSON file while the machine was already offering a
+  modal that accepts in one click and starts syncing with no restart (CR-27's
+  lesson: a parked editor needs the SMALLEST action available).
+* No migration and no new state file. `restart_self()` is an ALIAS for
+  `upgrade.restart_self` with the existing stand-down guard, never a second
+  restart path.
+
+### CR-168 - the sync engine knew what was wrong and told nobody - FIXED in repo 2026-09-04 (companion 0.9.68)
+Wave 3's sync-engine half (SYNC-101, SYNC-102, SYNC-107, SYNC-109, SYNC-112).
+Every value here was already computed somewhere under
+`companion/src/ccsync_companion/sync/` and readable nowhere: the reconcile
+outcome the sequencer discarded, the project the server renamed under the
+editor's feet, the plan this computer is running, the files that will never
+upload, and the recovery folder that is the whole "nothing was deleted"
+story.
+
+* **A shared or borrowed folder that fails is KEPT, with its reason**
+  (SYNC-101). `SharedFolderManager.reconcile` / `BorrowedFolderManager.reconcile`
+  have always returned `{id: outcome}` "for the log line and the tray", and
+  `sequencer._reconcile_*_folders` called them as bare statements. So an
+  editor whose LUT library was never shared with their device had no tray
+  line, no lane state, no `sync_guard` field, no dashboard chip and - the
+  `not-offered` branch being DEBUG - nothing in `companion.log` either. Both
+  managers now hold a `FolderProblems` (in `shared_folders.py`, shared by
+  both): a problem outcome is recorded with its reason and its `since`,
+  RETRIED ON A BACKOFF (60 s doubling to 30 min, so an approval is noticed
+  without a tray restart and a permanently unshared library does not cost a
+  pending-folders GET every pass), promoted to a WARNING **in the editor's
+  own words** on the third attempt, and cleared the moment that folder
+  reconciles. `Sequencer.shared_folder_problems()` is one sentence per
+  failure, naming the folder and what to do about it, from both managers.
+  A folder held paused because its `.stignore` could not be confirmed is a
+  new `unfiltered` outcome rather than an "ok": fail-closed was right and
+  invisible. `SyncthingLane` takes an optional `shared_folder_problems_fn`
+  and carries the first sentence in `detail`, never in the state - a library
+  nobody shared is not a reason to call the lane that IS syncing the
+  editor's projects broken.
+* **A project the server renamed is recorded, and Resolve is relinked**
+  (SYNC-102). `repath.reconcile` paused the folder, moved the editor's whole
+  project directory and re-pointed Syncthing with the editor told nothing,
+  while every clip in the open project still pointed at the old canonical
+  path - so it went offline mid-session with no explanation. Contrast
+  `file_moves.py`, where ONE file gets a toast, a relink, an undo journal
+  and a retry ledger. `RepathLedger` (last 20 events,
+  `~/.ccsync/state/repath_events.json`) records each rename with a sentence,
+  and the relink goes through the same code the file-move path uses:
+  `file_moves.relink_moved` (lifted to module level for it), i.e.
+  `resolve_bridge.replace_clip`, save point and undo journal included, with
+  `connect()` still the only caller of `scriptapp` (CR-68). `relinked` is
+  `None` when Resolve did not answer the question - closed, or open on
+  another project - which leaves the event PENDING, and every later
+  `reconcile` retries it, exactly as `_relink_pending_moves` does for file
+  moves. **The "leaving the folder PAUSED" branch records why**: that is the
+  routine failure (Resolve or Explorer holding a handle) and it left one
+  project quietly not syncing with a `log.error` nobody reads as its only
+  trace. Nothing in this path deletes and nothing about the repath DECISION
+  moved into the ledger: the local Syncthing config is still the state.
+* **The plan is readable on the machine that runs it** (SYNC-107).
+  `Sequencer.project_status()` is one row per ticked project - slug, label,
+  `mode` (`full` / `upload_only`), `state` (`syncing` / `waiting` /
+  `paused` / `blocked`), the three lanes and a whole sentence of detail -
+  built from `_queue_slugs`, `_slug_to_item`, `_ignores_unconfirmed` and the
+  repath ledger. Only the project whose turn it is has live lanes; an
+  upload-only tick reads `B: off`, `C: off` and "Uploads only. Proxies do
+  not come down for this project", which was the one fact an upload-only
+  editor had no way to learn (the words "upload only" appeared to them
+  exactly once, inside the label of the button that deletes the project).
+* **The upload alarm names the files** (SYNC-109).
+  `RcloneLane.size_mismatch_samples()` hands back `{path, local_size,
+  server_size}` for up to 20 of the samples `_refresh_size_mismatches`
+  already keeps, so "your newer version will NOT upload" - the one silent
+  data-loss shape on lane A - can say which files. `local_size` is a stat of
+  the copy on this machine and costs nothing; `server_size` is None because
+  `rclone check --differ` prints names only and a second NAS listing per
+  pass is not worth it for a line that already says what to do.
+* **The recovery folder can be named and explained** (SYNC-112).
+  `lane_guard.trash_summary(root)` is `{path, count, bytes, oldest,
+  retention_days}` from ONE walk, cached 60 s per root and dropped whenever
+  a prune changes the folder. `oldest` comes from the batch directory name
+  (`_backup_dir`'s own record of when it was made) so "how long have I got"
+  is answerable; `prune_trash` is untouched, including its refusal to prune
+  anything while the breaker is tripped.
+
+Deploy note: this is companion-side only and additive - every function is
+new, every existing return shape is unchanged, and a dashboard that knows
+nothing about them is not affected.
+
+### CR-169 - the Resolve half of the companion computed seven diagnoses and told nobody - FIXED in repo 2026-09-04 (companion 0.9.68)
+Wave 3's Resolve/proxy half (RES-3, RES-4, RES-10, RES-11, RES-14, RES-16,
+RES-22). Every item here is a fact the companion already knew and threw away,
+or logged into a 5 MB-rotating file nobody opens:
+
+* **The proxy ATTACH half had no user-visible surface at all** (RES-3).
+  `proxy_relink.apply_relinks` built "repointed 3 proxy link(s), 12 refused by
+  Resolve" and `app.py` dropped the return; the sentence that IS the answer to
+  "why is my proxy not attached" was a WARNING, the per-clip reason DEBUG, and
+  the case where the clip already points at that exact file and Resolve still
+  will not play it (an unreadable proxy) logged nothing whatever. It now
+  returns `attached`, `failed`, `why` (one sentence, None when there is
+  nothing to say) and `details` [{clip, reason}] in editor English -
+  `REASON_REFUSED` / `REASON_NO_ANSWER` / `REASON_NOT_IN_POOL` /
+  `REASON_UNREADABLE`. `ok`, `relinked`, `failures` and `message` keep their
+  meanings beside them. `plan_relinks(..., notes=[])` is how the unreadable
+  case gets out of a skip that no longer needs a restart to discover. The
+  per-clip DEBUG line stays DEBUG: 200 refused clips every 120 s at INFO is
+  COMP-MEDIA-5 again with a different level.
+* **An admin's [ UNDO THIS CHANGE ] died permanently at the Project Manager**
+  (RES-4). `resolve_undo` classified refusals by PROSE, and "no project open
+  in Resolve" matched none of the substrings (no "not", and "project open" is
+  not "is open"), so the commonest state Resolve is ever in was recorded
+  `failed` and never offered again - although the editor opening their project
+  is exactly what clears it. `_SCRIPTING_ERROR_MESSAGE` failed the same way
+  ("didn't" contains no "not"). `PARK_HINTS`/`RETRY_HINTS` replace the prose
+  test, the detail says **parked** and what will resume it, and the ledger
+  stores a parked undo as an OPEN one so the machine is asked again.
+  `STATE_PARKED` is returned only behind `apply_undo(allow_parked=True)`: the
+  wire value is validated against a three-word `Literal` by the deployed
+  dashboard (`ResolveUndoResultIn`, v40) and an unknown one would fail the
+  WHOLE report for that machine. Turn it on when a dashboard that knows the
+  word is deployed.
+* **A whole-project proxy scan that raised reported "fully covered"**
+  (RES-10). `scan_project` returned the zeroed gap, which is byte-identical to
+  "every clip here has a proxy" - the failure direction the feature exists to
+  prevent. A gap now carries `error` + `partial`, keeping whatever it had
+  counted as a FLOOR rather than a verdict, and the sweep's totals carry
+  `unreadable`, `error` and `partial`. A project the walk could not enter at
+  all (an unplugged drive is zero iterations, not an exception, because
+  `os.walk`'s onerror is None on purpose) is caught by the same test.
+  docs/SELF_DIAGNOSIS.md: an unverified check is NOT CHECKED, never OK.
+* **`capped`, `low_space` and `truncated` never reached the editor's tray**
+  (RES-11). The dashboard could see a low-space machine; the editor sitting at
+  it could not, and a clip that failed three times was capped for the life of
+  the process with nothing anywhere naming it - a machine reporting "1040
+  missing, 0 queued" and nothing else is the 0.6.1 muxer night. `gap()` and
+  `coverage()` now both carry the three flags plus `reasons`, one sentence per
+  flag, from `ProxyGenerator._brakes()`.
+* **CANCEL could leave an unresponsive, unclosable window for minutes**
+  (RES-14). `fsrc.read()` cannot be interrupted, so the chunk IS the
+  cancellation latency, and it was 8 MB against a Google Drive placeholder
+  hydrating at 222 MB per 10 s - while the dialog had already disabled
+  STOP/SKIP/CANCEL and could not be closed. Polls are every 1 MB now
+  (`POLL_CHUNK_BYTES`), and a read that takes longer than `POLL_MAX_SECONDS`
+  halves the next one down to `MIN_CHUNK_BYTES`, so a link four times slower
+  than the incident's still answers inside two seconds. `chunk_size` stays the
+  unit of PROGRESS reporting, so the bar and the ETA are unchanged. The
+  `ReplaceClip` loop consulted the predicate not at all - a clip cut in 50
+  places is 50 uninterruptible calls - and now checks between clips, keeping
+  the copy and answering `aborted` + `relinked` + `partial_relink`. Nothing on
+  that path deletes: the copy landed and the clips already repointed are
+  correct. The CORE-H5 bargain (`.ccsync-tmp` + the 0-byte reservation, both
+  removed on an abort, never a partial under the final name) is unchanged and
+  now pinned by a test.
+* **BPG's one actionable instruction was addressed to the editor and delivered
+  to a log** (RES-16). The companion opens a Resolve window on somebody's
+  machine while they are away, and when the UI-automation press failed the
+  only thing between the fleet and hours of no BRAW proxies was a sentence in
+  `companion.log` telling a human to click a button. `BpgLauncher.status()`
+  carries `needs_editor` (the sentence, or None), cleared the moment a press
+  succeeds or answers already-running - so an editor who starts it by hand
+  stops being nagged. A Mac never asks anyone: `press_start` answers
+  `not-windows` and there is nothing to do about it. The WARNING stays.
+* **The tray said "Resolve: connected" through a 20-minute wedge** (RES-22).
+  That line comes from the last COMPLETED enumeration, so a wedged
+  `ImportMedia` against a share that went away leaves it reading connected
+  indefinitely while every Resolve feature does nothing. `bridge_activity()`
+  gains `wedged_seconds` (0.0 while a call is merely answering) and
+  `wedged_call`, off the same `BRIDGE_WEDGE_SECONDS` the log's wedge warning
+  uses, so a status line and the log cannot disagree. Idle is still `{}`.
+  Nothing else in `resolve_bridge.py` changed, and nothing here goes near
+  `connect()` (CR-68).
+
+### CR-170 - a machine that took no fleet work, or served no cards page, could not say why - FIXED in repo 2026-09-04 (companion 0.9.68)
+Wave 3's companion half (CMEDIA-2, CMEDIA-12, CMEDIA-13, RES-6, RES-7):
+
+* `jobs_runner.status()` carries the gate IN WORDS - `gate: {taking_work,
+  reason}` from `GATE_SENTENCES`, one sentence per state, in the second
+  person. The verdict is the one the LAST tick reached and not a fresh
+  evaluation: `status()` runs on the tray's refresh thread, where any I/O
+  stalls the win32 message loop (the right-click freeze of 2026-07-26).
+  `no_capability` is two different problems with one state, so `_gate()`
+  records which (nothing set up here, or `[jobs] kinds` narrowed to a kind
+  this machine cannot run) where the capabilities are already in hand.
+  "Nothing offered" is `taking_work: true`, deliberately: a fleet with no
+  work must not read as a machine that is broken.
+* `status()["current"]` names the job an editor's machine is busy with -
+  id, kind, the RELATIVE path (the vault is a drive letter here and a mount
+  there), when it started, and `forced_reason`. `STATE_FORCED` has existed
+  since phase 1 exactly so somebody could be told why work started with them
+  at the keyboard, and nothing read it: an admin's `--now` and the editor's
+  own volunteer window are now two different sentences.
+* `jobs_runner.stop_current()` is THE ADMIN'S CANCEL PATH, REUSED WHOLE: the
+  id goes on the same `_cancel` list `commands.jobs.cancel` fills, so the
+  thread that owns the child and the `.partial` is still the only thing that
+  ends them, and the result goes back cancelled and NOT retryable. A second
+  kill path would have been a second way to publish a half-written proxy.
+* `status()["recent"]` is the last ten jobs this machine ran (id, kind, rel
+  path, outcome, error, finished at), written at every `_post_result` BEFORE
+  the call goes out - a result the dashboard never received is exactly the
+  case where this machine is the only place that knows - and persisted to
+  `~/.ccsync/state/jobs_recent.json`. proxy_history's posture: a ledger that
+  cannot be written is never why a transcode fails. `cancelled` is its own
+  outcome, not a failure: somebody chose it.
+* `timeline_cards_role.report_block()` is a JUDGEMENT now, not a list length.
+  `connected` was `bool(self._threads)` and nothing ever cleared that list,
+  so a loop that raised, a loop that returned, a fleet credential that had
+  been refused for hours and a dashboard that could not be reached all
+  rendered on the fleet grid exactly like a healthy machine. `state` is one
+  of `running` / `stopped` / `refused` / `credential_refused` /
+  `unreachable` with a `detail` sentence, `last_poll_at` and
+  `last_http_status` are the evidence, and the refusal vocabulary moved to
+  `gate_state`. Green needs the loops alive AND a 200 within two long polls
+  (50 s); a start buys 30 s of grace and a call that has FAILED spends it.
+  A 401/403 says "the fleet credential is refused: sign in again from the
+  tray", because that is the one thing that fixes it.
+* The cards refusal is RE-ASKED every `PROBE_CACHE_SECONDS` (its own
+  watchdog thread, only on machines with `cards_agent` on) instead of being
+  decided once at start. Every refusal is a condition that clears: somebody
+  signs in, somebody closes the standalone agent, a fleet halt expires at
+  24 h by design. The old sentence told an editor to sign in from the tray
+  when only a restart would have helped. A refusal that does not change is
+  logged once, not once a minute.
+* The advice names what to close: the process probe emits `pid<TAB>name<TAB>
+  command line` on both platforms and the refusal reads "python.exe (pid
+  4312): ... Close the standalone Timeline Cards agent window and this
+  computer will pick the page up on its own within a minute." "Cannot tell"
+  gets its own sentence rather than being rendered as `Found: this machine's
+  processes could not be listed`, which sent people looking for a process
+  nobody had seen. It still counts as a rival, and nothing here kills one.
+* NOT done, deliberately: a halt does not stop a role that is already up
+  (RES-6/7 proposed it) - the edits are synthetic keystroke sequences and one
+  stopped half way through is a timeline nobody asked for; and a role whose
+  loops have died is reported `stopped`, never restarted, because restarting
+  an engine that owns Resolve is a decision, not a watchdog's.
+
+### CR-171 - the companion did the work and told nobody: no download progress, no reason for a hand-back, no way to stop one, no retry for a failed upload - FIXED in repo 2026-09-04 (companion 0.9.68)
+
+Wave 3's companion half (CYT-2, CYT-11, CYT-14, CYT-15, CMEDIA-4, CMEDIA-7,
+CMEDIA-10, BROLL-5, APP-16). Everything here is additive on the loopback: a
+page that has not been updated sees what it saw before.
+
+* **`GET /ytdl/progress` had no consumer and the wrong shape** (CYT-2). The
+  executor has kept `bytes_done`/`bytes_total`/`speed_bps`/`phase` per clip
+  since 0.9.49 and served them as a flat dict its own docstring says exists
+  "so the SPA can show something in the first seconds"; the SPA never fetched
+  it, and a 40-minute 1080p clip showed the word `downloading` for its whole
+  life. It answers `{"jobs": [{job_id, title, phase, percent, speed,
+  eta_seconds, file, handed_back_reason, clip, done, failed, total,
+  running}]}` now - a LIST, so "nothing to say" is not a different shape from
+  "one job" - built by `ytdl_executor.snapshot()` / `progress_row()`.
+  `percent`/`speed`/`eta_seconds` are the CLIP in flight (an average over
+  clips that differ tenfold in length is a countdown that goes backwards);
+  `done`/`total` are the job, for "clip 3 of 12". Unknown is `null`, never 0.
+  `ytdl_executor.progress()` keeps the flat shape, because that is what the
+  tray line reads.
+* **Seven whole-job hand-backs were one `log.warning` each** (CYT-11): a
+  naming-template or sidecar skew, a quality only the server can name, a
+  destination this machine cannot resolve or create, an unmounted tree, not
+  enough free space, the WP6 identical-failure breaker, and the everyday one -
+  `_label_is_ours` false, i.e. the editor downloaded into a project this
+  computer does not sync. All seven now call `DownloadJob.hand_back(why)` with
+  a sentence in editor English that names what happens next, and it survives
+  the job in `_LAST`, so the page that has had its 202 learns WHY the badge is
+  about to flip instead of waiting minutes for the reclaim. Nothing about the
+  "no release endpoint" design changed: the lease still expires and the server
+  still downloads what is missing.
+* **No way to stop a local download from the machine doing it** (CYT-14). The
+  only escape hatches were the browser's [ DOWNLOAD ON THE SERVER INSTEAD ]
+  (needs the page open and the tailnet up) and Quit CCSync, which stops
+  syncing too. `ytdl_executor.cancel_job(job_id)` / `cancel_all()` and `POST
+  /ytdl/cancel` `{job_id}` or `{all: true}` on the same origin/token guard as
+  every other POST: the child is killed, `_cleanup_current` takes this clip's
+  partials with it, the lease expires. Always 200 - `stopped: 0` means nothing
+  was running, which is not an error, because a second click must mean what
+  the first one meant.
+* **The browser sign-in blocked for up to ten minutes behind one balloon**
+  (CYT-15). `ytdl_browser_login.run(progress=...)` takes
+  `(elapsed_s, remaining_s, phase)` and is called at launch (naming the
+  browser AND that closing the window cancels), at least every
+  `PROGRESS_SECONDS` (5 s) while waiting, and once more when the cookies are
+  being saved. The timeout says what to do next: "the sign-in did not finish
+  in time. Nothing was saved - try again from Settings > YOUTUBE". A callback
+  that raises costs a debug line, never the sign-in.
+* **`queued_for_base_rig` was invisible in every counter and then deleted**
+  (CMEDIA-4). It is in the kind's finished set and was in neither counter, so
+  the tray said "8 of 10" for ever, the progress window's `finished` never
+  became true and the ETA divided by a remainder that could not reach zero.
+  `status()` carries `queued_for_base_rig` and `queued_names`, the ETA
+  subtracts them, `progress_model` counts them as finished AND names them
+  ("2 track(s) need the base rig to finish. They are still on this
+  computer."), and `progress()` carries the count. The file is the whole point
+  of the state, so the drop is marked `held_for_base_rig` the moment the item
+  is queued (not only when the batch ends, which a cancel or a lost lease
+  never reaches) and `prune_staging` refuses to delete it - including at
+  `max_age_days=0`, which is the tray's CLEAR FINISHED STAGING - and reports
+  `held`/`held_names` so a button can say what it did not do.
+* **"This machine is already downloading" was delivered as a hard failure**
+  (CMEDIA-7). The two-download cap was designed around the page's own 1.5 s
+  re-POST being the retry, but the page loops only while the state is
+  `downloading`: every `ok: false` was a red toast and the end of the attempt.
+  `broll_fetch.poll_fetch` answers `STATE_BUSY` with `retry_after`, and
+  `/insert` and `/music/send` answer `{"ok": true, "state": "busy",
+  "retry_after": 1.5, "message": ...}`. The sentence is worded to read
+  correctly under a spinner and under a toast, because `/ytdl/fetch`
+  (`ytdl_server.build_fetch_response`) still maps everything that is not
+  downloading-or-done onto `failed`.
+* **A failed clip's reason reached nobody** (CMEDIA-10): `progress()` carries
+  `failed_items: [{name, error}]` (first 20), inside `batch` and mirrored at
+  the top level, where the tray had a count and "See the log".
+* **A failed upload was permanent** (BROLL-5): `POST
+  /{broll,music}/ingest/retry` `{staging_id, items:[local_id]}` clears the
+  item's error, deletes the half-written `.partial` and lets the page's pump
+  pick it up; `{"ok": true, "retried": n}`, and retrying something that is not
+  failed is a no-op. The companion was always safe to re-send to (`upload_slot`
+  409s "already staged", `_stream_body_to` renames only on a complete body) -
+  nothing had ever asked it to.
+* **The update offer was a version number and nothing else** (APP-16).
+  `parse_upgrade` carries an optional `notes` through (never rewriting one the
+  signature covers - `canonical_record` reads `record_fields`, so an unsigned
+  extra key is ignored by verification), `UpgradeManager.note_report_response`
+  remembers it, and `offer_label` / `offer_toast` / `offer_dialog_text` render
+  it: the first line in the menu item and the toast ("What's new: ..."), all
+  of it in the dialog. Publisher text is control-character-stripped and capped
+  before it reaches a Win32 menu item. A record without notes renders exactly
+  as it did, to the character, so no deployed dashboard is broken by it.
+
+Not done here, deliberately: the hand-back reason is NOT sent to the
+dashboard. The job status the server receives is per CLIP, and a whole-job
+hand-back posts nothing at all by design (there is no release endpoint, §3) -
+adding a field would mean adding the call this design exists to avoid.
+
+### CR-172 - the YouTube downloader measured more than its page ever showed - FIXED in repo 2026-09-04 (ytdl web, dashboard 0.7.33)
+Wave 3's ytdl half (YTWEB-1/3/7/8/9/11/13, CYT-2). One shape said seven ways:
+every fact below was already computed on the server and thrown away before it
+reached the editor.
+
+* **A queued job now says what it is waiting on** (YTWEB-1). The worker is
+  fleet-serial - one job at a time for every editor on the site - and every
+  number this app had was counted PER EDITOR, so the commonest queue there is
+  (editor B behind editor A's 20-minute enrich phase) answered
+  `queued_behind: 0`, toasted nothing (`announceQueued` returns on 0) and
+  parked a bar in `PHASE_SPAN.queued` over an EMPTY ticker: every other bit in
+  there is gated on a counter a queued job has none of. `db.fleet_ahead`
+  counts the rows `claim_next_job` would take first, off the same candidate
+  set and the same ORDER BY, and a job that is not startable yet is behind ALL
+  of them rather than ahead of the ones that sort after it. It rides on the
+  create answer AND on the poll (a toast is gone in seven seconds; a page
+  reloaded onto a `queued` job has to say the same sentence), with
+  `worker_alive` beside it because a queue nothing is draining looks exactly
+  like a queue with something big at the front of it.
+* **`js_runtime` is rendered** (YTWEB-3). Measured since YTDL-24 cost a week -
+  without deno or node on PATH yt-dlp cannot run YouTube's player JS and EVERY
+  clip fails "Requested format is not available", which reads as YouTube
+  flakiness one video at a time - shipped on `api/health`, and read by no line
+  of `app.js`. Now a fifth evidence pip (only when the answer is `missing`;
+  a runtime that is there is not news) plus a banner, both `== null`-guarded
+  like every other WP5 key. `worker.identical_failure_note`'s no-usable-format
+  branch names it too, so a streak that IS this cause stops sending the editor
+  to a yt-dlp update that would change nothing.
+* **The degraded-filter note survives `hintFor`** (YTWEB-7). The worker writes
+  `claude_auth: <note>` on a job whose phase is NOT failed, and the SPA matched
+  the prefix and returned the generic hint INSTEAD of the string: the editor
+  was told an admin must add a credential and never that the manifest below
+  them is UNFILTERED, which is the one fact that changes what they do next
+  (all 300 candidates arrive ticked as relevant). `hintFor` now returns the
+  remainder in front of the hint, and `DEGRADED_NOTE` is reworded off its
+  double hyphen.
+* **What is MOVING beats what is parked** (YTWEB-8). `db.active_job` was
+  "oldest non-terminal" from when an editor could only have one; the queue
+  (2026-08-30) then deliberately let a second search start while an older one
+  sat at `ready_for_review`. In-session it never showed - `runSearch` attaches
+  by id - but on a reload, a second tab or the next morning the page attached
+  to the week-old parked review, painted a full green bar, and the job that was
+  actually downloading appeared nowhere. It now prefers BUSY, then the NEWEST
+  parked job.
+* **...and the parked ones are a list, not a memory** (YTWEB-13).
+  `GET api/jobs/active` carries `waiting: [...]` (`db.parked_jobs`, the
+  attached job never in it), rendered as WAITING FOR YOU above the queue with
+  `[ RESUME ]` and `[ CANCEL ]` per row and a count in the header's own banner
+  slot. Since a parked review blocks nothing, nothing ever nagged about one:
+  five curated manifests could pile up discoverable only by reading `phase` in
+  Recent searches. The one-job-per-editor 409 (CR-30's remnant, the RETRY path)
+  now names the parked search and hands over the button instead of describing
+  where to find one.
+* **Free space is checked, and the number that was collected is shown**
+  (YTWEB-9). Nothing anywhere tested it: the editor's only proxy before
+  pressing DOWNLOAD was a DURATION, and 40 clips of 12 minutes at 1080p is
+  15-40 GB. `start_download` now refuses below TWICE the estimate (or 2 GB
+  when a manifest carries no durations, i.e. every paste) with a sentence
+  naming the folder and both numbers, BEFORE `mark_pending` so a refusal
+  leaves the job as it found it, and it FAILS OPEN on a disk it cannot read -
+  the point is one sentence instead of N opaque per-clip errors, not a new way
+  for a download to be impossible. `shutil.disk_usage` walks up to the nearest
+  existing ancestor (the destination is created by the download phase) and is
+  cached 60 s. The grid foot prints `roughly 22 GB` from a per-rung bitrate
+  table duplicated in both halves on purpose, and the companion's `free_bytes`
+  - sent on every claim since the feature shipped and written into a LOG LINE -
+  lands on the job row (**migration 014**, `jobs.claim_free_bytes`, additive,
+  NULL is a companion that does not say) and reads as "N GB free on the
+  download machine". Still advisory at both ends: the machine that knows what
+  a clip costs is the one that declines.
+* **A finished clip opens from the DOWNLOADS list** (YTWEB-11). The reveal
+  machinery worked from the history panel alone, so the last step of the flow
+  this page exists for was a scroll past two panels into a fleet-wide ledger to
+  find your own rows in it. The manifest carries `reveal_path` now
+  (`db.video_reveal_path`: the JOB's destination plus the row's FILENAME -
+  never `filepath`, which is absolute on whichever machine fetched it, with a
+  separator this one must not assume), a `done` row is clickable through the
+  same `reveal()`, and the header says how many clips landed where.
+* **The browser watches its own machine download** (CYT-2). The executor has
+  kept per-clip percent/speed/eta on the loopback since the feature shipped -
+  its own docstring says "this exists so the SPA can show something in the
+  first seconds" - and the SPA never fetched it: a 40-minute clip showed the
+  word `downloading` for the whole job. `GET /ytdl/progress` is polled every
+  2 s while THIS machine holds the job (one chain however many times a render
+  asks, same 1 s abort budget, gated on the same server flag), printing
+  `clip 3/12 · 38% at 4.2 MB/s · 2:10 left` and naming a `converting` clip so a
+  ten-minute re-encode does not read as a stall. `[ STOP ]` posts
+  `/ytdl/cancel` for that job and leaves the job itself alone - the server
+  picks up what is missing, which is what happens when a laptop closes anyway.
+  A companion answering 404 is a companion older than the route: the poll turns
+  itself off for the session and the page is byte-for-byte today's.
+* Deploy the dashboard before the companions as usual; the companion half of
+  CYT-2 (`/ytdl/progress`, `/ytdl/cancel`) is C6's, and until an editor has that
+  build the page degrades exactly as it does with no companion at all.
+
+### CR-173 - the music page said "nothing matches" when the search was broken, hid every fleet-ingested track behind the tempo filter, and had no door to ingest at all - FIXED in repo 2026-09-04 (music web, dashboard 0.7.33)
+Wave 3 of the usability + resilience sweep (MUSIC-2, MUSIC-3, MUSIC-4,
+MUSIC-7, MUSIC-9, MUSIC-13, MUSIC-14, and the browser half of CMEDIA-7):
+
+* **A failed query is no longer the empty state** (MUSIC-2). None of the three
+  query functions had a `catch`, and all three render into a list already
+  showing `render`'s empty copy, so a text encoder that would not load, a 401
+  from an expired dashboard session, a 500 from a locked database and a
+  genuinely empty answer were ONE screen - under advice ("try a looser
+  description") that was wrong in three of the four cases. `api()` now attaches
+  `err.status`, and `loadTracks`/`runSearch`/`showSimilar` each render
+  `failureText()`: the status or the transport message, "Try again", and a
+  separate sentence for a 401 ("your session expired. Reload the page to sign
+  in again."). The looser-description wording stays for a real empty answer.
+* **The left rail applies to a description search** (MUSIC-4). `SearchReq`
+  carried `{query, k, pool}` and nothing else, so the mood chip, the axis
+  slider and the BPM boxes were discarded the moment an editor typed - while
+  the rail went on showing them lit, asserting a filter that was not in the
+  query. `routes_api._filters()` is now the ONE builder for the browse route
+  and the search route: same names, same defaults, same JOINs and WHERE. The
+  hits are already an id set, so the rail is one more clause on the hydrate
+  query - CLAP decides the order, the filters decide the membership. The id
+  set binds LAST because the JOINs carry their own placeholders.
+* **A NULL is unknown, not "no"** (MUSIC-14). A track the companion ingested
+  has `bpm IS NULL` (MUSIC-ING-1: no librosa on an editor's machine) and
+  `t.bpm >= 90` is never true of it, so a tempo or length filter dropped every
+  fleet upload in silence. An unset filter still matches them; a set one
+  answers `unknown_hidden` / `unknown_fields` and the result head says "N
+  tracks have no bpm and are not shown" with `[ include them ]` beside it;
+  `include_unknown` widens the clause (`OR col IS NULL`) rather than dropping
+  it, so the range is still honoured for the tracks that HAVE a value. The
+  count is computed against the rest of the filter (and, for a search, against
+  that search's own hits), not against the library. `/api/facets` publishes
+  `_unknown: {bpm, duration}` so the rail can offer the bucket before a filter
+  is typed. **No schema change** - `music.db` is published by `publish_db.py`
+  and this is a query change.
+* **`[ ADD MUSIC ]` in the toolbar** (MUSIC-3). The whole ingest feature was
+  reachable only by dragging a file onto the page: nothing said music could be
+  added, and an editor whose batch ran yesterday could not read it, cancel it
+  or find out why three tracks failed without dropping another file first. The
+  button calls `miOpen()` behind a `typeof` guard (a stale index.html can ship
+  app.js without ingest.js, and a TypeError there takes the search page with
+  it). The staging area explains itself when empty.
+* **The ingest queue has a UI** (MUSIC-7). `GET /api/ingest/queue` has always
+  returned the counts, the pending rows and every parked failure's reason, and
+  the browser never read it - and a failed queue row is NEVER retried, so the
+  reason existed only in the log of whichever indexer run happened to hit it.
+  The panel now shows "Waiting for the base rig: N tracks", each failure with
+  its reason and "Nothing retries these on their own: fix the file and drop it
+  again", refreshed every 15 s while the panel is open. Server text goes
+  through `el()`/textContent, never innerHTML (MUSIC-15).
+* **The library catches up after an ingest, and NEWEST is offered** (MUSIC-9).
+  Nothing in ingest.js touched the results list, the facets or the header, so
+  a batch reaching `done` left the page exactly as it was and the answer to
+  "is my album in yet" was to reload. `miNoteBatchState` fires
+  `refreshLibrary(true)` on the TRANSITION into a terminal state only - a page
+  opened on last week's finished batches must not re-render the list under the
+  editor - and the new sort control (filename / newest / bpm / length) is set
+  to newest by that refresh. `sort=newest` was already supported by the route
+  and had no caller.
+* **An empty waveform says why** (MUSIC-13). The container has no indexer to
+  build one, so every track without stored peaks drew a blank strip - and
+  click-to-seek kept working over it, which read as "the waveform is broken".
+  `loadPeaks` now returns `{data, note, detail}`: a 404 gets "No waveform yet:
+  this track was added by the fleet and the base rig has not analysed it.
+  Seeking still works." under the strip, with the route's own wording in
+  `title=` for support. Only a real answer is still cached (MUSIC-4,
+  2026-08-11).
+* **"Already downloading" is a wait, not a refusal** (CMEDIA-7, browser half).
+  The companion's per-machine download cap relies on the page re-POSTing, and
+  the page looped only on `state === "downloading"`, so any `ok:false` ended
+  the send with a red toast an editor had to remember to retry in an hour.
+  The loop now keeps polling on `state` `busy` or `queued`, honouring
+  `retry_after`, AND on the older build's `ok:false` + "already downloading"
+  wording - an editor's tray app is upgraded on its own schedule, so both
+  shapes are accepted.
+* Tests: `music/web/tests/test_search_filters.py` (15) for the filter builder,
+  the NULL rule and the placeholder ordering, and
+  `music/web/tests/test_ui_says_what_it_knows.py` (23) pinning the frontend
+  intent against its own source, the way `test_ingest_ui.py` and
+  `test_plain_words.py` already do.
+
+### CR-174 - the b-roll page never said what it had searched, what it could not search, or how to get a failed clip back - FIXED in repo 2026-09-04 (broll web, dashboard 0.7.33)
+Wave 3's b-roll half (BROLL-5/8/9/10/18/22/23, and CMEDIA-7's browser side):
+
+* **A failed upload was permanent** (BROLL-5). `xhr.onerror` set `item.error`
+  for the life of the page and `ingestPumpUploads` skipped that item for ever,
+  so a wifi blip at 95% of a 4 GB file cost one clip of a 200-clip drop and the
+  only way back was to clear and re-drop everything - while the companion's own
+  `upload_slot` 409 says in as many words that "the SPA retries a dropped file
+  after a reconnect", a retry nobody had written. Now: three automatic attempts
+  at 2/4/8 s for a NETWORK-level failure only (an HTTP refusal is the
+  companion's considered answer and repeating it changes nothing), the row
+  reading `upload interrupted, retrying (2 of 3)...`; then `[ retry ]` in the
+  row and `[ retry all failed (n) ]` over the list, both of which clear the
+  attempt count because a human pressing them knows something the three
+  attempts could not - the wifi is back. The pump skips a backoff that has not
+  elapsed (`item.retryAt`), never an item for ever. A black hole is caught by a
+  STALL watchdog (no progress for two minutes) and deliberately not by
+  `xhr.timeout`: that is a ceiling on the whole request, and a legitimate 4 GB
+  body over a slow link takes an hour.
+* **A batch whose machine went away could be picked up by NOTHING** (BROLL-8),
+  under a notice claiming another of the editor's machines could take it. Six
+  fleet routes, every one keyed by a uid the caller must already hold, and a
+  companion that never polls. Now `GET /api/fleet/ingest/batches` lists the
+  VERIFIED editor's unfinished batches with machine and heartbeat (a
+  `?editor=` that does not match the identity is 403, not a way to enumerate
+  another editor's machines), and the panel offers
+  `[ take over on this computer ]` on any queued batch of the editor's own,
+  which re-dispatches the uid to this machine's loopback exactly as Run does.
+  Possession is still settled by the claim - another machine's live lease 409s
+  and the button says so. **Deploy note:** the dashboard's login_gate carve-out
+  (`app.py` `_broll_fleet_re`) covers `.../batches/<32 hex>/...` only, so a
+  companion cannot reach the discovery route through the mounted dashboard
+  until that regex is widened; the page's take-over path does not go through
+  it, so nothing an editor sees waits on that.
+* **`done_with_errors - 12 failed` was the end of the road** (BROLL-18): the
+  only affordance was `clips`, i.e. twelve names to transcribe by hand and
+  re-drop, which the first attempt's `videos` rows then read as duplicates.
+  `POST /api/ingest-batches/{uid}/retry-failed` (owner or admin) moves the
+  failed items back to `pending` and the batch back to `queued`; the video_id,
+  archive_dir and archive_stem STAY, so claim re-uses the slot rather than
+  allocating `_2`. `live`/`duplicate`/`cancelled` never move - somebody may
+  already have cut with them. The page then tells its own companion
+  (`POST /broll/ingest/retry {items}`, falling back to `/broll/ingest/run` on a
+  404 from a build that predates it). Nothing is dispatched from the browser:
+  it contributes the uid and nothing else.
+* **A search that found nothing showed an empty page** (BROLL-9). `/api/search`
+  carries `scope_total` when a query returned nothing - the size of what was
+  searched, computed from the same clause builders in the same order, so it
+  cannot describe a different scope - and the grid renders
+  `Nothing matched "<q>" in <scope>. N clips were searched. Try fewer words, or
+  switch to Semantic search`, plus only the levers that are actually on
+  (clear the folder filter / stop hiding flagged clips / turn fuzzy back on).
+* **Semantic mode could return nothing, for ever, and say nothing** (BROLL-10):
+  fastembed is optional and the query model must match the stored vectors', and
+  every one of those cases is a permanently empty grid with no signal to the
+  editor or the admin. `/api/search` now carries `mode_available`
+  (keyword/semantic/hybrid, each `{available, reason}`); the three buttons
+  disable with the reason as their title, a page that arrives in a mode this
+  server cannot run falls back to hybrid with one toast, and the empty state
+  names it. Hybrid is never disabled - it is keyword plus a booster, and
+  disabling the default mode would leave an editor with no mode at all - it
+  says what it lost. The probe is `find_spec`, never an import: it is asked on
+  every search response and building the encoder is a ~10 s ONNX load.
+* **Batch state was the database's word** (BROLL-22): `queued - creator-2 -
+  heartbeat 3 hours ago` reads as progress and means that computer stopped
+  answering. One mapping, `ingest_batches.BATCH_STATE_TEXT` and
+  `ING_BATCH_STATE_TEXT`, pinned as a pair by
+  `tests/test_batch_state_words.py`; `batch_public` carries `state_text` for
+  every other reader and the page re-renders it so its "3h ago" keeps ageing
+  between polls. A pending cancel outranks the state it is cancelling.
+  Counters in words: `180 of 200 indexed - 168 searchable - 12 failed - 20
+  already in the archive` (`n_live` was index jargon).
+* **Nothing said a search was in flight** (BROLL-23) while a semantic query
+  costs a model load plus a scan over Tailscale: `aria-busy` and a `.searching`
+  class on the grid (50% opacity) plus `Searching...` in the results head,
+  cleared by the winning token only, on every outcome.
+* **CMEDIA-7, the browser half:** "this machine is already downloading" was a
+  red toast, and the cap's documented retry mechanism ("the web UI re-POSTs
+  every 1.5 s anyway") did not exist - the loop polled only on `downloading`.
+  Both shapes are now a WAIT: `{ok: true, state: "busy", retry_after}` from
+  companion 0.9.67+ and the older `{ok: false}` whose message is the only tell.
+  Capped at 15 minutes, because a wait with no end is the bug above it.
+
+No migration: `failed -> pending` was already the one legal way back through
+`_check_transition`, and nothing here adds a column, so `publish_db.py`'s
+drain/re-apply is untouched (CR-152).
+
+Files: `broll/web/app/{routes_api,routes_batches,routes_fleet,ingest_batches,search,semantic}.py`,
+`broll/web/static/{app.js,ingest.js,style.css}`, four new test files.
+
+### CR-175 - the fleet grid explained itself only to a mouse, and the refusal always landed off screen - FIXED in repo 2026-09-04 (dashboard 0.7.33)
+Wave 3's page half (DUI-3, DUI-6, DUI-19, DUI-20, REL-11, REL-12, REL-16,
+RES-6, DCORE-16, CYT-3):
+
+* **A chip explains itself on a phone** (DUI-3). Every chip on the fleet grid
+  carried its cause and its next action in `title=` alone, and eighteen of
+  them can stack in one LANES cell; a touch device has no hover, so on the
+  page whose whole reason for being opened on a phone is "is anything red",
+  the entire explanatory layer was unreachable. The prose moved into ONE dict,
+  `ui.CHIP_HELP` (format strings, filled by the `chip_help(key, **values)`
+  Jinja global from the row's own numbers), so the tooltip and the sheet
+  cannot drift; `partials/chip_sheet.html` lives in `base.html` and NOT in the
+  grid, which replaces itself every 15 s and would swap the sheet shut under
+  whoever was reading it. The tap handler and the tabindex pass are ~50 lines
+  in `static/htmx_errors.js` - no library, no second `<script>` on every page.
+  A missing key or a missing value answers with something rather than raising:
+  this text is on the page that tells the fleet whether its footage is
+  syncing.
+* **The refusal renders beside the button that caused it** (DUI-6). These
+  panels return their whole selves with `error` in a banner at the top and
+  swap `outerHTML`, which preserves scroll - so [ DELETE ] on the fortieth
+  package row was refused two thousand pixels above the viewport and nothing
+  appeared to happen. The six partials mark that banner `error-banner`;
+  `htmx_errors.js` remembers the path the write went to and, after the swap,
+  moves the banner to the control that came back in its place. No match (a
+  poll, or an error with no button behind it) leaves it where the template put
+  it, which is right for those. In the wizard, `setup.js` had NO
+  `showError(null)` call site at all, so one transient failure stayed on
+  screen through every later success: it clears on every success now and
+  writes into the failing step's own slot.
+* **"Am I safe to close my laptop"** (DUI-19), one line above the queue and
+  the transfers panel, from `ui.safe_to_close` and the view those panels
+  already build. UPLOADS decide it: a download interrupted by a closed lid
+  resumes, an upload that has not happened yet leaves that footage on one
+  disk. An admin's fleet-wide view has no "this computer", so it says nothing
+  rather than guessing.
+* **A wired computer says where its setting lives** (DUI-20). The assignments
+  column head printed `wired`, greyed every box, and never said that per CR-88
+  the setting is that COMPUTER's own: "Change it on that computer: tray,
+  Settings, THIS COMPUTER." is in all three assignment strings, in the
+  sidebar's base-rig tooltip, and as visible muted text in the column head,
+  because on a phone there is no hover (DUI-3 again). CR-95's rule is
+  untouched: only a wired cell that is NOT ticked is disabled.
+* **When the feed will check again** (REL-11), not only when it last did. The
+  default interval is a DAY and nothing said so, so an admin who had just been
+  told a fix was out could not tell whether waiting five minutes would help.
+  `feed_interval_seconds` / `feed_next_check_seconds` come from
+  `ui._packages_and_feed`, off the same settings value the poller sleeps on;
+  with `last_error` set the line reads "next retry in about".
+* **The four long controls on Packages show that they are working** (REL-12):
+  `hx-indicator="this"` + `hx-disabled-elt="this"` on CHECK NOW, both PUBLISH
+  forms and PUSH TO ONE COMPUTER, which now swaps its label like the two
+  beside it. `[ PUBLISH ]` is a multi-megabyte download and looked identical
+  to a dead button for its whole duration; the natural second click started a
+  second download of the same artefact.
+* **A recalled build of any kind can be rolled back** (REL-16). The recovery
+  control was `{% if p.kind == "companion" and p.machines_running %}`, so a
+  recall of anything else that machines are still running had no button at
+  all; the version list beside it is that kind's now, not always the
+  companion's.
+* **The cards chip reads the state, not the connection** (RES-6). Two daemon
+  threads and no watchdog meant `connected` stayed true through a dead loop
+  and through hours of 401s, and the grid kept painting `[ CARDS: E1 v5 ]` in
+  green. The chip takes its colour from the companion's `state` (running green
+  / refused + unreachable amber / stopped + credential_refused red), names the
+  state in its label, and puts `detail` (or the older `gate_state`, plus the
+  HTTP status on a credential refusal) in the DUI-3 sheet. A companion too old
+  to send `state` still reports `connected` and renders exactly as before.
+* **A HELD sharing change is rendered** (DCORE-16). `record_enforce_plan`
+  wrote the note and `alerts.enforce_plan` fired on it; the collector panel
+  and the project page said nothing, so "applied 9 of 40; syncthing refused
+  the rest" reached nobody. Both render `Sharing change held: <note> (<when>)`
+  from `enforce_notes`, defaulted so a dashboard whose collector has not
+  written one yet renders nothing.
+* **YouTube clips that never reach Resolve** (CYT-3). The importer computed a
+  full status - `no-project-match`, `resolve-closed`, `drive-absent`, `paused`
+  - and it reached nobody at either end: the download worked, the clips are in
+  `Youtube/<term>/`, and they are not in the media pool. The grid carries
+  `[ YOUTUBE CLIPS WAITING FOR RESOLVE: N ]` and, when the machine has given
+  up, `[ YOUTUBE IMPORT GAVE UP ]` with the reason. `no-project-match` is a
+  per-machine misconfiguration an admin can fix and the editor cannot, which
+  is why it belongs on this page. A companion that does not send the section
+  renders nothing at all.
+
+Tests: `dashboard/tests/test_templates_wave3_2026_09_04.py` (15).
+
+
+### CR-176 - the dashboard did things and would not say what, to whom, or when - FIXED in repo 2026-09-04 (dashboard 0.7.33)
+Wave 3's dashboard-core half (DCORE-8/9/13/14/16, REL-16, APP-16, CYT-3, plus
+RES-4, RES-6 and BROLL-8 handed over by the companion and b-roll builders).
+Schema **v49**: `companion_packages.notes`, `report_auth.token_id` and four
+`machine_state.cap_cards_*` columns.
+
+* **DCORE-8** `/api/v1/login` and `/verify` computed the wait
+  (`auth.login_throttled` returns SECONDS, doubling 60 s -> 3600 s) and threw
+  it away, answering "too many failed attempts; wait and retry" with no
+  `Retry-After`. An editor at a tray could not tell a one-minute lockout from
+  a sixty-minute one, so they retried, which on the shared IP budget extends
+  it for everyone behind that address. Both routes now answer **"Too many
+  sign-in attempts. Try again in 6 minutes."** with `Retry-After`
+  (`auth.throttle_message` / `throttle_wait_phrase` / `throttle_headers`,
+  rounded UP to the whole minute, "about an hour" past 45 min), and the login
+  page says it too. **Not a username oracle** and the test now pins that
+  rather than the old silence: `record_login_failure` is unconditional, so an
+  invented username is throttled, and told the same wait, as a real one.
+* **DCORE-9** the JSON 401 for the dashboard's OWN `/api/` is now
+  `{"detail": "Your sign-in has expired. Sign in again.", "login": "/login"}`,
+  and `static/assignments.js` navigates to `/login?next=<this page>` instead
+  of toasting `could not tick <project>: login required` - copy that reads as
+  a permissions bug. htmx's `HX-Redirect` only ever covered the polls, which
+  stop while the tab is in the background, so the admin coming back to a
+  twelve-hour-old tab was exactly the person it did not cover. A signed-out
+  column run stops on the first 401 instead of grinding through 39 more. The
+  mounted apps (`/broll`, `/music`, `/ytdl`, `/cards`) keep "login required":
+  their consumers are companions and another repo's SPAs.
+* **DCORE-13** `[ UPDATE NOW ]`, `[ RESUME ]` and `[ ASK THIS MACHINE WHY ]`
+  all answered `{"ok": true}`, so pushing an update to a laptop that had been
+  shut in a bag for nine days produced the same confirmation as pushing it to
+  a live machine, and then an admin watched a queued row that was never going
+  to move. All three now answer `queued_for`, `applies` ("on that computer's
+  next report, usually within 30 s. It was last heard from 12 s ago" / "It was
+  last heard from 9 days ago, so this may sit for a while"), `last_report_at`,
+  `last_report_age_seconds`, `stale` and `pending_before` - read BEFORE the
+  write, so a second click says it is re-arming rather than being congratulated
+  twice. It WARNS, it refuses nothing: a machine that comes back on Tuesday
+  applies it on Tuesday, and that is a good reason to press the button.
+* **DCORE-14** `[ REVOKE ]` answered `{"ok": true}` and the panel could not
+  say which computers a token was holding: `last_used_at` said WHEN, never BY
+  WHICH, and one editor can own two machines and one token. `report_auth`
+  gained `token_id` (v49, written by the report ingest through
+  `db.report_token_id`, empty for the shared token which identifies nobody),
+  `build_report_tokens_view` puts `machines`/`machine_names` on every row, and
+  the revoke answers **"Revoked. jsmith/EDIT-PC and jsmith/EDIT-LAPTOP were
+  using this token and will stop reporting within a minute. Give that editor a
+  new token."** Nothing is refused.
+* **DCORE-16** the enforce cycle's `put_folder` loop let an exception out on
+  folder 10 of 40: `_timed` recorded the cycle as failed, the 30 after it were
+  never attempted, and the plan persisted before the loop still described all
+  40 - so the `enforce_plan` alert said "held" for shares that had been
+  applied and said nothing about the ones that had not. Each folder now
+  carries its own failure (`Collector._enforce_loop`), the pass finishes the
+  rest, and the cycle's note is "applied 2 of 3 folder(s); syncthing refused
+  the rest (bad: folder is paused)". `db.enforce_notes` puts the recent
+  config/enforce notes into the project page and the fleet diagnostics
+  contexts as `enforce_notes`, where the question "why is this computer not
+  getting this project" is actually asked.
+* **REL-16** `[ ROLL THE FLEET BACK ]` was reachable only from a vendor
+  recall; the commoner case is nobody recalling anything (ship a build, an
+  editor reports it broken an hour later) and the recovery was
+  `[ MAKE CURRENT ]` plus `[ UPDATE NOW ]` on every machine by hand.
+  `machines_running` is now on EVERY package row with a `machines_running_known`
+  flag beside it - **present and empty** for onboard/installer, because
+  nothing in a report says which installer a computer was set up with - and
+  the route takes `?kind=`, refuses a same-version no-op, and answers a
+  non-companion kind with why there is nobody to ask rather than an empty
+  success.
+* **APP-16** a package record carries `notes`, one line of what changed, shown
+  in the editor's update dialog: accepted on the PUT and by
+  `release_feed.publish_from_feed` (the feed record has carried `notes` since
+  its first version and nothing read it), stored (v49, folded to one line and
+  capped at 300 chars), returned in the packages view and added to the upgrade
+  offer. **UNSIGNED, and that is a condition, not a shortcut**: the signature
+  covers a field list every companion in the field mirrors, and a record
+  carrying a field an older canonicaliser does not know is REFUSED by that
+  build with no over-the-air recovery (REL-7). A sentence an editor reads must
+  never be able to strand a machine. `--notes` on `sign_release.py` (also
+  `$CCSYNC_RELEASE_NOTES`, which is how it reaches the PUT
+  `build_editor_package.ps1` makes) and `publish_latest.py`; `-Notes` on
+  `ship.ps1`; one paragraph in `docs/RELEASE.md`.
+* **CYT-3 (dashboard half)** `sync_guard.youtube_import {state, reason,
+  pending, at}` is declared, stored per machine in `meta` (the CR-164 shape,
+  same latch rule: an absent section DELETES, because a stale "8 clips
+  waiting" from March is worse than silence) and exposed as
+  `machine.youtube_import` on the fleet grid. `no-project-match` is the state
+  an admin can fix and the editor cannot, which is why it belongs there.
+* **RES-4** `ResolveUndoResultIn.state` accepts `parked` (additive; every
+  existing value unchanged) plus a `parked: bool` for the companion build that
+  straddles the change, and both spellings store as `parked` -
+  non-retiring like `retrying`, but read as "parked: no project open in
+  Resolve, will resume when one is" (`state_sentence`) instead of as a machine
+  that keeps failing.
+* **RES-6** `CardsAgentIn` takes `gate_state`, `detail`, `last_poll_at`,
+  `last_http_status` and any `state` string (`refused` /
+  `credential_refused` / `unreachable` joined the old two; an unknown value
+  must never 422 a whole report). Stored in four v49 columns beside
+  `cap_cards_state` and exposed under the same `capabilities.cards_agent`
+  object. NULL is "this build cannot say", never OK.
+* **BROLL-8** `login_gate` carved out only
+  `/broll/api/fleet/ingest/batches/<32 hex>/...`, so the new discovery route a
+  companion learns batch uids from was 303'd into a login page. The collection
+  path is carved out exactly (`/?$`), **GET only**, credential still required;
+  `/broll/api/fleet/` at large stays closed.
+
+Deploy the dashboard before the companions, as always: the report fields above
+(youtube_import, parked, the cards detail) are ones a newer companion sends
+and an older dashboard would 422 or drop.
+
+
 ## Carryover — unchanged from before the 2026-08-11 hunt
 
 Full write-ups in `docs/bug-hunt-2026-08.md` and

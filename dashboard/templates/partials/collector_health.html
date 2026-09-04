@@ -48,6 +48,20 @@
 {% set plan = fleet.collector.enforce_plan %}
 <div class="side-head" style="margin-top:1.4rem">[ PENDING SHARE CHANGES ]</div>
 <div class="rule"></div>
+{# DCORE-16 (resilience sweep 2026-09-03): what the enforce cycle DID NOT
+   APPLY, in words. record_enforce_plan stores the diff the cycle was about to
+   apply and the `enforce_plan` alert fires on it, but the loop itself used to
+   stop dead on the first folder Syncthing refused: the thirty folders after
+   it were never attempted, while the stored plan still described all forty.
+   So the alert said "held" for shares that had in fact gone out and said
+   nothing about the ones that had not. The per-folder note is the answer, and
+   this is where an admin reads it. #}
+{% set held = (enforce_notes if enforce_notes is defined and enforce_notes
+               else (fleet.collector.enforce_notes if fleet.collector is defined
+                     and fleet.collector.enforce_notes is defined else [])) %}
+{% for n in held %}
+<div class="banner">▲ Sharing change held: {{ n.note }} ({{ n.at | ago }})</div>
+{% endfor %}
 {% if not plan %}
 <div class="muted">no enforce cycle has run yet</div>
 {% elif not plan.folders %}

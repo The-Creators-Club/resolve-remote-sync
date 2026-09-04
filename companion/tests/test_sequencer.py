@@ -2163,3 +2163,140 @@ def test_the_join_timeout_sits_above_the_lanes_own_stall_ceiling():
     assert lane_b_join_timeout(600) > rclone_lane.hard_ceiling_seconds(600)
     # A missing budget still yields a real bound, never zero or infinity.
     assert lane_b_join_timeout(None) > 0
+
+
+# -- wave 3 (2026-09-04): the machine says what it knows ----------------------
+#
+# SYNC-107 / SYNC-101 / SYNC-102. Every value here was already computed
+# somewhere in this module and readable nowhere: the plan, the shared folders
+# that failed, and the projects the server renamed under the editor's feet.
+
+
+class _PlanLane(FakeLane):
+    def __init__(self, name, events, state="syncing"):
+        super().__init__(name, events)
+        self._state = state
+
+    def status(self):
+        from ccsync_companion.sync.base import LaneStatus
+
+        return LaneStatus(name=self.name, state=self._state)
+
+
+def _plan_sequencer(tmp_path, selection, **cfg_overrides):
+    admin = FakeAdmin()
+    client = FakeSelectionClient(selection)
+    lane_a = _PlanLane("lane_a", admin.events, state="syncing")
+    lane_b = _PlanLane("lane_b", admin.events, state="idle")
+    seq = Sequencer(
+        lane_a, lane_b, admin, client,
+        _cfg(log_path=str(tmp_path / "companion.log"), **cfg_overrides),
+        folder_status_poll_seconds=0.02,
+    )
+    seq._update_known_selection(selection)
+    return seq, admin
+
+
+def _upload_only(slug, rel, position):
+    item = _item(slug, rel, position)
+    item["sync_mode"] = "upload_only"
+    return item
+
+
+def test_project_status_lists_the_plan_with_its_modes(tmp_path):
+    """SYNC-107: the only enumeration of this machine's plan an editor could
+    see was the stack of destructive buttons in ADVANCED, and "upload only"
+    appeared nowhere except inside the label of the one that deletes it."""
+    selection = [_item("s1", "2026/FF5/Animals", 0, label="Animals"),
+                 _upload_only("s2", "2026/FF5/Cards", 1)]
+    seq, _admin = _plan_sequencer(tmp_path, selection)
+    with seq._lock:
+        seq._current_slug = "s1"
+        seq._current_position, seq._current_total = 1, 2
+        seq._queue_slugs = ["s2"]
+        seq._state = "running"
+
+    rows = seq.project_status()
+    assert [r["slug"] for r in rows] == ["s1", "s2"]
+    assert rows[0]["label"] == "Animals"
+    assert rows[0]["mode"] == "full" and rows[0]["state"] == "syncing"
+    assert rows[0]["lanes"] == {"A": "syncing", "B": "idle", "C": "syncing"}
+    assert rows[1]["mode"] == "upload_only" and rows[1]["state"] == "waiting"
+    # The thing an upload-only editor has no other way to learn.
+    assert "Proxies do not come down" in rows[1]["detail"]
+    assert rows[1]["lanes"] == {"A": "waiting", "B": "off", "C": "off"}
+    assert all("—" not in (r["detail"] or "") for r in rows)
+
+
+def test_project_status_says_what_a_project_is_waiting_for(tmp_path):
+    selection = [_item("s1", "2026/FF5/Animals", 0)]
+    seq, _admin = _plan_sequencer(tmp_path, selection)
+    seq._ignores_unconfirmed.add("s1")
+    (row,) = seq.project_status()
+    assert row["state"] == "blocked" and "filter list" in row["detail"]
+
+
+def test_project_status_survives_a_lane_that_cannot_answer(tmp_path):
+    selection = [_item("s1", "2026/FF5/Animals", 0)]
+    seq, _admin = _plan_sequencer(tmp_path, selection)
+
+    def _boom():
+        raise RuntimeError("the lane is mid-restart")
+
+    seq.lane_a.status = _boom
+    with seq._lock:
+        seq._current_slug = "s1"
+        seq._state = "running"
+    assert seq.project_status()[0]["lanes"]["A"] == "unknown"
+
+
+def test_shared_folder_problems_come_from_both_managers(tmp_path):
+    seq, _admin = _plan_sequencer(tmp_path, [])
+
+    class _Manager:
+        def __init__(self, texts):
+            self.texts = texts
+
+        def problems(self):
+            return list(self.texts)
+
+    seq.shared_folders = _Manager(["The LUT library has not been shared."])
+    seq.borrowed_folders = _Manager(["2026/FF5/Lender has not been shared."])
+    assert seq.shared_folder_problems() == [
+        "The LUT library has not been shared.",
+        "2026/FF5/Lender has not been shared.",
+    ]
+
+    class _Broken:
+        def problems(self):
+            raise RuntimeError("no")
+
+    seq.shared_folders = _Broken()
+    assert seq.shared_folder_problems() == ["2026/FF5/Lender has not been shared."]
+
+
+def test_a_blocked_rename_reaches_the_project_line(tmp_path):
+    """SYNC-102: a project whose folder could not be moved is one project
+    quietly not syncing, and nothing anywhere said so."""
+    selection = [_item("s1", "2026/FF5/Animals", 0)]
+    seq, _admin = _plan_sequencer(tmp_path, selection)
+    seq.repather.ledger.record("s1", "old", "new", "Animals is not syncing because "
+                               "CC Sync could not move its folder.", relinked=None,
+                               moved=False)
+    (row,) = seq.project_status()
+    assert row["state"] == "blocked"
+    assert "could not move its folder" in row["detail"]
+    assert [e["slug"] for e in seq.repath_events()] == ["s1"]
+
+    # ...and the rename that finally worked clears it.
+    seq.repather.ledger.record("s1", "old", "new", "moved", relinked=True, moved=True)
+    assert seq.project_status()[0]["state"] != "blocked"
+
+
+def test_the_repather_is_built_with_this_machine_s_state_and_relink(tmp_path):
+    seq, _admin = _plan_sequencer(tmp_path, [])
+    assert seq.repather.ledger._path == tmp_path / "state" / "repath_events.json"
+    # The relink is file_moves', i.e. the one that takes a save point and
+    # writes the undo journal (CLAUDE.md's media-pool rule).
+    assert seq.repather._relink_fn == seq._relink_moved_project
+    assert seq.repath_events() == []

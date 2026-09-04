@@ -232,7 +232,12 @@ def test_a_third_concurrent_download_is_refused_not_queued(tmp_path, rclone_pres
     result = broll_fetch.poll_fetch(
         CFG, "a/one_too_many.mov", str(tmp_path / "one_too_many.mov"), runner=runner)
 
-    assert result == {"state": "failed", "message": broll_fetch.BUSY_MESSAGE}
+    # "busy", not "failed" (CMEDIA-7, 2026-09-04): the cap was always designed
+    # around the page's own 1.5 s re-POST being the retry, and the page loops
+    # only while the state is downloading -- so as a failure it was a red toast
+    # and the end of the attempt, with the editor told to come back later.
+    assert result == {"state": "busy", "message": broll_fetch.BUSY_MESSAGE,
+                      "retry_after": broll_fetch.BUSY_RETRY_AFTER_SECONDS}
     assert len(started) == broll_fetch.MAX_CONCURRENT_FETCHES
     # ...and the refused one registered nothing, so the next poll is a fresh
     # start rather than a job stuck in "failed".

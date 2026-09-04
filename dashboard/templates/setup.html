@@ -11,7 +11,13 @@
       <span class="muted">First-run wizard: every step here can be re-run later from Settings.</span>
     </div>
 
-    <div id="setup-error" class="banner" style="display:none"></div>
+    {# DUI-6 (usability sweep 2026-09-03): this banner is at the top of a page
+       whose checklist is at the bottom, so a failed [ DO IT ] on the last row
+       announced itself off screen - and showError(null) had no call site at
+       all, so one transient failure stayed up through every later success.
+       setup.js writes into the failing step's own slot now and falls back
+       here for anything with no step behind it. #}
+    <div id="setup-error" class="banner error-banner" style="display:none"></div>
 
     {# ---------------------------------------------------------- EULA #}
     <section class="card" style="margin-top:1rem">

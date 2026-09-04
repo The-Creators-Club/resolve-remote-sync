@@ -1666,3 +1666,169 @@ def test_list_project_dirs_folds_the_two_spellings_of_one_project(tmp_path):
 
     rels = fixer.list_project_dirs(str(tmp_path), extra_rels=[selected])
     assert rels == [walked]
+
+
+# ===========================================================================
+# RES-14 (2026-09-04): a CANCEL that is honoured while the source is a cloud
+# placeholder. `fsrc.read()` cannot be interrupted, so the chunk IS the
+# cancellation latency -- and during it the dialog has already disabled
+# STOP/SKIP/CANCEL and cannot even be closed.
+# ===========================================================================
+
+
+class _SlowSource:
+    """A file-like whose reads cost TIME on a fake clock.
+
+    22.2 MB/s is the live incident's rate (222 MB per 10 s hydrating a Google
+    Drive placeholder). No sleeps: the wall clock is not part of this
+    measurement and a test that waits for one is a test that flakes on CI.
+    """
+
+    BYTES_PER_SECOND = 22.2 * 1024 * 1024
+
+    def __init__(self, size, clock):
+        self._left = size
+        self._clock = clock
+
+    def read(self, count):
+        chunk = min(count, self._left)
+        self._left -= chunk
+        self._clock.advance(chunk / self.BYTES_PER_SECOND)
+        return b"A" * chunk
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+def test_a_cancel_is_honoured_within_two_seconds_of_a_slow_source(tmp_path,
+                                                                  monkeypatch):
+    clock = _FakeClock()
+    src = tmp_path / "placeholder.braw"
+    src.write_bytes(b"")
+    dst = tmp_path / "copy.braw"
+    slow = _SlowSource(4 * 1024 * 1024 * 1024, clock)
+    real_open = open
+
+    def fake_open(path, mode="r", *args, **kwargs):
+        if "r" in mode and str(path) == str(src):
+            return slow
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    monkeypatch.setattr(fixer.os.path, "getsize", lambda p: 4 * 1024 * 1024 * 1024)
+
+    pressed_at = 3.0
+    with pytest.raises(fixer.CopyAborted):
+        fixer.copy_with_progress(
+            src, dst, should_abort=lambda: clock.now >= pressed_at, clock=clock)
+
+    assert clock.now - pressed_at < 2.0, (
+        "the button the editor pressed must be answered inside two seconds")
+
+
+def test_a_read_slower_than_the_poll_budget_makes_the_next_one_smaller(tmp_path,
+                                                                       monkeypatch):
+    """A cold placeholder blocks for the whole hydration whatever it is
+    asked for, so the answer is to ask for less."""
+    clock = _FakeClock()
+    sizes = []
+    src = tmp_path / "cold.braw"
+    src.write_bytes(b"")
+    dst = tmp_path / "copy.braw"
+
+    class _Glacial(_SlowSource):
+        BYTES_PER_SECOND = 64 * 1024      # 1 MB would be 16 s
+
+        def read(self, count):
+            sizes.append(count)
+            return super().read(count)
+
+    glacial = _Glacial(64 * 1024 * 1024, clock)
+    real_open = open
+
+    def fake_open(path, mode="r", *args, **kwargs):
+        if "r" in mode and str(path) == str(src):
+            return glacial
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    monkeypatch.setattr(fixer.os.path, "getsize", lambda p: 64 * 1024 * 1024)
+
+    with pytest.raises(fixer.CopyAborted):
+        fixer.copy_with_progress(
+            src, dst, should_abort=lambda: clock.now >= 300.0, clock=clock)
+
+    assert sizes[0] == fixer.POLL_CHUNK_BYTES
+    assert sizes[-1] == fixer.MIN_CHUNK_BYTES
+    assert sizes[-1] < sizes[0], "the reads must shrink, not the copy stall"
+
+
+def test_a_cancel_between_clips_stops_the_replaceclip_loop(tmp_path,
+                                                           monkeypatch):
+    """The other half of the wedge: a clip cut in 50 places is 50
+    uninterruptible ReplaceClip calls and the loop consulted should_abort not
+    at all, so the dialog sat disabled for the whole batch."""
+    src = tmp_path / "A001.braw"
+    src.write_bytes(b"x" * 64)
+    local_root = tmp_path / "tree"
+    (local_root / "Media").mkdir(parents=True)
+
+    relinked = []
+    items = [{"clip_name": "a"}, {"clip_name": "b"}, {"clip_name": "c"}]
+    monkeypatch.setattr(fixer.resolve_bridge, "resolve_media_pool_item",
+                        lambda entry: entry)
+
+    def replace_clip(mpi, path):
+        relinked.append(mpi["clip_name"])
+        return {"ok": True}
+
+    result = fixer.fix_clip(
+        str(src), "Media", str(local_root), items,
+        replace_clip_fn=replace_clip,
+        # Pressed after the copy landed, while the relinks are running.
+        should_abort=lambda: len(relinked) >= 2,
+        dry_run=False,
+    )
+
+    assert relinked == ["a", "b"], "it must stop between clips, never mid-call"
+    assert result["aborted"] is True and result["partial_relink"] is True
+    assert result["relinked"] == 2
+    # The copy landed and the clips already repointed are correct: nothing
+    # here deletes, and the message says exactly how far it got.
+    assert result["copied_to"] and Path(result["copied_to"]).exists()
+    assert "2 of 3" in result["message"]
+    assert "—" not in result["message"]
+
+
+def test_an_abandoned_copy_never_appears_under_the_final_name(tmp_path):
+    """RES-14's other guarantee, pinned: the partial is a `.ccsync-tmp` and
+    the 0-byte O_EXCL reservation goes with it, so lane A can never upload a
+    truncated file under a name it could then never replace."""
+    src = tmp_path / "A002.braw"
+    src.write_bytes(b"y" * 4096)
+    local_root = tmp_path / "tree"
+    (local_root / "Media").mkdir(parents=True)
+
+    result = fixer.fix_clip(
+        str(src), "Media", str(local_root), [{"clip_name": "a"}],
+        should_abort=lambda: True,
+        replace_clip_fn=lambda mpi, path: {"ok": True},
+        dry_run=False,
+    )
+
+    assert result["aborted"] is True
+    assert list((local_root / "Media").iterdir()) == []

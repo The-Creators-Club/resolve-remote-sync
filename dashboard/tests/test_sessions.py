@@ -324,12 +324,21 @@ def test_login_throttle_is_generic_and_applies_to_the_html_form(strict, tmp_path
         for _ in range(sessions.LOGIN_FAILURE_LIMIT):
             page = client.post("/login", data={"username": "jsmith", "password": "no"})
             assert "sign-in refused" in page.text
-        # even the RIGHT password now waits, and says the same thing -- a
-        # throttle that answers differently is a username oracle
+        # Even the RIGHT password now waits, and DCORE-8 (2026-09-04) says how
+        # long: a person told to wait, with no idea whether it is one minute
+        # or sixty, retries, which is the one thing that does not help.
         page = client.post("/login", data={"username": "jsmith",
                                            "password": "correct-horse"})
-        assert "sign-in refused" in page.text
-        assert "too many" not in page.text.lower()
+        assert "Too many sign-in attempts. Try again in" in page.text
+        # It is still not a username oracle, and THAT is the property worth
+        # pinning: a username that does not exist is throttled the same way
+        # and told the same thing, because a failure is recorded for any name
+        # (auth.record_login_failure is unconditional).
+        for _ in range(sessions.LOGIN_FAILURE_LIMIT):
+            client.post("/login", data={"username": "nobody-at-all", "password": "no"})
+        ghost = client.post("/login", data={"username": "nobody-at-all",
+                                            "password": "correct-horse"})
+        assert "Too many sign-in attempts. Try again in" in ghost.text
 
 
 # ------------------------------------------------------------------- CSRF

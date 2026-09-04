@@ -1617,6 +1617,31 @@ def test_the_call_in_flight_is_readable_without_touching_the_bridge():
     assert resolve_bridge.bridge_activity() == {}
 
 
+def test_a_call_that_is_merely_answering_is_not_wedged(monkeypatch):
+    """RES-22: the tray line is derived from the last COMPLETED enumeration,
+    so a wedged call leaves it reading "Resolve: connected" for as long as it
+    lasts. `wedged_seconds` is 0 while a call is simply working, and the
+    threshold is BRIDGE_WEDGE_SECONDS -- the same one the log's wedge warning
+    uses, so a status line and the log cannot disagree."""
+    with resolve_bridge._bridge_call("ImportMedia"):
+        activity = resolve_bridge.bridge_activity()
+        assert activity["wedged_seconds"] == 0.0
+        assert activity["wedged_call"] is None
+
+        monkeypatch.setattr(resolve_bridge, "BRIDGE_WEDGE_SECONDS", 0.0)
+        wedged = resolve_bridge.bridge_activity()
+        assert wedged["wedged_call"] == "ImportMedia"
+        assert wedged["wedged_seconds"] == wedged["seconds"] >= 0.0
+
+    # Idle stays EMPTY, unchanged since 2026-08-14: every caller tests the
+    # dict for truth first, and a reader wanting the wedge keys from an idle
+    # bridge gets 0.0/None out of .get().
+    idle = resolve_bridge.bridge_activity()
+    assert idle == {}
+    assert idle.get("wedged_seconds", 0.0) == 0.0
+    assert idle.get("wedged_call") is None
+
+
 def test_a_nested_call_keeps_the_outer_name_and_does_not_deadlock():
     """Every public function calls connect() with the lock already held; the
     RLock lets it through and the OUTER call is the one worth naming."""

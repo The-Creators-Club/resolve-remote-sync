@@ -215,7 +215,10 @@ def test_menu_does_not_claim_nothing_syncs_when_login_is_not_required():
     app._require_login = False
     labels = _menu_labels(_build_menu(app))
     assert "Sign in…" in labels
-    assert not any("nothing syncs" in label for label in labels)
+    # The exact prompt, not any sentence with those two words in it: APP-13
+    # reworded Quit to "nothing syncs until you start it again", which is
+    # true on every machine whatever require_login says.
+    assert not any("nothing syncs until you do" in label for label in labels)
 
 
 def test_tooltip_does_not_claim_nothing_syncs_when_login_is_not_required():
@@ -371,11 +374,18 @@ def test_update_item_is_never_adjacent_to_quit():
 
 
 def test_quit_says_it_stops_syncing():
+    """APP-13 (sweep 2026-09-03): the old label promised the wrong way back.
+    identity.json persists, so a restarted companion syncs with no sign-in at
+    all, and a first-time editor read "until you next sign in" as "Quit will
+    log me out"."""
     from ccsync_companion.tray import _build_menu
 
     labels = _menu_labels(_build_menu(_FakeApp({"dashboard_url": ""})))
     quit_label = next(la for la in labels if la.startswith("Quit"))
-    assert "stops syncing" in quit_label
+    assert "nothing syncs until you start it again" in quit_label
+    assert "sign in" not in quit_label.lower()
+    # ...and the logon entry the installers write is the other way back.
+    assert "log in to this computer again" in quit_label
 
 
 def test_pause_label_carries_state():
@@ -2822,7 +2832,10 @@ def test_the_reduced_menu_matches_the_approved_shape_exactly():
         "Open dashboard",
         "Settings\u2026",
         "- - - -",
-        "Quit CCSync (stops syncing until you next sign in)",
+        # APP-13: Restart joined Quit in the bottom block (sweep 2026-09-03).
+        "Restart CCSync",
+        "Quit CCSync (nothing syncs until you start it again, or log in to "
+        "this computer again)",
     ]
 
 
@@ -2879,16 +2892,16 @@ def test_open_my_project_folder_was_renamed_to_open_my_sync_drive():
     assert not any("project folder" in l for l in labels)
 
 
-def test_open_my_sync_drive_opens_local_root(monkeypatch):
+def test_open_my_sync_drive_opens_local_root(monkeypatch, tmp_path):
     from ccsync_companion import tray as tray_mod
 
-    app = _FakeApp({"dashboard_url": "", "local_root": "P:\\Creators_Club"})
+    app = _FakeApp({"dashboard_url": "", "local_root": str(tmp_path)})
     opened = []
     monkeypatch.setattr(tray_mod, "_open_log", lambda path: opened.append(str(path)))
     monkeypatch.setattr(tray_mod, "_spawn", lambda a, label, fn: fn())
 
     tray_mod.action_open_sync_drive(app)
-    assert opened == ["P:\\Creators_Club"]
+    assert opened == [str(tmp_path)]
 
 
 def test_settings_menu_item_opens_the_settings_window(monkeypatch):

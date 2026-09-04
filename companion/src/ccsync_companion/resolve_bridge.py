@@ -150,19 +150,40 @@ class _bridge_call:
 
 
 def bridge_activity() -> dict[str, Any]:
-    """{"call": str, "seconds": float} for the fusionscript call in flight.
+    """{"call", "seconds", "wedged_seconds", "wedged_call"} for the
+    fusionscript call in flight.
 
-    Empty when nothing is inside Resolve. Cached facts only -- no lock on the
-    bridge itself, no probe, no I/O -- so a tray snapshot or the reporter may
-    call it on their own threads, which is the whole point: the one thread
-    that knows a call is wedged is the one that cannot say so.
+    EMPTY when nothing is inside Resolve, unchanged since 2026-08-14: every
+    caller tests the dict for truth first, and a reader wanting the wedge
+    keys from an idle bridge gets 0.0/None out of `.get`.
+
+    `wedged_seconds` is 0.0 while a call is merely ANSWERING and the call's
+    age once it passes BRIDGE_WEDGE_SECONDS -- the same threshold the log's
+    wedge warning uses, so a status line and the log cannot disagree about
+    what is wedged (RES-22, 2026-09-04). It exists because the tray's
+    "Resolve: connected" is derived from the last COMPLETED enumeration: a
+    wedged ImportMedia against a share that went away leaves that line
+    reading connected for as long as it lasts, while every Resolve feature
+    does nothing.
+
+    Cached facts only -- no lock on the bridge itself, no probe, no I/O -- so
+    a tray snapshot or the reporter may call it on their own threads, which
+    is the whole point: the one thread that knows a call is wedged is the one
+    that cannot say so.
     """
     with _CALL_STATE_LOCK:
         current = _call_in_flight
     if current is None:
         return {}
     name, _ident, started = current
-    return {"call": name, "seconds": max(0.0, time.monotonic() - started)}
+    seconds = max(0.0, time.monotonic() - started)
+    wedged = seconds >= BRIDGE_WEDGE_SECONDS
+    return {
+        "call": name,
+        "seconds": seconds,
+        "wedged_seconds": seconds if wedged else 0.0,
+        "wedged_call": name if wedged else None,
+    }
 
 
 def api_call(name: str) -> "_bridge_call":

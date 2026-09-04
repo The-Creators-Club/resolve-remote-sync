@@ -21,7 +21,11 @@
      hx-get="/partials/admin/jobs{% if show_finished %}?finished=1{% endif %}"
      hx-trigger="every 15s [document.visibilityState === 'visible']"
      hx-swap="outerHTML">
-  {% if error %}<div class="banner">▲ {{ error }}</div>{% endif %}
+  {# DUI-6: `error-banner` is what static/htmx_errors.js moves next to the button
+     that caused it. This panel swaps outerHTML, which preserves scroll, so a
+     refusal used to render a screen or two above the click that earned it. An
+     error with no control behind it stays here, which is where it belongs. #}
+  {% if error %}<div class="banner error-banner">▲ {{ error }}</div>{% endif %}
   {% if notice %}<div class="banner">{{ notice }}</div>{% endif %}
 
   <div class="admin-users-box">

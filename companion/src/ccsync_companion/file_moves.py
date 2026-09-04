@@ -215,6 +215,73 @@ def apply_move(move: dict[str, Any], local_root: str) -> tuple[bool, str, Option
     return True, detail, (str(src), str(dest))
 
 
+def relink_moved(old_local: str, new_local: str, local_root: str,
+                 canonical_prefix: str, is_dir: bool = True) -> tuple[bool, str]:
+    """Repoint every media pool clip under `old_local` to `new_local`.
+    Returns (matched, detail).
+
+    `matched` is "a media pool walk actually found clips at the old path",
+    the only thing that retires a pending relink (RES-10): a Resolve that is
+    closed, or open on another project, has not answered the question.
+
+    The twin of CompanionApp._relink_moved, and here rather than there
+    because sync/repath.py needs the same act for a whole PROJECT DIRECTORY
+    the admin renamed on the server (SYNC-102, sweep 2026-09-03) and cannot
+    import the app. Every write still goes through resolve_bridge.replace_clip
+    -- save point plus undo journal, the CLAUDE.md rule -- and `connect()`
+    stays the only caller of scriptapp (CR-68). Never raises: a Resolve that
+    is busy is reported, not treated as a failed move; the files HAVE moved
+    either way, and the fixer meets an offline clip like any other.
+    """
+    try:
+        from . import canon, resolve_bridge
+
+        result = resolve_bridge.get_media_pool_items()
+        if not result.get("ok"):
+            return False, f"Resolve not relinked ({result.get('message') or 'not open'})"
+        old_n = os.path.normcase(os.path.normpath(old_local))
+        relinked = failed = 0
+        for item in result.get("items") or []:
+            file_path = str(item.get("file_path") or "")
+            local = canon.canonical_to_local(file_path, local_root, canonical_prefix) \
+                or file_path
+            local_n = os.path.normcase(os.path.normpath(local))
+            if is_dir:
+                if not (local_n == old_n or local_n.startswith(old_n.rstrip("\\/") + os.sep)):
+                    continue
+                target = os.path.join(new_local, os.path.relpath(local, old_local)) \
+                    if local_n != old_n else new_local
+            elif local_n == old_n:
+                target = new_local
+            else:
+                continue
+            clip = resolve_bridge.resolve_media_pool_item(item)
+            if clip is None:
+                failed += 1
+                continue
+            canonical = canon.local_to_canonical(target, local_root, canonical_prefix)
+            outcome = resolve_bridge.replace_clip(clip, canonical, source="file_move")
+            if outcome.get("ok"):
+                relinked += 1
+            else:
+                failed += 1
+                log.warning("relink: could not repoint %s -> %s: %s",
+                            file_path, canonical, outcome.get("message"))
+        if not relinked and not failed:
+            return False, ""
+        text = f"{relinked} Resolve clip(s) relinked"
+        if failed:
+            text += f", {failed} could not be"
+        # A walk that FOUND the old path answered the question, even where
+        # some of the writes were refused: the app's own _relink_moved_result
+        # draws the line in exactly this place, and a clip Resolve will not
+        # let us repoint is not something another pass fixes.
+        return True, text
+    except Exception:
+        log.exception("relink: the Resolve relink failed")
+        return False, "Resolve relink failed (see the log)"
+
+
 class FileMoveLedger:
     """What this machine has done about each move it was told of."""
 

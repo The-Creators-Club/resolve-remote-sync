@@ -795,3 +795,34 @@ def test_the_unfiltered_sentence_names_at_most_five_projects():
     text = SyncthingLane.unfiltered_sentence([f"p{i}" for i in range(7)])
     assert text.startswith("7 project(s) are not sharing yet")
     assert "+2 more" in text
+
+
+# -- SYNC-101: the shared folders nobody could see -----------------------------
+
+
+def test_a_shared_folder_problem_rides_in_the_lane_detail(fake_syncthing_server):
+    """SYNC-101 (sweep 2026-09-03): the LUT library and the borrowed lender
+    folders are lane C folders no selection names, so one the server never
+    shared with this device failed forever with nothing to show for it. It is
+    `detail`, not the state: a library nobody shared is not a reason to call
+    the lane that IS syncing the editor's projects broken."""
+    lane = _lane_for(
+        fake_syncthing_server, expected_folder_ids=["proj-1"],
+        shared_folder_problems_fn=lambda: [
+            "Assets/Luts (LUT library) has not been shared with this computer yet. "
+            "Ask your admin to approve it."])
+    status = lane.check_once()
+    assert status.state == STATE_IDLE
+    assert "LUT library" in status.detail
+    assert "—" not in status.detail
+
+
+def test_a_failing_shared_folder_probe_never_takes_the_lane_report_down(
+        fake_syncthing_server):
+    def _boom():
+        raise RuntimeError("no")
+
+    lane = _lane_for(fake_syncthing_server, expected_folder_ids=["proj-1"],
+                     shared_folder_problems_fn=_boom)
+    assert lane.check_once().state == STATE_IDLE
+    assert lane.shared_folder_problems() == []

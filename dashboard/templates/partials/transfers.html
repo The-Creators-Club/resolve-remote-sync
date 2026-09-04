@@ -4,6 +4,18 @@
   <span class="muted mono-sm">{{ transfers.fleet_speed_bps | human_bytes }}/s total</span>
 </div>
 <div class="rule"></div>
+{# DUI-19 (usability sweep 2026-09-03): the one sentence the editor came for.
+   This panel is good at what is MOVING and never composed it: they had to
+   read a percentage bar, a "12 files, 4.2 GB, ETA 26m" line and a
+   [ GETTING READY ] chip and do the synthesis themselves, and the question
+   they actually have is whether the lid can close. Uploads decide it (a
+   download resumes; footage that has not gone up is on one disk). Absent for
+   an admin's fleet-wide view, which has no "this computer" -
+   ui.safe_to_close returns None there. #}
+{% if safe_to_close is defined and safe_to_close %}
+<div class="{{ 'muted' if safe_to_close.safe else 'amber-text' }}" style="margin-bottom:0.6rem">
+  {{ safe_to_close.sentence }}</div>
+{% endif %}
 {% if transfers.transfers %}
 {# Both tables stack on a phone (MOBILE_PLAN.md M2, 2026-08-30): a file name
    is the widest thing on this page and the one nobody can afford to have

@@ -89,6 +89,17 @@ DEVTOOLS_READY_SECONDS = 30
 # instead of a window vanishing. The user chose two seconds (2026-08-17).
 DONE_PAGE_SECONDS = 2.0
 POLL_SECONDS = 1.0
+# How often the caller's `progress` hears from us while the person is signing
+# in (CYT-15, 2026-09-04). The whole wait used to be ONE balloon on launch and
+# then silence for up to ten minutes: an editor who got distracted came back to
+# a closed browser window and an expired balloon, with nothing anywhere saying
+# what had happened or that closing the window was the way to cancel.
+PROGRESS_SECONDS = 5.0
+
+# The phases the caller is told about, in the words an editor reads (the
+# first one names the browser, so it is built at the call site).
+PHASE_WAITING = "waiting for you to finish signing in"
+PHASE_SAVING = "signed in, saving your session"
 
 # Only these domains go into the file. yt-dlp reads youtube.com; the
 # .google.com session cookies are what a full manual export carries too and
@@ -490,7 +501,7 @@ def run(
     clock=time.monotonic,
     login_timeout: float = LOGIN_TIMEOUT_SECONDS,
     done_page_seconds: float = DONE_PAGE_SECONDS,
-    progress: Optional[Callable[[str], None]] = None,
+    progress: Optional[Callable[[float, float, str], None]] = None,
 ) -> Outcome:
     """The whole thing. Never raises; returns an Outcome the tray can show.
 
@@ -521,8 +532,26 @@ def run(
     except OSError as exc:
         return Outcome(False, f"couldn't start {browser.name} ({exc})")
     log.info("ytdl sign-in: launched %s with a private profile, devtools on 127.0.0.1:%d", browser.name, port)
-    if progress:
-        progress(f"{browser.name} is opening. Sign in to YouTube in that window")
+
+    started = clock()
+
+    def _say(phase: str) -> None:
+        """Tell the caller how long this has been going and how long is left.
+
+        `(elapsed_s, remaining_s, phase)` (CYT-15): the tray owns the wording
+        of the balloon, this owns the clock -- and it must never be able to
+        take the sign-in down, so a caller that raises costs a log line.
+        """
+        if progress is None:
+            return
+        try:
+            elapsed = max(0.0, clock() - started)
+            progress(elapsed, max(0.0, float(login_timeout) - elapsed), phase)
+        except Exception:  # noqa: BLE001
+            log.debug("ytdl sign-in: the progress callback failed", exc_info=True)
+
+    _say(f"{browser.name} is opening. Sign in to YouTube in that window. "
+         f"Close the window to cancel.")
 
     session: Optional[CdpSession] = None
     try:
@@ -535,7 +564,11 @@ def run(
 
         end = clock() + login_timeout
         cookies: list[dict] = []
+        next_say = clock() + PROGRESS_SECONDS
         while clock() < end:
+            if clock() >= next_say:
+                next_say = clock() + PROGRESS_SECONDS
+                _say(PHASE_WAITING)
             if not _alive(proc):
                 return Outcome(False, "the browser was closed before the sign-in finished - nothing saved")
             try:
@@ -558,8 +591,15 @@ def run(
                 break
             sleep(POLL_SECONDS)
         else:
-            return Outcome(False, "the sign-in did not finish in time - nothing saved; try again")
+            # The next action, named (CYT-15): "nothing saved" told the editor
+            # what did not happen and left them with no idea what to do about
+            # it, and the balloon that said the window was open had expired
+            # long before this one arrived.
+            return Outcome(False, "the sign-in did not finish in time. Nothing "
+                                  "was saved - try again from Settings > "
+                                  "YOUTUBE")
 
+        _say(PHASE_SAVING)
         text = netscape_text(relevant(cookies))
         ok, message = install_text(text)
         if not ok:

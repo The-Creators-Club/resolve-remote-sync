@@ -1758,3 +1758,66 @@ def test_a_checkpoint_is_not_lost_to_a_thread_adding_a_key(tmp_path, caplog):
     saved = json.loads(ingestor.state_path.read_text(encoding="utf-8"))
     assert saved["batch"]["batch_id"] == "b1"
     assert len(saved["batch"]["items"]) == 300
+
+
+# ---------------------------------------------------------------------------
+# BROLL-5 / CMEDIA-10: a failed clip can be retried, and says why it failed
+# ---------------------------------------------------------------------------
+
+
+def _staged(ing, name="clip.mov"):
+    status, answer = ing.prepare({"items": [{"local_id": "l1", "name": name,
+                                             "source": "upload", "size": 4096}]})
+    assert status == 202, answer
+    return answer["staging_id"]
+
+
+def test_a_failed_upload_can_be_re_queued(tmp_path):
+    """BROLL-5: `item.error` used to be permanent for the life of the page --
+    the pump skips a clip that has one, so a hotel-wifi blip at 95% of a 4 GB
+    file failed one clip of a 200-clip drop for good."""
+    ing = make_ingestor(tmp_path)
+    staging_id = _staged(ing)
+    entry = ing._staging[staging_id]["items"]["l1"]
+    entry.update(state=broll_ingest.STAGED_FAILED, error="upload failed")
+    partial = Path(entry["path"] + ".partial")
+    partial.parent.mkdir(parents=True, exist_ok=True)
+    partial.write_bytes(b"half a body")
+
+    status, answer = ing.retry({"staging_id": staging_id, "items": ["l1"]})
+
+    assert (status, answer) == (200, {"ok": True, "retried": 1})
+    assert entry["state"] == broll_ingest.STAGED_WAITING
+    assert entry["error"] == ""
+    # The half-body goes with it: _stream_body_to renames only on a complete
+    # body, so a stale .partial is the only litter there can be.
+    assert not partial.exists()
+
+
+def test_retrying_something_that_is_not_failed_is_a_no_op_not_an_error(tmp_path):
+    """Two clicks must mean what one click meant."""
+    ing = make_ingestor(tmp_path)
+    staging_id = _staged(ing)
+
+    assert ing.retry({"staging_id": staging_id}) == (200, {"ok": True, "retried": 0})
+    assert ing.retry({}) == (200, {"ok": True, "retried": 0})
+    assert ing.retry({"staging_id": "../../etc"})[0] == 400
+
+
+def test_the_progress_body_names_the_failures_not_just_a_count(tmp_path):
+    """CMEDIA-10: the reason is on the item and reached nobody -- the tray said
+    "3 clip(s) could not be indexed. See the log"."""
+    ing = make_ingestor(tmp_path)
+    ing._batch = {"uid": "b" * 32, "state": "running", "items": [
+        {"uid": "i1", "name": "one.mov", "stage": broll_ingest.ITEM_FAILED,
+         "error": "the source file is not on this machine any more"},
+        {"uid": "i2", "name": "two.mov", "stage": broll_ingest.ITEM_LIVE},
+    ]}
+
+    body = ing.progress()
+
+    assert body["failed_items"] == [
+        {"name": "one.mov",
+         "error": "the source file is not on this machine any more"}]
+    assert body["batch"]["failed_items"] == body["failed_items"]
+    assert ing.status()["failed_items"] == body["failed_items"]

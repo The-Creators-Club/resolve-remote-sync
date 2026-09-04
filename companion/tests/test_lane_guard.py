@@ -1120,3 +1120,45 @@ def test_the_sequencer_prunes_the_trash_on_a_lane_that_keeps_failing():
 
     seq.lane_b._maybe_prune_trash = boom
     seq._prune_trash()  # fault-isolated, exactly like _check_remote_root
+
+
+# -- SYNC-112: the recovery folder can be named, opened and explained --------
+
+def test_trash_summary_counts_the_folder_in_one_walk(tmp_path):
+    """SYNC-112 (sweep 2026-09-03): `.ccsync-trash` is the whole "nothing was
+    deleted" story and the editor had no way to open it, no idea how much was
+    in it and no warning that the copies expire."""
+    _trash_batch(tmp_path, "20260701-000000", age_days=30, size=500)
+    _trash_batch(tmp_path, "20260817-000000", age_days=1, size=1500)
+    summary = lane_guard.trash_summary(str(tmp_path), max_age_days=14, now=1.0)
+    assert summary["path"].endswith(lane_guard.TRASH_DIR_NAME)
+    assert summary["count"] == 2 and summary["bytes"] == 2000
+    assert summary["retention_days"] == 14
+    # The OLDEST batch, from the directory name _backup_dir wrote.
+    assert summary["oldest"] == lane_guard.batch_stamp("20260701-000000")
+
+
+def test_trash_summary_is_cached_then_refreshed(tmp_path):
+    _trash_batch(tmp_path, "20260701-000000", age_days=30, size=500)
+    first = lane_guard.trash_summary(str(tmp_path), now=1000.0)
+    _trash_batch(tmp_path, "20260817-000000", age_days=1, size=1500)
+    assert lane_guard.trash_summary(str(tmp_path), now=1010.0) == first
+    later = lane_guard.trash_summary(
+        str(tmp_path), now=1000.0 + lane_guard.TRASH_SUMMARY_CACHE_SECONDS + 1)
+    assert later["count"] == 2
+
+
+def test_trash_summary_of_a_machine_with_no_trash_is_zero_not_none(tmp_path):
+    """"Nothing has ever been trashed" and "the walk failed" are different
+    answers: only the second is None."""
+    summary = lane_guard.trash_summary(str(tmp_path), now=2000.0)
+    assert summary["count"] == 0 and summary["bytes"] == 0
+    assert summary["oldest"] is None
+
+
+def test_a_prune_drops_the_cached_summary(tmp_path):
+    _trash_batch(tmp_path, "20260701-000000", age_days=30, size=500)
+    _trash_batch(tmp_path, "20260817-000000", age_days=1, size=1500)
+    assert lane_guard.trash_summary(str(tmp_path), now=3000.0)["count"] == 2
+    lane_guard.prune_trash(str(tmp_path), max_age_days=14)
+    assert lane_guard.trash_summary(str(tmp_path), now=3001.0)["count"] == 1

@@ -1868,6 +1868,23 @@ class DownloadJob:
         self.done = 0
         self.failed = 0
         self.clip: Optional[str] = None
+        # The job as an editor would name it (CYT-2, 2026-09-04): the search
+        # folder the manifest names, falling back to the project label. Set
+        # once, when the manifest arrives -- before that there is nothing on
+        # this machine that knows what the job is about.
+        self.title: Optional[str] = None
+        # The last file this job actually landed, for the progress mirror.
+        self.file: Optional[str] = None
+        # WHY this machine gave the whole job back, in editor English
+        # (CYT-11, 2026-09-04). Every one of the whole-job refusals below used
+        # to be one log.warning and a lease left to expire: the page kept
+        # saying "downloading on your machine" until the reclaim flipped it,
+        # minutes later, with no reason attached. It survives the job in
+        # `_LAST`, which is what the SPA polls after the 202.
+        self.handed_back_reason: Optional[str] = None
+        # Set by cancel_job/cancel_all (CYT-14) so the mirror can tell "the
+        # editor stopped this" from "this machine handed it back".
+        self.cancelled = False
         # The clip in flight, from yt-dlp's own progress line (2026-08-25):
         # bytes so far, the total it expects (or estimates), and its rate in
         # bytes/s. None = not known yet, or between clips (merging, the pause).
@@ -1902,7 +1919,11 @@ class DownloadJob:
                     "bytes_done": self.bytes_done,
                     "bytes_total": self.bytes_total,
                     "speed_bps": self.speed_bps,
-                    "phase": self.phase}
+                    "phase": self.phase,
+                    "title": self.title,
+                    "file": self.file,
+                    "cancelled": self.cancelled,
+                    "handed_back_reason": self.handed_back_reason}
 
     def _on_ytdlp_line(self, line: str) -> None:
         """One line of yt-dlp's stdout. Only the progress template's lines
@@ -1947,6 +1968,30 @@ class DownloadJob:
                  "downloads what is missing", self.job_id, why)
         self._kill_proc()
 
+    def hand_back(self, why: str) -> None:
+        """Record WHY this machine is giving the whole job back (CYT-11).
+
+        Not a state change and not a message to the server: there is no
+        release endpoint (see _run's finally), so the hand-back is still the
+        lease expiring. This is the sentence the SPA can show in the meantime,
+        and it survives the job in `_LAST`. Editor English, present tense,
+        naming what happens next -- an editor reads this in a browser toast,
+        not in a log.
+        """
+        self._set(handed_back_reason=str(why or "") or None)
+
+    def cancel(self, why: str) -> None:
+        """The editor stopped this download on this machine (CYT-14).
+
+        stop() plus a reason: the child dies, the run loop's next
+        _should_stop() cleans this clip's own partials (so nothing is left
+        under the final name), the heartbeat ends and the lease expires --
+        which is the same ending every other hand-back on this path has, and
+        the server then downloads what is missing.
+        """
+        self._set(cancelled=True, handed_back_reason=str(why or "") or None)
+        self.stop()
+
     def stop(self) -> None:
         """Tray shutdown. Same shape as broll_fetch.stop_all's cancel: killing
         mid-download is safe, because the litter it leaves is id-scoped and the
@@ -1990,6 +2035,9 @@ class DownloadJob:
         cap = capabilities(self.deps)
         if not cap["ok"]:
             log.info("ytdl: job %s not started -- %s", self.job_id, cap["reason"])
+            self.hand_back(f"This computer cannot download right now: "
+                           f"{cap['reason']}. The server is downloading these "
+                           f"clips.")
             return
 
         # BEFORE the claim (§7, the 0.7.x free-space lesson). The claim body
@@ -2001,6 +2049,10 @@ class DownloadJob:
                 "ytdl: %.1f GB free on this machine but a download job needs "
                 "about %.1f GB -- not claiming job %s. The server downloads it.",
                 free / 1_000_000_000, needed / 1_000_000_000, self.job_id)
+            self.hand_back(
+                f"This computer has {free / 1_000_000_000:.1f} GB free and this "
+                f"download needs about {needed / 1_000_000_000:.1f} GB, so the "
+                f"server is downloading it instead.")
             return
 
         editor = cap["editor"]
@@ -2048,6 +2100,10 @@ class DownloadJob:
             log.warning("ytdl: job %s speaks naming template %s, this build "
                         "speaks %s -- handing it back", self.job_id, template,
                         ytdl_common.TEMPLATE_VERSION)
+            self.hand_back("This computer names downloaded clips differently "
+                           "from the server, so it handed the job back. The "
+                           "server is downloading these clips. Updating the "
+                           "companion fixes it.")
             return
 
         # The other half of the same handshake (COMP-BROLL-6). Checked here as
@@ -2060,6 +2116,10 @@ class DownloadJob:
             log.warning("ytdl: job %s wants credits sidecar version %s, this "
                         "build writes %s -- handing it back", self.job_id,
                         sidecar, ytdl_common.SIDECAR_VERSION)
+            self.hand_back("This computer writes clip credits in an older "
+                           "format than the server asked for, so it handed the "
+                           "job back. The server is downloading these clips. "
+                           "Updating the companion fixes it.")
             return
 
         quality = str(manifest.get("quality") or "").strip()
@@ -2073,6 +2133,10 @@ class DownloadJob:
             log.info("ytdl: job %s is a %s job, which only the server can name "
                      "correctly -- letting the lease expire", self.job_id,
                      quality or "(no quality)")
+            self.hand_back(
+                f"Only the server downloads {quality or 'this quality'} clips, "
+                f"so this computer handed the job back. The server is "
+                f"downloading them.")
             return
 
         label = manifest.get("project_label")
@@ -2084,6 +2148,9 @@ class DownloadJob:
             log.warning("ytdl: job %s named a destination this machine cannot "
                         "resolve (%r) -- downloading nothing", self.job_id,
                         manifest.get("project_rel_path"))
+            self.hand_back("This computer could not work out where these clips "
+                           "belong on its own disk, so it handed the job back. "
+                           "The server is downloading them.")
             return
         # RE-CHECKED HERE, with the full probe (comp-ytdl-1, 2026-08-21):
         # capabilities() answered when the SPA asked, the claim and the
@@ -2096,13 +2163,25 @@ class DownloadJob:
             log.warning("ytdl: job %s -- this machine's tree is not mounted, so "
                         "nothing is being downloaded into %s (the server will)",
                         self.job_id, outdir)
+            self.hand_back("This computer's project drive is not connected, so "
+                           "it handed the job back. The server is downloading "
+                           "these clips.")
             return
         try:
             Path(outdir).mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             log.warning("ytdl: could not create %s (%s) -- downloading nothing",
                         outdir, exc)
+            self.hand_back("This computer could not create the folder these "
+                           "clips go in, so it handed the job back. The server "
+                           "is downloading them.")
             return
+
+        # What the SPA calls this job in the progress mirror (CYT-2). The
+        # search folder is what the editor typed; the label is the fallback for
+        # a URL job, which has no term.
+        self._set(title=(str(manifest.get("term_dir") or "").strip()
+                         or str(label or "").strip() or None))
 
         clips = [c for c in (manifest.get("clips") or []) if isinstance(c, dict)]
         pause = _positive_number(manifest.get("download_pause_seconds"),
@@ -2129,6 +2208,11 @@ class DownloadJob:
                             "of %d and handing the rest back to the server",
                             self.job_id, self._identical_failures, wall,
                             index + 1, len(clips))
+                self.hand_back(
+                    f"{self._identical_failures} clips in a row failed the same "
+                    f"way on this computer ({wall}), so it stopped at clip "
+                    f"{index + 1} of {len(clips)} and handed the rest back. The "
+                    f"server is downloading them.")
                 return
             if index:
                 # Residential pacing, server-provided (§7): the NAS's 3 s is a
@@ -2159,6 +2243,9 @@ class DownloadJob:
         if not wanted:
             log.warning("ytdl: job %s named no project label -- downloading "
                         "nothing", self.job_id)
+            self.hand_back("The download did not say which project it belongs "
+                           "to, so this computer handed it back. The server is "
+                           "downloading these clips.")
             return False
         if self.deps.is_base_rig:
             root = projects_root(self.deps.cfg)
@@ -2178,17 +2265,25 @@ class DownloadJob:
             log.warning("ytdl: job %s names project %r, which is not in this "
                         "base rig's tree -- downloading nothing", self.job_id,
                         label)
+            self.hand_back(f"This computer has no folder for {label}, so it "
+                           f"handed the download back. The server is "
+                           f"downloading these clips.")
             return False
         labels = self.deps.selection_labels()
         if labels is None:
             log.warning("ytdl: job %s names project %r and this machine cannot "
                         "confirm what it syncs -- downloading nothing (the "
                         "server will)", self.job_id, label)
+            self.hand_back(f"This computer could not check whether it syncs "
+                           f"{label}, so it handed the download back. The "
+                           f"server is downloading these clips.")
             return False
         if wanted in labels:
             return True
         log.warning("ytdl: job %s names project %r, which this machine does not "
                     "sync -- downloading nothing", self.job_id, label)
+        self.hand_back(f"This computer does not sync {label}, so it handed the "
+                       f"download back. The server is downloading these clips.")
         return False
 
     # -- one clip ---------------------------------------------------------
@@ -2286,7 +2381,7 @@ class DownloadJob:
                                 filepath_rel=name, note=note,
                                 title=credits.get("title"),
                                 channel=credits.get("channel"))
-        self._set(done=self.done + 1)
+        self._set(done=self.done + 1, file=name)
         self._current = None
         # A clip that landed is proof the wall is not there any more, so the
         # breaker counts CONSECUTIVE failures and this is where the count dies.
@@ -3093,6 +3188,156 @@ def start(job_id: Any, deps: Deps) -> tuple[int, dict]:
     return 202, {"ok": True, "job_id": job_id, "state": "started"}
 
 
+# What GET /ytdl/progress answers with when there is nothing to say. A LIST,
+# always (CYT-2): the page renders rows, and "no rows" must not be a different
+# shape from "one row" or every consumer needs two code paths.
+def snapshot() -> dict:
+    """`{"jobs": [row, ...]}` -- GET /ytdl/progress's body (CYT-2, 2026-09-04).
+
+    One row at most: this machine runs one download job at a time (see
+    _GUARD). The row is the RUNNING job, or the last one this session, so a
+    page that polls after the job ended still learns how it ended -- including
+    a hand-back reason (CYT-11) or a cancel (CYT-14), neither of which the
+    server rows can explain, because neither is anything the server was told.
+
+    The fields are derived here rather than in the browser so the tray, the
+    b-roll page and the downloader page all read one arithmetic: `percent` and
+    `eta_seconds` are the CLIP in flight (which is what a per-clip bar wants),
+    `done`/`total` are the job. Everything is None when it is not known --
+    never 0, which reads as "nothing has happened" when the truth is "nobody
+    has said yet".
+    """
+    job = current_job()
+    raw = job.snapshot() if job is not None else None
+    if raw is None:
+        with _GUARD:
+            raw = dict(_LAST) if _LAST else None
+    if raw is None:
+        return {"jobs": []}
+    return {"jobs": [progress_row(raw)]}
+
+
+def progress_row(snap: dict) -> dict:
+    """One snapshot as the pages read it. Pure; never raises."""
+    snap = snap or {}
+    done = int(snap.get("done") or 0)
+    total = int(snap.get("total") or 0)
+    failed = int(snap.get("failed") or 0)
+    running = bool(snap.get("running"))
+    reason = snap.get("handed_back_reason") or None
+    if running:
+        phase = str(snap.get("phase") or "starting")
+    elif snap.get("cancelled"):
+        phase = "cancelled"
+    elif reason:
+        phase = "handed_back"
+    else:
+        phase = "finished"
+    return {
+        "job_id": snap.get("job_id"),
+        "title": snap.get("title") or None,
+        "phase": phase,
+        "percent": _clip_percent(snap),
+        "speed": _speed_text(snap.get("speed_bps")),
+        "eta_seconds": _clip_eta(snap),
+        "file": snap.get("file") or None,
+        "handed_back_reason": reason,
+        # Extras, additive: "clip 3 of 12" needs the counters, and the SPA
+        # cannot get them from anywhere else in the first seconds.
+        "clip": snap.get("clip") or None,
+        "done": done,
+        "failed": failed,
+        "total": total,
+        "running": running,
+    }
+
+
+def _clip_percent(snap: dict) -> Optional[float]:
+    """The clip in flight, 0-100 with one decimal, or None when unknown."""
+    try:
+        done = snap.get("bytes_done")
+        total = snap.get("bytes_total")
+        if not isinstance(done, (int, float)) or not isinstance(total, (int, float)):
+            return None
+        if total <= 0:
+            return None
+        return round(max(0.0, min(100.0, 100.0 * float(done) / float(total))), 1)
+    except Exception:
+        return None
+
+
+def _speed_text(speed_bps: Any) -> Optional[str]:
+    """`4.2 MB/s`, or None. Decimal MB, matching every other rate this fleet
+    shows (rclone's, the model download's)."""
+    try:
+        rate = float(speed_bps)
+    except (TypeError, ValueError):
+        return None
+    if rate <= 0:
+        return None
+    if rate >= 1_000_000:
+        return f"{rate / 1_000_000:.1f} MB/s"
+    if rate >= 1_000:
+        return f"{rate / 1_000:.0f} KB/s"
+    return f"{int(rate)} B/s"
+
+
+def _clip_eta(snap: dict) -> Optional[int]:
+    """Seconds left on the clip in flight, or None.
+
+    The CLIP, not the job: the clips of one search differ by an order of
+    magnitude in length, so an average over them would be a number that moves
+    backwards -- and a countdown that goes up is worse than no countdown.
+    """
+    try:
+        done = snap.get("bytes_done")
+        total = snap.get("bytes_total")
+        rate = float(snap.get("speed_bps") or 0)
+        if not isinstance(done, (int, float)) or not isinstance(total, (int, float)):
+            return None
+        left = float(total) - float(done)
+        if rate <= 0 or left <= 0:
+            return None
+        return int(left / rate)
+    except Exception:
+        return None
+
+
+def cancel_job(job_id: Any = None) -> bool:
+    """Stop the download this machine is running. -> did anything stop?
+
+    CYT-14 (2026-09-04): until this existed the only way to stop a local
+    download was the browser's [ DOWNLOAD ON THE SERVER INSTEAD ], which needs
+    the page open and the tailnet up, or Quit CCSync, which stops syncing too.
+    The ending is the documented one for every hand-back here: the child is
+    killed, this clip's own partials go with it (_cleanup_current), the lease
+    expires and the server downloads what is missing. Nothing is posted -- see
+    _run's finally on why there is no release call.
+
+    `job_id=None` means "whatever this machine is running".
+    """
+    wanted = _job_id_or_none(job_id)
+    job = current_job()
+    if job is None or not job.running:
+        return False
+    if wanted is not None and job.job_id != wanted:
+        return False
+    job.cancel("You stopped this download on this computer. The server will "
+               "download the clips this computer did not finish.")
+    log.info("ytdl: job %s cancelled on this machine", job.job_id)
+    return True
+
+
+def cancel_all() -> int:
+    """Every download this machine is running (there is at most one). -> how
+    many were stopped. Never raises: this is reachable from a button."""
+    try:
+        return 1 if cancel_job(None) else 0
+    except Exception:
+        log.debug("ytdl: cancelling the running job failed", exc_info=True)
+        return 0
+
+
 def progress(job_id: Any = None) -> dict:
     """GET /ytdl/progress's body. Small on purpose -- the server rows are the
     truth (§7) and this is a first-seconds mirror, not a second ledger."""
@@ -3106,7 +3351,9 @@ def progress(job_id: Any = None) -> dict:
         return last
     return {"job_id": wanted, "running": False, "clip": None,
             "done": 0, "failed": 0, "total": 0,
-            "bytes_done": None, "bytes_total": None, "speed_bps": None}
+            "bytes_done": None, "bytes_total": None, "speed_bps": None,
+            "title": None, "file": None, "cancelled": False,
+            "handed_back_reason": None}
 
 
 def stop_all() -> None:

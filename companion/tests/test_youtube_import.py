@@ -872,6 +872,11 @@ def test_status_reports_the_published_state(tmp_path):
         "last_import_at": None,
         "last_bin": "",
         "last_error": "",
+        # CYT-3: the two fields the tray, the Settings window and
+        # sync_guard.youtube_import render. `reason` is the state as a
+        # sentence, and it is what nobody had before this.
+        "given_up": 0,
+        "reason": youtube_import.state_reason(youtube_import.STATE_DISABLED),
     }
 
 
@@ -973,3 +978,48 @@ def test_the_canonical_spelling_fn_is_harmless_with_no_prefix_configured(tmp_pat
     # No prefix -> the physical path comes back unchanged (the bridge's
     # norm-equality check then makes the ReplaceClip a no-op).
     assert canonical_fn(paths[0]) == paths[0]
+
+
+# -- CYT-3: the state as a SENTENCE -------------------------------------------
+#
+# The importer computed a full verdict (state, pending, failed_session,
+# last_error, last_bin) and it reached nobody: the tray and the Settings
+# window contain no reference to this module, and the dashboard declared the
+# section, validated it and then read nothing. "The download worked, the clips
+# are in Youtube/<term>/, they are not in my media pool" was invisible on both
+# ends.
+
+
+def test_a_state_nothing_is_wrong_in_has_no_reason(tmp_path):
+    importer = _make(tmp_path)
+    assert youtube_import.state_reason(youtube_import.STATE_IDLE) == ""
+    assert youtube_import.state_reason(youtube_import.STATE_IMPORTING) == ""
+    assert importer.status()["reason"] == ""
+
+
+def test_the_gate_states_an_editor_can_act_on_get_a_sentence(tmp_path):
+    for state in (youtube_import.STATE_DISABLED, youtube_import.STATE_DRIVE_ABSENT,
+                  youtube_import.STATE_PAUSED, youtube_import.STATE_RESOLVE_CLOSED,
+                  youtube_import.STATE_NO_PROJECT_MATCH):
+        assert youtube_import.state_reason(state), f"{state} says nothing"
+    waiting = youtube_import.state_reason(
+        youtube_import.STATE_RESOLVE_CLOSED, pending=8)
+    assert waiting.startswith("8 downloaded clips are waiting.")
+
+
+def test_the_give_up_is_counted_and_it_wins_the_sentence(tmp_path):
+    """A clip dropped after youtube_import_max_failures tries is the one
+    shape here that stays broken with the gate wide open, and it had one
+    WARNING in a rotating log behind it."""
+    (path,) = _drop(tmp_path, ["a.mp4"])
+    importer = _make(tmp_path)
+    importer._import_fn.fail_paths = {path}
+
+    _settled(importer, tmp_path)
+    for _ in range(4):
+        importer.scan_once(PROJECT, _project_dir(tmp_path))
+
+    status = importer.status()
+    assert status["given_up"] == 1, "counted once, at the transition"
+    assert status["reason"].startswith("1 downloaded clip could not be filed")
+    assert "tries them again the next time it starts" in status["reason"]

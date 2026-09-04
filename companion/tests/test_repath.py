@@ -322,3 +322,129 @@ def test_repath_and_the_sequencer_agree_on_every_rel_path():
     for rel in shapes:
         item = {"slug": "s1", "rel_path": rel, "active": True}
         assert sequencer_mod._item_is_valid(item) == repath_mod._item_is_valid(item), rel
+
+
+# -- SYNC-102: the editor is told, and Resolve is relinked ------------------
+
+def _repather(admin, tmp_path, relink=None, state_dir=None):
+    from ccsync_companion.sync.repath import ProjectRepather as _P
+
+    return _P(admin, str(tmp_path), relink_fn=relink, state_dir=state_dir)
+
+
+def test_a_rename_is_recorded_with_the_relink_outcome(tmp_path):
+    """SYNC-102 (sweep 2026-09-03): the admin renames a project, the whole
+    local directory moves, and before this the editor was told nothing at
+    all while every clip in the open Resolve project went offline."""
+    old = tmp_path / "Projects" / "2026" / "Season 1"
+    old.mkdir(parents=True)
+    admin = FakeAdmin({"s1": str(old)})
+    seen: list[tuple[str, str]] = []
+
+    def relink(old_local, new_local):
+        seen.append((old_local, new_local))
+        return True, "2 Resolve clip(s) relinked"
+
+    r = _repather(admin, tmp_path, relink=relink)
+    assert r.reconcile([_sel("s1", "2026/CCT/Season 1")]) == ["s1"]
+
+    new = tmp_path / "Projects" / "2026" / "CCT" / "Season 1"
+    assert seen == [(str(old), str(new))]
+    (event,) = r.ledger.events()
+    assert event["slug"] == "s1" and event["relinked"] is True
+    assert event["old"] == str(old) and event["new"] == str(new)
+    assert "renamed a project on the server" in event["note"]
+    assert "—" not in event["note"]
+    assert r.ledger.pending_relinks() == []
+
+
+def test_a_rename_with_resolve_closed_stays_pending_and_is_retried(tmp_path):
+    """"Resolve was not open" is not "there was nothing to relink" -- the
+    RES-10 rule, kept identical here."""
+    old = tmp_path / "Projects" / "2026" / "Season 1"
+    old.mkdir(parents=True)
+    admin = FakeAdmin({"s1": str(old)})
+    answers = [(False, "Resolve not relinked (not open)"), (True, "1 Resolve clip(s) relinked")]
+
+    def relink(old_local, new_local):
+        return answers.pop(0)
+
+    r = _repather(admin, tmp_path, relink=relink)
+    r.reconcile([_sel("s1", "2026/CCT/Season 1")])
+    (event,) = r.ledger.events()
+    assert event["relinked"] is None
+    assert "next time you open that project" in event["note"]
+    assert [e["slug"] for e in r.ledger.pending_relinks()] == ["s1"]
+
+    # The next pass, with the project open in Resolve.
+    assert r.retry_pending_relinks() == 1
+    assert r.ledger.events()[0]["relinked"] is True
+    assert r.ledger.pending_relinks() == []
+
+
+def test_a_move_that_could_not_be_made_records_why(tmp_path):
+    """The routine failure (Resolve or Explorer holding a handle) leaves the
+    folder paused on purpose, and used to leave one project quietly not
+    syncing with a log line as its only trace."""
+    old = tmp_path / "Projects" / "2026" / "Season 1"
+    old.mkdir(parents=True)
+
+    def _boom(src, dst):
+        raise OSError("sharing violation")
+
+    admin = FakeAdmin({"s1": str(old)})
+    r = ProjectRepather(admin, str(tmp_path), move_fn=_boom,
+                        relink_fn=lambda a, b: (True, "relinked"))
+    assert r.reconcile([_sel("s1", "2026/CCT/Season 1")]) == []
+    (event,) = r.ledger.events()
+    assert event["moved"] is False and event["relinked"] is None
+    assert "could not move its folder" in event["note"]
+    assert "Close it in Resolve" in event["note"]
+    assert "—" not in event["note"]
+    # Nothing pending: there is no moved copy to relink to.
+    assert r.ledger.pending_relinks() == []
+
+
+def test_a_blocked_move_records_once_however_many_passes_it_takes(tmp_path):
+    old = tmp_path / "Projects" / "2026" / "Season 1"
+    old.mkdir(parents=True)
+
+    def _boom(src, dst):
+        raise OSError("sharing violation")
+
+    admin = FakeAdmin({"s1": str(old)})
+    r = ProjectRepather(admin, str(tmp_path), move_fn=_boom)
+    for _ in range(4):
+        r.reconcile([_sel("s1", "2026/CCT/Season 1")])
+    assert len(r.ledger.events()) == 1
+
+
+def test_events_survive_a_restart(tmp_path):
+    old = tmp_path / "Projects" / "2026" / "Season 1"
+    old.mkdir(parents=True)
+    state = tmp_path / "state"
+    admin = FakeAdmin({"s1": str(old)})
+    r = _repather(admin, tmp_path, relink=lambda a, b: (False, ""), state_dir=state)
+    r.reconcile([_sel("s1", "2026/CCT/Season 1")])
+    assert (state / "repath_events.json").is_file()
+
+    # A new process, one pass later, with Resolve open this time.
+    fresh = _repather(FakeAdmin({}), tmp_path,
+                      relink=lambda a, b: (True, "1 Resolve clip(s) relinked"),
+                      state_dir=state)
+    assert [e["slug"] for e in fresh.ledger.pending_relinks()] == ["s1"]
+    fresh.reconcile([])
+    assert fresh.ledger.events()[0]["relinked"] is True
+
+
+def test_a_relink_that_explodes_never_stops_the_repath(tmp_path):
+    old = tmp_path / "Projects" / "2026" / "Season 1"
+    old.mkdir(parents=True)
+    admin = FakeAdmin({"s1": str(old)})
+
+    def relink(old_local, new_local):
+        raise RuntimeError("Resolve went away mid-call")
+
+    r = _repather(admin, tmp_path, relink=relink)
+    assert r.reconcile([_sel("s1", "2026/CCT/Season 1")]) == ["s1"]
+    assert r.ledger.events()[0]["relinked"] is None

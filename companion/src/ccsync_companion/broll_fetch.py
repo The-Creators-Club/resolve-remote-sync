@@ -56,8 +56,22 @@ log = logging.getLogger("ccsync.broll")
 # sync that moves everyone's footage (2026-08-17, COMMERCIAL_READINESS.md
 # item 5).
 MAX_CONCURRENT_FETCHES = 2
-BUSY_MESSAGE = ("this machine is already downloading as much as it will at "
-                "once -- try again when the clip in progress has finished")
+# CMEDIA-7 (2026-09-04): this used to be delivered as a FAILURE, and the
+# retry the cap was designed around did not exist -- the page loops only while
+# the state is "downloading", so any failure was toasted red and the loop
+# returned. An editor who clicked "+ Resolve" on a music cue while two camera
+# originals were in flight was told to come back in an hour and click again.
+# It is a WAITING state now: same cap, same absence of a queue, and the page's
+# existing poll keeps polling.
+# Worded to read correctly BOTH as a wait and as a refusal: `/ytdl/fetch`
+# (ytdl_server.build_fetch_response) still maps everything that is not
+# downloading-or-done onto `failed`, so this sentence has to be true under a
+# red toast as well as under a spinner.
+BUSY_MESSAGE = ("this computer is already downloading as much as it will at "
+                "once. This one starts as soon as a slot is free")
+# What a caller should wait before polling again. The page already polls every
+# 1.5 s; naming it here means a client that is not the page has the number too.
+BUSY_RETRY_AFTER_SECONDS = 1.5
 
 # Where the archive lives under remote_root on the NAS. Must stay in step
 # with broll_server.BROLL_ARCHIVE_REL (the local half of the same layout);
@@ -78,6 +92,9 @@ MUSIC_REMOTE_REL = "Assets/Music"
 PROJECTS_REMOTE_REL = "Projects"
 
 STATE_DOWNLOADING = "downloading"
+# At the cap: nothing was started, nothing was registered, and the next poll is
+# a fresh start. NOT a failure (CMEDIA-7).
+STATE_BUSY = "busy"
 STATE_DONE = "done"
 STATE_FAILED = "failed"
 
@@ -352,6 +369,9 @@ def poll_fetch(
 
     Returns one of:
       {"state": "downloading", "progress": {...}}
+      {"state": "busy", "message": str, "retry_after": float}
+                                              -- at the cap; nothing started,
+                                                 nothing registered, poll again
       {"state": "done"}                       -- popped; caller re-checks disk
       {"state": "failed", "message": str}     -- popped; next poll retries
 
@@ -369,9 +389,10 @@ def poll_fetch(
                 # No queue: the web UI re-POSTs every 1.5 s anyway, so "busy"
                 # IS the retry mechanism. Registering nothing keeps a refused
                 # click out of the registry entirely.
-                log.info("broll fetch: at the %d-download cap -- refusing %s",
+                log.info("broll fetch: at the %d-download cap -- %s waits",
                          MAX_CONCURRENT_FETCHES, dest)
-                return {"state": STATE_FAILED, "message": BUSY_MESSAGE}
+                return {"state": STATE_BUSY, "message": BUSY_MESSAGE,
+                        "retry_after": BUSY_RETRY_AFTER_SECONDS}
             job = FetchJob(dest, rel_path)
             cmd = build_fetch_command(ccsync_cfg, rel_path, dest, remote_rel)
             _JOBS[key] = job

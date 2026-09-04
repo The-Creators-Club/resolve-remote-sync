@@ -279,7 +279,13 @@ def test_apply_survives_a_raising_link_fn():
 
 def test_apply_with_nothing_to_do_is_silent():
     result = proxy_relink.apply_relinks([], lambda *_: {"ok": True})
-    assert result == {"ok": True, "relinked": 0, "failed": 0, "failures": [], "message": ""}
+    assert result == {
+        "ok": True, "relinked": 0, "attached": 0, "failed": 0, "failures": [],
+        "details": [], "message": "",
+        # None, not "": a status reader that renders whatever it is handed
+        # must not put an empty line on the tray (RES-3).
+        "why": None,
+    }
 # -- a proxy Resolve refuses is not re-offered every 120 s (COMP-MEDIA-5) -----
 
 
@@ -540,3 +546,65 @@ def test_apply_relinks_still_passes_a_bare_object_straight_through():
         [op], link_fn=lambda m, p: (linked.append(m), {"ok": True})[1])
 
     assert linked == [mpi]
+
+
+# -- the attach half finally says something (RES-3, 2026-09-04) ---------------
+
+
+def test_apply_relinks_returns_the_diagnosis_the_editor_needs():
+    """The counts and the reasons were built and thrown away: `attached`,
+    `why` and per-clip `details` are the same facts where a status reader can
+    reach them. The old keys keep their meaning beside them."""
+    def link_fn(mpi, path):
+        if "refused" in path:
+            return {"ok": False, "reason": "refused", "message": "mismatch"}
+        if "quiet" in path:
+            return {"ok": False, "reason": "scripting_error", "message": "gone"}
+        return {"ok": True}
+
+    ops = [
+        {"media_pool_item": object(), "clip_name": name, "old_proxy": "",
+         "file_path": rf"P:\{name}.braw", "new_proxy": rf"P:\Proxy\{name}.mov"}
+        for name in ("good", "refused_a", "refused_b", "quiet_one")
+    ]
+    result = proxy_relink.apply_relinks(ops, link_fn, _stat_for({}))
+
+    assert result["attached"] == 1 == result["relinked"]
+    assert result["failed"] == 3
+    assert result["details"] == [
+        {"clip": "refused_a", "reason": proxy_relink.REASON_REFUSED},
+        {"clip": "refused_b", "reason": proxy_relink.REASON_REFUSED},
+        {"clip": "quiet_one", "reason": proxy_relink.REASON_NO_ANSWER},
+    ]
+    why = result["why"]
+    assert "Repointed 1 proxy file(s)" in why
+    assert "2 could not be attached" in why
+    assert "1 got no answer" in why
+    # Owner's rule 2026-08-18: no em dash in anything an editor reads.
+    assert "\u2014" not in why
+    assert all("\u2014" not in d["reason"] for d in result["details"])
+
+
+def test_a_clip_that_is_gone_from_the_pool_says_so_not_just_in_the_log():
+    result = proxy_relink.apply_relinks(
+        [{"media_pool_item": None, "media_pool_uid": "u1", "clip_name": "gone.mov",
+          "file_path": r"P:\gone.braw", "new_proxy": r"P:\Proxy\gone.mov"}],
+        link_fn=lambda m, p: {"ok": True}, resolve_fn=lambda op: None,
+    )
+    assert result["details"] == [
+        {"clip": "gone.mov", "reason": proxy_relink.REASON_NOT_IN_POOL}]
+
+
+def test_an_unreadable_proxy_is_reported_instead_of_silently_skipped():
+    """proxy_relink:318-322 -- already pointed at this exact file and still
+    not working. The skip is right; logging nothing about it was not."""
+    notes: list = []
+    ops = proxy_relink.plan_relinks(
+        [{"media_pool_item": object(), "clip_name": "A001.braw",
+          "file_path": BRAW, "proxy_path": GOOD_PROXY, "proxy_state": "Offline"}],
+        LOCAL_ROOT, CANON, exists_fn=exists_only(GOOD_PROXY), is_windows=True,
+        notes=notes,
+    )
+    assert ops == []
+    assert notes == [{"clip": "A001.braw", "path": GOOD_PROXY,
+                      "reason": proxy_relink.REASON_UNREADABLE}]

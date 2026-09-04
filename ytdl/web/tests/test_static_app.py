@@ -1691,7 +1691,12 @@ const loopback = h => h.calls.filter(c => c.url.startsWith('http://127.0.0.1:889
 // this machine take the job", asked at a different time. The invariants below
 // are about the DISPATCH ("one probe, one POST, and no retry loop"), so they
 // measure from the end of boot rather than from the start of the page.
-const dispatchedBy = h => loopback(h).slice(h._loopbackAtBoot || 0);
+// /ytdl/progress is EXCLUDED (CYT-2, 2026-09-03): asking this machine what
+// it is doing with the job it already took is not a dispatch, and the
+// invariants below would read its 2 s poll as the retry loop they exist to
+// forbid. The poll has scenarios of its own further down.
+const dispatchedBy = h => loopback(h).slice(h._loopbackAtBoot || 0)
+  .filter(c => !c.url.includes('/ytdl/progress'));
 
 // A page with one reviewed job (90) ready to submit. `flag` is the server's
 // phase-1 switch as api/health reports it -- UNDEFINED means a server that
@@ -1789,7 +1794,8 @@ scenarios['a_capable_companion_is_handed_the_job'] = async () => {
           // Sliced at the boot mark for dispatchedBy()'s reason: boot's own
           // picker probe is not part of the order this pins.
           order: h.calls.slice(h._callsAtBoot || 0).map(c => c.url)
-            .filter(u => u === 'api/jobs/90/download' || u.startsWith('http://127')),
+            .filter(u => u === 'api/jobs/90/download'
+                    || (u.startsWith('http://127') && !u.includes('/ytdl/progress'))),
           badge: h.get('dlmode').textContent,
           badge_hidden: h.get('dlmode').hidden,
           badge_class: h.get('dlmode').className,
@@ -2385,6 +2391,206 @@ scenarios['a_refused_retry_is_said_out_loud'] = async () => {
           hidden: h.get('dlretry').hidden};
 };
 
+
+// ------------------------------- wave 3: the page says what the server knows
+// YTWEB-1/3/7/8/11/13 + CYT-2 (2026-09-04). Every one of these is a fact the
+// server already had and the page threw away.
+
+const PROGRESS_URL = 'http://127.0.0.1:8899/ytdl/progress';
+const LOCAL_CANCEL_URL = 'http://127.0.0.1:8899/ytdl/cancel';
+
+// YTWEB-1: a queued job used to render the word 'queued' over an EMPTY ticker
+// -- every other bit in there is gated on a counter a queued job has none of.
+scenarios['a_queued_job_says_what_it_is_waiting_on'] = async () => {
+  const page = async over => {
+    const h = await boot(async (method, url) => {
+      const b = baseline(method, url); if (b) return b;
+      if (url === 'api/jobs/12') {
+        return {json: POLLRES(JOB({id: 12, phase: 'queued', terms_total: 0}), over)};
+      }
+      return {json: {}};
+    });
+    await h.app.attach(12);
+    await flush();
+    return h.get('ticker').textContent;
+  };
+  return {
+    fleet: await page({queued_behind: 1, fleet_ahead: 2}),
+    next: await page({queued_behind: 0, fleet_ahead: 0}),
+    dead: await page({queued_behind: 0, fleet_ahead: 3, worker_alive: false}),
+    // A server that predates the two keys says the one honest thing it can.
+    older: await page({}),
+  };
+};
+
+// YTWEB-8/13: the parked reviews, by name, with the two controls.
+scenarios['parked_reviews_are_listed_with_two_buttons'] = async () => {
+  const waiting = [
+    {id: 42, term: 'algal reef', kind: 'search', phase: 'ready_for_review',
+     project_label: '2026/FF5/Energy', position: 1},
+    {id: 43, term: '', kind: 'urls', phase: 'terms_review',
+     project_label: '2026/FF5/Water', position: 2},
+  ];
+  const h = await boot(async (method, url) => {
+    if (url === 'api/jobs/active') return {json: {job: null, queue: [], waiting}};
+    const b = baseline(method, url); if (b) return b;
+    if (url === 'api/jobs/42') {
+      return {json: POLLRES(JOB({id: 42, phase: 'ready_for_review'}))};
+    }
+    if (url.startsWith('api/jobs/42/manifest')) return {json: MANIFEST()};
+    return {json: {}};
+  });
+  const rows = h.get('waitinglist').byClass('queuerow');
+  const buttons = rows.map(r => r.children.filter(c => c.tagName === 'button')
+                                 .map(b => b.textContent));
+  rows[0].children.filter(c => c.tagName === 'button')[0].onclick();
+  await flush();
+  rows[1].children.filter(c => c.tagName === 'button')[1].onclick();
+  await flush();
+  return {panel_hidden: h.get('waiting').hidden,
+          rows: rows.map(r => r.textContent), buttons,
+          attached: h.app.state.jobId,
+          cancels: h.calls.filter(c => c.url === 'api/jobs/43/cancel').length,
+          warn: h.warnText()};
+};
+
+scenarios['no_parked_review_is_no_panel_and_no_line'] = async () => {
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    return {json: {}};
+  });
+  return {panel_hidden: h.get('waiting').hidden, warn: h.warnText()};
+};
+
+// YTWEB-11: the last step of the flow the whole page exists for.
+scenarios['a_finished_clip_opens_from_the_downloads_list'] = async () => {
+  const done = JOB({id: 55, phase: 'done', terminal: true, dl_total: 2,
+                    dl_done: 1, dl_failed: 1});
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (url === 'api/jobs/55') return {json: POLLRES(done)};
+    if (url.startsWith('api/jobs/55/manifest')) {
+      return {json: MANIFEST({job: done, videos: [
+        VIDEO('AAAAAAAAAA1', {dl_state: 'done',
+                              reveal_path: '2026/FF5/Energy/Youtube/algal reef/'
+                                + 'Channel [AAAAAAAAAA1].mp4'}),
+        VIDEO('BBBBBBBBBB2', {dl_state: 'failed', dl_error: 'nope'})]})};
+    }
+    if (method === 'POST' && url === REVEAL_URL) {
+      return {json: {ok: true, message: 'opened the folder'}};
+    }
+    return {json: {}};
+  });
+  await h.app.attach(55);
+  await flush();
+  const rows = h.get('dllist').byClass('dlrow');
+  rows[0].onclick();
+  await flush();
+  return {clickable: rows.map(r => typeof r.onclick === 'function'),
+          body: (h.calls.filter(c => c.url === REVEAL_URL)[0] || {}).body,
+          ticker: h.get('dlticker').textContent,
+          toast: h.get('toast').textContent};
+};
+
+// CYT-2: the executor has served this all along and nothing fetched it.
+const localPage = (progress, over) => boot(async (method, url) => {
+  if (url.startsWith('api/health')) {
+    return {json: {claude: 'ok', claude_detail: '', yt_dlp: 'ok',
+                   worker_alive: true, cookies: false, local_download: true}};
+  }
+  const b = baseline(method, url); if (b) return b;
+  if (url === 'api/jobs/90') {
+    return {json: POLLRES(JOB(Object.assign(
+      {id: 90, phase: 'downloading', dl_total: 3, dl_done: 2,
+       download_mode: 'local', claimed_by: 'owen'}, over || {})))};
+  }
+  if (url.startsWith('api/jobs/90/manifest')) {
+    return {json: MANIFEST({job: JOB({id: 90, phase: 'downloading'}), videos: []})};
+  }
+  if (url === PROGRESS_URL) return progress();
+  if (method === 'POST' && url === LOCAL_CANCEL_URL) return {json: {ok: true}};
+  return {json: {}};
+});
+
+scenarios['a_local_download_shows_percent_and_can_be_stopped'] = async () => {
+  const h = await localPage(() => ({json: {jobs: [
+    {job_id: 90, title: 't', phase: 'downloading', percent: 38.2,
+     speed: 4200000, eta_seconds: 130, file: 'x.mp4'},
+    {job_id: 91, title: 'somebody else', phase: 'downloading', percent: 99},
+  ]}}));
+  await h.app.attach(90);
+  await flush(40);
+  const line = h.get('dlticker').textContent;
+  const stop_hidden = h.get('dlstop').hidden;
+  h.get('dlstop').onclick();
+  await flush();
+  return {line, stop_hidden,
+          cancels: h.calls.filter(c => c.url === LOCAL_CANCEL_URL).map(c => c.body),
+          toast: h.get('toast').textContent};
+};
+
+scenarios['a_converting_clip_says_so_rather_than_stalling'] = async () => {
+  const h = await localPage(() => ({json: {jobs: [
+    {job_id: 90, phase: 'converting', percent: 100}]}}));
+  await h.app.attach(90);
+  await flush(40);
+  return {line: h.get('dlticker').textContent};
+};
+
+scenarios['a_companion_too_old_to_answer_gets_todays_page'] = async () => {
+  const h = await localPage(() => ({status: 404, json: {}}));
+  await h.app.attach(90);
+  await flush(40);
+  await h.timers.fire();
+  await h.timers.fire();
+  return {line: h.get('dlticker').textContent,
+          stop_hidden: h.get('dlstop').hidden,
+          polls: h.calls.filter(c => c.url === PROGRESS_URL).length};
+};
+
+scenarios['a_server_download_never_asks_this_machine'] = async () => {
+  const h = await localPage(() => ({json: {jobs: []}}),
+                            {download_mode: 'server', claimed_by: null});
+  await h.app.attach(90);
+  await flush(40);
+  return {polls: h.calls.filter(c => c.url === PROGRESS_URL).length,
+          stop_hidden: h.get('dlstop').hidden};
+};
+
+// YTWEB-7: the note the worker wrote, in front of the hint it was replaced by.
+scenarios['the_unfiltered_warning_reaches_the_editor'] = async () => {
+  const err = 'claude_auth: the relevance filter could not run, so every '
+    + 'result below is shown unfiltered';
+  const h = await boot(async (method, url) => {
+    const b = baseline(method, url); if (b) return b;
+    if (url === 'api/jobs/70') {
+      return {json: POLLRES(JOB({id: 70, phase: 'ready_for_review', error: err}))};
+    }
+    if (url.startsWith('api/jobs/70/manifest')) return {json: MANIFEST()};
+    return {json: {}};
+  });
+  await h.app.attach(70);
+  await flush();
+  return {warn: h.warnText()};
+};
+
+// YTWEB-3: measured since YTDL-24 and rendered nowhere.
+scenarios['a_server_with_no_js_runtime_says_so'] = async () => {
+  const page = async js => {
+    const h = await boot(async (method, url) => {
+      if (url.startsWith('api/health')) return {json: HEALTH5({js_runtime: js})};
+      const b = baseline(method, url); if (b) return b;
+      return {json: {}};
+    });
+    return {pip: h.get('healthjs').textContent,
+            cls: h.get('healthjs').className,
+            title: h.get('healthjs').title,
+            hidden: h.get('healthjs').hidden,
+            warn: h.warnText()};
+  };
+  return {missing: await page('missing'), ok: await page('ok')};
+};
+
 // ---- run them -----------------------------------------------------------
 (async () => {
   const out = {};
@@ -2451,7 +2657,11 @@ def test_declining_the_discard_keeps_the_parked_review(spa):
     r = spa['declining_the_discard_keeps_the_parked_review']
     assert r['cancels'] == 0, 'declining the confirm must cancel nothing'
     assert r['job_id'] == 77, 'the old re-attach behaviour must survive a decline'
-    assert 'CANCEL SEARCH' in r['toast']
+    # YTWEB-13 reworded it: the refusal hands over the button rather than
+    # describing where to find one, and the parked search is in the
+    # WAITING FOR YOU list with the same two controls.
+    assert 'RESUME IT' in r['toast'], r['toast']
+    assert 'cancel it' in r['toast'], r['toast']
 
 
 def test_a_blocked_paste_gets_the_same_discard_offer(spa):
@@ -4443,3 +4653,174 @@ def test_the_queue_is_read_from_the_active_route_and_not_every_tick():
     assert "api('api/jobs/active')" in body, body
     poll = js[js.index('async function poll()'):js.index('function detach()')]
     assert 'if (seen !== job.phase) loadQueue();' in poll, poll
+
+
+# ------------------------------- wave 3: the page says what the server knows
+# YTWEB-1/3/7/8/11/13 + CYT-2, 2026-09-04. The sweep's finding for this area
+# was one shape said seven ways: the server MEASURES more than the page SHOWS.
+
+
+def test_a_queued_job_names_its_wait(spa):
+    """YTWEB-1. The worker is fleet-serial and every number the page had was
+    counted per editor, so the commonest queue there is - one editor behind
+    another - printed the word 'queued' over an empty ticker."""
+    r = spa['a_queued_job_says_what_it_is_waiting_on']
+    assert '3 jobs ahead of it' in r['fleet'], r
+    assert '2 from other editors' in r['fleet'], r
+    assert 'you are next' in r['next'], r
+    assert 'the downloader on the server is not running' in r['dead'], r
+    # A server without the keys still says the honest thing rather than
+    # nothing: it is at the front of the line as far as this page can tell.
+    assert 'you are next' in r['older'], r
+
+
+def test_the_parked_reviews_are_a_list_with_resume_and_cancel(spa):
+    """YTWEB-8/13. Since the queue landed a parked review blocks nothing,
+    which is right and also means nothing ever mentions one again."""
+    r = spa['parked_reviews_are_listed_with_two_buttons']
+    assert r['panel_hidden'] is False
+    assert len(r['rows']) == 2, r['rows']
+    assert 'algal reef' in r['rows'][0]
+    assert 'pasted links' in r['rows'][1], 'a url job has no term to print'
+    assert 'waiting at the term review' in r['rows'][1], r['rows']
+    assert r['buttons'] == [['[ RESUME ]', '[ CANCEL ]']] * 2, r['buttons']
+    assert r['attached'] == 42, 'RESUME did not open the review'
+    assert r['cancels'] == 1, 'CANCEL did not reach the server'
+    assert '2 searches are waiting for your review' in r['warn'], r['warn']
+
+
+def test_nothing_parked_is_no_panel_and_no_line(spa):
+    r = spa['no_parked_review_is_no_panel_and_no_line']
+    assert r['panel_hidden'] is True
+    assert 'waiting for your review' not in r['warn']
+
+
+def test_a_landed_clip_opens_its_folder_from_the_downloads_list(spa):
+    """YTWEB-11: the editor watched 41 rows go green and then had to scroll
+    past two panels into a fleet-wide ledger to click one open."""
+    r = spa['a_finished_clip_opens_from_the_downloads_list']
+    assert r['clickable'] == [True, False], 'a failed row has no folder to open'
+    assert r['body'] == {'rel_path': '2026/FF5/Energy/Youtube/algal reef/'
+                                     'Channel [AAAAAAAAAA1].mp4'}, r
+    assert 'opened the folder' in r['toast']
+    assert 'Click a row to open the folder' in r['ticker'], r['ticker']
+    assert '1 clip landed in' in r['ticker'], r['ticker']
+
+
+def test_a_local_download_shows_what_this_machine_is_doing(spa):
+    """CYT-2: the executor has kept per-clip percent/speed on the loopback
+    since the feature shipped, and no line of app.js ever fetched it."""
+    r = spa['a_local_download_shows_percent_and_can_be_stopped']
+    assert 'clip 3/3' in r['line'], r['line']
+    assert '38% at 4.2 MB/s' in r['line'], r['line']
+    assert '2:10 left' in r['line'], r['line']
+    assert '99%' not in r['line'], 'another job on the same machine leaked in'
+    assert r['stop_hidden'] is False
+    assert r['cancels'] == [{'job_id': 90}], r['cancels']
+    assert 'stop' in r['toast']
+
+
+def test_a_converting_clip_is_named_rather_than_looking_stalled(spa):
+    r = spa['a_converting_clip_says_so_rather_than_stalling']
+    assert 'converting to H.264 on your machine' in r['line'], r['line']
+
+
+def test_a_companion_that_cannot_answer_leaves_the_page_as_it_was(spa):
+    """A 404 is a companion older than the route: today's page, and no second
+    ask every two seconds for the rest of the job."""
+    r = spa['a_companion_too_old_to_answer_gets_todays_page']
+    assert r['polls'] == 1, r['polls']
+    assert r['stop_hidden'] is True
+    assert '2/3 downloaded' in r['line'] and '%' not in r['line'], r['line']
+
+
+def test_a_server_side_download_never_touches_the_loopback(spa):
+    r = spa['a_server_download_never_asks_this_machine']
+    assert r['polls'] == 0, 'the page asked this machine about the NAS''s job'
+    assert r['stop_hidden'] is True
+
+
+def test_the_unfiltered_manifest_warning_survives_the_hint(spa):
+    """YTWEB-7: hintFor matched the prefix and returned the generic hint
+    INSTEAD of the string, so the editor was told an admin must add a
+    credential and never that every result below them is unfiltered."""
+    r = spa['the_unfiltered_warning_reaches_the_editor']
+    assert 'shown unfiltered' in r['warn'], r['warn']
+    assert 'AI provider credential' in r['warn'], 'the hint was lost instead'
+
+
+def test_a_server_with_no_js_runtime_is_reported(spa):
+    """YTWEB-3: computed since YTDL-24 cost a week, shipped on api/health, and
+    rendered by no line of this file."""
+    r = spa['a_server_with_no_js_runtime_says_so']
+    assert r['missing']['pip'] == 'no JS runtime', r['missing']
+    assert 'off' in r['missing']['cls'].split(), r['missing']
+    assert 'deno' in r['missing']['title']
+    assert 'no JavaScript runtime' in r['missing']['warn'], r['missing']['warn']
+    # A runtime that is there is not news, and the strip is already four pips.
+    assert r['ok']['pip'] == '' and r['ok']['hidden'] is True, r['ok']
+    assert 'JavaScript runtime' not in r['ok']['warn']
+
+
+# ---- source assertions (they run with no node) ---------------------------
+
+def test_the_waiting_panel_is_in_the_markup_above_the_queue():
+    html = _html()
+    assert re.search(r'id="waiting"[^>]*class="[^"]*\bhidden\b', html), html
+    assert 'id="waitinglist"' in html
+    # above the queue, because a queue waits on the server and this waits on
+    # the person reading the page
+    assert html.index('id="waiting"') < html.index('id="queue"') < \
+        html.index('id="recent"')
+
+
+def test_the_stop_button_is_in_the_downloads_header_and_starts_hidden():
+    html = _html()
+    assert re.search(r'id="dlstop"[^>]*class="[^"]*\bhidden\b', html), html
+    assert html.index('id="downloads"') < html.index('id="dlstop"') < \
+        html.index('id="dllist"')
+    assert "$('#dlstop').onclick = stopLocalDownload;" in _js()
+
+
+def test_the_health_strip_has_a_js_runtime_pip():
+    html = _html()
+    assert re.search(r'id="healthjs"[^>]*class="[^"]*\bhidden\b', html), html
+    js = _js()
+    assert "setPip('#healthjs'" in js
+    # read with the == null guard every other WP5 key carries
+    assert 'h.js_runtime == null' in js, js[js.index('function renderEvidence('):][:2000]
+
+
+def test_the_loopback_progress_call_is_document_absolute_and_bounded():
+    """It is the loopback, so it is one of the file's deliberate absolute URLs
+    - and it carries the same one-second budget every other one does."""
+    js = _js()
+    body = js[js.index('async function pollLocalProgress('):
+              js.index('function fmtSpeed(')]
+    assert '`${COMPANION_URL}/ytdl/progress`' in body, body
+    assert 'AbortController' in body and 'PROBE_MS' in body, body
+    assert 'res.status === 404' in body, 'an older companion must turn it off'
+    assert '/api/' not in body
+
+
+def test_the_free_space_table_matches_the_servers():
+    """YTWEB-9: the page and the server size the same selection, so the two
+    tables are duplicated deliberately and must not drift."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from ytdlweb import routes_api
+
+    js = _js()
+    table = js[js.index('const BYTES_PER_SECOND = {'):js.index('const fmtGB =')]
+    for rung, rate in routes_api.BYTES_PER_SECOND.items():
+        assert str(rate) in table.replace('_', ''), f'{rung} is missing or differs'
+
+
+def test_the_grid_foot_sizes_the_selection_before_the_button_is_pressed():
+    js = _js()
+    body = js[js.index('function renderGrid('):js.index('function card(')]
+    assert 'sizeEstimate(secs, m.job.quality)' in body, body
+    assert 'freeNote(m.job)' in body, body
+    est = js[js.index('function sizeEstimate('):js.index('function freeNote(')]
+    assert 'roughly' in est
+    assert "return bytes ? " in est, 'a paste has no durations to size'

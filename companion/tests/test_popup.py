@@ -2181,3 +2181,198 @@ def test_destination_free_bytes_never_raises():
 
     assert popup.destination_free_bytes("") == 0
     assert popup.destination_free_bytes(r"\\no\such\share") == 0
+
+
+# ===========================================================================
+# RES-13 (sweep 2026-09-03): FIX ALL used to succeed silently -- 158 clips
+# copied and repointed in the editor's project database, and the window
+# simply closed. No count, no size, and no mention that it can be undone.
+# ===========================================================================
+
+
+def test_the_summary_names_the_count_the_size_and_the_undo():
+    from ccsync_companion import popup
+
+    text = popup.fix_summary_text(
+        [{"ok": True, "file_path": "a.mov"}, {"ok": True, "file_path": "b.mov"}],
+        2, copied_bytes=3_400_000_000)
+    assert "Fixed 2 of 2" in text
+    assert "copied 3.4 GB" in text
+    assert "To undo: Settings, RESOLVE, [ UNDO LAST FIX ]" in text
+    assert "—" not in text                      # house rule: no em dashes
+
+
+def test_the_summary_carries_the_first_reason_not_a_count_of_reasons():
+    from ccsync_companion import popup
+
+    text = popup.fix_summary_text([
+        {"ok": True, "file_path": "a.mov"},
+        {"ok": False, "file_path": "b.mov", "message": "the disk is full"},
+        {"ok": False, "file_path": "c.mov", "message": "access denied"},
+    ], 3)
+    assert "Fixed 1 of 3" in text
+    assert "2 could not be fixed: the disk is full" in text
+
+
+def test_a_run_that_fixed_nothing_does_not_offer_an_undo():
+    from ccsync_companion import popup
+
+    text = popup.fix_summary_text(
+        [{"ok": False, "file_path": "a.mov", "message": "access denied"}], 1)
+    assert "Fixed 0 of 1" in text
+    assert "UNDO LAST FIX" not in text
+
+
+def test_only_the_successes_count_towards_the_bytes_copied(tmp_path):
+    from ccsync_companion import popup
+
+    good = tmp_path / "a.mov"
+    good.write_bytes(b"x" * 2048)
+    bad = tmp_path / "b.mov"
+    bad.write_bytes(b"x" * 4096)
+    rows = [{"file_path": str(good)}, {"file_path": str(bad)}]
+    # A failed or skipped attempt has had both its artifacts deleted by
+    # fixer.fix_clip: nothing of it is on the destination to count.
+    copied = popup.fix_copied_bytes(rows, [
+        {"ok": True, "file_path": str(good)},
+        {"ok": False, "aborted": True, "file_path": str(bad)},
+    ])
+    assert copied == 2048
+
+
+def test_a_partial_run_points_at_the_undo_in_the_window_it_leaves_open():
+    dialog = _bare_dialog([_row("a.mov"), _row("b.mov")])
+    dialog._fixing = True
+
+    dialog._fix_done([
+        {"ok": True, "message": "", "file_path": "a.mov"},
+        {"ok": False, "file_path": "b.mov", "message": "access denied"},
+    ])
+
+    assert dialog.root.destroyed is False
+    assert "To undo: Settings, RESOLVE, [ UNDO LAST FIX ]" in dialog.status_label.text
+
+
+def test_a_run_that_fixed_nothing_leaves_no_undo_pointer_behind():
+    dialog = _bare_dialog([_row("a.mov")])
+    dialog._fixing = True
+
+    dialog._fix_done([{"ok": False, "file_path": "a.mov", "message": "access denied"}])
+
+    assert "UNDO LAST FIX" not in dialog.status_label.text
+
+
+def test_show_popup_passes_an_on_done_and_shows_the_summary_after(monkeypatch):
+    """The summary is shown AFTER the dispatch returns, never from inside it:
+    _fix_done calls on_done just before destroying the window, and two Tk
+    roots alive at once in this process is the CORE-H8 hazard."""
+    from ccsync_companion import fixer as fixer_mod
+    from ccsync_companion import popup
+
+    shown: list = []
+    order: list = []
+
+    class _FakeDialog:
+        def __init__(self, *a, **k):
+            self._on_done = k["on_done"]
+
+        def show(self):
+            order.append("dialog")
+            self._on_done([{"ok": True, "file_path": r"G:\raw\A001.braw"}])
+
+    monkeypatch.setattr(popup, "PopupDialog", _FakeDialog)
+    monkeypatch.setattr(popup, "notice_dialog",
+                        lambda title, body, **k: (order.append("notice"),
+                                                  shown.append(body)))
+    items = [{"file_path": r"G:\raw\A001.braw", "media_pool_item": object(),
+              "clip_name": "A001", "resolve_project_name": ""}]
+    popup.show_popup(items, r"C:\Creators_Club", "owen", fixer_mod.IgnoreTracker())
+
+    assert order == ["dialog", "notice"]
+    assert "Fixed 1 of 1" in shown[0]
+    assert "UNDO LAST FIX" in shown[0]
+
+
+def test_a_dismissed_popup_shows_no_summary(monkeypatch):
+    """IGNORE / SKIP FOR NOW call on_done with an empty list. "Fixed 0 of 3"
+    about a batch nobody ran is a report of a failure that did not happen."""
+    from ccsync_companion import fixer as fixer_mod
+    from ccsync_companion import popup
+
+    shown: list = []
+
+    class _FakeDialog:
+        def __init__(self, *a, **k):
+            self._on_done = k["on_done"]
+
+        def show(self):
+            self._on_done([])
+
+    monkeypatch.setattr(popup, "PopupDialog", _FakeDialog)
+    monkeypatch.setattr(popup, "notice_dialog",
+                        lambda title, body, **k: shown.append(body))
+    popup.show_popup([{"file_path": r"G:\raw\A001.braw", "clip_name": "A001",
+                       "media_pool_item": object(), "resolve_project_name": ""}],
+                     r"C:\Creators_Club", "owen", fixer_mod.IgnoreTracker())
+    assert shown == []
+
+
+def test_a_headless_popup_still_auto_skips_and_shows_no_summary(monkeypatch, tmp_path):
+    """The summary must live OUTSIDE the try whose except branch auto-skips
+    the whole batch (RES-13)."""
+    from ccsync_companion import fixer as fixer_mod
+    from ccsync_companion import popup
+
+    tracker = fixer_mod.IgnoreTracker(tmp_path / "state")
+    shown: list = []
+
+    def no_display(*a, **k):
+        raise RuntimeError("no display name and no $DISPLAY environment variable")
+
+    monkeypatch.setattr(popup, "PopupDialog", no_display)
+    monkeypatch.setattr(popup, "notice_dialog",
+                        lambda title, body, **k: shown.append(body))
+    popup.show_popup([{"file_path": r"G:\raw\A001.braw", "clip_name": "A001",
+                       "media_pool_item": object(), "resolve_project_name": ""}],
+                     r"C:\Creators_Club", "owen", tracker)
+    assert tracker.skipped_count() == 1
+    assert shown == []
+
+
+# ===========================================================================
+# CMEDIA-10 (same sweep): a failed clip's reason existed in three places,
+# none of them the tray. ProgressModel carried `failed` as a COUNT.
+# ===========================================================================
+
+
+def test_the_progress_model_names_the_failures_with_their_reasons():
+    from ccsync_companion import popup
+
+    model = popup.ProgressModel(total=10, done=8, failed=2, failures=[
+        {"name": "A001.braw", "error": "the source file is not on this machine "
+                                       "any more"},
+        {"name": "A002.braw", "error": "the archive never saw these files"},
+    ])
+    lines = model.failure_lines()
+    assert lines == [
+        "✗ A001.braw: the source file is not on this machine any more",
+        "✗ A002.braw: the archive never saw these files",
+    ]
+    assert model.failures_block() == "\n".join(lines)
+
+
+def test_only_the_first_five_failures_are_drawn():
+    from ccsync_companion import popup
+
+    model = popup.ProgressModel(failures=[{"name": "c%d" % n, "error": "no"}
+                                          for n in range(8)])
+    lines = model.failure_lines()
+    assert len(lines) == 6
+    assert lines[-1] == "and 3 more"
+
+
+def test_a_model_with_no_failures_draws_nothing():
+    from ccsync_companion import popup
+
+    assert popup.ProgressModel(total=4, done=4).failure_lines() == []
+    assert popup.ProgressModel(total=4, done=4).failures_block() == ""
